@@ -21,15 +21,17 @@ jobs:
       - name: Build Swift app
         run: |
           chmod +x scripts/build-swift-app.sh
-          ./scripts/build-swift-app.sh vtest arm64 .
+          mkdir -p swift-build
+          ./scripts/build-swift-app.sh vtest arm64 swift-build
+          ls -la swift-build/MCPProxy.app/Contents/MacOS/
+          ls -la swift-build/MCPProxy.app/Contents/Frameworks/ || echo "No Frameworks yet"
 
       - name: Assemble app bundle
         run: |
-          # Use create-pkg.sh in adhoc mode
           export APP_CERT_IDENTITY=""
           export PKG_CERT_IDENTITY="adhoc"
           chmod +x scripts/create-pkg.sh
-          ./scripts/create-pkg.sh MCPProxy.app mcpproxy vtest arm64
+          ./scripts/create-pkg.sh swift-build/MCPProxy.app mcpproxy vtest arm64
 
       - name: Verify app bundle
         run: |
