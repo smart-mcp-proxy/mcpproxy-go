@@ -1,0 +1,62 @@
+name: Test macOS Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Build Go core
+        run: |
+          go build -ldflags "-X main.version=test -s -w" -o mcpproxy ./cmd/mcpproxy
+
+      - name: Build Swift app
+        run: |
+          chmod +x scripts/build-swift-app.sh
+          ./scripts/build-swift-app.sh vtest arm64 .
+
+      - name: Assemble app bundle
+        run: |
+          # Use create-pkg.sh in adhoc mode
+          export APP_CERT_IDENTITY=""
+          export PKG_CERT_IDENTITY="adhoc"
+          chmod +x scripts/create-pkg.sh
+          ./scripts/create-pkg.sh MCPProxy.app mcpproxy vtest arm64
+
+      - name: Verify app bundle
+        run: |
+          APP="pkg_temp/pkg_root/Applications/mcpproxy.app"
+          echo "=== Structure ==="
+          find "$APP/Contents" -maxdepth 2 | sort
+          echo "=== Info.plist ==="
+          /usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :LSUIElement" "$APP/Contents/Info.plist"
+          echo "=== Sparkle framework ==="
+          ls "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle" && echo "OK" || echo "MISSING"
+          echo "=== rpath ==="
+          otool -l "$APP/Contents/MacOS/MCPProxy" | grep -A2 "LC_RPATH"
+          echo "=== Binary ==="
+          file "$APP/Contents/MacOS/MCPProxy"
+          otool -L "$APP/Contents/MacOS/MCPProxy" | grep Sparkle
+
+      - name: Create DMG
+        run: |
+          APP="pkg_temp/pkg_root/Applications/mcpproxy.app"
+          chmod +x scripts/create-app-dmg.sh
+          ./scripts/create-app-dmg.sh "$APP" vtest arm64
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-test-build
+          path: |
+            *.dmg
+            pkg_temp/pkg_root/Applications/mcpproxy.app

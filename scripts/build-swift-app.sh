@@ -200,6 +200,16 @@ fi
 
 cd - > /dev/null
 
+# Fix rpath to find Sparkle.framework in Contents/Frameworks/
+# swift build sets @rpath to @loader_path but we need @loader_path/../Frameworks
+if otool -l "$APP_BUNDLE/Contents/MacOS/${APP_NAME}" 2>/dev/null | grep -q "LC_RPATH"; then
+  # Check if ../Frameworks is already in rpath
+  if ! otool -l "$APP_BUNDLE/Contents/MacOS/${APP_NAME}" 2>/dev/null | grep -A2 "LC_RPATH" | grep -q "../Frameworks"; then
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_BUNDLE/Contents/MacOS/${APP_NAME}" 2>/dev/null || true
+    echo "✅ Added @executable_path/../Frameworks to rpath"
+  fi
+fi
+
 echo "✅ Swift app bundle assembled: $APP_BUNDLE"
 echo "   Binary: $APP_BUNDLE/Contents/MacOS/${APP_NAME}"
 echo "   Size: $(du -sh "$APP_BUNDLE" | cut -f1)"
