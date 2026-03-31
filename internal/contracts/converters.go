@@ -341,9 +341,17 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 			tool.LastUsed = &lastUsed
 		}
 
-		// Extract annotations
+		// Extract annotations — may be a struct pointer or a map depending on source
 		if annotations, ok := generic["annotations"].(map[string]interface{}); ok {
 			tool.Annotations = convertMapToToolAnnotation(annotations)
+		} else if annotationsPtr, ok := generic["annotations"].(*config.ToolAnnotations); ok && annotationsPtr != nil {
+			tool.Annotations = &ToolAnnotation{
+				Title:           annotationsPtr.Title,
+				ReadOnlyHint:    annotationsPtr.ReadOnlyHint,
+				DestructiveHint: annotationsPtr.DestructiveHint,
+				IdempotentHint:  annotationsPtr.IdempotentHint,
+				OpenWorldHint:   annotationsPtr.OpenWorldHint,
+			}
 		}
 
 		tools = append(tools, tool)
