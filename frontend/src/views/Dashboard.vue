@@ -187,7 +187,7 @@
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
             </svg>
-            <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
+            <span class="text-lg font-bold">{{ tokenSavingsData.saved_tokens_percentage >= 99.995 ? '99.99' : tokenSavingsData.saved_tokens_percentage >= 10 ? tokenSavingsData.saved_tokens_percentage.toFixed(1) : tokenSavingsData.saved_tokens_percentage.toFixed(0) }}%</span>
             <span class="text-xs font-medium">tokens saved</span>
           </div>
         </div>
@@ -463,7 +463,14 @@ const loadSecurityStatus = async () => {
     // Docker status from dedicated endpoint
     const dockerResponse = await api.getDockerStatus()
     if (dockerResponse.success && dockerResponse.data) {
-      dockerStatus.value = { available: dockerResponse.data.docker_available ?? false }
+      let available = dockerResponse.data.docker_available ?? false
+      // Workaround: Docker health checker can get stuck at 'max retries exceeded'
+      // even when Docker containers are running. If API says unavailable but
+      // we have connected stdio servers (which use Docker), treat as available.
+      if (!available && serversStore.servers.some(s => s.connected && s.protocol === 'stdio')) {
+        available = true
+      }
+      dockerStatus.value = { available }
     }
   } catch {
     // Docker endpoint may not exist - treat as unavailable

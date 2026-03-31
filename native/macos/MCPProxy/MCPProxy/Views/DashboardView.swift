@@ -68,7 +68,7 @@ struct DashboardView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.down.right")
                         .font(.system(size: 10 * fontScale))
-                    Text("\(Int(stats.savedTokensPercentage))%")
+                    Text("\(stats.savedTokensPercentage >= 99.995 ? "99.99" : String(format: "%.1f", stats.savedTokensPercentage))%")
                         .font(.scaled(.title2, scale: fontScale))
                         .fontWeight(.bold)
                     Text("tokens saved")
