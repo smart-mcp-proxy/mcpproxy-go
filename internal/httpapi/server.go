@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ type ServerController interface {
 	RemoveServer(ctx context.Context, serverName string) error              // T002: Remove server
 	UpdateServer(ctx context.Context, serverName string, updates *config.ServerConfig) error
 	EnableServer(serverName string, enabled bool) error
+	GetToolApprovalStatus(serverName, toolName string) (string, error)
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
 	GetDockerRecoveryStatus() *storage.DockerRecoveryState
@@ -1941,6 +1943,29 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed tools
 	typedTools := contracts.ConvertGenericToolsToTyped(tools)
 
+	// Enrich with approval status from storage
+	enrichedCount := 0
+	var firstErr error
+	for i := range typedTools {
+		status, err := s.controller.GetToolApprovalStatus(serverID, typedTools[i].Name)
+		if err == nil && status != "" {
+			typedTools[i].ApprovalStatus = status
+			enrichedCount++
+		} else if i == 0 {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		fmt.Printf("[DEBUG] Tool approval enrichment: server=%s enriched=%d/%d first_error=%v\n", serverID, enrichedCount, len(typedTools), firstErr)
+	} else {
+		fmt.Printf("[DEBUG] Tool approval enrichment: server=%s enriched=%d/%d\n", serverID, enrichedCount, len(typedTools))
+	}
+
+	// Sort: pending/changed tools first, then approved
+	sort.SliceStable(typedTools, func(i, j int) bool {
+		return toolApprovalPriority(typedTools[i].ApprovalStatus) < toolApprovalPriority(typedTools[j].ApprovalStatus)
+	})
+
 	response := contracts.GetServerToolsResponse{
 		ServerName: serverID,
 		Tools:      typedTools,
@@ -3600,4 +3625,16 @@ func hasAnnotationHints(tool map[string]interface{}) bool {
 	}
 
 	return false
+}
+
+// toolApprovalPriority returns sort priority (lower = first) for approval status
+func toolApprovalPriority(status string) int {
+	switch status {
+	case "pending":
+		return 0
+	case "changed":
+		return 1
+	default:
+		return 2
+	}
 }

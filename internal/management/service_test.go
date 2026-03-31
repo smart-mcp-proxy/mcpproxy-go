@@ -318,14 +318,14 @@ func TestRestartServer(t *testing.T) {
 
 // mockRuntimeOperations implements RuntimeOperations for testing
 type mockRuntimeOperations struct {
-	servers       []map[string]interface{}
-	enableCalls   []enableCall
-	restartCalls  []string
-	enableError   error
-	restartError  error
-	getAllError   error
-	failOnServer  string // If set, only fail operations on this specific server
-	mu            sync.Mutex
+	servers      []map[string]interface{}
+	enableCalls  []enableCall
+	restartCalls []string
+	enableError  error
+	restartError error
+	getAllError  error
+	failOnServer string // If set, only fail operations on this specific server
+	mu           sync.Mutex
 }
 
 type enableCall struct {
@@ -807,4 +807,8 @@ func TestTriggerOAuthLogin_EmptyServerName(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server name required")
+}
+
+func (m *mockRuntimeOperations) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	return nil, fmt.Errorf("not found")
 }

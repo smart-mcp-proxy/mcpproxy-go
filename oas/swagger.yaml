@@ -1449,6 +1449,8 @@ components:
       properties:
         annotations:
           $ref: '#/components/schemas/contracts.ToolAnnotation'
+        approval_status:
+          type: string
         description:
           type: string
         last_used:

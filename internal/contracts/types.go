@@ -107,13 +107,14 @@ type MCPSession struct {
 
 // Tool represents an MCP tool with its metadata
 type Tool struct {
-	Name        string                 `json:"name"`
-	ServerName  string                 `json:"server_name"`
-	Description string                 `json:"description"`
-	Schema      map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
-	Usage       int                    `json:"usage"`
-	LastUsed    *time.Time             `json:"last_used,omitempty"`
-	Annotations *ToolAnnotation        `json:"annotations,omitempty"`
+	Name           string                 `json:"name"`
+	ServerName     string                 `json:"server_name"`
+	Description    string                 `json:"description"`
+	Schema         map[string]interface{} `json:"schema,omitempty" swaggertype:"object"`
+	Usage          int                    `json:"usage"`
+	LastUsed       *time.Time             `json:"last_used,omitempty"`
+	Annotations    *ToolAnnotation        `json:"annotations,omitempty"`
+	ApprovalStatus string                 `json:"approval_status,omitempty"`
 }
 
 // SearchResult represents a search result for tools

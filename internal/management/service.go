@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -133,6 +134,7 @@ type RuntimeOperations interface {
 	GetAllServers() ([]map[string]interface{}, error)
 	BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error)
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
+	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
 	TriggerOAuthLogin(serverName string) error
 	// TriggerOAuthLoginQuick returns browser status immediately (Spec 020 fix)
 	TriggerOAuthLoginQuick(serverName string) (*core.OAuthStartResult, error)
@@ -710,6 +712,17 @@ func (s *service) GetServerTools(ctx context.Context, name string) ([]map[string
 	tools, err := s.runtime.GetServerTools(name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tools: %w", err)
+	}
+
+	// Enrich with approval status from storage
+	for i, tool := range tools {
+		toolName, _ := tool["name"].(string)
+		if toolName == "" {
+			continue
+		}
+		if record, err := s.runtime.GetToolApproval(name, toolName); err == nil && record != nil {
+			tools[i]["approval_status"] = string(record.Status)
+		}
 	}
 
 	return tools, nil

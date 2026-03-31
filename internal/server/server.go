@@ -2327,3 +2327,12 @@ func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, err
 func (s *Server) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	return s.runtime.GetToolApproval(serverName, toolName)
 }
+
+// GetToolApprovalStatus returns the approval status string for a specific tool.
+func (s *Server) GetToolApprovalStatus(serverName, toolName string) (string, error) {
+	record, err := s.runtime.GetToolApproval(serverName, toolName)
+	if err != nil {
+		return "", err
+	}
+	return string(record.Status), nil
+}
