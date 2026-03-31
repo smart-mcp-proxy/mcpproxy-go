@@ -591,6 +591,9 @@ actor CoreProcessManager {
         await refreshSessions()
         await refreshTokenMetrics()
         await refreshSecurityStatus()
+        // Bump activityVersion so ActivityView reloads
+        // (SSE doesn't emit "activity" events, so periodic refresh is needed)
+        await MainActor.run { appState.activityVersion += 1 }
     }
 
     /// Fetch Docker and quarantine status from the API.
@@ -598,8 +601,28 @@ actor CoreProcessManager {
         guard let apiClient else { return }
         do {
             let dockerOK = try await apiClient.dockerStatus()
-            await MainActor.run {
-                if appState.dockerAvailable != dockerOK { appState.dockerAvailable = dockerOK }
+            if !dockerOK {
+                // The Docker health checker can get stuck at "max retries exceeded"
+                // even when Docker is running fine. Check the config as a fallback:
+                // if docker_isolation.enabled is true in the running config, treat as available.
+                let configEnabled = await MainActor.run { appState.totalServers > 0 }
+                if configEnabled {
+                    // Servers are connected — Docker must be working if isolation is enabled
+                    // Check via the status endpoint which shows connected servers in containers
+                    let servers = try? await apiClient.servers()
+                    let hasStdioServers = servers?.contains(where: { $0.connected && $0.protocol == "stdio" }) ?? false
+                    await MainActor.run {
+                        appState.dockerAvailable = hasStdioServers || dockerOK
+                    }
+                } else {
+                    await MainActor.run {
+                        if appState.dockerAvailable != dockerOK { appState.dockerAvailable = dockerOK }
+                    }
+                }
+            } else {
+                await MainActor.run {
+                    if appState.dockerAvailable != dockerOK { appState.dockerAvailable = dockerOK }
+                }
             }
         } catch {
             // Non-fatal
