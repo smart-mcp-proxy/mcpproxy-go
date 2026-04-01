@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -689,14 +690,16 @@ func TestAtomicWriteFile(t *testing.T) {
 // ---------- ConfigPath tests ----------
 
 func TestConfigPath_AllClients(t *testing.T) {
-	homeDir := "/test/home"
+	homeDir := t.TempDir()
 	for _, c := range allClients {
 		path := ConfigPath(c.ID, homeDir)
 		if path == "" {
 			t.Errorf("Empty path for client %s", c.ID)
 		}
-		if !strings.HasPrefix(path, homeDir) && !strings.HasPrefix(path, "/") {
-			t.Errorf("Path for %s does not start with home dir: %s", c.ID, path)
+		// On Windows, some clients (claude-desktop, vscode) use APPDATA
+		// instead of homeDir, so only check that the path is non-empty and absolute.
+		if !filepath.IsAbs(path) {
+			t.Errorf("Path for %s is not absolute: %s", c.ID, path)
 		}
 	}
 }
@@ -775,6 +778,10 @@ func TestGetAllClients(t *testing.T) {
 // ---------- Edge case tests ----------
 
 func TestConnect_FilePermissionsPreserved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not supported on Windows")
+	}
+
 	svc, homeDir := testService(t)
 
 	cfgPath := filepath.Join(homeDir, ".claude.json")
@@ -791,7 +798,6 @@ func TestConnect_FilePermissionsPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// On macOS/Linux, check the permission bits
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("Expected permissions 0600, got %o", info.Mode().Perm())
 	}
