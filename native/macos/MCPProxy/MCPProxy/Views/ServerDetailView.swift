@@ -280,7 +280,9 @@ struct ServerDetailView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 1) {
                         ForEach(tools) { tool in
-                            ToolRow(tool: tool, serverName: server.name, apiClient: apiClient)
+                            ToolRow(tool: tool, serverName: server.name, apiClient: apiClient) {
+                                Task { await loadTools() }
+                            }
                         }
                     }
                     .padding()
@@ -871,11 +873,14 @@ struct ToolRow: View {
     let tool: ServerTool
     var serverName: String = ""
     var apiClient: APIClient? = nil
+    var onApproved: (() -> Void)? = nil
     @Environment(\.fontScale) var fontScale
 
     @State private var isExpanded = false
     @State private var diffData: [String: Any]? = nil
     @State private var isLoadingDiff = false
+    @State private var isApprovingTool = false
+    @State private var approveSuccess = false
 
     private var needsApproval: Bool {
         guard let status = tool.approvalStatus else { return false }
@@ -1011,7 +1016,7 @@ struct ToolRow: View {
                     Text("Approval Status")
                         .font(.scaled(.caption, scale: fontScale).bold())
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 6) {
+                    HStack(spacing: 8) {
                         Circle()
                             .fill(approvalStatusColor(status))
                             .frame(width: 8, height: 8)
@@ -1019,6 +1024,30 @@ struct ToolRow: View {
                         Text(approvalStatusLabel(status))
                             .font(.scaled(.subheadline, scale: fontScale))
                             .foregroundStyle(.primary)
+
+                        if needsApproval {
+                            if approveSuccess {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                    Text("Approved")
+                                        .font(.scaled(.caption, scale: fontScale))
+                                        .foregroundStyle(.green)
+                                }
+                            } else if isApprovingTool {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Button {
+                                    approveTool()
+                                } label: {
+                                    Label("Approve", systemImage: "checkmark.shield")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                                .controlSize(.small)
+                            }
+                        }
                     }
                 }
             }
@@ -1223,6 +1252,26 @@ struct ToolRow: View {
                 await MainActor.run {
                     diffData = [:]
                     isLoadingDiff = false
+                }
+            }
+        }
+    }
+
+    private func approveTool() {
+        guard let client = apiClient else { return }
+        isApprovingTool = true
+        Task {
+            do {
+                try await client.approveSpecificTools(serverName, tools: [tool.name])
+                await MainActor.run {
+                    isApprovingTool = false
+                    approveSuccess = true
+                    onApproved?()
+                }
+            } catch {
+                await MainActor.run {
+                    isApprovingTool = false
+                    NSLog("[ToolRow] approveTool FAILED for %@: %@", tool.name, error.localizedDescription)
                 }
             }
         }

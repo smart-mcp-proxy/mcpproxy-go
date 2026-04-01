@@ -211,6 +211,7 @@ enum ServerColumn: String, CaseIterable {
     case type = "type"
     case state = "state"
     case tools = "tools"
+    case pending = "pending"
     case tokenSize = "tokenSize"
     case actions = "actions"
 
@@ -225,6 +226,7 @@ enum ServerColumn: String, CaseIterable {
         case .type: return "Type"
         case .state: return "Status"
         case .tools: return "Tools"
+        case .pending: return "Pending"
         case .tokenSize: return "Tokens"
         case .actions: return "Actions"
         }
@@ -237,6 +239,7 @@ enum ServerColumn: String, CaseIterable {
         case .type: return 50
         case .state: return 80
         case .tools: return 45
+        case .pending: return 60
         case .tokenSize: return 60
         case .actions: return 120
         }
@@ -249,6 +252,7 @@ enum ServerColumn: String, CaseIterable {
         case .type: return 60
         case .state: return 160
         case .tools: return 50
+        case .pending: return 80
         case .tokenSize: return 80
         case .actions: return 120
         }
@@ -256,7 +260,7 @@ enum ServerColumn: String, CaseIterable {
 
     var resizingMask: NSTableColumn.ResizingOptions {
         switch self {
-        case .status, .tools, .actions: return .userResizingMask
+        case .status, .tools, .pending, .actions: return .userResizingMask
         case .name: return [.userResizingMask, .autoresizingMask]
         default: return .userResizingMask
         }
@@ -368,6 +372,8 @@ struct ServerTableView: NSViewRepresentable {
                     result = stateOrder(a) < stateOrder(b)
                 case .tools:
                     result = a.toolCount < b.toolCount
+                case .pending:
+                    result = a.pendingApprovalCount < b.pendingApprovalCount
                 case .tokenSize:
                     result = (a.toolListTokenSize ?? 0) < (b.toolListTokenSize ?? 0)
                 case .actions:
@@ -638,6 +644,8 @@ struct ServerTableView: NSViewRepresentable {
                 return makeStateCell(server: server, tableView: tableView)
             case .tools:
                 return makeToolsCell(server: server, tableView: tableView)
+            case .pending:
+                return makePendingCell(server: server, tableView: tableView)
             case .tokenSize:
                 return makeTokenSizeCell(server: server, tableView: tableView)
             case .actions:
@@ -751,6 +759,29 @@ struct ServerTableView: NSViewRepresentable {
             label.alignment = .right
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            return cell
+        }
+
+        private func makePendingCell(server: ServerStatus, tableView: NSTableView) -> NSView {
+            let cellId = NSUserInterfaceItemIdentifier("PendingCell")
+            let cell = reuseOrCreate(tableView: tableView, identifier: cellId)
+
+            let count = server.pendingApprovalCount
+            let text = count > 0 ? "\(count)" : "-"
+            let label = NSTextField(labelWithString: text)
+            label.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize * fontScale, weight: .regular)
+            label.textColor = count > 0 ? .systemOrange : .secondaryLabelColor
+            label.alignment = .right
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            if count > 0 {
+                cell.toolTip = "\(count) tool(s) awaiting approval"
+            }
             NSLayoutConstraint.activate([
                 label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
                 label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),

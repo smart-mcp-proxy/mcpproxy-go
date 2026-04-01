@@ -150,7 +150,7 @@ struct ActivityView: View {
             // Right: detail panel
             if let selectedID = selectedActivityID,
                let selected = activities.first(where: { $0.id == selectedID }) {
-                ActivityDetailView(entry: selected)
+                ActivityDetailView(entry: selected, recentSessions: appState.recentSessions)
             } else {
                 Text("Select an activity entry")
                     .font(.scaled(.body, scale: fontScale))
@@ -694,8 +694,31 @@ struct IntentBadge: View {
 
 struct ActivityDetailView: View {
     let entry: ActivityEntry
+    var recentSessions: [APIClient.MCPSession] = []
     @Environment(\.fontScale) var fontScale
     @State private var copiedField: String?
+
+    /// Resolve a human-readable client name from the session ID.
+    private var clientName: String? {
+        guard let sessionId = entry.sessionId, !sessionId.isEmpty else { return nil }
+        if let session = recentSessions.first(where: { $0.id == sessionId }) {
+            if let name = session.clientName, !name.isEmpty {
+                if let version = session.clientVersion, !version.isEmpty {
+                    return "\(name) \(version)"
+                }
+                return name
+            }
+        }
+        // Fallback: infer from session ID prefix heuristics
+        let lower = sessionId.lowercased()
+        if lower.contains("claude") { return "Claude Code" }
+        if lower.contains("cursor") { return "Cursor" }
+        if lower.contains("vscode") || lower.contains("copilot") { return "VS Code" }
+        if lower.contains("codex") { return "Codex CLI" }
+        if lower.contains("gemini") { return "Gemini" }
+        if lower.contains("windsurf") { return "Windsurf" }
+        return nil
+    }
 
     var body: some View {
         ScrollView {
@@ -839,6 +862,9 @@ struct ActivityDetailView: View {
             }
             if let sessionId = entry.sessionId, !sessionId.isEmpty {
                 metadataRow(label: "Session ID", value: sessionId)
+            }
+            if let client = clientName {
+                metadataRow(label: "Client", value: client)
             }
         }
     }
