@@ -337,3 +337,4 @@ func (m *baseController) ApproveAllTools(_ string, _ string) (int, error)   { re
 func (m *baseController) GetToolApproval(_, _ string) (*storage.ToolApprovalRecord, error) {
 	return nil, nil
 }
+func (m *baseController) GetToolApprovalStatus(_, _ string) (string, error) { return "", nil }
