@@ -272,14 +272,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			continue
 		}
 
-		// If tool was previously marked "changed" but the description matches,
-		// restore to approved. This handles cases where the hash formula changed
-		// and the tool was falsely flagged as changed in a previous session.
+		// If tool was previously marked "changed", check if the tool has reverted
+		// to its PREVIOUS (pre-change) description. Only auto-approve if the
+		// description matches the APPROVED version, not the current (changed) one.
+		// This prevents the bug where a changed tool gets auto-approved on the
+		// next checkToolApprovals pass because CurrentDescription was already
+		// updated to the new description.
 		if existing.Status == storage.ToolApprovalStatusChanged {
-			descMatch := tool.Description == existing.CurrentDescription ||
-				tool.Description == existing.PreviousDescription ||
-				existing.CurrentDescription == ""
-			if descMatch {
+			// Only restore if the tool reverted to the PREVIOUS (approved) description
+			if existing.PreviousDescription != "" && tool.Description == existing.PreviousDescription {
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -288,12 +289,18 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
-					r.logger.Info("Previously 'changed' tool restored (description matches, hash formula migration)",
+					r.logger.Info("Changed tool restored (reverted to previous description)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
 				}
 				continue
 			}
+			// Tool still has the changed description — keep it blocked
+			if globalEnabled {
+				result.BlockedTools[toolName] = true
+				result.ChangedCount++
+			}
+			continue
 		}
 
 		if existing.ApprovedHash != "" && existing.ApprovedHash != currentHash {
