@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 

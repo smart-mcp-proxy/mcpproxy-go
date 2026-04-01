@@ -66,14 +66,15 @@ Use `github.com/flyingmutant/rapid` to define a state machine model of the quara
 - **SC-003**: `rapid` state machine test finds no violations in 1000 iterations.
 - **SC-004**: Runtime invariant prevents any future silent changed→approved transitions.
 
-## Files to Modify
+## Files Modified
 
-- `internal/runtime/tool_quarantine.go` — add assertToolApprovalInvariant calls
-- `internal/runtime/tool_quarantine_test.go` — add multi-pass tests + rapid state machine tests
-- `go.mod` / `go.sum` — add `github.com/flyingmutant/rapid` dependency
+- `internal/runtime/tool_quarantine.go` — `assertToolApprovalInvariant()`, `enforceInvariant()`, `TransitionReason` constants, integrated at all state transition points
+- `internal/runtime/tool_quarantine_invariant_test.go` — invariant unit tests, multi-pass scenario tests, rapid property-based state machine tests
+- `internal/management/service_test.go` — fix pre-existing lint error (missing storage import)
+- `go.mod` / `go.sum` — add `pgregory.net/rapid` v1.2.0 dependency
 
 ## Assumptions
 
-- `rapid` v1.1.0+ is stable and compatible with Go 1.24.
-- Runtime invariant assertions use `log.Fatal` in production (not panic) to avoid crashing the server, but return an error that blocks the transition.
+- `pgregory.net/rapid` v1.2.0 is stable and compatible with Go 1.24 (confirmed).
+- Runtime invariant assertions log critical error in production and return an error that blocks the transition (no panic, no crash).
 - The quarantine state machine has exactly 3 states: pending, approved, changed.

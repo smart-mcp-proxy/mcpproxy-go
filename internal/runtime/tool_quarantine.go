@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -81,6 +82,71 @@ func calculateHashWithAnnotations(toolName, description, schemaJSON string, anno
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// TransitionReason explains why a tool approval state transition is occurring.
+type TransitionReason string
+
+const (
+	ReasonHashMatch         TransitionReason = "hash_match"
+	ReasonDescriptionRevert TransitionReason = "description_revert"
+	ReasonFormulaMigration  TransitionReason = "formula_migration"
+	ReasonContentMatch      TransitionReason = "content_match"
+	ReasonDescriptionMatch  TransitionReason = "description_match"
+	ReasonUserApprove       TransitionReason = "user_approve"
+	ReasonAutoApprove       TransitionReason = "auto_approve"
+)
+
+// assertToolApprovalInvariant checks that a state transition is valid according
+// to quarantine safety rules. Returns nil for valid transitions.
+//
+// Invariants:
+//   - changed→approved: requires user action, description revert, or proof that
+//     the tool content hasn't actually changed (hash match, formula migration,
+//     content match).
+//   - pending→approved: requires explicit user action or auto-approve (when
+//     quarantine is disabled for the server).
+func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionReason) error {
+	if newStatus != storage.ToolApprovalStatusApproved {
+		return nil
+	}
+
+	switch oldStatus {
+	case storage.ToolApprovalStatusChanged:
+		switch reason {
+		case ReasonHashMatch, ReasonDescriptionRevert, ReasonFormulaMigration,
+			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove:
+			return nil
+		default:
+			return fmt.Errorf("invariant violation: changed→approved with reason %q "+
+				"(requires user action or description revert)", reason)
+		}
+	case storage.ToolApprovalStatusPending:
+		switch reason {
+		case ReasonUserApprove, ReasonAutoApprove:
+			return nil
+		default:
+			return fmt.Errorf("invariant violation: pending→approved with reason %q "+
+				"(requires user action)", reason)
+		}
+	}
+	return nil
+}
+
+// enforceInvariant logs and returns the invariant error, or panics in test mode.
+func (r *Runtime) enforceInvariant(serverName, toolName, oldStatus, newStatus string, reason TransitionReason) error {
+	err := assertToolApprovalInvariant(oldStatus, newStatus, reason)
+	if err == nil {
+		return nil
+	}
+	r.logger.Error("Tool approval invariant violation",
+		zap.String("server", serverName),
+		zap.String("tool", toolName),
+		zap.String("old_status", oldStatus),
+		zap.String("new_status", newStatus),
+		zap.String("reason", string(reason)),
+		zap.Error(err))
+	return err
 }
 
 // ToolApprovalResult contains the result of checking tool approvals for a server.
@@ -227,6 +293,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			if existing.Status != storage.ToolApprovalStatusApproved {
 				// Hash matches but status is not approved (e.g., falsely marked "changed"
 				// by a previous binary with a different hash formula). Restore to approved.
+				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonHashMatch); err != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
@@ -281,6 +352,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		if existing.Status == storage.ToolApprovalStatusChanged {
 			// Only restore if the tool reverted to the PREVIOUS (approved) description
 			if existing.PreviousDescription != "" && tool.Description == existing.PreviousDescription {
+				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionRevert); err != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -327,6 +403,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.ApprovedHash == annotationsHash
 
 			if isFormulaChange {
+				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonFormulaMigration); err != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -367,6 +448,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				schemaMatch = normalizeJSON(schemaJSON) == normalizeJSON(existing.CurrentSchema)
 			}
 			if descMatch && schemaMatch {
+				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -397,6 +483,11 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// auto-approve even if schema normalization differs.
 			// Schema formatting differences are NOT security concerns.
 			if descMatch {
+				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -484,6 +575,10 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 				zap.String("tool", toolName),
 				zap.Error(err))
 			continue
+		}
+
+		if err := r.enforceInvariant(serverName, toolName, record.Status, storage.ToolApprovalStatusApproved, ReasonUserApprove); err != nil {
+			return err
 		}
 
 		record.Status = storage.ToolApprovalStatusApproved
