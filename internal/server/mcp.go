@@ -3649,10 +3649,18 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		patch.Enabled = requestedEnabled
 	}
 
-	// Handle quarantined similarly
+	// Handle quarantined — only allow quarantining (true→true or false→true), NEVER unquarantine.
+	// Unquarantining via MCP is a security risk: a compromised AI agent could unquarantine
+	// a malicious server. Unquarantine is only available via REST API or config editing.
 	requestedQuarantined := request.GetBool("quarantined", existingServer.Quarantined)
 	if requestedQuarantined != existingServer.Quarantined {
-		patch.Quarantined = requestedQuarantined
+		if !requestedQuarantined && existingServer.Quarantined {
+			p.logger.Warn("MCP tool attempted to unquarantine server (blocked for security)",
+				zap.String("server", existingServer.Name))
+			// Silently ignore — do not update the field
+		} else {
+			patch.Quarantined = requestedQuarantined
+		}
 	}
 
 	// Handle args JSON string - arrays are replaced entirely

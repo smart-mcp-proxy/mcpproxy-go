@@ -903,6 +903,186 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 	// In a real scenario, unquarantining would be done through the system tray or manual config editing
 }
 
+// TestE2E_UnquarantineNotExposedViaMCP verifies that servers cannot be
+// unquarantined through the MCP interface. Unquarantine is a security-sensitive
+// operation that should only be available via REST API or config editing.
+func TestE2E_UnquarantineNotExposedViaMCP(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Test 1: "unquarantine" is not a valid operation — must be rejected
+	unquarantineReq := mcp.CallToolRequest{}
+	unquarantineReq.Params.Name = "quarantine_security"
+	unquarantineReq.Params.Arguments = map[string]interface{}{
+		"operation": "unquarantine",
+		"name":      "some-server",
+	}
+
+	result, err := mcpClient.CallTool(ctx, unquarantineReq)
+	require.NoError(t, err)
+	assert.True(t, result.IsError, "unquarantine operation must be rejected by MCP")
+
+	// Extract the error text
+	require.Greater(t, len(result.Content), 0)
+	contentBytes, _ := json.Marshal(result.Content[0])
+	var contentMap map[string]interface{}
+	_ = json.Unmarshal(contentBytes, &contentMap)
+	errorText, _ := contentMap["text"].(string)
+	assert.Contains(t, errorText, "Unknown quarantine operation",
+		"MCP should report unknown operation for unquarantine")
+
+	// Test 2: "unquarantine_server" is also not a valid operation
+	unquarantineReq2 := mcp.CallToolRequest{}
+	unquarantineReq2.Params.Name = "quarantine_security"
+	unquarantineReq2.Params.Arguments = map[string]interface{}{
+		"operation": "unquarantine_server",
+		"name":      "some-server",
+	}
+
+	result2, err := mcpClient.CallTool(ctx, unquarantineReq2)
+	require.NoError(t, err)
+	assert.True(t, result2.IsError, "unquarantine_server operation must be rejected by MCP")
+
+	// Test 3: Verify tool schema only lists the 6 allowed operations
+	// by checking that calling with empty operation fails with the right error
+	emptyReq := mcp.CallToolRequest{}
+	emptyReq.Params.Name = "quarantine_security"
+	emptyReq.Params.Arguments = map[string]interface{}{}
+
+	emptyResult, err := mcpClient.CallTool(ctx, emptyReq)
+	require.NoError(t, err)
+	assert.True(t, emptyResult.IsError, "Missing operation should be rejected")
+}
+
+// TestE2E_PatchCannotUnquarantineServer verifies that an AI agent cannot
+// bypass quarantine by using upstream_servers patch/update to set quarantined=false.
+func TestE2E_PatchCannotUnquarantineServer(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Step 1: Add a server (will be quarantined by default)
+	mockServer := env.CreateMockUpstreamServer("patch-quarantine-test", []mcp.Tool{
+		{Name: "test_tool", Description: "A test tool"},
+	})
+
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "patch-quarantine-test",
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	assert.False(t, addResult.IsError)
+
+	// Step 2: Try to unquarantine via patch — this should be silently blocked
+	patchRequest := mcp.CallToolRequest{}
+	patchRequest.Params.Name = "upstream_servers"
+	patchRequest.Params.Arguments = map[string]interface{}{
+		"operation":   "patch",
+		"name":        "patch-quarantine-test",
+		"quarantined": false,
+	}
+
+	patchResult, err := mcpClient.CallTool(ctx, patchRequest)
+	require.NoError(t, err)
+	assert.False(t, patchResult.IsError, "Patch should succeed (the quarantine field is just ignored)")
+
+	// Step 3: Verify server is STILL quarantined
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "quarantine_security"
+	listRequest.Params.Arguments = map[string]interface{}{
+		"operation": "list_quarantined",
+	}
+
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	assert.False(t, listResult.IsError)
+
+	// Parse the response
+	require.Greater(t, len(listResult.Content), 0)
+	contentBytes, _ := json.Marshal(listResult.Content[0])
+	var contentMap map[string]interface{}
+	_ = json.Unmarshal(contentBytes, &contentMap)
+	contentText, _ := contentMap["text"].(string)
+
+	var listResponse map[string]interface{}
+	err = json.Unmarshal([]byte(contentText), &listResponse)
+	require.NoError(t, err)
+
+	servers, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok)
+
+	// Server must still appear in quarantine list
+	found := false
+	for _, s := range servers {
+		serverMap, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := serverMap["name"].(string); name == "patch-quarantine-test" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "Server must remain quarantined after patch attempt to unquarantine")
+
+	// Step 4: Also try via update — should also be blocked
+	updateRequest := mcp.CallToolRequest{}
+	updateRequest.Params.Name = "upstream_servers"
+	updateRequest.Params.Arguments = map[string]interface{}{
+		"operation":   "update",
+		"name":        "patch-quarantine-test",
+		"quarantined": false,
+	}
+
+	updateResult, err := mcpClient.CallTool(ctx, updateRequest)
+	require.NoError(t, err)
+	assert.False(t, updateResult.IsError, "Update should succeed (quarantine field is just ignored)")
+
+	// Step 5: Verify STILL quarantined after update attempt
+	listResult2, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+
+	contentBytes2, _ := json.Marshal(listResult2.Content[0])
+	var contentMap2 map[string]interface{}
+	_ = json.Unmarshal(contentBytes2, &contentMap2)
+	contentText2, _ := contentMap2["text"].(string)
+
+	var listResponse2 map[string]interface{}
+	_ = json.Unmarshal([]byte(contentText2), &listResponse2)
+
+	servers2, _ := listResponse2["servers"].([]interface{})
+	found2 := false
+	for _, s := range servers2 {
+		serverMap, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if name, _ := serverMap["name"].(string); name == "patch-quarantine-test" {
+			found2 = true
+			break
+		}
+	}
+	assert.True(t, found2, "Server must remain quarantined after update attempt to unquarantine")
+}
+
 // Test: Error handling and recovery
 func TestHandleV1ToolProxy(t *testing.T) {
 	// Note: This test is currently disabled as it requires mock implementations
@@ -1534,9 +1714,9 @@ func TestPatchPreservesEnvAndHeaders(t *testing.T) {
 		Protocol: "http",
 		Enabled:  true,
 		Env: map[string]string{
-			"API_KEY":    "secret-key",
-			"DEBUG":      "true",
-			"LOG_LEVEL":  "info",
+			"API_KEY":   "secret-key",
+			"DEBUG":     "true",
+			"LOG_LEVEL": "info",
 		},
 		Headers: map[string]string{
 			"Authorization": "Bearer token123",

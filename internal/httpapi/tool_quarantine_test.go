@@ -332,3 +332,90 @@ func TestHandleExportToolDescriptions_Empty(t *testing.T) {
 	data := resp["data"].(map[string]interface{})
 	assert.Equal(t, float64(0), data["count"])
 }
+
+// =============================================================================
+// Server unquarantine is available ONLY via REST API, not MCP (security design)
+// =============================================================================
+
+type mockUnquarantineController struct {
+	baseController
+	apiKey              string
+	quarantineServerErr error
+	lastServerName      string
+	lastQuarantined     bool
+}
+
+func (m *mockUnquarantineController) GetCurrentConfig() any {
+	return &config.Config{
+		APIKey: m.apiKey,
+	}
+}
+
+func (m *mockUnquarantineController) QuarantineServer(serverName string, quarantined bool) error {
+	m.lastServerName = serverName
+	m.lastQuarantined = quarantined
+	return m.quarantineServerErr
+}
+
+func TestHandleUnquarantineServer_ViaAPI(t *testing.T) {
+	ctrl := &mockUnquarantineController{apiKey: "test-key"}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/malicious-server/unquarantine", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "Unquarantine must succeed via REST API")
+	assert.Equal(t, "malicious-server", ctrl.lastServerName)
+	assert.False(t, ctrl.lastQuarantined, "Unquarantine should pass quarantined=false")
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, "unquarantine", data["action"])
+	assert.Equal(t, true, data["success"])
+}
+
+func TestHandleQuarantineServer_ViaAPI(t *testing.T) {
+	ctrl := &mockUnquarantineController{apiKey: "test-key"}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/untrusted-server/quarantine", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "Quarantine must succeed via REST API")
+	assert.Equal(t, "untrusted-server", ctrl.lastServerName)
+	assert.True(t, ctrl.lastQuarantined, "Quarantine should pass quarantined=true")
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, "quarantine", data["action"])
+	assert.Equal(t, true, data["success"])
+}
+
+func TestHandleUnquarantineServer_Error(t *testing.T) {
+	ctrl := &mockUnquarantineController{
+		apiKey:              "test-key",
+		quarantineServerErr: fmt.Errorf("server not found"),
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/nonexistent/unquarantine", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
