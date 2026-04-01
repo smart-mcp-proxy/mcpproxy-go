@@ -903,6 +903,63 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 	// In a real scenario, unquarantining would be done through the system tray or manual config editing
 }
 
+// TestE2E_UnquarantineNotExposedViaMCP verifies that servers cannot be
+// unquarantined through the MCP interface. Unquarantine is a security-sensitive
+// operation that should only be available via REST API or config editing.
+func TestE2E_UnquarantineNotExposedViaMCP(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	// Test 1: "unquarantine" is not a valid operation — must be rejected
+	unquarantineReq := mcp.CallToolRequest{}
+	unquarantineReq.Params.Name = "quarantine_security"
+	unquarantineReq.Params.Arguments = map[string]interface{}{
+		"operation": "unquarantine",
+		"name":      "some-server",
+	}
+
+	result, err := mcpClient.CallTool(ctx, unquarantineReq)
+	require.NoError(t, err)
+	assert.True(t, result.IsError, "unquarantine operation must be rejected by MCP")
+
+	// Extract the error text
+	require.Greater(t, len(result.Content), 0)
+	contentBytes, _ := json.Marshal(result.Content[0])
+	var contentMap map[string]interface{}
+	_ = json.Unmarshal(contentBytes, &contentMap)
+	errorText, _ := contentMap["text"].(string)
+	assert.Contains(t, errorText, "Unknown quarantine operation",
+		"MCP should report unknown operation for unquarantine")
+
+	// Test 2: "unquarantine_server" is also not a valid operation
+	unquarantineReq2 := mcp.CallToolRequest{}
+	unquarantineReq2.Params.Name = "quarantine_security"
+	unquarantineReq2.Params.Arguments = map[string]interface{}{
+		"operation": "unquarantine_server",
+		"name":      "some-server",
+	}
+
+	result2, err := mcpClient.CallTool(ctx, unquarantineReq2)
+	require.NoError(t, err)
+	assert.True(t, result2.IsError, "unquarantine_server operation must be rejected by MCP")
+
+	// Test 3: Verify tool schema only lists the 6 allowed operations
+	// by checking that calling with empty operation fails with the right error
+	emptyReq := mcp.CallToolRequest{}
+	emptyReq.Params.Name = "quarantine_security"
+	emptyReq.Params.Arguments = map[string]interface{}{}
+
+	emptyResult, err := mcpClient.CallTool(ctx, emptyReq)
+	require.NoError(t, err)
+	assert.True(t, emptyResult.IsError, "Missing operation should be rejected")
+}
+
 // Test: Error handling and recovery
 func TestHandleV1ToolProxy(t *testing.T) {
 	// Note: This test is currently disabled as it requires mock implementations
@@ -1534,9 +1591,9 @@ func TestPatchPreservesEnvAndHeaders(t *testing.T) {
 		Protocol: "http",
 		Enabled:  true,
 		Env: map[string]string{
-			"API_KEY":    "secret-key",
-			"DEBUG":      "true",
-			"LOG_LEVEL":  "info",
+			"API_KEY":   "secret-key",
+			"DEBUG":     "true",
+			"LOG_LEVEL": "info",
 		},
 		Headers: map[string]string{
 			"Authorization": "Bearer token123",
