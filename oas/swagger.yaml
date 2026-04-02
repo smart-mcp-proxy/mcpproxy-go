@@ -1344,6 +1344,10 @@ components:
           type: boolean
         reconnect_count:
           type: integer
+        reconnect_on_use:
+          description: Attempt reconnection when a tool call targets this disconnected
+            server
+          type: boolean
         retry_count:
           type: integer
         should_retry:
@@ -1615,6 +1619,8 @@ components:
         protocol:
           type: string
         quarantined:
+          type: boolean
+        reconnect_on_use:
           type: boolean
         url:
           type: string
