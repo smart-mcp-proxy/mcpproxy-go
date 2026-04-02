@@ -437,6 +437,10 @@ components:
         quarantined:
           description: Security quarantine status
           type: boolean
+        reconnect_on_use:
+          description: Attempt reconnection when a tool call targets a disconnected
+            server
+          type: boolean
         shared:
           description: 'Server edition: shared with all users'
           type: boolean
