@@ -903,24 +903,60 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 			return nil, fmt.Errorf("server '%s' is currently connecting - please wait for connection to complete (state: %s)", serverName, state.String())
 		}
 
-		// Include last error if available with enhanced context
-		if lastError := targetClient.GetLastError(); lastError != nil {
-			// Enrich OAuth-related errors at source
-			lastErrStr := lastError.Error()
-			if strings.Contains(lastErrStr, "OAuth authentication failed") ||
-				strings.Contains(lastErrStr, "Dynamic Client Registration") ||
-				strings.Contains(lastErrStr, "authorization required") {
-				return nil, fmt.Errorf("server '%s' requires OAuth authentication but is not properly configured. OAuth setup failed: %s. Please configure OAuth credentials manually or use a Personal Access Token - check mcpproxy logs for detailed setup instructions", serverName, lastError.Error())
-			}
+		// Attempt reconnect-on-use if enabled for this server
+		reconnected := false
+		if targetClient.Config.ReconnectOnUse &&
+			!targetClient.IsUserLoggedOut() &&
+			!targetClient.Config.Quarantined {
+			m.logger.Info("reconnect_on_use: attempting reconnect for tool call",
+				zap.String("server", serverName),
+				zap.String("tool", actualToolName),
+				zap.String("state", state.String()))
 
-			if strings.Contains(lastErrStr, "OAuth metadata unavailable") {
-				return nil, fmt.Errorf("server '%s' does not provide valid OAuth configuration endpoints. This server may not support OAuth or requires manual authentication setup: %s", serverName, lastError.Error())
-			}
+			// Release the read lock during reconnection — Connect acquires mc.mu
+			// and we must not hold m.mu.RLock while blocking on a potentially
+			// slow network operation.
+			m.mu.RUnlock()
 
-			return nil, fmt.Errorf("server '%s' is not connected (state: %s) - connection failed with error: %s", serverName, state.String(), lastError.Error())
+			reconnectCtx, reconnectCancel := context.WithTimeout(ctx, 15*time.Second)
+			reconnectErr := targetClient.TryReconnectSync(reconnectCtx)
+			reconnectCancel()
+
+			// Re-acquire the read lock
+			m.mu.RLock()
+
+			if reconnectErr != nil {
+				m.logger.Warn("reconnect_on_use: reconnect failed, falling through to error",
+					zap.String("server", serverName),
+					zap.Error(reconnectErr))
+			} else if targetClient.IsConnected() {
+				m.logger.Info("reconnect_on_use: reconnect succeeded, proceeding with tool call",
+					zap.String("server", serverName),
+					zap.String("tool", actualToolName))
+				reconnected = true
+			}
 		}
 
-		return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
+		if !reconnected {
+			// Include last error if available with enhanced context
+			if lastError := targetClient.GetLastError(); lastError != nil {
+				// Enrich OAuth-related errors at source
+				lastErrStr := lastError.Error()
+				if strings.Contains(lastErrStr, "OAuth authentication failed") ||
+					strings.Contains(lastErrStr, "Dynamic Client Registration") ||
+					strings.Contains(lastErrStr, "authorization required") {
+					return nil, fmt.Errorf("server '%s' requires OAuth authentication but is not properly configured. OAuth setup failed: %s. Please configure OAuth credentials manually or use a Personal Access Token - check mcpproxy logs for detailed setup instructions", serverName, lastError.Error())
+				}
+
+				if strings.Contains(lastErrStr, "OAuth metadata unavailable") {
+					return nil, fmt.Errorf("server '%s' does not provide valid OAuth configuration endpoints. This server may not support OAuth or requires manual authentication setup: %s", serverName, lastError.Error())
+				}
+
+				return nil, fmt.Errorf("server '%s' is not connected (state: %s) - connection failed with error: %s", serverName, state.String(), lastError.Error())
+			}
+
+			return nil, fmt.Errorf("server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", serverName, state.String())
+		}
 	}
 
 	m.logger.Debug("CallTool: calling client.CallTool",

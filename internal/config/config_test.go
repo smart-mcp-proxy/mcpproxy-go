@@ -1260,3 +1260,69 @@ func TestTelemetryConfig_OmittedWhenNil(t *testing.T) {
 	// telemetry should not appear in JSON when nil
 	assert.NotContains(t, string(data), "telemetry")
 }
+
+func TestServerConfig_ReconnectOnUse(t *testing.T) {
+	t.Run("defaults to false", func(t *testing.T) {
+		server := &ServerConfig{
+			Name:    "test-server",
+			Enabled: true,
+		}
+		assert.False(t, server.ReconnectOnUse)
+	})
+
+	t.Run("parses from JSON when true", func(t *testing.T) {
+		jsonStr := `{"name":"test","enabled":true,"reconnect_on_use":true}`
+		var server ServerConfig
+		err := json.Unmarshal([]byte(jsonStr), &server)
+		require.NoError(t, err)
+		assert.True(t, server.ReconnectOnUse)
+	})
+
+	t.Run("parses from JSON when false", func(t *testing.T) {
+		jsonStr := `{"name":"test","enabled":true,"reconnect_on_use":false}`
+		var server ServerConfig
+		err := json.Unmarshal([]byte(jsonStr), &server)
+		require.NoError(t, err)
+		assert.False(t, server.ReconnectOnUse)
+	})
+
+	t.Run("omitted from JSON when false", func(t *testing.T) {
+		server := &ServerConfig{
+			Name:           "test",
+			Enabled:        true,
+			ReconnectOnUse: false,
+		}
+		data, err := json.Marshal(server)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), "reconnect_on_use")
+	})
+
+	t.Run("present in JSON when true", func(t *testing.T) {
+		server := &ServerConfig{
+			Name:           "test",
+			Enabled:        true,
+			ReconnectOnUse: true,
+		}
+		data, err := json.Marshal(server)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"reconnect_on_use":true`)
+	})
+
+	t.Run("round-trip serialization", func(t *testing.T) {
+		server := &ServerConfig{
+			Name:           "reconnect-test",
+			URL:            "http://localhost:3000",
+			Protocol:       "http",
+			Enabled:        true,
+			ReconnectOnUse: true,
+			Created:        time.Now(),
+		}
+		data, err := json.Marshal(server)
+		require.NoError(t, err)
+
+		var restored ServerConfig
+		err = json.Unmarshal(data, &restored)
+		require.NoError(t, err)
+		assert.Equal(t, server.ReconnectOnUse, restored.ReconnectOnUse)
+	})
+}
