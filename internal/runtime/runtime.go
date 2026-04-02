@@ -1710,6 +1710,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"authenticated":   authenticated,
 		}
 
+		// Add reconnect_on_use from config
+		if serverStatus.Config != nil && serverStatus.Config.ReconnectOnUse {
+			serverMap["reconnect_on_use"] = true
+		}
+
 		// Add OAuth status fields if available
 		if oauthStatus != "" {
 			serverMap["oauth_status"] = oauthStatus

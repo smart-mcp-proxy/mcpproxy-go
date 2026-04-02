@@ -31,21 +31,22 @@ const CurrentSchemaVersion = 2
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
-	ID          string                  `json:"id"`
-	Name        string                  `json:"name"`
-	URL         string                  `json:"url,omitempty"`
-	Protocol    string                  `json:"protocol,omitempty"` // stdio, http, sse, streamable-http, auto
-	Command     string                  `json:"command,omitempty"`
-	Args        []string                `json:"args,omitempty"`
-	WorkingDir  string                  `json:"working_dir,omitempty"` // Working directory for stdio servers
-	Env         map[string]string       `json:"env,omitempty"`
-	Headers     map[string]string       `json:"headers,omitempty"` // For HTTP authentication
-	OAuth       *config.OAuthConfig     `json:"oauth,omitempty"`   // OAuth configuration
-	Enabled     bool                    `json:"enabled"`
-	Quarantined bool                    `json:"quarantined"` // Security quarantine status
-	Created     time.Time               `json:"created"`
-	Updated     time.Time               `json:"updated"`
-	Isolation   *config.IsolationConfig `json:"isolation,omitempty"` // Per-server isolation settings
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name"`
+	URL            string                  `json:"url,omitempty"`
+	Protocol       string                  `json:"protocol,omitempty"` // stdio, http, sse, streamable-http, auto
+	Command        string                  `json:"command,omitempty"`
+	Args           []string                `json:"args,omitempty"`
+	WorkingDir     string                  `json:"working_dir,omitempty"` // Working directory for stdio servers
+	Env            map[string]string       `json:"env,omitempty"`
+	Headers        map[string]string       `json:"headers,omitempty"` // For HTTP authentication
+	OAuth          *config.OAuthConfig     `json:"oauth,omitempty"`   // OAuth configuration
+	Enabled        bool                    `json:"enabled"`
+	Quarantined    bool                    `json:"quarantined"` // Security quarantine status
+	Created        time.Time               `json:"created"`
+	Updated        time.Time               `json:"updated"`
+	Isolation      *config.IsolationConfig `json:"isolation,omitempty"`        // Per-server isolation settings
+	ReconnectOnUse bool                    `json:"reconnect_on_use,omitempty"` // Attempt reconnection on tool call
 }
 
 // ToolStatRecord represents tool usage statistics
