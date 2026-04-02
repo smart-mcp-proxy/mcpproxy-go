@@ -766,9 +766,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @objc private func openWebUI() {
         Task {
             let apiKey = await coreManager?.currentAPIKey ?? ""
+            let baseURL = await MainActor.run { appState.webUIBaseURL }
             let urlString = apiKey.isEmpty
-                ? "http://127.0.0.1:8080/ui/"
-                : "http://127.0.0.1:8080/ui/?apikey=\(apiKey)"
+                ? "\(baseURL)/ui/"
+                : "\(baseURL)/ui/?apikey=\(apiKey)"
             if let url = URL(string: urlString) {
                 NSWorkspace.shared.open(url)
             }

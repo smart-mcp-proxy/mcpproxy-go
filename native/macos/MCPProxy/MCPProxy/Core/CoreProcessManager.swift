@@ -436,8 +436,20 @@ actor CoreProcessManager {
             NSLog("[MCPProxy] connectToCore: WARNING - no API key found in web_ui_url: %@", info.webUiUrl)
         }
 
+        // Extract the base URL (scheme + host + port) from the web_ui_url
+        // so the tray can open the Web UI on the correct port.
+        let webUIBase: String
+        if let comps = URLComponents(string: info.webUiUrl),
+           let scheme = comps.scheme, let host = comps.host {
+            let port = comps.port.map { ":\($0)" } ?? ""
+            webUIBase = "\(scheme)://\(host)\(port)"
+        } else {
+            webUIBase = "http://127.0.0.1:8080"
+        }
+
         await MainActor.run {
             appState.version = info.version
+            appState.webUIBaseURL = webUIBase
             if let update = info.update, update.available, let latest = update.latestVersion {
                 appState.updateAvailable = latest
             }
@@ -447,10 +459,10 @@ actor CoreProcessManager {
         await MainActor.run { appState.apiClient = client }
 
         // Create SSE client — uses TCP (not socket) so needs the API key
-        NSLog("[MCPProxy] connectToCore: creating SSEClient (TCP, apiKey=%@)",
-              sessionAPIKey != nil ? "set" : "nil")
+        NSLog("[MCPProxy] connectToCore: creating SSEClient (TCP, apiKey=%@, base=%@)",
+              sessionAPIKey != nil ? "set" : "nil", webUIBase)
         sseClient = SSEClient(
-            baseURL: "http://127.0.0.1:8080",
+            baseURL: webUIBase,
             apiKey: sessionAPIKey
         )
         NSLog("[MCPProxy] connectToCore: done")
