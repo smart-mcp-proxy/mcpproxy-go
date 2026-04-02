@@ -45,9 +45,10 @@ type Server struct {
 	ShouldRetry       bool              `json:"should_retry,omitempty"`
 	RetryCount        int               `json:"retry_count,omitempty"`
 	LastRetryTime     *time.Time        `json:"last_retry_time,omitempty"`
-	UserLoggedOut     bool              `json:"user_logged_out,omitempty"` // True if user explicitly logged out (prevents auto-reconnection)
-	Health            *HealthStatus     `json:"health,omitempty"`          // Unified health status calculated by the backend
-	Quarantine        *QuarantineStats  `json:"quarantine,omitempty"`      // Tool quarantine metrics for this server
+	UserLoggedOut     bool              `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
+	Health            *HealthStatus     `json:"health,omitempty"`           // Unified health status calculated by the backend
+	Quarantine        *QuarantineStats  `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
+	ReconnectOnUse    bool              `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
 }
 
 // QuarantineStats represents tool quarantine metrics for a server.

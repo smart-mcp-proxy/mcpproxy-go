@@ -321,6 +321,11 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.Updated = updated
 		}
 
+		// Extract reconnect_on_use
+		if reconnectOnUse, ok := srvRaw["reconnect_on_use"].(bool); ok {
+			srv.ReconnectOnUse = reconnectOnUse
+		}
+
 		// Extract unified health status
 		if health, ok := srvRaw["health"].(*contracts.HealthStatus); ok {
 			srv.Health = health

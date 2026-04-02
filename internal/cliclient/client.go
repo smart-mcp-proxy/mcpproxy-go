@@ -911,16 +911,17 @@ func (c *Client) TriggerOAuthLogout(ctx context.Context, serverName string) erro
 
 // AddServerRequest represents the request body for adding a server.
 type AddServerRequest struct {
-	Name        string            `json:"name"`
-	URL         string            `json:"url,omitempty"`
-	Command     string            `json:"command,omitempty"`
-	Args        []string          `json:"args,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	WorkingDir  string            `json:"working_dir,omitempty"`
-	Protocol    string            `json:"protocol,omitempty"`
-	Enabled     *bool             `json:"enabled,omitempty"`
-	Quarantined *bool             `json:"quarantined,omitempty"`
+	Name           string            `json:"name"`
+	URL            string            `json:"url,omitempty"`
+	Command        string            `json:"command,omitempty"`
+	Args           []string          `json:"args,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	WorkingDir     string            `json:"working_dir,omitempty"`
+	Protocol       string            `json:"protocol,omitempty"`
+	Enabled        *bool             `json:"enabled,omitempty"`
+	Quarantined    *bool             `json:"quarantined,omitempty"`
+	ReconnectOnUse *bool             `json:"reconnect_on_use,omitempty"`
 }
 
 // AddServerResult represents the result of adding a server.

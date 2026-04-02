@@ -987,16 +987,17 @@ func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
 
 // AddServerRequest represents a request to add a new server
 type AddServerRequest struct {
-	Name        string            `json:"name"`
-	URL         string            `json:"url,omitempty"`
-	Command     string            `json:"command,omitempty"`
-	Args        []string          `json:"args,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	WorkingDir  string            `json:"working_dir,omitempty"`
-	Protocol    string            `json:"protocol,omitempty"`
-	Enabled     *bool             `json:"enabled,omitempty"`
-	Quarantined *bool             `json:"quarantined,omitempty"`
+	Name           string            `json:"name"`
+	URL            string            `json:"url,omitempty"`
+	Command        string            `json:"command,omitempty"`
+	Args           []string          `json:"args,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty"`
+	WorkingDir     string            `json:"working_dir,omitempty"`
+	Protocol       string            `json:"protocol,omitempty"`
+	Enabled        *bool             `json:"enabled,omitempty"`
+	Quarantined    *bool             `json:"quarantined,omitempty"`
+	ReconnectOnUse *bool             `json:"reconnect_on_use,omitempty"`
 }
 
 // handleAddServer godoc
@@ -1063,6 +1064,9 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		Protocol:    protocol,
 		Enabled:     enabled,
 		Quarantined: quarantined,
+	}
+	if req.ReconnectOnUse != nil {
+		serverConfig.ReconnectOnUse = *req.ReconnectOnUse
 	}
 
 	// Add server via controller
@@ -1194,6 +1198,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Quarantined != nil {
 		updates.Quarantined = *req.Quarantined
+		hasUpdates = true
+	}
+	if req.ReconnectOnUse != nil {
+		updates.ReconnectOnUse = *req.ReconnectOnUse
 		hasUpdates = true
 	}
 

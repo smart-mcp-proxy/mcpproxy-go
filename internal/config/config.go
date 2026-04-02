@@ -193,7 +193,8 @@ type ServerConfig struct {
 	Shared         bool              `json:"shared,omitempty" mapstructure:"shared"`                   // Server edition: shared with all users
 	Created        time.Time         `json:"created" mapstructure:"created"`
 	Updated        time.Time         `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation      *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"` // Per-server isolation settings
+	Isolation      *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
+	ReconnectOnUse bool              `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
 }
 
 // OAuthConfig represents OAuth configuration for a server

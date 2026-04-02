@@ -1113,6 +1113,7 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	// when the caller explicitly provided these fields
 	existing.Enabled = updates.Enabled
 	existing.Quarantined = updates.Quarantined
+	existing.ReconnectOnUse = updates.ReconnectOnUse
 
 	// Save to storage
 	if err := storageManager.SaveUpstreamServer(existing); err != nil {

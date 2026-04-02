@@ -244,6 +244,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		"Isolation":      true,
 		"Shared":         true, // Teams-only: persisted in JSON config, not in BBolt
 		"SkipQuarantine": true, // Spec 032: runtime-only field, not persisted to BBolt
+		"ReconnectOnUse": true, // Spec 354: persisted to BBolt for on-demand reconnection
 	}
 
 	// Get all fields from ServerConfig
