@@ -81,6 +81,10 @@ final class AppState: ObservableObject {
     @Published var updateAvailable: String? = nil
     @Published var autoStartEnabled: Bool = false
 
+    /// Base URL for the Web UI, populated from /api/v1/info on connect.
+    /// Falls back to localhost:8080 until the actual URL is fetched.
+    @Published var webUIBaseURL: String = "http://127.0.0.1:8080"
+
     /// Whether the user has explicitly stopped MCPProxy (distinct from idle/error states).
     @Published var isStopped: Bool = false
 

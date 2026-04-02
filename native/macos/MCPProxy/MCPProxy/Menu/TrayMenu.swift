@@ -415,8 +415,7 @@ struct TrayMenu: View {
     }
 
     private func openWebUI(path: String = "") {
-        // Default base URL; in production the APIClient would provide this
-        let baseURLString = "http://127.0.0.1:8080"
+        let baseURLString = appState.webUIBaseURL
         if let url = URL(string: "\(baseURLString)/ui/\(path)") {
             NSWorkspace.shared.open(url)
         }
