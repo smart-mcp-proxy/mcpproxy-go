@@ -808,6 +808,20 @@ components:
         success:
           type: boolean
       type: object
+    contracts.FindingCounts:
+      properties:
+        dangerous:
+          description: Tool poisoning, active prompt injection
+          type: integer
+        info:
+          description: Low-severity CVEs, informational
+          type: integer
+        total:
+          type: integer
+        warning:
+          description: Rug pull, supply chain CVEs with exploits
+          type: integer
+      type: object
     contracts.GetConfigResponse:
       properties:
         config:
@@ -1307,6 +1321,20 @@ components:
         total:
           type: integer
       type: object
+    contracts.SecurityScanSummary:
+      description: Latest security scan results summary
+      properties:
+        finding_counts:
+          $ref: '#/components/schemas/contracts.FindingCounts'
+        last_scan_at:
+          type: string
+        risk_score:
+          description: 0-100
+          type: integer
+        status:
+          description: '"clean", "warnings", "dangerous", "not_scanned", "scanning"'
+          type: string
+      type: object
     contracts.Server:
       properties:
         args:
@@ -1370,6 +1398,8 @@ components:
           type: boolean
         retry_count:
           type: integer
+        security_scan:
+          $ref: '#/components/schemas/contracts.SecurityScanSummary'
         should_retry:
           type: boolean
         status:
