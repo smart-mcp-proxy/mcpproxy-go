@@ -26,6 +26,52 @@ export interface QuarantineStats {
   changed_count: number
 }
 
+// Security scan summary (Spec 039)
+export type SecurityScanStatus = 'clean' | 'warnings' | 'dangerous' | 'not_scanned' | 'scanning'
+
+export interface SecurityScanFindingCounts {
+  dangerous: number
+  warning: number
+  info: number
+  total: number
+}
+
+export interface SecurityScanSummary {
+  last_scan_at?: string
+  risk_score: number
+  status: SecurityScanStatus
+  finding_counts?: SecurityScanFindingCounts
+}
+
+// Security scan finding (Spec 039)
+export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code'
+export type ThreatLevel = 'dangerous' | 'warning' | 'info'
+
+export interface SecurityScanFinding {
+  id?: string
+  threat_type: ThreatType
+  threat_level: ThreatLevel
+  title: string
+  description: string
+  help_uri?: string
+  package_name?: string
+  package_version?: string
+  fix_version?: string
+  tool_name?: string
+  scanner_id?: string
+}
+
+export interface SecurityScanReport {
+  server_name: string
+  status: SecurityScanStatus
+  risk_score: number
+  findings: SecurityScanFinding[]
+  finding_counts: SecurityScanFindingCounts
+  scanned_at: string
+  duration_ms?: number
+  scanners_used?: string[]
+}
+
 // Server types
 export interface Server {
   name: string
@@ -50,6 +96,7 @@ export interface Server {
   user_logged_out?: boolean // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus // Unified health status calculated by the backend
   quarantine?: QuarantineStats // Tool-level quarantine stats (Spec 032)
+  security_scan?: SecurityScanSummary // Security scan summary (Spec 039)
 }
 
 // Tool Annotation types

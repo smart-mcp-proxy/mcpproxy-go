@@ -213,6 +213,23 @@
         >
           Configuration
         </button>
+        <button
+          :class="['tab tab-lg', activeTab === 'security' ? 'tab-active' : '']"
+          @click="activeTab = 'security'; loadScanReport()"
+        >
+          <span class="flex items-center gap-2">
+            <span
+              v-if="securityScanStatus === 'scanning'"
+              class="loading loading-spinner loading-xs"
+            ></span>
+            <span
+              v-else
+              class="inline-block w-2.5 h-2.5 rounded-full"
+              :class="securityDotClass"
+            ></span>
+            Security{{ securityTabSuffix }}
+          </span>
+        </button>
       </div>
 
       <!-- Tab Content -->
@@ -478,6 +495,209 @@
             </div>
           </div>
         </div>
+
+        <!-- Security Tab (Spec 039) -->
+        <div v-if="activeTab === 'security'">
+          <div class="space-y-6">
+            <!-- Header: Scan button + Risk Score -->
+            <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
+              <button
+                @click="startSecurityScan"
+                :disabled="scanLoading"
+                class="btn btn-primary"
+              >
+                <span v-if="scanLoading" class="loading loading-spinner loading-xs"></span>
+                <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                </svg>
+                {{ scanLoading ? 'Scanning...' : 'Scan Now' }}
+              </button>
+
+              <div v-if="scanReport || server.security_scan" class="flex items-center gap-3">
+                <div class="text-right">
+                  <div class="text-sm text-base-content/70">Risk Score</div>
+                  <div class="text-2xl font-bold" :class="riskScoreClass">
+                    {{ currentRiskScore }}<span class="text-sm font-normal text-base-content/50">/100</span>
+                  </div>
+                </div>
+                <div
+                  class="radial-progress text-sm"
+                  :class="riskScoreClass"
+                  :style="`--value:${currentRiskScore}; --size:3.5rem; --thickness:4px;`"
+                  role="progressbar"
+                >
+                  {{ currentRiskScore }}
+                </div>
+              </div>
+            </div>
+
+            <!-- Scan error -->
+            <div v-if="scanError" class="alert alert-error">
+              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>{{ scanError }}</span>
+            </div>
+
+            <!-- Loading state for report -->
+            <div v-if="scanReportLoading" class="text-center py-8">
+              <span class="loading loading-spinner loading-lg"></span>
+              <p class="mt-2">Loading scan report...</p>
+            </div>
+
+            <!-- Not scanned yet -->
+            <div v-else-if="!scanReport && securityScanStatus === 'not_scanned'" class="text-center py-12">
+              <svg class="w-16 h-16 mx-auto mb-4 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+              </svg>
+              <h3 class="text-xl font-semibold mb-2">No Security Scan</h3>
+              <p class="text-base-content/70 mb-4">
+                This server has not been scanned yet. Click "Scan Now" to check for security issues.
+              </p>
+            </div>
+
+            <!-- Scan results -->
+            <template v-else-if="scanReport">
+              <!-- Threat Summary Cards -->
+              <div>
+                <h3 class="text-lg font-semibold mb-3">Threat Summary</h3>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div class="stats shadow bg-base-100">
+                    <div class="stat py-3 px-4">
+                      <div class="stat-title text-xs">Dangerous</div>
+                      <div class="stat-value text-lg text-error">{{ scanReport.finding_counts?.dangerous ?? 0 }}</div>
+                    </div>
+                  </div>
+                  <div class="stats shadow bg-base-100">
+                    <div class="stat py-3 px-4">
+                      <div class="stat-title text-xs">Warnings</div>
+                      <div class="stat-value text-lg text-warning">{{ scanReport.finding_counts?.warning ?? 0 }}</div>
+                    </div>
+                  </div>
+                  <div class="stats shadow bg-base-100">
+                    <div class="stat py-3 px-4">
+                      <div class="stat-title text-xs">Info</div>
+                      <div class="stat-value text-lg text-info">{{ scanReport.finding_counts?.info ?? 0 }}</div>
+                    </div>
+                  </div>
+                  <div class="stats shadow bg-base-100">
+                    <div class="stat py-3 px-4">
+                      <div class="stat-title text-xs">Total</div>
+                      <div class="stat-value text-lg">{{ scanReport.finding_counts?.total ?? 0 }}</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Clean state -->
+              <div v-if="!scanReport.findings || scanReport.findings.length === 0" class="alert alert-success">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                </svg>
+                <span>No security issues detected. This server appears to be safe.</span>
+              </div>
+
+              <!-- Findings grouped by threat type -->
+              <div v-else class="space-y-4">
+                <h3 class="text-lg font-semibold">Findings</h3>
+
+                <div v-for="group in groupedFindings" :key="group.type" class="collapse collapse-arrow bg-base-100 shadow-md" :class="{ 'collapse-open': group.defaultOpen }">
+                  <input type="checkbox" :checked="group.defaultOpen" />
+                  <div class="collapse-title font-medium flex items-center gap-2">
+                    <span>{{ group.label }}</span>
+                    <span class="badge badge-sm" :class="group.badgeClass">{{ group.findings.length }}</span>
+                  </div>
+                  <div class="collapse-content">
+                    <div class="overflow-x-auto">
+                      <table class="table table-sm">
+                        <thead>
+                          <tr>
+                            <th class="w-24">Severity</th>
+                            <th>Finding</th>
+                            <th class="w-32">Package</th>
+                            <th class="w-24">Fix</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(finding, idx) in group.findings" :key="idx">
+                            <td>
+                              <span
+                                class="badge badge-sm"
+                                :class="{
+                                  'badge-error': finding.threat_level === 'dangerous',
+                                  'badge-warning': finding.threat_level === 'warning',
+                                  'badge-info': finding.threat_level === 'info',
+                                }"
+                              >
+                                {{ finding.threat_level }}
+                              </span>
+                            </td>
+                            <td>
+                              <div class="font-medium">
+                                <a
+                                  v-if="finding.help_uri"
+                                  :href="finding.help_uri"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  class="link link-primary"
+                                >
+                                  {{ finding.title }}
+                                </a>
+                                <span v-else>{{ finding.title }}</span>
+                              </div>
+                              <div class="text-xs text-base-content/60 mt-0.5">{{ finding.description }}</div>
+                              <div v-if="finding.tool_name" class="text-xs text-base-content/50 mt-0.5">
+                                Tool: <span class="font-mono">{{ finding.tool_name }}</span>
+                              </div>
+                            </td>
+                            <td>
+                              <div v-if="finding.package_name" class="text-sm">
+                                <div class="font-mono">{{ finding.package_name }}</div>
+                                <div v-if="finding.package_version" class="text-xs text-base-content/50">{{ finding.package_version }}</div>
+                              </div>
+                              <span v-else class="text-base-content/30">-</span>
+                            </td>
+                            <td>
+                              <span v-if="finding.fix_version" class="badge badge-sm badge-success badge-outline">{{ finding.fix_version }}</span>
+                              <span v-else class="text-base-content/30">-</span>
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Approve / Reject actions -->
+              <div v-if="scanReport.findings && scanReport.findings.length > 0" class="flex gap-3 pt-2">
+                <button
+                  @click="approveServerSecurity"
+                  :disabled="securityActionLoading"
+                  class="btn btn-success"
+                >
+                  <span v-if="securityActionLoading" class="loading loading-spinner loading-xs"></span>
+                  Approve Server
+                </button>
+                <button
+                  @click="rejectServerSecurity"
+                  :disabled="securityActionLoading"
+                  class="btn btn-error btn-outline"
+                >
+                  <span v-if="securityActionLoading" class="loading loading-spinner loading-xs"></span>
+                  Reject Server
+                </button>
+              </div>
+
+              <!-- Scan metadata -->
+              <div v-if="scanReport.scanned_at" class="text-xs text-base-content/40 pt-2">
+                Scanned {{ formatRelativeTime(scanReport.scanned_at) }}
+                <span v-if="scanReport.duration_ms"> in {{ scanReport.duration_ms }}ms</span>
+                <span v-if="scanReport.scanners_used?.length"> using {{ scanReport.scanners_used.join(', ') }}</span>
+              </div>
+            </template>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -500,14 +720,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool, ToolApproval } from '@/types'
+import type { Server, Tool, ToolApproval, SecurityScanReport, SecurityScanFinding, ThreatType } from '@/types'
 import api from '@/services/api'
 
 interface Props {
@@ -524,7 +744,7 @@ const systemStore = useSystemStore()
 const loading = ref(true)
 const error = ref<string | null>(null)
 const server = ref<Server | null>(null)
-const activeTab = ref<'tools' | 'logs' | 'config'>('tools')
+const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
 const actionLoading = ref(false)
 
 // Tools
@@ -542,6 +762,14 @@ const quarantinedTools = computed(() => {
   return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
 })
 
+// Security scan (Spec 039)
+const scanReport = ref<SecurityScanReport | null>(null)
+const scanLoading = ref(false)
+const scanReportLoading = ref(false)
+const scanError = ref<string | null>(null)
+const securityActionLoading = ref(false)
+let scanPollTimer: ReturnType<typeof setInterval> | null = null
+
 // Logs
 const serverLogs = ref<string[]>([])
 const logsLoading = ref(false)
@@ -556,6 +784,87 @@ const isHttpProtocol = computed(() => {
 // Suggested action from unified health status
 const healthAction = computed(() => {
   return server.value?.health?.action || ''
+})
+
+// Security scan computed properties
+const securityScanStatus = computed(() => {
+  if (scanLoading.value) return 'scanning'
+  return server.value?.security_scan?.status || 'not_scanned'
+})
+
+const securityDotClass = computed(() => {
+  switch (securityScanStatus.value) {
+    case 'clean': return 'bg-success'
+    case 'warnings': return 'bg-warning'
+    case 'dangerous': return 'bg-error'
+    case 'scanning': return '' // handled by spinner
+    default: return 'bg-base-content/30'
+  }
+})
+
+const securityTabSuffix = computed(() => {
+  const scan = server.value?.security_scan
+  if (!scan?.last_scan_at) return ''
+  return ` (${formatRelativeTime(scan.last_scan_at)})`
+})
+
+const currentRiskScore = computed(() => {
+  if (scanReport.value) return scanReport.value.risk_score
+  return server.value?.security_scan?.risk_score ?? 0
+})
+
+const riskScoreClass = computed(() => {
+  const score = currentRiskScore.value
+  if (score >= 70) return 'text-error'
+  if (score >= 30) return 'text-warning'
+  return 'text-success'
+})
+
+interface FindingGroup {
+  type: ThreatType
+  label: string
+  findings: SecurityScanFinding[]
+  defaultOpen: boolean
+  badgeClass: string
+}
+
+const threatTypeLabels: Record<ThreatType, string> = {
+  tool_poisoning: 'Tool Poisoning',
+  prompt_injection: 'Prompt Injection',
+  rug_pull: 'Rug Pull Detection',
+  supply_chain: 'Supply Chain (CVEs)',
+  malicious_code: 'Malicious Code',
+}
+
+// Types that should be expanded by default (the dangerous ones)
+const dangerousTypes: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
+
+const groupedFindings = computed<FindingGroup[]>(() => {
+  if (!scanReport.value?.findings) return []
+
+  const groups = new Map<ThreatType, SecurityScanFinding[]>()
+  for (const f of scanReport.value.findings) {
+    const type = f.threat_type || 'supply_chain'
+    if (!groups.has(type)) groups.set(type, [])
+    groups.get(type)!.push(f)
+  }
+
+  const result: FindingGroup[] = []
+  // Show dangerous types first, then supply_chain
+  const typeOrder: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'supply_chain']
+  for (const type of typeOrder) {
+    const findings = groups.get(type)
+    if (!findings) continue
+    const hasDangerous = findings.some(f => f.threat_level === 'dangerous')
+    result.push({
+      type,
+      label: threatTypeLabels[type] || type,
+      findings,
+      defaultOpen: dangerousTypes.includes(type),
+      badgeClass: hasDangerous ? 'badge-error' : findings.some(f => f.threat_level === 'warning') ? 'badge-warning' : 'badge-info',
+    })
+  }
+  return result
 })
 
 const filteredTools = computed(() => {
@@ -977,6 +1286,159 @@ function viewToolSchema(tool: Tool) {
   selectedToolSchema.value = tool
 }
 
+// Security scan functions (Spec 039)
+function formatRelativeTime(isoString: string): string {
+  const date = new Date(isoString)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return 'just now'
+  if (diffMin < 60) return `${diffMin}m ago`
+  const diffHr = Math.floor(diffMin / 60)
+  if (diffHr < 24) return `${diffHr}h ago`
+  const diffDay = Math.floor(diffHr / 24)
+  return `${diffDay}d ago`
+}
+
+function stopScanPolling() {
+  if (scanPollTimer) {
+    clearInterval(scanPollTimer)
+    scanPollTimer = null
+  }
+}
+
+async function loadScanReport() {
+  if (!server.value) return
+  // Only load if we have a previous scan
+  if (!server.value.security_scan?.last_scan_at && !scanReport.value) return
+
+  scanReportLoading.value = true
+  scanError.value = null
+  try {
+    const response = await api.getScanReport(server.value.name)
+    if (response.success && response.data) {
+      scanReport.value = response.data as SecurityScanReport
+    }
+  } catch (err) {
+    // Silently fail - report may not exist yet
+  } finally {
+    scanReportLoading.value = false
+  }
+}
+
+async function startSecurityScan() {
+  if (!server.value) return
+
+  scanLoading.value = true
+  scanError.value = null
+
+  try {
+    const response = await api.startScan(server.value.name)
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to start scan')
+    }
+
+    systemStore.addToast({
+      type: 'info',
+      title: 'Security Scan Started',
+      message: `Scanning ${server.value.name} for security issues...`,
+    })
+
+    // Poll for status every 3 seconds
+    stopScanPolling()
+    scanPollTimer = setInterval(async () => {
+      if (!server.value) { stopScanPolling(); return }
+      try {
+        const statusResp = await api.getScanStatus(server.value.name)
+        if (statusResp.success && statusResp.data) {
+          const status = statusResp.data.status || statusResp.data
+          if (status === 'completed' || status === 'complete' || statusResp.data.completed) {
+            stopScanPolling()
+            scanLoading.value = false
+            // Fetch the full report
+            await loadScanReport()
+            // Refresh server to update security_scan summary
+            await serversStore.fetchServers()
+            server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+            systemStore.addToast({
+              type: 'success',
+              title: 'Scan Complete',
+              message: `Security scan for ${server.value?.name} finished.`,
+            })
+          } else if (status === 'failed' || status === 'error') {
+            stopScanPolling()
+            scanLoading.value = false
+            scanError.value = statusResp.data.error || 'Scan failed'
+          }
+        }
+      } catch {
+        // Polling error, keep trying
+      }
+    }, 3000)
+  } catch (err) {
+    scanLoading.value = false
+    scanError.value = err instanceof Error ? err.message : 'Failed to start scan'
+  }
+}
+
+async function approveServerSecurity() {
+  if (!server.value) return
+
+  securityActionLoading.value = true
+  try {
+    const response = await api.securityApprove(server.value.name)
+    if (response.success) {
+      systemStore.addToast({
+        type: 'success',
+        title: 'Server Approved',
+        message: `${server.value.name} security findings acknowledged`,
+      })
+      // Refresh
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    } else {
+      throw new Error(response.error || 'Approve failed')
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Approval Failed',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    })
+  } finally {
+    securityActionLoading.value = false
+  }
+}
+
+async function rejectServerSecurity() {
+  if (!server.value) return
+
+  securityActionLoading.value = true
+  try {
+    const response = await api.securityReject(server.value.name)
+    if (response.success) {
+      systemStore.addToast({
+        type: 'warning',
+        title: 'Server Rejected',
+        message: `${server.value.name} has been rejected and quarantined`,
+      })
+      // Refresh
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    } else {
+      throw new Error(response.error || 'Reject failed')
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Rejection Failed',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    })
+  } finally {
+    securityActionLoading.value = false
+  }
+}
+
 // Server detail hints
 const serverDetailHints = computed<Hint[]>(() => {
   const hints: Hint[] = [
@@ -1059,6 +1521,16 @@ watch(logTail, () => {
 
 // Load data on mount
 onMounted(() => {
+  // Read tab from query parameter (e.g., ?tab=security)
+  const tabParam = route.query.tab as string
+  if (tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)) {
+    activeTab.value = tabParam as typeof activeTab.value
+  }
   loadServerDetails()
+})
+
+// Cleanup polling on unmount
+onUnmounted(() => {
+  stopScanPolling()
 })
 </script>

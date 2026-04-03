@@ -313,3 +313,93 @@ func parsePackageFromMessage(msg string) (pkg, installed, fixed string) {
 	}
 	return
 }
+
+// ClassifyThreat assigns user-facing threat_type and threat_level to a finding
+// based on rule ID, category, description, and severity.
+func ClassifyThreat(f *ScanFinding) {
+	ruleLC := strings.ToLower(f.RuleID)
+	catLC := strings.ToLower(f.Category)
+	titleLC := strings.ToLower(f.Title)
+	descLC := strings.ToLower(f.Description)
+	combined := ruleLC + " " + catLC + " " + titleLC + " " + descLC
+
+	// Tool Poisoning: hidden instructions in tool descriptions
+	if containsAny(combined, "tool-poisoning", "tool_poisoning", "tpa", "hidden instruction",
+		"tool description attack", "poisoned tool", "tool shadowing") {
+		f.ThreatType = ThreatToolPoisoning
+		f.ThreatLevel = ThreatLevelDangerous
+		return
+	}
+
+	// Prompt Injection: malicious payloads in responses/inputs
+	if containsAny(combined, "prompt-injection", "prompt_injection", "injection vector",
+		"prompt injection", "indirect injection", "jailbreak") {
+		f.ThreatType = ThreatPromptInjection
+		f.ThreatLevel = ThreatLevelDangerous
+		return
+	}
+
+	// Malicious code: malware, backdoors, suspicious patterns
+	if containsAny(combined, "malware", "backdoor", "malicious", "trojan", "reverse shell",
+		"crypto miner", "exfiltrat") {
+		f.ThreatType = ThreatMaliciousCode
+		f.ThreatLevel = ThreatLevelDangerous
+		return
+	}
+
+	// Rug Pull: tool definition changes
+	if containsAny(combined, "rug-pull", "rug_pull", "definition change", "tool changed") {
+		f.ThreatType = ThreatRugPull
+		f.ThreatLevel = ThreatLevelWarning
+		return
+	}
+
+	// Supply Chain: CVEs, package vulnerabilities
+	if strings.HasPrefix(ruleLC, "cve-") || f.PackageName != "" ||
+		containsAny(combined, "vulnerability", "cve", "supply chain", "dependency") {
+		f.ThreatType = ThreatSupplyChain
+		// High CVEs are warning, lower are info
+		if f.Severity == SeverityCritical || f.Severity == SeverityHigh {
+			f.ThreatLevel = ThreatLevelWarning
+		} else {
+			f.ThreatLevel = ThreatLevelInfo
+		}
+		return
+	}
+
+	// Code quality / security best practices
+	if containsAny(combined, "eval", "subprocess", "shell=true", "command injection",
+		"path traversal", "sql injection", "xss", "insecure") {
+		f.ThreatType = ThreatMaliciousCode
+		if f.Severity == SeverityCritical || f.Severity == SeverityHigh {
+			f.ThreatLevel = ThreatLevelWarning
+		} else {
+			f.ThreatLevel = ThreatLevelInfo
+		}
+		return
+	}
+
+	// Default: uncategorized
+	f.ThreatType = ThreatUncategorized
+	if f.Severity == SeverityCritical || f.Severity == SeverityHigh {
+		f.ThreatLevel = ThreatLevelWarning
+	} else {
+		f.ThreatLevel = ThreatLevelInfo
+	}
+}
+
+func containsAny(s string, patterns ...string) bool {
+	for _, p := range patterns {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyAllFindings applies threat classification to all findings
+func ClassifyAllFindings(findings []ScanFinding) {
+	for i := range findings {
+		ClassifyThreat(&findings[i])
+	}
+}

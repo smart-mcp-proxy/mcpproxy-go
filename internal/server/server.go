@@ -70,6 +70,9 @@ type Server struct {
 	// Spec 024: Track server start time for lifecycle events
 	startTime time.Time
 
+	// Spec 039: Security scanner service (for scan summaries in server list)
+	securityScanner *scanner.Service
+
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
 	shutdownSignal string
@@ -848,7 +851,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
 			"command":         command,
@@ -867,7 +870,16 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"retry_count":     serverStatus.RetryCount,
 			"last_retry_time": nil,          // Actor tracks this internally
 			"health":          healthStatus, // Spec 013: Health is source of truth
-		})
+		}
+
+		// Spec 039: Add security scan summary if available
+		if s.securityScanner != nil {
+			if scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name); scanSummary != nil {
+				serverMap["security_scan"] = scanSummary
+			}
+		}
+
+		result = append(result, serverMap)
 	}
 
 	s.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
@@ -1661,6 +1673,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		httpAPIServer.SetSecurityController(secService)
+		s.securityScanner = secService
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
 	wireTeamsOAuth(s, httpAPIServer)

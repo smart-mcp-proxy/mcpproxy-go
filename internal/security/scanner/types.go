@@ -87,11 +87,30 @@ type ScannerJobStatus struct {
 	FindingsCount int       `json:"findings_count"`
 }
 
+// User-facing threat category constants
+const (
+	ThreatToolPoisoning   = "tool_poisoning"   // Hidden instructions in tool descriptions
+	ThreatPromptInjection = "prompt_injection" // Malicious payloads in tool responses
+	ThreatRugPull         = "rug_pull"         // Tool definitions changed after approval
+	ThreatSupplyChain     = "supply_chain"     // Known CVEs in dependencies
+	ThreatMaliciousCode   = "malicious_code"   // Malware, backdoors, suspicious code
+	ThreatUncategorized   = "uncategorized"    // Other findings
+)
+
+// User-facing severity levels (simpler than CVSS)
+const (
+	ThreatLevelDangerous = "dangerous" // Blocks approval: tool poisoning, active injection
+	ThreatLevelWarning   = "warning"   // Rug pull, high CVEs
+	ThreatLevelInfo      = "info"      // Low CVEs, informational
+)
+
 // ScanFinding represents an individual security finding
 type ScanFinding struct {
 	RuleID           string  `json:"rule_id"`
-	Severity         string  `json:"severity"` // critical, high, medium, low, info
-	Category         string  `json:"category"`
+	Severity         string  `json:"severity"`     // critical, high, medium, low, info
+	Category         string  `json:"category"`     // SARIF category
+	ThreatType       string  `json:"threat_type"`  // User-facing: tool_poisoning, prompt_injection, rug_pull, supply_chain
+	ThreatLevel      string  `json:"threat_level"` // User-facing: dangerous, warning, info
 	Title            string  `json:"title"`
 	Description      string  `json:"description"`
 	Location         string  `json:"location,omitempty"`

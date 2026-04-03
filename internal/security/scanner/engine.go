@@ -354,6 +354,7 @@ func (e *Engine) parseResults(data []byte, scannerID string) (*ScanReport, error
 			return nil, fmt.Errorf("failed to parse SARIF from %s: %w", scannerID, err)
 		}
 		report.Findings = NormalizeFindings(sarifReport, scannerID)
+		ClassifyAllFindings(report.Findings)
 		report.SarifRaw = json.RawMessage(data)
 		report.RiskScore = CalculateRiskScore(report.Findings)
 		return report, nil

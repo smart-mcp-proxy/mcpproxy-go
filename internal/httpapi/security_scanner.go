@@ -29,6 +29,7 @@ type SecurityController interface {
 	CheckIntegrity(ctx context.Context, serverName string) (*scanner.IntegrityCheckResult, error)
 
 	GetSecurityOverview(ctx context.Context) (*scanner.SecurityOverview, error)
+	GetScanSummary(ctx context.Context, serverName string) *scanner.ScanSummary
 }
 
 // SetSecurityController configures the security scanner controller on the server.

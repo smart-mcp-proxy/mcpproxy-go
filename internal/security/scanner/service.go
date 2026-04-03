@@ -622,3 +622,81 @@ type IntegrityViolation struct {
 	Expected string `json:"expected,omitempty"`
 	Actual   string `json:"actual,omitempty"`
 }
+
+// GetScanSummary returns a compact scan summary for a server (for the server list API).
+// Returns nil if no scans have been run for this server.
+func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
+	// Check for active scan
+	if active := s.engine.GetActiveJob(serverName); active != nil {
+		return &ScanSummary{
+			RiskScore: 0,
+			Status:    "scanning",
+		}
+	}
+
+	// Get latest job
+	job, err := s.storage.GetLatestScanJob(serverName)
+	if err != nil {
+		return nil // No scans run
+	}
+
+	summary := &ScanSummary{
+		LastScanAt: &job.StartedAt,
+		Status:     "clean",
+	}
+
+	// Get reports for this job
+	reports, err := s.storage.ListScanReportsByJob(job.ID)
+	if err != nil || len(reports) == 0 {
+		return summary
+	}
+
+	// Aggregate findings
+	var allFindings []ScanFinding
+	for _, r := range reports {
+		allFindings = append(allFindings, r.Findings...)
+	}
+
+	summary.RiskScore = CalculateRiskScore(allFindings)
+
+	// Count by threat level
+	counts := FindingCounts{Total: len(allFindings)}
+	for _, f := range allFindings {
+		switch f.ThreatLevel {
+		case ThreatLevelDangerous:
+			counts.Dangerous++
+		case ThreatLevelWarning:
+			counts.Warning++
+		default:
+			counts.Info++
+		}
+	}
+	summary.FindingCounts = &counts
+
+	// Determine status
+	if counts.Dangerous > 0 {
+		summary.Status = "dangerous"
+	} else if counts.Warning > 0 {
+		summary.Status = "warnings"
+	} else if counts.Total > 0 {
+		summary.Status = "clean" // Only informational findings
+	}
+
+	return summary
+}
+
+// ScanSummary is a compact representation of scan status for the server list.
+type ScanSummary struct {
+	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
+	RiskScore     int            `json:"risk_score"`
+	Status        string         `json:"status"` // clean, warnings, dangerous, not_scanned, scanning
+	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
+}
+
+// FindingCounts groups findings by user-facing threat level.
+type FindingCounts struct {
+	Dangerous int `json:"dangerous"`
+	Warning   int `json:"warning"`
+	Info      int `json:"info"`
+	Total     int `json:"total"`
+}

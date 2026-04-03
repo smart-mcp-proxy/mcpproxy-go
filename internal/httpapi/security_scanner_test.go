@@ -126,6 +126,10 @@ func (m *mockSecurityController) GetSecurityOverview(_ context.Context) (*scanne
 	return &scanner.SecurityOverview{}, nil
 }
 
+func (m *mockSecurityController) GetScanSummary(_ context.Context, _ string) *scanner.ScanSummary {
+	return nil
+}
+
 // secTestController embeds baseController and adds GetCurrentConfig
 // returning nil to bypass auth middleware in tests.
 type secTestController struct {
