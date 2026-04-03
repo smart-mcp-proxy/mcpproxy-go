@@ -322,6 +322,10 @@ func runSecurityScanners(_ *cobra.Command, _ []string) error {
 	}
 
 	var scanners []map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &scanners); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -530,6 +534,10 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	}
 
 	var job map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &job); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -642,6 +650,10 @@ func runSecurityStatus(_ *cobra.Command, args []string) error {
 	}
 
 	var status map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &status); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -723,6 +735,10 @@ func runSecurityReport(_ *cobra.Command, args []string) error {
 	// Special case: SARIF output
 	if format == "sarif" {
 		var report map[string]interface{}
+		respBody, err = unwrapAPIResponse(respBody)
+		if err != nil {
+			return fmt.Errorf("API error: %w", err)
+		}
 		if err := json.Unmarshal(respBody, &report); err != nil {
 			return fmt.Errorf("failed to parse report: %w", err)
 		}
@@ -735,6 +751,10 @@ func runSecurityReport(_ *cobra.Command, args []string) error {
 
 	// Table output: parse and display human-readable report
 	var report map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &report); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -844,6 +864,10 @@ func runSecurityOverview(_ *cobra.Command, _ []string) error {
 	}
 
 	var overview map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &overview); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -906,6 +930,10 @@ func runSecurityIntegrity(_ *cobra.Command, args []string) error {
 	}
 
 	var result map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -976,6 +1004,10 @@ func printScanSummary(client *cliclient.Client, ctx context.Context, serverName 
 	}
 
 	var report map[string]interface{}
+	respBody, err = unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
 	if err := json.Unmarshal(respBody, &report); err != nil {
 		fmt.Println("Scan completed. Use 'mcpproxy security report " + serverName + "' to view results.")
 		return nil
@@ -1089,6 +1121,26 @@ func printSarifOutput(report map[string]interface{}) error {
 }
 
 // --- Utility helpers ---
+
+// unwrapAPIResponse extracts the "data" field from an API response envelope
+// {success: true, data: ...}. If the response is not wrapped, returns the raw bytes.
+func unwrapAPIResponse(raw []byte) ([]byte, error) {
+	var envelope struct {
+		Success bool            `json:"success"`
+		Data    json.RawMessage `json:"data"`
+		Error   string          `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return raw, nil // Not an envelope, return raw
+	}
+	if envelope.Error != "" {
+		return nil, fmt.Errorf("%s", envelope.Error)
+	}
+	if envelope.Data != nil {
+		return envelope.Data, nil
+	}
+	return raw, nil // No data field, return raw
+}
 
 // formatAndPrint marshals the data in the given format and prints it.
 func formatAndPrint(format string, data interface{}) error {

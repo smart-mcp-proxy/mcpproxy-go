@@ -104,8 +104,8 @@ func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (st
 	// Security: no new privileges
 	args = append(args, "--security-opt", "no-new-privileges")
 
-	// Tmpfs for temp files
-	args = append(args, "--tmpfs", "/tmp:rw,noexec,nosuid,size=100m")
+	// Tmpfs for temp files (500MB to accommodate scanner DB downloads like Trivy ~90MB)
+	args = append(args, "--tmpfs", "/tmp:rw,nosuid,size=500m")
 
 	// Mount source directory read-only
 	if cfg.SourceDir != "" {

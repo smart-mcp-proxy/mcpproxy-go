@@ -64,13 +64,13 @@ var bundledScanners = []*ScannerPlugin{
 		Description: "Comprehensive vulnerability scanner for filesystem, dependencies, and container images. Detects known CVEs and misconfigurations.",
 		License:     "Apache-2.0",
 		Homepage:    "https://trivy.dev",
-		DockerImage: "aquasecurity/trivy:latest",
+		DockerImage: "ghcr.io/aquasecurity/trivy:latest",
 		Inputs:      []string{"source", "container_image"},
 		Outputs:     []string{"sarif"},
 		RequiredEnv: nil,
 		OptionalEnv: nil,
-		Command:     []string{"trivy", "fs", "--format", "sarif", "--output", "/scan/report/results.sarif", "/scan/source"},
-		Timeout:     "120s",
-		NetworkReq:  true, // Needs to download vulnerability database
+		Command:     []string{"fs", "--format", "sarif", "/scan/source"},
+		Timeout:     "300s", // First run downloads vuln DB (~90MB)
+		NetworkReq:  true,   // Needs to download vulnerability database
 	},
 }
