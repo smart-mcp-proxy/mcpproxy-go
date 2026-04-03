@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
@@ -57,7 +58,7 @@ func (s *Server) handleListScanners(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, scanners)
+	s.writeSuccess(w, scanners)
 }
 
 func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +81,7 @@ func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "installed", "id": req.ID})
+	s.writeSuccess(w, map[string]string{"status": "installed", "id": req.ID})
 }
 
 func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +98,7 @@ func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "removed", "id": id})
+	s.writeSuccess(w, map[string]string{"status": "removed", "id": id})
 }
 
 func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +127,7 @@ func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "configured", "id": id})
+	s.writeSuccess(w, map[string]string{"status": "configured", "id": id})
 }
 
 func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) {
@@ -144,7 +145,7 @@ func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, sc)
+	s.writeSuccess(w, sc)
 }
 
 // --- Scan operation handlers ---
@@ -172,7 +173,7 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusAccepted, job)
+	s.writeJSON(w, http.StatusAccepted, contracts.NewSuccessResponse(job))
 }
 
 func (s *Server) handleGetScanStatus(w http.ResponseWriter, r *http.Request) {
@@ -190,7 +191,7 @@ func (s *Server) handleGetScanStatus(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, job)
+	s.writeSuccess(w, job)
 }
 
 func (s *Server) handleGetScanReport(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +209,7 @@ func (s *Server) handleGetScanReport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, report)
+	s.writeSuccess(w, report)
 }
 
 func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +226,7 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "server_name": name})
+	s.writeSuccess(w, map[string]string{"status": "cancelled", "server_name": name})
 }
 
 // --- Approval handlers ---
@@ -250,7 +251,7 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "approved", "server_name": name})
+	s.writeSuccess(w, map[string]string{"status": "approved", "server_name": name})
 }
 
 func (s *Server) handleSecurityReject(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +268,7 @@ func (s *Server) handleSecurityReject(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]string{"status": "rejected", "server_name": name})
+	s.writeSuccess(w, map[string]string{"status": "rejected", "server_name": name})
 }
 
 func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +286,7 @@ func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, result)
+	s.writeSuccess(w, result)
 }
 
 // --- Overview handler ---
@@ -299,5 +300,5 @@ func (s *Server) handleSecurityOverview(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeJSON(w, http.StatusOK, overview)
+	s.writeSuccess(w, overview)
 }

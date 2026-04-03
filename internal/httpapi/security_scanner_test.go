@@ -137,6 +137,22 @@ func (m *secTestController) GetCurrentConfig() interface{} {
 }
 
 // helper to create a test server with security controller
+
+// secParseData extracts the "data" field from an APIResponse wrapper {success: true, data: ...}
+func secParseData(t *testing.T, body *bytes.Buffer, target interface{}) {
+	t.Helper()
+	var wrapper struct {
+		Success bool            `json:"success"`
+		Data    json.RawMessage `json:"data"`
+	}
+	err := json.NewDecoder(body).Decode(&wrapper)
+	require.NoError(t, err)
+	assert.True(t, wrapper.Success)
+	if target != nil && wrapper.Data != nil {
+		require.NoError(t, json.Unmarshal(wrapper.Data, target))
+	}
+}
+
 func newTestServerWithSecurity(t *testing.T, secCtrl SecurityController) *Server {
 	t.Helper()
 	logger := zap.NewNop().Sugar()
@@ -165,8 +181,7 @@ func TestSecurityHandlerListScanners(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var scanners []*scanner.ScannerPlugin
-	err := json.NewDecoder(w.Body).Decode(&scanners)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &scanners)
 	assert.Len(t, scanners, 2)
 	assert.Equal(t, "mcp-scan", scanners[0].ID)
 }
@@ -184,8 +199,7 @@ func TestSecurityHandlerInstallScanner(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var resp map[string]string
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "installed", resp["status"])
 	assert.Equal(t, "mcp-scan", resp["id"])
 }
@@ -229,8 +243,7 @@ func TestSecurityHandlerRemoveScanner(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var resp map[string]string
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "removed", resp["status"])
 }
 
@@ -247,8 +260,7 @@ func TestSecurityHandlerConfigureScanner(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var resp map[string]string
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "configured", resp["status"])
 }
 
@@ -280,8 +292,7 @@ func TestSecurityHandlerGetScannerStatus(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var sc scanner.ScannerPlugin
-	err := json.NewDecoder(w.Body).Decode(&sc)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &sc)
 	assert.Equal(t, "mcp-scan", sc.ID)
 	assert.Equal(t, scanner.ScannerStatusInstalled, sc.Status)
 }
@@ -312,8 +323,7 @@ func TestSecurityHandlerStartScan(t *testing.T) {
 	assert.Equal(t, http.StatusAccepted, w.Code)
 
 	var job scanner.ScanJob
-	err := json.NewDecoder(w.Body).Decode(&job)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &job)
 	assert.Equal(t, "my-server", job.ServerName)
 	assert.True(t, job.DryRun)
 }
@@ -350,8 +360,7 @@ func TestSecurityHandlerGetScanStatus(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var job scanner.ScanJob
-	err := json.NewDecoder(w.Body).Decode(&job)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &job)
 	assert.Equal(t, "scan-123", job.ID)
 	assert.Equal(t, scanner.ScanJobStatusCompleted, job.Status)
 }
@@ -387,8 +396,7 @@ func TestSecurityHandlerGetScanReport(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var report scanner.AggregatedReport
-	err := json.NewDecoder(w.Body).Decode(&report)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &report)
 	assert.Equal(t, "scan-123", report.JobID)
 	assert.Len(t, report.Findings, 1)
 	assert.Equal(t, 1, report.Summary.High)
@@ -431,8 +439,7 @@ func TestSecurityHandlerApproveServer(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var resp map[string]string
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "approved", resp["status"])
 }
 
@@ -460,8 +467,7 @@ func TestSecurityHandlerRejectServer(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var resp map[string]string
-	err := json.NewDecoder(w.Body).Decode(&resp)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "rejected", resp["status"])
 }
 
@@ -482,8 +488,7 @@ func TestSecurityHandlerCheckIntegrity(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var result scanner.IntegrityCheckResult
-	err := json.NewDecoder(w.Body).Decode(&result)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &result)
 	assert.True(t, result.Passed)
 }
 
@@ -524,8 +529,7 @@ func TestSecurityHandlerOverview(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var overview scanner.SecurityOverview
-	err := json.NewDecoder(w.Body).Decode(&overview)
-	require.NoError(t, err)
+	secParseData(t, w.Body, &overview)
 	assert.Equal(t, 5, overview.TotalScans)
 	assert.Equal(t, 1, overview.ActiveScans)
 	assert.Equal(t, 2, overview.ScannersInstalled)
