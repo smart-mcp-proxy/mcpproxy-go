@@ -99,6 +99,8 @@ components:
             Routing mode (Spec 031): how MCP tools are exposed to clients
             Valid values: "retrieve_tools" (default), "direct", "code_execution"
           type: string
+        security:
+          $ref: '#/components/schemas/config.SecurityConfig'
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         telemetry:
@@ -364,6 +366,24 @@ components:
           type: array
           uniqueItems: false
         url:
+          type: string
+      type: object
+    config.SecurityConfig:
+      description: Security scanner settings (Spec 039)
+      properties:
+        auto_scan_quarantined:
+          type: boolean
+        integrity_check_interval:
+          type: string
+        integrity_check_on_restart:
+          type: boolean
+        runtime_read_only:
+          type: boolean
+        runtime_tmpfs_size:
+          type: string
+        scan_timeout_default:
+          type: string
+        scanner_registry_url:
           type: string
       type: object
     config.SensitiveDataDetectionConfig:
