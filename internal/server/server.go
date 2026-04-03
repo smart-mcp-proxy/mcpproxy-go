@@ -874,9 +874,11 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 
 		// Spec 039: Add security scan summary if available
 		if s.securityScanner != nil {
-			if scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name); scanSummary != nil {
+			scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name)
+			if scanSummary != nil {
 				serverMap["security_scan"] = scanSummary
 			}
+		} else {
 		}
 
 		result = append(result, serverMap)

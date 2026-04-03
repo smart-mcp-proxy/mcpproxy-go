@@ -501,15 +501,13 @@ func (s *Server) setupRoutes() {
 			r.Get("/tools/export", s.handleExportToolDescriptions)
 
 			// Security scanner scan/approval routes (Spec 039)
-			if s.securityController != nil {
-				r.Post("/scan", s.handleStartScan)
-				r.Get("/scan/status", s.handleGetScanStatus)
-				r.Get("/scan/report", s.handleGetScanReport)
-				r.Post("/scan/cancel", s.handleCancelScan)
-				r.Post("/security/approve", s.handleSecurityApprove)
-				r.Post("/security/reject", s.handleSecurityReject)
-				r.Get("/integrity", s.handleCheckIntegrity)
-			}
+			r.Post("/scan", s.handleStartScan)
+			r.Get("/scan/status", s.handleGetScanStatus)
+			r.Get("/scan/report", s.handleGetScanReport)
+			r.Post("/scan/cancel", s.handleCancelScan)
+			r.Post("/security/approve", s.handleSecurityApprove)
+			r.Post("/security/reject", s.handleSecurityReject)
+			r.Get("/integrity", s.handleCheckIntegrity)
 		})
 
 		// Search
@@ -587,16 +585,14 @@ func (s *Server) setupRoutes() {
 		r.Delete("/connect/{client}", s.handleDisconnectClient)
 
 		// Security scanner management routes (Spec 039)
-		if s.securityController != nil {
-			r.Route("/security", func(r chi.Router) {
-				r.Get("/scanners", s.handleListScanners)
-				r.Post("/scanners/install", s.handleInstallScanner)
-				r.Delete("/scanners/{id}", s.handleRemoveScanner)
-				r.Put("/scanners/{id}/config", s.handleConfigureScanner)
-				r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
-				r.Get("/overview", s.handleSecurityOverview)
-			})
-		}
+		r.Route("/security", func(r chi.Router) {
+			r.Get("/scanners", s.handleListScanners)
+			r.Post("/scanners/install", s.handleInstallScanner)
+			r.Delete("/scanners/{id}", s.handleRemoveScanner)
+			r.Put("/scanners/{id}/config", s.handleConfigureScanner)
+			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
+			r.Get("/overview", s.handleSecurityOverview)
+		})
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD
@@ -940,6 +936,27 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 
 		// Enrich with quarantine stats
 		s.enrichServersWithQuarantineStats(serverValues)
+
+		// Enrich with security scan summary (Spec 039)
+		if s.securityController != nil {
+			for i := range serverValues {
+				if summary := s.securityController.GetScanSummary(r.Context(), serverValues[i].Name); summary != nil {
+					serverValues[i].SecurityScan = &contracts.SecurityScanSummary{
+						LastScanAt: summary.LastScanAt,
+						RiskScore:  summary.RiskScore,
+						Status:     summary.Status,
+					}
+					if summary.FindingCounts != nil {
+						serverValues[i].SecurityScan.FindingCounts = &contracts.FindingCounts{
+							Dangerous: summary.FindingCounts.Dangerous,
+							Warning:   summary.FindingCounts.Warning,
+							Info:      summary.FindingCounts.Info,
+							Total:     summary.FindingCounts.Total,
+						}
+					}
+				}
+			}
+		}
 
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats

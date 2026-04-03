@@ -626,6 +626,7 @@ type IntegrityViolation struct {
 // GetScanSummary returns a compact scan summary for a server (for the server list API).
 // Returns nil if no scans have been run for this server.
 func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
+
 	// Check for active scan
 	if active := s.engine.GetActiveJob(serverName); active != nil {
 		return &ScanSummary{
@@ -651,11 +652,13 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		return summary
 	}
 
-	// Aggregate findings
+	// Aggregate findings and apply classification if missing
 	var allFindings []ScanFinding
 	for _, r := range reports {
 		allFindings = append(allFindings, r.Findings...)
 	}
+	// Re-classify findings that lack threat_level (legacy data)
+	ClassifyAllFindings(allFindings)
 
 	summary.RiskScore = CalculateRiskScore(allFindings)
 
