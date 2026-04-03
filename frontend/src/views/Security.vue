@@ -99,7 +99,7 @@
                         Install
                       </button>
                       <button
-                        v-if="scanner.status === 'installed' && scanner.required_env?.length"
+                        v-if="scanner.status === 'installed' || scanner.status === 'configured'"
                         @click="openConfigDialog(scanner)"
                         class="btn btn-sm btn-outline"
                       >
@@ -215,29 +215,51 @@
 
     <!-- Configure Scanner Dialog -->
     <dialog ref="configDialog" class="modal">
-      <div class="modal-box">
+      <div class="modal-box max-w-lg">
         <h3 class="font-bold text-lg">Configure {{ configScanner?.name }}</h3>
+        <p class="text-sm text-base-content/60 mt-1">Set API keys and environment variables. Secrets are stored in your OS keychain.</p>
         <div class="py-4 space-y-4" v-if="configScanner">
-          <div v-for="env in configScanner.required_env" :key="env.key" class="form-control">
-            <label class="label"><span class="label-text">{{ env.label }}</span></label>
-            <input
-              v-model="configValues[env.key]"
-              :type="env.secret ? 'password' : 'text'"
-              :placeholder="env.key"
-              class="input input-bordered"
-            />
-          </div>
-          <div v-for="env in (configScanner.optional_env || [])" :key="env.key" class="form-control">
+          <!-- Required env vars -->
+          <div v-for="env in (configScanner.required_env || [])" :key="env.key" class="form-control">
             <label class="label">
-              <span class="label-text">{{ env.label }}</span>
-              <span class="label-text-alt">Optional</span>
+              <span class="label-text font-medium">{{ env.label }}</span>
+              <span class="badge badge-sm badge-error">Required</span>
             </label>
             <input
               v-model="configValues[env.key]"
               :type="env.secret ? 'password' : 'text'"
-              :placeholder="env.key"
+              :placeholder="configuredPlaceholder(env.key)"
               class="input input-bordered"
             />
+          </div>
+          <!-- Optional env vars -->
+          <div v-for="env in (configScanner.optional_env || [])" :key="env.key" class="form-control">
+            <label class="label">
+              <span class="label-text">{{ env.label }}</span>
+              <span class="badge badge-sm badge-ghost">Optional</span>
+            </label>
+            <input
+              v-model="configValues[env.key]"
+              :type="env.secret ? 'password' : 'text'"
+              :placeholder="configuredPlaceholder(env.key)"
+              class="input input-bordered"
+            />
+          </div>
+          <!-- Custom env var -->
+          <div class="divider text-xs">Add Custom Variable</div>
+          <div class="flex gap-2">
+            <input v-model="customEnvKey" type="text" placeholder="OPENAI_API_KEY" class="input input-bordered input-sm flex-1" />
+            <input v-model="customEnvValue" type="password" placeholder="Value" class="input input-bordered input-sm flex-1" />
+            <button @click="addCustomEnv" :disabled="!customEnvKey || !customEnvValue" class="btn btn-sm btn-outline">Add</button>
+          </div>
+          <!-- Show existing configured vars -->
+          <div v-if="Object.keys(configValues).length > 0" class="mt-2">
+            <div class="text-xs text-base-content/50 mb-1">Configured variables:</div>
+            <div v-for="(val, key) in configValues" :key="key" class="flex items-center gap-2 text-sm py-1">
+              <code class="font-mono text-xs bg-base-200 px-2 py-0.5 rounded">{{ key }}</code>
+              <span class="text-base-content/50">{{ val.startsWith('${keyring:') ? 'stored in keyring' : 'set' }}</span>
+              <button @click="delete configValues[key]" class="btn btn-ghost btn-xs text-error">x</button>
+            </div>
           </div>
         </div>
         <div class="modal-action">
@@ -267,6 +289,8 @@ const scanResult = ref<any>(null)
 const configDialog = ref<HTMLDialogElement>()
 const configScanner = ref<any>(null)
 const configValues = ref<Record<string, string>>({})
+const customEnvKey = ref('')
+const customEnvValue = ref('')
 
 const totalFindings = computed(() => overview.value?.findings_by_severity?.total || 0)
 
@@ -334,7 +358,11 @@ async function removeScanner(id: string) {
 
 function openConfigDialog(scanner: any) {
   configScanner.value = scanner
-  configValues.value = {}
+  // Pre-populate with existing configured values
+  const existing = scanner.configured_env || {}
+  configValues.value = { ...existing }
+  customEnvKey.value = ''
+  customEnvValue.value = ''
   configDialog.value?.showModal()
 }
 
@@ -342,13 +370,35 @@ function closeConfigDialog() {
   configDialog.value?.close()
 }
 
+function configuredPlaceholder(key: string): string {
+  const existing = configScanner.value?.configured_env?.[key]
+  if (existing) {
+    if (existing.startsWith('${keyring:')) return '(stored in keyring)'
+    return '(configured)'
+  }
+  return key
+}
+
+function addCustomEnv() {
+  if (customEnvKey.value && customEnvValue.value) {
+    configValues.value[customEnvKey.value] = customEnvValue.value
+    customEnvKey.value = ''
+    customEnvValue.value = ''
+  }
+}
+
 async function saveConfig() {
   if (!configScanner.value) return
-  const nonEmpty: Record<string, string> = {}
+  // Only send non-empty values that aren't keyring references (new values)
+  const toSend: Record<string, string> = {}
   for (const [k, v] of Object.entries(configValues.value)) {
-    if (v) nonEmpty[k] = v
+    if (v && !v.startsWith('${keyring:')) {
+      toSend[k] = v
+    }
   }
-  await api.configureScanner(configScanner.value.id, nonEmpty)
+  if (Object.keys(toSend).length > 0) {
+    await api.configureScanner(configScanner.value.id, toSend)
+  }
   closeConfigDialog()
   await refresh()
 }
