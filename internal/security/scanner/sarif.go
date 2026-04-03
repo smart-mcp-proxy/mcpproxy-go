@@ -280,6 +280,7 @@ func CalculateRiskScore(findings []ScanFinding) int {
 func SummarizeFindings(findings []ScanFinding) ReportSummary {
 	summary := ReportSummary{Total: len(findings)}
 	for _, f := range findings {
+		// Count by CVSS severity
 		switch f.Severity {
 		case SeverityCritical:
 			summary.Critical++
@@ -291,6 +292,15 @@ func SummarizeFindings(findings []ScanFinding) ReportSummary {
 			summary.Low++
 		case SeverityInfo:
 			summary.Info++
+		}
+		// Count by user-facing threat level
+		switch f.ThreatLevel {
+		case ThreatLevelDangerous:
+			summary.Dangerous++
+		case ThreatLevelWarning:
+			summary.Warnings++
+		case ThreatLevelInfo:
+			summary.InfoLevel++
 		}
 	}
 	return summary

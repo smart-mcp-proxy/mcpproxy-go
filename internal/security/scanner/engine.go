@@ -427,6 +427,9 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 		agg.Reports = append(agg.Reports, *r)
 	}
 
+	// Classify findings that lack threat_type/threat_level (legacy data)
+	ClassifyAllFindings(agg.Findings)
+
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
 	return agg

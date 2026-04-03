@@ -565,25 +565,25 @@
                   <div class="stats shadow bg-base-100">
                     <div class="stat py-3 px-4">
                       <div class="stat-title text-xs">Dangerous</div>
-                      <div class="stat-value text-lg text-error">{{ scanReport.finding_counts?.dangerous ?? 0 }}</div>
+                      <div class="stat-value text-lg text-error">{{ scanReport.summary?.dangerous ?? 0 }}</div>
                     </div>
                   </div>
                   <div class="stats shadow bg-base-100">
                     <div class="stat py-3 px-4">
                       <div class="stat-title text-xs">Warnings</div>
-                      <div class="stat-value text-lg text-warning">{{ scanReport.finding_counts?.warning ?? 0 }}</div>
+                      <div class="stat-value text-lg text-warning">{{ scanReport.summary?.warnings ?? 0 }}</div>
                     </div>
                   </div>
                   <div class="stats shadow bg-base-100">
                     <div class="stat py-3 px-4">
                       <div class="stat-title text-xs">Info</div>
-                      <div class="stat-value text-lg text-info">{{ scanReport.finding_counts?.info ?? 0 }}</div>
+                      <div class="stat-value text-lg text-info">{{ scanReport.summary?.info_level ?? 0 }}</div>
                     </div>
                   </div>
                   <div class="stats shadow bg-base-100">
                     <div class="stat py-3 px-4">
                       <div class="stat-title text-xs">Total</div>
-                      <div class="stat-value text-lg">{{ scanReport.finding_counts?.total ?? 0 }}</div>
+                      <div class="stat-value text-lg">{{ scanReport.summary?.total ?? 0 }}</div>
                     </div>
                   </div>
                 </div>

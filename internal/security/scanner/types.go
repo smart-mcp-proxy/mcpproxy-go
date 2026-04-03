@@ -145,14 +145,17 @@ type AggregatedReport struct {
 	Reports    []ScanReport  `json:"reports"`
 }
 
-// ReportSummary provides counts by severity
+// ReportSummary provides counts by severity and threat level
 type ReportSummary struct {
-	Critical int `json:"critical"`
-	High     int `json:"high"`
-	Medium   int `json:"medium"`
-	Low      int `json:"low"`
-	Info     int `json:"info"`
-	Total    int `json:"total"`
+	Critical  int `json:"critical"`
+	High      int `json:"high"`
+	Medium    int `json:"medium"`
+	Low       int `json:"low"`
+	Info      int `json:"info"`
+	Total     int `json:"total"`
+	Dangerous int `json:"dangerous"`  // Threat level: tool poisoning, prompt injection
+	Warnings  int `json:"warnings"`   // Threat level: rug pull, high CVEs
+	InfoLevel int `json:"info_level"` // Threat level: low CVEs, informational
 }
 
 // IntegrityBaseline represents the approved integrity state for a server

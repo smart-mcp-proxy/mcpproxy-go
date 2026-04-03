@@ -67,9 +67,23 @@ export interface SecurityScanReport {
   risk_score: number
   findings: SecurityScanFinding[]
   finding_counts: SecurityScanFindingCounts
+  summary: SecurityScanReportSummary
   scanned_at: string
   duration_ms?: number
   scanners_used?: string[]
+}
+
+// Summary from the aggregated report API (matches Go ReportSummary)
+export interface SecurityScanReportSummary {
+  critical: number
+  high: number
+  medium: number
+  low: number
+  info: number
+  total: number
+  dangerous: number   // Threat level counts
+  warnings: number
+  info_level: number
 }
 
 // Server types
