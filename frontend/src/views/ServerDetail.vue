@@ -608,62 +608,75 @@
                     <span class="badge badge-sm" :class="group.badgeClass">{{ group.findings.length }}</span>
                   </div>
                   <div class="collapse-content">
-                    <div class="overflow-x-auto">
-                      <table class="table table-sm">
-                        <thead>
-                          <tr>
-                            <th class="w-24">Severity</th>
-                            <th>Finding</th>
-                            <th class="w-32">Package</th>
-                            <th class="w-24">Fix</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr v-for="(finding, idx) in group.findings" :key="idx">
-                            <td>
-                              <span
-                                class="badge badge-sm"
-                                :class="{
-                                  'badge-error': finding.threat_level === 'dangerous',
-                                  'badge-warning': finding.threat_level === 'warning',
-                                  'badge-info': finding.threat_level === 'info',
-                                }"
-                              >
-                                {{ finding.threat_level }}
-                              </span>
-                            </td>
-                            <td>
-                              <div class="font-medium">
-                                <a
-                                  v-if="finding.help_uri"
-                                  :href="finding.help_uri"
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  class="link link-primary"
-                                >
-                                  {{ finding.title }}
-                                </a>
-                                <span v-else>{{ finding.title }}</span>
+                    <div class="space-y-2">
+                      <div v-for="(finding, idx) in group.findings" :key="idx"
+                        class="collapse collapse-arrow bg-base-200 rounded-lg"
+                      >
+                        <input type="checkbox" />
+                        <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
+                          <span
+                            class="badge badge-sm flex-shrink-0"
+                            :class="{
+                              'badge-error': finding.threat_level === 'dangerous',
+                              'badge-warning': finding.threat_level === 'warning',
+                              'badge-info': finding.threat_level === 'info',
+                            }"
+                          >
+                            {{ finding.threat_level }}
+                          </span>
+                          <span class="font-medium text-sm flex-1">
+                            {{ finding.rule_id || finding.title }}
+                          </span>
+                          <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
+                            {{ finding.package_name }}
+                          </span>
+                          <span v-if="finding.fixed_version" class="badge badge-xs badge-success badge-outline">
+                            fix: {{ finding.fixed_version }}
+                          </span>
+                        </div>
+                        <div class="collapse-content px-4 pb-3">
+                          <div class="space-y-2 text-sm">
+                            <p class="text-base-content/80">{{ finding.description }}</p>
+                            <div class="grid grid-cols-2 gap-2 text-xs">
+                              <div v-if="finding.rule_id">
+                                <span class="text-base-content/50">Rule:</span>
+                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.rule_id }}</code>
                               </div>
-                              <div class="text-xs text-base-content/60 mt-0.5">{{ finding.description }}</div>
-                              <div v-if="finding.tool_name" class="text-xs text-base-content/50 mt-0.5">
-                                Tool: <span class="font-mono">{{ finding.tool_name }}</span>
+                              <div v-if="finding.severity">
+                                <span class="text-base-content/50">CVSS Severity:</span>
+                                <span class="ml-1 font-medium">{{ finding.severity }}</span>
+                                <span v-if="finding.cvss_score" class="ml-1">({{ finding.cvss_score }})</span>
                               </div>
-                            </td>
-                            <td>
-                              <div v-if="finding.package_name" class="text-sm">
-                                <div class="font-mono">{{ finding.package_name }}</div>
-                                <div v-if="finding.package_version" class="text-xs text-base-content/50">{{ finding.package_version }}</div>
+                              <div v-if="finding.package_name">
+                                <span class="text-base-content/50">Package:</span>
+                                <span class="ml-1 font-mono">{{ finding.package_name }}</span>
+                                <span v-if="finding.installed_version" class="ml-1 text-base-content/50">v{{ finding.installed_version }}</span>
                               </div>
-                              <span v-else class="text-base-content/30">-</span>
-                            </td>
-                            <td>
-                              <span v-if="finding.fix_version" class="badge badge-sm badge-success badge-outline">{{ finding.fix_version }}</span>
-                              <span v-else class="text-base-content/30">-</span>
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
+                              <div v-if="finding.fixed_version">
+                                <span class="text-base-content/50">Fixed in:</span>
+                                <span class="ml-1 font-mono text-success">{{ finding.fixed_version }}</span>
+                              </div>
+                              <div v-if="finding.location">
+                                <span class="text-base-content/50">Location:</span>
+                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
+                              </div>
+                              <div v-if="finding.scanner">
+                                <span class="text-base-content/50">Scanner:</span>
+                                <span class="ml-1">{{ finding.scanner }}</span>
+                              </div>
+                            </div>
+                            <a
+                              v-if="finding.help_uri"
+                              :href="finding.help_uri"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="link link-primary text-xs inline-flex items-center gap-1"
+                            >
+                              View Advisory Details &rarr;
+                            </a>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -694,6 +707,46 @@
                 Scanned {{ formatRelativeTime(scanReport.scanned_at) }}
                 <span v-if="scanReport.duration_ms"> in {{ scanReport.duration_ms }}ms</span>
                 <span v-if="scanReport.scanners_used?.length"> using {{ scanReport.scanners_used.join(', ') }}</span>
+              </div>
+
+              <!-- Scanner Execution Logs -->
+              <div v-if="scanStatus" class="pt-4">
+                <div class="collapse collapse-arrow bg-base-100 shadow-md">
+                  <input type="checkbox" />
+                  <div class="collapse-title font-medium">
+                    Scanner Execution Logs
+                    <span class="badge badge-sm badge-ghost ml-2">{{ scanStatus.scanner_statuses?.length || 0 }} scanners</span>
+                  </div>
+                  <div class="collapse-content">
+                    <div v-for="ss in (scanStatus.scanner_statuses || [])" :key="ss.scanner_id" class="mb-4 last:mb-0">
+                      <div class="flex items-center gap-2 mb-1">
+                        <span class="font-mono font-medium text-sm">{{ ss.scanner_id }}</span>
+                        <span class="badge badge-xs" :class="{
+                          'badge-success': ss.status === 'completed',
+                          'badge-error': ss.status === 'failed',
+                          'badge-warning': ss.status === 'running',
+                          'badge-ghost': ss.status === 'pending',
+                        }">{{ ss.status }}</span>
+                        <span class="text-xs text-base-content/40">
+                          exit code: {{ ss.exit_code ?? '?' }}
+                          <template v-if="ss.findings_count"> | {{ ss.findings_count }} findings</template>
+                        </span>
+                      </div>
+                      <div v-if="ss.error" class="text-xs text-error mb-1 break-all">{{ ss.error }}</div>
+                      <div v-if="ss.stderr" class="mb-1">
+                        <div class="text-xs text-base-content/50 mb-0.5">stderr:</div>
+                        <pre class="bg-base-300 text-xs p-2 rounded max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ ss.stderr }}</pre>
+                      </div>
+                      <div v-if="ss.stdout && !ss.stdout.startsWith('{')">
+                        <div class="text-xs text-base-content/50 mb-0.5">stdout:</div>
+                        <pre class="bg-base-300 text-xs p-2 rounded max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ ss.stdout.substring(0, 2000) }}</pre>
+                      </div>
+                    </div>
+                    <div v-if="!scanStatus.scanner_statuses?.length" class="text-sm text-base-content/40">
+                      No scanner execution data available.
+                    </div>
+                  </div>
+                </div>
               </div>
             </template>
           </div>
@@ -764,6 +817,7 @@ const quarantinedTools = computed(() => {
 
 // Security scan (Spec 039)
 const scanReport = ref<SecurityScanReport | null>(null)
+const scanStatus = ref<any>(null)
 const scanLoading = ref(false)
 const scanReportLoading = ref(false)
 const scanError = ref<string | null>(null)
@@ -1315,9 +1369,15 @@ async function loadScanReport() {
   scanReportLoading.value = true
   scanError.value = null
   try {
-    const response = await api.getScanReport(server.value.name)
-    if (response.success && response.data) {
-      scanReport.value = response.data as SecurityScanReport
+    const [reportRes, statusRes] = await Promise.all([
+      api.getScanReport(server.value.name),
+      api.getScanStatus(server.value.name),
+    ])
+    if (reportRes.success && reportRes.data) {
+      scanReport.value = reportRes.data as SecurityScanReport
+    }
+    if (statusRes.success && statusRes.data) {
+      scanStatus.value = statusRes.data
     }
   } catch (err) {
     // Silently fail - report may not exist yet

@@ -48,17 +48,20 @@ export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 's
 export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 
 export interface SecurityScanFinding {
-  id?: string
+  rule_id?: string
+  severity?: string             // critical, high, medium, low, info
+  category?: string
   threat_type: ThreatType
   threat_level: ThreatLevel
   title: string
   description: string
-  help_uri?: string
+  location?: string
+  scanner?: string              // Scanner that found this
+  help_uri?: string             // Link to CVE/advisory
+  cvss_score?: number           // CVSS score (0-10)
   package_name?: string
-  package_version?: string
-  fix_version?: string
-  tool_name?: string
-  scanner_id?: string
+  installed_version?: string
+  fixed_version?: string        // Version with fix
 }
 
 export interface SecurityScanReport {
