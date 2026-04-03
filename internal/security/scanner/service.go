@@ -53,26 +53,34 @@ func (n *NoopEmitter) EmitSecurityScanCompleted(string, map[string]int)     {}
 func (n *NoopEmitter) EmitSecurityScanFailed(string, string, string)        {}
 func (n *NoopEmitter) EmitSecurityIntegrityAlert(string, string, string)    {}
 
+// ServerInfoProvider resolves server configuration for auto-source resolution
+type ServerInfoProvider interface {
+	GetServerInfo(serverName string) (*ServerInfo, error)
+}
+
 // Service coordinates scanner management, scan execution, and approval workflow
 type Service struct {
-	storage  Storage
-	engine   *Engine
-	registry *Registry
-	docker   *DockerRunner
-	emitter  EventEmitter
-	logger   *zap.Logger
+	storage        Storage
+	engine         *Engine
+	registry       *Registry
+	docker         *DockerRunner
+	emitter        EventEmitter
+	sourceResolver *SourceResolver
+	serverInfo     ServerInfoProvider
+	logger         *zap.Logger
 }
 
 // NewService creates a new SecurityService
 func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataDir string, logger *zap.Logger) *Service {
 	engine := NewEngine(docker, registry, dataDir, logger)
 	svc := &Service{
-		storage:  storage,
-		engine:   engine,
-		registry: registry,
-		docker:   docker,
-		emitter:  &NoopEmitter{},
-		logger:   logger,
+		storage:        storage,
+		engine:         engine,
+		registry:       registry,
+		docker:         docker,
+		emitter:        &NoopEmitter{},
+		sourceResolver: NewSourceResolver(logger),
+		logger:         logger,
 	}
 	// Restore installed scanner state from storage (survives restart)
 	svc.syncRegistryFromStorage()
@@ -82,6 +90,11 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 // SetEmitter sets the event emitter for the service
 func (s *Service) SetEmitter(emitter EventEmitter) {
 	s.emitter = emitter
+}
+
+// SetServerInfoProvider sets the provider for resolving server configuration
+func (s *Service) SetServerInfoProvider(provider ServerInfoProvider) {
+	s.serverInfo = provider
 }
 
 // syncRegistryFromStorage updates the in-memory registry status from
@@ -265,6 +278,7 @@ func (s *Service) GetScannerStatus(ctx context.Context, id string) (*ScannerPlug
 // scanCallbackAdapter adapts scan engine callbacks to service operations
 type scanCallbackAdapter struct {
 	service *Service
+	cleanup func() // Optional cleanup function (e.g., remove temp source dir)
 }
 
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
@@ -298,10 +312,18 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 		}
 	}
 	a.service.emitter.EmitSecurityScanCompleted(job.ServerName, summary)
+	// Cleanup auto-resolved source directory
+	if a.cleanup != nil {
+		a.cleanup()
+	}
 }
 
 func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 	_ = a.service.storage.SaveScanJob(job)
+	// Cleanup auto-resolved source directory
+	if a.cleanup != nil {
+		a.cleanup()
+	}
 }
 
 // StartScan triggers a security scan for a server
@@ -313,7 +335,35 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		SourceDir:  sourceDir,
 	}
 
-	callback := &scanCallbackAdapter{service: s}
+	// Auto-resolve source if not explicitly provided
+	var resolvedCleanup func()
+	if req.SourceDir == "" && s.serverInfo != nil {
+		info, err := s.serverInfo.GetServerInfo(serverName)
+		if err != nil {
+			s.logger.Warn("Could not get server info for auto-source resolution",
+				zap.String("server", serverName),
+				zap.Error(err),
+			)
+		} else {
+			resolved, err := s.sourceResolver.Resolve(ctx, *info)
+			if err != nil {
+				s.logger.Warn("Auto-source resolution failed, scan may have limited results",
+					zap.String("server", serverName),
+					zap.Error(err),
+				)
+			} else {
+				req.SourceDir = resolved.SourceDir
+				resolvedCleanup = resolved.Cleanup
+				s.logger.Info("Auto-resolved source for scanning",
+					zap.String("server", serverName),
+					zap.String("method", resolved.Method),
+					zap.String("source_dir", resolved.SourceDir),
+				)
+			}
+		}
+	}
+
+	callback := &scanCallbackAdapter{service: s, cleanup: resolvedCleanup}
 	return s.engine.StartScan(ctx, req, callback)
 }
 

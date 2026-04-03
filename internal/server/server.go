@@ -1658,6 +1658,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
+		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg})
 		httpAPIServer.SetSecurityController(secService)
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
@@ -2349,4 +2350,29 @@ func (s *Server) GetToolApprovalStatus(serverName, toolName string) (string, err
 		return "", err
 	}
 	return string(record.Status), nil
+}
+
+// configServerInfoProvider implements scanner.ServerInfoProvider using the config.
+type configServerInfoProvider struct {
+	cfg *config.Config
+}
+
+func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.ServerInfo, error) {
+	if p.cfg == nil {
+		return nil, fmt.Errorf("no config available")
+	}
+	for _, sc := range p.cfg.Servers {
+		if sc.Name == serverName {
+			return &scanner.ServerInfo{
+				Name:       sc.Name,
+				Protocol:   sc.Protocol,
+				Command:    sc.Command,
+				Args:       sc.Args,
+				WorkingDir: sc.WorkingDir,
+				URL:        sc.URL,
+				Env:        sc.Env,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("server %q not found in config", serverName)
 }
