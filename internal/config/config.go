@@ -143,6 +143,9 @@ type Config struct {
 	// Set to explicit false to disable tool-level quarantine.
 	QuarantineEnabled *bool `json:"quarantine_enabled,omitempty" mapstructure:"quarantine-enabled"`
 
+	// Security scanner settings (Spec 039)
+	Security *SecurityConfig `json:"security,omitempty" mapstructure:"security"`
+
 	// Server edition multi-user configuration (only meaningful with -tags server)
 	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
 }
@@ -1177,4 +1180,15 @@ func (c *Config) GetAnonymousID() string {
 		return c.Telemetry.AnonymousID
 	}
 	return ""
+}
+
+// SecurityConfig represents security scanner configuration (Spec 039)
+type SecurityConfig struct {
+	AutoScanQuarantined     bool     `json:"auto_scan_quarantined" mapstructure:"auto-scan-quarantined"`
+	ScanTimeoutDefault      Duration `json:"scan_timeout_default,omitempty" mapstructure:"scan-timeout-default" swaggertype:"string"`
+	IntegrityCheckInterval  Duration `json:"integrity_check_interval,omitempty" mapstructure:"integrity-check-interval" swaggertype:"string"`
+	IntegrityCheckOnRestart bool     `json:"integrity_check_on_restart" mapstructure:"integrity-check-on-restart"`
+	ScannerRegistryURL      string   `json:"scanner_registry_url,omitempty" mapstructure:"scanner-registry-url"`
+	RuntimeReadOnly         bool     `json:"runtime_read_only" mapstructure:"runtime-read-only"`
+	RuntimeTmpfsSize        string   `json:"runtime_tmpfs_size,omitempty" mapstructure:"runtime-tmpfs-size"`
 }

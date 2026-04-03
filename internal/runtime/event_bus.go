@@ -253,3 +253,53 @@ func (r *Runtime) EmitSensitiveDataDetected(activityID string, detectionCount in
 	}
 	r.publishEvent(newEvent(EventTypeSensitiveDataDetected, payload))
 }
+
+// EmitSecurityScanStarted emits an event when a security scan begins (Spec 039).
+func (r *Runtime) EmitSecurityScanStarted(serverName string, scanners []string, jobID string) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"scanners":    scanners,
+		"job_id":      jobID,
+	}
+	r.publishEvent(newEvent(EventTypeSecurityScanStarted, payload))
+}
+
+// EmitSecurityScanProgress emits an event for scanner progress updates (Spec 039).
+func (r *Runtime) EmitSecurityScanProgress(serverName, scannerID, status string, progress int) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"scanner_id":  scannerID,
+		"status":      status,
+		"progress":    progress,
+	}
+	r.publishEvent(newEvent(EventTypeSecurityScanProgress, payload))
+}
+
+// EmitSecurityScanCompleted emits an event when a security scan completes (Spec 039).
+func (r *Runtime) EmitSecurityScanCompleted(serverName string, findingsSummary map[string]int) {
+	payload := map[string]any{
+		"server_name":      serverName,
+		"findings_summary": findingsSummary,
+	}
+	r.publishEvent(newEvent(EventTypeSecurityScanCompleted, payload))
+}
+
+// EmitSecurityScanFailed emits an event when a scanner fails (Spec 039).
+func (r *Runtime) EmitSecurityScanFailed(serverName, scannerID, errMsg string) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"scanner_id":  scannerID,
+		"error":       errMsg,
+	}
+	r.publishEvent(newEvent(EventTypeSecurityScanFailed, payload))
+}
+
+// EmitSecurityIntegrityAlert emits an event for integrity violations (Spec 039).
+func (r *Runtime) EmitSecurityIntegrityAlert(serverName, alertType, action string) {
+	payload := map[string]any{
+		"server_name": serverName,
+		"alert_type":  alertType,
+		"action":      action,
+	}
+	r.publishEvent(newEvent(EventTypeSecurityIntegrityAlert, payload))
+}

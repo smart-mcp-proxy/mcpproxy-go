@@ -132,15 +132,16 @@ type ServerController interface {
 
 // Server provides HTTP API endpoints with chi router
 type Server struct {
-	controller        ServerController
-	logger            *zap.SugaredLogger
-	httpLogger        *zap.Logger // Separate logger for HTTP requests
-	router            *chi.Mux
-	observability     *observability.Manager
-	tokenStore        TokenStore        // Agent token CRUD (T022)
-	dataDir           string            // Data directory for HMAC key (T022)
-	feedbackSubmitter FeedbackSubmitter // Feedback submission (Spec 036)
-	connectService    *connect.Service  // Client connect/disconnect operations
+	controller         ServerController
+	logger             *zap.SugaredLogger
+	httpLogger         *zap.Logger // Separate logger for HTTP requests
+	router             *chi.Mux
+	observability      *observability.Manager
+	tokenStore         TokenStore         // Agent token CRUD (T022)
+	dataDir            string             // Data directory for HMAC key (T022)
+	feedbackSubmitter  FeedbackSubmitter  // Feedback submission (Spec 036)
+	connectService     *connect.Service   // Client connect/disconnect operations
+	securityController SecurityController // Security scanner operations (Spec 039)
 }
 
 // NewServer creates a new HTTP API server
@@ -498,6 +499,17 @@ func (s *Server) setupRoutes() {
 			r.Post("/tools/approve", s.handleApproveTools)
 			r.Get("/tools/{tool}/diff", s.handleGetToolDiff)
 			r.Get("/tools/export", s.handleExportToolDescriptions)
+
+			// Security scanner scan/approval routes (Spec 039)
+			if s.securityController != nil {
+				r.Post("/scan", s.handleStartScan)
+				r.Get("/scan/status", s.handleGetScanStatus)
+				r.Get("/scan/report", s.handleGetScanReport)
+				r.Post("/scan/cancel", s.handleCancelScan)
+				r.Post("/security/approve", s.handleSecurityApprove)
+				r.Post("/security/reject", s.handleSecurityReject)
+				r.Get("/integrity", s.handleCheckIntegrity)
+			}
 		})
 
 		// Search
@@ -573,6 +585,18 @@ func (s *Server) setupRoutes() {
 		r.Get("/connect", s.handleGetConnectStatus)
 		r.Post("/connect/{client}", s.handleConnectClient)
 		r.Delete("/connect/{client}", s.handleDisconnectClient)
+
+		// Security scanner management routes (Spec 039)
+		if s.securityController != nil {
+			r.Route("/security", func(r chi.Router) {
+				r.Get("/scanners", s.handleListScanners)
+				r.Post("/scanners/install", s.handleInstallScanner)
+				r.Delete("/scanners/{id}", s.handleRemoveScanner)
+				r.Put("/scanners/{id}/config", s.handleConfigureScanner)
+				r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
+				r.Get("/overview", s.handleSecurityOverview)
+			})
+		}
 	})
 
 	// SSE events (protected by API key) - support both GET and HEAD

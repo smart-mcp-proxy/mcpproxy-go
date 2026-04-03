@@ -46,6 +46,18 @@ const (
 	// Spec 032: Tool-level quarantine events
 	// EventTypeActivityToolQuarantineChange is emitted when a tool's quarantine status changes.
 	EventTypeActivityToolQuarantineChange EventType = "activity.tool_quarantine_change"
+
+	// Spec 039: Security scanner events
+	// EventTypeSecurityScanStarted is emitted when a security scan begins.
+	EventTypeSecurityScanStarted EventType = "security.scan_started"
+	// EventTypeSecurityScanProgress is emitted for scanner progress updates.
+	EventTypeSecurityScanProgress EventType = "security.scan_progress"
+	// EventTypeSecurityScanCompleted is emitted when a security scan completes.
+	EventTypeSecurityScanCompleted EventType = "security.scan_completed"
+	// EventTypeSecurityScanFailed is emitted when a scanner fails.
+	EventTypeSecurityScanFailed EventType = "security.scan_failed"
+	// EventTypeSecurityIntegrityAlert is emitted for integrity violations.
+	EventTypeSecurityIntegrityAlert EventType = "security.integrity_alert"
 )
 
 // Event is a typed notification published by the runtime event bus.

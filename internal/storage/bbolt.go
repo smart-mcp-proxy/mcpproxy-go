@@ -89,6 +89,10 @@ func (b *BoltDB) initBuckets() error {
 			OAuthTokenBucket,
 			MetaBucket,
 			ActivityRecordsBucket,
+			ScannersBucket,
+			ScanJobsBucket,
+			ScanReportsBucket,
+			IntegrityBaselinesBucket,
 		}
 
 		for _, bucket := range buckets {

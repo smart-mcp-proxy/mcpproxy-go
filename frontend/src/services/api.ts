@@ -767,6 +767,77 @@ class APIService {
     })
   }
 
+  // Security Scanner Management (Spec 039)
+  async listScanners(): Promise<APIResponse<any[]>> {
+    return this.request<any[]>('/api/v1/security/scanners')
+  }
+
+  async installScanner(id: string): Promise<APIResponse<void>> {
+    return this.request<void>('/api/v1/security/scanners/install', {
+      method: 'POST',
+      body: JSON.stringify({ id }),
+    })
+  }
+
+  async removeScanner(id: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  async configureScanner(id: string, env: Record<string, string>): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ env }),
+    })
+  }
+
+  async getScannerStatus(id: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/security/scanners/${encodeURIComponent(id)}/status`)
+  }
+
+  async startScan(serverName: string, dryRun = false, scannerIds: string[] = []): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan`, {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: dryRun, scanner_ids: scannerIds }),
+    })
+  }
+
+  async getScanStatus(serverName: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/status`)
+  }
+
+  async getScanReport(serverName: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/report`)
+  }
+
+  async cancelScan(serverName: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  async securityApprove(serverName: string, force = false): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    })
+  }
+
+  async securityReject(serverName: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/reject`, {
+      method: 'POST',
+    })
+  }
+
+  async checkIntegrity(serverName: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/integrity`)
+  }
+
+  async getSecurityOverview(): Promise<APIResponse<any>> {
+    return this.request<any>('/api/v1/security/overview')
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {

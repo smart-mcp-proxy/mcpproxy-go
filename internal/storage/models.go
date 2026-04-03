@@ -18,6 +18,12 @@ const (
 	CacheBucket           = "cache"
 	CacheStatsBucket      = "cache_stats"
 	SessionsBucket        = "sessions"
+
+	// Security scanner buckets (Spec 039)
+	ScannersBucket           = "security_scanners"
+	ScanJobsBucket           = "security_scan_jobs"
+	ScanReportsBucket        = "security_reports"
+	IntegrityBaselinesBucket = "integrity_baselines"
 )
 
 // Meta keys
