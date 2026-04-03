@@ -85,6 +85,9 @@ type ScannerJobStatus struct {
 	CompletedAt   time.Time `json:"completed_at,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	FindingsCount int       `json:"findings_count"`
+	Stdout        string    `json:"stdout,omitempty"` // Scanner stdout (for log viewing)
+	Stderr        string    `json:"stderr,omitempty"` // Scanner stderr (for log viewing)
+	ExitCode      int       `json:"exit_code"`
 }
 
 // User-facing threat category constants

@@ -247,29 +247,54 @@ func categorizeFromRule(ruleID string, props map[string]any, rules map[string]SA
 	return "security"
 }
 
-// CalculateRiskScore computes a 0-100 risk score from findings
+// CalculateRiskScore computes a 0-100 risk score from findings.
+// Scoring is based on user-facing threat levels, not raw CVSS:
+//   - Dangerous (tool poisoning, prompt injection): 30 pts each, max contribution 90
+//   - Warning (rug pull, high CVEs): 5 pts each, max contribution 40
+//   - Info (low CVEs): 1 pt each, max contribution 10
+//
+// This prevents a pile of CVE warnings from scoring as high as actual tool poisoning.
 func CalculateRiskScore(findings []ScanFinding) int {
 	if len(findings) == 0 {
 		return 0
 	}
 
-	score := 0
+	var dangerousScore, warningScore, infoScore int
 	for _, f := range findings {
-		switch f.Severity {
-		case SeverityCritical:
-			score += 25
-		case SeverityHigh:
-			score += 15
-		case SeverityMedium:
-			score += 5
-		case SeverityLow:
-			score += 2
-		case SeverityInfo:
-			score += 1
+		switch f.ThreatLevel {
+		case ThreatLevelDangerous:
+			dangerousScore += 30
+		case ThreatLevelWarning:
+			warningScore += 5
+		case ThreatLevelInfo:
+			infoScore += 1
+		default:
+			// Unclassified: use severity as fallback
+			switch f.Severity {
+			case SeverityCritical:
+				dangerousScore += 30
+			case SeverityHigh:
+				warningScore += 5
+			case SeverityMedium:
+				warningScore += 3
+			case SeverityLow:
+				infoScore += 1
+			}
 		}
 	}
 
-	// Cap at 100
+	// Cap each category
+	if dangerousScore > 90 {
+		dangerousScore = 90
+	}
+	if warningScore > 40 {
+		warningScore = 40
+	}
+	if infoScore > 10 {
+		infoScore = 10
+	}
+
+	score := dangerousScore + warningScore + infoScore
 	if score > 100 {
 		score = 100
 	}

@@ -233,22 +233,35 @@ func TestCalculateRiskScore(t *testing.T) {
 		want     int
 	}{
 		{"no findings", nil, 0},
-		{"one low", []ScanFinding{{Severity: SeverityLow}}, 2},
-		{"one high", []ScanFinding{{Severity: SeverityHigh}}, 15},
-		{"one critical", []ScanFinding{{Severity: SeverityCritical}}, 25},
-		{"mixed", []ScanFinding{
+		{"one info", []ScanFinding{{ThreatLevel: ThreatLevelInfo}}, 1},
+		{"one warning", []ScanFinding{{ThreatLevel: ThreatLevelWarning}}, 5},
+		{"one dangerous", []ScanFinding{{ThreatLevel: ThreatLevelDangerous}}, 30},
+		{"6 warnings + 1 info", []ScanFinding{
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelInfo},
+		}, 31}, // 6*5=30 + 1 = 31
+		{"dangerous + warnings", []ScanFinding{
+			{ThreatLevel: ThreatLevelDangerous},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelWarning},
+			{ThreatLevel: ThreatLevelInfo},
+		}, 41}, // 30 + 10 + 1 = 41
+		{"capped dangerous", []ScanFinding{
+			{ThreatLevel: ThreatLevelDangerous},
+			{ThreatLevel: ThreatLevelDangerous},
+			{ThreatLevel: ThreatLevelDangerous},
+			{ThreatLevel: ThreatLevelDangerous},
+		}, 90}, // 4*30=120 capped to 90 (dangerous max)
+		{"unclassified fallback", []ScanFinding{
 			{Severity: SeverityCritical},
 			{Severity: SeverityHigh},
-			{Severity: SeverityMedium},
 			{Severity: SeverityLow},
-		}, 47},
-		{"capped at 100", []ScanFinding{
-			{Severity: SeverityCritical},
-			{Severity: SeverityCritical},
-			{Severity: SeverityCritical},
-			{Severity: SeverityCritical},
-			{Severity: SeverityCritical},
-		}, 100},
+		}, 36}, // 30 + 5 + 1 = 36
 	}
 
 	for _, tt := range tests {

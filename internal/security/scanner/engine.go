@@ -196,7 +196,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*Scan
 			callback.OnScannerStarted(job, scanner.ID)
 			e.updateScannerStatus(job, scanner.ID, ScanJobStatusRunning, time.Now(), time.Time{}, "", 0)
 
-			report, err := e.runSingleScanner(ctx, scanner, req)
+			report, scanLogs, err := e.runSingleScanner(ctx, scanner, req)
 			if err != nil {
 				e.logger.Warn("Scanner failed",
 					zap.String("scanner", scanner.ID),
@@ -204,6 +204,8 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*Scan
 					zap.Error(err),
 				)
 				e.updateScannerStatus(job, scanner.ID, ScanJobStatusFailed, time.Time{}, time.Now(), err.Error(), 0)
+				// Store logs even on failure
+				e.setScannerLogs(job, scanner.ID, scanLogs)
 				callback.OnScannerFailed(job, scanner.ID, err)
 				return
 			}
@@ -216,6 +218,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*Scan
 			mu.Unlock()
 
 			e.updateScannerStatus(job, scanner.ID, ScanJobStatusCompleted, time.Time{}, time.Now(), "", len(report.Findings))
+			e.setScannerLogs(job, scanner.ID, scanLogs)
 			callback.OnScannerCompleted(job, scanner.ID, report)
 		}(i, s)
 	}
@@ -252,8 +255,8 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*Scan
 	callback.OnScanCompleted(job, reports)
 }
 
-// runSingleScanner executes one scanner and returns its report
-func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req ScanRequest) (*ScanReport, error) {
+// runSingleScanner executes one scanner and returns its report plus execution logs
+func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req ScanRequest) (*ScanReport, scannerLogs, error) {
 	// Parse timeout
 	timeout := 120 * time.Second
 	if s.Timeout != "" {
@@ -266,7 +269,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	jobID := fmt.Sprintf("scan-%s-%d", req.ServerName, time.Now().UnixNano())
 	reportDir, err := PrepareReportDir(e.dataDir, jobID, s.ID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare report directory: %w", err)
+		return nil, scannerLogs{}, fmt.Errorf("failed to prepare report directory: %w", err)
 	}
 
 	// Build env vars: scanner config + request env
@@ -310,8 +313,9 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	}
 
 	stdout, stderr, exitCode, err := e.docker.RunScanner(ctx, cfg)
+	logs := scannerLogs{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}
 	if err != nil {
-		return nil, fmt.Errorf("scanner %s execution failed: %w", s.ID, err)
+		return nil, logs, fmt.Errorf("scanner %s execution failed: %w", s.ID, err)
 	}
 
 	e.logger.Debug("Scanner finished",
@@ -331,12 +335,13 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		if len(stdout) > 0 {
 			reportData = []byte(stdout)
 		} else {
-			return nil, fmt.Errorf("scanner %s produced no output (exit code: %d, stderr: %s)", s.ID, exitCode, truncate(stderr, 500))
+			return nil, logs, fmt.Errorf("scanner %s produced no output (exit code: %d, stderr: %s)", s.ID, exitCode, truncate(stderr, 500))
 		}
 	}
 
 	// Parse results
-	return e.parseResults(reportData, s.ID)
+	report, parseErr := e.parseResults(reportData, s.ID)
+	return report, logs, parseErr
 }
 
 // parseResults parses scanner output into a ScanReport
@@ -391,6 +396,27 @@ func (e *Engine) parseResults(data []byte, scannerID string) (*ScanReport, error
 	report.Findings = []ScanFinding{}
 	report.RiskScore = 0
 	return report, nil
+}
+
+// scannerLogs captures stdout/stderr from a scanner execution
+type scannerLogs struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+// setScannerLogs stores stdout/stderr on a scanner's job status
+func (e *Engine) setScannerLogs(job *ScanJob, scannerID string, logs scannerLogs) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for i := range job.ScannerStatuses {
+		if job.ScannerStatuses[i].ScannerID == scannerID {
+			job.ScannerStatuses[i].Stdout = truncate(logs.Stdout, 50000)
+			job.ScannerStatuses[i].Stderr = truncate(logs.Stderr, 50000)
+			job.ScannerStatuses[i].ExitCode = logs.ExitCode
+			return
+		}
+	}
 }
 
 // updateScannerStatus updates a specific scanner's status within a job
