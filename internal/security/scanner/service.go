@@ -66,7 +66,7 @@ type Service struct {
 // NewService creates a new SecurityService
 func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataDir string, logger *zap.Logger) *Service {
 	engine := NewEngine(docker, registry, dataDir, logger)
-	return &Service{
+	svc := &Service{
 		storage:  storage,
 		engine:   engine,
 		registry: registry,
@@ -74,11 +74,34 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 		emitter:  &NoopEmitter{},
 		logger:   logger,
 	}
+	// Restore installed scanner state from storage (survives restart)
+	svc.syncRegistryFromStorage()
+	return svc
 }
 
 // SetEmitter sets the event emitter for the service
 func (s *Service) SetEmitter(emitter EventEmitter) {
 	s.emitter = emitter
+}
+
+// syncRegistryFromStorage updates the in-memory registry status from
+// persistent storage. This is needed after restart so the engine knows
+// which scanners are installed/configured.
+func (s *Service) syncRegistryFromStorage() {
+	installed, err := s.storage.ListScanners()
+	if err != nil || len(installed) == 0 {
+		return
+	}
+	for _, inst := range installed {
+		_ = s.registry.UpdateStatus(inst.ID, inst.Status)
+		// Also update configured env so the engine can pass it to containers
+		if inst.ConfiguredEnv != nil {
+			if reg, err := s.registry.Get(inst.ID); err == nil {
+				reg.ConfiguredEnv = inst.ConfiguredEnv
+			}
+		}
+	}
+	s.logger.Info("Synced scanner registry from storage", zap.Int("count", len(installed)))
 }
 
 // --- Scanner Management ---
@@ -282,11 +305,12 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 }
 
 // StartScan triggers a security scan for a server
-func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string) (*ScanJob, error) {
+func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*ScanJob, error) {
 	req := ScanRequest{
 		ServerName: serverName,
 		DryRun:     dryRun,
 		ScannerIDs: scannerIDs,
+		SourceDir:  sourceDir,
 	}
 
 	callback := &scanCallbackAdapter{service: s}
@@ -435,6 +459,12 @@ func (s *Service) CheckIntegrity(ctx context.Context, serverName string) (*Integ
 }
 
 // --- Overview ---
+
+// GetSecurityOverview returns aggregated security statistics.
+// Satisfies the httpapi.SecurityController interface.
+func (s *Service) GetSecurityOverview(ctx context.Context) (*SecurityOverview, error) {
+	return s.GetOverview(ctx)
+}
 
 // GetOverview returns aggregated security statistics
 func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {

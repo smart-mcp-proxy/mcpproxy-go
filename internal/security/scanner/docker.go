@@ -110,6 +110,8 @@ func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (st
 	// Mount source directory read-only
 	if cfg.SourceDir != "" {
 		args = append(args, "-v", cfg.SourceDir+":/scan/source:ro")
+		// Also mount at /src for scanners that expect it (e.g., Semgrep Docker image)
+		args = append(args, "-v", cfg.SourceDir+":/src:ro")
 	}
 
 	// Mount report directory writable

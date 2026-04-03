@@ -18,7 +18,7 @@ type SecurityController interface {
 	ConfigureScanner(ctx context.Context, id string, env map[string]string) error
 	GetScannerStatus(ctx context.Context, id string) (*scanner.ScannerPlugin, error)
 
-	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string) (*scanner.ScanJob, error)
+	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error)
 	GetScanStatus(ctx context.Context, serverName string) (*scanner.ScanJob, error)
 	GetScanReport(ctx context.Context, serverName string) (*scanner.AggregatedReport, error)
 	CancelScan(ctx context.Context, serverName string) error
@@ -37,9 +37,21 @@ func (s *Server) SetSecurityController(ctrl SecurityController) {
 	s.securityController = ctrl
 }
 
+// requireSecurity returns true if the security controller is available, writing a 501 error if not.
+func (s *Server) requireSecurity(w http.ResponseWriter, r *http.Request) bool {
+	if s.securityController == nil {
+		s.writeError(w, r, http.StatusNotImplemented, "security scanner feature is not configured")
+		return false
+	}
+	return true
+}
+
 // --- Scanner management handlers ---
 
 func (s *Server) handleListScanners(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	scanners, err := s.securityController.ListScanners(r.Context())
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
@@ -49,6 +61,9 @@ func (s *Server) handleListScanners(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	var req struct {
 		ID string `json:"id"`
 	}
@@ -69,6 +84,9 @@ func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		s.writeError(w, r, http.StatusBadRequest, "scanner id is required")
@@ -83,6 +101,9 @@ func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		s.writeError(w, r, http.StatusBadRequest, "scanner id is required")
@@ -109,6 +130,9 @@ func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		s.writeError(w, r, http.StatusBadRequest, "scanner id is required")
@@ -126,6 +150,9 @@ func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) 
 // --- Scan operation handlers ---
 
 func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -135,11 +162,12 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DryRun     bool     `json:"dry_run"`
 		ScannerIDs []string `json:"scanner_ids"`
+		SourceDir  string   `json:"source_dir"`
 	}
 	// Body is optional for simple scans
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	job, err := s.securityController.StartScan(r.Context(), name, req.DryRun, req.ScannerIDs)
+	job, err := s.securityController.StartScan(r.Context(), name, req.DryRun, req.ScannerIDs, req.SourceDir)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
@@ -148,6 +176,9 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetScanStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -163,6 +194,9 @@ func (s *Server) handleGetScanStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetScanReport(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -178,6 +212,9 @@ func (s *Server) handleGetScanReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -194,6 +231,9 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 // --- Approval handlers ---
 
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -214,6 +254,9 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecurityReject(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -228,6 +271,9 @@ func (s *Server) handleSecurityReject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	name := chi.URLParam(r, "id")
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "server name is required")
@@ -245,6 +291,9 @@ func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
 // --- Overview handler ---
 
 func (s *Server) handleSecurityOverview(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
 	overview, err := s.securityController.GetSecurityOverview(r.Context())
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())

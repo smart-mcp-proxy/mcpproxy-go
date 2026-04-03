@@ -53,9 +53,9 @@ var bundledScanners = []*ScannerPlugin{
 		OptionalEnv: []EnvRequirement{
 			{Key: "SEMGREP_APP_TOKEN", Label: "Semgrep Cloud Token", Secret: true},
 		},
-		Command:    []string{"semgrep", "scan", "--sarif", "--output", "/scan/report/results.sarif"},
-		Timeout:    "120s",
-		NetworkReq: false,
+		Command:    []string{"semgrep", "scan", "--sarif", "--output", "/scan/report/results.sarif", "/scan/source"},
+		Timeout:    "300s",
+		NetworkReq: true, // Downloads rules from registry
 	},
 	{
 		ID:          "trivy-mcp",
@@ -64,7 +64,7 @@ var bundledScanners = []*ScannerPlugin{
 		Description: "Comprehensive vulnerability scanner for filesystem, dependencies, and container images. Detects known CVEs and misconfigurations.",
 		License:     "Apache-2.0",
 		Homepage:    "https://trivy.dev",
-		DockerImage: "aquasec/trivy:latest",
+		DockerImage: "aquasecurity/trivy:latest",
 		Inputs:      []string{"source", "container_image"},
 		Outputs:     []string{"sarif"},
 		RequiredEnv: nil,

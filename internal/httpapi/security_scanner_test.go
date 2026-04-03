@@ -62,7 +62,7 @@ func (m *mockSecurityController) GetScannerStatus(_ context.Context, id string) 
 	return nil, fmt.Errorf("scanner not found: %s", id)
 }
 
-func (m *mockSecurityController) StartScan(_ context.Context, serverName string, dryRun bool, scannerIDs []string) (*scanner.ScanJob, error) {
+func (m *mockSecurityController) StartScan(_ context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error) {
 	if m.startScanErr != nil {
 		return nil, m.startScanErr
 	}
@@ -532,7 +532,7 @@ func TestSecurityHandlerOverview(t *testing.T) {
 	assert.Equal(t, 1, overview.FindingsBySeverity.Critical)
 }
 
-func TestSecurityRoutesNotRegisteredWithoutController(t *testing.T) {
+func TestSecurityRoutesReturnNotImplementedWithoutController(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	ctrl := &secTestController{}
 	srv := NewServer(ctrl, logger, nil)
@@ -542,6 +542,6 @@ func TestSecurityRoutesNotRegisteredWithoutController(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	// Should be 404 since routes are not registered without security controller
-	assert.Equal(t, http.StatusNotFound, w.Code)
+	// Should be 501 since security controller is not configured
+	assert.Equal(t, http.StatusNotImplemented, w.Code)
 }

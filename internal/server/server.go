@@ -29,6 +29,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -1646,6 +1647,18 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	if cfg := s.runtime.Config(); cfg != nil {
 		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
 		httpAPIServer.SetConnectService(connectSvc)
+	}
+	// Wire security scanner service (Spec 039)
+	if sm := s.runtime.StorageManager(); sm != nil {
+		cfg := s.runtime.Config()
+		dataDir := ""
+		if cfg != nil {
+			dataDir = cfg.DataDir
+		}
+		secRegistry := scanner.NewRegistry(dataDir, s.logger)
+		secDocker := scanner.NewDockerRunner(s.logger)
+		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
+		httpAPIServer.SetSecurityController(secService)
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
 	wireTeamsOAuth(s, httpAPIServer)

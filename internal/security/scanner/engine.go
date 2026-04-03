@@ -110,8 +110,9 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 
 	callback.OnScanStarted(job)
 
-	// Run scanners in background
-	go e.executeScan(ctx, job, scanners, req, callback)
+	// Run scanners in background with detached context
+	// (the HTTP request context may be cancelled after the response is sent)
+	go e.executeScan(context.Background(), job, scanners, req, callback)
 
 	return job, nil
 }
@@ -288,7 +289,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		ReportDir:     reportDir,
 		NetworkMode:   networkMode,
 		Timeout:       timeout,
-		ReadOnly:      true,
+		ReadOnly:      false, // Scanner containers need to write cache/temp files
 		MemoryLimit:   "512m",
 	}
 
