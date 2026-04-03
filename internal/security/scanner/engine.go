@@ -4,18 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
 )
 
+// SecretResolverFunc resolves a secret reference like ${keyring:name} to its value
+type SecretResolverFunc func(ctx context.Context, ref string) (string, error)
+
 // Engine orchestrates parallel scanner execution for a server
 type Engine struct {
-	docker   *DockerRunner
-	registry *Registry
-	logger   *zap.Logger
-	dataDir  string
+	docker         *DockerRunner
+	registry       *Registry
+	logger         *zap.Logger
+	dataDir        string
+	secretResolver SecretResolverFunc
 
 	// Track active scans (one per server)
 	mu          sync.Mutex
@@ -265,9 +270,20 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	}
 
 	// Build env vars: scanner config + request env
+	// Resolve ${keyring:...} references if a secret resolver is available
 	env := make(map[string]string)
 	for k, v := range s.ConfiguredEnv {
-		env[k] = v
+		if e.secretResolver != nil && strings.HasPrefix(v, "${keyring:") {
+			resolved, err := e.secretResolver(ctx, v)
+			if err != nil {
+				e.logger.Warn("Failed to resolve secret for scanner env",
+					zap.String("key", k), zap.Error(err))
+				continue // Skip unresolvable secrets
+			}
+			env[k] = resolved
+		} else {
+			env[k] = v
+		}
 	}
 	for k, v := range req.Env {
 		env[k] = v

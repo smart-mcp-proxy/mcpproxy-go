@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -67,6 +68,7 @@ type Service struct {
 	emitter        EventEmitter
 	sourceResolver *SourceResolver
 	serverInfo     ServerInfoProvider
+	secretStore    SecretStore
 	logger         *zap.Logger
 }
 
@@ -232,18 +234,55 @@ func (s *Service) RemoveScanner(ctx context.Context, id string) error {
 	return nil
 }
 
-// ConfigureScanner sets environment variables (API keys) for a scanner
+// SecretStore allows storing and resolving secrets via the OS keyring
+type SecretStore interface {
+	StoreSecret(ctx context.Context, name, value string) error
+	ResolveSecret(ctx context.Context, ref string) (string, error)
+}
+
+// SetSecretStore sets the secret store for secure API key management.
+// Also wires secret resolution into the scan engine for resolving
+// ${keyring:...} references in scanner env vars at scan time.
+func (s *Service) SetSecretStore(store SecretStore) {
+	s.secretStore = store
+	if store != nil {
+		s.engine.secretResolver = func(ctx context.Context, ref string) (string, error) {
+			return store.ResolveSecret(ctx, ref)
+		}
+	}
+}
+
+// ConfigureScanner sets environment variables (API keys) for a scanner.
+// Secret values are stored in the OS keyring; only references are kept in config.
 func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[string]string) error {
 	sc, err := s.storage.GetScanner(id)
 	if err != nil {
-		return fmt.Errorf("scanner not installed: %w", err)
+		// If not in storage yet (just registered in registry), create from registry
+		regScanner, regErr := s.registry.Get(id)
+		if regErr != nil {
+			return fmt.Errorf("scanner not found: %w", err)
+		}
+		sc = regScanner
 	}
 
 	if sc.ConfiguredEnv == nil {
 		sc.ConfiguredEnv = make(map[string]string)
 	}
+
+	// Store secrets in keyring, keep references in config
 	for k, v := range env {
-		sc.ConfiguredEnv[k] = v
+		if s.secretStore != nil && v != "" {
+			keyringName := fmt.Sprintf("scanner_%s_%s", id, strings.ToLower(k))
+			if err := s.secretStore.StoreSecret(ctx, keyringName, v); err != nil {
+				s.logger.Warn("Failed to store secret in keyring, storing as reference",
+					zap.String("key", k), zap.Error(err))
+				sc.ConfiguredEnv[k] = v // Fallback: store directly
+			} else {
+				sc.ConfiguredEnv[k] = fmt.Sprintf("${keyring:%s}", keyringName)
+			}
+		} else {
+			sc.ConfiguredEnv[k] = v
+		}
 	}
 	sc.Status = ScannerStatusConfigured
 

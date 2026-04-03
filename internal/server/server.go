@@ -1659,6 +1659,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
 		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg})
+		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		httpAPIServer.SetSecurityController(secService)
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
@@ -2350,6 +2351,24 @@ func (s *Server) GetToolApprovalStatus(serverName, toolName string) (string, err
 		return "", err
 	}
 	return string(record.Status), nil
+}
+
+// keyringSecretStore adapts secret.Resolver to scanner.SecretStore for API key management.
+type keyringSecretStore struct {
+	resolver *secret.Resolver
+}
+
+func (k *keyringSecretStore) StoreSecret(ctx context.Context, name, value string) error {
+	ref := secret.Ref{Type: "keyring", Name: name}
+	return k.resolver.Store(ctx, ref, value)
+}
+
+func (k *keyringSecretStore) ResolveSecret(ctx context.Context, refStr string) (string, error) {
+	ref, err := secret.ParseSecretRef(refStr)
+	if err != nil {
+		return "", err
+	}
+	return k.resolver.Resolve(ctx, *ref)
 }
 
 // configServerInfoProvider implements scanner.ServerInfoProvider using the config.
