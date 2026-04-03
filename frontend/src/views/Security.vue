@@ -162,18 +162,38 @@
                 <thead>
                   <tr>
                     <th>Severity</th>
-                    <th>Title</th>
-                    <th>Location</th>
+                    <th>Finding</th>
+                    <th>Package</th>
+                    <th>Fix</th>
                     <th>Scanner</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="(finding, idx) in scanResult.findings" :key="idx">
                     <td>
-                      <span class="badge badge-sm" :class="severityBadgeClass(finding.severity)">{{ finding.severity }}</span>
+                      <div class="flex flex-col items-center gap-1">
+                        <span class="badge badge-sm" :class="severityBadgeClass(finding.severity)">{{ finding.severity }}</span>
+                        <span v-if="finding.cvss_score" class="text-xs text-base-content/50">{{ finding.cvss_score.toFixed(1) }}</span>
+                      </div>
                     </td>
-                    <td>{{ finding.title }}</td>
-                    <td class="font-mono text-xs">{{ finding.location || '-' }}</td>
+                    <td>
+                      <div class="font-medium">
+                        <a v-if="finding.help_uri" :href="finding.help_uri" target="_blank" class="link link-primary">
+                          {{ finding.rule_id || finding.title }}
+                        </a>
+                        <span v-else>{{ finding.rule_id || finding.title }}</span>
+                      </div>
+                      <div class="text-sm text-base-content/60 max-w-md truncate">{{ finding.title }}</div>
+                      <div v-if="finding.location" class="text-xs font-mono text-base-content/40 mt-1">{{ finding.location }}</div>
+                    </td>
+                    <td>
+                      <div v-if="finding.package_name" class="font-mono text-sm">{{ finding.package_name }}</div>
+                      <div v-if="finding.installed_version" class="text-xs text-base-content/50">v{{ finding.installed_version }}</div>
+                    </td>
+                    <td>
+                      <span v-if="finding.fixed_version" class="badge badge-sm badge-success badge-outline">{{ finding.fixed_version }}</span>
+                      <span v-else class="text-xs text-base-content/30">-</span>
+                    </td>
                     <td class="text-sm text-base-content/70">{{ finding.scanner }}</td>
                   </tr>
                 </tbody>

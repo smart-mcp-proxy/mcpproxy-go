@@ -3,6 +3,7 @@ package scanner
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -39,6 +40,7 @@ type SARIFRule struct {
 	ShortDescription *SARIFMessage       `json:"shortDescription,omitempty"`
 	FullDescription  *SARIFMessage       `json:"fullDescription,omitempty"`
 	DefaultConfig    *SARIFConfiguration `json:"defaultConfiguration,omitempty"`
+	HelpURI          string              `json:"helpUri,omitempty"`
 	Properties       map[string]any      `json:"properties,omitempty"`
 }
 
@@ -146,12 +148,33 @@ func NormalizeFindings(report *SARIFReport, scannerID string) []ScanFinding {
 				}
 			}
 
-			// Enrich title from rule short description if available
+			// Enrich from SARIF rule metadata
 			if rule, ok := rules[result.RuleID]; ok {
 				if rule.ShortDescription != nil && rule.ShortDescription.Text != "" {
 					finding.Title = rule.ShortDescription.Text
 				}
+				// Extract help URI (link to CVE/advisory)
+				if rule.HelpURI != "" {
+					finding.HelpURI = rule.HelpURI
+				}
+				// Extract CVSS score from properties
+				if rule.Properties != nil {
+					if score, ok := rule.Properties["security-severity"]; ok {
+						switch v := score.(type) {
+						case float64:
+							finding.CVSSScore = v
+						case string:
+							if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+								finding.CVSSScore = parsed
+							}
+						}
+					}
+				}
 			}
+
+			// Parse package info from Trivy-style message text
+			// Format: "Package: name\nInstalled Version: x\nVulnerability CVE-xxx\nFixed Version: y"
+			finding.PackageName, finding.InstalledVersion, finding.FixedVersion = parsePackageFromMessage(result.Message.Text)
 
 			findings = append(findings, finding)
 		}
@@ -271,4 +294,22 @@ func SummarizeFindings(findings []ScanFinding) ReportSummary {
 		}
 	}
 	return summary
+}
+
+// parsePackageFromMessage extracts package info from Trivy-style SARIF message text.
+// Trivy messages follow the pattern:
+//
+//	Package: @modelcontextprotocol/sdk\nInstalled Version: 0.6.0\nVulnerability CVE-2025-66414\nSeverity: HIGH\nFixed Version: 1.12.1
+func parsePackageFromMessage(msg string) (pkg, installed, fixed string) {
+	for _, line := range strings.Split(msg, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "Package: ") {
+			pkg = strings.TrimPrefix(line, "Package: ")
+		} else if strings.HasPrefix(line, "Installed Version: ") {
+			installed = strings.TrimPrefix(line, "Installed Version: ")
+		} else if strings.HasPrefix(line, "Fixed Version: ") {
+			fixed = strings.TrimPrefix(line, "Fixed Version: ")
+		}
+	}
+	return
 }

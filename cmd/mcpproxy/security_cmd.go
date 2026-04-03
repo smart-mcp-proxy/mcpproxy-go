@@ -1051,18 +1051,47 @@ func printReportTable(serverName string, report map[string]interface{}) error {
 		for _, f := range findings {
 			if finding, ok := f.(map[string]interface{}); ok {
 				severity := strings.ToUpper(getMapString(finding, "severity"))
+				ruleID := getMapString(finding, "rule_id")
 				title := getMapString(finding, "title")
 				location := getMapString(finding, "location")
 				scannerName := getMapString(finding, "scanner")
+				helpURI := getMapString(finding, "help_uri")
+				pkg := getMapString(finding, "package_name")
+				installed := getMapString(finding, "installed_version")
+				fixed := getMapString(finding, "fixed_version")
 
-				line := fmt.Sprintf("  [%s] %s", severity, title)
-				if location != "" {
-					line += " -- " + location
+				// Main line: [SEVERITY] CVE-ID: title (scanner)
+				label := title
+				if ruleID != "" && ruleID != title {
+					label = ruleID
 				}
+				line := fmt.Sprintf("  [%s] %s", severity, label)
 				if scannerName != "" {
 					line += " (" + scannerName + ")"
 				}
 				fmt.Println(line)
+
+				// Package info
+				if pkg != "" {
+					pkgLine := "         Package: " + pkg
+					if installed != "" {
+						pkgLine += " v" + installed
+					}
+					if fixed != "" {
+						pkgLine += " -> fix: " + fixed
+					}
+					fmt.Println(pkgLine)
+				}
+
+				// Location
+				if location != "" {
+					fmt.Println("         Location: " + location)
+				}
+
+				// Link to advisory
+				if helpURI != "" {
+					fmt.Println("         Details: " + helpURI)
+				}
 			}
 		}
 	}

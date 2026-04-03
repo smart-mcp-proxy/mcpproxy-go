@@ -89,13 +89,18 @@ type ScannerJobStatus struct {
 
 // ScanFinding represents an individual security finding
 type ScanFinding struct {
-	RuleID      string `json:"rule_id"`
-	Severity    string `json:"severity"` // critical, high, medium, low, info
-	Category    string `json:"category"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Location    string `json:"location,omitempty"`
-	Scanner     string `json:"scanner"`
+	RuleID           string  `json:"rule_id"`
+	Severity         string  `json:"severity"` // critical, high, medium, low, info
+	Category         string  `json:"category"`
+	Title            string  `json:"title"`
+	Description      string  `json:"description"`
+	Location         string  `json:"location,omitempty"`
+	Scanner          string  `json:"scanner"`
+	HelpURI          string  `json:"help_uri,omitempty"`          // Link to CVE/advisory details
+	CVSSScore        float64 `json:"cvss_score,omitempty"`        // CVSS severity score (0-10)
+	PackageName      string  `json:"package_name,omitempty"`      // Affected package
+	InstalledVersion string  `json:"installed_version,omitempty"` // Current version
+	FixedVersion     string  `json:"fixed_version,omitempty"`     // Version with fix
 }
 
 // ScanReport represents aggregated scan results for a server
