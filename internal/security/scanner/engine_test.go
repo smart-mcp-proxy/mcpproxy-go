@@ -100,6 +100,106 @@ func TestAggregateReportsEmpty(t *testing.T) {
 	if agg.Summary.Total != 0 {
 		t.Errorf("expected 0 total, got %d", agg.Summary.Total)
 	}
+	// Empty reports means no scanner succeeded
+	if agg.ScanComplete {
+		t.Error("expected ScanComplete=false when no reports")
+	}
+	if agg.ScannersRun != 0 {
+		t.Errorf("expected ScannersRun=0, got %d", agg.ScannersRun)
+	}
+}
+
+func TestAggregateReportsScanComplete(t *testing.T) {
+	reports := []*ScanReport{
+		{
+			ID:        "r1",
+			ScannerID: "scanner-a",
+			Findings:  []ScanFinding{},
+			RiskScore: 0,
+		},
+	}
+
+	agg := AggregateReports("job-1", "test-server", reports)
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true when at least one report exists")
+	}
+	if agg.ScannersRun != 1 {
+		t.Errorf("expected ScannersRun=1, got %d", agg.ScannersRun)
+	}
+}
+
+func TestAggregateReportsWithJobStatusAllFailed(t *testing.T) {
+	// No successful reports
+	var reports []*ScanReport
+
+	job := &ScanJob{
+		ID:         "job-fail",
+		ServerName: "test-server",
+		Status:     ScanJobStatusFailed,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "scanner-a", Status: ScanJobStatusFailed, Error: "image not found"},
+			{ScannerID: "scanner-b", Status: ScanJobStatusFailed, Error: "timeout"},
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-fail", "test-server", reports, job)
+
+	if agg.ScanComplete {
+		t.Error("expected ScanComplete=false when all scanners failed")
+	}
+	if agg.ScannersRun != 0 {
+		t.Errorf("expected ScannersRun=0, got %d", agg.ScannersRun)
+	}
+	if agg.ScannersFailed != 2 {
+		t.Errorf("expected ScannersFailed=2, got %d", agg.ScannersFailed)
+	}
+	if agg.ScannersTotal != 2 {
+		t.Errorf("expected ScannersTotal=2, got %d", agg.ScannersTotal)
+	}
+	if agg.RiskScore != 0 {
+		t.Errorf("expected risk score 0, got %d", agg.RiskScore)
+	}
+}
+
+func TestAggregateReportsWithJobStatusPartialFailure(t *testing.T) {
+	reports := []*ScanReport{
+		{
+			ID:        "r1",
+			ScannerID: "scanner-a",
+			Findings: []ScanFinding{
+				{Severity: SeverityHigh, Title: "Found issue"},
+			},
+			RiskScore: 30,
+		},
+	}
+
+	job := &ScanJob{
+		ID:         "job-partial",
+		ServerName: "test-server",
+		Status:     ScanJobStatusCompleted,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "scanner-a", Status: ScanJobStatusCompleted, FindingsCount: 1},
+			{ScannerID: "scanner-b", Status: ScanJobStatusFailed, Error: "image not found"},
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-partial", "test-server", reports, job)
+
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true when at least one scanner succeeded")
+	}
+	if agg.ScannersRun != 1 {
+		t.Errorf("expected ScannersRun=1, got %d", agg.ScannersRun)
+	}
+	if agg.ScannersFailed != 1 {
+		t.Errorf("expected ScannersFailed=1, got %d", agg.ScannersFailed)
+	}
+	if agg.ScannersTotal != 2 {
+		t.Errorf("expected ScannersTotal=2, got %d", agg.ScannersTotal)
+	}
+	if len(agg.Findings) != 1 {
+		t.Errorf("expected 1 finding, got %d", len(agg.Findings))
+	}
 }
 
 func TestEngineResolveScanners(t *testing.T) {

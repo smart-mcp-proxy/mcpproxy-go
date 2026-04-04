@@ -859,6 +859,173 @@ func TestServiceRemoveScannerNotInstalled(t *testing.T) {
 	}
 }
 
+func TestServiceGetScanSummaryAllFailed(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Create a failed scan job (all scanners failed)
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-fail",
+		ServerName: "server-a",
+		Status:     ScanJobStatusFailed,
+		Scanners:   []string{"s1", "s2"},
+		StartedAt:  now,
+		Error:      "all scanners failed",
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusFailed, Error: "image not found"},
+			{ScannerID: "s2", Status: ScanJobStatusFailed, Error: "timeout"},
+		},
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Status != "failed" {
+		t.Errorf("expected status 'failed', got %q", summary.Status)
+	}
+}
+
+func TestServiceGetScanSummaryPartialSuccess(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Create a completed job where one scanner succeeded and one failed
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-partial",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"s1", "s2"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusCompleted, FindingsCount: 0},
+			{ScannerID: "s2", Status: ScanJobStatusFailed, Error: "image not found"},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r1", JobID: "j-partial", ServerName: "server-a", ScannerID: "s1",
+		Findings: []ScanFinding{}, ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	// At least one scanner succeeded, so status should be "clean" (no findings)
+	if summary.Status != "clean" {
+		t.Errorf("expected status 'clean', got %q", summary.Status)
+	}
+}
+
+func TestServiceGetScanSummaryClean(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-clean",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"s1"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusCompleted, FindingsCount: 0},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r1", JobID: "j-clean", ServerName: "server-a", ScannerID: "s1",
+		Findings: []ScanFinding{}, ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Status != "clean" {
+		t.Errorf("expected status 'clean', got %q", summary.Status)
+	}
+}
+
+func TestServiceGetScanReportWithJobStatus(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Create a job where one scanner failed and one succeeded
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-mixed",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"s1", "s2"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusCompleted, FindingsCount: 1},
+			{ScannerID: "s2", Status: ScanJobStatusFailed, Error: "docker image not found"},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r1", JobID: "j-mixed", ServerName: "server-a", ScannerID: "s1",
+		Findings: []ScanFinding{
+			{RuleID: "R1", Severity: SeverityHigh, Title: "Issue"},
+		},
+		ScannedAt: now,
+	})
+
+	agg, err := svc.GetScanReport(context.Background(), "server-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true (one scanner succeeded)")
+	}
+	if agg.ScannersRun != 1 {
+		t.Errorf("expected ScannersRun=1, got %d", agg.ScannersRun)
+	}
+	if agg.ScannersFailed != 1 {
+		t.Errorf("expected ScannersFailed=1, got %d", agg.ScannersFailed)
+	}
+	if agg.ScannersTotal != 2 {
+		t.Errorf("expected ScannersTotal=2, got %d", agg.ScannersTotal)
+	}
+}
+
+func TestServiceGetScanReportAllFailed(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-allfail",
+		ServerName: "server-a",
+		Status:     ScanJobStatusFailed,
+		Scanners:   []string{"s1", "s2"},
+		StartedAt:  now,
+		Error:      "all scanners failed",
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusFailed, Error: "image not found"},
+			{ScannerID: "s2", Status: ScanJobStatusFailed, Error: "timeout"},
+		},
+	})
+	// No reports (all failed)
+
+	agg, err := svc.GetScanReport(context.Background(), "server-a")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if agg.ScanComplete {
+		t.Error("expected ScanComplete=false when all scanners failed")
+	}
+	if agg.ScannersFailed != 2 {
+		t.Errorf("expected ScannersFailed=2, got %d", agg.ScannersFailed)
+	}
+	if agg.ScannersTotal != 2 {
+		t.Errorf("expected ScannersTotal=2, got %d", agg.ScannersTotal)
+	}
+	if agg.ScannersRun != 0 {
+		t.Errorf("expected ScannersRun=0, got %d", agg.ScannersRun)
+	}
+	if agg.RiskScore != 0 {
+		t.Errorf("expected 0 risk score, got %d", agg.RiskScore)
+	}
+}
+
 func TestServiceNoopEmitterDefault(t *testing.T) {
 	logger := zap.NewNop()
 	store := newMockStorage()

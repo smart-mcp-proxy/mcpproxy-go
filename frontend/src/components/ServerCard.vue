@@ -350,6 +350,7 @@ const securityBadgeColor = computed(() => {
     case 'clean': return 'text-success'
     case 'warnings': return 'text-warning'
     case 'dangerous': return 'text-error'
+    case 'failed': return 'text-error'
     default: return 'text-base-content/40'
   }
 })
@@ -364,6 +365,7 @@ const securityBadgeText = computed(() => {
       return `${count} warning${count !== 1 ? 's' : ''}`
     }
     case 'dangerous': return 'Dangerous'
+    case 'failed': return 'Scan Failed'
     case 'not_scanned': return 'Not scanned'
     case 'scanning': return 'Scanning...'
     default: return scan.status

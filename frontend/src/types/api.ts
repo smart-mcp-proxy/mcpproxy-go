@@ -27,7 +27,7 @@ export interface QuarantineStats {
 }
 
 // Security scan summary (Spec 039)
-export type SecurityScanStatus = 'clean' | 'warnings' | 'dangerous' | 'not_scanned' | 'scanning'
+export type SecurityScanStatus = 'clean' | 'warnings' | 'dangerous' | 'failed' | 'not_scanned' | 'scanning'
 
 export interface SecurityScanFindingCounts {
   dangerous: number
@@ -74,6 +74,11 @@ export interface SecurityScanReport {
   scanned_at: string
   duration_ms?: number
   scanners_used?: string[]
+  // Scan completion tracking
+  scanners_run?: number     // How many scanners actually produced results
+  scanners_failed?: number  // How many scanners failed
+  scanners_total?: number   // Total scanners attempted
+  scan_complete?: boolean   // True only if at least one scanner succeeded
 }
 
 // Summary from the aggregated report API (matches Go ReportSummary)

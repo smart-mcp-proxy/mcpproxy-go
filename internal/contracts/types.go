@@ -56,7 +56,7 @@ type Server struct {
 type SecurityScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"` // 0-100
-	Status        string         `json:"status"`     // "clean", "warnings", "dangerous", "not_scanned", "scanning"
+	Status        string         `json:"status"`     // "clean", "warnings", "dangerous", "failed", "not_scanned", "scanning"
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
 }
 

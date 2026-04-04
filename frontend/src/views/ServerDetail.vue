@@ -513,7 +513,7 @@
                 {{ scanLoading ? 'Scanning...' : 'Scan Now' }}
               </button>
 
-              <div v-if="scanReport || server.security_scan" class="flex items-center gap-3">
+              <div v-if="(scanReport || server.security_scan) && scanReport?.scan_complete !== false" class="flex items-center gap-3">
                 <div class="text-right">
                   <div class="text-sm text-base-content/70">Risk Score</div>
                   <div class="text-2xl font-bold" :class="riskScoreClass">
@@ -528,6 +528,12 @@
                 >
                   {{ currentRiskScore }}
                 </div>
+              </div>
+              <div v-else-if="scanReport?.scan_complete === false" class="flex items-center gap-2">
+                <svg class="w-5 h-5 text-error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span class="text-sm text-error font-medium">Scan Failed</span>
               </div>
             </div>
 
@@ -658,8 +664,22 @@
                 </div>
               </div>
 
-              <!-- Clean state -->
-              <div v-if="!scanReport.findings || scanReport.findings.length === 0" class="alert alert-success">
+              <!-- Scan incomplete: all scanners failed -->
+              <div v-if="scanReport.scan_complete === false" class="alert alert-error">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                  <div class="font-semibold">Scan Incomplete</div>
+                  <span>
+                    {{ scanReport.scanners_failed ?? 0 }} of {{ scanReport.scanners_total ?? 0 }} scanner(s) failed.
+                    No scanner was able to analyze this server. Check Scanner Execution Logs below for details.
+                  </span>
+                </div>
+              </div>
+
+              <!-- Clean state: scan completed and no findings -->
+              <div v-else-if="!scanReport.findings || scanReport.findings.length === 0" class="alert alert-success">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                 </svg>
@@ -970,6 +990,7 @@ const securityDotClass = computed(() => {
     case 'clean': return 'bg-success'
     case 'warnings': return 'bg-warning'
     case 'dangerous': return 'bg-error'
+    case 'failed': return 'bg-error'
     case 'scanning': return '' // handled by spinner
     default: return 'bg-base-content/30'
   }

@@ -164,13 +164,17 @@ type ScanReport struct {
 
 // AggregatedReport combines results from all scanners for a single scan job
 type AggregatedReport struct {
-	JobID      string        `json:"job_id"`
-	ServerName string        `json:"server_name"`
-	Findings   []ScanFinding `json:"findings"`
-	RiskScore  int           `json:"risk_score"`
-	Summary    ReportSummary `json:"summary"`
-	ScannedAt  time.Time     `json:"scanned_at"`
-	Reports    []ScanReport  `json:"reports"`
+	JobID          string        `json:"job_id"`
+	ServerName     string        `json:"server_name"`
+	Findings       []ScanFinding `json:"findings"`
+	RiskScore      int           `json:"risk_score"`
+	Summary        ReportSummary `json:"summary"`
+	ScannedAt      time.Time     `json:"scanned_at"`
+	Reports        []ScanReport  `json:"reports"`
+	ScannersRun    int           `json:"scanners_run"`    // How many scanners actually produced results
+	ScannersFailed int           `json:"scanners_failed"` // How many scanners failed
+	ScannersTotal  int           `json:"scanners_total"`  // Total scanners attempted
+	ScanComplete   bool          `json:"scan_complete"`   // True only if at least one scanner succeeded
 }
 
 // ReportSummary provides counts by severity and threat level

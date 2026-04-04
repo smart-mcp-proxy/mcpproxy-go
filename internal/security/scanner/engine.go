@@ -441,7 +441,9 @@ func (e *Engine) updateScannerStatus(job *ScanJob, scannerID, status string, sta
 	}
 }
 
-// AggregateReports combines multiple scan reports into an aggregated report
+// AggregateReports combines multiple scan reports into an aggregated report.
+// Note: scannersTotal and scannersFailed should be provided by the caller
+// from the ScanJob.ScannerStatuses, since reports only contains successful results.
 func AggregateReports(jobID, serverName string, reports []*ScanReport) *AggregatedReport {
 	agg := &AggregatedReport{
 		JobID:      jobID,
@@ -460,6 +462,36 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
+
+	// ScannersRun = number of successful reports
+	agg.ScannersRun = len(reports)
+	// ScanComplete = at least one scanner succeeded
+	agg.ScanComplete = len(reports) > 0
+
+	return agg
+}
+
+// AggregateReportsWithJobStatus combines reports and enriches with scanner failure info from the job.
+func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanReport, job *ScanJob) *AggregatedReport {
+	agg := AggregateReports(jobID, serverName, reports)
+
+	if job != nil {
+		agg.ScannersTotal = len(job.ScannerStatuses)
+		failed := 0
+		succeeded := 0
+		for _, ss := range job.ScannerStatuses {
+			if ss.Status == ScanJobStatusFailed {
+				failed++
+			}
+			if ss.Status == ScanJobStatusCompleted {
+				succeeded++
+			}
+		}
+		agg.ScannersFailed = failed
+		agg.ScannersRun = succeeded
+		agg.ScanComplete = succeeded > 0
+	}
+
 	return agg
 }
 

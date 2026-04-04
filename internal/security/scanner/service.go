@@ -474,7 +474,7 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 		return nil, fmt.Errorf("failed to load reports for job %s: %w", job.ID, err)
 	}
 
-	return AggregateReports(job.ID, serverName, reports), nil
+	return AggregateReportsWithJobStatus(job.ID, serverName, reports, job), nil
 }
 
 // CancelScan cancels a running scan for a server
@@ -692,9 +692,35 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		Status:     "clean",
 	}
 
+	// Check if the job itself failed (all scanners failed)
+	if job.Status == ScanJobStatusFailed {
+		summary.Status = "failed"
+		return summary
+	}
+
+	// Check scanner statuses: if all scanners failed, mark as failed
+	if len(job.ScannerStatuses) > 0 {
+		allFailed := true
+		for _, ss := range job.ScannerStatuses {
+			if ss.Status == ScanJobStatusCompleted {
+				allFailed = false
+				break
+			}
+		}
+		if allFailed {
+			summary.Status = "failed"
+			return summary
+		}
+	}
+
 	// Get reports for this job
 	reports, err := s.storage.ListScanReportsByJob(job.ID)
 	if err != nil || len(reports) == 0 {
+		// No reports but job didn't explicitly fail — treat as incomplete
+		if job.Status == ScanJobStatusCompleted {
+			// Job completed but no reports means no scanner produced output
+			summary.Status = "failed"
+		}
 		return summary
 	}
 
@@ -738,7 +764,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 type ScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"`
-	Status        string         `json:"status"` // clean, warnings, dangerous, not_scanned, scanning
+	Status        string         `json:"status"` // clean, warnings, dangerous, failed, not_scanned, scanning
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
 }
 
