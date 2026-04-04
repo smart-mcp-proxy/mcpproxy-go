@@ -1332,7 +1332,8 @@ components:
           description: 0-100
           type: integer
         status:
-          description: '"clean", "warnings", "dangerous", "not_scanned", "scanning"'
+          description: '"clean", "warnings", "dangerous", "failed", "not_scanned",
+            "scanning"'
           type: string
       type: object
     contracts.Server:
