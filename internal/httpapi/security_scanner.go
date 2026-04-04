@@ -210,6 +210,14 @@ func (s *Server) handleGetScanReport(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
+
+	// Strip sarif_raw from response unless ?include_sarif=true (it can be 2MB+)
+	if r.URL.Query().Get("include_sarif") != "true" {
+		for i := range report.Reports {
+			report.Reports[i].SarifRaw = nil
+		}
+	}
+
 	s.writeSuccess(w, report)
 }
 
