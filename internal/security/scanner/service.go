@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -374,36 +375,79 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		SourceDir:  sourceDir,
 	}
 
+	// Build scan context for transparency
+	scanCtx := &ScanContext{
+		SourceMethod: "none",
+	}
+
+	// Get server info for context
+	var serverInfo *ServerInfo
+	if s.serverInfo != nil {
+		if info, err := s.serverInfo.GetServerInfo(serverName); err == nil {
+			serverInfo = info
+			scanCtx.ServerProtocol = info.Protocol
+			scanCtx.ServerCommand = info.Command
+		}
+	}
+
 	// Auto-resolve source if not explicitly provided
 	var resolvedCleanup func()
-	if req.SourceDir == "" && s.serverInfo != nil {
-		info, err := s.serverInfo.GetServerInfo(serverName)
+	if req.SourceDir == "" && serverInfo != nil {
+		resolved, err := s.sourceResolver.Resolve(ctx, *serverInfo)
 		if err != nil {
-			s.logger.Warn("Could not get server info for auto-source resolution",
+			s.logger.Warn("Auto-source resolution failed",
 				zap.String("server", serverName),
 				zap.Error(err),
 			)
 		} else {
-			resolved, err := s.sourceResolver.Resolve(ctx, *info)
-			if err != nil {
-				s.logger.Warn("Auto-source resolution failed, scan may have limited results",
-					zap.String("server", serverName),
-					zap.Error(err),
-				)
-			} else {
-				req.SourceDir = resolved.SourceDir
-				resolvedCleanup = resolved.Cleanup
-				s.logger.Info("Auto-resolved source for scanning",
-					zap.String("server", serverName),
-					zap.String("method", resolved.Method),
-					zap.String("source_dir", resolved.SourceDir),
-				)
+			req.SourceDir = resolved.SourceDir
+			resolvedCleanup = resolved.Cleanup
+			scanCtx.SourceMethod = resolved.Method
+			scanCtx.SourcePath = resolved.SourceDir
+			if resolved.ServerURL != "" {
+				scanCtx.SourcePath = resolved.ServerURL
 			}
+			scanCtx.ContainerID = resolved.ContainerID
+			// Determine Docker isolation status
+			if resolved.Method == "docker_extract" {
+				scanCtx.DockerIsolation = true
+			}
+			// Collect file list for transparency
+			s.sourceResolver.EnrichWithFileList(resolved)
+			scanCtx.ScannedFiles = resolved.Files
+			scanCtx.TotalFiles = resolved.TotalFiles
+			scanCtx.TotalSizeBytes = resolved.TotalSize
+
+			s.logger.Info("Scan source resolved",
+				zap.String("server", serverName),
+				zap.String("method", resolved.Method),
+				zap.String("source_dir", resolved.SourceDir),
+				zap.Int("files", resolved.TotalFiles),
+				zap.Int64("size_bytes", resolved.TotalSize),
+			)
 		}
+	} else if req.SourceDir != "" {
+		scanCtx.SourceMethod = "manual"
+		scanCtx.SourcePath = req.SourceDir
+		files, total, size := CollectFileList(req.SourceDir)
+		scanCtx.ScannedFiles = files
+		scanCtx.TotalFiles = total
+		scanCtx.TotalSizeBytes = size
 	}
 
+	// Attach context to the scan request so the engine can set it on the job
+	req.ScanContext = scanCtx
+
 	callback := &scanCallbackAdapter{service: s, cleanup: resolvedCleanup}
-	return s.engine.StartScan(ctx, req, callback)
+	job, err := s.engine.StartScan(ctx, req, callback)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prune old scans (keep last MaxScansPerServer)
+	go s.pruneOldScans(serverName)
+
+	return job, err
 }
 
 // GetScanStatus returns the current scan status for a server
@@ -702,4 +746,33 @@ type FindingCounts struct {
 	Warning   int `json:"warning"`
 	Info      int `json:"info"`
 	Total     int `json:"total"`
+}
+
+// pruneOldScans removes old scan jobs and reports beyond MaxScansPerServer
+func (s *Service) pruneOldScans(serverName string) {
+	jobs, err := s.storage.ListScanJobs(serverName)
+	if err != nil || len(jobs) <= MaxScansPerServer {
+		return
+	}
+
+	// Sort by start time descending (newest first)
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].StartedAt.After(jobs[j].StartedAt)
+	})
+
+	// Delete jobs beyond the limit
+	for i := MaxScansPerServer; i < len(jobs); i++ {
+		// Delete associated reports
+		reports, _ := s.storage.ListScanReportsByJob(jobs[i].ID)
+		for _, r := range reports {
+			_ = s.storage.DeleteScanReport(r.ID)
+		}
+		_ = s.storage.DeleteScanJob(jobs[i].ID)
+	}
+
+	s.logger.Debug("Pruned old scans",
+		zap.String("server", serverName),
+		zap.Int("deleted", len(jobs)-MaxScansPerServer),
+		zap.Int("kept", MaxScansPerServer),
+	)
 }

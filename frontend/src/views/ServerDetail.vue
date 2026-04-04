@@ -531,6 +531,75 @@
               </div>
             </div>
 
+            <!-- Scan Context Banner -->
+            <div v-if="scanContext" class="mt-2">
+              <!-- No Docker Isolation (local process) -->
+              <div v-if="!scanContext.docker_isolation && scanContext.source_method !== 'url' && scanContext.source_method !== 'none'" class="alert alert-warning">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+                <div>
+                  <h3 class="font-bold">No Docker Isolation</h3>
+                  <p class="text-sm">This server runs locally without Docker isolation.</p>
+                  <p class="text-sm">
+                    Source: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
+                    <span v-if="scanContext.total_files"> ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})</span>
+                  </p>
+                  <p class="text-sm text-base-content/70">
+                    Protocol: {{ scanContext.server_protocol }}
+                    <span v-if="scanContext.server_command"> &bull; Command: {{ scanContext.server_command }}</span>
+                  </p>
+                </div>
+              </div>
+
+              <!-- Docker Isolated -->
+              <div v-else-if="scanContext.docker_isolation" class="alert alert-info">
+                <svg class="w-6 h-6 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
+                </svg>
+                <div>
+                  <h3 class="font-bold">Docker Isolated</h3>
+                  <p class="text-sm">
+                    Source extracted from container<span v-if="scanContext.container_id">: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.container_id.substring(0, 12) }}...</code></span>
+                  </p>
+                  <p class="text-sm">
+                    Source: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
+                    <span v-if="scanContext.total_files"> ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})</span>
+                  </p>
+                  <p class="text-sm text-base-content/70">
+                    Protocol: {{ scanContext.server_protocol }}
+                    <span v-if="scanContext.server_command"> &bull; Command: {{ scanContext.server_command }}</span>
+                  </p>
+                </div>
+              </div>
+
+              <!-- HTTP Server (url) -->
+              <div v-else-if="scanContext.source_method === 'url'" class="alert">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+                </svg>
+                <div>
+                  <h3 class="font-bold">HTTP Server</h3>
+                  <p class="text-sm">Behavioral scanning only (no filesystem to scan)</p>
+                  <p class="text-sm">
+                    URL: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
+                  </p>
+                </div>
+              </div>
+
+              <!-- No Source Available -->
+              <div v-else-if="scanContext.source_method === 'none'" class="alert alert-error">
+                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                  <h3 class="font-bold">No Source Available</h3>
+                  <p class="text-sm">Could not resolve source files for scanning.</p>
+                  <p class="text-sm text-base-content/70">Server may be disconnected or not running in Docker.</p>
+                </div>
+              </div>
+            </div>
+
             <!-- Scan error -->
             <div v-if="scanError" class="alert alert-error">
               <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -748,6 +817,47 @@
                   </div>
                 </div>
               </div>
+
+              <!-- Scanned Files (lazy-loaded collapsible) -->
+              <div v-if="scanContext && scanContext.source_method !== 'none' && scanContext.source_method !== 'url'" class="pt-4">
+                <div class="collapse collapse-arrow bg-base-100 shadow-md">
+                  <input type="checkbox" @change="onScannedFilesToggle" />
+                  <div class="collapse-title font-medium">
+                    Scanned Files
+                    <span v-if="scanContext.total_files" class="text-base-content/60 font-normal">
+                      ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})
+                    </span>
+                  </div>
+                  <div class="collapse-content">
+                    <div v-if="scanFilesLoading" class="text-center py-4">
+                      <span class="loading loading-spinner loading-sm"></span>
+                      <span class="ml-2 text-sm">Loading file list...</span>
+                    </div>
+                    <div v-else-if="scanFiles.length === 0" class="text-sm text-base-content/40 py-2">
+                      No file information available.
+                    </div>
+                    <ul v-else class="space-y-0.5 py-1">
+                      <li
+                        v-for="(file, idx) in scanFiles"
+                        :key="file.path"
+                        class="flex items-center gap-2 py-0.5"
+                      >
+                        <span class="text-base-content/30 text-xs select-none w-4 text-right">{{ idx === scanFiles.length - 1 ? '\u2514' : '\u251C' }}</span>
+                        <code
+                          class="text-sm"
+                          :class="file.suspicious ? 'text-error font-semibold' : 'text-base-content/80'"
+                        >{{ file.path }}</code>
+                        <span
+                          v-if="file.suspicious && file.findings?.length"
+                          class="badge badge-error badge-xs gap-1"
+                        >
+                          {{ file.findings.join(', ') }}
+                        </span>
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
             </template>
           </div>
         </div>
@@ -823,6 +933,15 @@ const scanReportLoading = ref(false)
 const scanError = ref<string | null>(null)
 const securityActionLoading = ref(false)
 let scanPollTimer: ReturnType<typeof setInterval> | null = null
+
+// Scan context & files
+const scanFiles = ref<Array<{ path: string; suspicious: boolean; findings?: string[] }>>([])
+const scanFilesLoading = ref(false)
+const scanFilesLoaded = ref(false)
+
+const scanContext = computed(() => {
+  return scanStatus.value?.scan_context || null
+})
 
 // Logs
 const serverLogs = ref<string[]>([])
@@ -1341,6 +1460,31 @@ function viewToolSchema(tool: Tool) {
 }
 
 // Security scan functions (Spec 039)
+function formatFileSize(bytes: number): string {
+  if (!bytes || bytes === 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+async function onScannedFilesToggle(event: Event) {
+  const checkbox = event.target as HTMLInputElement
+  if (checkbox.checked && !scanFilesLoaded.value && server.value) {
+    scanFilesLoading.value = true
+    try {
+      const response = await api.getScanFiles(server.value.name)
+      if (response.success && response.data) {
+        scanFiles.value = response.data.files || []
+        scanFilesLoaded.value = true
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      scanFilesLoading.value = false
+    }
+  }
+}
+
 function formatRelativeTime(isoString: string): string {
   const date = new Date(isoString)
   const now = new Date()
@@ -1391,6 +1535,8 @@ async function startSecurityScan() {
 
   scanLoading.value = true
   scanError.value = null
+  scanFiles.value = []
+  scanFilesLoaded.value = false
 
   try {
     const response = await api.startScan(server.value.name)

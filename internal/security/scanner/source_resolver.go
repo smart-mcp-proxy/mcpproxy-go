@@ -39,11 +39,14 @@ type ServerInfo struct {
 
 // ResolvedSource contains the resolved source information for scanning
 type ResolvedSource struct {
-	SourceDir   string // Host directory containing source files
-	ContainerID string // Docker container ID (if applicable)
-	ServerURL   string // URL for mcp_connection input (HTTP/SSE servers)
-	Method      string // How source was resolved: "docker_extract", "working_dir", "url", "manual"
-	Cleanup     func() // Cleanup function (removes temp dirs)
+	SourceDir   string   // Host directory containing source files
+	ContainerID string   // Docker container ID (if applicable)
+	ServerURL   string   // URL for mcp_connection input (HTTP/SSE servers)
+	Method      string   // How source was resolved: "docker_extract", "working_dir", "local_path", "url", "manual"
+	Cleanup     func()   // Cleanup function (removes temp dirs)
+	Files       []string // List of files found in source dir (capped)
+	TotalFiles  int      // Total file count
+	TotalSize   int64    // Total size in bytes
 }
 
 // Resolve determines the source directory for scanning a server.
@@ -294,6 +297,43 @@ func (r *SourceResolver) extractAppRoot(path string) string {
 	}
 
 	return ""
+}
+
+// CollectFileList walks a directory and returns a list of files (relative paths).
+// Caps at MaxScannedFiles entries. Also returns total count and size.
+func CollectFileList(dir string) (files []string, totalFiles int, totalSize int64) {
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		if info.IsDir() {
+			// Skip common uninteresting directories
+			name := info.Name()
+			if name == ".git" || name == "__pycache__" || name == ".npm" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		totalFiles++
+		totalSize += info.Size()
+		if len(files) < MaxScannedFiles {
+			rel, _ := filepath.Rel(dir, path)
+			if rel == "" {
+				rel = path
+			}
+			files = append(files, rel)
+		}
+		return nil
+	})
+	return
+}
+
+// EnrichWithFileList populates the Files, TotalFiles, TotalSize fields on a ResolvedSource
+func (r *SourceResolver) EnrichWithFileList(resolved *ResolvedSource) {
+	if resolved.SourceDir == "" {
+		return
+	}
+	resolved.Files, resolved.TotalFiles, resolved.TotalSize = CollectFileList(resolved.SourceDir)
 }
 
 // sanitizeForDocker removes characters invalid in Docker container names

@@ -63,6 +63,14 @@ type ScannerPlugin struct {
 	Custom        bool              `json:"custom,omitempty"` // User-added (not from registry)
 }
 
+// Scan context limits
+const (
+	MaxScanLogLines   = 5000   // Max lines of stdout/stderr per scanner
+	MaxScannedFiles   = 10000  // Max file entries in scanned_files list
+	MaxScansPerServer = 20     // Keep last N scans per server
+	MaxLogBytes       = 500000 // ~500KB max per log field
+)
+
 // ScanJob represents a scan execution job
 type ScanJob struct {
 	ID          string    `json:"id"`
@@ -75,6 +83,23 @@ type ScanJob struct {
 	DryRun      bool      `json:"dry_run,omitempty"`
 	// Per-scanner status
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses"`
+	// Scan context — what was scanned and how
+	ScanContext *ScanContext `json:"scan_context,omitempty"`
+}
+
+// ScanContext describes what was scanned and how the source was resolved.
+// This gives users full transparency into what the scanners actually checked.
+type ScanContext struct {
+	SourceMethod    string   `json:"source_method"`             // "docker_extract", "working_dir", "local_path", "url", "none"
+	SourcePath      string   `json:"source_path"`               // Actual path/URL that was scanned
+	DockerIsolation bool     `json:"docker_isolation"`          // Whether server runs in Docker
+	ContainerID     string   `json:"container_id,omitempty"`    // Docker container ID (if applicable)
+	ContainerImage  string   `json:"container_image,omitempty"` // Docker image used
+	ServerProtocol  string   `json:"server_protocol"`           // stdio, http, sse
+	ServerCommand   string   `json:"server_command,omitempty"`  // Command used to start server
+	ScannedFiles    []string `json:"scanned_files,omitempty"`   // List of files that were scanned (capped at MaxScannedFiles)
+	TotalFiles      int      `json:"total_files"`               // Total file count (may be > len(ScannedFiles) if capped)
+	TotalSizeBytes  int64    `json:"total_size_bytes"`          // Total size of scanned source
 }
 
 // ScannerJobStatus tracks a single scanner's execution within a scan job

@@ -505,6 +505,7 @@ func (s *Server) setupRoutes() {
 			r.Get("/scan/status", s.handleGetScanStatus)
 			r.Get("/scan/report", s.handleGetScanReport)
 			r.Post("/scan/cancel", s.handleCancelScan)
+			r.Get("/scan/files", s.handleGetScanFiles)
 			r.Post("/security/approve", s.handleSecurityApprove)
 			r.Post("/security/reject", s.handleSecurityReject)
 			r.Get("/integrity", s.handleCheckIntegrity)

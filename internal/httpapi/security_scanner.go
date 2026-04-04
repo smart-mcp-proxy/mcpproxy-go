@@ -303,3 +303,108 @@ func (s *Server) handleSecurityOverview(w http.ResponseWriter, r *http.Request) 
 	}
 	s.writeSuccess(w, overview)
 }
+
+func (s *Server) handleGetScanFiles(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+	name := chi.URLParam(r, "id")
+	if name == "" {
+		s.writeError(w, r, http.StatusBadRequest, "server name is required")
+		return
+	}
+
+	// Get scan status for context
+	job, err := s.securityController.GetScanStatus(r.Context(), name)
+	if err != nil {
+		s.writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Get report for finding locations
+	report, _ := s.securityController.GetScanReport(r.Context(), name)
+
+	// Build file tree with suspicious markers
+	result := buildFileTree(job, report)
+	s.writeSuccess(w, result)
+}
+
+// fileTreeEntry represents a file in the scanned directory tree
+type fileTreeEntry struct {
+	Path       string   `json:"path"`
+	Suspicious bool     `json:"suspicious"`
+	Findings   []string `json:"findings,omitempty"` // Finding titles for this file
+}
+
+type fileTreeResponse struct {
+	SourceMethod    string          `json:"source_method"`
+	SourcePath      string          `json:"source_path"`
+	DockerIsolation bool            `json:"docker_isolation"`
+	TotalFiles      int             `json:"total_files"`
+	TotalSizeBytes  int64           `json:"total_size_bytes"`
+	Files           []fileTreeEntry `json:"files"`
+}
+
+func buildFileTree(job *scanner.ScanJob, report *scanner.AggregatedReport) *fileTreeResponse {
+	resp := &fileTreeResponse{}
+
+	if job == nil || job.ScanContext == nil {
+		return resp
+	}
+
+	ctx := job.ScanContext
+	resp.SourceMethod = ctx.SourceMethod
+	resp.SourcePath = ctx.SourcePath
+	resp.DockerIsolation = ctx.DockerIsolation
+	resp.TotalFiles = ctx.TotalFiles
+	resp.TotalSizeBytes = ctx.TotalSizeBytes
+
+	// Build location-to-findings lookup from report
+	locationFindings := make(map[string][]string)
+	if report != nil {
+		for _, f := range report.Findings {
+			if f.Location != "" {
+				// Normalize: strip line number for matching
+				filePath := f.Location
+				if idx := lastIndexByte(filePath, ':'); idx > 0 {
+					filePath = filePath[:idx]
+				}
+				// Strip leading /scan/source/ prefix
+				filePath = trimScanPrefix(filePath)
+				locationFindings[filePath] = append(locationFindings[filePath], f.Title)
+			}
+		}
+	}
+
+	// Build entries
+	for _, path := range ctx.ScannedFiles {
+		normalized := trimScanPrefix(path)
+		entry := fileTreeEntry{Path: path}
+		if findings, ok := locationFindings[normalized]; ok {
+			entry.Suspicious = true
+			entry.Findings = findings
+		}
+		resp.Files = append(resp.Files, entry)
+	}
+
+	return resp
+}
+
+func lastIndexByte(s string, c byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func trimScanPrefix(path string) string {
+	prefixes := []string{"/scan/source/", "scan/source/", "/src/"}
+	for _, p := range prefixes {
+		if len(path) > len(p) && path[:len(p)] == p {
+			return path[len(p):]
+		}
+	}
+	return path
+}

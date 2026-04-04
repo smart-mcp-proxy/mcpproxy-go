@@ -40,11 +40,12 @@ func NewEngine(docker *DockerRunner, registry *Registry, dataDir string, logger 
 
 // ScanRequest describes a scan to execute
 type ScanRequest struct {
-	ServerName string
-	SourceDir  string            // Path to server source files (for "source" input)
-	DryRun     bool              // If true, don't affect quarantine state
-	ScannerIDs []string          // Specific scanners to use (empty = all installed)
-	Env        map[string]string // Additional environment variables
+	ServerName  string
+	SourceDir   string            // Path to server source files (for "source" input)
+	DryRun      bool              // If true, don't affect quarantine state
+	ScannerIDs  []string          // Specific scanners to use (empty = all installed)
+	Env         map[string]string // Additional environment variables
+	ScanContext *ScanContext      // Context metadata (set by service)
 }
 
 // ScanCallback receives scan lifecycle events
@@ -95,12 +96,13 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 
 	// Create job
 	job := &ScanJob{
-		ID:         fmt.Sprintf("scan-%s-%d", req.ServerName, time.Now().UnixNano()),
-		ServerName: req.ServerName,
-		Status:     ScanJobStatusRunning,
-		Scanners:   make([]string, len(scanners)),
-		StartedAt:  time.Now(),
-		DryRun:     req.DryRun,
+		ID:          fmt.Sprintf("scan-%s-%d", req.ServerName, time.Now().UnixNano()),
+		ServerName:  req.ServerName,
+		Status:      ScanJobStatusRunning,
+		Scanners:    make([]string, len(scanners)),
+		StartedAt:   time.Now(),
+		DryRun:      req.DryRun,
+		ScanContext: req.ScanContext,
 	}
 	for i, s := range scanners {
 		job.Scanners[i] = s.ID
@@ -411,8 +413,8 @@ func (e *Engine) setScannerLogs(job *ScanJob, scannerID string, logs scannerLogs
 	defer e.mu.Unlock()
 	for i := range job.ScannerStatuses {
 		if job.ScannerStatuses[i].ScannerID == scannerID {
-			job.ScannerStatuses[i].Stdout = truncate(logs.Stdout, 50000)
-			job.ScannerStatuses[i].Stderr = truncate(logs.Stderr, 50000)
+			job.ScannerStatuses[i].Stdout = truncate(logs.Stdout, MaxLogBytes)
+			job.ScannerStatuses[i].Stderr = truncate(logs.Stderr, MaxLogBytes)
 			job.ScannerStatuses[i].ExitCode = logs.ExitCode
 			return
 		}
