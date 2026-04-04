@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ var (
 	secScanAsync  bool
 	secScanDryRun bool
 	secScanners   string
+	secScanAll    bool
 
 	// security approve flags
 	secApproveForce bool
@@ -62,6 +64,7 @@ Examples:
 	securityCmd.AddCommand(newSecurityRescanCmd())
 	securityCmd.AddCommand(newSecurityOverviewCmd())
 	securityCmd.AddCommand(newSecurityIntegrityCmd())
+	securityCmd.AddCommand(newSecurityCancelAllCmd())
 
 	return securityCmd
 }
@@ -155,22 +158,26 @@ Examples:
 
 func newSecurityScanCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "scan <server>",
+		Use:   "scan [server]",
 		Short: "Scan a server with security scanners",
 		Long: `Start a security scan on an upstream MCP server.
 
 By default, blocks until the scan completes and shows a summary.
 Use --async to start the scan and return immediately.
+Use --all to scan all servers at once with a progress table.
 
 Examples:
   mcpproxy security scan github-server
   mcpproxy security scan github-server --async
   mcpproxy security scan github-server --dry-run
-  mcpproxy security scan github-server --scanners mcp-scan,cisco-mcp-scanner`,
-		Args: cobra.ExactArgs(1),
+  mcpproxy security scan github-server --scanners mcp-scan,cisco-mcp-scanner
+  mcpproxy security scan --all
+  mcpproxy security scan --all --scanners mcp-scan`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: runSecurityScan,
 	}
 
+	cmd.Flags().BoolVar(&secScanAll, "all", false, "Scan all servers (shows progress table)")
 	cmd.Flags().BoolVar(&secScanAsync, "async", false, "Start scan and return immediately without waiting")
 	cmd.Flags().BoolVar(&secScanDryRun, "dry-run", false, "Simulate scan without executing")
 	cmd.Flags().StringVar(&secScanners, "scanners", "", "Comma-separated scanner IDs to use (default: all installed)")
@@ -495,6 +502,16 @@ func runSecurityConfigure(_ *cobra.Command, args []string) error {
 }
 
 func runSecurityScan(_ *cobra.Command, args []string) error {
+	// Handle --all flag
+	if secScanAll {
+		return runSecurityScanAll()
+	}
+
+	// Single server mode requires exactly one argument
+	if len(args) < 1 {
+		return fmt.Errorf("server name is required (or use --all to scan all servers)")
+	}
+
 	client, _, err := newSecurityCLIClient()
 	if err != nil {
 		return err
@@ -527,6 +544,17 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Check for disabled server (500 with specific message)
+	if resp.StatusCode == http.StatusInternalServerError {
+		errMsg := extractAPIErrorMsg(respBody)
+		if strings.Contains(strings.ToLower(errMsg), "disabled") || strings.Contains(strings.ToLower(errMsg), "not enabled") {
+			fmt.Fprintf(os.Stderr, "Error: Server %q is disabled. Enable it first or quarantine and scan:\n", serverName)
+			fmt.Fprintf(os.Stderr, "  mcpproxy upstream enable %s\n", serverName)
+			fmt.Fprintf(os.Stderr, "  mcpproxy security scan %s\n", serverName)
+			return fmt.Errorf("server %q is disabled", serverName)
+		}
 	}
 
 	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
@@ -619,6 +647,224 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		}
 		// pending or running: continue polling
 	}
+}
+
+// runSecurityScanAll handles the --all flag: starts a batch scan and polls for progress.
+func runSecurityScanAll() error {
+	client, _, err := newSecurityCLIClient()
+	if err != nil {
+		return err
+	}
+
+	// Build request body
+	reqBody := map[string]interface{}{}
+	if secScanners != "" {
+		reqBody["scanner_ids"] = splitAndTrim(secScanners)
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/security/scan-all", body)
+	if err != nil {
+		return fmt.Errorf("failed to start batch scan: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return parseAPIError(respBody, resp.StatusCode, "start batch scan")
+	}
+
+	format := ResolveOutputFormat()
+
+	// If --async, return immediately
+	if secScanAsync {
+		if format == "json" || format == "yaml" {
+			return formatAndPrintRaw(format, respBody)
+		}
+		fmt.Println("Batch scan started. Use 'mcpproxy security scan --all' to check progress.")
+		return nil
+	}
+
+	// Poll for progress
+	for {
+		time.Sleep(3 * time.Second)
+
+		qResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/security/queue", nil)
+		if err != nil {
+			return fmt.Errorf("failed to check queue progress: %w", err)
+		}
+
+		qBody, err := io.ReadAll(qResp.Body)
+		qResp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("failed to read queue response: %w", err)
+		}
+
+		if qResp.StatusCode != http.StatusOK {
+			return parseAPIError(qBody, qResp.StatusCode, "check queue progress")
+		}
+
+		var progress map[string]interface{}
+		qBody, err = unwrapAPIResponse(qBody)
+		if err != nil {
+			return fmt.Errorf("API error: %w", err)
+		}
+		if err := json.Unmarshal(qBody, &progress); err != nil {
+			return fmt.Errorf("failed to parse progress: %w", err)
+		}
+
+		// Check if idle (no batch in progress)
+		queueStatus := getMapString(progress, "status")
+		if queueStatus == "idle" {
+			fmt.Println("No batch scan in progress.")
+			return nil
+		}
+
+		// JSON/YAML output for final state
+		if queueStatus == "completed" || queueStatus == "cancelled" {
+			if format == "json" || format == "yaml" {
+				return formatAndPrint(format, progress)
+			}
+			printQueueProgressTable(progress)
+			fmt.Println()
+			if queueStatus == "completed" {
+				fmt.Println("Batch scan completed.")
+			} else {
+				fmt.Println("Batch scan was cancelled.")
+			}
+			return nil
+		}
+
+		// Show progress table (clear screen with carriage returns for terminal)
+		printQueueProgressTable(progress)
+	}
+}
+
+// printQueueProgressTable prints the progress table for a batch scan.
+func printQueueProgressTable(progress map[string]interface{}) {
+	total := int(getMapFloat(progress, "total"))
+	completed := int(getMapFloat(progress, "completed"))
+	running := int(getMapFloat(progress, "running"))
+	skipped := int(getMapFloat(progress, "skipped"))
+	failed := int(getMapFloat(progress, "failed"))
+
+	fmt.Printf("\nScanning all servers (%d/%d completed, %d running", completed, total, running)
+	if skipped > 0 {
+		fmt.Printf(", %d skipped", skipped)
+	}
+	if failed > 0 {
+		fmt.Printf(", %d failed", failed)
+	}
+	fmt.Println(")...")
+
+	// Table header
+	fmt.Printf("%-24s %-12s %-10s %s\n", "SERVER", "STATUS", "FINDINGS", "ERROR")
+	fmt.Println(strings.Repeat("-", 70))
+
+	// Items
+	if items, ok := progress["items"].([]interface{}); ok {
+		for _, item := range items {
+			if it, ok := item.(map[string]interface{}); ok {
+				name := getMapString(it, "server_name")
+				status := getMapString(it, "status")
+				errMsg := getMapString(it, "error")
+				skipReason := getMapString(it, "skip_reason")
+				findings := "-"
+
+				// Show error or skip reason
+				msg := errMsg
+				if skipReason != "" {
+					msg = skipReason
+				}
+				if len(msg) > 30 {
+					msg = msg[:27] + "..."
+				}
+
+				fmt.Printf("%-24s %-12s %-10s %s\n",
+					secTruncate(name, 24),
+					status,
+					findings,
+					msg,
+				)
+			}
+		}
+	}
+}
+
+func newSecurityCancelAllCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cancel-all",
+		Short: "Cancel a running batch scan",
+		Long: `Cancel the current batch security scan in progress.
+Any pending server scans will be skipped. Running scans may complete.
+
+Examples:
+  mcpproxy security cancel-all`,
+		RunE: runSecurityCancelAll,
+	}
+}
+
+func runSecurityCancelAll(_ *cobra.Command, _ []string) error {
+	client, _, err := newSecurityCLIClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/security/cancel-all", nil)
+	if err != nil {
+		return fmt.Errorf("failed to cancel batch scan: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return parseAPIError(respBody, resp.StatusCode, "cancel batch scan")
+	}
+
+	format := ResolveOutputFormat()
+	if format == "json" || format == "yaml" {
+		return formatAndPrintRaw(format, respBody)
+	}
+
+	fmt.Println("Batch scan cancelled.")
+	return nil
+}
+
+// extractAPIErrorMsg extracts the error message from an API error response body.
+func extractAPIErrorMsg(body []byte) string {
+	var errResp map[string]interface{}
+	if err := json.Unmarshal(body, &errResp); err == nil {
+		if msg, ok := errResp["error"].(string); ok {
+			return msg
+		}
+	}
+	return string(body)
+}
+
+// getMapFloat returns a float64 value from a map, defaulting to 0.
+func getMapFloat(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
 }
 
 func runSecurityStatus(_ *cobra.Command, args []string) error {

@@ -30,6 +30,12 @@ type SecurityController interface {
 
 	GetSecurityOverview(ctx context.Context) (*scanner.SecurityOverview, error)
 	GetScanSummary(ctx context.Context, serverName string) *scanner.ScanSummary
+
+	// Batch scan operations
+	ScanAll(ctx context.Context, servers []scanner.ServerStatus, scannerIDs []string) (*scanner.QueueProgress, error)
+	GetQueueProgress() *scanner.QueueProgress
+	CancelAllScans() error
+	IsQueueRunning() bool
 }
 
 // SetSecurityController configures the security scanner controller on the server.
@@ -415,4 +421,84 @@ func trimScanPrefix(path string) string {
 		}
 	}
 	return path
+}
+
+// --- Batch scan handlers ---
+
+func (s *Server) handleScanAll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+
+	// Parse optional request body
+	var req struct {
+		ScannerIDs []string `json:"scanner_ids"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	// Get server list from controller
+	genericServers, err := s.controller.GetAllServers()
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "failed to get server list: "+err.Error())
+		return
+	}
+
+	// Build scanner.ServerStatus list
+	var servers []scanner.ServerStatus
+	for _, gs := range genericServers {
+		name, _ := gs["name"].(string)
+		if name == "" {
+			continue
+		}
+		enabled := true
+		if e, ok := gs["enabled"].(bool); ok {
+			enabled = e
+		}
+		connected := false
+		if c, ok := gs["connected"].(bool); ok {
+			connected = c
+		}
+		protocol, _ := gs["protocol"].(string)
+		servers = append(servers, scanner.ServerStatus{
+			Name:      name,
+			Enabled:   enabled,
+			Connected: connected,
+			Protocol:  protocol,
+		})
+	}
+
+	progress, err := s.securityController.ScanAll(r.Context(), servers, req.ScannerIDs)
+	if err != nil {
+		s.writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, contracts.NewSuccessResponse(progress))
+}
+
+func (s *Server) handleGetQueueProgress(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+
+	progress := s.securityController.GetQueueProgress()
+	if progress == nil {
+		s.writeSuccess(w, map[string]interface{}{
+			"status":  "idle",
+			"message": "no batch scan in progress or completed",
+		})
+		return
+	}
+	s.writeSuccess(w, progress)
+}
+
+func (s *Server) handleCancelAllScans(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+
+	if err := s.securityController.CancelAllScans(); err != nil {
+		s.writeError(w, r, http.StatusConflict, err.Error())
+		return
+	}
+	s.writeSuccess(w, map[string]string{"status": "cancelled"})
 }

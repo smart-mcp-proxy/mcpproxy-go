@@ -593,6 +593,11 @@ func (s *Server) setupRoutes() {
 			r.Put("/scanners/{id}/config", s.handleConfigureScanner)
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
+
+			// Batch scan operations
+			r.Post("/scan-all", s.handleScanAll)
+			r.Get("/queue", s.handleGetQueueProgress)
+			r.Post("/cancel-all", s.handleCancelAllScans)
 		})
 	})
 

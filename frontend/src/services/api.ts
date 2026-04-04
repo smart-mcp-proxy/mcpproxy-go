@@ -842,6 +842,21 @@ class APIService {
     return this.request<any>('/api/v1/security/overview')
   }
 
+  async scanAll(scannerIds: string[] = []): Promise<APIResponse<any>> {
+    return this.request<any>('/api/v1/security/scan-all', {
+      method: 'POST',
+      body: JSON.stringify({ scanner_ids: scannerIds }),
+    })
+  }
+
+  async getQueueProgress(): Promise<APIResponse<any>> {
+    return this.request<any>('/api/v1/security/queue')
+  }
+
+  async cancelAllScans(): Promise<APIResponse<void>> {
+    return this.request<void>('/api/v1/security/cancel-all', { method: 'POST' })
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {

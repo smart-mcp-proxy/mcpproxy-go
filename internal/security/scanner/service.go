@@ -70,6 +70,7 @@ type Service struct {
 	sourceResolver *SourceResolver
 	serverInfo     ServerInfoProvider
 	secretStore    SecretStore
+	queue          *ScanQueue
 	logger         *zap.Logger
 }
 
@@ -83,6 +84,7 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 		docker:         docker,
 		emitter:        &NoopEmitter{},
 		sourceResolver: NewSourceResolver(logger),
+		queue:          NewScanQueue(logger),
 		logger:         logger,
 	}
 	// Restore installed scanner state from storage (survives restart)
@@ -775,4 +777,30 @@ func (s *Service) pruneOldScans(serverName string) {
 		zap.Int("deleted", len(jobs)-MaxScansPerServer),
 		zap.Int("kept", MaxScansPerServer),
 	)
+}
+
+// --- Batch Scan (Scan All) ---
+
+// ScanAll starts scanning all eligible servers using the worker pool.
+// Disabled servers are skipped with a reason.
+func (s *Service) ScanAll(ctx context.Context, servers []ServerStatus, scannerIDs []string) (*QueueProgress, error) {
+	scanFunc := func(ctx context.Context, serverName string) (*ScanJob, error) {
+		return s.StartScan(ctx, serverName, false, scannerIDs, "")
+	}
+	return s.queue.StartScanAll(servers, scanFunc)
+}
+
+// GetQueueProgress returns the current batch scan progress
+func (s *Service) GetQueueProgress() *QueueProgress {
+	return s.queue.GetProgress()
+}
+
+// CancelAllScans cancels the current batch scan
+func (s *Service) CancelAllScans() error {
+	return s.queue.CancelAll()
+}
+
+// IsQueueRunning returns true if a batch scan is in progress
+func (s *Service) IsQueueRunning() bool {
+	return s.queue.IsRunning()
 }

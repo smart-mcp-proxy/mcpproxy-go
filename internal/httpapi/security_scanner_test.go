@@ -21,11 +21,12 @@ import (
 // --- Mock SecurityController ---
 
 type mockSecurityController struct {
-	scanners  []*scanner.ScannerPlugin
-	scanJob   *scanner.ScanJob
-	report    *scanner.AggregatedReport
-	overview  *scanner.SecurityOverview
-	integrity *scanner.IntegrityCheckResult
+	scanners      []*scanner.ScannerPlugin
+	scanJob       *scanner.ScanJob
+	report        *scanner.AggregatedReport
+	overview      *scanner.SecurityOverview
+	integrity     *scanner.IntegrityCheckResult
+	queueProgress *scanner.QueueProgress
 
 	installErr   error
 	removeErr    error
@@ -35,6 +36,9 @@ type mockSecurityController struct {
 	approveErr   error
 	rejectErr    error
 	integrityErr error
+	scanAllErr   error
+	cancelAllErr error
+	queueRunning bool
 }
 
 func (m *mockSecurityController) ListScanners(_ context.Context) ([]*scanner.ScannerPlugin, error) {
@@ -130,14 +134,49 @@ func (m *mockSecurityController) GetScanSummary(_ context.Context, _ string) *sc
 	return nil
 }
 
+func (m *mockSecurityController) ScanAll(_ context.Context, servers []scanner.ServerStatus, scannerIDs []string) (*scanner.QueueProgress, error) {
+	if m.scanAllErr != nil {
+		return nil, m.scanAllErr
+	}
+	if m.queueProgress != nil {
+		return m.queueProgress, nil
+	}
+	return &scanner.QueueProgress{
+		BatchID: "batch-test-123",
+		Status:  "running",
+		Total:   len(servers),
+		Pending: len(servers),
+	}, nil
+}
+
+func (m *mockSecurityController) GetQueueProgress() *scanner.QueueProgress {
+	return m.queueProgress
+}
+
+func (m *mockSecurityController) CancelAllScans() error {
+	return m.cancelAllErr
+}
+
+func (m *mockSecurityController) IsQueueRunning() bool {
+	return m.queueRunning
+}
+
 // secTestController embeds baseController and adds GetCurrentConfig
 // returning nil to bypass auth middleware in tests.
 type secTestController struct {
 	baseController
+	servers []map[string]interface{}
 }
 
 func (m *secTestController) GetCurrentConfig() interface{} {
 	return nil // nil config = testing scenario, bypasses auth
+}
+
+func (m *secTestController) GetAllServers() ([]map[string]interface{}, error) {
+	if m.servers != nil {
+		return m.servers, nil
+	}
+	return nil, nil
 }
 
 // helper to create a test server with security controller
@@ -552,4 +591,129 @@ func TestSecurityRoutesReturnNotImplementedWithoutController(t *testing.T) {
 
 	// Should be 501 since security controller is not configured
 	assert.Equal(t, http.StatusNotImplemented, w.Code)
+}
+
+func newTestServerWithSecurityAndServers(t *testing.T, secCtrl SecurityController, servers []map[string]interface{}) *Server {
+	t.Helper()
+	logger := zap.NewNop().Sugar()
+	ctrl := &secTestController{servers: servers}
+	srv := NewServer(ctrl, logger, nil)
+	srv.SetSecurityController(secCtrl)
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+	return srv
+}
+
+func TestSecurityHandlerScanAll(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	servers := []map[string]interface{}{
+		{"name": "server-1", "enabled": true, "connected": true, "protocol": "stdio"},
+		{"name": "server-2", "enabled": true, "connected": true, "protocol": "http"},
+		{"name": "disabled-srv", "enabled": false, "connected": false, "protocol": "stdio"},
+	}
+	srv := newTestServerWithSecurityAndServers(t, secCtrl, servers)
+
+	body := bytes.NewBufferString(`{"scanner_ids": ["mcp-scan"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/security/scan-all", body)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusAccepted, w.Code)
+
+	var progress scanner.QueueProgress
+	secParseData(t, w.Body, &progress)
+	assert.Equal(t, "batch-test-123", progress.BatchID)
+	assert.Equal(t, "running", progress.Status)
+	assert.Equal(t, 3, progress.Total)
+}
+
+func TestSecurityHandlerScanAllAlreadyRunning(t *testing.T) {
+	secCtrl := &mockSecurityController{
+		scanAllErr: fmt.Errorf("batch scan already in progress"),
+	}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	req := httptest.NewRequest("POST", "/api/v1/security/scan-all", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+func TestSecurityHandlerGetQueueProgress(t *testing.T) {
+	secCtrl := &mockSecurityController{
+		queueProgress: &scanner.QueueProgress{
+			BatchID:   "batch-456",
+			Status:    "running",
+			Total:     5,
+			Completed: 2,
+			Running:   1,
+			Pending:   2,
+			Items: []scanner.QueueItem{
+				{ServerName: "s1", Status: "completed"},
+				{ServerName: "s2", Status: "completed"},
+				{ServerName: "s3", Status: "running"},
+				{ServerName: "s4", Status: "pending"},
+				{ServerName: "s5", Status: "pending"},
+			},
+		},
+	}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	req := httptest.NewRequest("GET", "/api/v1/security/queue", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var progress scanner.QueueProgress
+	secParseData(t, w.Body, &progress)
+	assert.Equal(t, "batch-456", progress.BatchID)
+	assert.Equal(t, 5, progress.Total)
+	assert.Equal(t, 2, progress.Completed)
+	assert.Len(t, progress.Items, 5)
+}
+
+func TestSecurityHandlerGetQueueProgressEmpty(t *testing.T) {
+	secCtrl := &mockSecurityController{} // No queueProgress set
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	req := httptest.NewRequest("GET", "/api/v1/security/queue", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "idle", resp["status"])
+}
+
+func TestSecurityHandlerCancelAll(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	req := httptest.NewRequest("POST", "/api/v1/security/cancel-all", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]string
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "cancelled", resp["status"])
+}
+
+func TestSecurityHandlerCancelAllNoScan(t *testing.T) {
+	secCtrl := &mockSecurityController{
+		cancelAllErr: fmt.Errorf("no batch scan in progress"),
+	}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	req := httptest.NewRequest("POST", "/api/v1/security/cancel-all", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
 }

@@ -6,10 +6,67 @@
         <h1 class="text-3xl font-bold">Security</h1>
         <p class="text-base-content/70 mt-1">Manage security scanners and scan quarantined servers</p>
       </div>
-      <button @click="refresh" :disabled="loading" class="btn btn-outline">
-        <span v-if="loading" class="loading loading-spinner loading-sm"></span>
-        {{ loading ? 'Refreshing...' : 'Refresh' }}
-      </button>
+      <div class="flex gap-2">
+        <button @click="startScanAll" :disabled="loading || scanAllRunning" class="btn btn-primary">
+          <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
+          {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
+        </button>
+        <button @click="refresh" :disabled="loading" class="btn btn-outline">
+          <span v-if="loading" class="loading loading-spinner loading-sm"></span>
+          {{ loading ? 'Refreshing...' : 'Refresh' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Scan All Progress Card -->
+    <div v-if="queueProgress && queueProgress.status !== 'idle'" class="card bg-base-100 shadow-xl">
+      <div class="card-body">
+        <h2 class="card-title text-lg">Scanning All Servers</h2>
+        <p class="text-sm text-base-content/70">
+          Progress: {{ queueProgress.completed || 0 }}/{{ queueProgress.total || 0 }} completed,
+          {{ queueProgress.running || 0 }} running<span v-if="queueProgress.skipped">, {{ queueProgress.skipped }} skipped</span>
+        </p>
+
+        <!-- Progress bar -->
+        <div class="w-full bg-base-200 rounded-full h-4 mt-2">
+          <div
+            class="h-4 rounded-full transition-all duration-500"
+            :class="queueProgress.status === 'cancelled' ? 'bg-warning' : 'bg-primary'"
+            :style="{ width: queueProgressPercent + '%' }"
+          ></div>
+        </div>
+        <p class="text-xs text-base-content/50 mt-1">{{ queueProgressPercent }}%</p>
+
+        <!-- Items table -->
+        <div v-if="queueProgress.items?.length" class="overflow-x-auto mt-4">
+          <table class="table table-sm">
+            <thead>
+              <tr>
+                <th>Server</th>
+                <th>Status</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in queueProgress.items" :key="item.server_name">
+                <td class="font-mono text-sm">{{ item.server_name }}</td>
+                <td>
+                  <span class="badge badge-sm" :class="queueItemBadgeClass(item.status)">{{ item.status }}</span>
+                </td>
+                <td class="text-xs text-base-content/60">{{ item.error || item.skip_reason || '' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Cancel button -->
+        <div class="card-actions justify-end mt-2" v-if="queueProgress.status === 'running'">
+          <button @click="cancelAllScans" class="btn btn-sm btn-warning btn-outline">Cancel All</button>
+        </div>
+        <div v-else class="text-sm text-base-content/50 mt-2">
+          Batch scan {{ queueProgress.status }}.
+        </div>
+      </div>
     </div>
 
     <!-- Overview Stats -->
@@ -273,7 +330,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 
 const loading = ref(false)
@@ -285,6 +342,11 @@ const scanServerName = ref('')
 const scanning = ref(false)
 const scanResult = ref<any>(null)
 
+// Scan All state
+const scanAllRunning = ref(false)
+const queueProgress = ref<any>(null)
+let queuePollTimer: ReturnType<typeof setInterval> | null = null
+
 // Config dialog
 const configDialog = ref<HTMLDialogElement>()
 const configScanner = ref<any>(null)
@@ -293,6 +355,23 @@ const customEnvKey = ref('')
 const customEnvValue = ref('')
 
 const totalFindings = computed(() => overview.value?.findings_by_severity?.total || 0)
+
+const queueProgressPercent = computed(() => {
+  const p = queueProgress.value
+  if (!p || !p.total) return 0
+  return Math.round(((p.completed || 0) + (p.failed || 0) + (p.skipped || 0)) / p.total * 100)
+})
+
+function queueItemBadgeClass(status: string) {
+  switch (status) {
+    case 'completed': return 'badge-success'
+    case 'running': return 'badge-info'
+    case 'failed': return 'badge-error'
+    case 'skipped': return 'badge-ghost'
+    case 'cancelled': return 'badge-warning'
+    default: return 'badge-ghost'
+  }
+}
 
 function statusBadgeClass(status: string) {
   switch (status) {
@@ -453,5 +532,77 @@ async function rejectServer(name: string) {
   await refresh()
 }
 
-onMounted(refresh)
+async function startScanAll() {
+  scanAllRunning.value = true
+  try {
+    const res = await api.scanAll()
+    if (!res.success) {
+      error.value = `Failed to start batch scan: ${res.error}`
+      scanAllRunning.value = false
+      return
+    }
+    queueProgress.value = res.data
+    // Start polling
+    startQueuePolling()
+  } catch (e: any) {
+    error.value = e.message
+    scanAllRunning.value = false
+  }
+}
+
+function startQueuePolling() {
+  stopQueuePolling()
+  queuePollTimer = setInterval(async () => {
+    try {
+      const res = await api.getQueueProgress()
+      if (res.success && res.data) {
+        queueProgress.value = res.data
+        // Stop polling when done
+        if (res.data.status === 'completed' || res.data.status === 'cancelled') {
+          stopQueuePolling()
+          scanAllRunning.value = false
+          // Auto-refresh page data
+          await refresh()
+        }
+      }
+    } catch {
+      // Ignore polling errors
+    }
+  }, 3000)
+}
+
+function stopQueuePolling() {
+  if (queuePollTimer) {
+    clearInterval(queuePollTimer)
+    queuePollTimer = null
+  }
+}
+
+async function cancelAllScans() {
+  try {
+    await api.cancelAllScans()
+    // Progress will update via polling
+  } catch (e: any) {
+    error.value = e.message
+  }
+}
+
+onMounted(async () => {
+  await refresh()
+  // Check if a batch scan is already running
+  try {
+    const res = await api.getQueueProgress()
+    if (res.success && res.data && res.data.status === 'running') {
+      queueProgress.value = res.data
+      scanAllRunning.value = true
+      startQueuePolling()
+    }
+  } catch {
+    // Ignore
+  }
+})
+
+onUnmounted(() => {
+  stopQueuePolling()
+})
 </script>
