@@ -210,8 +210,8 @@ func TestEngineResolveScanners(t *testing.T) {
 	// Mark one scanner as installed
 	registry.scanners["mcp-scan"].Status = ScannerStatusInstalled
 
-	docker := NewDockerRunner(logger)
-	engine := NewEngine(docker, registry, dir, logger)
+	// Use nil docker to skip image existence checks in tests
+	engine := NewEngine(nil, registry, dir, logger)
 
 	// Resolve all installed
 	scanners, err := engine.resolveScanners(nil)

@@ -71,6 +71,7 @@ type ScannerRunConfig struct {
 	Env           map[string]string // Environment variables
 	SourceDir     string            // Host directory to mount at /scan/source (read-only)
 	ReportDir     string            // Host directory to mount at /scan/report (writable)
+	CacheDir      string            // Host directory for scanner cache (persists between runs)
 	NetworkMode   string            // "none", "bridge", or custom network name
 	Timeout       time.Duration     // Container execution timeout
 	ReadOnly      bool              // Read-only root filesystem
@@ -117,6 +118,11 @@ func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (st
 	// Mount report directory writable
 	if cfg.ReportDir != "" {
 		args = append(args, "-v", cfg.ReportDir+":/scan/report:rw")
+	}
+
+	// Mount cache directory (persists scanner DB downloads between runs)
+	if cfg.CacheDir != "" {
+		args = append(args, "-v", cfg.CacheDir+":/root/.cache:rw")
 	}
 
 	// Environment variables

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -166,10 +168,18 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]*ScannerPlugin, error
 		return result, nil
 	}
 
-	// Use all installed/configured scanners
+	// Use all installed/configured scanners whose Docker images exist locally
 	var result []*ScannerPlugin
 	for _, s := range all {
 		if s.Status == ScannerStatusInstalled || s.Status == ScannerStatusConfigured {
+			// Verify Docker image exists before adding to scan list
+			if e.docker != nil && !e.docker.ImageExists(context.Background(), s.DockerImage) {
+				e.logger.Warn("Skipping scanner: Docker image not found locally",
+					zap.String("scanner", s.ID),
+					zap.String("image", s.DockerImage),
+				)
+				continue
+			}
 			result = append(result, s)
 		}
 	}
@@ -300,6 +310,10 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		networkMode = "bridge"
 	}
 
+	// Create per-scanner cache directory (persists DB downloads between runs)
+	cacheDir := filepath.Join(e.dataDir, "scanner-cache", s.ID)
+	os.MkdirAll(cacheDir, 0755)
+
 	// Run scanner container
 	cfg := ScannerRunConfig{
 		ContainerName: GenerateContainerName(s.ID, req.ServerName),
@@ -308,6 +322,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		Env:           env,
 		SourceDir:     req.SourceDir,
 		ReportDir:     reportDir,
+		CacheDir:      cacheDir,
 		NetworkMode:   networkMode,
 		Timeout:       timeout,
 		ReadOnly:      false, // Scanner containers need to write cache/temp files
