@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -132,20 +133,24 @@ A /usr/local/lib/python3.11/site-packages/mcp_server/main.py`
 
 	dirs := r.findAppDirectories(diffOutput)
 
-	// Should find: /root/.npm, /app, and site-packages
+	// Should find: /root/.npm and /app
+	// node_modules and site-packages are now excluded (dependency code, not user code)
 	found := make(map[string]bool)
 	for _, d := range dirs {
 		found[d] = true
 	}
 
-	if !found["/root/.npm/_npx/abc123/node_modules"] {
-		t.Errorf("expected node_modules dir, got %v", dirs)
+	if !found["/root/.npm"] {
+		t.Errorf("expected /root/.npm dir, got %v", dirs)
 	}
 	if !found["/app"] {
 		t.Errorf("expected /app dir, got %v", dirs)
 	}
-	if !found["/usr/local/lib/python3.11/site-packages"] {
-		t.Errorf("expected site-packages dir, got %v", dirs)
+	// site-packages and node_modules should be filtered out
+	for _, d := range dirs {
+		if strings.Contains(d, "site-packages") || strings.Contains(d, "node_modules") {
+			t.Errorf("dependency dir should be excluded: %s", d)
+		}
 	}
 }
 

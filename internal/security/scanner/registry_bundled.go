@@ -53,9 +53,9 @@ var bundledScanners = []*ScannerPlugin{
 		OptionalEnv: []EnvRequirement{
 			{Key: "SEMGREP_APP_TOKEN", Label: "Semgrep Cloud Token", Secret: true},
 		},
-		Command:    []string{"semgrep", "scan", "--sarif", "--output", "/scan/report/results.sarif", "/scan/source"},
-		Timeout:    "300s",
-		NetworkReq: true, // Downloads rules from registry
+		Command:    []string{"semgrep", "scan", "--sarif", "--output", "/scan/report/results.sarif", "--exclude", "site-packages", "--exclude", "node_modules", "--exclude", "dist-packages", "/scan/source"},
+		Timeout:    "600s", // 10 minutes — large source trees take time
+		NetworkReq: true,   // Downloads rules from registry
 	},
 	{
 		ID:          "trivy-mcp",

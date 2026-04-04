@@ -250,7 +250,7 @@ func (r *SourceResolver) findAppDirectories(diffOutput string) []string {
 	return dirs
 }
 
-// isSystemPath returns true for OS-level paths that aren't app source
+// isSystemPath returns true for OS-level paths or dependency dirs that aren't app source
 func (r *SourceResolver) isSystemPath(path string) bool {
 	systemPrefixes := []string{
 		"/etc/", "/var/", "/tmp/", "/proc/", "/sys/", "/dev/",
@@ -261,6 +261,12 @@ func (r *SourceResolver) isSystemPath(path string) bool {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}
+	}
+	// Skip dependency directories (too large, not user code)
+	if strings.Contains(path, "/site-packages/") ||
+		strings.Contains(path, "/dist-packages/") ||
+		strings.Contains(path, "/node_modules/") {
+		return true
 	}
 	return false
 }
