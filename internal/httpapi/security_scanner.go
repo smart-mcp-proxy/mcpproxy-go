@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
@@ -328,6 +329,24 @@ func (s *Server) handleGetScanFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pagination: ?limit=100&offset=0&suspicious_only=true
+	limit := 100
+	offset := 0
+	suspiciousOnly := false
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if parsed, err := strconv.Atoi(o); err == nil && parsed >= 0 {
+			offset = parsed
+		}
+	}
+	if r.URL.Query().Get("suspicious_only") == "true" {
+		suspiciousOnly = true
+	}
+
 	// Get scan status for context
 	job, err := s.securityController.GetScanStatus(r.Context(), name)
 	if err != nil {
@@ -338,8 +357,8 @@ func (s *Server) handleGetScanFiles(w http.ResponseWriter, r *http.Request) {
 	// Get report for finding locations
 	report, _ := s.securityController.GetScanReport(r.Context(), name)
 
-	// Build file tree with suspicious markers
-	result := buildFileTree(job, report)
+	// Build file tree with suspicious markers and pagination
+	result := buildFileTreePaginated(job, report, limit, offset, suspiciousOnly)
 	s.writeSuccess(w, result)
 }
 
@@ -356,11 +375,19 @@ type fileTreeResponse struct {
 	DockerIsolation bool            `json:"docker_isolation"`
 	TotalFiles      int             `json:"total_files"`
 	TotalSizeBytes  int64           `json:"total_size_bytes"`
+	SuspiciousCount int             `json:"suspicious_count"`
 	Files           []fileTreeEntry `json:"files"`
+	Offset          int             `json:"offset"`
+	Limit           int             `json:"limit"`
+	HasMore         bool            `json:"has_more"`
 }
 
 func buildFileTree(job *scanner.ScanJob, report *scanner.AggregatedReport) *fileTreeResponse {
-	resp := &fileTreeResponse{}
+	return buildFileTreePaginated(job, report, 100, 0, false)
+}
+
+func buildFileTreePaginated(job *scanner.ScanJob, report *scanner.AggregatedReport, limit, offset int, suspiciousOnly bool) *fileTreeResponse {
+	resp := &fileTreeResponse{Limit: limit, Offset: offset}
 
 	if job == nil || job.ScanContext == nil {
 		return resp
@@ -378,28 +405,56 @@ func buildFileTree(job *scanner.ScanJob, report *scanner.AggregatedReport) *file
 	if report != nil {
 		for _, f := range report.Findings {
 			if f.Location != "" {
-				// Normalize: strip line number for matching
 				filePath := f.Location
 				if idx := lastIndexByte(filePath, ':'); idx > 0 {
 					filePath = filePath[:idx]
 				}
-				// Strip leading /scan/source/ prefix
 				filePath = trimScanPrefix(filePath)
 				locationFindings[filePath] = append(locationFindings[filePath], f.Title)
 			}
 		}
 	}
 
-	// Build entries
+	// Build all entries first (for counting), then paginate
+	// Suspicious files always sorted first
+	var suspiciousFiles []fileTreeEntry
+	var normalFiles []fileTreeEntry
+
 	for _, path := range ctx.ScannedFiles {
 		normalized := trimScanPrefix(path)
 		entry := fileTreeEntry{Path: path}
 		if findings, ok := locationFindings[normalized]; ok {
 			entry.Suspicious = true
 			entry.Findings = findings
+			suspiciousFiles = append(suspiciousFiles, entry)
+		} else {
+			normalFiles = append(normalFiles, entry)
 		}
-		resp.Files = append(resp.Files, entry)
 	}
+
+	resp.SuspiciousCount = len(suspiciousFiles)
+
+	// Combine: suspicious first, then normal
+	var allFiles []fileTreeEntry
+	if suspiciousOnly {
+		allFiles = suspiciousFiles
+	} else {
+		allFiles = append(suspiciousFiles, normalFiles...)
+	}
+
+	// Apply pagination
+	totalFiltered := len(allFiles)
+	if offset >= totalFiltered {
+		resp.HasMore = false
+		return resp
+	}
+
+	end := offset + limit
+	if end > totalFiltered {
+		end = totalFiltered
+	}
+	resp.Files = allFiles[offset:end]
+	resp.HasMore = end < totalFiltered
 
 	return resp
 }

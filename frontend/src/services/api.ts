@@ -811,8 +811,8 @@ class APIService {
     return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/report`)
   }
 
-  async getScanFiles(serverName: string): Promise<APIResponse<any>> {
-    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/files`)
+  async getScanFiles(serverName: string, limit = 100, offset = 0): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/files?limit=${limit}&offset=${offset}`)
   }
 
   async cancelScan(serverName: string): Promise<APIResponse<void>> {

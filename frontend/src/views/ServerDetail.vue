@@ -934,7 +934,7 @@
                 </div>
               </div>
 
-              <!-- Scanned Files (lazy-loaded collapsible) -->
+              <!-- Scanned Files (lazy-loaded with pagination) -->
               <div v-if="scanContext && scanContext.source_method !== 'none' && scanContext.source_method !== 'url'" class="pt-4">
                 <div class="collapse collapse-arrow bg-base-100 shadow-md">
                   <input type="checkbox" @change="onScannedFilesToggle" />
@@ -943,34 +943,53 @@
                     <span v-if="scanContext.total_files" class="text-base-content/60 font-normal">
                       ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})
                     </span>
+                    <span v-if="scanFilesMeta.suspicious_count" class="badge badge-error badge-sm ml-2">
+                      {{ scanFilesMeta.suspicious_count }} suspicious
+                    </span>
                   </div>
                   <div class="collapse-content">
-                    <div v-if="scanFilesLoading" class="text-center py-4">
+                    <div v-if="scanFilesLoading && scanFiles.length === 0" class="text-center py-4">
                       <span class="loading loading-spinner loading-sm"></span>
                       <span class="ml-2 text-sm">Loading file list...</span>
                     </div>
-                    <div v-else-if="scanFiles.length === 0" class="text-sm text-base-content/40 py-2">
+                    <div v-else-if="!scanFilesLoading && scanFiles.length === 0" class="text-sm text-base-content/40 py-2">
                       No file information available.
                     </div>
-                    <ul v-else class="space-y-0.5 py-1">
-                      <li
-                        v-for="(file, idx) in scanFiles"
-                        :key="file.path"
-                        class="flex items-center gap-2 py-0.5"
-                      >
-                        <span class="text-base-content/30 text-xs select-none w-4 text-right">{{ idx === scanFiles.length - 1 ? '\u2514' : '\u251C' }}</span>
-                        <code
-                          class="text-sm"
-                          :class="file.suspicious ? 'text-error font-semibold' : 'text-base-content/80'"
-                        >{{ file.path }}</code>
-                        <span
-                          v-if="file.suspicious && file.findings?.length"
-                          class="badge badge-error badge-xs gap-1"
+                    <template v-else>
+                      <ul class="space-y-0.5 py-1 max-h-96 overflow-y-auto">
+                        <li
+                          v-for="(file, idx) in scanFiles"
+                          :key="file.path + idx"
+                          class="flex items-center gap-2 py-0.5"
                         >
-                          {{ file.findings.join(', ') }}
+                          <span class="text-base-content/30 text-xs select-none w-4 text-right">{{ '\u251C' }}</span>
+                          <code
+                            class="text-xs"
+                            :class="file.suspicious ? 'text-error font-semibold' : 'text-base-content/60'"
+                          >{{ file.path }}</code>
+                          <span
+                            v-if="file.suspicious && file.findings?.length"
+                            class="badge badge-error badge-xs gap-1 shrink-0"
+                          >
+                            {{ file.findings[0] }}
+                          </span>
+                        </li>
+                      </ul>
+                      <div class="flex items-center gap-2 mt-2 pt-2 border-t border-base-200">
+                        <span class="text-xs text-base-content/50">
+                          Showing {{ scanFiles.length }} of {{ scanFilesMeta.total || scanContext?.total_files || '?' }}
                         </span>
-                      </li>
-                    </ul>
+                        <button
+                          v-if="scanFilesMeta.has_more"
+                          @click="loadMoreFiles"
+                          :disabled="scanFilesLoading"
+                          class="btn btn-xs btn-ghost"
+                        >
+                          <span v-if="scanFilesLoading" class="loading loading-spinner loading-xs"></span>
+                          Load more
+                        </button>
+                      </div>
+                    </template>
                   </div>
                 </div>
               </div>
@@ -1054,6 +1073,9 @@ let scanPollTimer: ReturnType<typeof setInterval> | null = null
 const scanFiles = ref<Array<{ path: string; suspicious: boolean; findings?: string[] }>>([])
 const scanFilesLoading = ref(false)
 const scanFilesLoaded = ref(false)
+const scanFilesMeta = ref<{ total: number; has_more: boolean; suspicious_count: number; offset: number }>({
+  total: 0, has_more: false, suspicious_count: 0, offset: 0
+})
 
 const scanContext = computed(() => {
   return scanStatus.value?.scan_context || null
@@ -1604,19 +1626,38 @@ function formatFileSize(bytes: number): string {
 async function onScannedFilesToggle(event: Event) {
   const checkbox = event.target as HTMLInputElement
   if (checkbox.checked && !scanFilesLoaded.value && server.value) {
-    scanFilesLoading.value = true
-    try {
-      const response = await api.getScanFiles(server.value.name)
-      if (response.success && response.data) {
-        scanFiles.value = response.data.files || []
-        scanFilesLoaded.value = true
-      }
-    } catch {
-      // Silently fail
-    } finally {
-      scanFilesLoading.value = false
-    }
+    await loadScanFiles(0)
   }
+}
+
+async function loadScanFiles(offset: number) {
+  if (!server.value) return
+  scanFilesLoading.value = true
+  try {
+    const response = await api.getScanFiles(server.value.name, 100, offset)
+    if (response.success && response.data) {
+      if (offset === 0) {
+        scanFiles.value = response.data.files || []
+      } else {
+        scanFiles.value = [...scanFiles.value, ...(response.data.files || [])]
+      }
+      scanFilesMeta.value = {
+        total: response.data.total_files || 0,
+        has_more: response.data.has_more || false,
+        suspicious_count: response.data.suspicious_count || 0,
+        offset: offset + (response.data.files?.length || 0),
+      }
+      scanFilesLoaded.value = true
+    }
+  } catch {
+    // Silently fail
+  } finally {
+    scanFilesLoading.value = false
+  }
+}
+
+async function loadMoreFiles() {
+  await loadScanFiles(scanFilesMeta.value.offset)
 }
 
 function formatRelativeTime(isoString: string): string {
