@@ -1382,6 +1382,15 @@ func printFindingsList(findings []interface{}) {
 		if helpURI != "" {
 			fmt.Println("         Details: " + helpURI)
 		}
+
+		// Evidence (triggering content)
+		evidence := getMapString(finding, "evidence")
+		if evidence != "" {
+			if len(evidence) > 200 {
+				evidence = evidence[:200] + "..."
+			}
+			fmt.Println("         Evidence: " + evidence)
+		}
 	}
 }
 

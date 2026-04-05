@@ -63,6 +63,7 @@ export interface SecurityScanFinding {
   installed_version?: string
   fixed_version?: string        // Version with fix
   scan_pass?: number            // 1 = security scan, 2 = supply chain audit
+  evidence?: string             // Text/content that triggered the finding
 }
 
 export interface SecurityScanReport {

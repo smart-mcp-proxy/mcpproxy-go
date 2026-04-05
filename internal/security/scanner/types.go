@@ -156,6 +156,7 @@ type ScanFinding struct {
 	InstalledVersion string  `json:"installed_version,omitempty"` // Current version
 	FixedVersion     string  `json:"fixed_version,omitempty"`     // Version with fix
 	ScanPass         int     `json:"scan_pass,omitempty"`         // 1 = security scan, 2 = supply chain audit
+	Evidence         string  `json:"evidence,omitempty"`          // The text/content that triggered the finding
 }
 
 // ScanReport represents aggregated scan results for a server

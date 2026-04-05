@@ -578,12 +578,18 @@ func parseCiscoScannerOutput(data []byte, scannerID string) []ScanFinding {
 				continue
 			}
 			for _, threat := range analyzerResult.ThreatNames {
+				// Truncate tool description for evidence (max 500 chars)
+				evidence := result.ToolDescription
+				if len(evidence) > 500 {
+					evidence = evidence[:500] + "..."
+				}
 				finding := ScanFinding{
 					RuleID:      strings.ToLower(strings.ReplaceAll(threat, " ", "_")),
 					Title:       threat + " in tool: " + result.ToolName,
 					Description: analyzerResult.ThreatSummary,
 					Scanner:     scannerID,
 					Location:    "tool:" + result.ToolName,
+					Evidence:    evidence,
 				}
 
 				// Map Cisco severity to our severity

@@ -726,6 +726,11 @@
                         <div class="collapse-content px-4 pb-3">
                           <div class="space-y-2 text-sm">
                             <p class="text-base-content/80">{{ finding.description }}</p>
+                            <!-- Evidence: the actual text that triggered the finding -->
+                            <div v-if="finding.evidence" class="mt-2">
+                              <div class="text-xs text-base-content/50 mb-1">Triggering content:</div>
+                              <pre class="bg-base-300 text-xs p-3 rounded-lg max-h-32 overflow-auto whitespace-pre-wrap break-words border border-base-content/10">{{ finding.evidence }}</pre>
+                            </div>
                             <div class="grid grid-cols-2 gap-2 text-xs">
                               <div v-if="finding.rule_id">
                                 <span class="text-base-content/50">Rule:</span>
@@ -816,6 +821,11 @@
                         <div class="collapse-content px-4 pb-3">
                           <div class="space-y-2 text-sm">
                             <p class="text-base-content/80">{{ finding.description }}</p>
+                            <!-- Evidence: the actual text that triggered the finding -->
+                            <div v-if="finding.evidence" class="mt-2">
+                              <div class="text-xs text-base-content/50 mb-1">Triggering content:</div>
+                              <pre class="bg-base-300 text-xs p-3 rounded-lg max-h-32 overflow-auto whitespace-pre-wrap break-words border border-base-content/10">{{ finding.evidence }}</pre>
+                            </div>
                             <div class="grid grid-cols-2 gap-2 text-xs">
                               <div v-if="finding.rule_id">
                                 <span class="text-base-content/50">Rule:</span>
