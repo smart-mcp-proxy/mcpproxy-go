@@ -62,6 +62,7 @@ export interface SecurityScanFinding {
   package_name?: string
   installed_version?: string
   fixed_version?: string        // Version with fix
+  scan_pass?: number            // 1 = security scan, 2 = supply chain audit
 }
 
 export interface SecurityScanReport {
@@ -79,6 +80,10 @@ export interface SecurityScanReport {
   scanners_failed?: number  // How many scanners failed
   scanners_total?: number   // Total scanners attempted
   scan_complete?: boolean   // True only if at least one scanner succeeded
+  // Two-pass scan tracking
+  pass1_complete?: boolean  // Security scan (fast) done
+  pass2_complete?: boolean  // Supply chain audit done
+  pass2_running?: boolean   // Supply chain audit in progress
 }
 
 // Summary from the aggregated report API (matches Go ReportSummary)

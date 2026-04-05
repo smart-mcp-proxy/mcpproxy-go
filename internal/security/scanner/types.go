@@ -63,6 +63,12 @@ type ScannerPlugin struct {
 	Custom        bool              `json:"custom,omitempty"` // User-added (not from registry)
 }
 
+// Scan pass constants
+const (
+	ScanPassSecurityScan     = 1 // Fast pass: source code + lockfile scanning
+	ScanPassSupplyChainAudit = 2 // Background pass: full filesystem CVE analysis
+)
+
 // Scan context limits
 const (
 	MaxScanLogLines   = 5000   // Max lines of stdout/stderr per scanner
@@ -75,7 +81,8 @@ const (
 type ScanJob struct {
 	ID          string    `json:"id"`
 	ServerName  string    `json:"server_name"`
-	Status      string    `json:"status"` // pending, running, completed, failed, cancelled
+	Status      string    `json:"status"`    // pending, running, completed, failed, cancelled
+	ScanPass    int       `json:"scan_pass"` // 1 = security scan (fast), 2 = supply chain audit (background)
 	Scanners    []string  `json:"scanners"`
 	StartedAt   time.Time `json:"started_at"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
@@ -148,6 +155,7 @@ type ScanFinding struct {
 	PackageName      string  `json:"package_name,omitempty"`      // Affected package
 	InstalledVersion string  `json:"installed_version,omitempty"` // Current version
 	FixedVersion     string  `json:"fixed_version,omitempty"`     // Version with fix
+	ScanPass         int     `json:"scan_pass,omitempty"`         // 1 = security scan, 2 = supply chain audit
 }
 
 // ScanReport represents aggregated scan results for a server
@@ -175,6 +183,10 @@ type AggregatedReport struct {
 	ScannersFailed int           `json:"scanners_failed"` // How many scanners failed
 	ScannersTotal  int           `json:"scanners_total"`  // Total scanners attempted
 	ScanComplete   bool          `json:"scan_complete"`   // True only if at least one scanner succeeded
+	// Two-pass scan tracking
+	Pass1Complete bool `json:"pass1_complete"` // Security scan (fast) done
+	Pass2Complete bool `json:"pass2_complete"` // Supply chain audit done
+	Pass2Running  bool `json:"pass2_running"`  // Supply chain audit in progress
 }
 
 // ReportSummary provides counts by severity and threat level

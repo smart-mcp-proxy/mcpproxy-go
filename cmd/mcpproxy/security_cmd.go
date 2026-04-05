@@ -1263,7 +1263,7 @@ func printScanSummary(client *cliclient.Client, ctx context.Context, serverName 
 	return printReportTable(serverName, report)
 }
 
-// printReportTable prints a human-readable report.
+// printReportTable prints a human-readable report with two-pass scan support.
 func printReportTable(serverName string, report map[string]interface{}) error {
 	riskScore := "?"
 	if rs, ok := report["risk_score"].(float64); ok {
@@ -1279,70 +1279,110 @@ func printReportTable(serverName string, report map[string]interface{}) error {
 	}
 	fmt.Println()
 
-	// Summary table
-	if summary, ok := report["summary"].(map[string]interface{}); ok {
-		fmt.Printf("%-12s %s\n", "SEVERITY", "COUNT")
-		fmt.Println(strings.Repeat("-", 24))
-		fmt.Printf("%-12s %s\n", "Critical", secFormatInt(summary, "critical"))
-		fmt.Printf("%-12s %s\n", "High", secFormatInt(summary, "high"))
-		fmt.Printf("%-12s %s\n", "Medium", secFormatInt(summary, "medium"))
-		fmt.Printf("%-12s %s\n", "Low", secFormatInt(summary, "low"))
-		fmt.Printf("%-12s %s\n", "Info", secFormatInt(summary, "info"))
-	}
-
-	// Individual findings
-	if findings, ok := report["findings"].([]interface{}); ok && len(findings) > 0 {
-		fmt.Println()
-		fmt.Println("FINDINGS:")
+	// Separate findings by scan pass
+	var pass1Findings, pass2Findings []interface{}
+	if findings, ok := report["findings"].([]interface{}); ok {
 		for _, f := range findings {
 			if finding, ok := f.(map[string]interface{}); ok {
-				severity := strings.ToUpper(getMapString(finding, "severity"))
-				ruleID := getMapString(finding, "rule_id")
-				title := getMapString(finding, "title")
-				location := getMapString(finding, "location")
-				scannerName := getMapString(finding, "scanner")
-				helpURI := getMapString(finding, "help_uri")
-				pkg := getMapString(finding, "package_name")
-				installed := getMapString(finding, "installed_version")
-				fixed := getMapString(finding, "fixed_version")
-
-				// Main line: [SEVERITY] CVE-ID: title (scanner)
-				label := title
-				if ruleID != "" && ruleID != title {
-					label = ruleID
-				}
-				line := fmt.Sprintf("  [%s] %s", severity, label)
-				if scannerName != "" {
-					line += " (" + scannerName + ")"
-				}
-				fmt.Println(line)
-
-				// Package info
-				if pkg != "" {
-					pkgLine := "         Package: " + pkg
-					if installed != "" {
-						pkgLine += " v" + installed
-					}
-					if fixed != "" {
-						pkgLine += " -> fix: " + fixed
-					}
-					fmt.Println(pkgLine)
-				}
-
-				// Location
-				if location != "" {
-					fmt.Println("         Location: " + location)
-				}
-
-				// Link to advisory
-				if helpURI != "" {
-					fmt.Println("         Details: " + helpURI)
+				scanPass := int(getMapFloat(finding, "scan_pass"))
+				if scanPass == 2 {
+					pass2Findings = append(pass2Findings, f)
+				} else {
+					pass1Findings = append(pass1Findings, f)
 				}
 			}
 		}
 	}
 
+	// === Security Scan (Pass 1) ===
+	fmt.Println("=== Security Scan (Pass 1) ===")
+	if len(pass1Findings) == 0 {
+		fmt.Println("  0 findings")
+	} else {
+		fmt.Printf("  %d finding(s)\n", len(pass1Findings))
+		fmt.Println()
+		printFindingsList(pass1Findings)
+	}
+
+	// === Supply Chain Audit (Pass 2) ===
+	pass2Running := false
+	if v, ok := report["pass2_running"].(bool); ok {
+		pass2Running = v
+	}
+	pass2Complete := false
+	if v, ok := report["pass2_complete"].(bool); ok {
+		pass2Complete = v
+	}
+
+	fmt.Println()
+	fmt.Println("=== Supply Chain Audit (Pass 2) ===")
+	if pass2Running {
+		fmt.Println("  Running in background...")
+	} else if pass2Complete {
+		if len(pass2Findings) == 0 {
+			fmt.Println("  0 findings")
+		} else {
+			fmt.Printf("  %d finding(s)\n", len(pass2Findings))
+			fmt.Println()
+			printFindingsList(pass2Findings)
+		}
+	} else {
+		fmt.Println("  Not started")
+	}
+
 	return nil
+}
+
+// printFindingsList prints a list of findings in the CLI report format.
+func printFindingsList(findings []interface{}) {
+	for _, f := range findings {
+		finding, ok := f.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		severity := strings.ToUpper(getMapString(finding, "severity"))
+		ruleID := getMapString(finding, "rule_id")
+		title := getMapString(finding, "title")
+		location := getMapString(finding, "location")
+		scannerName := getMapString(finding, "scanner")
+		helpURI := getMapString(finding, "help_uri")
+		pkg := getMapString(finding, "package_name")
+		installed := getMapString(finding, "installed_version")
+		fixed := getMapString(finding, "fixed_version")
+
+		// Main line: [SEVERITY] CVE-ID: title (scanner)
+		label := title
+		if ruleID != "" && ruleID != title {
+			label = ruleID
+		}
+		line := fmt.Sprintf("  [%s] %s", severity, label)
+		if scannerName != "" {
+			line += " (" + scannerName + ")"
+		}
+		fmt.Println(line)
+
+		// Package info
+		if pkg != "" {
+			pkgLine := "         Package: " + pkg
+			if installed != "" {
+				pkgLine += " v" + installed
+			}
+			if fixed != "" {
+				pkgLine += " -> fix: " + fixed
+			}
+			fmt.Println(pkgLine)
+		}
+
+		// Location
+		if location != "" {
+			fmt.Println("         Location: " + location)
+		}
+
+		// Link to advisory
+		if helpURI != "" {
+			fmt.Println("         Details: " + helpURI)
+		}
+	}
 }
 
 // printSarifOutput extracts and prints raw SARIF data from individual scanner reports.

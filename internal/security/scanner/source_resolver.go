@@ -340,6 +340,172 @@ func (r *SourceResolver) extractAppRoot(path string) string {
 	return ""
 }
 
+// ResolveFullSource resolves the FULL source directory for a server, including
+// all dependencies (site-packages, node_modules, UV archives, etc.).
+// This is used for Pass 2 (supply chain audit) to scan the complete filesystem.
+func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
+	// HTTP/SSE servers: no filesystem to scan
+	if info.Protocol == "http" || info.Protocol == "sse" || info.Protocol == "streamable-http" {
+		if info.URL != "" {
+			return &ResolvedSource{
+				ServerURL: info.URL,
+				Method:    "url",
+				Cleanup:   func() {},
+			}, nil
+		}
+		return nil, fmt.Errorf("HTTP server %s has no URL configured", info.Name)
+	}
+
+	// Stdio servers: try Docker container first — extract FULL container
+	containerID, err := r.findServerContainer(ctx, info.Name)
+	if err == nil && containerID != "" {
+		sourceDir, cleanup, err := r.extractFullFromContainer(ctx, containerID, info.Name)
+		if err == nil {
+			r.logger.Info("Resolved full source from Docker container for Pass 2",
+				zap.String("server", info.Name),
+				zap.String("container", containerID),
+				zap.String("source_dir", sourceDir),
+			)
+			return &ResolvedSource{
+				SourceDir:   sourceDir,
+				ContainerID: containerID,
+				Method:      "docker_extract",
+				Cleanup:     cleanup,
+			}, nil
+		}
+		r.logger.Warn("Failed to extract full source from container, trying fallback",
+			zap.String("server", info.Name),
+			zap.Error(err),
+		)
+	}
+
+	// Fallback: use working_dir (same as Pass 1 — no container means no deps to scan)
+	if info.WorkingDir != "" {
+		if stat, err := os.Stat(info.WorkingDir); err == nil && stat.IsDir() {
+			return &ResolvedSource{
+				SourceDir: info.WorkingDir,
+				Method:    "working_dir",
+				Cleanup:   func() {},
+			}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("could not resolve full source for server %s", info.Name)
+}
+
+// extractFullFromContainer extracts ALL changed files from a container
+// WITHOUT filtering out dependency directories. Used for Pass 2 supply chain audit.
+func (r *SourceResolver) extractFullFromContainer(ctx context.Context, containerID, serverName string) (string, func(), error) {
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-full-%s-", serverName))
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(tempDir) }
+
+	// Get docker diff to find ALL changed directories
+	cmd := exec.CommandContext(ctx, "docker", "diff", containerID)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("docker diff failed: %w", err)
+	}
+
+	// Find all top-level changed directories (no filtering of deps)
+	dirs := r.findAllChangedDirectories(stdout.String())
+
+	if len(dirs) == 0 {
+		// Try common directories including dependency paths
+		for _, dir := range []string{"/app", "/src", "/opt/app", "/root"} {
+			destDir := filepath.Join(tempDir, filepath.Base(dir))
+			os.MkdirAll(destDir, 0755)
+			cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+			if cpCmd.Run() == nil {
+				return tempDir, cleanup, nil
+			}
+		}
+		cleanup()
+		return "", nil, fmt.Errorf("no extractable source found in container %s", containerID)
+	}
+
+	// Extract each directory
+	for _, dir := range dirs {
+		destDir := filepath.Join(tempDir, filepath.Base(dir))
+		os.MkdirAll(destDir, 0755)
+		cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+		if err := cpCmd.Run(); err != nil {
+			r.logger.Debug("Failed to copy directory from container (Pass 2)",
+				zap.String("dir", dir),
+				zap.Error(err),
+			)
+		}
+	}
+
+	return tempDir, cleanup, nil
+}
+
+// findAllChangedDirectories analyzes docker diff output and returns ALL changed
+// directories including dependency directories. Unlike findAppDirectories, this
+// does NOT filter out site-packages, node_modules, UV archives, etc.
+func (r *SourceResolver) findAllChangedDirectories(diffOutput string) []string {
+	seen := make(map[string]bool)
+	var dirs []string
+
+	for _, line := range strings.Split(diffOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) < 3 {
+			continue
+		}
+		action := line[0]
+		path := line[2:]
+
+		if action == 'D' {
+			continue
+		}
+
+		// Skip only OS-level system paths (proc, sys, dev, etc.)
+		if r.isHardSystemPath(path) {
+			continue
+		}
+
+		dir := r.extractTopLevelDir(path)
+		if dir != "" && !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+
+	return dirs
+}
+
+// isHardSystemPath returns true only for paths that are never useful for scanning
+// (kernel, device, proc pseudo-filesystems). Does NOT filter dependency dirs.
+func (r *SourceResolver) isHardSystemPath(path string) bool {
+	hardSystemPrefixes := []string{
+		"/proc/", "/sys/", "/dev/",
+		"/etc/", "/var/run/", "/var/lock/",
+	}
+	for _, prefix := range hardSystemPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractTopLevelDir extracts the top-level directory from a path.
+// For /root/.cache/uv/... it returns /root (broader than extractAppRoot).
+func (r *SourceResolver) extractTopLevelDir(path string) string {
+	// Known top-level directories
+	topDirs := []string{"/app", "/src", "/opt", "/root", "/home", "/usr", "/var", "/tmp"}
+	for _, dir := range topDirs {
+		if strings.HasPrefix(path, dir+"/") || path == dir {
+			return dir
+		}
+	}
+	return ""
+}
+
 // CollectFileList walks a directory and returns a list of files (relative paths).
 // Caps at MaxScannedFiles entries. Also returns total count and size.
 func CollectFileList(dir string) (files []string, totalFiles int, totalSize int64) {

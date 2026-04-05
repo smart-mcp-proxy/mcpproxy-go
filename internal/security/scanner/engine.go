@@ -48,6 +48,7 @@ type ScanRequest struct {
 	ScannerIDs  []string          // Specific scanners to use (empty = all installed)
 	Env         map[string]string // Additional environment variables
 	ScanContext *ScanContext      // Context metadata (set by service)
+	ScanPass    int               // 1 = security scan (fast), 2 = supply chain audit (background)
 }
 
 // ScanCallback receives scan lifecycle events
@@ -97,10 +98,15 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 	}
 
 	// Create job
+	scanPass := req.ScanPass
+	if scanPass == 0 {
+		scanPass = ScanPassSecurityScan // Default to pass 1
+	}
 	job := &ScanJob{
 		ID:          fmt.Sprintf("scan-%s-%d", req.ServerName, time.Now().UnixNano()),
 		ServerName:  req.ServerName,
 		Status:      ScanJobStatusRunning,
+		ScanPass:    scanPass,
 		Scanners:    make([]string, len(scanners)),
 		StartedAt:   time.Now(),
 		DryRun:      req.DryRun,

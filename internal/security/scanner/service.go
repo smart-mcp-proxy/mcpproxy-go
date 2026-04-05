@@ -319,8 +319,10 @@ func (s *Service) GetScannerStatus(ctx context.Context, id string) (*ScannerPlug
 
 // scanCallbackAdapter adapts scan engine callbacks to service operations
 type scanCallbackAdapter struct {
-	service *Service
-	cleanup func() // Optional cleanup function (e.g., remove temp source dir)
+	service    *Service
+	cleanup    func()      // Optional cleanup function (e.g., remove temp source dir)
+	scanPass   int         // Which pass this callback is for (1 or 2)
+	serverInfo *ServerInfo // Cached server info for pass 2 auto-start
 }
 
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
@@ -358,6 +360,10 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 	if a.cleanup != nil {
 		a.cleanup()
 	}
+	// Auto-start Pass 2 (supply chain audit) in background after Pass 1 completes
+	if a.scanPass == ScanPassSecurityScan && !job.DryRun {
+		go a.service.startPass2(job.ServerName, a.serverInfo)
+	}
 }
 
 func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
@@ -368,13 +374,15 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 	}
 }
 
-// StartScan triggers a security scan for a server
+// StartScan triggers a security scan for a server (Pass 1: fast security scan).
+// After Pass 1 completes, Pass 2 (supply chain audit) is auto-started in the background.
 func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*ScanJob, error) {
 	req := ScanRequest{
 		ServerName: serverName,
 		DryRun:     dryRun,
 		ScannerIDs: scannerIDs,
 		SourceDir:  sourceDir,
+		ScanPass:   ScanPassSecurityScan,
 	}
 
 	// Build scan context for transparency
@@ -440,7 +448,12 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	// Attach context to the scan request so the engine can set it on the job
 	req.ScanContext = scanCtx
 
-	callback := &scanCallbackAdapter{service: s, cleanup: resolvedCleanup}
+	callback := &scanCallbackAdapter{
+		service:    s,
+		cleanup:    resolvedCleanup,
+		scanPass:   ScanPassSecurityScan,
+		serverInfo: serverInfo,
+	}
 	job, err := s.engine.StartScan(ctx, req, callback)
 	if err != nil {
 		return nil, err
@@ -450,6 +463,98 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	go s.pruneOldScans(serverName)
 
 	return job, err
+}
+
+// startPass2 starts the background supply chain audit (Pass 2) for a server.
+// It re-resolves source WITHOUT filtering (full container filesystem including deps)
+// and runs only Trivy-compatible scanners for deep CVE analysis.
+func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
+	s.logger.Info("Starting Pass 2 (supply chain audit) in background",
+		zap.String("server", serverName),
+	)
+
+	ctx := context.Background()
+
+	req := ScanRequest{
+		ServerName: serverName,
+		DryRun:     false,
+		ScanPass:   ScanPassSupplyChainAudit,
+	}
+
+	// Build scan context
+	scanCtx := &ScanContext{
+		SourceMethod: "none",
+	}
+
+	// Re-resolve source for Pass 2: include full filesystem (deps, site-packages, etc.)
+	var resolvedCleanup func()
+	if serverInfo != nil {
+		scanCtx.ServerProtocol = serverInfo.Protocol
+		scanCtx.ServerCommand = serverInfo.Command
+
+		resolved, err := s.sourceResolver.ResolveFullSource(ctx, *serverInfo)
+		if err != nil {
+			s.logger.Warn("Pass 2 source resolution failed",
+				zap.String("server", serverName),
+				zap.Error(err),
+			)
+			// Fall back to a failed pass 2 job so the UI knows it was attempted
+			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error())
+			return
+		}
+		req.SourceDir = resolved.SourceDir
+		resolvedCleanup = resolved.Cleanup
+		scanCtx.SourceMethod = resolved.Method + "_full"
+		scanCtx.SourcePath = resolved.SourceDir
+		if resolved.ServerURL != "" {
+			scanCtx.SourcePath = resolved.ServerURL
+		}
+		scanCtx.ContainerID = resolved.ContainerID
+		if resolved.Method == "docker_extract" {
+			scanCtx.DockerIsolation = true
+		}
+		s.sourceResolver.EnrichWithFileList(resolved)
+		scanCtx.ScannedFiles = resolved.Files
+		scanCtx.TotalFiles = resolved.TotalFiles
+		scanCtx.TotalSizeBytes = resolved.TotalSize
+	} else {
+		s.logger.Warn("No server info available for Pass 2, skipping",
+			zap.String("server", serverName),
+		)
+		return
+	}
+
+	req.ScanContext = scanCtx
+
+	callback := &scanCallbackAdapter{
+		service:  s,
+		cleanup:  resolvedCleanup,
+		scanPass: ScanPassSupplyChainAudit,
+	}
+
+	_, err := s.engine.StartScan(ctx, req, callback)
+	if err != nil {
+		s.logger.Warn("Failed to start Pass 2 scan",
+			zap.String("server", serverName),
+			zap.Error(err),
+		)
+		// If the engine rejected (e.g., scan already in progress for same server),
+		// just log and move on. Pass 2 is best-effort.
+	}
+}
+
+// saveFailedPass2Job creates a failed ScanJob for Pass 2 so the UI knows it was attempted.
+func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
+	job := &ScanJob{
+		ID:          fmt.Sprintf("scan-%s-pass2-%d", serverName, time.Now().UnixNano()),
+		ServerName:  serverName,
+		Status:      ScanJobStatusFailed,
+		ScanPass:    ScanPassSupplyChainAudit,
+		StartedAt:   time.Now(),
+		CompletedAt: time.Now(),
+		Error:       errMsg,
+	}
+	_ = s.storage.SaveScanJob(job)
 }
 
 // GetScanStatus returns the current scan status for a server
@@ -462,19 +567,98 @@ func (s *Service) GetScanStatus(ctx context.Context, serverName string) (*ScanJo
 	return s.storage.GetLatestScanJob(serverName)
 }
 
-// GetScanReport returns the aggregated report for a server's latest scan
+// GetScanReport returns the aggregated report for a server, merging both Pass 1 and Pass 2 results.
 func (s *Service) GetScanReport(ctx context.Context, serverName string) (*AggregatedReport, error) {
-	job, err := s.storage.GetLatestScanJob(serverName)
+	// Find the latest Pass 1 and Pass 2 jobs
+	pass1Job, pass2Job, err := s.findLatestPassJobs(serverName)
 	if err != nil {
 		return nil, fmt.Errorf("no scan found for server %s: %w", serverName, err)
 	}
 
-	reports, err := s.storage.ListScanReportsByJob(job.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load reports for job %s: %w", job.ID, err)
+	// Build report from Pass 1
+	var allReports []*ScanReport
+	var primaryJob *ScanJob
+
+	if pass1Job != nil {
+		primaryJob = pass1Job
+		reports, err := s.storage.ListScanReportsByJob(pass1Job.ID)
+		if err == nil {
+			// Tag findings with scan pass
+			for _, r := range reports {
+				for i := range r.Findings {
+					r.Findings[i].ScanPass = ScanPassSecurityScan
+				}
+			}
+			allReports = append(allReports, reports...)
+		}
 	}
 
-	return AggregateReportsWithJobStatus(job.ID, serverName, reports, job), nil
+	// Merge Pass 2 findings if available
+	if pass2Job != nil && pass2Job.Status == ScanJobStatusCompleted {
+		if primaryJob == nil {
+			primaryJob = pass2Job
+		}
+		reports, err := s.storage.ListScanReportsByJob(pass2Job.ID)
+		if err == nil {
+			// Tag findings with scan pass
+			for _, r := range reports {
+				for i := range r.Findings {
+					r.Findings[i].ScanPass = ScanPassSupplyChainAudit
+				}
+			}
+			allReports = append(allReports, reports...)
+		}
+	}
+
+	if primaryJob == nil {
+		return nil, fmt.Errorf("no scan found for server %s", serverName)
+	}
+
+	agg := AggregateReportsWithJobStatus(primaryJob.ID, serverName, allReports, primaryJob)
+
+	// Set pass completion status
+	agg.Pass1Complete = pass1Job != nil && pass1Job.Status == ScanJobStatusCompleted
+	agg.Pass2Complete = pass2Job != nil && pass2Job.Status == ScanJobStatusCompleted
+
+	// Check if Pass 2 is currently running
+	if activeJob := s.engine.GetActiveJob(serverName); activeJob != nil && activeJob.ScanPass == ScanPassSupplyChainAudit {
+		agg.Pass2Running = true
+	}
+
+	return agg, nil
+}
+
+// findLatestPassJobs finds the latest Pass 1 and Pass 2 jobs for a server.
+// Returns (pass1Job, pass2Job, error). At least one must be non-nil on success.
+func (s *Service) findLatestPassJobs(serverName string) (*ScanJob, *ScanJob, error) {
+	jobs, err := s.storage.ListScanJobs(serverName)
+	if err != nil || len(jobs) == 0 {
+		return nil, nil, fmt.Errorf("no scan jobs found for server: %s", serverName)
+	}
+
+	// Sort by start time descending (newest first)
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].StartedAt.After(jobs[j].StartedAt)
+	})
+
+	var pass1Job, pass2Job *ScanJob
+	for _, j := range jobs {
+		if j.ScanPass == ScanPassSupplyChainAudit && pass2Job == nil {
+			pass2Job = j
+		} else if (j.ScanPass == ScanPassSecurityScan || j.ScanPass == 0) && pass1Job == nil {
+			// ScanPass == 0 handles legacy jobs (before two-pass was added)
+			pass1Job = j
+		}
+		if pass1Job != nil && pass2Job != nil {
+			break
+		}
+	}
+
+	if pass1Job == nil && pass2Job == nil {
+		return nil, nil, fmt.Errorf("no scan jobs found for server: %s", serverName)
+	}
+
+	return pass1Job, pass2Job, nil
 }
 
 // CancelScan cancels a running scan for a server
@@ -671,37 +855,47 @@ type IntegrityViolation struct {
 
 // GetScanSummary returns a compact scan summary for a server (for the server list API).
 // Returns nil if no scans have been run for this server.
+// Considers both Pass 1 and Pass 2 results when computing status.
 func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
 
-	// Check for active scan
+	// Check for active scan (Pass 1 takes priority in status display)
 	if active := s.engine.GetActiveJob(serverName); active != nil {
-		return &ScanSummary{
-			RiskScore: 0,
-			Status:    "scanning",
+		if active.ScanPass == ScanPassSecurityScan {
+			return &ScanSummary{
+				RiskScore: 0,
+				Status:    "scanning",
+			}
 		}
+		// Pass 2 running in background: show results from Pass 1 if available
 	}
 
-	// Get latest job
-	job, err := s.storage.GetLatestScanJob(serverName)
+	// Find latest Pass 1 and Pass 2 jobs
+	pass1Job, pass2Job, err := s.findLatestPassJobs(serverName)
 	if err != nil {
 		return nil // No scans run
 	}
 
+	// Use Pass 1 job as primary for timestamp
+	primaryJob := pass1Job
+	if primaryJob == nil {
+		primaryJob = pass2Job
+	}
+
 	summary := &ScanSummary{
-		LastScanAt: &job.StartedAt,
+		LastScanAt: &primaryJob.StartedAt,
 		Status:     "clean",
 	}
 
-	// Check if the job itself failed (all scanners failed)
-	if job.Status == ScanJobStatusFailed {
+	// Check if the primary job failed
+	if primaryJob.Status == ScanJobStatusFailed {
 		summary.Status = "failed"
 		return summary
 	}
 
-	// Check scanner statuses: if all scanners failed, mark as failed
-	if len(job.ScannerStatuses) > 0 {
+	// Check scanner statuses on primary job
+	if len(primaryJob.ScannerStatuses) > 0 {
 		allFailed := true
-		for _, ss := range job.ScannerStatuses {
+		for _, ss := range primaryJob.ScannerStatuses {
 			if ss.Status == ScanJobStatusCompleted {
 				allFailed = false
 				break
@@ -713,22 +907,38 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		}
 	}
 
-	// Get reports for this job
-	reports, err := s.storage.ListScanReportsByJob(job.ID)
-	if err != nil || len(reports) == 0 {
-		// No reports but job didn't explicitly fail — treat as incomplete
-		if job.Status == ScanJobStatusCompleted {
-			// Job completed but no reports means no scanner produced output
-			summary.Status = "failed"
+	// Collect reports from both passes
+	var allFindings []ScanFinding
+
+	if pass1Job != nil {
+		reports, err := s.storage.ListScanReportsByJob(pass1Job.ID)
+		if err == nil {
+			for _, r := range reports {
+				allFindings = append(allFindings, r.Findings...)
+			}
+		}
+	}
+
+	if pass2Job != nil && pass2Job.Status == ScanJobStatusCompleted {
+		reports, err := s.storage.ListScanReportsByJob(pass2Job.ID)
+		if err == nil {
+			for _, r := range reports {
+				allFindings = append(allFindings, r.Findings...)
+			}
+		}
+	}
+
+	if len(allFindings) == 0 {
+		if primaryJob.Status == ScanJobStatusCompleted {
+			// Check if there are actually any reports
+			reports, _ := s.storage.ListScanReportsByJob(primaryJob.ID)
+			if len(reports) == 0 {
+				summary.Status = "failed"
+			}
 		}
 		return summary
 	}
 
-	// Aggregate findings and apply classification if missing
-	var allFindings []ScanFinding
-	for _, r := range reports {
-		allFindings = append(allFindings, r.Findings...)
-	}
 	// Re-classify findings that lack threat_level (legacy data)
 	ClassifyAllFindings(allFindings)
 

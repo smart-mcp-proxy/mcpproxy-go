@@ -771,6 +771,102 @@
                 </div>
               </div>
 
+              <!-- Supply Chain Audit (Pass 2) -->
+              <div v-if="scanReport.pass2_running" class="alert alert-info mt-4">
+                <span class="loading loading-spinner loading-sm"></span>
+                <div>
+                  <h3 class="font-bold">Supply Chain Audit</h3>
+                  <p class="text-sm">Deep dependency analysis running in background. Results will appear here when complete.</p>
+                </div>
+              </div>
+              <div v-else-if="scanReport.pass2_complete && pass2Findings.length > 0" class="mt-4">
+                <div class="collapse collapse-arrow bg-base-100 shadow-md">
+                  <input type="checkbox" />
+                  <div class="collapse-title font-medium flex items-center gap-2">
+                    <span>Supply Chain Audit (CVEs)</span>
+                    <span class="badge badge-sm" :class="pass2HasDangerous ? 'badge-error' : pass2HasWarnings ? 'badge-warning' : 'badge-info'">{{ pass2Findings.length }}</span>
+                  </div>
+                  <div class="collapse-content">
+                    <div class="space-y-2">
+                      <div v-for="(finding, idx) in pass2Findings" :key="'p2-' + idx"
+                        class="collapse collapse-arrow bg-base-200 rounded-lg"
+                      >
+                        <input type="checkbox" />
+                        <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
+                          <span
+                            class="badge badge-sm flex-shrink-0"
+                            :class="{
+                              'badge-error': finding.threat_level === 'dangerous',
+                              'badge-warning': finding.threat_level === 'warning',
+                              'badge-info': finding.threat_level === 'info',
+                            }"
+                          >
+                            {{ finding.threat_level }}
+                          </span>
+                          <span class="font-medium text-sm flex-1">
+                            {{ finding.rule_id || finding.title }}
+                          </span>
+                          <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
+                            {{ finding.package_name }}
+                          </span>
+                          <span v-if="finding.fixed_version" class="badge badge-xs badge-success badge-outline">
+                            fix: {{ finding.fixed_version }}
+                          </span>
+                        </div>
+                        <div class="collapse-content px-4 pb-3">
+                          <div class="space-y-2 text-sm">
+                            <p class="text-base-content/80">{{ finding.description }}</p>
+                            <div class="grid grid-cols-2 gap-2 text-xs">
+                              <div v-if="finding.rule_id">
+                                <span class="text-base-content/50">Rule:</span>
+                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.rule_id }}</code>
+                              </div>
+                              <div v-if="finding.severity">
+                                <span class="text-base-content/50">CVSS Severity:</span>
+                                <span class="ml-1 font-medium">{{ finding.severity }}</span>
+                                <span v-if="finding.cvss_score" class="ml-1">({{ finding.cvss_score }})</span>
+                              </div>
+                              <div v-if="finding.package_name">
+                                <span class="text-base-content/50">Package:</span>
+                                <span class="ml-1 font-mono">{{ finding.package_name }}</span>
+                                <span v-if="finding.installed_version" class="ml-1 text-base-content/50">v{{ finding.installed_version }}</span>
+                              </div>
+                              <div v-if="finding.fixed_version">
+                                <span class="text-base-content/50">Fixed in:</span>
+                                <span class="ml-1 font-mono text-success">{{ finding.fixed_version }}</span>
+                              </div>
+                              <div v-if="finding.location">
+                                <span class="text-base-content/50">Location:</span>
+                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
+                              </div>
+                              <div v-if="finding.scanner">
+                                <span class="text-base-content/50">Scanner:</span>
+                                <span class="ml-1">{{ finding.scanner }}</span>
+                              </div>
+                            </div>
+                            <a
+                              v-if="finding.help_uri"
+                              :href="finding.help_uri"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="link link-primary text-xs inline-flex items-center gap-1"
+                            >
+                              View Advisory Details &rarr;
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="scanReport.pass2_complete && pass2Findings.length === 0" class="alert alert-success mt-4">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                </svg>
+                <span>Supply chain audit complete. No additional CVEs found in dependencies.</span>
+              </div>
+
               <!-- Approve / Reject actions -->
               <div v-if="scanReport.findings && scanReport.findings.length > 0" class="flex gap-3 pt-2">
                 <button
@@ -1036,8 +1132,11 @@ const dangerousTypes: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug
 const groupedFindings = computed<FindingGroup[]>(() => {
   if (!scanReport.value?.findings) return []
 
+  // Only include Pass 1 findings (or findings without a pass for backward compat)
+  const pass1Findings = scanReport.value.findings.filter(f => !f.scan_pass || f.scan_pass === 1)
+
   const groups = new Map<ThreatType, SecurityScanFinding[]>()
-  for (const f of scanReport.value.findings) {
+  for (const f of pass1Findings) {
     const type = f.threat_type || 'supply_chain'
     if (!groups.has(type)) groups.set(type, [])
     groups.get(type)!.push(f)
@@ -1059,6 +1158,20 @@ const groupedFindings = computed<FindingGroup[]>(() => {
     })
   }
   return result
+})
+
+// Pass 2 (supply chain audit) findings
+const pass2Findings = computed<SecurityScanFinding[]>(() => {
+  if (!scanReport.value?.findings) return []
+  return scanReport.value.findings.filter(f => f.scan_pass === 2)
+})
+
+const pass2HasDangerous = computed(() => {
+  return pass2Findings.value.some(f => f.threat_level === 'dangerous')
+})
+
+const pass2HasWarnings = computed(() => {
+  return pass2Findings.value.some(f => f.threat_level === 'warning')
 })
 
 const filteredTools = computed(() => {

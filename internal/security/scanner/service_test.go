@@ -1040,3 +1040,354 @@ func TestServiceNoopEmitterDefault(t *testing.T) {
 	svc.emitter.EmitSecurityScanProgress("test", "s1", "running", 50)
 	svc.emitter.EmitSecurityIntegrityAlert("test", "mismatch", "quarantine")
 }
+
+// --- Two-pass scanning tests ---
+
+func TestFindLatestPassJobs(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Create Pass 1 and Pass 2 jobs
+	pass1Job := &ScanJob{
+		ID:         "job-pass1",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-5 * time.Minute),
+	}
+	pass2Job := &ScanJob{
+		ID:         "job-pass2",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSupplyChainAudit,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-2 * time.Minute),
+	}
+	_ = store.SaveScanJob(pass1Job)
+	_ = store.SaveScanJob(pass2Job)
+
+	p1, p2, err := svc.findLatestPassJobs("my-server")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p1 == nil {
+		t.Fatal("expected Pass 1 job, got nil")
+	}
+	if p1.ID != "job-pass1" {
+		t.Errorf("expected Pass 1 job ID 'job-pass1', got %s", p1.ID)
+	}
+	if p2 == nil {
+		t.Fatal("expected Pass 2 job, got nil")
+	}
+	if p2.ID != "job-pass2" {
+		t.Errorf("expected Pass 2 job ID 'job-pass2', got %s", p2.ID)
+	}
+}
+
+func TestFindLatestPassJobsLegacy(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Legacy job with ScanPass == 0 (before two-pass was added)
+	legacyJob := &ScanJob{
+		ID:         "job-legacy",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   0,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-5 * time.Minute),
+	}
+	_ = store.SaveScanJob(legacyJob)
+
+	p1, p2, err := svc.findLatestPassJobs("my-server")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p1 == nil {
+		t.Fatal("expected legacy job to be treated as Pass 1")
+	}
+	if p1.ID != "job-legacy" {
+		t.Errorf("expected legacy job ID, got %s", p1.ID)
+	}
+	if p2 != nil {
+		t.Error("expected no Pass 2 job for legacy scan")
+	}
+}
+
+func TestGetScanReportMergesBothPasses(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Create Pass 1 job and report
+	pass1Job := &ScanJob{
+		ID:         "job-pass1",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-5 * time.Minute),
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 1},
+		},
+	}
+	pass1Report := &ScanReport{
+		ID:         "report-pass1",
+		JobID:      "job-pass1",
+		ServerName: "my-server",
+		ScannerID:  "test-scanner",
+		Findings: []ScanFinding{
+			{
+				RuleID:      "TOOL-001",
+				Title:       "Tool poisoning detected",
+				Severity:    SeverityHigh,
+				ThreatType:  ThreatToolPoisoning,
+				ThreatLevel: ThreatLevelDangerous,
+				Scanner:     "test-scanner",
+			},
+		},
+		ScannedAt: time.Now().Add(-5 * time.Minute),
+	}
+
+	// Create Pass 2 job and report
+	pass2Job := &ScanJob{
+		ID:         "job-pass2",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSupplyChainAudit,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-2 * time.Minute),
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 1},
+		},
+	}
+	pass2Report := &ScanReport{
+		ID:         "report-pass2",
+		JobID:      "job-pass2",
+		ServerName: "my-server",
+		ScannerID:  "test-scanner",
+		Findings: []ScanFinding{
+			{
+				RuleID:           "CVE-2026-1234",
+				Title:            "Known CVE in dependency",
+				Severity:         SeverityMedium,
+				ThreatType:       ThreatSupplyChain,
+				ThreatLevel:      ThreatLevelWarning,
+				Scanner:          "test-scanner",
+				PackageName:      "authlib",
+				InstalledVersion: "1.3.0",
+				FixedVersion:     "1.3.2",
+			},
+		},
+		ScannedAt: time.Now().Add(-2 * time.Minute),
+	}
+
+	_ = store.SaveScanJob(pass1Job)
+	_ = store.SaveScanReport(pass1Report)
+	_ = store.SaveScanJob(pass2Job)
+	_ = store.SaveScanReport(pass2Report)
+
+	report, err := svc.GetScanReport(context.Background(), "my-server")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should merge findings from both passes
+	if len(report.Findings) != 2 {
+		t.Fatalf("expected 2 merged findings, got %d", len(report.Findings))
+	}
+
+	// Verify pass tags
+	foundPass1 := false
+	foundPass2 := false
+	for _, f := range report.Findings {
+		if f.ScanPass == ScanPassSecurityScan {
+			foundPass1 = true
+		}
+		if f.ScanPass == ScanPassSupplyChainAudit {
+			foundPass2 = true
+		}
+	}
+	if !foundPass1 {
+		t.Error("expected at least one finding tagged as Pass 1")
+	}
+	if !foundPass2 {
+		t.Error("expected at least one finding tagged as Pass 2")
+	}
+
+	// Verify pass completion flags
+	if !report.Pass1Complete {
+		t.Error("expected Pass1Complete to be true")
+	}
+	if !report.Pass2Complete {
+		t.Error("expected Pass2Complete to be true")
+	}
+	if report.Pass2Running {
+		t.Error("expected Pass2Running to be false")
+	}
+}
+
+func TestGetScanReportPass2NotStarted(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Only Pass 1 completed
+	pass1Job := &ScanJob{
+		ID:         "job-pass1-only",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-5 * time.Minute),
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted},
+		},
+	}
+	_ = store.SaveScanJob(pass1Job)
+
+	report, err := svc.GetScanReport(context.Background(), "my-server")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !report.Pass1Complete {
+		t.Error("expected Pass1Complete to be true")
+	}
+	if report.Pass2Complete {
+		t.Error("expected Pass2Complete to be false")
+	}
+	if report.Pass2Running {
+		t.Error("expected Pass2Running to be false")
+	}
+}
+
+func TestGetScanSummaryBothPasses(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	// Pass 1 with no findings
+	pass1Job := &ScanJob{
+		ID:         "job-p1",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-5 * time.Minute),
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted},
+		},
+	}
+	pass1Report := &ScanReport{
+		ID:         "report-p1",
+		JobID:      "job-p1",
+		ServerName: "my-server",
+		ScannerID:  "test-scanner",
+		Findings:   []ScanFinding{},
+		ScannedAt:  time.Now().Add(-5 * time.Minute),
+	}
+
+	// Pass 2 with warning-level findings
+	pass2Job := &ScanJob{
+		ID:         "job-p2",
+		ServerName: "my-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSupplyChainAudit,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-2 * time.Minute),
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 1},
+		},
+	}
+	pass2Report := &ScanReport{
+		ID:         "report-p2",
+		JobID:      "job-p2",
+		ServerName: "my-server",
+		ScannerID:  "test-scanner",
+		Findings: []ScanFinding{
+			{
+				RuleID:      "CVE-2026-5678",
+				Severity:    SeverityHigh,
+				ThreatType:  ThreatSupplyChain,
+				ThreatLevel: ThreatLevelWarning,
+			},
+		},
+		ScannedAt: time.Now().Add(-2 * time.Minute),
+	}
+
+	_ = store.SaveScanJob(pass1Job)
+	_ = store.SaveScanReport(pass1Report)
+	_ = store.SaveScanJob(pass2Job)
+	_ = store.SaveScanReport(pass2Report)
+
+	summary := svc.GetScanSummary(context.Background(), "my-server")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+
+	// Summary should reflect Pass 2 findings (warning status)
+	if summary.Status != "warnings" {
+		t.Errorf("expected status 'warnings' (from Pass 2 findings), got %s", summary.Status)
+	}
+
+	if summary.FindingCounts == nil {
+		t.Fatal("expected FindingCounts to be non-nil")
+	}
+	if summary.FindingCounts.Warning != 1 {
+		t.Errorf("expected 1 warning, got %d", summary.FindingCounts.Warning)
+	}
+	if summary.FindingCounts.Total != 1 {
+		t.Errorf("expected 1 total finding, got %d", summary.FindingCounts.Total)
+	}
+}
+
+func TestScanJobScanPassField(t *testing.T) {
+	// Verify ScanPass is correctly set on new jobs via the engine
+	logger := zap.NewNop()
+	store := newMockStorage()
+	docker := NewDockerRunner(logger)
+	registry := &Registry{scanners: make(map[string]*ScannerPlugin), logger: logger}
+	_ = NewService(store, registry, docker, t.TempDir(), logger)
+
+	// Create a job with ScanPass set
+	job := &ScanJob{
+		ID:         "test-job-pass",
+		ServerName: "test-server",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSupplyChainAudit,
+		Scanners:   []string{"scanner-a"},
+		StartedAt:  time.Now(),
+	}
+
+	_ = store.SaveScanJob(job)
+
+	retrieved, err := store.GetScanJob("test-job-pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if retrieved.ScanPass != ScanPassSupplyChainAudit {
+		t.Errorf("expected ScanPass=%d, got %d", ScanPassSupplyChainAudit, retrieved.ScanPass)
+	}
+}
+
+func TestScanFindingScanPassTag(t *testing.T) {
+	// Verify ScanPass is preserved on findings through aggregation
+	findings := []ScanFinding{
+		{RuleID: "RULE-1", Severity: SeverityHigh, ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, ScanPass: ScanPassSecurityScan},
+		{RuleID: "CVE-001", Severity: SeverityMedium, ThreatType: ThreatSupplyChain, ThreatLevel: ThreatLevelWarning, ScanPass: ScanPassSupplyChainAudit},
+	}
+
+	report := &ScanReport{
+		ID:        "report-test",
+		ScannerID: "scanner-a",
+		Findings:  findings,
+		ScannedAt: time.Now(),
+	}
+
+	agg := AggregateReports("job-test", "server-test", []*ScanReport{report})
+
+	if len(agg.Findings) != 2 {
+		t.Fatalf("expected 2 findings, got %d", len(agg.Findings))
+	}
+
+	if agg.Findings[0].ScanPass != ScanPassSecurityScan {
+		t.Errorf("expected first finding ScanPass=%d, got %d", ScanPassSecurityScan, agg.Findings[0].ScanPass)
+	}
+	if agg.Findings[1].ScanPass != ScanPassSupplyChainAudit {
+		t.Errorf("expected second finding ScanPass=%d, got %d", ScanPassSupplyChainAudit, agg.Findings[1].ScanPass)
+	}
+}
