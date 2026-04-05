@@ -23,21 +23,20 @@ var bundledScanners = []*ScannerPlugin{
 		ID:          "cisco-mcp-scanner",
 		Name:        "Cisco MCP Scanner",
 		Vendor:      "Cisco AI Defense",
-		Description: "YARA rules + LLM-as-judge analysis. Detects tool poisoning, prompt injection, malware, and behavioral anomalies.",
+		Description: "YARA rules + readiness analysis. Detects tool poisoning, prompt injection, credential harvesting, and data exfiltration. No API key needed for offline mode.",
 		License:     "Apache-2.0",
 		Homepage:    "https://github.com/cisco-ai-defense/mcp-scanner",
 		DockerImage: "mcpproxy/scanner-cisco:latest",
-		Inputs:      []string{"source", "mcp_connection"},
+		Inputs:      []string{"source"},
 		Outputs:     []string{"sarif"},
-		RequiredEnv: []EnvRequirement{
-			{Key: "MCP_SCANNER_API_KEY", Label: "Cisco AI Defense API Key", Secret: true},
-		},
+		RequiredEnv: nil, // YARA + readiness work without any API key
 		OptionalEnv: []EnvRequirement{
+			{Key: "MCP_SCANNER_API_KEY", Label: "Cisco AI Defense API Key (for cloud analysis)", Secret: true},
 			{Key: "VIRUSTOTAL_API_KEY", Label: "VirusTotal API Key", Secret: true},
 		},
-		Command:    []string{"mcp-scanner", "scan", "--format", "sarif"},
-		Timeout:    "180s",
-		NetworkReq: true,
+		Command:    []string{"--analyzers", "yara,readiness", "--format", "raw", "static", "--tools", "/scan/source/tools.json"},
+		Timeout:    "120s",
+		NetworkReq: false, // YARA + readiness are fully offline
 	},
 	{
 		ID:          "semgrep-mcp",

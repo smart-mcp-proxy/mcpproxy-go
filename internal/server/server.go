@@ -1672,7 +1672,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
-		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg})
+		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		httpAPIServer.SetSecurityController(secService)
 		s.securityScanner = secService
@@ -2386,9 +2386,10 @@ func (k *keyringSecretStore) ResolveSecret(ctx context.Context, refStr string) (
 	return k.resolver.Resolve(ctx, *ref)
 }
 
-// configServerInfoProvider implements scanner.ServerInfoProvider using the config.
+// configServerInfoProvider implements scanner.ServerInfoProvider using the config and server.
 type configServerInfoProvider struct {
-	cfg *config.Config
+	cfg    *config.Config
+	server *Server
 }
 
 func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.ServerInfo, error) {
@@ -2409,4 +2410,11 @@ func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.Se
 		}
 	}
 	return nil, fmt.Errorf("server %q not found in config", serverName)
+}
+
+func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	if p.server != nil {
+		return p.server.GetServerTools(serverName)
+	}
+	return nil, fmt.Errorf("server tools not available")
 }

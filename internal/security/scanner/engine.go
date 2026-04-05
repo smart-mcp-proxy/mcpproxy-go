@@ -388,6 +388,17 @@ func (e *Engine) parseResults(data []byte, scannerID string) (*ScanReport, error
 		return report, nil
 	}
 
+	// Try Cisco MCP Scanner raw JSON format
+	if isCiscoScannerOutput(data) {
+		findings := parseCiscoScannerOutput(data, scannerID)
+		report.Findings = findings
+		if len(findings) > 0 {
+			ClassifyAllFindings(report.Findings)
+		}
+		report.RiskScore = CalculateRiskScore(report.Findings)
+		return report, nil
+	}
+
 	// Try generic JSON with findings array
 	var generic struct {
 		Findings []ScanFinding `json:"findings"`
@@ -514,6 +525,106 @@ func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanRepo
 	}
 
 	return agg
+}
+
+// isCiscoScannerOutput checks if the data looks like Cisco MCP Scanner output
+func isCiscoScannerOutput(data []byte) bool {
+	var probe struct {
+		ScanResults []any `json:"scan_results"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.ScanResults != nil
+}
+
+// parseCiscoScannerOutput parses Cisco MCP Scanner's raw JSON format into ScanFindings.
+// The Cisco format has: { "scan_results": [ { "tool_name": "x", "is_safe": false, "findings": { "yara_analyzer": { ... } } } ] }
+func parseCiscoScannerOutput(data []byte, scannerID string) []ScanFinding {
+	var cisco struct {
+		ScanResults []struct {
+			ToolName        string `json:"tool_name"`
+			ToolDescription string `json:"tool_description"`
+			IsSafe          bool   `json:"is_safe"`
+			Findings        map[string]struct {
+				Severity      string   `json:"severity"`
+				ThreatNames   []string `json:"threat_names"`
+				ThreatSummary string   `json:"threat_summary"`
+				TotalFindings int      `json:"total_findings"`
+				MCPTaxonomies []struct {
+					ScannerCategory string `json:"scanner_category"`
+					AITechName      string `json:"aitech_name"`
+					AISubtechName   string `json:"aisubtech_name"`
+					Description     string `json:"description"`
+				} `json:"mcp_taxonomies"`
+			} `json:"findings"`
+		} `json:"scan_results"`
+	}
+
+	if err := json.Unmarshal(data, &cisco); err != nil {
+		return nil
+	}
+	if len(cisco.ScanResults) == 0 {
+		return nil
+	}
+
+	var findings []ScanFinding
+	for _, result := range cisco.ScanResults {
+		if result.IsSafe {
+			continue // Skip safe tools
+		}
+		for analyzerName, analyzerResult := range result.Findings {
+			if analyzerResult.TotalFindings == 0 {
+				continue
+			}
+			for _, threat := range analyzerResult.ThreatNames {
+				finding := ScanFinding{
+					RuleID:      strings.ToLower(strings.ReplaceAll(threat, " ", "_")),
+					Title:       threat + " in tool: " + result.ToolName,
+					Description: analyzerResult.ThreatSummary,
+					Scanner:     scannerID,
+					Location:    "tool:" + result.ToolName,
+				}
+
+				// Map Cisco severity to our severity
+				switch strings.ToUpper(analyzerResult.Severity) {
+				case "HIGH":
+					finding.Severity = SeverityHigh
+					finding.ThreatType = ThreatToolPoisoning
+					finding.ThreatLevel = ThreatLevelDangerous
+				case "MEDIUM":
+					finding.Severity = SeverityMedium
+					finding.ThreatType = ThreatToolPoisoning
+					finding.ThreatLevel = ThreatLevelWarning
+				default:
+					finding.Severity = SeverityLow
+					finding.ThreatType = ThreatUncategorized
+					finding.ThreatLevel = ThreatLevelInfo
+				}
+
+				// Classify based on threat name
+				threatLower := strings.ToLower(threat)
+				if strings.Contains(threatLower, "credential") || strings.Contains(threatLower, "exfiltrat") {
+					finding.ThreatType = ThreatToolPoisoning
+					finding.ThreatLevel = ThreatLevelDangerous
+				} else if strings.Contains(threatLower, "injection") {
+					finding.ThreatType = ThreatPromptInjection
+					finding.ThreatLevel = ThreatLevelDangerous
+				}
+
+				// Add taxonomy description if available
+				if len(analyzerResult.MCPTaxonomies) > 0 {
+					finding.Description = analyzerResult.MCPTaxonomies[0].Description
+					finding.Category = analyzerResult.MCPTaxonomies[0].ScannerCategory
+				}
+
+				_ = analyzerName // used for context but not in the finding
+				findings = append(findings, finding)
+			}
+		}
+	}
+
+	return findings
 }
 
 func truncate(s string, maxLen int) string {

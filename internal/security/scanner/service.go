@@ -2,7 +2,10 @@ package scanner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -59,6 +62,7 @@ func (n *NoopEmitter) EmitSecurityIntegrityAlert(string, string, string)    {}
 // ServerInfoProvider resolves server configuration for auto-source resolution
 type ServerInfoProvider interface {
 	GetServerInfo(serverName string) (*ServerInfo, error)
+	GetServerTools(serverName string) ([]map[string]interface{}, error)
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -200,8 +204,11 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 		return fmt.Errorf("Docker is not available; scanner installation requires Docker")
 	}
 
-	// Pull Docker image
-	if err := s.docker.PullImage(ctx, scanner.DockerImage); err != nil {
+	// Pull Docker image (skip if already exists locally)
+	if s.docker.ImageExists(ctx, scanner.DockerImage) {
+		s.logger.Info("Docker image already exists locally, skipping pull",
+			zap.String("image", scanner.DockerImage))
+	} else if err := s.docker.PullImage(ctx, scanner.DockerImage); err != nil {
 		scanner.Status = ScannerStatusError
 		scanner.ErrorMsg = err.Error()
 		_ = s.storage.SaveScanner(scanner)
@@ -457,6 +464,11 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		scanCtx.TotalSizeBytes = size
 	}
 
+	// Export server tool definitions for Cisco scanner (which scans tool descriptions)
+	if req.SourceDir != "" && s.serverInfo != nil {
+		s.exportToolDefinitions(serverName, req.SourceDir)
+	}
+
 	// Attach context to the scan request so the engine can set it on the job
 	req.ScanContext = scanCtx
 
@@ -529,6 +541,11 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 		scanCtx.ScannedFiles = resolved.Files
 		scanCtx.TotalFiles = resolved.TotalFiles
 		scanCtx.TotalSizeBytes = resolved.TotalSize
+
+		// Export tool definitions for Cisco scanner
+		if s.serverInfo != nil {
+			s.exportToolDefinitions(serverName, req.SourceDir)
+		}
 	} else {
 		s.logger.Warn("No server info available for Pass 2, skipping",
 			zap.String("server", serverName),
@@ -1026,6 +1043,40 @@ func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary) {
 	s.summaryCacheMu.Lock()
 	s.summaryCache[serverName] = summary
 	s.summaryCacheMu.Unlock()
+}
+
+// exportToolDefinitions writes a tools.json file to the source directory
+// so the Cisco MCP Scanner can analyze tool descriptions for poisoning attacks.
+func (s *Service) exportToolDefinitions(serverName, sourceDir string) {
+	tools, err := s.serverInfo.GetServerTools(serverName)
+	if err != nil {
+		s.logger.Debug("Could not export tool definitions (server may be disconnected)",
+			zap.String("server", serverName), zap.Error(err))
+		return
+	}
+	if len(tools) == 0 {
+		return
+	}
+
+	// Format as MCP tools/list output
+	toolsData := map[string]interface{}{
+		"tools": tools,
+	}
+	data, err := json.MarshalIndent(toolsData, "", "  ")
+	if err != nil {
+		return
+	}
+
+	toolsPath := filepath.Join(sourceDir, "tools.json")
+	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
+		s.logger.Debug("Failed to write tools.json", zap.Error(err))
+	} else {
+		s.logger.Info("Exported tool definitions for scanning",
+			zap.String("server", serverName),
+			zap.Int("tools", len(tools)),
+			zap.String("path", toolsPath),
+		)
+	}
 }
 
 // pruneOldScans removes old scan jobs and reports beyond MaxScansPerServer
