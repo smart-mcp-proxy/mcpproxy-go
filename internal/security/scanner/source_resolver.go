@@ -184,12 +184,31 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID, 
 	appDirs := r.findAppDirectories(stdout.String())
 
 	if len(appDirs) == 0 {
-		// Fallback: copy the entire container filesystem (minus OS dirs)
-		r.logger.Info("No specific app directories found, extracting working directory",
+		// Fallback: try UV git checkouts directly, then common app dirs
+		// Do NOT copy /root entirely — it may contain 10K+ dependency files
+		r.logger.Info("No specific app directories found in docker diff, trying direct paths",
 			zap.String("container", containerID),
 		)
-		// Try common app locations
-		for _, dir := range []string{"/app", "/src", "/opt", "/root"} {
+		// Try UV git checkouts first (uvx --from pkg@git+URL)
+		uvCheckoutCmd := exec.CommandContext(ctx, "docker", "exec", containerID, "find", "/root/.cache/uv/git-v0/checkouts", "-maxdepth", "2", "-mindepth", "2", "-type", "d")
+		var uvOut bytes.Buffer
+		uvCheckoutCmd.Stdout = &uvOut
+		if uvCheckoutCmd.Run() == nil {
+			for _, dir := range strings.Split(strings.TrimSpace(uvOut.String()), "\n") {
+				if dir == "" {
+					continue
+				}
+				destDir := filepath.Join(tempDir, "source")
+				os.MkdirAll(destDir, 0755)
+				cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+				if cpCmd.Run() == nil {
+					r.logger.Info("Extracted UV git checkout", zap.String("dir", dir))
+					return tempDir, cleanup, nil
+				}
+			}
+		}
+		// Try common app dirs (NOT /root — too broad)
+		for _, dir := range []string{"/app", "/src", "/opt/app"} {
 			cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", filepath.Join(tempDir, filepath.Base(dir)))
 			if cpCmd.Run() == nil {
 				return tempDir, cleanup, nil
@@ -308,8 +327,10 @@ func (r *SourceResolver) extractAppRoot(path string) string {
 		}
 	}
 
-	// Root-level user files (but NOT .cache — too broad)
-	if strings.HasPrefix(path, "/root/") && !strings.HasPrefix(path, "/root/.cache/") {
+	// Root-level user files (but NOT .cache or .local — too broad, contains deps)
+	if strings.HasPrefix(path, "/root/") &&
+		!strings.HasPrefix(path, "/root/.cache") &&
+		!strings.HasPrefix(path, "/root/.local") {
 		parts := strings.SplitN(path[6:], "/", 2) // after "/root/"
 		if len(parts) > 0 {
 			return "/root/" + parts[0]
