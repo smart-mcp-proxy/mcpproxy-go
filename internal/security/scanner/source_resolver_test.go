@@ -121,7 +121,6 @@ func TestFindAppDirectories(t *testing.T) {
 	r := NewSourceResolver(zap.NewNop())
 
 	diffOutput := `C /root
-A /root/.npm
 A /root/.npm/_npx/abc123/node_modules/@mcp/server/index.js
 A /root/.npm/_npx/abc123/node_modules/@mcp/server/package.json
 C /tmp
@@ -129,27 +128,35 @@ A /tmp/some-cache
 A /app/server.py
 A /app/tools/search.py
 C /etc/hostname
-A /usr/local/lib/python3.11/site-packages/mcp_server/main.py`
+A /usr/local/lib/python3.11/site-packages/mcp_server/main.py
+A /root/.cache/uv/git-v0/checkouts/abc123/def456/gcore_mcp_server/server.py
+A /root/.cache/uv/archive-v0/xxx/click/__init__.py`
 
 	dirs := r.findAppDirectories(diffOutput)
 
-	// Should find: /root/.npm and /app
-	// node_modules and site-packages are now excluded (dependency code, not user code)
 	found := make(map[string]bool)
 	for _, d := range dirs {
 		found[d] = true
 	}
 
-	if !found["/root/.npm"] {
-		t.Errorf("expected /root/.npm dir, got %v", dirs)
+	// Should find: npm node_modules, /app, and UV git checkout
+	if !found["/root/.npm/_npx/abc123/node_modules"] {
+		t.Errorf("expected npm node_modules dir, got %v", dirs)
 	}
 	if !found["/app"] {
 		t.Errorf("expected /app dir, got %v", dirs)
 	}
-	// site-packages and node_modules should be filtered out
+	if !found["/root/.cache/uv/git-v0/checkouts/abc123/def456"] {
+		t.Errorf("expected UV git checkout dir, got %v", dirs)
+	}
+
+	// Should NOT find: site-packages, UV archive (dependencies)
 	for _, d := range dirs {
-		if strings.Contains(d, "site-packages") || strings.Contains(d, "node_modules") {
-			t.Errorf("dependency dir should be excluded: %s", d)
+		if strings.Contains(d, "site-packages") {
+			t.Errorf("site-packages should be excluded: %s", d)
+		}
+		if strings.Contains(d, "archive-v0") {
+			t.Errorf("UV archive should be excluded: %s", d)
 		}
 	}
 }
@@ -187,11 +194,14 @@ func TestExtractAppRoot(t *testing.T) {
 		want string
 	}{
 		{"/root/.npm/_npx/abc/node_modules/@mcp/server/index.js", "/root/.npm/_npx/abc/node_modules"},
-		{"/usr/local/lib/python3.11/site-packages/mcp_server/main.py", "/usr/local/lib/python3.11/site-packages"},
 		{"/app/server.py", "/app"},
 		{"/src/main.go", "/src"},
-		{"/root/.cache/data", "/root/.cache"},
 		{"/opt/app/config.yaml", "/opt/app"},
+		// UV git checkouts — actual server source
+		{"/root/.cache/uv/git-v0/checkouts/abc123/def456/server.py", "/root/.cache/uv/git-v0/checkouts/abc123/def456"},
+		{"/root/.cache/uv/git-v0/checkouts/abc123/def456/pkg/main.py", "/root/.cache/uv/git-v0/checkouts/abc123/def456"},
+		// /root non-cache files
+		{"/root/script.py", "/root/script.py"},
 	}
 
 	for _, tt := range tests {

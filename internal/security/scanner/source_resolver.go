@@ -264,26 +264,40 @@ func (r *SourceResolver) isSystemPath(path string) bool {
 	}
 	// Skip dependency directories (too large, not user code)
 	if strings.Contains(path, "/site-packages/") ||
-		strings.Contains(path, "/dist-packages/") ||
-		strings.Contains(path, "/node_modules/") {
+		strings.Contains(path, "/dist-packages/") {
+		return true
+	}
+	// Skip standalone node_modules (but NOT inside npx cache which is the server itself)
+	if strings.Contains(path, "/node_modules/") && !strings.Contains(path, "/_npx/") {
+		return true
+	}
+	// Skip UV/pip dependency archives (keep git checkouts which are actual source)
+	if strings.Contains(path, "/.cache/uv/archive-v0/") ||
+		strings.Contains(path, "/.cache/pip/") {
 		return true
 	}
 	return false
 }
 
 // extractAppRoot extracts the top-level application directory from a path.
-// For npm: /root/.npm/_npx/*/node_modules/@scope/pkg → /root/.npm/_npx/*/node_modules
-// For pip: /usr/local/lib/python*/site-packages/pkg → /usr/local/lib/python*/site-packages
-// For generic: /app/src/file.py → /app
+// Identifies actual server source vs dependency code for various package managers.
 func (r *SourceResolver) extractAppRoot(path string) string {
-	// npm packages (npx installs)
-	if idx := strings.Index(path, "/node_modules/"); idx != -1 {
-		return path[:idx+len("/node_modules")]
+	// UV git checkouts: /root/.cache/uv/git-v0/checkouts/<hash>/<rev>/ → extract that specific checkout
+	// This is the ACTUAL source code of a git-installed package (e.g., uvx --from pkg@git+URL)
+	if strings.Contains(path, "/.cache/uv/git-v0/checkouts/") {
+		// Extract: /root/.cache/uv/git-v0/checkouts/<hash>/<rev>
+		parts := strings.Split(path, "/")
+		for i, p := range parts {
+			if p == "checkouts" && i+2 < len(parts) {
+				return strings.Join(parts[:i+3], "/")
+			}
+		}
 	}
 
-	// pip packages
-	if idx := strings.Index(path, "/site-packages/"); idx != -1 {
-		return path[:idx+len("/site-packages")]
+	// npm npx cache: /root/.npm/_npx/<hash>/node_modules/<pkg> → extract the specific package
+	if strings.Contains(path, "/.npm/_npx/") && strings.Contains(path, "/node_modules/") {
+		idx := strings.Index(path, "/node_modules/")
+		return path[:idx+len("/node_modules")]
 	}
 
 	// Common app directories
@@ -294,8 +308,8 @@ func (r *SourceResolver) extractAppRoot(path string) string {
 		}
 	}
 
-	// Root-level user files (e.g., /root/.npm/_npx/...)
-	if strings.HasPrefix(path, "/root/") {
+	// Root-level user files (but NOT .cache — too broad)
+	if strings.HasPrefix(path, "/root/") && !strings.HasPrefix(path, "/root/.cache/") {
 		parts := strings.SplitN(path[6:], "/", 2) // after "/root/"
 		if len(parts) > 0 {
 			return "/root/" + parts[0]
