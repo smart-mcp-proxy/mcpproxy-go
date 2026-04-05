@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -72,6 +73,10 @@ type Service struct {
 	secretStore    SecretStore
 	queue          *ScanQueue
 	logger         *zap.Logger
+
+	// In-memory scan summary cache — avoids expensive BBolt reads per server
+	summaryCache   map[string]*ScanSummary
+	summaryCacheMu sync.RWMutex
 }
 
 // NewService creates a new SecurityService
@@ -85,6 +90,7 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 		emitter:        &NoopEmitter{},
 		sourceResolver: NewSourceResolver(logger),
 		queue:          NewScanQueue(logger),
+		summaryCache:   make(map[string]*ScanSummary),
 		logger:         logger,
 	}
 	// Restore installed scanner state from storage (survives restart)
@@ -328,6 +334,8 @@ type scanCallbackAdapter struct {
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
 	_ = a.service.storage.SaveScanJob(job)
 	a.service.emitter.EmitSecurityScanStarted(job.ServerName, job.Scanners, job.ID)
+	// Invalidate cached summary so server list shows "scanning"
+	a.service.invalidateScanSummaryCache(job.ServerName)
 }
 
 func (a *scanCallbackAdapter) OnScannerStarted(job *ScanJob, scannerID string) {
@@ -348,6 +356,8 @@ func (a *scanCallbackAdapter) OnScannerFailed(job *ScanJob, scannerID string, er
 
 func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanReport) {
 	_ = a.service.storage.SaveScanJob(job)
+	// Invalidate cached summary so next read gets fresh results
+	a.service.invalidateScanSummaryCache(job.ServerName)
 	// Aggregate findings summary for event
 	summary := make(map[string]int)
 	for _, r := range reports {
@@ -368,6 +378,8 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 
 func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 	_ = a.service.storage.SaveScanJob(job)
+	// Invalidate cached summary
+	a.service.invalidateScanSummaryCache(job.ServerName)
 	// Cleanup auto-resolved source directory
 	if a.cleanup != nil {
 		a.cleanup()
@@ -857,6 +869,13 @@ type IntegrityViolation struct {
 // Returns nil if no scans have been run for this server.
 // Considers both Pass 1 and Pass 2 results when computing status.
 func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
+	// Check cache first (avoids expensive BBolt reads for every server)
+	s.summaryCacheMu.RLock()
+	if cached, ok := s.summaryCache[serverName]; ok {
+		s.summaryCacheMu.RUnlock()
+		return cached
+	}
+	s.summaryCacheMu.RUnlock()
 
 	// Check for active scan (Pass 1 takes priority in status display)
 	if active := s.engine.GetActiveJob(serverName); active != nil {
@@ -889,6 +908,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// Check if the primary job failed
 	if primaryJob.Status == ScanJobStatusFailed {
 		summary.Status = "failed"
+		s.cacheScanSummary(serverName, summary)
 		return summary
 	}
 
@@ -903,6 +923,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		}
 		if allFailed {
 			summary.Status = "failed"
+			s.cacheScanSummary(serverName, summary)
 			return summary
 		}
 	}
@@ -936,6 +957,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 				summary.Status = "failed"
 			}
 		}
+		s.cacheScanSummary(serverName, summary)
 		return summary
 	}
 
@@ -967,6 +989,8 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		summary.Status = "clean" // Only informational findings
 	}
 
+	// Cache for fast subsequent reads
+	s.cacheScanSummary(serverName, summary)
 	return summary
 }
 
@@ -984,6 +1008,24 @@ type FindingCounts struct {
 	Warning   int `json:"warning"`
 	Info      int `json:"info"`
 	Total     int `json:"total"`
+}
+
+// invalidateScanSummaryCache removes a server's cached scan summary,
+// forcing the next GetScanSummary call to recompute from storage.
+func (s *Service) invalidateScanSummaryCache(serverName string) {
+	s.summaryCacheMu.Lock()
+	delete(s.summaryCache, serverName)
+	s.summaryCacheMu.Unlock()
+}
+
+// cacheScanSummary stores a computed scan summary in the cache.
+func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary) {
+	if summary == nil {
+		return
+	}
+	s.summaryCacheMu.Lock()
+	s.summaryCache[serverName] = summary
+	s.summaryCacheMu.Unlock()
 }
 
 // pruneOldScans removes old scan jobs and reports beyond MaxScansPerServer
