@@ -42,7 +42,7 @@ var bundledScanners = []*ScannerPlugin{
 		ID:          "semgrep-mcp",
 		Name:        "Semgrep MCP Rules",
 		Vendor:      "Semgrep",
-		Description: "Static analysis with MCP-specific rules for detecting insecure tool patterns, injection vectors, and unsafe configurations.",
+		Description: "Static analysis for detecting dangerous code patterns, injection vectors, and hardcoded secrets in server source code.",
 		License:     "LGPL-2.1",
 		Homepage:    "https://semgrep.dev",
 		DockerImage: "returntocorp/semgrep:latest",
@@ -52,7 +52,7 @@ var bundledScanners = []*ScannerPlugin{
 		OptionalEnv: []EnvRequirement{
 			{Key: "SEMGREP_APP_TOKEN", Label: "Semgrep Cloud Token", Secret: true},
 		},
-		Command:    []string{"semgrep", "scan", "--sarif", "--output", "/scan/report/results.sarif", "--exclude", "site-packages", "--exclude", "node_modules", "--exclude", "dist-packages", "/scan/source"},
+		Command:    []string{"semgrep", "scan", "--novcs", "--sarif", "--output", "/scan/report/results.sarif", "--exclude", "site-packages", "--exclude", "node_modules", "--exclude", "dist-packages", "/scan/source"},
 		Timeout:    "600s", // 10 minutes — large source trees take time
 		NetworkReq: true,   // Downloads rules from registry
 	},

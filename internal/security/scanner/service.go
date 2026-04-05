@@ -63,6 +63,12 @@ func (n *NoopEmitter) EmitSecurityIntegrityAlert(string, string, string)    {}
 type ServerInfoProvider interface {
 	GetServerInfo(serverName string) (*ServerInfo, error)
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
+	// EnsureConnected attempts to connect a disconnected/quarantined server
+	// so that tool definitions can be retrieved for scanning.
+	// Returns nil if already connected or successfully connected.
+	EnsureConnected(ctx context.Context, serverName string) error
+	// IsConnected returns whether the server has an active MCP connection.
+	IsConnected(serverName string) bool
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -464,9 +470,45 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		scanCtx.TotalSizeBytes = size
 	}
 
-	// Export server tool definitions for Cisco scanner (which scans tool descriptions)
-	if req.SourceDir != "" && s.serverInfo != nil {
-		s.exportToolDefinitions(serverName, req.SourceDir)
+	// Export server tool definitions for Cisco scanner (which scans tool descriptions).
+	// If the server is disconnected (e.g., quarantined), auto-connect it first so we
+	// can retrieve tool definitions. The quarantine state is preserved — tools remain
+	// blocked for clients; we only need the definitions for scanning.
+	if s.serverInfo != nil {
+		// If no source dir was resolved (no Docker container, no working_dir),
+		// create a temp dir so Cisco scanner can at least scan tool definitions.
+		if req.SourceDir == "" {
+			tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-tools-%s-", serverName))
+			if err == nil {
+				req.SourceDir = tempDir
+				scanCtx.SourceMethod = "tool_definitions_only"
+				scanCtx.SourcePath = tempDir
+				oldCleanup := resolvedCleanup
+				resolvedCleanup = func() {
+					os.RemoveAll(tempDir)
+					if oldCleanup != nil {
+						oldCleanup()
+					}
+				}
+				s.logger.Info("Created temp dir for tool definitions (no source files available)",
+					zap.String("server", serverName), zap.String("dir", tempDir))
+			}
+		}
+
+		if req.SourceDir != "" {
+			if !s.serverInfo.IsConnected(serverName) {
+				s.logger.Info("Server is disconnected, attempting to connect for scan",
+					zap.String("server", serverName))
+				if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
+					s.logger.Warn("Failed to connect server for tool export (scan will continue without tool definitions)",
+						zap.String("server", serverName), zap.Error(err))
+				} else {
+					// Wait for the server to actually connect (up to 15 seconds)
+					s.waitForConnection(serverName, 15*time.Second)
+				}
+			}
+			scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+		}
 	}
 
 	// Attach context to the scan request so the engine can set it on the job
@@ -973,6 +1015,15 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 			if len(reports) == 0 {
 				summary.Status = "failed"
 			}
+			// Detect empty scans: scanners ran but had no files to analyze.
+			// Without this, the server list shows "clean" when nothing was scanned.
+			// Valid when: URL scan, tool_definitions_only, or tools were exported.
+			if primaryJob.ScanContext != nil && primaryJob.ScanContext.TotalFiles == 0 &&
+				primaryJob.ScanContext.SourceMethod != "url" &&
+				primaryJob.ScanContext.SourceMethod != "tool_definitions_only" &&
+				primaryJob.ScanContext.ToolsExported == 0 {
+				summary.Status = "failed"
+			}
 		}
 		s.cacheScanSummary(serverName, summary)
 		return summary
@@ -1045,17 +1096,34 @@ func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary) {
 	s.summaryCacheMu.Unlock()
 }
 
+// waitForConnection polls IsConnected until the server connects or the timeout expires.
+func (s *Service) waitForConnection(serverName string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.serverInfo.IsConnected(serverName) {
+			s.logger.Info("Server connected for scan",
+				zap.String("server", serverName))
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	s.logger.Warn("Timed out waiting for server to connect for scan",
+		zap.String("server", serverName),
+		zap.Duration("timeout", timeout))
+}
+
 // exportToolDefinitions writes a tools.json file to the source directory
 // so the Cisco MCP Scanner can analyze tool descriptions for poisoning attacks.
-func (s *Service) exportToolDefinitions(serverName, sourceDir string) {
+// Returns the number of tools exported.
+func (s *Service) exportToolDefinitions(serverName, sourceDir string) int {
 	tools, err := s.serverInfo.GetServerTools(serverName)
 	if err != nil {
 		s.logger.Debug("Could not export tool definitions (server may be disconnected)",
 			zap.String("server", serverName), zap.Error(err))
-		return
+		return 0
 	}
 	if len(tools) == 0 {
-		return
+		return 0
 	}
 
 	// Format as MCP tools/list output
@@ -1064,19 +1132,20 @@ func (s *Service) exportToolDefinitions(serverName, sourceDir string) {
 	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
-		return
+		return 0
 	}
 
 	toolsPath := filepath.Join(sourceDir, "tools.json")
 	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
 		s.logger.Debug("Failed to write tools.json", zap.Error(err))
-	} else {
-		s.logger.Info("Exported tool definitions for scanning",
-			zap.String("server", serverName),
-			zap.Int("tools", len(tools)),
-			zap.String("path", toolsPath),
-		)
+		return 0
 	}
+	s.logger.Info("Exported tool definitions for scanning",
+		zap.String("server", serverName),
+		zap.Int("tools", len(tools)),
+		zap.String("path", toolsPath),
+	)
+	return len(tools)
 }
 
 // pruneOldScans removes old scan jobs and reports beyond MaxScansPerServer

@@ -2418,3 +2418,30 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 	}
 	return nil, fmt.Errorf("server tools not available")
 }
+
+// EnsureConnected attempts to connect a disconnected server so tool definitions
+// can be retrieved for security scanning. Uses RestartServer which handles
+// enabling disabled servers and connecting disconnected ones.
+func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverName string) error {
+	if p.server == nil {
+		return fmt.Errorf("server instance not available")
+	}
+	return p.server.runtime.RestartServer(serverName)
+}
+
+// IsConnected checks if the server has an active MCP connection via the stateview.
+func (p *configServerInfoProvider) IsConnected(serverName string) bool {
+	if p.server == nil {
+		return false
+	}
+	supervisor := p.server.runtime.Supervisor()
+	if supervisor == nil {
+		return false
+	}
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return false
+	}
+	return serverStatus.Connected
+}

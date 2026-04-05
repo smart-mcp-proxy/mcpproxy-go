@@ -202,6 +202,175 @@ func TestAggregateReportsWithJobStatusPartialFailure(t *testing.T) {
 	}
 }
 
+func TestAggregateReportsEmptyScan(t *testing.T) {
+	// Scanners "succeed" but scan 0 files (quarantined/disconnected server).
+	// This should set scan_complete=false and empty_scan=true.
+	reports := []*ScanReport{
+		{
+			ID:        "r1",
+			ScannerID: "semgrep-mcp",
+			Findings:  nil, // No findings because nothing was scanned
+			RiskScore: 0,
+		},
+		{
+			ID:        "r2",
+			ScannerID: "trivy-mcp",
+			Findings:  nil,
+			RiskScore: 0,
+		},
+	}
+
+	job := &ScanJob{
+		ID:         "job-empty",
+		ServerName: "test-server",
+		Status:     ScanJobStatusCompleted,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "cisco-mcp-scanner", Status: ScanJobStatusFailed, Error: "tools.json not found"},
+			{ScannerID: "semgrep-mcp", Status: ScanJobStatusCompleted, FindingsCount: 0},
+			{ScannerID: "trivy-mcp", Status: ScanJobStatusCompleted, FindingsCount: 0},
+		},
+		ScanContext: &ScanContext{
+			SourceMethod: "docker_extract",
+			TotalFiles:   0, // Key: no files were extracted
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-empty", "test-server", reports, job)
+
+	if agg.ScanComplete {
+		t.Error("expected ScanComplete=false when 0 files scanned")
+	}
+	if !agg.EmptyScan {
+		t.Error("expected EmptyScan=true when scanners ran but had no files")
+	}
+	if agg.RiskScore != 0 {
+		t.Errorf("expected risk score 0, got %d", agg.RiskScore)
+	}
+}
+
+func TestAggregateReportsDockerExtractWithToolsExported(t *testing.T) {
+	// Docker extraction found container but 0 source files. However, tool
+	// definitions were exported (ToolsExported > 0), so Cisco scanner had
+	// data to analyze. This is a valid scan, not empty.
+	reports := []*ScanReport{
+		{ID: "r1", ScannerID: "cisco-mcp-scanner", Findings: nil},
+		{ID: "r2", ScannerID: "semgrep-mcp", Findings: nil},
+	}
+
+	job := &ScanJob{
+		ID:         "job-docker-tools",
+		ServerName: "test-server",
+		Status:     ScanJobStatusCompleted,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "cisco-mcp-scanner", Status: ScanJobStatusCompleted},
+			{ScannerID: "semgrep-mcp", Status: ScanJobStatusCompleted},
+		},
+		ScanContext: &ScanContext{
+			SourceMethod:  "docker_extract",
+			TotalFiles:    0,  // No source files
+			ToolsExported: 13, // But tool definitions were analyzed
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-docker-tools", "test-server", reports, job)
+
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true when tool definitions were exported")
+	}
+	if agg.EmptyScan {
+		t.Error("expected EmptyScan=false when tool definitions were analyzed")
+	}
+}
+
+func TestAggregateReportsEmptyScanURLServer(t *testing.T) {
+	// URL-based servers (HTTP/SSE) with 0 files should NOT be marked as empty scan,
+	// since they don't have filesystem source — they use behavioral scanning.
+	reports := []*ScanReport{
+		{ID: "r1", ScannerID: "scanner-a", Findings: nil},
+	}
+
+	job := &ScanJob{
+		ID:         "job-url",
+		ServerName: "http-server",
+		Status:     ScanJobStatusCompleted,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "scanner-a", Status: ScanJobStatusCompleted},
+		},
+		ScanContext: &ScanContext{
+			SourceMethod: "url",
+			TotalFiles:   0, // Expected for URL servers
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-url", "http-server", reports, job)
+
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true for URL-based servers with 0 files")
+	}
+	if agg.EmptyScan {
+		t.Error("expected EmptyScan=false for URL-based servers")
+	}
+}
+
+func TestAggregateReportsToolDefinitionsOnly(t *testing.T) {
+	// "tool_definitions_only" scan (no source files but Cisco scanner analyzed
+	// tool descriptions) should be considered a valid scan, not empty.
+	reports := []*ScanReport{
+		{ID: "r1", ScannerID: "cisco-mcp-scanner", Findings: nil},
+	}
+
+	job := &ScanJob{
+		ID:         "job-tools",
+		ServerName: "test-server",
+		Status:     ScanJobStatusCompleted,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "cisco-mcp-scanner", Status: ScanJobStatusCompleted},
+		},
+		ScanContext: &ScanContext{
+			SourceMethod: "tool_definitions_only",
+			TotalFiles:   0,
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-tools", "test-server", reports, job)
+
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true for tool_definitions_only scan")
+	}
+	if agg.EmptyScan {
+		t.Error("expected EmptyScan=false for tool_definitions_only scan")
+	}
+}
+
+func TestAggregateReportsNonEmptySuccessfulScan(t *testing.T) {
+	// Normal successful scan with files and no findings = genuinely clean.
+	reports := []*ScanReport{
+		{ID: "r1", ScannerID: "scanner-a", Findings: nil},
+	}
+
+	job := &ScanJob{
+		ID:         "job-clean",
+		ServerName: "clean-server",
+		Status:     ScanJobStatusCompleted,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "scanner-a", Status: ScanJobStatusCompleted},
+		},
+		ScanContext: &ScanContext{
+			SourceMethod: "docker_extract",
+			TotalFiles:   42, // Files were actually scanned
+		},
+	}
+
+	agg := AggregateReportsWithJobStatus("job-clean", "clean-server", reports, job)
+
+	if !agg.ScanComplete {
+		t.Error("expected ScanComplete=true when files were scanned and no findings")
+	}
+	if agg.EmptyScan {
+		t.Error("expected EmptyScan=false when files were actually scanned")
+	}
+}
+
 func TestEngineResolveScanners(t *testing.T) {
 	dir := t.TempDir()
 	logger := zap.NewNop()

@@ -104,6 +104,7 @@ type ScanContext struct {
 	ContainerImage  string   `json:"container_image,omitempty"` // Docker image used
 	ServerProtocol  string   `json:"server_protocol"`           // stdio, http, sse
 	ServerCommand   string   `json:"server_command,omitempty"`  // Command used to start server
+	ToolsExported   int      `json:"tools_exported,omitempty"`  // Number of tool definitions exported for scanning
 	ScannedFiles    []string `json:"scanned_files,omitempty"`   // List of files that were scanned (capped at MaxScannedFiles)
 	TotalFiles      int      `json:"total_files"`               // Total file count (may be > len(ScannedFiles) if capped)
 	TotalSizeBytes  int64    `json:"total_size_bytes"`          // Total size of scanned source
@@ -184,6 +185,7 @@ type AggregatedReport struct {
 	ScannersFailed int           `json:"scanners_failed"` // How many scanners failed
 	ScannersTotal  int           `json:"scanners_total"`  // Total scanners attempted
 	ScanComplete   bool          `json:"scan_complete"`   // True only if at least one scanner succeeded
+	EmptyScan      bool          `json:"empty_scan"`      // True when scanners ran but had no files to analyze
 	// Two-pass scan tracking
 	Pass1Complete bool `json:"pass1_complete"` // Security scan (fast) done
 	Pass2Complete bool `json:"pass2_complete"` // Supply chain audit done

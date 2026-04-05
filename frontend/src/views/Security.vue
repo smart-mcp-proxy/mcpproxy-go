@@ -201,7 +201,8 @@
             <div class="flex gap-4 mb-4">
               <div class="stat bg-base-200 rounded-lg p-4">
                 <div class="stat-title text-sm">Risk Score</div>
-                <div class="stat-value text-2xl" :class="riskScoreClass(scanResult.risk_score)">{{ scanResult.risk_score }}/100</div>
+                <div v-if="scanResult.empty_scan" class="stat-value text-2xl text-warning">N/A</div>
+                <div v-else class="stat-value text-2xl" :class="riskScoreClass(scanResult.risk_score)">{{ scanResult.risk_score }}/100</div>
               </div>
               <div class="stat bg-base-200 rounded-lg p-4" v-if="scanResult.summary">
                 <div class="stat-title text-sm">Findings</div>

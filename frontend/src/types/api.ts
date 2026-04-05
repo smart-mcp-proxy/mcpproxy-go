@@ -81,6 +81,7 @@ export interface SecurityScanReport {
   scanners_failed?: number  // How many scanners failed
   scanners_total?: number   // Total scanners attempted
   scan_complete?: boolean   // True only if at least one scanner succeeded
+  empty_scan?: boolean      // True when scanners ran but had no files to analyze
   // Two-pass scan tracking
   pass1_complete?: boolean  // Security scan (fast) done
   pass2_complete?: boolean  // Supply chain audit done

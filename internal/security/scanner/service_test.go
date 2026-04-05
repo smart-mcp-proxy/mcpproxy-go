@@ -945,6 +945,39 @@ func TestServiceGetScanSummaryClean(t *testing.T) {
 	}
 }
 
+func TestServiceGetScanSummaryEmptyScan(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-empty",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"s1", "s2"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusFailed, Error: "tools.json not found"},
+			{ScannerID: "s2", Status: ScanJobStatusCompleted, FindingsCount: 0},
+		},
+		ScanContext: &ScanContext{
+			SourceMethod: "docker_extract",
+			TotalFiles:   0, // No files extracted
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r1", JobID: "j-empty", ServerName: "server-a", ScannerID: "s2",
+		Findings: []ScanFinding{}, ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Status != "failed" {
+		t.Errorf("expected status 'failed' for empty scan, got %q", summary.Status)
+	}
+}
+
 func TestServiceGetScanReportWithJobStatus(t *testing.T) {
 	svc, store, _ := newTestService(t)
 

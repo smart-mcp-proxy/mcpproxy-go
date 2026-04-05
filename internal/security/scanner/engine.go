@@ -522,6 +522,24 @@ func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanRepo
 		agg.ScannersFailed = failed
 		agg.ScannersRun = succeeded
 		agg.ScanComplete = succeeded > 0
+
+		// Detect empty scans: scanners "succeeded" but scanned nothing meaningful.
+		// This happens when a quarantined/disconnected server has no extractable
+		// source files. Without this check, the UI would show a misleading "0/100"
+		// risk score that implies the server is safe when nothing was actually analyzed.
+		// Exceptions:
+		//   - "url": HTTP behavioral scan (no filesystem)
+		//   - "tool_definitions_only": Cisco scanner analyzed tool descriptions
+		//   - ToolsExported > 0: tool definitions were analyzed even if no source files
+		if agg.ScanComplete && len(agg.Findings) == 0 && job.ScanContext != nil {
+			if job.ScanContext.TotalFiles == 0 &&
+				job.ScanContext.SourceMethod != "url" &&
+				job.ScanContext.SourceMethod != "tool_definitions_only" &&
+				job.ScanContext.ToolsExported == 0 {
+				agg.ScanComplete = false
+				agg.EmptyScan = true
+			}
+		}
 	}
 
 	return agg
