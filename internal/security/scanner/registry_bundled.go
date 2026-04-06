@@ -122,6 +122,6 @@ var bundledScanners = []*ScannerPlugin{
 		},
 		Command:    nil, // Uses entrypoint.py
 		Timeout:    "300s",
-		NetworkReq: false, // AI analysis uses mounted Claude OAuth token
+		NetworkReq: true, // Needs network for Claude API calls
 	},
 }

@@ -320,6 +320,16 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	cacheDir := filepath.Join(e.dataDir, "scanner-cache", s.ID)
 	os.MkdirAll(cacheDir, 0755)
 
+	// Mount Claude credentials for AI-powered scanners (read-only)
+	var extraMounts []string
+	if s.ID == "mcp-ai-scanner" {
+		homeDir, _ := os.UserHomeDir()
+		claudeDir := filepath.Join(homeDir, ".claude")
+		if _, err := os.Stat(claudeDir); err == nil {
+			extraMounts = append(extraMounts, claudeDir+":/app/.claude:ro")
+		}
+	}
+
 	// Run scanner container
 	cfg := ScannerRunConfig{
 		ContainerName: GenerateContainerName(s.ID, req.ServerName),
@@ -333,6 +343,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		Timeout:       timeout,
 		ReadOnly:      false, // Scanner containers need to write cache/temp files
 		MemoryLimit:   "512m",
+		ExtraMounts:   extraMounts,
 	}
 
 	stdout, stderr, exitCode, err := e.docker.RunScanner(ctx, cfg)

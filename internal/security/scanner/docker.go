@@ -76,6 +76,7 @@ type ScannerRunConfig struct {
 	Timeout       time.Duration     // Container execution timeout
 	ReadOnly      bool              // Read-only root filesystem
 	MemoryLimit   string            // e.g., "512m"
+	ExtraMounts   []string          // Additional -v mounts (e.g., "~/.claude:/app/.claude:ro")
 }
 
 // RunScanner runs a scanner container and returns the exit code and stdout/stderr
@@ -123,6 +124,11 @@ func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (st
 	// Mount cache directory (persists scanner DB downloads between runs)
 	if cfg.CacheDir != "" {
 		args = append(args, "-v", cfg.CacheDir+":/root/.cache:rw")
+	}
+
+	// Extra mounts (e.g., Claude credentials for AI scanner)
+	for _, mount := range cfg.ExtraMounts {
+		args = append(args, "-v", mount)
 	}
 
 	// Environment variables
