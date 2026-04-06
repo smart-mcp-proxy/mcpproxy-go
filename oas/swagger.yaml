@@ -153,6 +153,9 @@ components:
             type: string
           description: Map of runtime type to Docker image
           type: object
+        enable_cache_volume:
+          description: 'Mount shared cache volumes for faster restarts (default: true)'
+          type: boolean
         enabled:
           description: Global enable/disable for Docker isolation
           type: boolean

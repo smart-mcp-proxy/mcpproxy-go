@@ -208,3 +208,51 @@ func isValidDockerContainerNamePart(name string) bool {
 
 	return true
 }
+
+func TestGetCacheVolumeForRuntime(t *testing.T) {
+	tests := []struct {
+		runtime       string
+		wantVolume    string
+		wantPath      string
+		expectNoCache bool
+	}{
+		{"uvx", "mcpproxy-uv-cache", "/root/.cache/uv", false},
+		{"pip", "mcpproxy-uv-cache", "/root/.cache/uv", false},
+		{"python", "mcpproxy-uv-cache", "/root/.cache/uv", false},
+		{"npx", "mcpproxy-npm-cache", "/root/.npm", false},
+		{"npm", "mcpproxy-npm-cache", "/root/.npm", false},
+		{"go", "mcpproxy-go-cache", "/go/pkg/mod", false},
+		{"binary", "", "", true},
+		{"sh", "", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.runtime, func(t *testing.T) {
+			vol, path := getCacheVolumeForRuntime(tt.runtime)
+			if tt.expectNoCache {
+				if vol != "" || path != "" {
+					t.Errorf("expected no cache for %q, got vol=%q path=%q", tt.runtime, vol, path)
+				}
+			} else {
+				if vol != tt.wantVolume {
+					t.Errorf("volume: got %q, want %q", vol, tt.wantVolume)
+				}
+				if path != tt.wantPath {
+					t.Errorf("path: got %q, want %q", path, tt.wantPath)
+				}
+			}
+		})
+	}
+}
+
+func TestTransformCommandForContainer_UvxDirect(t *testing.T) {
+	im := NewIsolationManager(nil)
+	cmd, args := im.TransformCommandForContainer("uvx", []string{"mcp-server-time"}, "uvx")
+
+	if cmd != "uvx" {
+		t.Errorf("expected command 'uvx', got %q", cmd)
+	}
+	if len(args) != 1 || args[0] != "mcp-server-time" {
+		t.Errorf("expected args ['mcp-server-time'], got %v", args)
+	}
+}

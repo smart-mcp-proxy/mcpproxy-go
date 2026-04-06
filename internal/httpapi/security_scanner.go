@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -22,6 +23,7 @@ type SecurityController interface {
 
 	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error)
 	GetScanStatus(ctx context.Context, serverName string) (*scanner.ScanJob, error)
+	GetScanStatusByPass(ctx context.Context, serverName string, pass int) (*scanner.ScanJob, error)
 	GetScanReport(ctx context.Context, serverName string) (*scanner.AggregatedReport, error)
 	CancelScan(ctx context.Context, serverName string) error
 
@@ -178,7 +180,11 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 
 	job, err := s.securityController.StartScan(r.Context(), name, req.DryRun, req.ScannerIDs, req.SourceDir)
 	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, err.Error())
+		if strings.Contains(err.Error(), "already in progress") {
+			s.writeError(w, r, http.StatusConflict, err.Error())
+		} else {
+			s.writeError(w, r, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	s.writeJSON(w, http.StatusAccepted, contracts.NewSuccessResponse(job))
@@ -329,10 +335,11 @@ func (s *Server) handleGetScanFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pagination: ?limit=100&offset=0&suspicious_only=true
+	// Pagination: ?limit=100&offset=0&suspicious_only=true&pass=1
 	limit := 100
 	offset := 0
 	suspiciousOnly := false
+	pass := 0 // 0 = latest, 1 = security scan, 2 = supply chain
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
 			limit = parsed
@@ -346,9 +353,17 @@ func (s *Server) handleGetScanFiles(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("suspicious_only") == "true" {
 		suspiciousOnly = true
 	}
+	if p := r.URL.Query().Get("pass"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && (parsed == 1 || parsed == 2) {
+			pass = parsed
+		}
+	}
 
-	// Get scan status for context
-	job, err := s.securityController.GetScanStatus(r.Context(), name)
+	// Get scan status for the requested pass (default: pass 1 for consistency with scan context header)
+	if pass == 0 {
+		pass = 1 // Default to Pass 1 (security scan) to match the scan context shown in the UI
+	}
+	job, err := s.securityController.GetScanStatusByPass(r.Context(), name, pass)
 	if err != nil {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return

@@ -383,9 +383,13 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 	if a.cleanup != nil {
 		a.cleanup()
 	}
-	// Auto-start Pass 2 (supply chain audit) in background after Pass 1 completes
+	// Auto-start Pass 2 (supply chain audit) in background after Pass 1 completes.
+	// Skip for HTTP/URL servers — they have no filesystem to do supply chain analysis on.
 	if a.scanPass == ScanPassSecurityScan && !job.DryRun {
-		go a.service.startPass2(job.ServerName, a.serverInfo)
+		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
+		if !isURLServer {
+			go a.service.startPass2(job.ServerName, a.serverInfo)
+		}
 	}
 }
 
@@ -481,8 +485,12 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-tools-%s-", serverName))
 			if err == nil {
 				req.SourceDir = tempDir
-				scanCtx.SourceMethod = "tool_definitions_only"
-				scanCtx.SourcePath = tempDir
+				// For HTTP/URL servers, preserve the "url" source method and path
+				// (the temp dir is only for tool definitions, not the real source)
+				if scanCtx.SourceMethod != "url" {
+					scanCtx.SourceMethod = "tool_definitions_only"
+					scanCtx.SourcePath = tempDir
+				}
 				oldCleanup := resolvedCleanup
 				resolvedCleanup = func() {
 					os.RemoveAll(tempDir)
@@ -509,6 +517,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			}
 			scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
 		}
+	}
+
+	// Abort scan if we have no source files AND no tool definitions to scan.
+	// This prevents running 6 scanners on an empty directory (wasting time).
+	if scanCtx.SourceMethod == "tool_definitions_only" && scanCtx.ToolsExported == 0 {
+		// Clean up the empty temp dir
+		if resolvedCleanup != nil {
+			resolvedCleanup()
+		}
+		return nil, fmt.Errorf("cannot scan server %s: no source files available and server is disconnected (unable to export tool definitions). Connect the server first or configure a working_dir", serverName)
 	}
 
 	// Attach context to the scan request so the engine can set it on the job
@@ -628,14 +646,58 @@ func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
 	_ = s.storage.SaveScanJob(job)
 }
 
-// GetScanStatus returns the current scan status for a server
+// GetScanStatus returns the current scan status for a server.
+// Prefers Pass 1 (security scan) which contains the primary scanner execution data.
+// Pass 2 (supply chain audit) is only returned if Pass 1 is not available.
 func (s *Service) GetScanStatus(ctx context.Context, serverName string) (*ScanJob, error) {
 	// Check for active scan first
 	if active := s.engine.GetActiveJob(serverName); active != nil {
 		return active, nil
 	}
-	// Return latest completed scan
+
+	// Prefer Pass 1 — it has the primary security scan results and scanner execution logs.
+	// Pass 2 is a background follow-up (supply chain audit) with different scope.
+	pass1Job, pass2Job, err := s.findLatestPassJobs(serverName)
+	if err != nil {
+		return s.storage.GetLatestScanJob(serverName)
+	}
+
+	if pass1Job != nil {
+		return pass1Job, nil
+	}
+
+	if pass2Job != nil {
+		return pass2Job, nil
+	}
+
 	return s.storage.GetLatestScanJob(serverName)
+}
+
+// GetScanStatusByPass returns the scan job for a specific pass (1=security, 2=supply chain).
+// If pass is 0 or not found, falls back to GetScanStatus behavior (latest job).
+func (s *Service) GetScanStatusByPass(ctx context.Context, serverName string, pass int) (*ScanJob, error) {
+	if pass == 0 {
+		return s.GetScanStatus(ctx, serverName)
+	}
+
+	pass1Job, pass2Job, err := s.findLatestPassJobs(serverName)
+	if err != nil {
+		return nil, err
+	}
+
+	switch pass {
+	case ScanPassSecurityScan:
+		if pass1Job != nil {
+			return pass1Job, nil
+		}
+	case ScanPassSupplyChainAudit:
+		if pass2Job != nil {
+			return pass2Job, nil
+		}
+	}
+
+	// Fall back to latest job
+	return s.GetScanStatus(ctx, serverName)
 }
 
 // GetScanReport returns the aggregated report for a server, merging both Pass 1 and Pass 2 results.
@@ -685,6 +747,9 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 		return nil, fmt.Errorf("no scan found for server %s", serverName)
 	}
 
+	// Deduplicate Pass 2 findings that overlap with Pass 1 (e.g., trivy scanning same lockfiles)
+	allReports = deduplicatePass2Findings(allReports)
+
 	agg := AggregateReportsWithJobStatus(primaryJob.ID, serverName, allReports, primaryJob)
 
 	// Set pass completion status
@@ -697,6 +762,43 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	}
 
 	return agg, nil
+}
+
+// deduplicatePass2Findings removes Pass 2 findings that duplicate Pass 1 findings.
+// The dedup key is scanner + rule_id + title (not location, since paths may differ between passes).
+func deduplicatePass2Findings(reports []*ScanReport) []*ScanReport {
+	// Build a set of Pass 1 finding keys
+	pass1Keys := make(map[string]struct{})
+	for _, r := range reports {
+		for _, f := range r.Findings {
+			if f.ScanPass == ScanPassSecurityScan {
+				key := f.Scanner + "|" + f.RuleID + "|" + f.Title
+				pass1Keys[key] = struct{}{}
+			}
+		}
+	}
+
+	// If no Pass 1 findings, nothing to deduplicate
+	if len(pass1Keys) == 0 {
+		return reports
+	}
+
+	// Filter Pass 2 findings, removing duplicates
+	for _, r := range reports {
+		filtered := r.Findings[:0]
+		for _, f := range r.Findings {
+			if f.ScanPass == ScanPassSupplyChainAudit {
+				key := f.Scanner + "|" + f.RuleID + "|" + f.Title
+				if _, dup := pass1Keys[key]; dup {
+					continue // Skip Pass 2 finding that duplicates Pass 1
+				}
+			}
+			filtered = append(filtered, f)
+		}
+		r.Findings = filtered
+	}
+
+	return reports
 }
 
 // findLatestPassJobs finds the latest Pass 1 and Pass 2 jobs for a server.
@@ -887,7 +989,7 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 	reports, err := s.storage.ListScanReports("")
 	if err == nil {
 		for _, r := range reports {
-			for _, f := range r.Findings {
+			for i, f := range r.Findings {
 				switch f.Severity {
 				case SeverityCritical:
 					overview.FindingsBySeverity.Critical++
@@ -901,6 +1003,20 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 					overview.FindingsBySeverity.Info++
 				}
 				overview.FindingsBySeverity.Total++
+
+				// Classify threat level if not already set (stored findings may lack it)
+				if f.ThreatLevel == "" {
+					ClassifyThreat(&r.Findings[i])
+					f = r.Findings[i]
+				}
+				switch f.ThreatLevel {
+				case ThreatLevelDangerous:
+					overview.FindingsBySeverity.Dangerous++
+				case ThreatLevelWarning:
+					overview.FindingsBySeverity.Warnings++
+				case ThreatLevelInfo:
+					overview.FindingsBySeverity.InfoLevel++
+				}
 			}
 		}
 	}

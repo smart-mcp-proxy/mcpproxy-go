@@ -388,6 +388,28 @@ func (e *Engine) parseResults(data []byte, scannerID string) (*ScanReport, error
 		return report, nil
 	}
 
+	// Try Ramparts JSON format
+	if isRampartsOutput(data) {
+		findings := parseRampartsOutput(data, scannerID)
+		report.Findings = findings
+		if len(findings) > 0 {
+			ClassifyAllFindings(report.Findings)
+		}
+		report.RiskScore = CalculateRiskScore(report.Findings)
+		return report, nil
+	}
+
+	// Try Snyk Agent Scan JSON format
+	if isSnykAgentScanOutput(data) {
+		findings := parseSnykAgentScanOutput(data, scannerID)
+		report.Findings = findings
+		if len(findings) > 0 {
+			ClassifyAllFindings(report.Findings)
+		}
+		report.RiskScore = CalculateRiskScore(report.Findings)
+		return report, nil
+	}
+
 	// Try Cisco MCP Scanner raw JSON format
 	if isCiscoScannerOutput(data) {
 		findings := parseCiscoScannerOutput(data, scannerID)
@@ -649,6 +671,222 @@ func parseCiscoScannerOutput(data []byte, scannerID string) []ScanFinding {
 	}
 
 	return findings
+}
+
+// isSnykAgentScanOutput checks if the data looks like Snyk Agent Scan output.
+// The format is: { "/path/to/config.json": { "servers": [{ "name": "...", "signature": {...}, "issues": [...] }] } }
+func isSnykAgentScanOutput(data []byte) bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	for _, v := range probe {
+		var entry struct {
+			Client  string `json:"client"`
+			Servers []any  `json:"servers"`
+		}
+		if json.Unmarshal(v, &entry) == nil && entry.Servers != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// parseSnykAgentScanOutput parses Snyk Agent Scan JSON output into ScanFindings.
+// Snyk format: { "/path": { "servers": [{ "name": "x", "issues": [{ "code": "E001", "severity": "critical", ... }] }] } }
+func parseSnykAgentScanOutput(data []byte, scannerID string) []ScanFinding {
+	var snyk map[string]struct {
+		Servers []struct {
+			Name   string `json:"name"`
+			Issues []struct {
+				Code        string `json:"code"`
+				Severity    string `json:"severity"`
+				Title       string `json:"title"`
+				Message     string `json:"message"`
+				Description string `json:"description"`
+				ToolName    string `json:"tool_name"`
+				Category    string `json:"category"`
+			} `json:"issues"`
+		} `json:"servers"`
+	}
+
+	if err := json.Unmarshal(data, &snyk); err != nil {
+		return nil
+	}
+
+	var findings []ScanFinding
+	for _, config := range snyk {
+		for _, srv := range config.Servers {
+			for _, issue := range srv.Issues {
+				title := issue.Title
+				if title == "" {
+					title = issue.Message
+				}
+				if title == "" {
+					title = issue.Code
+				}
+
+				desc := issue.Description
+				if desc == "" {
+					desc = issue.Message
+				}
+
+				finding := ScanFinding{
+					RuleID:      issue.Code,
+					Title:       title,
+					Description: desc,
+					Scanner:     scannerID,
+					Category:    issue.Category,
+				}
+				if issue.ToolName != "" {
+					finding.Location = "tool:" + issue.ToolName
+				}
+
+				switch strings.ToLower(issue.Severity) {
+				case "critical":
+					finding.Severity = SeverityCritical
+				case "high":
+					finding.Severity = SeverityHigh
+				case "medium":
+					finding.Severity = SeverityMedium
+				case "low":
+					finding.Severity = SeverityLow
+				default:
+					finding.Severity = SeverityMedium
+				}
+
+				findings = append(findings, finding)
+			}
+		}
+	}
+
+	return findings
+}
+
+// isRampartsOutput checks if the data looks like Ramparts MCP Scanner output
+func isRampartsOutput(data []byte) bool {
+	var probe struct {
+		URL            string `json:"url"`
+		SecurityIssues any    `json:"security_issues"`
+		YaraResults    []any  `json:"yara_results"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return false
+	}
+	return probe.SecurityIssues != nil && probe.YaraResults != nil
+}
+
+// parseRampartsOutput parses Ramparts MCP Scanner's JSON format into ScanFindings.
+// Ramparts output has: { "security_issues": { "tool_issues": [...], "prompt_issues": [...] }, "yara_results": [...] }
+func parseRampartsOutput(data []byte, scannerID string) []ScanFinding {
+	var ramparts struct {
+		SecurityIssues struct {
+			ToolIssues     []rampartsIssue `json:"tool_issues"`
+			PromptIssues   []rampartsIssue `json:"prompt_issues"`
+			ResourceIssues []rampartsIssue `json:"resource_issues"`
+		} `json:"security_issues"`
+		YaraResults []struct {
+			TargetType   string `json:"target_type"`
+			TargetName   string `json:"target_name"`
+			RuleName     string `json:"rule_name"`
+			RuleFile     string `json:"rule_file"`
+			Context      string `json:"context"`
+			Status       string `json:"status"`
+			RuleMetadata *struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Severity    string `json:"severity"`
+				Category    string `json:"category"`
+			} `json:"rule_metadata"`
+		} `json:"yara_results"`
+	}
+
+	if err := json.Unmarshal(data, &ramparts); err != nil {
+		return nil
+	}
+
+	var findings []ScanFinding
+
+	// Parse YARA results (individual matches, not summaries)
+	for _, yr := range ramparts.YaraResults {
+		if yr.TargetType == "summary" {
+			continue // Skip pre-scan/post-scan summaries
+		}
+		if yr.Status != "warning" && yr.Status != "alert" {
+			continue
+		}
+
+		finding := ScanFinding{
+			RuleID:      strings.ToLower(strings.ReplaceAll(yr.RuleName, " ", "_")),
+			Title:       yr.RuleName,
+			Description: yr.Context,
+			Scanner:     scannerID,
+			Location:    yr.TargetType + ":" + yr.TargetName,
+		}
+
+		if yr.RuleMetadata != nil {
+			if yr.RuleMetadata.Name != "" {
+				finding.Title = yr.RuleMetadata.Name + " in " + yr.TargetType + ": " + yr.TargetName
+			}
+			if yr.RuleMetadata.Description != "" {
+				finding.Description = yr.RuleMetadata.Description
+			}
+			finding.Category = yr.RuleFile
+
+			switch strings.ToUpper(yr.RuleMetadata.Severity) {
+			case "CRITICAL":
+				finding.Severity = SeverityCritical
+			case "HIGH":
+				finding.Severity = SeverityHigh
+			case "MEDIUM":
+				finding.Severity = SeverityMedium
+			default:
+				finding.Severity = SeverityLow
+			}
+		} else {
+			finding.Severity = SeverityMedium
+		}
+
+		findings = append(findings, finding)
+	}
+
+	// Parse security_issues (tool_issues, prompt_issues, resource_issues)
+	parseIssues := func(issues []rampartsIssue, issueType string) {
+		for _, issue := range issues {
+			finding := ScanFinding{
+				RuleID:      strings.ToLower(strings.ReplaceAll(issue.Type, " ", "_")),
+				Title:       issue.Type + " in " + issueType + ": " + issue.ToolName,
+				Description: issue.Description,
+				Scanner:     scannerID,
+				Location:    issueType + ":" + issue.ToolName,
+			}
+			switch strings.ToUpper(issue.Impact) {
+			case "CRITICAL":
+				finding.Severity = SeverityCritical
+			case "HIGH":
+				finding.Severity = SeverityHigh
+			case "MEDIUM":
+				finding.Severity = SeverityMedium
+			default:
+				finding.Severity = SeverityLow
+			}
+			findings = append(findings, finding)
+		}
+	}
+
+	parseIssues(ramparts.SecurityIssues.ToolIssues, "tool")
+	parseIssues(ramparts.SecurityIssues.PromptIssues, "prompt")
+	parseIssues(ramparts.SecurityIssues.ResourceIssues, "resource")
+
+	return findings
+}
+
+// rampartsIssue represents a security issue from Ramparts
+type rampartsIssue struct {
+	ToolName    string `json:"tool_name"`
+	Type        string `json:"type"`
+	Impact      string `json:"impact"`
+	Description string `json:"description"`
 }
 
 func truncate(s string, maxLen int) string {

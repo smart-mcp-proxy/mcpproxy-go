@@ -134,6 +134,13 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 		}
 	}
 
+	// Fallback: resolve from local package manager cache (npx, uvx, pipx)
+	if info.Command != "" {
+		if resolved, err := r.resolveFromPackageCache(ctx, info); err == nil {
+			return resolved, nil
+		}
+	}
+
 	return nil, fmt.Errorf("could not resolve source for server %s: no Docker container found, no working_dir configured, and no local file paths in command args", info.Name)
 }
 
@@ -541,6 +548,306 @@ func (r *SourceResolver) EnrichWithFileList(resolved *ResolvedSource) {
 		return
 	}
 	resolved.Files, resolved.TotalFiles, resolved.TotalSize = CollectFileList(resolved.SourceDir)
+}
+
+// resolveFromPackageCache attempts to find server source in local package manager caches.
+// Supports npx (npm), uvx (uv/pip), and pipx.
+func (r *SourceResolver) resolveFromPackageCache(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
+	cmdBase := filepath.Base(info.Command)
+
+	switch cmdBase {
+	case "npx":
+		return r.resolveNpxCache(info)
+	case "uvx":
+		return r.resolveUvxCache(info)
+	}
+
+	return nil, fmt.Errorf("unsupported command %q for package cache resolution", cmdBase)
+}
+
+// resolveNpxCache finds an npx package's source in ~/.npm/_npx/*/node_modules/<package>/
+func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, error) {
+	// Extract package name from args (first non-flag arg)
+	pkgName := ""
+	for _, arg := range info.Args {
+		if !strings.HasPrefix(arg, "-") {
+			pkgName = arg
+			break
+		}
+	}
+	if pkgName == "" {
+		return nil, fmt.Errorf("no package name found in npx args")
+	}
+
+	// Strip version specifier: @modelcontextprotocol/server-everything@1.0.0 → @modelcontextprotocol/server-everything
+	if idx := strings.LastIndex(pkgName, "@"); idx > 0 {
+		pkgName = pkgName[:idx]
+	}
+
+	// Find npm cache directory
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	npxCacheDir := filepath.Join(homeDir, ".npm", "_npx")
+	if _, err := os.Stat(npxCacheDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("npx cache directory not found: %s", npxCacheDir)
+	}
+
+	// Search for the package in npx cache: ~/.npm/_npx/<hash>/node_modules/<package>/
+	var bestMatch string
+	var bestModTime int64
+
+	entries, err := os.ReadDir(npxCacheDir)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read npx cache: %w", err)
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidatePath := filepath.Join(npxCacheDir, entry.Name(), "node_modules", pkgName)
+		stat, err := os.Stat(candidatePath)
+		if err != nil {
+			continue
+		}
+		if stat.IsDir() {
+			modTime := stat.ModTime().Unix()
+			if modTime > bestModTime {
+				bestModTime = modTime
+				bestMatch = candidatePath
+			}
+		}
+	}
+
+	if bestMatch == "" {
+		return nil, fmt.Errorf("package %q not found in npx cache (%s)", pkgName, npxCacheDir)
+	}
+
+	r.logger.Info("Resolved source from npx cache",
+		zap.String("server", info.Name),
+		zap.String("package", pkgName),
+		zap.String("path", bestMatch),
+	)
+
+	return &ResolvedSource{
+		SourceDir: bestMatch,
+		Method:    "npx_cache",
+		Cleanup:   func() {},
+	}, nil
+}
+
+// resolveUvxCache finds a uvx package's source in ~/.cache/uv/ or ~/.local/share/uv/tools/
+func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, error) {
+	// Extract package name from args
+	// uvx supports: uvx <package>, uvx --from <package> <command>, uvx git+<url>
+	pkgName := ""
+	isGitURL := false
+	for i, arg := range info.Args {
+		if arg == "--from" && i+1 < len(info.Args) {
+			pkgName = info.Args[i+1]
+			break
+		}
+		if !strings.HasPrefix(arg, "-") {
+			pkgName = arg
+			break
+		}
+	}
+	if pkgName == "" {
+		return nil, fmt.Errorf("no package name found in uvx args")
+	}
+
+	// Check if it's a git URL: git+https://github.com/...
+	if strings.HasPrefix(pkgName, "git+") {
+		isGitURL = true
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	// Strategy 1: UV git checkouts (for git+URL packages)
+	// The cache structure is: ~/.cache/uv/git-v0/checkouts/<hash>/<rev>/
+	// We must match the checkout to the actual git URL by checking for repo-specific files,
+	// not just picking the newest subdirectory (which could be from a different package).
+	if isGitURL {
+		gitCheckoutsDir := filepath.Join(homeDir, ".cache", "uv", "git-v0", "checkouts")
+		// Extract repo name from git URL for matching: git+https://github.com/org/repo → repo
+		repoName := ""
+		gitURL := strings.TrimPrefix(pkgName, "git+")
+		if parts := strings.Split(strings.TrimSuffix(gitURL, ".git"), "/"); len(parts) > 0 {
+			repoName = parts[len(parts)-1]
+		}
+		if dir, err := r.findGitCheckoutByRepo(gitCheckoutsDir, repoName, pkgName); err == nil {
+			r.logger.Info("Resolved source from UV git checkout",
+				zap.String("server", info.Name),
+				zap.String("repo", repoName),
+				zap.String("path", dir),
+			)
+			return &ResolvedSource{
+				SourceDir: dir,
+				Method:    "uvx_cache",
+				Cleanup:   func() {},
+			}, nil
+		}
+	}
+
+	// Strategy 2: UV tools directory (for regular packages)
+	// Strip version: package@version → package
+	cleanPkg := pkgName
+	if idx := strings.LastIndex(cleanPkg, "@"); idx > 0 {
+		cleanPkg = cleanPkg[:idx]
+	}
+	// Also strip git+ prefix and URL
+	if strings.HasPrefix(cleanPkg, "git+") {
+		// Extract package name from URL: git+https://github.com/org/repo → repo
+		parts := strings.Split(cleanPkg, "/")
+		if len(parts) > 0 {
+			cleanPkg = parts[len(parts)-1]
+		}
+	}
+
+	toolsDir := filepath.Join(homeDir, ".local", "share", "uv", "tools", cleanPkg)
+	if stat, err := os.Stat(toolsDir); err == nil && stat.IsDir() {
+		r.logger.Info("Resolved source from UV tools directory",
+			zap.String("server", info.Name),
+			zap.String("package", cleanPkg),
+			zap.String("path", toolsDir),
+		)
+		return &ResolvedSource{
+			SourceDir: toolsDir,
+			Method:    "uvx_cache",
+			Cleanup:   func() {},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("package %q not found in UV cache", pkgName)
+}
+
+// findNewestSubdir finds the newest directory at a given depth within a root directory.
+// depth=2 means rootDir/<level1>/<level2> (e.g., checkouts/<hash>/<rev>)
+func (r *SourceResolver) findNewestSubdir(rootDir string, depth int) (string, error) {
+	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
+		return "", err
+	}
+
+	var bestPath string
+	var bestModTime int64
+
+	if depth <= 0 {
+		return rootDir, nil
+	}
+
+	entries, err := os.ReadDir(rootDir)
+	if err != nil {
+		return "", err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subPath := filepath.Join(rootDir, entry.Name())
+		if depth == 1 {
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().Unix() > bestModTime {
+				bestModTime = info.ModTime().Unix()
+				bestPath = subPath
+			}
+		} else {
+			if found, err := r.findNewestSubdir(subPath, depth-1); err == nil {
+				info, err := os.Stat(found)
+				if err != nil {
+					continue
+				}
+				if info.ModTime().Unix() > bestModTime {
+					bestModTime = info.ModTime().Unix()
+					bestPath = found
+				}
+			}
+		}
+	}
+
+	if bestPath == "" {
+		return "", fmt.Errorf("no subdirectories found in %s", rootDir)
+	}
+	return bestPath, nil
+}
+
+// findGitCheckoutByRepo searches UV git checkouts for a directory that matches the given repo.
+// It walks checkouts/<hash>/<rev>/ directories and checks for repo-identifying markers
+// (pyproject.toml with matching name, or .git/config with matching URL).
+func (r *SourceResolver) findGitCheckoutByRepo(checkoutsDir, repoName, gitURL string) (string, error) {
+	if _, err := os.Stat(checkoutsDir); os.IsNotExist(err) {
+		return "", err
+	}
+
+	gitURL = strings.TrimPrefix(gitURL, "git+")
+
+	hashDirs, err := os.ReadDir(checkoutsDir)
+	if err != nil {
+		return "", err
+	}
+
+	var bestPath string
+	var bestModTime int64
+
+	for _, hashDir := range hashDirs {
+		if !hashDir.IsDir() {
+			continue
+		}
+		hashPath := filepath.Join(checkoutsDir, hashDir.Name())
+		revDirs, err := os.ReadDir(hashPath)
+		if err != nil {
+			continue
+		}
+		for _, revDir := range revDirs {
+			if !revDir.IsDir() {
+				continue
+			}
+			candidate := filepath.Join(hashPath, revDir.Name())
+
+			// Check pyproject.toml for package name match
+			pyproject, err := os.ReadFile(filepath.Join(candidate, "pyproject.toml"))
+			if err == nil {
+				content := string(pyproject)
+				// Match repo name in project name (handles hyphens/underscores)
+				normalizedRepo := strings.ReplaceAll(strings.ToLower(repoName), "-", "[_-]")
+				if matched, _ := filepath.Match("*"+strings.ToLower(repoName)+"*", strings.ToLower(content)); matched ||
+					strings.Contains(strings.ToLower(content), strings.ToLower(repoName)) ||
+					strings.Contains(strings.ToLower(content), strings.ReplaceAll(strings.ToLower(repoName), "-", "_")) {
+					_ = normalizedRepo
+					info, err := revDir.Info()
+					if err == nil && info.ModTime().Unix() > bestModTime {
+						bestModTime = info.ModTime().Unix()
+						bestPath = candidate
+					}
+					continue
+				}
+			}
+
+			// Fallback: check .git/config for URL match
+			gitConfig, err := os.ReadFile(filepath.Join(candidate, ".git", "config"))
+			if err == nil && strings.Contains(string(gitConfig), gitURL) {
+				info, err := revDir.Info()
+				if err == nil && info.ModTime().Unix() > bestModTime {
+					bestModTime = info.ModTime().Unix()
+					bestPath = candidate
+				}
+			}
+		}
+	}
+
+	if bestPath == "" {
+		return "", fmt.Errorf("no git checkout found matching repo %q", repoName)
+	}
+	return bestPath, nil
 }
 
 // sanitizeForDocker removes characters invalid in Docker container names

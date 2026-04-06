@@ -215,7 +215,7 @@
         </button>
         <button
           :class="['tab tab-lg', activeTab === 'security' ? 'tab-active' : '']"
-          @click="activeTab = 'security'; loadScanReport()"
+          @click="activeTab = 'security'; loadScannerNames(); loadScanReport()"
         >
           <span class="flex items-center gap-2">
             <span
@@ -512,8 +512,18 @@
                 </svg>
                 {{ scanLoading ? 'Scanning...' : 'Scan Now' }}
               </button>
+              <button
+                v-if="scanLoading"
+                @click="cancelSecurityScan"
+                class="btn btn-error btn-outline btn-sm"
+              >
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Cancel
+              </button>
 
-              <div v-if="(scanReport || server.security_scan) && scanReport?.scan_complete !== false" class="flex items-center gap-3">
+              <div v-if="(scanReport || server.security_scan) && scanReport?.scan_complete !== false && !scanLoading" class="flex items-center gap-3">
                 <div class="text-right">
                   <div class="text-sm text-base-content/70">Risk Score</div>
                   <div class="text-2xl font-bold" :class="riskScoreClass">
@@ -529,7 +539,7 @@
                   {{ currentRiskScore }}
                 </div>
               </div>
-              <div v-else-if="scanReport?.scan_complete === false" class="flex items-center gap-2">
+              <div v-else-if="scanReport?.scan_complete === false && !scanLoading" class="flex items-center gap-2">
                 <svg class="w-5 h-5 text-error" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
@@ -538,10 +548,46 @@
               </div>
             </div>
 
+            <!-- Scan Progress (visible during active scan) -->
+            <div v-if="scanLoading" class="space-y-3">
+              <template v-if="scanProgress && scanProgress.total > 0">
+                <div class="flex items-center justify-between text-sm">
+                  <span class="font-medium">Scanning with {{ scanProgress.total }} scanner{{ scanProgress.total !== 1 ? 's' : '' }}...</span>
+                  <span class="text-base-content/60">{{ scanProgress.completed }}/{{ scanProgress.total }} complete</span>
+                </div>
+                <progress
+                  class="progress progress-primary w-full"
+                  :value="scanProgress.completed"
+                  :max="scanProgress.total"
+                ></progress>
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                  <div
+                    v-for="ss in scanProgress.scanners"
+                    :key="ss.scanner_id"
+                    class="flex items-center gap-2 px-3 py-2 rounded-lg bg-base-200"
+                  >
+                    <span v-if="ss.status === 'running'" class="loading loading-spinner loading-xs text-primary"></span>
+                    <span v-else-if="ss.status === 'completed'" class="text-success">&#10003;</span>
+                    <span v-else-if="ss.status === 'failed'" class="text-error">&#10007;</span>
+                    <span v-else class="text-base-content/30">&#9679;</span>
+                    <span class="text-sm truncate flex-1">{{ scannerDisplayName(ss.scanner_id) }}</span>
+                    <span v-if="ss.findings_count > 0" class="badge badge-xs badge-error">{{ ss.findings_count }}</span>
+                  </div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="flex items-center gap-3 text-sm">
+                  <span class="loading loading-spinner loading-sm text-primary"></span>
+                  <span class="font-medium">Initializing security scan...</span>
+                </div>
+                <progress class="progress progress-primary w-full"></progress>
+              </template>
+            </div>
+
             <!-- Scan Context Banner -->
             <div v-if="scanContext" class="mt-2">
               <!-- No Docker Isolation (local process) -->
-              <div v-if="!scanContext.docker_isolation && scanContext.source_method !== 'url' && scanContext.source_method !== 'none'" class="alert alert-warning">
+              <div v-if="!scanContext.docker_isolation && !isUrlSourceMethod && scanContext.source_method !== 'none' && scanContext.source_method !== 'tool_definitions_only'" class="alert alert-warning">
                 <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                 </svg>
@@ -580,16 +626,19 @@
                 </div>
               </div>
 
-              <!-- HTTP Server (url) -->
-              <div v-else-if="scanContext.source_method === 'url'" class="alert">
+              <!-- HTTP Server (url, url_full, or tool_definitions_only for http protocol) -->
+              <div v-else-if="isUrlSourceMethod || scanContext.source_method === 'tool_definitions_only'" class="alert alert-info">
                 <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
                 </svg>
                 <div>
-                  <h3 class="font-bold">HTTP Server</h3>
-                  <p class="text-sm">Behavioral scanning only (no filesystem to scan)</p>
-                  <p class="text-sm">
+                  <h3 class="font-bold">{{ isUrlSourceMethod ? 'HTTP Server' : 'Tool Definitions Only' }}</h3>
+                  <p class="text-sm">{{ isUrlSourceMethod ? 'Tool description scanning only (no filesystem to scan)' : 'Scanning tool descriptions for poisoning and injection attacks' }}</p>
+                  <p v-if="isUrlSourceMethod && scanContext.source_path" class="text-sm">
                     URL: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
+                  </p>
+                  <p v-if="scanContext.tools_exported" class="text-sm text-base-content/70">
+                    {{ scanContext.tools_exported }} tool definitions exported for analysis
                   </p>
                 </div>
               </div>
@@ -609,20 +658,21 @@
 
             <!-- Scan error -->
             <div v-if="scanError" class="alert alert-error">
-              <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <span>{{ scanError }}</span>
+              <button @click="scanError = null; startSecurityScan()" class="btn btn-sm btn-ghost">Retry</button>
             </div>
 
             <!-- Loading state for report -->
-            <div v-if="scanReportLoading" class="text-center py-8">
+            <div v-if="scanReportLoading && !scanLoading" class="text-center py-8">
               <span class="loading loading-spinner loading-lg"></span>
               <p class="mt-2">Loading scan report...</p>
             </div>
 
             <!-- Not scanned yet -->
-            <div v-else-if="!scanReport && securityScanStatus === 'not_scanned'" class="text-center py-12">
+            <div v-else-if="!scanReport && !scanLoading && securityScanStatus === 'not_scanned'" class="text-center py-12">
               <svg class="w-16 h-16 mx-auto mb-4 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
               </svg>
@@ -632,8 +682,8 @@
               </p>
             </div>
 
-            <!-- Scan results -->
-            <template v-else-if="scanReport">
+            <!-- Scan results (hidden during active scan) -->
+            <template v-else-if="scanReport && !scanLoading">
               <!-- Threat Summary Cards -->
               <div>
                 <h3 class="text-lg font-semibold mb-3">Threat Summary</h3>
@@ -769,7 +819,7 @@
                               </div>
                               <div v-if="finding.scanner">
                                 <span class="text-base-content/50">Scanner:</span>
-                                <span class="ml-1">{{ finding.scanner }}</span>
+                                <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
                               </div>
                             </div>
                             <a
@@ -864,7 +914,7 @@
                               </div>
                               <div v-if="finding.scanner">
                                 <span class="text-base-content/50">Scanner:</span>
-                                <span class="ml-1">{{ finding.scanner }}</span>
+                                <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
                               </div>
                             </div>
                             <a
@@ -914,7 +964,7 @@
               <div v-if="scanReport.scanned_at" class="text-xs text-base-content/40 pt-2">
                 Scanned {{ formatRelativeTime(scanReport.scanned_at) }}
                 <span v-if="scanReport.duration_ms"> in {{ scanReport.duration_ms }}ms</span>
-                <span v-if="scanReport.scanners_used?.length"> using {{ scanReport.scanners_used.join(', ') }}</span>
+                <span v-if="scanReport.scanners_used?.length"> using {{ scanReport.scanners_used.map(s => scannerDisplayName(s)).join(', ') }}</span>
               </div>
 
               <!-- Scanner Execution Logs -->
@@ -928,7 +978,7 @@
                   <div class="collapse-content">
                     <div v-for="ss in (scanStatus.scanner_statuses || [])" :key="ss.scanner_id" class="mb-4 last:mb-0">
                       <div class="flex items-center gap-2 mb-1">
-                        <span class="font-mono font-medium text-sm">{{ ss.scanner_id }}</span>
+                        <span class="font-medium text-sm">{{ scannerDisplayName(ss.scanner_id) }}</span>
                         <span class="badge badge-xs" :class="{
                           'badge-success': ss.status === 'completed',
                           'badge-error': ss.status === 'failed',
@@ -958,19 +1008,32 @@
               </div>
 
               <!-- Scanned Files (lazy-loaded with pagination) -->
-              <div v-if="scanContext && scanContext.source_method !== 'none' && scanContext.source_method !== 'url'" class="pt-4">
+              <div v-if="scanContext && scanContext.source_method !== 'none' && !isUrlSourceMethod && scanContext.source_method !== 'tool_definitions_only'" class="pt-4">
                 <div class="collapse collapse-arrow bg-base-100 shadow-md">
                   <input type="checkbox" @change="onScannedFilesToggle" />
                   <div class="collapse-title font-medium">
                     Scanned Files
-                    <span v-if="scanContext.total_files" class="text-base-content/60 font-normal">
-                      ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})
+                    <span v-if="scanFilesMeta.total || scanContext.total_files" class="text-base-content/60 font-normal">
+                      ({{ scanFilesMeta.total || scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})
                     </span>
                     <span v-if="scanFilesMeta.suspicious_count" class="badge badge-error badge-sm ml-2">
                       {{ scanFilesMeta.suspicious_count }} suspicious
                     </span>
                   </div>
                   <div class="collapse-content">
+                    <!-- Pass switcher (show only when docker-isolated and pass 2 exists) -->
+                    <div v-if="scanContext.docker_isolation && scanReport?.pass2_complete" class="flex gap-1 mb-2">
+                      <button
+                        class="btn btn-xs"
+                        :class="scanFilesPass === 1 ? 'btn-primary' : 'btn-ghost'"
+                        @click="switchFilesPass(1)"
+                      >Source (Pass 1)</button>
+                      <button
+                        class="btn btn-xs"
+                        :class="scanFilesPass === 2 ? 'btn-primary' : 'btn-ghost'"
+                        @click="switchFilesPass(2)"
+                      >Full Deps (Pass 2)</button>
+                    </div>
                     <div v-if="scanFilesLoading && scanFiles.length === 0" class="text-center py-4">
                       <span class="loading loading-spinner loading-sm"></span>
                       <span class="ml-2 text-sm">Loading file list...</span>
@@ -1000,7 +1063,7 @@
                       </ul>
                       <div class="flex items-center gap-2 mt-2 pt-2 border-t border-base-200">
                         <span class="text-xs text-base-content/50">
-                          Showing {{ scanFiles.length }} of {{ scanFilesMeta.total || scanContext?.total_files || '?' }}
+                          Showing {{ scanFiles.length }} of {{ scanFilesMeta.total || '?' }}
                         </span>
                         <button
                           v-if="scanFilesMeta.has_more"
@@ -1090,18 +1153,27 @@ const scanLoading = ref(false)
 const scanReportLoading = ref(false)
 const scanError = ref<string | null>(null)
 const securityActionLoading = ref(false)
+const activeScanJobId = ref<string | null>(null) // Track the active scan job ID
+const scannerNameMap = ref<Record<string, string>>({}) // scanner_id → human-readable name
 let scanPollTimer: ReturnType<typeof setInterval> | null = null
 
 // Scan context & files
 const scanFiles = ref<Array<{ path: string; suspicious: boolean; findings?: string[] }>>([])
 const scanFilesLoading = ref(false)
 const scanFilesLoaded = ref(false)
+const scanFilesPass = ref(1) // 1 = security scan (source), 2 = supply chain (full deps)
 const scanFilesMeta = ref<{ total: number; has_more: boolean; suspicious_count: number; offset: number }>({
   total: 0, has_more: false, suspicious_count: 0, offset: 0
 })
 
 const scanContext = computed(() => {
   return scanStatus.value?.scan_context || null
+})
+
+// Whether the scan source method indicates a URL-based server (HTTP/SSE)
+const isUrlSourceMethod = computed(() => {
+  const method = scanContext.value?.source_method || ''
+  return method === 'url' || method === 'url_full'
 })
 
 // Logs
@@ -1124,6 +1196,22 @@ const healthAction = computed(() => {
 const securityScanStatus = computed(() => {
   if (scanLoading.value) return 'scanning'
   return server.value?.security_scan?.status || 'not_scanned'
+})
+
+// Resolve scanner ID to human-readable name
+function scannerDisplayName(scannerId: string): string {
+  return scannerNameMap.value[scannerId] || scannerId
+}
+
+// Per-scanner progress during active scan
+const scanProgress = computed(() => {
+  if (!scanStatus.value?.scanner_statuses) return null
+  const statuses = scanStatus.value.scanner_statuses as Array<{
+    scanner_id: string; status: string; findings_count: number; error?: string
+  }>
+  const total = statuses.length
+  const completed = statuses.filter(s => s.status === 'completed' || s.status === 'failed').length
+  return { total, completed, scanners: statuses }
 })
 
 const securityDotClass = computed(() => {
@@ -1657,7 +1745,7 @@ async function loadScanFiles(offset: number) {
   if (!server.value) return
   scanFilesLoading.value = true
   try {
-    const response = await api.getScanFiles(server.value.name, 100, offset)
+    const response = await api.getScanFiles(server.value.name, 100, offset, scanFilesPass.value)
     if (response.success && response.data) {
       if (offset === 0) {
         scanFiles.value = response.data.files || []
@@ -1683,6 +1771,13 @@ async function loadMoreFiles() {
   await loadScanFiles(scanFilesMeta.value.offset)
 }
 
+async function switchFilesPass(pass: number) {
+  scanFilesPass.value = pass
+  scanFiles.value = []
+  scanFilesLoaded.value = false
+  await loadScanFiles(0)
+}
+
 function formatRelativeTime(isoString: string): string {
   const date = new Date(isoString)
   const now = new Date()
@@ -1703,10 +1798,27 @@ function stopScanPolling() {
   }
 }
 
-async function loadScanReport() {
+// Load scanner name map from the scanners API (for human-readable names)
+async function loadScannerNames() {
+  if (Object.keys(scannerNameMap.value).length > 0) return // Already loaded
+  try {
+    const resp = await api.listScanners()
+    if (resp.success && resp.data) {
+      const map: Record<string, string> = {}
+      for (const s of resp.data) {
+        if (s.id && s.name) map[s.id] = s.name
+      }
+      scannerNameMap.value = map
+    }
+  } catch {
+    // Not critical
+  }
+}
+
+async function loadScanReport(force = false) {
   if (!server.value) return
-  // Only load if we have a previous scan
-  if (!server.value.security_scan?.last_scan_at && !scanReport.value) return
+  // Only load if we have a previous scan (skip check when force-loading after scan completion)
+  if (!force && !server.value.security_scan?.last_scan_at && !scanReport.value) return
 
   scanReportLoading.value = true
   scanError.value = null
@@ -1720,6 +1832,12 @@ async function loadScanReport() {
     }
     if (statusRes.success && statusRes.data) {
       scanStatus.value = statusRes.data
+      // If scan is still running (e.g., page reload during scan), resume polling
+      if (statusRes.data.status === 'running' || statusRes.data.status === 'pending') {
+        activeScanJobId.value = statusRes.data.id
+        scanLoading.value = true
+        startScanPolling()
+      }
     }
   } catch (err) {
     // Silently fail - report may not exist yet
@@ -1728,18 +1846,84 @@ async function loadScanReport() {
   }
 }
 
+function startScanPolling() {
+  stopScanPolling()
+  scanPollTimer = setInterval(async () => {
+    if (!server.value) { stopScanPolling(); return }
+    try {
+      const statusResp = await api.getScanStatus(server.value.name)
+      if (statusResp.success && statusResp.data) {
+        // Update scan status for live progress display
+        scanStatus.value = statusResp.data
+        const jobId = statusResp.data.id
+        const status = statusResp.data.status
+
+        // Only react to the active job (Pass 1). Ignore completed Pass 2 from previous runs.
+        if (activeScanJobId.value && jobId !== activeScanJobId.value) {
+          // Different job — could be Pass 2 starting after Pass 1 completed.
+          if (statusResp.data.scan_pass === 2) {
+            // Pass 2 started or completed — Pass 1 is done. Finish polling.
+            stopScanPolling()
+            scanLoading.value = false
+            activeScanJobId.value = null
+            await loadScanReport(true)
+            await serversStore.fetchServers()
+            server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+            systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
+          }
+          return
+        }
+
+        if (status === 'completed' || status === 'complete') {
+          stopScanPolling()
+          scanLoading.value = false
+          activeScanJobId.value = null
+          await loadScanReport(true)
+          await serversStore.fetchServers()
+          server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+          systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
+        } else if (status === 'failed' || status === 'error') {
+          stopScanPolling()
+          scanLoading.value = false
+          activeScanJobId.value = null
+          scanError.value = statusResp.data.error || 'Scan failed'
+        }
+      }
+    } catch {
+      // Polling error, keep trying
+    }
+  }, 2000) // Poll every 2s for smoother progress updates
+}
+
 async function startSecurityScan() {
-  if (!server.value) return
+  if (!server.value || scanLoading.value) return
 
   scanLoading.value = true
   scanError.value = null
+  scanReport.value = null
+  scanStatus.value = null
   scanFiles.value = []
   scanFilesLoaded.value = false
 
   try {
     const response = await api.startScan(server.value.name)
     if (!response.success) {
-      throw new Error(response.error || 'Failed to start scan')
+      // Check if scan is already in progress
+      const errMsg = response.error || ''
+      if (errMsg.includes('already in progress')) {
+        // Not an error — just start polling the existing scan
+        const match = errMsg.match(/\(job ([\w-]+)\)/)
+        activeScanJobId.value = match ? match[1] : null
+        systemStore.addToast({ type: 'info', title: 'Scan In Progress', message: 'A scan is already running for this server.' })
+        startScanPolling()
+        return
+      }
+      throw new Error(errMsg || 'Failed to start scan')
+    }
+
+    // Track the new job ID
+    if (response.data?.id) {
+      activeScanJobId.value = response.data.id
     }
 
     systemStore.addToast({
@@ -1748,40 +1932,23 @@ async function startSecurityScan() {
       message: `Scanning ${server.value.name} for security issues...`,
     })
 
-    // Poll for status every 3 seconds
-    stopScanPolling()
-    scanPollTimer = setInterval(async () => {
-      if (!server.value) { stopScanPolling(); return }
-      try {
-        const statusResp = await api.getScanStatus(server.value.name)
-        if (statusResp.success && statusResp.data) {
-          const status = statusResp.data.status || statusResp.data
-          if (status === 'completed' || status === 'complete' || statusResp.data.completed) {
-            stopScanPolling()
-            scanLoading.value = false
-            // Fetch the full report
-            await loadScanReport()
-            // Refresh server to update security_scan summary
-            await serversStore.fetchServers()
-            server.value = serversStore.servers.find(s => s.name === props.serverName) || null
-            systemStore.addToast({
-              type: 'success',
-              title: 'Scan Complete',
-              message: `Security scan for ${server.value?.name} finished.`,
-            })
-          } else if (status === 'failed' || status === 'error') {
-            stopScanPolling()
-            scanLoading.value = false
-            scanError.value = statusResp.data.error || 'Scan failed'
-          }
-        }
-      } catch {
-        // Polling error, keep trying
-      }
-    }, 3000)
+    startScanPolling()
   } catch (err) {
     scanLoading.value = false
     scanError.value = err instanceof Error ? err.message : 'Failed to start scan'
+  }
+}
+
+async function cancelSecurityScan() {
+  if (!server.value) return
+  try {
+    await api.cancelScan(server.value.name)
+    stopScanPolling()
+    scanLoading.value = false
+    scanError.value = null
+    activeScanJobId.value = null
+  } catch (err: any) {
+    scanError.value = err.response?.data?.error || 'Failed to cancel scan'
   }
 }
 
@@ -1930,7 +2097,13 @@ onMounted(() => {
   if (tabParam && ['tools', 'logs', 'config', 'security'].includes(tabParam)) {
     activeTab.value = tabParam as typeof activeTab.value
   }
-  loadServerDetails()
+  loadServerDetails().then(() => {
+    // Pre-load scanner names and report if opening security tab
+    if (activeTab.value === 'security') {
+      loadScannerNames()
+      loadScanReport()
+    }
+  })
 })
 
 // Cleanup polling on unmount

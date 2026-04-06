@@ -5,19 +5,21 @@ package scanner
 var bundledScanners = []*ScannerPlugin{
 	{
 		ID:          "mcp-scan",
-		Name:        "MCP Scan",
-		Vendor:      "Invariant Labs",
-		Description: "Detects tool poisoning attacks, prompt injection, cross-origin escalation, and rug pulls in MCP servers.",
-		License:     "MIT",
-		Homepage:    "https://github.com/invariantlabs-ai/mcp-scan",
-		DockerImage: "mcpproxy/scanner-mcp-scan:latest",
+		Name:        "Snyk Agent Scan",
+		Vendor:      "Snyk (Invariant Labs)",
+		Description: "Detects tool poisoning, prompt injection, tool shadowing, toxic flows, secrets exposure, and rug pulls. Requires free Snyk token.",
+		License:     "Apache-2.0",
+		Homepage:    "https://github.com/snyk/agent-scan",
+		DockerImage: "mcpproxy/scanner-snyk:latest",
 		Inputs:      []string{"source"},
 		Outputs:     []string{"sarif"},
-		RequiredEnv: nil,
+		RequiredEnv: []EnvRequirement{
+			{Key: "SNYK_TOKEN", Label: "Snyk API Token (free at app.snyk.io → Account Settings → API Token)", Secret: true},
+		},
 		OptionalEnv: nil,
-		Command:     []string{"mcp-scan", "--json"},
+		Command:     nil, // Uses entrypoint.sh
 		Timeout:     "120s",
-		NetworkReq:  true, // Needs network for Invariant API
+		NetworkReq:  true, // Sends tool descriptions to Snyk API for analysis
 	},
 	{
 		ID:          "cisco-mcp-scanner",
@@ -71,5 +73,55 @@ var bundledScanners = []*ScannerPlugin{
 		Command:     []string{"fs", "--format", "sarif", "/scan/source"},
 		Timeout:     "300s", // First run downloads vuln DB (~90MB)
 		NetworkReq:  true,   // Needs to download vulnerability database
+	},
+	{
+		ID:          "ramparts",
+		Name:        "Ramparts MCP Scanner",
+		Vendor:      "Javelin (getjavelin.com)",
+		Description: "Rust-based MCP security scanner with YARA rules. Detects tool poisoning, SQL injection, command injection, path traversal, secrets leakage, and prompt injection.",
+		License:     "Proprietary",
+		Homepage:    "https://github.com/getjavelin/ramparts",
+		DockerImage: "mcpproxy/scanner-ramparts:latest",
+		Inputs:      []string{"source"},
+		Outputs:     []string{"sarif"},
+		RequiredEnv: nil,
+		OptionalEnv: nil,
+		Command:     nil, // Uses entrypoint.sh
+		Timeout:     "120s",
+		NetworkReq:  true, // Stub MCP server runs inside container
+	},
+	{
+		ID:          "nova-proximity",
+		Name:        "Nova Proximity",
+		Vendor:      "MCPProxy (NOVA-inspired rules)",
+		Description: "Keyword-based MCP security scanner. Detects prompt injection, tool poisoning, data exfiltration, credential harvesting, dangerous commands, and impersonation. Fully offline — no API key needed.",
+		License:     "Apache-2.0",
+		Homepage:    "https://github.com/fr0gger/proximity",
+		DockerImage: "mcpproxy/scanner-proximity:latest",
+		Inputs:      []string{"source"},
+		Outputs:     []string{"sarif"},
+		RequiredEnv: nil,
+		OptionalEnv: nil,
+		Command:     nil, // Uses entrypoint.py
+		Timeout:     "60s",
+		NetworkReq:  false, // Fully offline keyword matching
+	},
+	{
+		ID:          "mcp-ai-scanner",
+		Name:        "MCP AI Scanner",
+		Vendor:      "MCPProxy",
+		Description: "AI-powered MCP security scanner using Claude Agent SDK. Intelligently analyzes tool descriptions and source code for tool poisoning, prompt injection, data exfiltration, and malicious code patterns. Requires Claude OAuth token.",
+		License:     "Apache-2.0",
+		Homepage:    "https://github.com/smart-mcp-proxy/mcp-scanner",
+		DockerImage: "ghcr.io/smart-mcp-proxy/mcp-scanner:latest",
+		Inputs:      []string{"source"},
+		Outputs:     []string{"sarif"},
+		RequiredEnv: nil,
+		OptionalEnv: []EnvRequirement{
+			{Key: "SCANNER_MODEL", Label: "Claude model for AI analysis (default: claude-sonnet-4-6)", Secret: false},
+		},
+		Command:    nil, // Uses entrypoint.py
+		Timeout:    "300s",
+		NetworkReq: false, // AI analysis uses mounted Claude OAuth token
 	},
 }

@@ -90,6 +90,13 @@ func (m *mockSecurityController) GetScanStatus(_ context.Context, serverName str
 	return nil, fmt.Errorf("no scan found for server: %s", serverName)
 }
 
+func (m *mockSecurityController) GetScanStatusByPass(_ context.Context, serverName string, pass int) (*scanner.ScanJob, error) {
+	if m.scanJob != nil {
+		return m.scanJob, nil
+	}
+	return nil, fmt.Errorf("no scan found for server: %s", serverName)
+}
+
 func (m *mockSecurityController) GetScanReport(_ context.Context, serverName string) (*scanner.AggregatedReport, error) {
 	if m.report != nil {
 		return m.report, nil

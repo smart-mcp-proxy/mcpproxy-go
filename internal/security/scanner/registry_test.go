@@ -35,8 +35,8 @@ func TestRegistryGetScanner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get mcp-scan: %v", err)
 	}
-	if s.Vendor != "Invariant Labs" {
-		t.Errorf("expected vendor 'Invariant Labs', got %q", s.Vendor)
+	if s.Vendor != "Snyk (Invariant Labs)" {
+		t.Errorf("expected vendor 'Snyk (Invariant Labs)', got %q", s.Vendor)
 	}
 }
 

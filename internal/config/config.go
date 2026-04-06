@@ -212,17 +212,18 @@ type OAuthConfig struct {
 
 // DockerIsolationConfig represents global Docker isolation settings
 type DockerIsolationConfig struct {
-	Enabled       bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation
-	DefaultImages map[string]string `json:"default_images" mapstructure:"default_images"`                  // Map of runtime type to Docker image
-	Registry      string            `json:"registry,omitempty" mapstructure:"registry"`                    // Custom registry (defaults to docker.io)
-	NetworkMode   string            `json:"network_mode,omitempty" mapstructure:"network_mode"`            // Docker network mode (default: bridge)
-	MemoryLimit   string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`            // Memory limit for containers
-	CPULimit      string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`                  // CPU limit for containers
-	Timeout       Duration          `json:"timeout,omitempty" mapstructure:"timeout" swaggertype:"string"` // Container startup timeout
-	ExtraArgs     []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`                // Additional docker run arguments
-	LogDriver     string            `json:"log_driver,omitempty" mapstructure:"log_driver"`                // Docker log driver (default: json-file)
-	LogMaxSize    string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`            // Maximum size of log files (default: 100m)
-	LogMaxFiles   string            `json:"log_max_files,omitempty" mapstructure:"log_max_files"`          // Maximum number of log files (default: 3)
+	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation
+	EnableCacheVolume bool              `json:"enable_cache_volume" mapstructure:"enable_cache_volume"`        // Mount shared cache volumes for faster restarts (default: true)
+	DefaultImages     map[string]string `json:"default_images" mapstructure:"default_images"`                  // Map of runtime type to Docker image
+	Registry          string            `json:"registry,omitempty" mapstructure:"registry"`                    // Custom registry (defaults to docker.io)
+	NetworkMode       string            `json:"network_mode,omitempty" mapstructure:"network_mode"`            // Docker network mode (default: bridge)
+	MemoryLimit       string            `json:"memory_limit,omitempty" mapstructure:"memory_limit"`            // Memory limit for containers
+	CPULimit          string            `json:"cpu_limit,omitempty" mapstructure:"cpu_limit"`                  // CPU limit for containers
+	Timeout           Duration          `json:"timeout,omitempty" mapstructure:"timeout" swaggertype:"string"` // Container startup timeout
+	ExtraArgs         []string          `json:"extra_args,omitempty" mapstructure:"extra_args"`                // Additional docker run arguments
+	LogDriver         string            `json:"log_driver,omitempty" mapstructure:"log_driver"`                // Docker log driver (default: json-file)
+	LogMaxSize        string            `json:"log_max_size,omitempty" mapstructure:"log_max_size"`            // Maximum size of log files (default: 100m)
+	LogMaxFiles       string            `json:"log_max_files,omitempty" mapstructure:"log_max_files"`          // Maximum number of log files (default: 3)
 }
 
 // IsolationConfig represents per-server isolation settings
@@ -550,20 +551,21 @@ type ToolStatEntry struct {
 // DefaultDockerIsolationConfig returns default Docker isolation configuration
 func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 	return &DockerIsolationConfig{
-		Enabled: false, // Disabled by default for backward compatibility
+		Enabled:           false, // Disabled by default for backward compatibility
+		EnableCacheVolume: true,  // Cache volumes speed up container restarts dramatically
 		DefaultImages: map[string]string{
-			// Python environments - using full images for Git and build tool support
-			"python":  "python:3.11",
-			"python3": "python:3.11",
-			"uvx":     "python:3.11", // Full image needed for git+https:// installs
-			"pip":     "python:3.11",
-			"pipx":    "python:3.11",
+			// Python environments - single uv image for all Python commands (includes python, pip, uvx)
+			"python":  "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+			"python3": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+			"uvx":     "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+			"pip":     "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+			"pipx":    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 
-			// Node.js environments - using full images for Git and native module support
-			"node": "node:20",
-			"npm":  "node:20",
-			"npx":  "node:20", // Full image needed for git dependencies and native modules
-			"yarn": "node:20",
+			// Node.js environments - full image for git deps and native modules (LTS until Apr 2028)
+			"node": "node:22",
+			"npm":  "node:22",
+			"npx":  "node:22",
+			"yarn": "node:22",
 
 			// Go binaries
 			"go": "golang:1.21-alpine",

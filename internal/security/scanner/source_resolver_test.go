@@ -213,6 +213,104 @@ func TestExtractAppRoot(t *testing.T) {
 	}
 }
 
+func TestResolveNpxCache(t *testing.T) {
+	// Create a fake npx cache structure
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	npxDir := filepath.Join(homeDir, ".npm", "_npx", "abc123hash", "node_modules", "@modelcontextprotocol", "server-everything")
+	os.MkdirAll(npxDir, 0755)
+	os.WriteFile(filepath.Join(npxDir, "index.js"), []byte("// server"), 0644)
+	os.WriteFile(filepath.Join(npxDir, "package.json"), []byte(`{"name": "test"}`), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveNpxCache(ServerInfo{
+		Name:    "everything-server",
+		Command: "npx",
+		Args:    []string{"-y", "@modelcontextprotocol/server-everything"},
+	})
+	if err != nil {
+		t.Fatalf("resolveNpxCache: %v", err)
+	}
+	if result.SourceDir != npxDir {
+		t.Errorf("expected source_dir %q, got %q", npxDir, result.SourceDir)
+	}
+	if result.Method != "npx_cache" {
+		t.Errorf("expected method 'npx_cache', got %q", result.Method)
+	}
+}
+
+func TestResolveNpxCacheNotFound(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	// Create npx dir but no matching package
+	os.MkdirAll(filepath.Join(homeDir, ".npm", "_npx"), 0755)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.resolveNpxCache(ServerInfo{
+		Name:    "test",
+		Command: "npx",
+		Args:    []string{"nonexistent-package"},
+	})
+	if err == nil {
+		t.Error("expected error for missing npx package")
+	}
+}
+
+func TestResolveUvxCacheToolsDir(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	// Create a fake UV tools directory
+	toolDir := filepath.Join(homeDir, ".local", "share", "uv", "tools", "my-tool")
+	os.MkdirAll(toolDir, 0755)
+	os.WriteFile(filepath.Join(toolDir, "main.py"), []byte("# test"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "my-tool",
+		Command: "uvx",
+		Args:    []string{"my-tool"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != toolDir {
+		t.Errorf("expected source_dir %q, got %q", toolDir, result.SourceDir)
+	}
+	if result.Method != "uvx_cache" {
+		t.Errorf("expected method 'uvx_cache', got %q", result.Method)
+	}
+}
+
+func TestResolveUvxCacheGitCheckout(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	// Create a fake UV git checkout with pyproject.toml identifying the repo
+	checkoutDir := filepath.Join(homeDir, ".cache", "uv", "git-v0", "checkouts", "abc123", "def456")
+	os.MkdirAll(checkoutDir, 0755)
+	os.WriteFile(filepath.Join(checkoutDir, "server.py"), []byte("# test"), 0644)
+	os.WriteFile(filepath.Join(checkoutDir, "pyproject.toml"), []byte("[project]\nname = \"repo\"\nversion = \"0.1.0\"\n"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "malicious-demo",
+		Command: "uvx",
+		Args:    []string{"git+https://github.com/org/repo"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != checkoutDir {
+		t.Errorf("expected source_dir %q, got %q", checkoutDir, result.SourceDir)
+	}
+	if result.Method != "uvx_cache" {
+		t.Errorf("expected method 'uvx_cache', got %q", result.Method)
+	}
+}
+
 func TestSanitizeForDocker(t *testing.T) {
 	tests := []struct {
 		input string
