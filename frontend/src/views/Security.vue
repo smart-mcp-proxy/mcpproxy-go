@@ -25,6 +25,7 @@
         <p class="text-sm text-base-content/70">
           Progress: {{ queueProgress.completed || 0 }}/{{ queueProgress.total || 0 }} completed,
           {{ queueProgress.running || 0 }} running<span v-if="queueProgress.skipped">, {{ queueProgress.skipped }} skipped</span>
+          <span class="ml-2 font-mono text-base-content/50">{{ scanAllElapsedStr }}</span>
         </p>
 
         <!-- Progress bar -->
@@ -142,32 +143,24 @@
                     </div>
                   </td>
                   <td>
-                    <span class="badge" :class="statusBadgeClass(scanner.status)">{{ scanner.status }}</span>
+                    <span class="badge" :class="statusBadgeClass(scanner.status)">{{ scannerDisplayStatus(scanner.status) }}</span>
                   </td>
                   <td>
-                    <div class="flex gap-2">
-                      <button
-                        v-if="scanner.status === 'available'"
-                        @click="installScanner(scanner.id)"
+                    <div class="flex gap-2 items-center">
+                      <input
+                        type="checkbox"
+                        class="toggle toggle-sm toggle-primary"
+                        :checked="scanner.status !== 'available'"
                         :disabled="installing === scanner.id"
-                        class="btn btn-sm btn-primary"
-                      >
-                        <span v-if="installing === scanner.id" class="loading loading-spinner loading-xs"></span>
-                        Install
-                      </button>
+                        @change="toggleScanner(scanner)"
+                      />
+                      <span v-if="installing === scanner.id" class="loading loading-spinner loading-xs"></span>
                       <button
                         v-if="scanner.status === 'installed' || scanner.status === 'configured'"
                         @click="openConfigDialog(scanner)"
                         class="btn btn-sm btn-outline"
                       >
                         Configure
-                      </button>
-                      <button
-                        v-if="scanner.status !== 'available'"
-                        @click="removeScanner(scanner.id)"
-                        class="btn btn-sm btn-ghost text-error"
-                      >
-                        Remove
                       </button>
                     </div>
                   </td>
@@ -178,94 +171,104 @@
         </div>
       </div>
 
-      <!-- Recent Scan Reports -->
-      <div class="card bg-base-100 shadow-xl" v-if="scanners.some(s => s.status !== 'available')">
+      <!-- Scan History -->
+      <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
-          <h2 class="card-title">Scan a Server</h2>
-          <p class="text-sm text-base-content/70 mb-4">Select a quarantined server to scan with installed scanners</p>
-
-          <div class="flex gap-4 items-end">
-            <div class="form-control flex-1">
-              <label class="label"><span class="label-text">Server Name</span></label>
-              <input v-model="scanServerName" type="text" placeholder="e.g., github-server" class="input input-bordered" />
+          <div class="flex justify-between items-start">
+            <div>
+              <h2 class="card-title">Scan History</h2>
+              <p class="text-sm text-base-content/70 mb-4">All security scan results across servers</p>
             </div>
-            <button @click="startScan" :disabled="!scanServerName || scanning" class="btn btn-primary">
-              <span v-if="scanning" class="loading loading-spinner loading-sm"></span>
-              {{ scanning ? 'Scanning...' : 'Start Scan' }}
-            </button>
+            <div class="flex items-center gap-2">
+              <span class="text-sm text-base-content/50">Sort by:</span>
+              <select v-model="historySort" @change="onSortChange" class="select select-sm select-bordered">
+                <option value="started_at">Date</option>
+                <option value="findings_count">Findings</option>
+              </select>
+              <button @click="toggleSortOrder" class="btn btn-sm btn-ghost btn-square" :title="'Order: ' + historyOrder">
+                <svg v-if="historyOrder === 'desc'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" /></svg>
+              </button>
+            </div>
           </div>
 
-          <!-- Scan Result -->
-          <div v-if="scanResult" class="mt-6">
-            <div class="divider">Scan Result</div>
-            <div class="flex gap-4 mb-4">
-              <div class="stat bg-base-200 rounded-lg p-4">
-                <div class="stat-title text-sm">Risk Score</div>
-                <div v-if="scanResult.empty_scan" class="stat-value text-2xl text-warning">N/A</div>
-                <div v-else class="stat-value text-2xl" :class="riskScoreClass(scanResult.risk_score)">{{ scanResult.risk_score }}/100</div>
-              </div>
-              <div class="stat bg-base-200 rounded-lg p-4" v-if="scanResult.summary">
-                <div class="stat-title text-sm">Findings</div>
-                <div class="stat-value text-2xl">{{ scanResult.summary.total }}</div>
-                <div class="stat-desc">
-                  <span class="text-error">{{ scanResult.summary.critical }} critical</span>,
-                  <span class="text-warning">{{ scanResult.summary.high }} high</span>
-                </div>
-              </div>
-            </div>
+          <div v-if="historyLoading && scanHistory.length === 0" class="text-center py-8">
+            <span class="loading loading-spinner loading-md"></span>
+            <p class="mt-2 text-sm text-base-content/50">Loading scan history...</p>
+          </div>
 
-            <!-- Findings Table -->
-            <div v-if="scanResult.findings?.length" class="overflow-x-auto">
-              <table class="table table-sm">
-                <thead>
-                  <tr>
-                    <th>Severity</th>
-                    <th>Finding</th>
-                    <th>Package</th>
-                    <th>Fix</th>
-                    <th>Scanner</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(finding, idx) in scanResult.findings" :key="idx">
-                    <td>
-                      <div class="flex flex-col items-center gap-1">
-                        <span class="badge badge-sm" :class="severityBadgeClass(finding.severity)">{{ finding.severity }}</span>
-                        <span v-if="finding.cvss_score" class="text-xs text-base-content/50">{{ finding.cvss_score.toFixed(1) }}</span>
-                      </div>
-                    </td>
-                    <td>
-                      <div class="font-medium">
-                        <a v-if="finding.help_uri" :href="finding.help_uri" target="_blank" class="link link-primary">
-                          {{ finding.rule_id || finding.title }}
-                        </a>
-                        <span v-else>{{ finding.rule_id || finding.title }}</span>
-                      </div>
-                      <div class="text-sm text-base-content/60 max-w-md truncate">{{ finding.title }}</div>
-                      <div v-if="finding.location" class="text-xs font-mono text-base-content/40 mt-1">{{ finding.location }}</div>
-                    </td>
-                    <td>
-                      <div v-if="finding.package_name" class="font-mono text-sm">{{ finding.package_name }}</div>
-                      <div v-if="finding.installed_version" class="text-xs text-base-content/50">v{{ finding.installed_version }}</div>
-                    </td>
-                    <td>
-                      <span v-if="finding.fixed_version" class="badge badge-sm badge-success badge-outline">{{ finding.fixed_version }}</span>
-                      <span v-else class="text-xs text-base-content/30">-</span>
-                    </td>
-                    <td class="text-sm text-base-content/70">{{ finding.scanner }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <div v-else class="alert alert-success mt-4">
-              No security findings detected.
-            </div>
+          <div v-else-if="scanHistory.length === 0" class="text-center py-8 text-base-content/50">
+            No scan history yet. Use "Scan All Servers" to start scanning.
+          </div>
 
-            <!-- Approve/Reject Actions -->
-            <div class="flex gap-2 mt-4">
-              <button @click="approveServer(scanServerName)" class="btn btn-success">Approve Server</button>
-              <button @click="rejectServer(scanServerName)" class="btn btn-error btn-outline">Reject Server</button>
-            </div>
+          <div v-else class="overflow-x-auto">
+            <table class="table table-zebra">
+              <thead>
+                <tr>
+                  <th>Server</th>
+                  <th>Scan ID</th>
+                  <th class="cursor-pointer select-none" @click="toggleSort('started_at')">
+                    Date
+                    <span v-if="historySort === 'started_at'" class="ml-1">{{ historyOrder === 'desc' ? '▼' : '▲' }}</span>
+                  </th>
+                  <th>Status</th>
+                  <th class="cursor-pointer select-none" @click="toggleSort('findings_count')">
+                    Findings
+                    <span v-if="historySort === 'findings_count'" class="ml-1">{{ historyOrder === 'desc' ? '▼' : '▲' }}</span>
+                  </th>
+                  <th>Risk</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="scan in scanHistory" :key="scan.job_id">
+                  <td>
+                    <router-link :to="`/servers/${encodeURIComponent(scan.server_name)}`" class="link link-primary font-medium">
+                      {{ scan.server_name }}
+                    </router-link>
+                    <div v-if="scan.pass === 2" class="text-xs text-base-content/50">(Pass 2)</div>
+                  </td>
+                  <td>
+                    <span class="font-mono text-sm text-base-content/70">{{ (scan.job_id || '').substring(0, 8) }}</span>
+                  </td>
+                  <td>
+                    <span class="tooltip" :data-tip="scan.started_at">
+                      {{ timeAgo(scan.started_at) }}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="badge badge-sm" :class="scanStatusBadge(scan.status)">
+                      <span v-if="scan.status === 'running'" class="loading loading-spinner loading-xs mr-1"></span>
+                      {{ scan.status }}
+                    </span>
+                  </td>
+                  <td>
+                    <span :class="{ 'font-bold': (scan.findings_count || 0) > 0 }">{{ scan.findings_count || 0 }}</span>
+                  </td>
+                  <td>
+                    <span v-if="scan.risk_score != null" :class="riskScoreClass(scan.risk_score)">{{ scan.risk_score }}</span>
+                    <span v-else class="text-base-content/30">-</span>
+                  </td>
+                  <td>
+                    <router-link
+                      v-if="scan.status === 'completed'"
+                      :to="`/security/scans/${encodeURIComponent(scan.job_id)}`"
+                      class="link link-primary text-sm whitespace-nowrap"
+                    >
+                      Details →
+                    </router-link>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Load More -->
+          <div v-if="scanHistory.length < historyTotal" class="text-center mt-4">
+            <button @click="loadMoreHistory" :disabled="historyLoading" class="btn btn-sm btn-outline">
+              <span v-if="historyLoading" class="loading loading-spinner loading-xs"></span>
+              Load More ({{ scanHistory.length }}/{{ historyTotal }})
+            </button>
           </div>
         </div>
       </div>
@@ -339,14 +342,31 @@ const error = ref('')
 const scanners = ref<any[]>([])
 const overview = ref<any>({})
 const installing = ref<string | null>(null)
-const scanServerName = ref('')
-const scanning = ref(false)
-const scanResult = ref<any>(null)
+
+// Scan history state
+const scanHistory = ref<any[]>([])
+const historyLoading = ref(false)
+const historySort = ref('started_at')
+const historyOrder = ref('desc')
+const historyTotal = ref(0)
+const historyOffset = ref(0)
+const HISTORY_PAGE_SIZE = 20
 
 // Scan All state
 const scanAllRunning = ref(false)
+const scanAllStartTime = ref<number>(0)
+const scanAllElapsed = ref(0)
+let scanAllElapsedTimer: ReturnType<typeof setInterval> | null = null
 const queueProgress = ref<any>(null)
 let queuePollTimer: ReturnType<typeof setInterval> | null = null
+
+const scanAllElapsedStr = computed(() => {
+  const s = scanAllElapsed.value
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${m}m ${sec}s`
+})
 
 // Config dialog
 const configDialog = ref<HTMLDialogElement>()
@@ -384,13 +404,15 @@ function statusBadgeClass(status: string) {
   }
 }
 
-function severityBadgeClass(severity: string) {
-  switch (severity) {
-    case 'critical': return 'badge-error'
-    case 'high': return 'badge-warning'
-    case 'medium': return 'badge-info'
-    case 'low': return 'badge-ghost'
-    default: return 'badge-ghost'
+function scannerDisplayStatus(status: string): string {
+  switch (status) {
+    case 'installed':
+    case 'configured':
+      return 'enabled'
+    case 'available':
+      return 'disabled'
+    default:
+      return status
   }
 }
 
@@ -417,23 +439,21 @@ async function refresh() {
   }
 }
 
-async function installScanner(id: string) {
-  installing.value = id
+async function toggleScanner(scanner: any) {
+  installing.value = scanner.id
   try {
-    const res = await api.installScanner(id)
-    if (!res.success) {
-      error.value = `Failed to install: ${res.error}`
+    if (scanner.status === 'available') {
+      const res = await api.installScanner(scanner.id)
+      if (!res.success) {
+        error.value = `Failed to enable: ${res.error}`
+      }
+    } else {
+      await api.removeScanner(scanner.id)
     }
     await refresh()
   } finally {
     installing.value = null
   }
-}
-
-async function removeScanner(id: string) {
-  if (!confirm(`Remove scanner ${id}?`)) return
-  await api.removeScanner(id)
-  await refresh()
 }
 
 function openConfigDialog(scanner: any) {
@@ -483,63 +503,95 @@ async function saveConfig() {
   await refresh()
 }
 
-async function startScan() {
-  if (!scanServerName.value) return
-  scanning.value = true
-  scanResult.value = null
-  try {
-    const startRes = await api.startScan(scanServerName.value)
-    if (!startRes.success) {
-      error.value = `Scan failed: ${startRes.error}`
-      return
-    }
-    // Poll for completion
-    let attempts = 0
-    while (attempts < 60) {
-      await new Promise(r => setTimeout(r, 2000))
-      const statusRes = await api.getScanStatus(scanServerName.value)
-      if (statusRes.success && statusRes.data) {
-        if (statusRes.data.status === 'completed' || statusRes.data.status === 'failed') {
-          break
-        }
-      }
-      attempts++
-    }
-    // Get report
-    const reportRes = await api.getScanReport(scanServerName.value)
-    if (reportRes.success) {
-      scanResult.value = reportRes.data
-    }
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    scanning.value = false
-    await refresh()
+function toggleSort(field: string) {
+  if (historySort.value === field) {
+    historyOrder.value = historyOrder.value === 'desc' ? 'asc' : 'desc'
+  } else {
+    historySort.value = field
+    historyOrder.value = 'desc'
+  }
+  historyOffset.value = 0
+  scanHistory.value = []
+  loadHistory()
+}
+
+function onSortChange() {
+  historyOffset.value = 0
+  scanHistory.value = []
+  loadHistory()
+}
+
+function toggleSortOrder() {
+  historyOrder.value = historyOrder.value === 'desc' ? 'asc' : 'desc'
+  historyOffset.value = 0
+  scanHistory.value = []
+  loadHistory()
+}
+
+function scanStatusBadge(status: string) {
+  switch (status) {
+    case 'completed': return 'badge-success'
+    case 'running': return 'badge-info'
+    case 'failed': return 'badge-error'
+    case 'cancelled': return 'badge-warning'
+    default: return 'badge-ghost'
   }
 }
 
-async function approveServer(name: string) {
-  const force = scanResult.value?.summary?.critical > 0
-  if (force && !confirm('Server has critical findings. Force approve?')) return
-  await api.securityApprove(name, force)
-  scanResult.value = null
-  await refresh()
+function timeAgo(dateStr: string): string {
+  if (!dateStr) return '-'
+  const diff = Date.now() - new Date(dateStr).getTime()
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  return `${days}d ago`
 }
 
-async function rejectServer(name: string) {
-  if (!confirm(`Reject and remove ${name}?`)) return
-  await api.securityReject(name)
-  scanResult.value = null
-  await refresh()
+async function loadHistory() {
+  historyLoading.value = true
+  try {
+    const res = await api.listScanHistory({
+      sort: historySort.value,
+      order: historyOrder.value,
+      limit: HISTORY_PAGE_SIZE,
+      offset: historyOffset.value,
+    })
+    if (res.success && res.data) {
+      if (historyOffset.value === 0) {
+        scanHistory.value = res.data.scans || []
+      } else {
+        scanHistory.value.push(...(res.data.scans || []))
+      }
+      historyTotal.value = res.data.total || 0
+    }
+  } catch {
+    // Ignore history load errors
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function loadMoreHistory() {
+  historyOffset.value += HISTORY_PAGE_SIZE
+  await loadHistory()
 }
 
 async function startScanAll() {
   scanAllRunning.value = true
+  scanAllStartTime.value = Date.now()
+  scanAllElapsed.value = 0
+  scanAllElapsedTimer = setInterval(() => {
+    scanAllElapsed.value = Math.floor((Date.now() - scanAllStartTime.value) / 1000)
+  }, 1000)
   try {
     const res = await api.scanAll()
     if (!res.success) {
       error.value = `Failed to start batch scan: ${res.error}`
       scanAllRunning.value = false
+      if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
       return
     }
     queueProgress.value = res.data
@@ -561,6 +613,7 @@ function startQueuePolling() {
         // Stop polling when done
         if (res.data.status === 'completed' || res.data.status === 'cancelled') {
           stopQueuePolling()
+          if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
           scanAllRunning.value = false
           // Auto-refresh page data
           await refresh()
@@ -589,7 +642,7 @@ async function cancelAllScans() {
 }
 
 onMounted(async () => {
-  await refresh()
+  await Promise.all([refresh(), loadHistory()])
   // Check if a batch scan is already running
   try {
     const res = await api.getQueueProgress()
@@ -605,5 +658,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopQueuePolling()
+  if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
 })
 </script>
