@@ -88,6 +88,19 @@ export interface SecurityScanReport {
   pass2_running?: boolean   // Supply chain audit in progress
 }
 
+// Scan job summary for history listing
+export interface ScanJobSummary {
+  id: string
+  server_name: string
+  status: string
+  scan_pass: number
+  started_at: string
+  completed_at?: string
+  findings_count: number
+  risk_score: number
+  scanners: string[]
+}
+
 // Summary from the aggregated report API (matches Go ReportSummary)
 export interface SecurityScanReportSummary {
   critical: number

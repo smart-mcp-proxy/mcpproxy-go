@@ -773,15 +773,14 @@ class APIService {
   }
 
   async installScanner(id: string): Promise<APIResponse<void>> {
-    return this.request<void>('/api/v1/security/scanners/install', {
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/enable`, {
       method: 'POST',
-      body: JSON.stringify({ id }),
     })
   }
 
   async removeScanner(id: string): Promise<APIResponse<void>> {
-    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}`, {
-      method: 'DELETE',
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/disable`, {
+      method: 'POST',
     })
   }
 
@@ -855,6 +854,21 @@ class APIService {
 
   async cancelAllScans(): Promise<APIResponse<void>> {
     return this.request<void>('/api/v1/security/cancel-all', { method: 'POST' })
+  }
+
+  async listScanHistory(params?: { sort?: string; order?: string; limit?: number; offset?: number; status?: string }): Promise<APIResponse<{ scans: any[]; total: number }>> {
+    const q = new URLSearchParams()
+    if (params?.sort) q.set('sort', params.sort)
+    if (params?.order) q.set('order', params.order)
+    if (params?.limit) q.set('limit', String(params.limit))
+    if (params?.offset) q.set('offset', String(params.offset))
+    if (params?.status) q.set('status', params.status)
+    const qs = q.toString()
+    return this.request<{ scans: any[]; total: number }>(`/api/v1/security/scans${qs ? '?' + qs : ''}`)
+  }
+
+  async getScanReportByJobId(jobId: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/security/scans/${encodeURIComponent(jobId)}/report`)
   }
 
   // Utility methods
