@@ -205,6 +205,13 @@ func (s *ActivityService) handleEvent(evt Event) {
 	// Spec 032: Tool-level quarantine events
 	case EventTypeActivityToolQuarantineChange:
 		s.handleToolQuarantineChange(evt)
+	// Spec 039: Security scan events
+	case EventTypeSecurityScanStarted:
+		s.handleSecurityScanStarted(evt)
+	case EventTypeSecurityScanCompleted:
+		s.handleSecurityScanCompleted(evt)
+	case EventTypeSecurityScanFailed:
+		s.handleSecurityScanFailed(evt)
 	default:
 		// Ignore other event types
 	}
@@ -774,6 +781,88 @@ func (s *ActivityService) handleToolQuarantineChange(evt Event) {
 			zap.String("server_name", serverName),
 			zap.String("tool_name", toolName),
 			zap.String("action", action))
+	}
+}
+
+// handleSecurityScanStarted records a security scan start event (Spec 039).
+func (s *ActivityService) handleSecurityScanStarted(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+	jobID := getStringPayload(evt.Payload, "job_id")
+
+	metadata := map[string]interface{}{
+		"job_id": jobID,
+	}
+	if scanners := evt.Payload["scanners"]; scanners != nil {
+		metadata["scanners"] = scanners
+	}
+
+	record := &storage.ActivityRecord{
+		Type:       storage.ActivityTypeSecurityScan,
+		Source:     storage.ActivitySourceInternal,
+		ServerName: serverName,
+		ToolName:   "security_scan",
+		Status:     "started",
+		Timestamp:  evt.Timestamp,
+		Metadata:   metadata,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save security scan started activity",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+}
+
+// handleSecurityScanCompleted records a security scan completion event (Spec 039).
+func (s *ActivityService) handleSecurityScanCompleted(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+
+	metadata := map[string]interface{}{}
+	if findingsSummary := getMapPayload(evt.Payload, "findings_summary"); findingsSummary != nil {
+		metadata["findings_summary"] = findingsSummary
+	}
+	if jobID := getStringPayload(evt.Payload, "job_id"); jobID != "" {
+		metadata["job_id"] = jobID
+	}
+
+	record := &storage.ActivityRecord{
+		Type:       storage.ActivityTypeSecurityScan,
+		Source:     storage.ActivitySourceInternal,
+		ServerName: serverName,
+		ToolName:   "security_scan",
+		Status:     "success",
+		Timestamp:  evt.Timestamp,
+		Metadata:   metadata,
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save security scan completed activity",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+}
+
+// handleSecurityScanFailed records a security scan failure event (Spec 039).
+func (s *ActivityService) handleSecurityScanFailed(evt Event) {
+	serverName := getStringPayload(evt.Payload, "server_name")
+	scannerID := getStringPayload(evt.Payload, "scanner_id")
+	errMsg := getStringPayload(evt.Payload, "error")
+
+	record := &storage.ActivityRecord{
+		Type:         storage.ActivityTypeSecurityScan,
+		Source:       storage.ActivitySourceInternal,
+		ServerName:   serverName,
+		ToolName:     "security_scan",
+		Status:       "error",
+		ErrorMessage: errMsg,
+		Timestamp:    evt.Timestamp,
+		Metadata:     map[string]interface{}{"scanner_id": scannerID},
+	}
+
+	if err := s.storage.SaveActivity(record); err != nil {
+		s.logger.Error("Failed to save security scan failed activity",
+			zap.String("server", serverName),
+			zap.Error(err))
 	}
 }
 
