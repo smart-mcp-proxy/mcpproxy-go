@@ -204,7 +204,8 @@ type AggregatedReport struct {
 	Pass2Complete bool `json:"pass2_complete"` // Supply chain audit done
 	Pass2Running  bool `json:"pass2_running"`  // Supply chain audit in progress
 	// Scan context from the primary job (for report page display)
-	ScanContext *ScanContext `json:"scan_context,omitempty"`
+	ScanContext     *ScanContext       `json:"scan_context,omitempty"`
+	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses,omitempty"` // Per-scanner execution logs
 }
 
 // ReportSummary provides counts by severity and threat level

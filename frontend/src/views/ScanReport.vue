@@ -344,37 +344,40 @@
         <span v-else>Supply chain audit complete. No CVEs found in dependencies.</span>
       </div>
 
-      <!-- Scanner Reports -->
-      <div v-if="report.reports && report.reports.length > 0" class="collapse collapse-arrow bg-base-100 shadow-md">
+      <!-- Scanner Execution Logs -->
+      <div v-if="report.scanner_statuses && report.scanner_statuses.length > 0" class="collapse collapse-arrow bg-base-100 shadow-md">
         <input type="checkbox" />
         <div class="collapse-title font-medium">
-          Scanner Reports
-          <span class="badge badge-sm badge-ghost ml-2">{{ report.reports.length }} scanners</span>
+          Scanner Execution Logs
+          <span class="badge badge-sm badge-ghost ml-2">{{ report.scanner_statuses.length }} scanners</span>
         </div>
         <div class="collapse-content">
-          <div class="overflow-x-auto">
-            <table class="table table-sm">
-              <thead>
-                <tr>
-                  <th>Scanner</th>
-                  <th>Findings</th>
-                  <th>Risk Score</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="sr in report.reports" :key="sr.scanner_id">
-                  <td class="font-medium">{{ scannerDisplayName(sr.scanner_id) }}</td>
-                  <td>{{ sr.findings?.length ?? 0 }}</td>
-                  <td>
-                    <span class="font-mono" :class="{
-                      'text-error': sr.risk_score >= 70,
-                      'text-warning': sr.risk_score >= 30 && sr.risk_score < 70,
-                      'text-success': sr.risk_score < 30,
-                    }">{{ sr.risk_score }}/100</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+          <div class="space-y-4">
+            <div v-for="ss in report.scanner_statuses" :key="ss.scanner_id" class="border border-base-300 rounded-lg p-3">
+              <div class="flex items-center justify-between mb-2">
+                <span class="font-medium">{{ scannerDisplayName(ss.scanner_id) }}</span>
+                <div class="flex items-center gap-2">
+                  <span class="badge badge-sm" :class="{
+                    'badge-success': ss.status === 'completed',
+                    'badge-error': ss.status === 'failed',
+                    'badge-info': ss.status === 'running',
+                    'badge-ghost': !ss.status,
+                  }">{{ ss.status || 'unknown' }}</span>
+                  <span v-if="ss.findings_count" class="text-xs text-base-content/60">{{ ss.findings_count }} findings</span>
+                  <span v-if="ss.exit_code !== undefined && ss.exit_code !== 0" class="text-xs text-error">exit {{ ss.exit_code }}</span>
+                </div>
+              </div>
+              <div v-if="ss.error" class="text-sm text-error mb-2">{{ ss.error }}</div>
+              <div v-if="ss.stdout" class="mb-2">
+                <div class="text-xs text-base-content/50 mb-1">stdout</div>
+                <pre class="bg-base-200 text-xs p-3 rounded-lg max-h-48 overflow-auto whitespace-pre-wrap break-words">{{ ss.stdout }}</pre>
+              </div>
+              <div v-if="ss.stderr">
+                <div class="text-xs text-base-content/50 mb-1">stderr</div>
+                <pre class="bg-base-200 text-xs p-3 rounded-lg max-h-48 overflow-auto whitespace-pre-wrap break-words text-warning">{{ ss.stderr }}</pre>
+              </div>
+              <div v-if="!ss.stdout && !ss.stderr && !ss.error" class="text-xs text-base-content/40 italic">No output captured</div>
+            </div>
           </div>
         </div>
       </div>

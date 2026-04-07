@@ -789,6 +789,7 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 
 	// Attach scan context from primary job
 	agg.ScanContext = primaryJob.ScanContext
+	agg.ScannerStatuses = primaryJob.ScannerStatuses
 
 	return agg, nil
 }
@@ -911,8 +912,9 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 		}
 	}
 
-	// Attach scan context from job
+	// Attach scan context and scanner execution logs from job
 	agg.ScanContext = job.ScanContext
+	agg.ScannerStatuses = job.ScannerStatuses
 
 	return agg, nil
 }
