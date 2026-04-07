@@ -607,8 +607,14 @@ func (s *Server) handleListScanHistory(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(summaries, func(i, j int) bool {
 		var less bool
 		switch sortField {
+		case "server_name":
+			less = summaries[i].ServerName < summaries[j].ServerName
+		case "status":
+			less = summaries[i].Status < summaries[j].Status
 		case "findings_count":
 			less = summaries[i].FindingsCount < summaries[j].FindingsCount
+		case "risk_score":
+			less = summaries[i].RiskScore < summaries[j].RiskScore
 		default: // started_at
 			less = summaries[i].StartedAt.Before(summaries[j].StartedAt)
 		}

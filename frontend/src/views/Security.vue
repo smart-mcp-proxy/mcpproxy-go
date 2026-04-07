@@ -174,22 +174,9 @@
       <!-- Scan History -->
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
-          <div class="flex justify-between items-start">
-            <div>
-              <h2 class="card-title">Scan History</h2>
-              <p class="text-sm text-base-content/70 mb-4">All security scan results across servers</p>
-            </div>
-            <div class="flex items-center gap-2">
-              <span class="text-sm text-base-content/50">Sort by:</span>
-              <select v-model="historySort" @change="onSortChange" class="select select-sm select-bordered">
-                <option value="started_at">Date</option>
-                <option value="findings_count">Findings</option>
-              </select>
-              <button @click="toggleSortOrder" class="btn btn-sm btn-ghost btn-square" :title="'Order: ' + historyOrder">
-                <svg v-if="historyOrder === 'desc'" xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" /></svg>
-                <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7" /></svg>
-              </button>
-            </div>
+          <div>
+            <h2 class="card-title">Scan History</h2>
+            <p class="text-sm text-base-content/70 mb-4">All security scan results across servers</p>
           </div>
 
           <div v-if="historyLoading && scanHistory.length === 0" class="text-center py-8">
@@ -205,18 +192,21 @@
             <table class="table table-zebra">
               <thead>
                 <tr>
-                  <th>Server</th>
-                  <th>Scan ID</th>
+                  <th class="cursor-pointer select-none" @click="toggleSort('server_name')">
+                    Server {{ sortIndicator('server_name') }}
+                  </th>
                   <th class="cursor-pointer select-none" @click="toggleSort('started_at')">
-                    Date
-                    <span v-if="historySort === 'started_at'" class="ml-1">{{ historyOrder === 'desc' ? '▼' : '▲' }}</span>
+                    Date {{ sortIndicator('started_at') }}
                   </th>
-                  <th>Status</th>
+                  <th class="cursor-pointer select-none" @click="toggleSort('status')">
+                    Status {{ sortIndicator('status') }}
+                  </th>
                   <th class="cursor-pointer select-none" @click="toggleSort('findings_count')">
-                    Findings
-                    <span v-if="historySort === 'findings_count'" class="ml-1">{{ historyOrder === 'desc' ? '▼' : '▲' }}</span>
+                    Findings {{ sortIndicator('findings_count') }}
                   </th>
-                  <th>Risk</th>
+                  <th class="cursor-pointer select-none" @click="toggleSort('risk_score')">
+                    Risk {{ sortIndicator('risk_score') }}
+                  </th>
                   <th></th>
                 </tr>
               </thead>
@@ -227,9 +217,6 @@
                       {{ scan.server_name }}
                     </router-link>
                     <div v-if="scan.pass === 2" class="text-xs text-base-content/50">(Pass 2)</div>
-                  </td>
-                  <td>
-                    <span class="font-mono text-sm text-base-content/70">{{ (scan.id || '').substring(0, 8) }}</span>
                   </td>
                   <td>
                     <span class="tooltip" :data-tip="scan.started_at">
@@ -263,12 +250,18 @@
             </table>
           </div>
 
-          <!-- Load More -->
-          <div v-if="scanHistory.length < historyTotal" class="text-center mt-4">
-            <button @click="loadMoreHistory" :disabled="historyLoading" class="btn btn-sm btn-outline">
-              <span v-if="historyLoading" class="loading loading-spinner loading-xs"></span>
-              Load More ({{ scanHistory.length }}/{{ historyTotal }})
-            </button>
+          <!-- Pagination -->
+          <div v-if="historyTotalPages > 1" class="flex justify-between items-center mt-4 pt-4 border-t border-base-300">
+            <div class="text-sm text-base-content/60">
+              Showing {{ (historyPage - 1) * HISTORY_PAGE_SIZE + 1 }}-{{ Math.min(historyPage * HISTORY_PAGE_SIZE, historyTotal) }} of {{ historyTotal }}
+            </div>
+            <div class="join">
+              <button @click="historyPage = 1" :disabled="historyPage === 1" class="join-item btn btn-sm">&#xAB;</button>
+              <button @click="historyPage = Math.max(1, historyPage - 1)" :disabled="historyPage === 1" class="join-item btn btn-sm">&#x2039;</button>
+              <button class="join-item btn btn-sm">{{ historyPage }} / {{ historyTotalPages }}</button>
+              <button @click="historyPage = Math.min(historyTotalPages, historyPage + 1)" :disabled="historyPage === historyTotalPages" class="join-item btn btn-sm">&#x203A;</button>
+              <button @click="historyPage = historyTotalPages" :disabled="historyPage === historyTotalPages" class="join-item btn btn-sm">&#xBB;</button>
+            </div>
           </div>
         </div>
       </div>
@@ -334,7 +327,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 
 const loading = ref(false)
@@ -349,8 +342,9 @@ const historyLoading = ref(false)
 const historySort = ref('started_at')
 const historyOrder = ref('desc')
 const historyTotal = ref(0)
-const historyOffset = ref(0)
+const historyPage = ref(1)
 const HISTORY_PAGE_SIZE = 20
+const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / HISTORY_PAGE_SIZE)))
 
 // Scan All state
 const scanAllRunning = ref(false)
@@ -510,22 +504,13 @@ function toggleSort(field: string) {
     historySort.value = field
     historyOrder.value = 'desc'
   }
-  historyOffset.value = 0
-  scanHistory.value = []
+  historyPage.value = 1
   loadHistory()
 }
 
-function onSortChange() {
-  historyOffset.value = 0
-  scanHistory.value = []
-  loadHistory()
-}
-
-function toggleSortOrder() {
-  historyOrder.value = historyOrder.value === 'desc' ? 'asc' : 'desc'
-  historyOffset.value = 0
-  scanHistory.value = []
-  loadHistory()
+function sortIndicator(field: string): string {
+  if (historySort.value !== field) return ''
+  return historyOrder.value === 'desc' ? '\u25BC' : '\u25B2'
 }
 
 function scanStatusBadge(status: string) {
@@ -553,18 +538,15 @@ function timeAgo(dateStr: string): string {
 async function loadHistory() {
   historyLoading.value = true
   try {
+    const offset = (historyPage.value - 1) * HISTORY_PAGE_SIZE
     const res = await api.listScanHistory({
       sort: historySort.value,
       order: historyOrder.value,
       limit: HISTORY_PAGE_SIZE,
-      offset: historyOffset.value,
+      offset,
     })
     if (res.success && res.data) {
-      if (historyOffset.value === 0) {
-        scanHistory.value = res.data.scans || []
-      } else {
-        scanHistory.value.push(...(res.data.scans || []))
-      }
+      scanHistory.value = res.data.scans || []
       historyTotal.value = res.data.total || 0
     }
   } catch {
@@ -574,10 +556,7 @@ async function loadHistory() {
   }
 }
 
-async function loadMoreHistory() {
-  historyOffset.value += HISTORY_PAGE_SIZE
-  await loadHistory()
-}
+watch(historyPage, () => loadHistory())
 
 async function startScanAll() {
   scanAllRunning.value = true
