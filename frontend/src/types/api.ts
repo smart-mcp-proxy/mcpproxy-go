@@ -67,6 +67,7 @@ export interface SecurityScanFinding {
 }
 
 export interface SecurityScanReport {
+  job_id?: string
   server_name: string
   status: SecurityScanStatus
   risk_score: number

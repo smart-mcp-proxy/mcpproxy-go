@@ -682,402 +682,43 @@
               </p>
             </div>
 
-            <!-- Scan results (hidden during active scan) -->
+            <!-- Scan results summary (hidden during active scan) -->
             <template v-else-if="scanReport && !scanLoading">
-              <!-- Threat Summary Cards -->
-              <div>
-                <h3 class="text-lg font-semibold mb-3">Threat Summary</h3>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div class="stats shadow bg-base-100">
-                    <div class="stat py-3 px-4">
-                      <div class="stat-title text-xs">Dangerous</div>
-                      <div class="stat-value text-lg text-error">{{ scanReport.summary?.dangerous ?? 0 }}</div>
-                    </div>
+              <!-- Risk Score + Summary -->
+              <div class="flex items-center gap-6 mb-4">
+                <div class="text-center">
+                  <div class="text-3xl font-bold" :class="scanReport.risk_score >= 70 ? 'text-error' : scanReport.risk_score >= 40 ? 'text-warning' : 'text-success'">
+                    {{ scanReport.empty_scan ? 'N/A' : scanReport.risk_score + '/100' }}
                   </div>
-                  <div class="stats shadow bg-base-100">
-                    <div class="stat py-3 px-4">
-                      <div class="stat-title text-xs">Warnings</div>
-                      <div class="stat-value text-lg text-warning">{{ scanReport.summary?.warnings ?? 0 }}</div>
-                    </div>
-                  </div>
-                  <div class="stats shadow bg-base-100">
-                    <div class="stat py-3 px-4">
-                      <div class="stat-title text-xs">Info</div>
-                      <div class="stat-value text-lg text-info">{{ scanReport.summary?.info_level ?? 0 }}</div>
-                    </div>
-                  </div>
-                  <div class="stats shadow bg-base-100">
-                    <div class="stat py-3 px-4">
-                      <div class="stat-title text-xs">Total</div>
-                      <div class="stat-value text-lg">{{ scanReport.summary?.total ?? 0 }}</div>
-                    </div>
-                  </div>
+                  <div class="text-xs text-base-content/50">Risk Score</div>
                 </div>
-              </div>
-
-              <!-- Scan incomplete: empty scan (0 files) or all scanners failed -->
-              <div v-if="scanReport.scan_complete === false && scanReport.empty_scan" class="alert alert-warning">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                </svg>
-                <div>
-                  <div class="font-semibold">No Files Scanned</div>
-                  <span>
-                    Scanners ran but found no files to analyze. The server may have been disconnected during source extraction.
-                    Try scanning again — the server will be auto-connected. Check Scanner Execution Logs below for details.
-                  </span>
+                <div class="flex gap-4 text-sm">
+                  <span v-if="scanReport.summary?.dangerous" class="text-error font-semibold">{{ scanReport.summary.dangerous }} dangerous</span>
+                  <span v-if="scanReport.summary?.warnings" class="text-warning font-semibold">{{ scanReport.summary.warnings }} warnings</span>
+                  <span v-if="scanReport.summary?.info_level" class="text-info">{{ scanReport.summary.info_level }} info</span>
+                  <span v-if="scanReport.summary?.total === 0" class="text-success font-semibold">No findings</span>
                 </div>
-              </div>
-              <div v-else-if="scanReport.scan_complete === false" class="alert alert-error">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <div>
-                  <div class="font-semibold">Scan Incomplete</div>
-                  <span>
-                    {{ scanReport.scanners_failed ?? 0 }} of {{ scanReport.scanners_total ?? 0 }} scanner(s) failed.
-                    No scanner was able to analyze this server. Check Scanner Execution Logs below for details.
-                  </span>
-                </div>
-              </div>
-
-              <!-- Clean state: scan completed and no findings -->
-              <div v-else-if="!scanReport.findings || scanReport.findings.length === 0" class="alert alert-success">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-                <span>No security issues detected. This server appears to be safe.</span>
-              </div>
-
-              <!-- Findings grouped by threat type -->
-              <div v-else class="space-y-4">
-                <h3 class="text-lg font-semibold">Findings</h3>
-
-                <div v-for="group in groupedFindings" :key="group.type" class="collapse collapse-arrow bg-base-100 shadow-md" :class="{ 'collapse-open': group.defaultOpen }">
-                  <input type="checkbox" :checked="group.defaultOpen" />
-                  <div class="collapse-title font-medium flex items-center gap-2">
-                    <span>{{ group.label }}</span>
-                    <span class="badge badge-sm" :class="group.badgeClass">{{ group.findings.length }}</span>
-                  </div>
-                  <div class="collapse-content">
-                    <div class="space-y-2">
-                      <div v-for="(finding, idx) in group.findings" :key="idx"
-                        class="collapse collapse-arrow bg-base-200 rounded-lg"
-                      >
-                        <input type="checkbox" />
-                        <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
-                          <span
-                            class="badge badge-sm flex-shrink-0"
-                            :class="{
-                              'badge-error': finding.threat_level === 'dangerous',
-                              'badge-warning': finding.threat_level === 'warning',
-                              'badge-info': finding.threat_level === 'info',
-                            }"
-                          >
-                            {{ finding.threat_level }}
-                          </span>
-                          <span class="font-medium text-sm flex-1">
-                            {{ finding.rule_id || finding.title }}
-                          </span>
-                          <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
-                            {{ finding.package_name }}
-                          </span>
-                          <span v-if="finding.fixed_version" class="badge badge-xs badge-success badge-outline">
-                            fix: {{ finding.fixed_version }}
-                          </span>
-                        </div>
-                        <div class="collapse-content px-4 pb-3">
-                          <div class="space-y-2 text-sm">
-                            <p class="text-base-content/80">{{ finding.description }}</p>
-                            <!-- Evidence: the actual text that triggered the finding -->
-                            <div v-if="finding.evidence" class="mt-2">
-                              <div class="text-xs text-base-content/50 mb-1">Triggering content:</div>
-                              <pre class="bg-base-300 text-xs p-3 rounded-lg max-h-32 overflow-auto whitespace-pre-wrap break-words border border-base-content/10">{{ finding.evidence }}</pre>
-                            </div>
-                            <div class="grid grid-cols-2 gap-2 text-xs">
-                              <div v-if="finding.rule_id">
-                                <span class="text-base-content/50">Rule:</span>
-                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.rule_id }}</code>
-                              </div>
-                              <div v-if="finding.severity">
-                                <span class="text-base-content/50">CVSS Severity:</span>
-                                <span class="ml-1 font-medium">{{ finding.severity }}</span>
-                                <span v-if="finding.cvss_score" class="ml-1">({{ finding.cvss_score }})</span>
-                              </div>
-                              <div v-if="finding.package_name">
-                                <span class="text-base-content/50">Package:</span>
-                                <span class="ml-1 font-mono">{{ finding.package_name }}</span>
-                                <span v-if="finding.installed_version" class="ml-1 text-base-content/50">v{{ finding.installed_version }}</span>
-                              </div>
-                              <div v-if="finding.fixed_version">
-                                <span class="text-base-content/50">Fixed in:</span>
-                                <span class="ml-1 font-mono text-success">{{ finding.fixed_version }}</span>
-                              </div>
-                              <div v-if="finding.location">
-                                <span class="text-base-content/50">Location:</span>
-                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
-                              </div>
-                              <div v-if="finding.scanner">
-                                <span class="text-base-content/50">Scanner:</span>
-                                <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
-                              </div>
-                            </div>
-                            <a
-                              v-if="finding.help_uri"
-                              :href="finding.help_uri"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              class="link link-primary text-xs inline-flex items-center gap-1"
-                            >
-                              View Advisory Details &rarr;
-                            </a>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Supply Chain Audit (Pass 2) -->
-              <div v-if="scanReport.pass2_running" class="alert alert-info mt-4">
-                <span class="loading loading-spinner loading-sm"></span>
-                <div>
-                  <h3 class="font-bold">Supply Chain Audit</h3>
-                  <p class="text-sm">Deep dependency analysis running in background. Results will appear here when complete.</p>
-                </div>
-              </div>
-              <div v-else-if="scanReport.pass2_complete && pass2Findings.length > 0" class="mt-4">
-                <div class="collapse collapse-arrow bg-base-100 shadow-md">
-                  <input type="checkbox" />
-                  <div class="collapse-title font-medium flex items-center gap-2">
-                    <span>Supply Chain Audit (CVEs)</span>
-                    <span class="badge badge-sm" :class="pass2HasDangerous ? 'badge-error' : pass2HasWarnings ? 'badge-warning' : 'badge-info'">{{ pass2Findings.length }}</span>
-                  </div>
-                  <div class="collapse-content">
-                    <div class="space-y-2">
-                      <div v-for="(finding, idx) in pass2Findings" :key="'p2-' + idx"
-                        class="collapse collapse-arrow bg-base-200 rounded-lg"
-                      >
-                        <input type="checkbox" />
-                        <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
-                          <span
-                            class="badge badge-sm flex-shrink-0"
-                            :class="{
-                              'badge-error': finding.threat_level === 'dangerous',
-                              'badge-warning': finding.threat_level === 'warning',
-                              'badge-info': finding.threat_level === 'info',
-                            }"
-                          >
-                            {{ finding.threat_level }}
-                          </span>
-                          <span class="font-medium text-sm flex-1">
-                            {{ finding.rule_id || finding.title }}
-                          </span>
-                          <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
-                            {{ finding.package_name }}
-                          </span>
-                          <span v-if="finding.fixed_version" class="badge badge-xs badge-success badge-outline">
-                            fix: {{ finding.fixed_version }}
-                          </span>
-                        </div>
-                        <div class="collapse-content px-4 pb-3">
-                          <div class="space-y-2 text-sm">
-                            <p class="text-base-content/80">{{ finding.description }}</p>
-                            <!-- Evidence: the actual text that triggered the finding -->
-                            <div v-if="finding.evidence" class="mt-2">
-                              <div class="text-xs text-base-content/50 mb-1">Triggering content:</div>
-                              <pre class="bg-base-300 text-xs p-3 rounded-lg max-h-32 overflow-auto whitespace-pre-wrap break-words border border-base-content/10">{{ finding.evidence }}</pre>
-                            </div>
-                            <div class="grid grid-cols-2 gap-2 text-xs">
-                              <div v-if="finding.rule_id">
-                                <span class="text-base-content/50">Rule:</span>
-                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.rule_id }}</code>
-                              </div>
-                              <div v-if="finding.severity">
-                                <span class="text-base-content/50">CVSS Severity:</span>
-                                <span class="ml-1 font-medium">{{ finding.severity }}</span>
-                                <span v-if="finding.cvss_score" class="ml-1">({{ finding.cvss_score }})</span>
-                              </div>
-                              <div v-if="finding.package_name">
-                                <span class="text-base-content/50">Package:</span>
-                                <span class="ml-1 font-mono">{{ finding.package_name }}</span>
-                                <span v-if="finding.installed_version" class="ml-1 text-base-content/50">v{{ finding.installed_version }}</span>
-                              </div>
-                              <div v-if="finding.fixed_version">
-                                <span class="text-base-content/50">Fixed in:</span>
-                                <span class="ml-1 font-mono text-success">{{ finding.fixed_version }}</span>
-                              </div>
-                              <div v-if="finding.location">
-                                <span class="text-base-content/50">Location:</span>
-                                <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
-                              </div>
-                              <div v-if="finding.scanner">
-                                <span class="text-base-content/50">Scanner:</span>
-                                <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
-                              </div>
-                            </div>
-                            <a
-                              v-if="finding.help_uri"
-                              :href="finding.help_uri"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              class="link link-primary text-xs inline-flex items-center gap-1"
-                            >
-                              View Advisory Details &rarr;
-                            </a>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-else-if="scanReport.pass2_complete && pass2Findings.length === 0" class="alert alert-success mt-4">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-                <span>Supply chain audit complete. No additional CVEs found in dependencies.</span>
-              </div>
-
-              <!-- Approve / Reject actions -->
-              <div v-if="scanReport.findings && scanReport.findings.length > 0" class="flex gap-3 pt-2">
-                <button
-                  @click="approveServerSecurity"
-                  :disabled="securityActionLoading"
-                  class="btn btn-success"
-                >
-                  <span v-if="securityActionLoading" class="loading loading-spinner loading-xs"></span>
-                  Approve Server
-                </button>
-                <button
-                  @click="rejectServerSecurity"
-                  :disabled="securityActionLoading"
-                  class="btn btn-error btn-outline"
-                >
-                  <span v-if="securityActionLoading" class="loading loading-spinner loading-xs"></span>
-                  Reject Server
-                </button>
               </div>
 
               <!-- Scan metadata -->
-              <div v-if="scanReport.scanned_at" class="text-xs text-base-content/40 pt-2">
-                Scanned {{ formatRelativeTime(scanReport.scanned_at) }}
-                <span v-if="scanReport.duration_ms"> in {{ scanReport.duration_ms }}ms</span>
-                <span v-if="scanReport.scanners_used?.length"> using {{ scanReport.scanners_used.map(s => scannerDisplayName(s)).join(', ') }}</span>
+              <div class="text-sm text-base-content/60 mb-4">
+                <span v-if="scanReport.job_id">Scan ID: <code class="bg-base-200 px-1 rounded text-xs">{{ scanReport.job_id.substring(0, 8) }}</code></span>
+                <span v-if="scanReport.scanned_at" class="ml-4">{{ new Date(scanReport.scanned_at).toLocaleString() }}</span>
+                <span v-if="scanReport.pass2_running" class="ml-4 badge badge-sm badge-info">Pass 2 running...</span>
+                <span v-else-if="scanReport.pass2_complete" class="ml-4 badge badge-sm badge-success">Pass 2 complete</span>
               </div>
 
-              <!-- Scanner Execution Logs -->
-              <div v-if="scanStatus" class="pt-4">
-                <div class="collapse collapse-arrow bg-base-100 shadow-md">
-                  <input type="checkbox" />
-                  <div class="collapse-title font-medium">
-                    Scanner Execution Logs
-                    <span class="badge badge-sm badge-ghost ml-2">{{ scanStatus.scanner_statuses?.length || 0 }} scanners</span>
-                  </div>
-                  <div class="collapse-content">
-                    <div v-for="ss in (scanStatus.scanner_statuses || [])" :key="ss.scanner_id" class="mb-4 last:mb-0">
-                      <div class="flex items-center gap-2 mb-1">
-                        <span class="font-medium text-sm">{{ scannerDisplayName(ss.scanner_id) }}</span>
-                        <span class="badge badge-xs" :class="{
-                          'badge-success': ss.status === 'completed',
-                          'badge-error': ss.status === 'failed',
-                          'badge-warning': ss.status === 'running',
-                          'badge-ghost': ss.status === 'pending',
-                        }">{{ ss.status }}</span>
-                        <span class="text-xs text-base-content/40">
-                          exit code: {{ ss.exit_code ?? '?' }}
-                          <template v-if="ss.findings_count"> | {{ ss.findings_count }} findings</template>
-                        </span>
-                      </div>
-                      <div v-if="ss.error" class="text-xs text-error mb-1 break-all">{{ ss.error }}</div>
-                      <div v-if="ss.stderr" class="mb-1">
-                        <div class="text-xs text-base-content/50 mb-0.5">stderr:</div>
-                        <pre class="bg-base-300 text-xs p-2 rounded max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ ss.stderr }}</pre>
-                      </div>
-                      <div v-if="ss.stdout && !ss.stdout.startsWith('{')">
-                        <div class="text-xs text-base-content/50 mb-0.5">stdout:</div>
-                        <pre class="bg-base-300 text-xs p-2 rounded max-h-40 overflow-auto whitespace-pre-wrap break-all">{{ ss.stdout.substring(0, 2000) }}</pre>
-                      </div>
-                    </div>
-                    <div v-if="!scanStatus.scanner_statuses?.length" class="text-sm text-base-content/40">
-                      No scanner execution data available.
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Scanned Files (lazy-loaded with pagination) -->
-              <div v-if="scanContext && scanContext.source_method !== 'none' && !isUrlSourceMethod && scanContext.source_method !== 'tool_definitions_only'" class="pt-4">
-                <div class="collapse collapse-arrow bg-base-100 shadow-md">
-                  <input type="checkbox" @change="onScannedFilesToggle" />
-                  <div class="collapse-title font-medium">
-                    Scanned Files
-                    <span v-if="scanFilesMeta.total || scanContext.total_files" class="text-base-content/60 font-normal">
-                      ({{ scanFilesMeta.total || scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})
-                    </span>
-                    <span v-if="scanFilesMeta.suspicious_count" class="badge badge-error badge-sm ml-2">
-                      {{ scanFilesMeta.suspicious_count }} suspicious
-                    </span>
-                  </div>
-                  <div class="collapse-content">
-                    <!-- Pass switcher (show only when docker-isolated and pass 2 exists) -->
-                    <div v-if="scanContext.docker_isolation && scanReport?.pass2_complete" class="flex gap-1 mb-2">
-                      <button
-                        class="btn btn-xs"
-                        :class="scanFilesPass === 1 ? 'btn-primary' : 'btn-ghost'"
-                        @click="switchFilesPass(1)"
-                      >Source (Pass 1)</button>
-                      <button
-                        class="btn btn-xs"
-                        :class="scanFilesPass === 2 ? 'btn-primary' : 'btn-ghost'"
-                        @click="switchFilesPass(2)"
-                      >Full Deps (Pass 2)</button>
-                    </div>
-                    <div v-if="scanFilesLoading && scanFiles.length === 0" class="text-center py-4">
-                      <span class="loading loading-spinner loading-sm"></span>
-                      <span class="ml-2 text-sm">Loading file list...</span>
-                    </div>
-                    <div v-else-if="!scanFilesLoading && scanFiles.length === 0" class="text-sm text-base-content/40 py-2">
-                      No file information available.
-                    </div>
-                    <template v-else>
-                      <ul class="space-y-0.5 py-1 max-h-96 overflow-y-auto">
-                        <li
-                          v-for="(file, idx) in scanFiles"
-                          :key="file.path + idx"
-                          class="flex items-center gap-2 py-0.5"
-                        >
-                          <span class="text-base-content/30 text-xs select-none w-4 text-right">{{ '\u251C' }}</span>
-                          <code
-                            class="text-xs"
-                            :class="file.suspicious ? 'text-error font-semibold' : 'text-base-content/60'"
-                          >{{ file.path }}</code>
-                          <span
-                            v-if="file.suspicious && file.findings?.length"
-                            class="badge badge-error badge-xs gap-1 shrink-0"
-                          >
-                            {{ file.findings[0] }}
-                          </span>
-                        </li>
-                      </ul>
-                      <div class="flex items-center gap-2 mt-2 pt-2 border-t border-base-200">
-                        <span class="text-xs text-base-content/50">
-                          Showing {{ scanFiles.length }} of {{ scanFilesMeta.total || '?' }}
-                        </span>
-                        <button
-                          v-if="scanFilesMeta.has_more"
-                          @click="loadMoreFiles"
-                          :disabled="scanFilesLoading"
-                          class="btn btn-xs btn-ghost"
-                        >
-                          <span v-if="scanFilesLoading" class="loading loading-spinner loading-xs"></span>
-                          Load more
-                        </button>
-                      </div>
-                    </template>
-                  </div>
-                </div>
+              <!-- Action buttons -->
+              <div class="flex gap-3">
+                <router-link v-if="scanReport.job_id" :to="`/security/scans/${scanReport.job_id}`" class="btn btn-primary btn-sm">
+                  View Full Report &rarr;
+                </router-link>
+                <button v-if="scanReport.findings?.length > 0" @click="approveServerSecurity" :disabled="securityActionLoading" class="btn btn-success btn-sm">
+                  Approve
+                </button>
+                <button v-if="scanReport.findings?.length > 0" @click="rejectServerSecurity" :disabled="securityActionLoading" class="btn btn-error btn-outline btn-sm">
+                  Reject
+                </button>
               </div>
             </template>
           </div>
@@ -1111,7 +752,7 @@ import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Server, Tool, ToolApproval, SecurityScanReport, SecurityScanFinding, ThreatType } from '@/types'
+import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 
 interface Props {
@@ -1241,70 +882,6 @@ const riskScoreClass = computed(() => {
   if (score >= 70) return 'text-error'
   if (score >= 30) return 'text-warning'
   return 'text-success'
-})
-
-interface FindingGroup {
-  type: ThreatType
-  label: string
-  findings: SecurityScanFinding[]
-  defaultOpen: boolean
-  badgeClass: string
-}
-
-const threatTypeLabels: Record<ThreatType, string> = {
-  tool_poisoning: 'Tool Poisoning',
-  prompt_injection: 'Prompt Injection',
-  rug_pull: 'Rug Pull Detection',
-  supply_chain: 'Supply Chain (CVEs)',
-  malicious_code: 'Malicious Code',
-}
-
-// Types that should be expanded by default (the dangerous ones)
-const dangerousTypes: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
-
-const groupedFindings = computed<FindingGroup[]>(() => {
-  if (!scanReport.value?.findings) return []
-
-  // Only include Pass 1 findings (or findings without a pass for backward compat)
-  const pass1Findings = scanReport.value.findings.filter(f => !f.scan_pass || f.scan_pass === 1)
-
-  const groups = new Map<ThreatType, SecurityScanFinding[]>()
-  for (const f of pass1Findings) {
-    const type = f.threat_type || 'supply_chain'
-    if (!groups.has(type)) groups.set(type, [])
-    groups.get(type)!.push(f)
-  }
-
-  const result: FindingGroup[] = []
-  // Show dangerous types first, then supply_chain
-  const typeOrder: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'supply_chain']
-  for (const type of typeOrder) {
-    const findings = groups.get(type)
-    if (!findings) continue
-    const hasDangerous = findings.some(f => f.threat_level === 'dangerous')
-    result.push({
-      type,
-      label: threatTypeLabels[type] || type,
-      findings,
-      defaultOpen: dangerousTypes.includes(type),
-      badgeClass: hasDangerous ? 'badge-error' : findings.some(f => f.threat_level === 'warning') ? 'badge-warning' : 'badge-info',
-    })
-  }
-  return result
-})
-
-// Pass 2 (supply chain audit) findings
-const pass2Findings = computed<SecurityScanFinding[]>(() => {
-  if (!scanReport.value?.findings) return []
-  return scanReport.value.findings.filter(f => f.scan_pass === 2)
-})
-
-const pass2HasDangerous = computed(() => {
-  return pass2Findings.value.some(f => f.threat_level === 'dangerous')
-})
-
-const pass2HasWarnings = computed(() => {
-  return pass2Findings.value.some(f => f.threat_level === 'warning')
 })
 
 const filteredTools = computed(() => {
