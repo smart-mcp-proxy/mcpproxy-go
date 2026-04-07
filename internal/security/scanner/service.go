@@ -800,6 +800,28 @@ func (s *Service) ListScanHistory(ctx context.Context) ([]ScanJobSummary, error)
 		return nil, fmt.Errorf("failed to list scan jobs: %w", err)
 	}
 
+	// Clean up stale scans — jobs stuck in "running" for more than 2 hours
+	staleThreshold := time.Now().Add(-2 * time.Hour)
+	for _, job := range jobs {
+		if (job.Status == ScanJobStatusRunning || job.Status == ScanJobStatusPending) && job.StartedAt.Before(staleThreshold) {
+			job.Status = ScanJobStatusFailed
+			job.Error = "scan timed out (stale job cleaned up)"
+			job.CompletedAt = time.Now()
+			if err := s.storage.SaveScanJob(job); err != nil {
+				s.logger.Warn("failed to clean up stale scan job",
+					zap.String("job_id", job.ID),
+					zap.Error(err),
+				)
+			} else {
+				s.logger.Info("cleaned up stale scan job",
+					zap.String("job_id", job.ID),
+					zap.String("server", job.ServerName),
+					zap.Duration("age", time.Since(job.StartedAt)),
+				)
+			}
+		}
+	}
+
 	summaries := make([]ScanJobSummary, 0, len(jobs))
 	for _, job := range jobs {
 		summary := ScanJobSummary{

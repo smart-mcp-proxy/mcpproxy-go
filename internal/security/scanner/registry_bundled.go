@@ -110,7 +110,7 @@ var bundledScanners = []*ScannerPlugin{
 		ID:          "mcp-ai-scanner",
 		Name:        "MCP AI Scanner",
 		Vendor:      "MCPProxy",
-		Description: "AI-powered MCP security scanner using Claude Agent SDK. Intelligently analyzes tool descriptions and source code for tool poisoning, prompt injection, data exfiltration, and malicious code patterns. Requires Claude OAuth token.",
+		Description: "AI-powered MCP security scanner using Claude Agent SDK. Agent explores code with Read/Grep/Glob tools like a security specialist. Detects tool poisoning, prompt injection, data exfiltration, and malicious code. Pattern scan works offline; AI analysis needs API key or OAuth token. Note: AI analysis may produce false positives — always verify findings manually. You can use your Claude Code subscription tokens for this scanner.",
 		License:     "Apache-2.0",
 		Homepage:    "https://github.com/smart-mcp-proxy/mcp-scanner",
 		DockerImage: "ghcr.io/smart-mcp-proxy/mcp-scanner:latest",
@@ -118,10 +118,12 @@ var bundledScanners = []*ScannerPlugin{
 		Outputs:     []string{"sarif"},
 		RequiredEnv: nil,
 		OptionalEnv: []EnvRequirement{
+			{Key: "ANTHROPIC_API_KEY", Label: "Anthropic API key for AI analysis (pattern scan works without it)", Secret: true},
+			{Key: "CLAUDE_CODE_OAUTH_TOKEN", Label: "Claude Code OAuth token for AI analysis (alternative to API key)", Secret: true},
 			{Key: "SCANNER_MODEL", Label: "Claude model for AI analysis (default: claude-sonnet-4-6)", Secret: false},
 		},
-		Command:    nil, // Uses entrypoint.py
-		Timeout:    "300s",
-		NetworkReq: true, // Needs network for Claude API calls
+		Command:    nil,    // Uses entrypoint.py
+		Timeout:    "900s", // 15 minutes — AI analysis can take time on large codebases
+		NetworkReq: true,   // AI analysis needs network for Claude API
 	},
 }
