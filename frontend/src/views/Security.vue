@@ -4,7 +4,7 @@
     <div class="flex justify-between items-center">
       <div>
         <h1 class="text-3xl font-bold">Security</h1>
-        <p class="text-base-content/70 mt-1">Manage security scanners and scan quarantined servers</p>
+        <p class="text-base-content/70 mt-1">Configure security scanner plugins and review scan results</p>
       </div>
       <div class="flex gap-2">
         <button @click="startScanAll" :disabled="loading || scanAllRunning" class="btn btn-primary">
@@ -113,7 +113,7 @@
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
           <h2 class="card-title">Security Scanners</h2>
-          <p class="text-sm text-base-content/70 mb-4">Install and configure security scanners to analyze MCP servers</p>
+          <p class="text-sm text-base-content/70 mb-4">Scanners are Docker-based plugins powered by third-party security tools. Enable or disable individual scanners and configure their API keys.</p>
 
           <div v-if="scanners.length === 0" class="text-center py-8 text-base-content/50">
             No scanners available. Check Docker connectivity.
@@ -136,7 +136,12 @@
                     <div class="font-bold">{{ scanner.name }}</div>
                     <div class="text-sm text-base-content/50">{{ scanner.description }}</div>
                   </td>
-                  <td>{{ scanner.vendor }}</td>
+                  <td>
+                    <a v-if="scanner.homepage" :href="scanner.homepage" target="_blank" rel="noopener noreferrer" class="link link-hover">
+                      {{ scanner.vendor }}
+                    </a>
+                    <span v-else>{{ scanner.vendor }}</span>
+                  </td>
                   <td>
                     <div class="flex flex-wrap gap-1">
                       <span v-for="input in scanner.inputs" :key="input" class="badge badge-sm badge-outline">{{ input }}</span>

@@ -713,12 +713,6 @@
                 <router-link v-if="scanReport.job_id" :to="`/security/scans/${scanReport.job_id}`" class="btn btn-primary btn-sm">
                   View Full Report &rarr;
                 </router-link>
-                <button v-if="scanReport.findings?.length > 0" @click="approveServerSecurity" :disabled="securityActionLoading" class="btn btn-success btn-sm">
-                  Approve
-                </button>
-                <button v-if="scanReport.findings?.length > 0" @click="rejectServerSecurity" :disabled="securityActionLoading" class="btn btn-error btn-outline btn-sm">
-                  Reject
-                </button>
               </div>
             </template>
           </div>
@@ -793,7 +787,6 @@ const scanStatus = ref<any>(null)
 const scanLoading = ref(false)
 const scanReportLoading = ref(false)
 const scanError = ref<string | null>(null)
-const securityActionLoading = ref(false)
 const activeScanJobId = ref<string | null>(null) // Track the active scan job ID
 const scannerNameMap = ref<Record<string, string>>({}) // scanner_id → human-readable name
 let scanPollTimer: ReturnType<typeof setInterval> | null = null
@@ -1529,63 +1522,6 @@ async function cancelSecurityScan() {
   }
 }
 
-async function approveServerSecurity() {
-  if (!server.value) return
-
-  securityActionLoading.value = true
-  try {
-    const response = await api.securityApprove(server.value.name)
-    if (response.success) {
-      systemStore.addToast({
-        type: 'success',
-        title: 'Server Approved',
-        message: `${server.value.name} security findings acknowledged`,
-      })
-      // Refresh
-      await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
-    } else {
-      throw new Error(response.error || 'Approve failed')
-    }
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approval Failed',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  } finally {
-    securityActionLoading.value = false
-  }
-}
-
-async function rejectServerSecurity() {
-  if (!server.value) return
-
-  securityActionLoading.value = true
-  try {
-    const response = await api.securityReject(server.value.name)
-    if (response.success) {
-      systemStore.addToast({
-        type: 'warning',
-        title: 'Server Rejected',
-        message: `${server.value.name} has been rejected and quarantined`,
-      })
-      // Refresh
-      await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
-    } else {
-      throw new Error(response.error || 'Reject failed')
-    }
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Rejection Failed',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  } finally {
-    securityActionLoading.value = false
-  }
-}
 
 // Server detail hints
 const serverDetailHints = computed<Hint[]>(() => {

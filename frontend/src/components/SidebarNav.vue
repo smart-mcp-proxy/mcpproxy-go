@@ -148,7 +148,7 @@ const personalMenu = [
   { name: 'Agent Tokens', path: '/tokens' },
   { name: 'Search', path: '/search' },
   { name: 'Activity Log', path: '/activity' },
-  { name: 'Security', path: '/security' },
+  { name: 'Security Scanners', path: '/security' },
   { name: 'Repositories', path: '/repositories' },
   { name: 'Configuration', path: '/settings' },
   { name: 'Feedback', path: '/feedback' },
