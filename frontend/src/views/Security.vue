@@ -158,7 +158,17 @@
                     </div>
                   </td>
                   <td>
-                    <span class="badge" :class="statusBadgeClass(scanner.status)">{{ scannerDisplayStatus(scanner.status) }}</span>
+                    <div class="flex flex-col gap-1">
+                      <span class="badge badge-sm" :class="statusBadgeClass(scanner.status)">{{ scannerDisplayStatus(scanner.status) }}</span>
+                      <!-- Error details -->
+                      <span v-if="scanner.status === 'error' && scanner.error_message" class="text-xs text-error max-w-xs truncate" :title="scanner.error_message">
+                        {{ scanner.error_message }}
+                      </span>
+                      <!-- Missing required API key hint -->
+                      <span v-else-if="scannerNeedsApiKey(scanner)" class="text-xs text-warning">
+                        API key required
+                      </span>
+                    </div>
                   </td>
                   <td>
                     <div class="flex gap-2 items-center">
@@ -171,7 +181,22 @@
                       />
                       <span v-if="installing === scanner.id" class="loading loading-spinner loading-xs"></span>
                       <button
-                        v-if="scanner.status === 'installed' || scanner.status === 'configured'"
+                        v-if="scanner.status === 'error'"
+                        @click="toggleScanner(scanner)"
+                        :disabled="installing === scanner.id"
+                        class="btn btn-sm btn-error btn-outline"
+                      >
+                        Retry
+                      </button>
+                      <button
+                        v-else-if="scannerNeedsApiKey(scanner)"
+                        @click="openConfigDialog(scanner)"
+                        class="btn btn-sm btn-warning btn-outline"
+                      >
+                        Set API Key
+                      </button>
+                      <button
+                        v-else-if="scanner.status === 'installed' || scanner.status === 'configured'"
                         @click="openConfigDialog(scanner)"
                         class="btn btn-sm btn-outline"
                       >
@@ -406,7 +431,7 @@ function queueItemBadgeClass(status: string) {
 function statusBadgeClass(status: string) {
   switch (status) {
     case 'configured': return 'badge-success'
-    case 'installed': return 'badge-info'
+    case 'installed': return 'badge-success'
     case 'available': return 'badge-ghost'
     case 'error': return 'badge-error'
     default: return 'badge-ghost'
@@ -420,9 +445,18 @@ function scannerDisplayStatus(status: string): string {
       return 'enabled'
     case 'available':
       return 'disabled'
+    case 'error':
+      return 'failed'
     default:
       return status
   }
+}
+
+function scannerNeedsApiKey(scanner: any): boolean {
+  if (scanner.status !== 'installed' && scanner.status !== 'configured') return false
+  if (!scanner.required_env?.length) return false
+  const configured = scanner.configured_env || {}
+  return scanner.required_env.some((env: any) => !configured[env.key])
 }
 
 function riskScoreClass(score: number) {
