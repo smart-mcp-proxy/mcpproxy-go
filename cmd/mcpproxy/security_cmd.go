@@ -46,13 +46,17 @@ for vulnerabilities, tool poisoning attacks, and other security issues.
 
 Examples:
   mcpproxy security scanners
-  mcpproxy security install mcp-scan
+  mcpproxy security enable mcp-scan
+  mcpproxy security disable mcp-scan
   mcpproxy security scan github-server
   mcpproxy security report github-server
   mcpproxy security overview`,
 	}
 
 	securityCmd.AddCommand(newSecurityScannersCmd())
+	securityCmd.AddCommand(newSecurityEnableCmd())
+	securityCmd.AddCommand(newSecurityDisableCmd())
+	// Keep old names as hidden aliases for backwards compatibility
 	securityCmd.AddCommand(newSecurityInstallCmd())
 	securityCmd.AddCommand(newSecurityRemoveCmd())
 	securityCmd.AddCommand(newSecurityConfigureCmd())
@@ -108,31 +112,53 @@ Examples:
 	}
 }
 
-func newSecurityInstallCmd() *cobra.Command {
+func newSecurityEnableCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "install <scanner-id>",
-		Short: "Install a security scanner",
-		Long: `Install a security scanner by pulling its Docker image.
+		Use:   "enable <scanner-id>",
+		Short: "Enable a security scanner",
+		Long: `Enable a security scanner by pulling its Docker image.
 
 Examples:
-  mcpproxy security install mcp-scan
-  mcpproxy security install cisco-mcp-scanner`,
+  mcpproxy security enable mcp-scan
+  mcpproxy security enable cisco-mcp-scanner`,
 		Args: cobra.ExactArgs(1),
 		RunE: runSecurityInstall,
 	}
 }
 
-func newSecurityRemoveCmd() *cobra.Command {
+func newSecurityDisableCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "remove <scanner-id>",
-		Short: "Remove an installed scanner",
-		Long: `Remove an installed security scanner and clean up its Docker image.
+		Use:   "disable <scanner-id>",
+		Short: "Disable a security scanner",
+		Long: `Disable a security scanner and clean up its Docker image.
 
 Examples:
-  mcpproxy security remove mcp-scan`,
+  mcpproxy security disable mcp-scan`,
 		Args: cobra.ExactArgs(1),
 		RunE: runSecurityRemove,
 	}
+}
+
+func newSecurityInstallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:    "install <scanner-id>",
+		Short:  "Install a security scanner (alias for enable)",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE:   runSecurityInstall,
+	}
+	return cmd
+}
+
+func newSecurityRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:    "remove <scanner-id>",
+		Short:  "Remove an installed scanner (alias for disable)",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE:   runSecurityRemove,
+	}
+	return cmd
 }
 
 func newSecurityConfigureCmd() *cobra.Command {
@@ -356,7 +382,7 @@ func runSecurityScanners(_ *cobra.Command, _ []string) error {
 		id := getMapString(sc, "id")
 		name := getMapString(sc, "name")
 		vendor := getMapString(sc, "vendor")
-		status := getMapString(sc, "status")
+		status := scannerDisplayStatus(getMapString(sc, "status"))
 		inputs := secJoinSlice(sc, "inputs")
 
 		fmt.Printf("%-20s %-22s %-22s %-12s %-s\n",
@@ -377,19 +403,15 @@ func runSecurityInstall(_ *cobra.Command, args []string) error {
 	}
 
 	scannerID := args[0]
-	body, err := json.Marshal(map[string]string{"id": scannerID})
-	if err != nil {
-		return fmt.Errorf("failed to marshal request: %w", err)
-	}
 
-	fmt.Printf("Installing scanner %q...\n", scannerID)
+	fmt.Printf("Enabling scanner %q...\n", scannerID)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/security/scanners/install", body)
+	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/security/scanners/"+scannerID+"/enable", nil)
 	if err != nil {
-		return fmt.Errorf("failed to install scanner: %w", err)
+		return fmt.Errorf("failed to enable scanner: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -407,7 +429,7 @@ func runSecurityInstall(_ *cobra.Command, args []string) error {
 		return formatAndPrintRaw(format, respBody)
 	}
 
-	fmt.Printf("Scanner %q installed successfully.\n", scannerID)
+	fmt.Printf("Scanner %q enabled successfully.\n", scannerID)
 	return nil
 }
 
@@ -421,9 +443,9 @@ func runSecurityRemove(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodDelete, "/api/v1/security/scanners/"+scannerID, nil)
+	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/security/scanners/"+scannerID+"/disable", nil)
 	if err != nil {
-		return fmt.Errorf("failed to remove scanner: %w", err)
+		return fmt.Errorf("failed to disable scanner: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -444,7 +466,7 @@ func runSecurityRemove(_ *cobra.Command, args []string) error {
 		return formatAndPrintRaw(format, respBody)
 	}
 
-	fmt.Printf("Scanner %q removed successfully.\n", scannerID)
+	fmt.Printf("Scanner %q disabled successfully.\n", scannerID)
 	return nil
 }
 
@@ -585,6 +607,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 
 	// Synchronous mode: poll until done
 	fmt.Printf("Scanning %q...\n", serverName)
+	scanStart := time.Now()
 
 	for {
 		time.Sleep(2 * time.Second)
@@ -610,10 +633,12 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		}
 
 		jobStatus := getMapString(status, "status")
+		elapsed := time.Since(scanStart).Truncate(time.Second)
 
 		// Show progress from per-scanner statuses
 		if scannerStatuses, ok := status["scanner_statuses"].([]interface{}); ok {
 			var running, done int
+			var runningNames []string
 			for _, s := range scannerStatuses {
 				if ss, ok := s.(map[string]interface{}); ok {
 					switch getMapString(ss, "status") {
@@ -621,28 +646,35 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 						done++
 					case "running":
 						running++
+						if name := getMapString(ss, "scanner_id"); name != "" {
+							runningNames = append(runningNames, name)
+						}
 					}
 				}
 			}
 			total := len(scannerStatuses)
 			if total > 0 {
-				fmt.Printf("\r  Progress: %d/%d scanners complete, %d running", done, total, running)
+				progress := fmt.Sprintf("\r  [%s] %d/%d scanners complete, %d running", elapsed, done, total, running)
+				if len(runningNames) > 0 {
+					progress += fmt.Sprintf(" (%s)", strings.Join(runningNames, ", "))
+				}
+				fmt.Print(progress)
 			}
 		}
 
 		switch jobStatus {
 		case "completed":
-			fmt.Println()
+			fmt.Printf("\n  Scan completed in %s\n", elapsed)
 			return printScanSummary(client, ctx, serverName)
 		case "failed":
-			fmt.Println()
+			fmt.Printf("\n  Scan failed after %s\n", elapsed)
 			errMsg := getMapString(status, "error")
 			if errMsg != "" {
 				return fmt.Errorf("scan failed: %s", errMsg)
 			}
 			return fmt.Errorf("scan failed for %q", serverName)
 		case "cancelled":
-			fmt.Println()
+			fmt.Printf("\n  Scan cancelled after %s\n", elapsed)
 			return fmt.Errorf("scan was cancelled for %q", serverName)
 		}
 		// pending or running: continue polling
@@ -1271,11 +1303,15 @@ func printReportTable(serverName string, report map[string]interface{}) error {
 	}
 
 	scannedAt := getMapString(report, "scanned_at")
+	jobID := getMapString(report, "job_id")
 
 	fmt.Printf("Security Report: %s\n", serverName)
-	fmt.Printf("Risk Score: %s/100\n", riskScore)
+	if jobID != "" {
+		fmt.Printf("Scan ID:     %s\n", jobID)
+	}
+	fmt.Printf("Risk Score:  %s/100\n", riskScore)
 	if scannedAt != "" {
-		fmt.Printf("Scanned: %s\n", formatTimestamp(scannedAt))
+		fmt.Printf("Scanned:     %s\n", formatTimestamp(scannedAt))
 	}
 	fmt.Println()
 
@@ -1508,6 +1544,20 @@ func secFormatInt(m map[string]interface{}, key string) string {
 		return fmt.Sprintf("%d", int(v))
 	}
 	return "0"
+}
+
+// scannerDisplayStatus maps API status to user-friendly display status
+func scannerDisplayStatus(status string) string {
+	switch status {
+	case "installed", "configured":
+		return "enabled"
+	case "available":
+		return "disabled"
+	case "error":
+		return "error"
+	default:
+		return status
+	}
 }
 
 // secTruncate shortens a string to maxLen, appending "..." if truncated.
