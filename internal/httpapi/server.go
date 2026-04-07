@@ -588,16 +588,24 @@ func (s *Server) setupRoutes() {
 		// Security scanner management routes (Spec 039)
 		r.Route("/security", func(r chi.Router) {
 			r.Get("/scanners", s.handleListScanners)
-			r.Post("/scanners/install", s.handleInstallScanner)
-			r.Delete("/scanners/{id}", s.handleRemoveScanner)
+			r.Post("/scanners/{id}/enable", s.handleInstallScanner)
+			r.Post("/scanners/{id}/disable", s.handleRemoveScanner)
 			r.Put("/scanners/{id}/config", s.handleConfigureScanner)
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
+
+			// Legacy routes (backwards compatibility)
+			r.Post("/scanners/install", s.handleInstallScanner)
+			r.Delete("/scanners/{id}", s.handleRemoveScanner)
 
 			// Batch scan operations
 			r.Post("/scan-all", s.handleScanAll)
 			r.Get("/queue", s.handleGetQueueProgress)
 			r.Post("/cancel-all", s.handleCancelAllScans)
+
+			// Scan history
+			r.Get("/scans", s.handleListScanHistory)
+			r.Get("/scans/{jobId}/report", s.handleGetScanReportByJobID)
 		})
 	})
 

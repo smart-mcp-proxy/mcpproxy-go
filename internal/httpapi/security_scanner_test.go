@@ -168,6 +168,17 @@ func (m *mockSecurityController) IsQueueRunning() bool {
 	return m.queueRunning
 }
 
+func (m *mockSecurityController) ListScanHistory(_ context.Context) ([]scanner.ScanJobSummary, error) {
+	return nil, nil
+}
+
+func (m *mockSecurityController) GetScanReportByJobID(_ context.Context, jobID string) (*scanner.AggregatedReport, error) {
+	if m.report != nil {
+		return m.report, nil
+	}
+	return nil, fmt.Errorf("no report found for job: %s", jobID)
+}
+
 // secTestController embeds baseController and adds GetCurrentConfig
 // returning nil to bypass auth middleware in tests.
 type secTestController struct {

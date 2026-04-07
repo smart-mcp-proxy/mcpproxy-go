@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -39,6 +40,10 @@ type SecurityController interface {
 	GetQueueProgress() *scanner.QueueProgress
 	CancelAllScans() error
 	IsQueueRunning() bool
+
+	// Scan history
+	ListScanHistory(ctx context.Context) ([]scanner.ScanJobSummary, error)
+	GetScanReportByJobID(ctx context.Context, jobID string) (*scanner.AggregatedReport, error)
 }
 
 // SetSecurityController configures the security scanner controller on the server.
@@ -75,23 +80,29 @@ func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
 		return
 	}
-	var req struct {
-		ID string `json:"id"`
+
+	// Accept scanner ID from URL path (new /enable endpoint) or request body (legacy /install)
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		var req struct {
+			ID string `json:"id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, r, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		id = req.ID
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "invalid request body")
-		return
-	}
-	if req.ID == "" {
+	if id == "" {
 		s.writeError(w, r, http.StatusBadRequest, "scanner id is required")
 		return
 	}
 
-	if err := s.securityController.InstallScanner(r.Context(), req.ID); err != nil {
+	if err := s.securityController.InstallScanner(r.Context(), id); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeSuccess(w, map[string]string{"status": "installed", "id": req.ID})
+	s.writeSuccess(w, map[string]string{"status": "enabled", "id": id})
 }
 
 func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +119,7 @@ func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeSuccess(w, map[string]string{"status": "removed", "id": id})
+	s.writeSuccess(w, map[string]string{"status": "disabled", "id": id})
 }
 
 func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) {
@@ -571,4 +582,102 @@ func (s *Server) handleCancelAllScans(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeSuccess(w, map[string]string{"status": "cancelled"})
+}
+
+// --- Scan history handlers ---
+
+func (s *Server) handleListScanHistory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+
+	summaries, err := s.securityController.ListScanHistory(r.Context())
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Sort
+	sortField := r.URL.Query().Get("sort")
+	order := r.URL.Query().Get("order")
+	if order == "" {
+		order = "desc"
+	}
+
+	sort.Slice(summaries, func(i, j int) bool {
+		var less bool
+		switch sortField {
+		case "findings_count":
+			less = summaries[i].FindingsCount < summaries[j].FindingsCount
+		default: // started_at
+			less = summaries[i].StartedAt.Before(summaries[j].StartedAt)
+		}
+		if order == "desc" {
+			return !less
+		}
+		return less
+	})
+
+	// Status filter
+	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
+		filtered := summaries[:0]
+		for _, s := range summaries {
+			if s.Status == statusFilter {
+				filtered = append(filtered, s)
+			}
+		}
+		summaries = filtered
+	}
+
+	// Pagination
+	limit := 50
+	offset := 0
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 200 {
+		limit = l
+	}
+	if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o >= 0 {
+		offset = o
+	}
+
+	total := len(summaries)
+	if offset >= len(summaries) {
+		summaries = nil
+	} else {
+		end := offset + limit
+		if end > len(summaries) {
+			end = len(summaries)
+		}
+		summaries = summaries[offset:end]
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"scans": summaries,
+		"total": total,
+	})
+}
+
+func (s *Server) handleGetScanReportByJobID(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+	jobID := chi.URLParam(r, "jobId")
+	if jobID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "job ID is required")
+		return
+	}
+
+	report, err := s.securityController.GetScanReportByJobID(r.Context(), jobID)
+	if err != nil {
+		s.writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Strip sarif_raw unless requested
+	if r.URL.Query().Get("include_sarif") != "true" {
+		for i := range report.Reports {
+			report.Reports[i].SarifRaw = nil
+		}
+	}
+
+	s.writeSuccess(w, report)
 }
