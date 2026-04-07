@@ -379,24 +379,41 @@
         </div>
       </div>
 
-      <!-- Approve / Reject Actions -->
-      <div v-if="report.findings && report.findings.length > 0" class="flex gap-3 pt-2">
-        <button
-          @click="approveServer"
-          :disabled="actionLoading"
-          class="btn btn-success"
-        >
-          <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-          Approve Server
-        </button>
-        <button
-          @click="rejectServer"
-          :disabled="actionLoading"
-          class="btn btn-error btn-outline"
-        >
-          <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-          Reject Server
-        </button>
+      <!-- Server Status & Actions -->
+      <div class="card bg-base-100 shadow-xl">
+        <div class="card-body py-4">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-3">
+              <span class="text-sm text-base-content/60">Server Status:</span>
+              <span v-if="serverStatus === 'loading'" class="loading loading-spinner loading-xs"></span>
+              <span v-else class="badge" :class="{
+                'badge-success': serverAdminState === 'enabled',
+                'badge-warning': serverAdminState === 'disabled',
+                'badge-error': serverAdminState === 'quarantined',
+              }">{{ serverAdminState }}</span>
+            </div>
+            <div class="flex gap-2">
+              <button
+                v-if="serverAdminState === 'enabled' && report.summary?.dangerous > 0"
+                @click="quarantineServer"
+                :disabled="actionLoading"
+                class="btn btn-error btn-sm"
+              >
+                <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+                Quarantine Server
+              </button>
+              <button
+                v-if="serverAdminState === 'quarantined'"
+                @click="unquarantineServer"
+                :disabled="actionLoading"
+                class="btn btn-success btn-sm"
+              >
+                <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+                Unquarantine Server
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </template>
   </div>
@@ -415,6 +432,8 @@ const loading = ref(false)
 const error = ref('')
 const report = ref<any>(null)
 const actionLoading = ref(false)
+const serverStatus = ref<'loading' | 'loaded'>('loading')
+const serverAdminState = ref('unknown')
 
 const scannerNames: Record<string, string> = {
   'mcp-ai-scanner': 'MCP AI Scanner',
@@ -554,32 +573,52 @@ async function loadReport() {
   }
 }
 
-async function approveServer() {
+async function loadServerStatus() {
   if (!report.value?.server_name) return
-  const force = (report.value.summary?.critical ?? 0) > 0
-  if (force && !confirm('Server has critical findings. Force approve?')) return
+  serverStatus.value = 'loading'
+  try {
+    const res = await api.getServers()
+    if (res.success && res.data?.servers) {
+      const server = res.data.servers.find((s: any) => s.name === report.value.server_name)
+      if (server?.health?.admin_state) {
+        serverAdminState.value = server.health.admin_state
+      } else {
+        serverAdminState.value = 'unknown'
+      }
+    }
+  } catch {
+    serverAdminState.value = 'unknown'
+  } finally {
+    serverStatus.value = 'loaded'
+  }
+}
+
+async function quarantineServer() {
+  if (!report.value?.server_name) return
+  if (!confirm(`Quarantine ${report.value.server_name}? This will disconnect the server.`)) return
   actionLoading.value = true
   try {
-    await api.securityApprove(report.value.server_name, force)
-    await loadReport()
+    await api.quarantineServer(report.value.server_name)
+    await loadServerStatus()
   } finally {
     actionLoading.value = false
   }
 }
 
-async function rejectServer() {
+async function unquarantineServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Reject and remove ${report.value.server_name}?`)) return
+  if (!confirm(`Unquarantine ${report.value.server_name}? This will re-enable the server.`)) return
   actionLoading.value = true
   try {
-    await api.securityReject(report.value.server_name)
-    await loadReport()
+    await api.unquarantineServer(report.value.server_name)
+    await loadServerStatus()
   } finally {
     actionLoading.value = false
   }
 }
 
-onMounted(() => {
-  loadReport()
+onMounted(async () => {
+  await loadReport()
+  await loadServerStatus()
 })
 </script>
