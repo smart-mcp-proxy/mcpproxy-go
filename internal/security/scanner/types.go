@@ -94,6 +94,19 @@ type ScanJob struct {
 	ScanContext *ScanContext `json:"scan_context,omitempty"`
 }
 
+// ScanJobSummary is a lightweight view of a scan job for history listing
+type ScanJobSummary struct {
+	ID            string    `json:"id"`
+	ServerName    string    `json:"server_name"`
+	Status        string    `json:"status"`
+	ScanPass      int       `json:"scan_pass"`
+	StartedAt     time.Time `json:"started_at"`
+	CompletedAt   time.Time `json:"completed_at,omitempty"`
+	FindingsCount int       `json:"findings_count"`
+	RiskScore     int       `json:"risk_score"`
+	Scanners      []string  `json:"scanners"`
+}
+
 // ScanContext describes what was scanned and how the source was resolved.
 // This gives users full transparency into what the scanners actually checked.
 type ScanContext struct {

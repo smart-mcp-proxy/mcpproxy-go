@@ -313,6 +313,13 @@ func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[strin
 	}
 
 	_ = s.registry.UpdateStatus(id, ScannerStatusConfigured)
+
+	// Also update the registry's ConfiguredEnv so the engine picks up
+	// new env vars without requiring a restart
+	if reg, err := s.registry.Get(id); err == nil {
+		reg.ConfiguredEnv = sc.ConfiguredEnv
+	}
+
 	return nil
 }
 
@@ -511,11 +518,26 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.logger.Warn("Failed to connect server for tool export (scan will continue without tool definitions)",
 						zap.String("server", serverName), zap.Error(err))
 				} else {
-					// Wait for the server to actually connect (up to 15 seconds)
-					s.waitForConnection(serverName, 15*time.Second)
+					// Wait for the server to actually connect (up to 30 seconds)
+					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
 			scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+
+			// If export failed but server should be connected, retry once after
+			// ensuring connection (handles quarantined servers that need an
+			// inspection exemption, and stale StateView snapshots)
+			if scanCtx.ToolsExported == 0 {
+				s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
+					zap.String("server", serverName))
+				if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
+					s.logger.Warn("Retry EnsureConnected failed",
+						zap.String("server", serverName), zap.Error(err))
+				} else {
+					s.waitForConnection(serverName, 30*time.Second)
+					scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+				}
+			}
 		}
 	}
 
@@ -525,6 +547,10 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		// Clean up the empty temp dir
 		if resolvedCleanup != nil {
 			resolvedCleanup()
+		}
+		connected := s.serverInfo != nil && s.serverInfo.IsConnected(serverName)
+		if connected {
+			return nil, fmt.Errorf("cannot scan server %s: no source files available and tool export failed (server is connected but returned 0 tools). Check server logs", serverName)
 		}
 		return nil, fmt.Errorf("cannot scan server %s: no source files available and server is disconnected (unable to export tool definitions). Connect the server first or configure a working_dir", serverName)
 	}
@@ -759,6 +785,102 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	// Check if Pass 2 is currently running
 	if activeJob := s.engine.GetActiveJob(serverName); activeJob != nil && activeJob.ScanPass == ScanPassSupplyChainAudit {
 		agg.Pass2Running = true
+	}
+
+	return agg, nil
+}
+
+// ListScanHistory returns all scan jobs as summaries, enriched with findings count and risk score.
+func (s *Service) ListScanHistory(ctx context.Context) ([]ScanJobSummary, error) {
+	jobs, err := s.storage.ListScanJobs("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list scan jobs: %w", err)
+	}
+
+	summaries := make([]ScanJobSummary, 0, len(jobs))
+	for _, job := range jobs {
+		summary := ScanJobSummary{
+			ID:          job.ID,
+			ServerName:  job.ServerName,
+			Status:      job.Status,
+			ScanPass:    job.ScanPass,
+			StartedAt:   job.StartedAt,
+			CompletedAt: job.CompletedAt,
+			Scanners:    job.Scanners,
+		}
+
+		// Enrich with findings count and risk score from reports
+		if job.Status == ScanJobStatusCompleted {
+			reports, err := s.storage.ListScanReportsByJob(job.ID)
+			if err == nil {
+				var allFindings []ScanFinding
+				for _, r := range reports {
+					allFindings = append(allFindings, r.Findings...)
+				}
+				summary.FindingsCount = len(allFindings)
+				summary.RiskScore = CalculateRiskScore(allFindings)
+			}
+		}
+
+		summaries = append(summaries, summary)
+	}
+
+	return summaries, nil
+}
+
+// GetScanReportByJobID returns an aggregated report for a specific scan job ID.
+func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*AggregatedReport, error) {
+	job, err := s.storage.GetScanJob(jobID)
+	if err != nil {
+		return nil, fmt.Errorf("scan job not found: %w", err)
+	}
+
+	reports, err := s.storage.ListScanReportsByJob(jobID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get reports for job %s: %w", jobID, err)
+	}
+
+	// Tag findings with scan pass
+	scanPass := ScanPassSecurityScan
+	if job.ScanPass == ScanPassSupplyChainAudit {
+		scanPass = ScanPassSupplyChainAudit
+	}
+	for _, r := range reports {
+		for i := range r.Findings {
+			r.Findings[i].ScanPass = scanPass
+		}
+	}
+
+	agg := AggregateReportsWithJobStatus(job.ID, job.ServerName, reports, job)
+	agg.Pass1Complete = job.ScanPass == ScanPassSecurityScan && job.Status == ScanJobStatusCompleted
+	agg.Pass2Complete = job.ScanPass == ScanPassSupplyChainAudit && job.Status == ScanJobStatusCompleted
+
+	// If this is a Pass 1 job, try to find and merge companion Pass 2 results
+	if job.ScanPass == ScanPassSecurityScan || job.ScanPass == 0 {
+		allJobs, _ := s.storage.ListScanJobs(job.ServerName)
+		for _, j := range allJobs {
+			if j.ScanPass == ScanPassSupplyChainAudit && j.Status == ScanJobStatusCompleted && j.StartedAt.After(job.StartedAt) {
+				pass2Reports, err := s.storage.ListScanReportsByJob(j.ID)
+				if err == nil {
+					for _, r := range pass2Reports {
+						for i := range r.Findings {
+							r.Findings[i].ScanPass = ScanPassSupplyChainAudit
+						}
+					}
+					allMerged := append(reports, pass2Reports...)
+					allMerged = deduplicatePass2Findings(allMerged)
+					agg = AggregateReportsWithJobStatus(job.ID, job.ServerName, allMerged, job)
+					agg.Pass1Complete = true
+					agg.Pass2Complete = true
+				}
+				break
+			}
+		}
+
+		// Check if Pass 2 is running
+		if activeJob := s.engine.GetActiveJob(job.ServerName); activeJob != nil && activeJob.ScanPass == ScanPassSupplyChainAudit {
+			agg.Pass2Running = true
+		}
 	}
 
 	return agg, nil
@@ -1234,7 +1356,7 @@ func (s *Service) waitForConnection(serverName string, timeout time.Duration) {
 func (s *Service) exportToolDefinitions(serverName, sourceDir string) int {
 	tools, err := s.serverInfo.GetServerTools(serverName)
 	if err != nil {
-		s.logger.Debug("Could not export tool definitions (server may be disconnected)",
+		s.logger.Warn("Could not export tool definitions for scanning",
 			zap.String("server", serverName), zap.Error(err))
 		return 0
 	}
