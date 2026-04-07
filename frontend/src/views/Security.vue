@@ -7,10 +7,12 @@
         <p class="text-base-content/70 mt-1">Configure security scanner plugins and review scan results</p>
       </div>
       <div class="flex gap-2">
-        <button @click="startScanAll" :disabled="loading || scanAllRunning" class="btn btn-primary">
-          <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
-          {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
-        </button>
+        <div class="tooltip" :data-tip="!overview?.docker_available ? 'Docker is required to run security scanners' : ''">
+          <button @click="startScanAll" :disabled="loading || scanAllRunning || !overview?.docker_available" class="btn btn-primary">
+            <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
+            {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
+          </button>
+        </div>
         <button @click="refresh" :disabled="loading" class="btn btn-outline">
           <span v-if="loading" class="loading loading-spinner loading-sm"></span>
           {{ loading ? 'Refreshing...' : 'Refresh' }}
@@ -91,6 +93,14 @@
           {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
         </div>
       </div>
+    </div>
+
+    <!-- Docker unavailable warning -->
+    <div v-if="overview && !overview.docker_available" class="alert alert-warning">
+      <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+      </svg>
+      <span>Docker is not running. Security scanners require Docker to analyze MCP servers.</span>
     </div>
 
     <!-- Loading -->

@@ -1174,6 +1174,9 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 		}
 	}
 
+	// Check Docker availability
+	overview.DockerAvailable = s.docker.IsDockerAvailable(ctx)
+
 	return overview, nil
 }
 

@@ -241,6 +241,7 @@ type SecurityOverview struct {
 	ScannersInstalled  int           `json:"scanners_installed"`
 	ServersScanned     int           `json:"servers_scanned"`
 	LastScanAt         time.Time     `json:"last_scan_at,omitempty"`
+	DockerAvailable    bool          `json:"docker_available"`
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler

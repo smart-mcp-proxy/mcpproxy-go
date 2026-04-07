@@ -501,17 +501,19 @@
           <div class="space-y-6">
             <!-- Header: Scan button + Risk Score -->
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-              <button
-                @click="startSecurityScan"
-                :disabled="scanLoading"
-                class="btn btn-primary"
-              >
-                <span v-if="scanLoading" class="loading loading-spinner loading-xs"></span>
-                <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                </svg>
-                {{ scanLoading ? 'Scanning...' : 'Scan Now' }}
-              </button>
+              <div class="tooltip" :data-tip="!dockerAvailable ? 'Docker is required to run security scanners' : ''">
+                <button
+                  @click="startSecurityScan"
+                  :disabled="scanLoading || !dockerAvailable"
+                  class="btn btn-primary"
+                >
+                  <span v-if="scanLoading" class="loading loading-spinner loading-xs"></span>
+                  <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                  {{ scanLoading ? 'Scanning...' : 'Scan Now' }}
+                </button>
+              </div>
               <button
                 v-if="scanLoading"
                 @click="cancelSecurityScan"
@@ -782,6 +784,7 @@ const quarantinedTools = computed(() => {
 })
 
 // Security scan (Spec 039)
+const dockerAvailable = ref(true) // optimistic default until overview loads
 const scanReport = ref<SecurityScanReport | null>(null)
 const scanStatus = ref<any>(null)
 const scanLoading = ref(false)
@@ -1393,6 +1396,13 @@ async function loadScanReport(force = false) {
   scanReportLoading.value = true
   scanError.value = null
   try {
+    // Check Docker availability for scan button
+    api.getSecurityOverview().then(res => {
+      if (res.success && res.data) {
+        dockerAvailable.value = res.data.docker_available !== false
+      }
+    })
+
     const [reportRes, statusRes] = await Promise.all([
       api.getScanReport(server.value.name),
       api.getScanStatus(server.value.name),
