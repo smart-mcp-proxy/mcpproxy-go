@@ -137,7 +137,7 @@
                     <div class="text-sm text-base-content/50">{{ scanner.description }}</div>
                   </td>
                   <td>
-                    <a v-if="scanner.homepage" :href="scanner.homepage" target="_blank" rel="noopener noreferrer" class="link link-hover">
+                    <a v-if="scanner.homepage" :href="scanner.homepage" target="_blank" rel="noopener noreferrer" class="link link-primary">
                       {{ scanner.vendor }}
                     </a>
                     <span v-else>{{ scanner.vendor }}</span>
