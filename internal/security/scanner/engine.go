@@ -323,11 +323,6 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	// Mount Claude credentials for AI-powered scanners (read-only)
 	var extraMounts []string
 	if s.ID == "mcp-ai-scanner" {
-		homeDir, _ := os.UserHomeDir()
-		claudeDir := filepath.Join(homeDir, ".claude")
-		if _, err := os.Stat(claudeDir); err == nil {
-			extraMounts = append(extraMounts, claudeDir+":/app/.claude:ro")
-		}
 		// Auto-forward Claude auth tokens from host environment
 		if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
 			if _, exists := env["CLAUDE_CODE_OAUTH_TOKEN"]; !exists {
@@ -337,6 +332,38 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 			if _, exists := env["ANTHROPIC_API_KEY"]; !exists {
 				env["ANTHROPIC_API_KEY"] = key
+			}
+		}
+		// Build a temp .claude directory with credentials for the scanner container.
+		// The scanner uses Claude Agent SDK which reads from ~/.claude/.credentials.json.
+		// We copy .claude.json from host (if exists) and generate .credentials.json
+		// from the configured CLAUDE_CODE_OAUTH_TOKEN (stored in keyring).
+		tmpClaudeDir, err := os.MkdirTemp("", "mcpproxy-claude-creds-")
+		if err == nil {
+			mounted := false
+			// Copy .claude.json from host if it exists
+			homeDir, _ := os.UserHomeDir()
+			hostClaudeJSON := filepath.Join(homeDir, ".claude", ".claude.json")
+			if data, err := os.ReadFile(hostClaudeJSON); err == nil {
+				os.WriteFile(filepath.Join(tmpClaudeDir, ".claude.json"), data, 0644)
+			}
+			// Generate .credentials.json from OAuth token
+			if oauthToken, ok := env["CLAUDE_CODE_OAUTH_TOKEN"]; ok && oauthToken != "" {
+				credsJSON := fmt.Sprintf(`{"oauth_tokens":{"default":{"accessToken":"%s","expiresAt":"2099-12-31T23:59:59Z"}}}`, oauthToken)
+				if err := os.WriteFile(filepath.Join(tmpClaudeDir, ".credentials.json"), []byte(credsJSON), 0600); err == nil {
+					mounted = true
+					e.logger.Debug("Generated OAuth credentials for AI scanner")
+				}
+			}
+			if mounted {
+				extraMounts = append(extraMounts, tmpClaudeDir+":/app/.claude:ro")
+			} else {
+				// Fall back to host .claude dir
+				claudeDir := filepath.Join(homeDir, ".claude")
+				if _, err := os.Stat(claudeDir); err == nil {
+					extraMounts = append(extraMounts, claudeDir+":/app/.claude:ro")
+				}
+				os.RemoveAll(tmpClaudeDir)
 			}
 		}
 	}
