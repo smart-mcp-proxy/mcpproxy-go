@@ -1672,6 +1672,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
+		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
