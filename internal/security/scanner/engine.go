@@ -328,7 +328,29 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		if _, err := os.Stat(claudeDir); err == nil {
 			extraMounts = append(extraMounts, claudeDir+":/app/.claude:ro")
 		}
+		// Auto-forward Claude auth tokens from host environment
+		if token := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); token != "" {
+			if _, exists := env["CLAUDE_CODE_OAUTH_TOKEN"]; !exists {
+				env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+			}
+		}
+		if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+			if _, exists := env["ANTHROPIC_API_KEY"]; !exists {
+				env["ANTHROPIC_API_KEY"] = key
+			}
+		}
 	}
+
+	// Log which env keys are being passed (redact values for security)
+	envKeys := make([]string, 0, len(env))
+	for k := range env {
+		envKeys = append(envKeys, k)
+	}
+	e.logger.Info("Scanner env vars resolved",
+		zap.String("scanner", s.ID),
+		zap.Strings("env_keys", envKeys),
+		zap.Int("configured_env_count", len(s.ConfiguredEnv)),
+	)
 
 	// Run scanner container
 	cfg := ScannerRunConfig{
@@ -560,15 +582,9 @@ func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanRepo
 		// This happens when a quarantined/disconnected server has no extractable
 		// source files. Without this check, the UI would show a misleading "0/100"
 		// risk score that implies the server is safe when nothing was actually analyzed.
-		// Exceptions:
-		//   - "url": HTTP behavioral scan (no filesystem)
-		//   - "tool_definitions_only": Cisco scanner analyzed tool descriptions
-		//   - ToolsExported > 0: tool definitions were analyzed even if no source files
+		// A scan is considered empty if no source files AND no tool definitions were analyzed.
 		if agg.ScanComplete && len(agg.Findings) == 0 && job.ScanContext != nil {
-			if job.ScanContext.TotalFiles == 0 &&
-				job.ScanContext.SourceMethod != "url" &&
-				job.ScanContext.SourceMethod != "tool_definitions_only" &&
-				job.ScanContext.ToolsExported == 0 {
+			if job.ScanContext.TotalFiles == 0 && job.ScanContext.ToolsExported == 0 {
 				agg.ScanComplete = false
 				agg.EmptyScan = true
 			}
