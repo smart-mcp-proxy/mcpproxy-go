@@ -221,7 +221,7 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="scan in scanHistory" :key="scan.job_id">
+                <tr v-for="scan in scanHistory" :key="scan.id">
                   <td>
                     <router-link :to="`/servers/${encodeURIComponent(scan.server_name)}`" class="link link-primary font-medium">
                       {{ scan.server_name }}
@@ -229,7 +229,7 @@
                     <div v-if="scan.pass === 2" class="text-xs text-base-content/50">(Pass 2)</div>
                   </td>
                   <td>
-                    <span class="font-mono text-sm text-base-content/70">{{ (scan.job_id || '').substring(0, 8) }}</span>
+                    <span class="font-mono text-sm text-base-content/70">{{ (scan.id || '').substring(0, 8) }}</span>
                   </td>
                   <td>
                     <span class="tooltip" :data-tip="scan.started_at">
@@ -252,7 +252,7 @@
                   <td>
                     <router-link
                       v-if="scan.status === 'completed'"
-                      :to="`/security/scans/${encodeURIComponent(scan.job_id)}`"
+                      :to="`/security/scans/${encodeURIComponent(scan.id)}`"
                       class="link link-primary text-sm whitespace-nowrap"
                     >
                       Details →

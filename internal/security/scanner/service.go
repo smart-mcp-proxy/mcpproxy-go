@@ -812,17 +812,9 @@ func (s *Service) ListScanHistory(ctx context.Context) ([]ScanJobSummary, error)
 			Scanners:    job.Scanners,
 		}
 
-		// Enrich with findings count and risk score from reports
-		if job.Status == ScanJobStatusCompleted {
-			reports, err := s.storage.ListScanReportsByJob(job.ID)
-			if err == nil {
-				var allFindings []ScanFinding
-				for _, r := range reports {
-					allFindings = append(allFindings, r.Findings...)
-				}
-				summary.FindingsCount = len(allFindings)
-				summary.RiskScore = CalculateRiskScore(allFindings)
-			}
+		// Use findings count from scanner statuses (already on the job — no extra DB reads)
+		for _, ss := range job.ScannerStatuses {
+			summary.FindingsCount += ss.FindingsCount
 		}
 
 		summaries = append(summaries, summary)
