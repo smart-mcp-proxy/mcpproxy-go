@@ -1674,6 +1674,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
 		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
+		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
 		s.securityScanner = secService
 	}
@@ -2420,12 +2421,26 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 }
 
 // EnsureConnected attempts to connect a disconnected server so tool definitions
-// can be retrieved for security scanning. Uses RestartServer which handles
-// enabling disabled servers and connecting disconnected ones.
+// can be retrieved for security scanning. For quarantined servers, grants a
+// temporary inspection exemption so the supervisor allows the connection.
 func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverName string) error {
 	if p.server == nil {
 		return fmt.Errorf("server instance not available")
 	}
+
+	// For quarantined servers, grant inspection exemption before restart.
+	// Without this, the supervisor refuses to connect quarantined servers.
+	supervisor := p.server.runtime.Supervisor()
+	if supervisor != nil {
+		snapshot := supervisor.StateView().Snapshot()
+		if ss, exists := snapshot.Servers[serverName]; exists && ss.Quarantined {
+			if err := supervisor.RequestInspectionExemption(serverName, 15*time.Minute); err != nil {
+				p.server.logger.Warn("Failed to grant inspection exemption for scan",
+					zap.String("server", serverName), zap.Error(err))
+			}
+		}
+	}
+
 	return p.server.runtime.RestartServer(serverName)
 }
 

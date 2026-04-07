@@ -793,19 +793,20 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	return agg, nil
 }
 
-// ListScanHistory returns all scan jobs as summaries, enriched with findings count and risk score.
-func (s *Service) ListScanHistory(ctx context.Context) ([]ScanJobSummary, error) {
+// CleanupStaleJobs marks any running/pending scan jobs as failed.
+// Called on startup to clean up jobs that were interrupted by a process crash.
+func (s *Service) CleanupStaleJobs() {
 	jobs, err := s.storage.ListScanJobs("")
 	if err != nil {
-		return nil, fmt.Errorf("failed to list scan jobs: %w", err)
+		s.logger.Warn("failed to list scan jobs for stale cleanup", zap.Error(err))
+		return
 	}
 
-	// Clean up stale scans — jobs stuck in "running" for more than 2 hours
-	staleThreshold := time.Now().Add(-2 * time.Hour)
+	cleaned := 0
 	for _, job := range jobs {
-		if (job.Status == ScanJobStatusRunning || job.Status == ScanJobStatusPending) && job.StartedAt.Before(staleThreshold) {
+		if job.Status == ScanJobStatusRunning || job.Status == ScanJobStatusPending {
 			job.Status = ScanJobStatusFailed
-			job.Error = "scan timed out (stale job cleaned up)"
+			job.Error = "interrupted by server restart"
 			job.CompletedAt = time.Now()
 			if err := s.storage.SaveScanJob(job); err != nil {
 				s.logger.Warn("failed to clean up stale scan job",
@@ -813,13 +814,23 @@ func (s *Service) ListScanHistory(ctx context.Context) ([]ScanJobSummary, error)
 					zap.Error(err),
 				)
 			} else {
-				s.logger.Info("cleaned up stale scan job",
-					zap.String("job_id", job.ID),
-					zap.String("server", job.ServerName),
-					zap.Duration("age", time.Since(job.StartedAt)),
-				)
+				cleaned++
 			}
 		}
+	}
+
+	if cleaned > 0 {
+		s.logger.Info("cleaned up stale scan jobs on startup",
+			zap.Int("count", cleaned),
+		)
+	}
+}
+
+// ListScanHistory returns all scan jobs as summaries, enriched with findings count and risk score.
+func (s *Service) ListScanHistory(ctx context.Context) ([]ScanJobSummary, error) {
+	jobs, err := s.storage.ListScanJobs("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list scan jobs: %w", err)
 	}
 
 	summaries := make([]ScanJobSummary, 0, len(jobs))
