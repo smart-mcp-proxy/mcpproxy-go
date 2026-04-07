@@ -787,6 +787,9 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 		agg.Pass2Running = true
 	}
 
+	// Attach scan context from primary job
+	agg.ScanContext = primaryJob.ScanContext
+
 	return agg, nil
 }
 
@@ -882,6 +885,9 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 			agg.Pass2Running = true
 		}
 	}
+
+	// Attach scan context from job
+	agg.ScanContext = job.ScanContext
 
 	return agg, nil
 }

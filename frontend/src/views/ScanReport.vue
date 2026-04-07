@@ -427,9 +427,9 @@ function scannerDisplayName(id: string): string {
   return scannerNames[id] || id
 }
 
-// Scan context from first individual scanner report (if available)
+// Scan context from the aggregated report (populated from job's ScanContext)
 const scanContext = computed(() => {
-  return report.value?.reports?.[0]?.scan_context || null
+  return report.value?.scan_context || null
 })
 
 // Status display
