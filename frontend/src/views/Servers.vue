@@ -19,6 +19,7 @@
           {{ serversStore.loading.loading ? 'Refreshing...' : 'Refresh' }}
         </button>
         <button
+          v-if="hasEnabledScanners()"
           @click="scanAllServers"
           :disabled="scanAllRunning"
           class="btn btn-primary btn-outline"
@@ -170,12 +171,14 @@ import api from '@/services/api'
 import ServerCard from '@/components/ServerCard.vue'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
+import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const filter = ref<'all' | 'connected' | 'enabled' | 'quarantined'>('all')
 const searchQuery = ref('')
 const scanAllRunning = ref(false)
+const { hasEnabledScanners } = useSecurityScannerStatus()
 
 const filteredServers = computed(() => {
   let servers = serversStore.servers

@@ -249,6 +249,7 @@ type SecurityOverview struct {
 	ActiveScans        int           `json:"active_scans"`
 	FindingsBySeverity ReportSummary `json:"findings_by_severity"`
 	ScannersInstalled  int           `json:"scanners_installed"`
+	ScannersEnabled    int           `json:"scanners_enabled"` // Subset of installed that the engine will run (status installed or configured)
 	ServersScanned     int           `json:"servers_scanned"`
 	LastScanAt         time.Time     `json:"last_scan_at,omitempty"`
 	DockerAvailable    bool          `json:"docker_available"`

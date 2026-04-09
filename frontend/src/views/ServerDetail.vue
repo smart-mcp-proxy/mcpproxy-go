@@ -214,6 +214,7 @@
           Configuration
         </button>
         <button
+          v-if="hasEnabledScanners()"
           :class="['tab tab-lg', activeTab === 'security' ? 'tab-active' : '']"
           @click="activeTab = 'security'; loadScannerNames(); loadScanReport()"
         >
@@ -501,8 +502,9 @@
           <div class="space-y-6">
             <!-- Header: Scan button + Risk Score -->
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-              <div class="tooltip" :data-tip="!dockerAvailable ? 'Docker is required to run security scanners' : ''">
+              <div class="tooltip" :data-tip="!dockerAvailable ? 'Docker is required to run security scanners' : (!hasEnabledScanners() ? 'No scanners enabled — install one from Security Scanners' : '')">
                 <button
+                  v-if="hasEnabledScanners()"
                   @click="startSecurityScan"
                   :disabled="scanLoading || !dockerAvailable"
                   class="btn btn-primary"
@@ -750,6 +752,7 @@ import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
+import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 
 interface Props {
   serverName: string
@@ -785,6 +788,7 @@ const quarantinedTools = computed(() => {
 
 // Security scan (Spec 039)
 const dockerAvailable = ref(true) // optimistic default until overview loads
+const { hasEnabledScanners } = useSecurityScannerStatus()
 const scanReport = ref<SecurityScanReport | null>(null)
 const scanStatus = ref<any>(null)
 const scanLoading = ref(false)

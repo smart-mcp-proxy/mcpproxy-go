@@ -7,7 +7,11 @@
         <p class="text-base-content/70 mt-1">Configure security scanner plugins and review scan results</p>
       </div>
       <div class="flex gap-2">
-        <div class="tooltip" :data-tip="!overview?.docker_available ? 'Docker is required to run security scanners' : ''">
+        <div
+          v-if="(overview?.scanners_enabled ?? overview?.scanners_installed ?? 0) > 0"
+          class="tooltip"
+          :data-tip="!overview?.docker_available ? 'Docker is required to run security scanners' : ''"
+        >
           <button @click="startScanAll" :disabled="loading || scanAllRunning || !overview?.docker_available" class="btn btn-primary">
             <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
             {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
@@ -386,6 +390,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
+import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 
 const loading = ref(false)
 const error = ref('')
@@ -512,6 +517,9 @@ async function toggleScanner(scanner: any) {
       await api.removeScanner(scanner.id)
     }
     await refresh()
+    // Refresh shared scanner-status cache so other pages (Servers,
+    // ServerDetail) update their scan-button visibility immediately.
+    await refreshSecurityScannerStatus()
   } finally {
     installing.value = null
   }

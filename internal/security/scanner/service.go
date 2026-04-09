@@ -1129,10 +1129,18 @@ func (s *Service) GetSecurityOverview(ctx context.Context) (*SecurityOverview, e
 func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 	overview := &SecurityOverview{}
 
-	// Count installed scanners
+	// Count installed scanners. ScannersInstalled is the total number of
+	// scanners persisted in storage; ScannersEnabled is the subset the engine
+	// will actually run (status installed or configured). UI uses
+	// ScannersEnabled to decide whether to show scan-trigger buttons.
 	scanners, err := s.storage.ListScanners()
 	if err == nil {
 		overview.ScannersInstalled = len(scanners)
+		for _, sc := range scanners {
+			if sc.Status == ScannerStatusInstalled || sc.Status == ScannerStatusConfigured {
+				overview.ScannersEnabled++
+			}
+		}
 	}
 
 	// Count scan jobs

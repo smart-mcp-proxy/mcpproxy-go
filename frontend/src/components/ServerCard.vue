@@ -181,32 +181,34 @@
           Logout
         </button>
 
-        <div
-          v-if="!server.enabled"
-          class="tooltip tooltip-top"
-          data-tip="Enable server first"
-        >
-          <button
+        <template v-if="hasEnabledScanners()">
+          <div
+            v-if="!server.enabled"
+            class="tooltip tooltip-top"
+            data-tip="Enable server first"
+          >
+            <button
+              class="btn btn-sm btn-outline btn-ghost"
+              disabled
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+              </svg>
+              Scan
+            </button>
+          </div>
+          <router-link
+            v-else
+            :to="`/servers/${server.name}?tab=security`"
             class="btn btn-sm btn-outline btn-ghost"
-            disabled
+            title="Security Scan"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
             Scan
-          </button>
-        </div>
-        <router-link
-          v-else
-          :to="`/servers/${server.name}?tab=security`"
-          class="btn btn-sm btn-outline btn-ghost"
-          title="Security Scan"
-        >
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-          </svg>
-          Scan
-        </router-link>
+          </router-link>
+        </template>
 
         <router-link
           :to="`/servers/${server.name}`"
@@ -262,6 +264,7 @@ import { ref, computed } from 'vue'
 import type { Server } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 
 interface Props {
   server: Server
@@ -271,6 +274,7 @@ const props = defineProps<Props>()
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const { hasEnabledScanners } = useSecurityScannerStatus()
 const loading = ref(false)
 const showDeleteConfirmation = ref(false)
 
