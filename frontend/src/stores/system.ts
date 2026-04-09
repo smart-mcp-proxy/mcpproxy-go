@@ -9,6 +9,15 @@ export const useSystemStore = defineStore('system', () => {
   const eventSource = ref<EventSource | null>(null)
   const connected = ref(false)
   const currentTheme = ref<string>('corporate')
+  const sidebarCollapsed = ref<boolean>(
+    (() => {
+      try {
+        return localStorage.getItem('mcpproxy-sidebar-collapsed') === '1'
+      } catch {
+        return false
+      }
+    })()
+  )
   const toasts = ref<Toast[]>([])
   const info = ref<InfoResponse | null>(null)
   const routing = ref<RoutingInfo | null>(null)
@@ -310,6 +319,18 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  function toggleSidebar() {
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    try {
+      localStorage.setItem(
+        'mcpproxy-sidebar-collapsed',
+        sidebarCollapsed.value ? '1' : '0'
+      )
+    } catch {
+      // localStorage unavailable (private browsing, etc.) — just keep in-memory
+    }
+  }
+
   function addToast(toast: Omit<Toast, 'id'>): string {
     const id = Math.random().toString(36).substr(2, 9)
     const newToast: Toast = {
@@ -385,12 +406,14 @@ export const useSystemStore = defineStore('system', () => {
     updateAvailable,
     latestVersion,
     routingMode,
+    sidebarCollapsed,
 
     // Actions
     connectEventSource,
     disconnectEventSource,
     setTheme,
     loadTheme,
+    toggleSidebar,
     addToast,
     removeToast,
     clearToasts,

@@ -56,9 +56,14 @@
         </div>
       </div>
 
-      <!-- Security scan badge (Spec 039) -->
+      <!-- Security scan badge (Spec 039)
+           Wrapped in a DaisyUI tooltip that explains the state and carries a
+           disclaimer that the risk score is an experimental heuristic. -->
       <div v-if="server.security_scan" class="flex items-center gap-2 mb-4">
-        <div class="flex items-center gap-1.5 text-sm">
+        <div
+          class="flex items-center gap-1.5 text-sm tooltip tooltip-right tooltip-bottom max-w-xs"
+          :data-tip="securityBadgeTooltip"
+        >
           <!-- Shield icon -->
           <svg
             class="w-4 h-4 flex-shrink-0"
@@ -373,6 +378,35 @@ const securityBadgeText = computed(() => {
     case 'not_scanned': return 'Not scanned'
     case 'scanning': return 'Scanning...'
     default: return scan.status
+  }
+})
+
+// Hover explanation for the security badge. Every state carries the
+// experimental-heuristic disclaimer so users don't over-trust the label.
+const securityBadgeTooltip = computed(() => {
+  const scan = props.server.security_scan
+  if (!scan) return ''
+  const disclaimer =
+    'Experimental heuristic — verify findings manually; results may not be precise.'
+  switch (scan.status) {
+    case 'clean':
+      return `Clean: no findings above the warning threshold in the most recent scan. ${disclaimer}`
+    case 'warnings': {
+      const count = scan.finding_counts?.warning ?? 0
+      return `${count} warning${count !== 1 ? 's' : ''} found — review the Security tab for details. ${disclaimer}`
+    }
+    case 'dangerous': {
+      const dangerous = scan.finding_counts?.dangerous ?? 0
+      return `${dangerous} dangerous finding${dangerous !== 1 ? 's' : ''} detected. Review before approving. ${disclaimer}`
+    }
+    case 'failed':
+      return `The last scan failed to produce a verdict. Re-run from the Security tab. ${disclaimer}`
+    case 'not_scanned':
+      return 'This server has not been scanned yet.'
+    case 'scanning':
+      return 'Security scan in progress…'
+    default:
+      return disclaimer
   }
 })
 

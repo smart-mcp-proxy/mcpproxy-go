@@ -1,67 +1,209 @@
 <template>
   <div class="drawer-side z-40">
     <label for="sidebar-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
-    <aside class="bg-base-100 w-64 h-screen flex flex-col border-r border-base-300 fixed">
-      <!-- Logo Section -->
-      <div class="px-6 py-5 border-b border-base-300">
-        <router-link to="/" class="flex items-center space-x-3">
-          <img src="/src/assets/logo.svg" alt="MCPProxy Logo" class="w-10 h-10" />
-          <div>
-            <span class="text-xl font-bold">MCPProxy</span>
-            <span v-if="authStore.isTeamsEdition" class="badge badge-xs badge-primary ml-1">Server</span>
+    <aside
+      class="bg-base-100 h-screen flex flex-col border-r border-base-300 fixed transition-[width] duration-200 ease-out"
+      :class="collapsed ? 'w-14' : 'w-64'"
+    >
+      <!-- Logo + collapse toggle -->
+      <div
+        class="border-b border-base-300 flex items-center"
+        :class="collapsed ? 'px-2 py-4 justify-center' : 'px-4 py-4 justify-between'"
+      >
+        <router-link to="/" class="flex items-center gap-2 min-w-0" :title="collapsed ? 'MCPProxy' : ''">
+          <img src="/src/assets/logo.svg" alt="MCPProxy Logo" class="w-8 h-8 shrink-0" />
+          <div v-show="!collapsed" class="min-w-0">
+            <span class="text-lg font-bold truncate block leading-tight">MCPProxy</span>
+            <span v-if="authStore.isTeamsEdition" class="badge badge-xs badge-primary">Server</span>
           </div>
         </router-link>
+        <button
+          v-show="!collapsed"
+          @click="systemStore.toggleSidebar"
+          class="btn btn-ghost btn-xs btn-square text-base-content/40 hover:text-base-content"
+          aria-label="Collapse sidebar"
+          title="Collapse sidebar"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+          </svg>
+        </button>
       </div>
+      <!-- Expand button: only visible in collapsed state, rendered as a separate row -->
+      <button
+        v-if="collapsed"
+        @click="systemStore.toggleSidebar"
+        class="mx-auto mt-2 mb-1 btn btn-ghost btn-xs btn-square text-base-content/40 hover:text-base-content"
+        aria-label="Expand sidebar"
+        title="Expand sidebar"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+        </svg>
+      </button>
 
       <!-- Navigation Menu -->
-      <nav class="flex-1 p-4 overflow-y-auto">
+      <nav
+        class="flex-1 overflow-y-auto overflow-x-hidden"
+        :class="collapsed ? 'px-2 py-2' : 'px-3 py-3'"
+      >
         <!-- Server Edition: User Menu -->
         <template v-if="authStore.isTeamsEdition">
-          <ul class="menu">
-            <li class="menu-title" v-if="authStore.isAdmin">
-              <span>My Workspace</span>
+          <ul class="menu menu-sm gap-0.5 p-0">
+            <li v-if="authStore.isAdmin && !collapsed" class="menu-title px-3 !py-1">
+              <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40">My Workspace</span>
             </li>
             <li v-for="item in teamsUserMenu" :key="item.path">
               <router-link
                 :to="item.path"
                 :class="{ 'active': isActiveRoute(item.path) }"
-                class="flex items-center space-x-3 py-3 px-4 rounded-lg"
+                class="rounded-lg"
+                :title="collapsed ? item.name : ''"
               >
-                <span class="text-lg">{{ item.name }}</span>
+                <span :class="collapsed ? 'mx-auto' : ''">{{ item.name }}</span>
               </router-link>
             </li>
           </ul>
 
-          <!-- Admin Section -->
           <template v-if="authStore.isAdmin">
             <div class="divider my-2 px-2"></div>
-            <ul class="menu">
-              <li class="menu-title">
-                <span>Administration</span>
+            <ul class="menu menu-sm gap-0.5 p-0">
+              <li v-if="!collapsed" class="menu-title px-3 !py-1">
+                <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40">Administration</span>
               </li>
               <li v-for="item in teamsAdminMenu" :key="item.path">
                 <router-link
                   :to="item.path"
                   :class="{ 'active': isActiveRoute(item.path) }"
-                  class="flex items-center space-x-3 py-3 px-4 rounded-lg"
+                  class="rounded-lg"
+                  :title="collapsed ? item.name : ''"
                 >
-                  <span class="text-lg">{{ item.name }}</span>
+                  <span :class="collapsed ? 'mx-auto' : ''">{{ item.name }}</span>
                 </router-link>
               </li>
             </ul>
           </template>
         </template>
 
-        <!-- Personal Edition: Original Menu -->
+        <!-- Personal Edition: Grouped Menu -->
         <template v-else>
-          <ul class="menu">
-            <li v-for="item in personalMenu" :key="item.path">
+          <!-- Dashboard (solo top row, no section label) -->
+          <ul class="menu menu-sm gap-0.5 p-0">
+            <li>
               <router-link
-                :to="item.path"
-                :class="{ 'active': isActiveRoute(item.path) }"
-                class="flex items-center space-x-3 py-3 px-4 rounded-lg"
+                to="/"
+                :class="{ 'active': isActiveRoute('/') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Dashboard' : ''"
               >
-                <span class="text-lg">{{ item.name }}</span>
+                <IconDashboard class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Dashboard</span>
+              </router-link>
+            </li>
+          </ul>
+
+          <!-- Section: Workspace -->
+          <div
+            v-if="!collapsed"
+            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+          >
+            Workspace
+          </div>
+          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+
+          <ul class="menu menu-sm gap-0.5 p-0">
+            <li>
+              <router-link
+                to="/servers"
+                :class="{ 'active': isActiveRoute('/servers') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Servers' : ''"
+              >
+                <IconServers class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Servers</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
+                to="/secrets"
+                :class="{ 'active': isActiveRoute('/secrets') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Secrets' : ''"
+              >
+                <IconSecrets class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Secrets</span>
+              </router-link>
+            </li>
+            <!-- Sub-item: Agent Tokens nested under Secrets.
+                 In expanded mode: indented with a left bracket.
+                 In collapsed mode: shown as a normal icon row. -->
+            <li>
+              <router-link
+                to="/tokens"
+                :class="[
+                  { 'active': isActiveRoute('/tokens') },
+                  collapsed ? 'rounded-lg' : 'rounded-lg !pl-7 text-[13px] text-base-content/75',
+                ]"
+                :title="collapsed ? 'Agent Tokens' : ''"
+              >
+                <IconTokens class="w-4 h-4 shrink-0" :class="collapsed ? 'w-5 h-5' : ''" />
+                <span v-show="!collapsed">Agent Tokens</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
+                to="/activity"
+                :class="{ 'active': isActiveRoute('/activity') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Activity Log' : ''"
+              >
+                <IconActivity class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Activity Log</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
+                to="/security"
+                :class="{ 'active': isActiveRoute('/security') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Security Scanners' : ''"
+              >
+                <IconShield class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Security Scanners</span>
+              </router-link>
+            </li>
+          </ul>
+
+          <!-- Section: System -->
+          <div
+            v-if="!collapsed"
+            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+          >
+            System
+          </div>
+          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+
+          <ul class="menu menu-sm gap-0.5 p-0">
+            <li>
+              <router-link
+                to="/repositories"
+                :class="{ 'active': isActiveRoute('/repositories') }"
+                class="rounded-lg text-base-content/70"
+                :title="collapsed ? 'Repositories' : ''"
+              >
+                <IconRepo class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed" class="text-[13px]">Repositories</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
+                to="/settings"
+                :class="{ 'active': isActiveRoute('/settings') }"
+                class="rounded-lg text-base-content/70"
+                :title="collapsed ? 'Configuration' : ''"
+              >
+                <IconSettings class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed" class="text-[13px]">Configuration</span>
               </router-link>
             </li>
           </ul>
@@ -69,7 +211,7 @@
       </nav>
 
       <!-- User Info (Server Edition) -->
-      <div v-if="authStore.isTeamsEdition && authStore.isAuthenticated" class="px-4 py-3 border-t border-base-300">
+      <div v-if="authStore.isTeamsEdition && authStore.isAuthenticated && !collapsed" class="px-4 py-3 border-t border-base-300">
         <div class="flex items-center justify-between">
           <div class="flex items-center gap-2 min-w-0">
             <div class="avatar placeholder">
@@ -90,39 +232,74 @@
         </div>
       </div>
 
-      <!-- Version Display -->
-      <div v-if="systemStore.version" class="px-4 py-2 border-t border-base-300">
-        <div class="text-xs text-base-content/60">
-          <span>{{ systemStore.version }}</span>
-          <span v-if="systemStore.updateAvailable" class="ml-1 badge badge-xs badge-primary">
-            update available
-          </span>
+      <!-- Footer: version + theme + feedback -->
+      <div class="border-t border-base-300 py-2" :class="collapsed ? 'px-1' : 'px-3'">
+        <!-- Version (hidden when collapsed) -->
+        <div
+          v-if="!collapsed && systemStore.version"
+          class="px-2 pt-1 pb-2 text-[11px] text-base-content/50 flex items-center gap-1.5"
+        >
+          <span class="font-mono">{{ systemStore.version }}</span>
+          <span v-if="systemStore.updateAvailable" class="badge badge-xs badge-primary">update</span>
         </div>
-      </div>
 
-      <!-- Theme Selector at Bottom -->
-      <div class="p-4 border-t border-base-300">
-        <div class="dropdown dropdown-top dropdown-end w-full">
-          <div tabindex="0" role="button" class="btn btn-ghost btn-sm w-full justify-start">
-            <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
-            </svg>
-            <span class="flex-1 text-left">Theme</span>
+        <!-- Action row: Theme + Feedback -->
+        <div
+          class="flex items-stretch gap-1"
+          :class="collapsed ? 'flex-col' : ''"
+        >
+          <!-- Theme dropdown -->
+          <div
+            class="dropdown dropdown-top"
+            :class="collapsed ? '' : 'dropdown-end flex-1'"
+          >
+            <div
+              tabindex="0"
+              role="button"
+              class="btn btn-ghost btn-sm font-normal"
+              :class="collapsed ? 'btn-square w-full' : 'w-full justify-start gap-2 px-2'"
+              :title="collapsed ? 'Theme' : ''"
+            >
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+              </svg>
+              <span v-show="!collapsed">Theme</span>
+            </div>
+            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-2xl bg-base-300 rounded-box w-64 max-h-96 overflow-y-auto mb-2">
+              <li class="menu-title">
+                <span>Choose theme</span>
+              </li>
+              <li v-for="theme in systemStore.themes" :key="theme.name">
+                <a
+                  @click="systemStore.setTheme(theme.name)"
+                  :class="{ 'active': systemStore.currentTheme === theme.name }"
+                >
+                  <span :data-theme="theme.name" class="bg-base-100 rounded-badge w-4 h-4 mr-2"></span>
+                  {{ theme.displayName }}
+                </a>
+              </li>
+            </ul>
           </div>
-          <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-2xl bg-base-300 rounded-box w-64 max-h-96 overflow-y-auto mb-2">
-            <li class="menu-title">
-              <span>Choose theme</span>
-            </li>
-            <li v-for="theme in systemStore.themes" :key="theme.name">
-              <a
-                @click="systemStore.setTheme(theme.name)"
-                :class="{ 'active': systemStore.currentTheme === theme.name }"
-              >
-                <span :data-theme="theme.name" class="bg-base-100 rounded-badge w-4 h-4 mr-2"></span>
-                {{ theme.displayName }}
-              </a>
-            </li>
-          </ul>
+
+          <!-- Feedback icon button.
+               Uses inline flex centering (not btn-square) because btn-square's
+               fixed aspect ratio fights with w-full in collapsed mode, and a
+               plain btn would left-align its content. -->
+          <router-link
+            v-if="!authStore.isTeamsEdition"
+            to="/feedback"
+            class="btn btn-ghost btn-sm !h-9 !min-h-[2.25rem] px-0 flex items-center justify-center"
+            :class="[
+              { 'btn-active': isActiveRoute('/feedback') },
+              collapsed ? 'w-full' : 'w-9',
+            ]"
+            title="Send feedback"
+            aria-label="Send feedback"
+          >
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+            </svg>
+          </router-link>
         </div>
       </div>
     </aside>
@@ -130,7 +307,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, h, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useAuthStore } from '@/stores/auth'
@@ -140,21 +317,49 @@ const router = useRouter()
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
 
-// Personal edition menu (unchanged from original)
-const personalMenu = [
-  { name: 'Dashboard', path: '/' },
-  { name: 'Servers', path: '/servers' },
-  { name: 'Secrets', path: '/secrets' },
-  { name: 'Agent Tokens', path: '/tokens' },
-  { name: 'Search', path: '/search' },
-  { name: 'Activity Log', path: '/activity' },
-  { name: 'Security Scanners', path: '/security' },
-  { name: 'Repositories', path: '/repositories' },
-  { name: 'Configuration', path: '/settings' },
-  { name: 'Feedback', path: '/feedback' },
-]
+const collapsed = computed(() => systemStore.sidebarCollapsed)
 
-// Server edition: items visible to all authenticated users
+// --- Inline SVG icon components (Heroicons outline style, stroke=currentColor) ---
+// Kept local to this file so the sidebar remains self-contained. Each icon is a
+// functional component rendering a single <svg>.
+const iconProps = {
+  fill: 'none',
+  stroke: 'currentColor',
+  'stroke-width': 1.6,
+  'stroke-linecap': 'round' as const,
+  'stroke-linejoin': 'round' as const,
+  viewBox: '0 0 24 24',
+}
+
+const makeIcon = (d: string): FunctionalComponent =>
+  (props) => h('svg', { ...iconProps, ...props }, [h('path', { d })])
+
+const IconDashboard = makeIcon(
+  'M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z'
+)
+const IconServers = makeIcon(
+  'M4 7a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V7zm0 8a2 2 0 012-2h12a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm4-6h.01M8 17h.01'
+)
+const IconSecrets = makeIcon(
+  'M12 11v3m-3-3a3 3 0 116 0m-9 3v6a1 1 0 001 1h10a1 1 0 001-1v-6a1 1 0 00-1-1H6a1 1 0 00-1 1z'
+)
+const IconTokens = makeIcon(
+  'M15 7a4 4 0 11-8 0 4 4 0 018 0zM15 7l6 6m-3-3l3 3-2 2m-4-4l2-2'
+)
+const IconActivity = makeIcon(
+  'M4 12h3l3-8 4 16 3-8h3'
+)
+const IconShield = makeIcon(
+  'M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3zm-3 9l2 2 4-4'
+)
+const IconRepo = makeIcon(
+  'M4 4.5A2.5 2.5 0 016.5 2H19v16H6.5a2.5 2.5 0 000 5H19v2H6.5A2.5 2.5 0 014 22.5v-18z'
+)
+const IconSettings = makeIcon(
+  'M10.3 3.6a1.5 1.5 0 013.4 0l.2 1.1a7 7 0 011.9.8l1-.6a1.5 1.5 0 012.1 2.1l-.6 1a7 7 0 01.8 1.9l1.1.2a1.5 1.5 0 010 3.4l-1.1.2a7 7 0 01-.8 1.9l.6 1a1.5 1.5 0 01-2.1 2.1l-1-.6a7 7 0 01-1.9.8l-.2 1.1a1.5 1.5 0 01-3.4 0l-.2-1.1a7 7 0 01-1.9-.8l-1 .6a1.5 1.5 0 01-2.1-2.1l.6-1a7 7 0 01-.8-1.9l-1.1-.2a1.5 1.5 0 010-3.4l1.1-.2a7 7 0 01.8-1.9l-.6-1a1.5 1.5 0 012.1-2.1l1 .6a7 7 0 011.9-.8l.2-1.1zM12 9a3 3 0 100 6 3 3 0 000-6z'
+)
+
+// Server edition menus (unchanged behavior)
 const teamsUserMenu = [
   { name: 'My Servers', path: '/my/servers' },
   { name: 'My Activity', path: '/my/activity' },
@@ -163,7 +368,6 @@ const teamsUserMenu = [
   { name: 'Search', path: '/search' },
 ]
 
-// Server edition: items visible only to admins
 const teamsAdminMenu = [
   { name: 'Dashboard', path: '/admin/dashboard' },
   { name: 'Server Management', path: '/admin/servers' },
@@ -173,7 +377,6 @@ const teamsAdminMenu = [
   { name: 'Configuration', path: '/settings' },
 ]
 
-// Compute user initials for avatar
 const userInitials = computed(() => {
   const name = authStore.displayName
   if (!name) return '?'
@@ -196,3 +399,12 @@ async function handleLogout() {
   router.push('/login')
 }
 </script>
+
+<style scoped>
+/* Tighten DaisyUI menu padding when collapsed so icons center cleanly */
+nav :deep(.menu li > a),
+nav :deep(.menu li > .router-link-active),
+nav :deep(.menu li > a.router-link-active) {
+  transition: padding 0.15s ease;
+}
+</style>
