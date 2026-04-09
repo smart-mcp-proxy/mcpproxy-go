@@ -1098,12 +1098,20 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Default to enabled=true and quarantined=true for security
+	// Default to enabled=true. Default quarantine follows the global
+	// quarantine_enabled flag (issue #370): secure by default, but
+	// operators can opt out via quarantine_enabled=false. Explicit
+	// values on the request always win.
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
 	quarantined := true
+	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
+		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
+			quarantined = cfg.DefaultQuarantineForNewServer()
+		}
+	}
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
 	}

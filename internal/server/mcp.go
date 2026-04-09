@@ -3035,7 +3035,18 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	url := request.GetString("url", "")
 	command := request.GetString("command", "")
 	enabled := request.GetBool("enabled", true)
-	quarantined := request.GetBool("quarantined", true) // Default to quarantined for security
+
+	// Default quarantine follows the global quarantine_enabled flag
+	// (issue #370). Secure by default: true unless the operator has
+	// explicitly set quarantine_enabled=false. An explicit quarantined
+	// field in the request still wins over the default.
+	defaultQuarantined := true
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if cfg := p.mainServer.runtime.Config(); cfg != nil {
+			defaultQuarantined = cfg.DefaultQuarantineForNewServer()
+		}
+	}
+	quarantined := request.GetBool("quarantined", defaultQuarantined)
 
 	// Must have either URL or command
 	if url == "" && command == "" {
