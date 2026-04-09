@@ -451,7 +451,7 @@ func TestServiceConfigureScanner(t *testing.T) {
 		"API_KEY":    "my-key",
 		"API_SECRET": "my-secret",
 	}
-	err := svc.ConfigureScanner(context.Background(), "test-scanner", env)
+	err := svc.ConfigureScanner(context.Background(), "test-scanner", env, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestServiceConfigureScanner(t *testing.T) {
 func TestServiceConfigureScannerNotInstalled(t *testing.T) {
 	svc, _, _ := newTestService(t)
 
-	err := svc.ConfigureScanner(context.Background(), "nonexistent", map[string]string{"KEY": "val"})
+	err := svc.ConfigureScanner(context.Background(), "nonexistent", map[string]string{"KEY": "val"}, "")
 	if err == nil {
 		t.Fatal("expected error for non-installed scanner")
 	}

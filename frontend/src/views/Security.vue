@@ -196,7 +196,7 @@
                         Set API Key
                       </button>
                       <button
-                        v-else-if="scanner.status === 'installed' || scanner.status === 'configured'"
+                        v-else
                         @click="openConfigDialog(scanner)"
                         class="btn btn-sm btn-outline"
                       >
@@ -339,6 +339,23 @@
               class="input input-bordered"
             />
           </div>
+          <!-- Docker image override -->
+          <div class="divider text-xs">Docker Image</div>
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text">Docker Image</span>
+              <span class="badge badge-sm badge-ghost">Optional</span>
+            </label>
+            <input
+              v-model="configDockerImage"
+              type="text"
+              :placeholder="configScanner?.image_override || configScanner?.docker_image || 'default image'"
+              class="input input-bordered input-sm font-mono"
+            />
+            <label class="label" v-if="configScanner?.docker_image">
+              <span class="label-text-alt text-base-content/40">Default: {{ configScanner.docker_image }}</span>
+            </label>
+          </div>
           <!-- Custom env var -->
           <div class="divider text-xs">Add Custom Variable</div>
           <div class="flex gap-2">
@@ -408,6 +425,7 @@ const configScanner = ref<any>(null)
 const configValues = ref<Record<string, string>>({})
 const customEnvKey = ref('')
 const customEnvValue = ref('')
+const configDockerImage = ref('')
 
 const totalFindings = computed(() => overview.value?.findings_by_severity?.total || 0)
 
@@ -506,6 +524,7 @@ function openConfigDialog(scanner: any) {
   configValues.value = { ...existing }
   customEnvKey.value = ''
   customEnvValue.value = ''
+  configDockerImage.value = scanner.image_override || ''
   configDialog.value?.showModal()
 }
 
@@ -539,8 +558,10 @@ async function saveConfig() {
       toSend[k] = v
     }
   }
-  if (Object.keys(toSend).length > 0) {
-    await api.configureScanner(configScanner.value.id, toSend)
+  const hasEnv = Object.keys(toSend).length > 0
+  const hasImage = configDockerImage.value && configDockerImage.value !== (configScanner.value?.image_override || '')
+  if (hasEnv || hasImage) {
+    await api.configureScanner(configScanner.value.id, toSend, configDockerImage.value || undefined)
   }
   closeConfigDialog()
   await refresh()

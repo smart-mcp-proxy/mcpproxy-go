@@ -58,9 +58,18 @@ type ScannerPlugin struct {
 	Status        string            `json:"status"` // available, installed, configured, error
 	InstalledAt   time.Time         `json:"installed_at,omitempty"`
 	ConfiguredEnv map[string]string `json:"configured_env,omitempty"` // Set env values (secrets redacted in API)
+	ImageOverride string            `json:"image_override,omitempty"` // User override for DockerImage
 	LastUsedAt    time.Time         `json:"last_used_at,omitempty"`
 	ErrorMsg      string            `json:"error_message,omitempty"`
 	Custom        bool              `json:"custom,omitempty"` // User-added (not from registry)
+}
+
+// EffectiveImage returns ImageOverride if set, otherwise DockerImage.
+func (s *ScannerPlugin) EffectiveImage() string {
+	if s.ImageOverride != "" {
+		return s.ImageOverride
+	}
+	return s.DockerImage
 }
 
 // Scan pass constants

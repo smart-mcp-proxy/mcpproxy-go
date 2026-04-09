@@ -276,7 +276,7 @@ func (s *Service) SetSecretStore(store SecretStore) {
 
 // ConfigureScanner sets environment variables (API keys) for a scanner.
 // Secret values are stored in the OS keyring; only references are kept in config.
-func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[string]string) error {
+func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[string]string, dockerImage string) error {
 	sc, err := s.storage.GetScanner(id)
 	if err != nil {
 		// If not in storage yet (just registered in registry), create from registry
@@ -306,6 +306,12 @@ func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[strin
 			sc.ConfiguredEnv[k] = v
 		}
 	}
+
+	// Apply Docker image override
+	if dockerImage != "" {
+		sc.ImageOverride = dockerImage
+	}
+
 	sc.Status = ScannerStatusConfigured
 
 	if err := s.storage.SaveScanner(sc); err != nil {
@@ -314,10 +320,11 @@ func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[strin
 
 	_ = s.registry.UpdateStatus(id, ScannerStatusConfigured)
 
-	// Also update the registry's ConfiguredEnv so the engine picks up
-	// new env vars without requiring a restart
+	// Also update the registry's ConfiguredEnv and ImageOverride so the engine
+	// picks up changes without requiring a restart
 	if reg, err := s.registry.Get(id); err == nil {
 		reg.ConfiguredEnv = sc.ConfiguredEnv
+		reg.ImageOverride = sc.ImageOverride
 	}
 
 	return nil

@@ -53,7 +53,7 @@ func (m *mockSecurityController) RemoveScanner(_ context.Context, id string) err
 	return m.removeErr
 }
 
-func (m *mockSecurityController) ConfigureScanner(_ context.Context, id string, env map[string]string) error {
+func (m *mockSecurityController) ConfigureScanner(_ context.Context, id string, env map[string]string, dockerImage string) error {
 	return m.configureErr
 }
 

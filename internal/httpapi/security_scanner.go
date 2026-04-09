@@ -19,7 +19,7 @@ type SecurityController interface {
 	ListScanners(ctx context.Context) ([]*scanner.ScannerPlugin, error)
 	InstallScanner(ctx context.Context, id string) error
 	RemoveScanner(ctx context.Context, id string) error
-	ConfigureScanner(ctx context.Context, id string, env map[string]string) error
+	ConfigureScanner(ctx context.Context, id string, env map[string]string, dockerImage string) error
 	GetScannerStatus(ctx context.Context, id string) (*scanner.ScannerPlugin, error)
 
 	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error)
@@ -133,18 +133,19 @@ func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req struct {
-		Env map[string]string `json:"env"`
+		Env         map[string]string `json:"env"`
+		DockerImage string            `json:"docker_image,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.Env) == 0 {
-		s.writeError(w, r, http.StatusBadRequest, "env map is required")
+	if len(req.Env) == 0 && req.DockerImage == "" {
+		s.writeError(w, r, http.StatusBadRequest, "env map or docker_image is required")
 		return
 	}
 
-	if err := s.securityController.ConfigureScanner(r.Context(), id, req.Env); err != nil {
+	if err := s.securityController.ConfigureScanner(r.Context(), id, req.Env, req.DockerImage); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}

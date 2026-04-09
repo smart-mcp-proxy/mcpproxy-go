@@ -784,10 +784,12 @@ class APIService {
     })
   }
 
-  async configureScanner(id: string, env: Record<string, string>): Promise<APIResponse<void>> {
+  async configureScanner(id: string, env: Record<string, string>, dockerImage?: string): Promise<APIResponse<void>> {
+    const payload: any = { env }
+    if (dockerImage) payload.docker_image = dockerImage
     return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/config`, {
       method: 'PUT',
-      body: JSON.stringify({ env }),
+      body: JSON.stringify(payload),
     })
   }
 

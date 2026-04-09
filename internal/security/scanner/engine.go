@@ -179,10 +179,10 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]*ScannerPlugin, error
 	for _, s := range all {
 		if s.Status == ScannerStatusInstalled || s.Status == ScannerStatusConfigured {
 			// Verify Docker image exists before adding to scan list
-			if e.docker != nil && !e.docker.ImageExists(context.Background(), s.DockerImage) {
+			if e.docker != nil && !e.docker.ImageExists(context.Background(), s.EffectiveImage()) {
 				e.logger.Warn("Skipping scanner: Docker image not found locally",
 					zap.String("scanner", s.ID),
-					zap.String("image", s.DockerImage),
+					zap.String("image", s.EffectiveImage()),
 				)
 				continue
 			}
@@ -382,7 +382,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	// Run scanner container
 	cfg := ScannerRunConfig{
 		ContainerName: GenerateContainerName(s.ID, req.ServerName),
-		Image:         s.DockerImage,
+		Image:         s.EffectiveImage(),
 		Command:       s.Command,
 		Env:           env,
 		SourceDir:     req.SourceDir,
