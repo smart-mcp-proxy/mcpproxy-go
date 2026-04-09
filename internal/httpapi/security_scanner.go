@@ -409,10 +409,6 @@ type fileTreeResponse struct {
 	HasMore         bool            `json:"has_more"`
 }
 
-func buildFileTree(job *scanner.ScanJob, report *scanner.AggregatedReport) *fileTreeResponse {
-	return buildFileTreePaginated(job, report, 100, 0, false)
-}
-
 func buildFileTreePaginated(job *scanner.ScanJob, report *scanner.AggregatedReport, limit, offset int, suspiciousOnly bool) *fileTreeResponse {
 	resp := &fileTreeResponse{Limit: limit, Offset: offset}
 

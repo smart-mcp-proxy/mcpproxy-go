@@ -20,6 +20,6 @@ if [ ! -f "$TOOLS_JSON" ]; then
   exit 3
 fi
 
-# `mcp-scan scan` emits JSON on stdout. MCPProxy captures stdout and
+# `snyk-agent-scan scan` emits JSON on stdout. MCPProxy captures stdout and
 # parses it with parseSnykAgentScanOutput in engine.go.
-exec mcp-scan scan --json "$TOOLS_JSON"
+exec snyk-agent-scan scan --json "$TOOLS_JSON"

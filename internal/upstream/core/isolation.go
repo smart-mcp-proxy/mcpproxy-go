@@ -392,27 +392,6 @@ func (im *IsolationManager) TransformCommandForContainer(command string, args []
 	}
 }
 
-// shellescapeArgs escapes arguments for shell execution
-func shellescapeArgs(args []string) []string {
-	var escaped []string
-	for _, arg := range args {
-		if arg == "" {
-			escaped = append(escaped, "''")
-			continue
-		}
-
-		// If string contains no special characters, return as-is
-		if !strings.ContainsAny(arg, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
-			escaped = append(escaped, arg)
-			continue
-		}
-
-		// Use single quotes and escape any single quotes in the string
-		escaped = append(escaped, "'"+strings.ReplaceAll(arg, "'", "'\"'\"'")+"'")
-	}
-	return escaped
-}
-
 // generateContainerName creates a Docker container name from server name with random suffix
 func generateContainerName(serverName string) string {
 	// Sanitize server name for Docker container naming

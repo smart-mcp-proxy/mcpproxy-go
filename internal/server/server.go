@@ -878,7 +878,6 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			if scanSummary != nil {
 				serverMap["security_scan"] = scanSummary
 			}
-		} else {
 		}
 
 		result = append(result, serverMap)

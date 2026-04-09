@@ -291,21 +291,6 @@ func (e *mockEmitter) EmitSecurityScannerChanged(scannerID, status, errMsg strin
 	})
 }
 
-func (e *mockEmitter) eventCount() int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return len(e.events)
-}
-
-func (e *mockEmitter) lastEventType() string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if len(e.events) == 0 {
-		return ""
-	}
-	return e.events[len(e.events)-1].eventType
-}
-
 // helper to create a service with test registry and mock storage
 func newTestService(t *testing.T) (*Service, *mockStorage, *mockEmitter) {
 	t.Helper()

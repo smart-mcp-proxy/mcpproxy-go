@@ -217,6 +217,7 @@ func TestResolveNpxCache(t *testing.T) {
 	// Create a fake npx cache structure
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir) // Windows uses USERPROFILE
 
 	npxDir := filepath.Join(homeDir, ".npm", "_npx", "abc123hash", "node_modules", "@modelcontextprotocol", "server-everything")
 	os.MkdirAll(npxDir, 0755)
@@ -243,6 +244,7 @@ func TestResolveNpxCache(t *testing.T) {
 func TestResolveNpxCacheNotFound(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir) // Windows uses USERPROFILE
 
 	// Create npx dir but no matching package
 	os.MkdirAll(filepath.Join(homeDir, ".npm", "_npx"), 0755)
@@ -261,6 +263,7 @@ func TestResolveNpxCacheNotFound(t *testing.T) {
 func TestResolveUvxCacheToolsDir(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir) // Windows uses USERPROFILE
 
 	// Create a fake UV tools directory
 	toolDir := filepath.Join(homeDir, ".local", "share", "uv", "tools", "my-tool")
@@ -287,6 +290,7 @@ func TestResolveUvxCacheToolsDir(t *testing.T) {
 func TestResolveUvxCacheGitCheckout(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir) // Windows uses USERPROFILE
 
 	// Create a fake UV git checkout with pyproject.toml identifying the repo
 	checkoutDir := filepath.Join(homeDir, ".cache", "uv", "git-v0", "checkouts", "abc123", "def456")

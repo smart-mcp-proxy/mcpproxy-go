@@ -5,41 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
 	"go.uber.org/zap"
 )
-
-// mockDockerRunner is a test double for DockerRunner that doesn't need Docker
-type mockDockerRunner struct {
-	results map[string]mockScanResult // keyed by scanner ID
-}
-
-type mockScanResult struct {
-	stdout   string
-	stderr   string
-	exitCode int
-	err      error
-}
-
-func newMockEngine(t *testing.T, scanners []*ScannerPlugin, results map[string]mockScanResult) (*Engine, string) {
-	t.Helper()
-	dir := t.TempDir()
-	logger := zap.NewNop()
-
-	registry := NewRegistry(dir, logger)
-	// Override registry with test scanners
-	for _, s := range scanners {
-		registry.scanners[s.ID] = s
-	}
-
-	docker := NewDockerRunner(logger)
-	engine := NewEngine(docker, registry, dir, logger)
-
-	return engine, dir
-}
 
 func TestAggregateReports(t *testing.T) {
 	reports := []*ScanReport{
@@ -589,41 +559,6 @@ func TestEngineCancelScan(t *testing.T) {
 		t.Error("expected error cancelling non-existent scan")
 	}
 }
-
-type testCallback struct {
-	mu             sync.Mutex
-	started        bool
-	scannerStarted []string
-	scannerDone    []string
-	scannerFailed  []string
-	completed      bool
-	failed         bool
-	reports        []*ScanReport
-}
-
-func (c *testCallback) OnScanStarted(_ *ScanJob) { c.mu.Lock(); c.started = true; c.mu.Unlock() }
-func (c *testCallback) OnScannerStarted(_ *ScanJob, id string) {
-	c.mu.Lock()
-	c.scannerStarted = append(c.scannerStarted, id)
-	c.mu.Unlock()
-}
-func (c *testCallback) OnScannerCompleted(_ *ScanJob, id string, report *ScanReport) {
-	c.mu.Lock()
-	c.scannerDone = append(c.scannerDone, id)
-	c.reports = append(c.reports, report)
-	c.mu.Unlock()
-}
-func (c *testCallback) OnScannerFailed(_ *ScanJob, id string, _ error) {
-	c.mu.Lock()
-	c.scannerFailed = append(c.scannerFailed, id)
-	c.mu.Unlock()
-}
-func (c *testCallback) OnScanCompleted(_ *ScanJob, reports []*ScanReport) {
-	c.mu.Lock()
-	c.completed = true
-	c.mu.Unlock()
-}
-func (c *testCallback) OnScanFailed(_ *ScanJob, _ error) { c.mu.Lock(); c.failed = true; c.mu.Unlock() }
 
 func TestUpdateScannerStatus(t *testing.T) {
 	dir := t.TempDir()

@@ -1,7 +1,7 @@
 # Snyk Agent Scan — tool poisoning, prompt injection, rug pull detector.
 #
 # Upstream: https://github.com/snyk/agent-scan (formerly Invariant Labs mcp-scan)
-# Package:  https://pypi.org/project/mcp-scan/
+# Package:  https://pypi.org/project/snyk-agent-scan/
 #
 # Scans the tool definitions exported by MCPProxy at /scan/source/tools.json
 # against the Snyk cloud API. Requires SNYK_TOKEN (user-provided, passed
@@ -14,7 +14,9 @@ LABEL org.opencontainers.image.source="https://github.com/smart-mcp-proxy/mcppro
 LABEL org.opencontainers.image.description="Snyk Agent Scan packaged for MCPProxy"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
-RUN pip install --no-cache-dir mcp-scan && mcp-scan --version
+# Install the renamed vendor package. The CLI does not support --version,
+# so we run `-h` as a build-time sanity check that the binary is on PATH.
+RUN pip install --no-cache-dir snyk-agent-scan && snyk-agent-scan -h >/dev/null
 
 WORKDIR /scan
 

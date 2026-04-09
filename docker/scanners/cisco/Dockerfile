@@ -15,8 +15,10 @@ LABEL org.opencontainers.image.description="Cisco MCP Scanner (YARA + readiness)
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Install the vendor package. We pin the top-level tool name so the image
-# fails at build time if the upstream package name ever changes.
-RUN pip install --no-cache-dir cisco-ai-mcp-scanner && mcp-scanner --version
+# fails at build time if the upstream package name ever changes. The CLI
+# does not accept --version, so we run `-h` as a sanity check that the
+# binary is on PATH.
+RUN pip install --no-cache-dir cisco-ai-mcp-scanner && mcp-scanner -h >/dev/null
 
 WORKDIR /scan
 ENTRYPOINT ["mcp-scanner"]

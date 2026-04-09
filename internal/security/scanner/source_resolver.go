@@ -727,59 +727,6 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 	return nil, fmt.Errorf("package %q not found in UV cache", pkgName)
 }
 
-// findNewestSubdir finds the newest directory at a given depth within a root directory.
-// depth=2 means rootDir/<level1>/<level2> (e.g., checkouts/<hash>/<rev>)
-func (r *SourceResolver) findNewestSubdir(rootDir string, depth int) (string, error) {
-	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
-		return "", err
-	}
-
-	var bestPath string
-	var bestModTime int64
-
-	if depth <= 0 {
-		return rootDir, nil
-	}
-
-	entries, err := os.ReadDir(rootDir)
-	if err != nil {
-		return "", err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		subPath := filepath.Join(rootDir, entry.Name())
-		if depth == 1 {
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().Unix() > bestModTime {
-				bestModTime = info.ModTime().Unix()
-				bestPath = subPath
-			}
-		} else {
-			if found, err := r.findNewestSubdir(subPath, depth-1); err == nil {
-				info, err := os.Stat(found)
-				if err != nil {
-					continue
-				}
-				if info.ModTime().Unix() > bestModTime {
-					bestModTime = info.ModTime().Unix()
-					bestPath = found
-				}
-			}
-		}
-	}
-
-	if bestPath == "" {
-		return "", fmt.Errorf("no subdirectories found in %s", rootDir)
-	}
-	return bestPath, nil
-}
-
 // findGitCheckoutByRepo searches UV git checkouts for a directory that matches the given repo.
 // It walks checkouts/<hash>/<rev>/ directories and checks for repo-identifying markers
 // (pyproject.toml with matching name, or .git/config with matching URL).
