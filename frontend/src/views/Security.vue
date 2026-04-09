@@ -244,8 +244,8 @@
                   <th class="cursor-pointer select-none" @click="toggleSort('findings_count')">
                     Findings {{ sortIndicator('findings_count') }}
                   </th>
-                  <th class="cursor-pointer select-none" @click="toggleSort('risk_score')">
-                    Risk {{ sortIndicator('risk_score') }}
+                  <th class="cursor-pointer select-none tooltip tooltip-bottom" data-tip="Experimental heuristic score. Not a definitive safety assessment." @click="toggleSort('risk_score')">
+                    Risk* {{ sortIndicator('risk_score') }}
                   </th>
                   <th></th>
                 </tr>

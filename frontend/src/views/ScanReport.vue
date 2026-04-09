@@ -119,6 +119,17 @@
         </div>
       </div>
 
+      <!-- Risk score disclaimer -->
+      <div v-if="report.risk_score !== undefined" class="alert shadow-sm bg-base-200 border border-base-300">
+        <svg class="w-5 h-5 text-base-content/50 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span class="text-xs text-base-content/60">
+          The risk score is an experimental heuristic combining findings from multiple scanners using logarithmic aggregation.
+          There is no industry standard for scoring MCP security risks. Treat the score as directional guidance, not a definitive safety assessment.
+        </span>
+      </div>
+
       <!-- Scan incomplete warnings -->
       <div v-if="report.scan_complete === false && report.empty_scan" class="alert alert-warning">
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

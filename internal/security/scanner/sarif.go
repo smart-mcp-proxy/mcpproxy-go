@@ -3,6 +3,7 @@ package scanner
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -248,51 +249,76 @@ func categorizeFromRule(ruleID string, props map[string]any, rules map[string]SA
 }
 
 // CalculateRiskScore computes a 0-100 risk score from findings.
-// Scoring is based on user-facing threat levels, not raw CVSS:
-//   - Dangerous (tool poisoning, prompt injection): 30 pts each, max contribution 90
-//   - Warning (rug pull, high CVEs): 5 pts each, max contribution 40
-//   - Info (low CVEs): 1 pt each, max contribution 10
+// Scoring is based on user-facing threat levels, not raw CVSS.
 //
-// This prevents a pile of CVE warnings from scoring as high as actual tool poisoning.
+// This uses logarithmic diminishing returns so duplicate findings from multiple
+// scanners don't inflate the score, while still reflecting cumulative risk.
+// Findings are deduplicated by (rule_id + location) before scoring.
+//
+// Formula per category: category_score = weight * log2(1 + unique_count)
+//   - Dangerous: weight 25 (1 finding=25, 2=40, 4=58, 8=72, cap 80)
+//   - Warning:   weight 6  (1 finding=6,  2=10, 4=15, 8=18, cap 25)
+//   - Info:      weight 2  (1 finding=2,  2=3,  4=5,  8=6,  cap 10)
+//
+// Note: This score is an experimental heuristic. There is no industry standard
+// for aggregating multi-scanner MCP security findings into a single number.
 func CalculateRiskScore(findings []ScanFinding) int {
 	if len(findings) == 0 {
 		return 0
 	}
 
-	var dangerousScore, warningScore, infoScore int
+	// Deduplicate: group by (rule_id + location) to avoid triple-counting
+	// when multiple scanners report the same issue.
+	type dedupKey struct{ ruleID, location string }
+	seen := make(map[dedupKey]bool)
+	var dangerousCount, warningCount, infoCount int
+
 	for _, f := range findings {
+		key := dedupKey{f.RuleID, f.Location}
+		if key.ruleID != "" && seen[key] {
+			continue // Skip duplicate finding
+		}
+		if key.ruleID != "" {
+			seen[key] = true
+		}
+
 		switch f.ThreatLevel {
 		case ThreatLevelDangerous:
-			dangerousScore += 30
+			dangerousCount++
 		case ThreatLevelWarning:
-			warningScore += 5
+			warningCount++
 		case ThreatLevelInfo:
-			infoScore += 1
+			infoCount++
 		default:
 			// Unclassified: use severity as fallback
 			switch f.Severity {
 			case SeverityCritical:
-				dangerousScore += 30
+				dangerousCount++
 			case SeverityHigh:
-				warningScore += 5
+				warningCount++
 			case SeverityMedium:
-				warningScore += 3
+				warningCount++
 			case SeverityLow:
-				infoScore += 1
+				infoCount++
 			}
 		}
 	}
 
-	// Cap each category
-	if dangerousScore > 90 {
-		dangerousScore = 90
+	// Logarithmic diminishing returns: score = weight * log2(1 + count)
+	logScore := func(count int, weight float64, cap int) int {
+		if count == 0 {
+			return 0
+		}
+		s := int(weight * math.Log2(1+float64(count)))
+		if s > cap {
+			return cap
+		}
+		return s
 	}
-	if warningScore > 40 {
-		warningScore = 40
-	}
-	if infoScore > 10 {
-		infoScore = 10
-	}
+
+	dangerousScore := logScore(dangerousCount, 25, 80)
+	warningScore := logScore(warningCount, 6, 25)
+	infoScore := logScore(infoCount, 2, 10)
 
 	score := dangerousScore + warningScore + infoScore
 	if score > 100 {

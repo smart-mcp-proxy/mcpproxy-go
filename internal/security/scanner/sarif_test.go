@@ -227,15 +227,18 @@ func TestNormalizeFindingsNoLevel(t *testing.T) {
 }
 
 func TestCalculateRiskScore(t *testing.T) {
+	// Logarithmic formula: score = weight * log2(1 + count)
+	// Dangerous: weight=25, cap=80. Warning: weight=6, cap=25. Info: weight=2, cap=10.
+	// log2(2)=1.0, log2(3)=1.58, log2(5)=2.32, log2(7)=2.81
 	tests := []struct {
 		name     string
 		findings []ScanFinding
 		want     int
 	}{
 		{"no findings", nil, 0},
-		{"one info", []ScanFinding{{ThreatLevel: ThreatLevelInfo}}, 1},
-		{"one warning", []ScanFinding{{ThreatLevel: ThreatLevelWarning}}, 5},
-		{"one dangerous", []ScanFinding{{ThreatLevel: ThreatLevelDangerous}}, 30},
+		{"one info", []ScanFinding{{ThreatLevel: ThreatLevelInfo}}, 2},            // 2*log2(2)=2
+		{"one warning", []ScanFinding{{ThreatLevel: ThreatLevelWarning}}, 6},      // 6*log2(2)=6
+		{"one dangerous", []ScanFinding{{ThreatLevel: ThreatLevelDangerous}}, 25}, // 25*log2(2)=25
 		{"6 warnings + 1 info", []ScanFinding{
 			{ThreatLevel: ThreatLevelWarning},
 			{ThreatLevel: ThreatLevelWarning},
@@ -244,24 +247,33 @@ func TestCalculateRiskScore(t *testing.T) {
 			{ThreatLevel: ThreatLevelWarning},
 			{ThreatLevel: ThreatLevelWarning},
 			{ThreatLevel: ThreatLevelInfo},
-		}, 31}, // 6*5=30 + 1 = 31
+		}, 18}, // 6*log2(7)=16 + 2*log2(2)=2 = 18
 		{"dangerous + warnings", []ScanFinding{
 			{ThreatLevel: ThreatLevelDangerous},
 			{ThreatLevel: ThreatLevelWarning},
 			{ThreatLevel: ThreatLevelWarning},
 			{ThreatLevel: ThreatLevelInfo},
-		}, 41}, // 30 + 10 + 1 = 41
-		{"capped dangerous", []ScanFinding{
+		}, 36}, // 25*log2(2)=25 + 6*log2(3)=9 + 2*log2(2)=2 = 36
+		{"4 dangerous - diminishing returns", []ScanFinding{
 			{ThreatLevel: ThreatLevelDangerous},
 			{ThreatLevel: ThreatLevelDangerous},
 			{ThreatLevel: ThreatLevelDangerous},
 			{ThreatLevel: ThreatLevelDangerous},
-		}, 90}, // 4*30=120 capped to 90 (dangerous max)
+		}, 58}, // 25*log2(5)=58 (not 120 like old linear)
 		{"unclassified fallback", []ScanFinding{
 			{Severity: SeverityCritical},
 			{Severity: SeverityHigh},
 			{Severity: SeverityLow},
-		}, 36}, // 30 + 5 + 1 = 36
+		}, 33}, // dangerous:1→25 + warning:1→6 + info:1→2 = 33
+		{"dedup same rule+location", []ScanFinding{
+			{RuleID: "MCP-TP-003", Location: "tool:add_numbers", ThreatLevel: ThreatLevelDangerous, Scanner: "scanner-a"},
+			{RuleID: "MCP-TP-003", Location: "tool:add_numbers", ThreatLevel: ThreatLevelDangerous, Scanner: "scanner-b"},
+			{RuleID: "MCP-TP-003", Location: "tool:add_numbers", ThreatLevel: ThreatLevelDangerous, Scanner: "scanner-c"},
+		}, 25}, // Deduped to 1 unique dangerous → 25 (not 3x)
+		{"dedup different locations kept", []ScanFinding{
+			{RuleID: "MCP-TP-003", Location: "tool:add_numbers", ThreatLevel: ThreatLevelDangerous},
+			{RuleID: "MCP-TP-003", Location: "tool:send_message", ThreatLevel: ThreatLevelDangerous},
+		}, 39}, // 2 unique dangerous → 25*log2(3)=39
 	}
 
 	for _, tt := range tests {
