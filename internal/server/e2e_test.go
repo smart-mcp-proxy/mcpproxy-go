@@ -539,26 +539,12 @@ func TestE2E_ToolCalling(t *testing.T) {
 		}
 	}
 
-	// Parse the content response which has format: {"content": [{"type": "text", "text": "..."}]}
-	var contentResponse map[string]interface{}
-	err = json.Unmarshal([]byte(contentText), &contentResponse)
-	require.NoError(t, err)
-
-	// Extract the content array
-	contentArray, ok := contentResponse["content"].([]interface{})
-	require.True(t, ok)
-	require.Greater(t, len(contentArray), 0)
-
-	// Get the first content item
-	firstContent, ok := contentArray[0].(map[string]interface{})
-	require.True(t, ok)
-
-	// Extract the actual JSON response from the text field
-	actualResponseText, ok := firstContent["text"].(string)
-	require.True(t, ok)
-
+	// After the fix for issue #368, the proxy forwards upstream content blocks
+	// as-is. The mock server returned a single TextContent whose text is the
+	// JSON-encoded echo payload, so contentText is that JSON directly (no more
+	// double-wrapping in a {"content":[...]} envelope).
 	var response map[string]interface{}
-	err = json.Unmarshal([]byte(actualResponseText), &response)
+	err = json.Unmarshal([]byte(contentText), &response)
 	require.NoError(t, err)
 
 	assert.Equal(t, "echo_tool", response["tool"])

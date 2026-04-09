@@ -173,34 +173,76 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
-		// Format response
-		var responseText string
-		switch v := result.(type) {
-		case string:
-			responseText = v
-		default:
-			responseBytes, marshalErr := json.Marshal(v)
-			if marshalErr != nil {
-				responseText = fmt.Sprintf("%v", v)
-			} else {
-				responseText = string(responseBytes)
-			}
-		}
-
 		// Determine tool variant for activity logging
 		toolVariant := contracts.DeriveCallWith(annotations)
 
-		// Truncate if needed
-		truncated := false
-		if p.config.ToolResponseLimit > 0 && len(responseText) > p.config.ToolResponseLimit {
-			responseText = responseText[:p.config.ToolResponseLimit]
-			truncated = true
+		// Forward content blocks (preserving ImageContent, AudioContent, etc.)
+		// while applying truncation only to TextContent. See issue #368.
+		//
+		// Direct mode has a simpler truncator based on ToolResponseLimit; the
+		// Truncator type (with caching) is not available here.
+		var forwarded *mcp.CallToolResult
+		var responseText string
+		var truncated bool
+		if ctr, ok := result.(*mcp.CallToolResult); ok && ctr != nil {
+			newContent := make([]mcp.Content, 0, len(ctr.Content))
+			var parts []string
+			limit := p.config.ToolResponseLimit
+			for _, c := range ctr.Content {
+				switch tc := c.(type) {
+				case mcp.TextContent:
+					txt := tc.Text
+					if limit > 0 && len(txt) > limit {
+						txt = txt[:limit]
+						truncated = true
+					}
+					tc.Text = txt
+					newContent = append(newContent, tc)
+					parts = append(parts, txt)
+				case mcp.ImageContent:
+					newContent = append(newContent, tc)
+					parts = append(parts, fmt.Sprintf("[image:%s len=%d]", tc.MIMEType, len(tc.Data)))
+				case mcp.AudioContent:
+					newContent = append(newContent, tc)
+					parts = append(parts, fmt.Sprintf("[audio:%s len=%d]", tc.MIMEType, len(tc.Data)))
+				default:
+					newContent = append(newContent, c)
+					if b, err := json.Marshal(c); err == nil {
+						parts = append(parts, string(b))
+					}
+				}
+			}
+			forwarded = &mcp.CallToolResult{
+				Result:            ctr.Result,
+				Content:           newContent,
+				StructuredContent: ctr.StructuredContent,
+				IsError:           ctr.IsError,
+			}
+			responseText = joinTextParts(parts)
+		} else {
+			// Fallback for non-CallToolResult values (string, struct, etc.)
+			switch v := result.(type) {
+			case string:
+				responseText = v
+			default:
+				responseBytes, marshalErr := json.Marshal(v)
+				if marshalErr != nil {
+					responseText = fmt.Sprintf("%v", v)
+				} else {
+					responseText = string(responseBytes)
+				}
+			}
+			if p.config.ToolResponseLimit > 0 && len(responseText) > p.config.ToolResponseLimit {
+				responseText = responseText[:p.config.ToolResponseLimit]
+				truncated = true
+			}
+			forwarded = mcp.NewToolResultText(responseText)
 		}
 
 		// Emit success activity
 		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust)
 
-		return mcp.NewToolResultText(responseText), nil
+		return forwarded, nil
 	}
 }
 
