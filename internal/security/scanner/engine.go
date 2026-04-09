@@ -610,8 +610,12 @@ func AggregateReportsWithJobStatus(jobID, serverName string, reports []*ScanRepo
 		// source files. Without this check, the UI would show a misleading "0/100"
 		// risk score that implies the server is safe when nothing was actually analyzed.
 		// A scan is considered empty if no source files AND no tool definitions were analyzed.
+		// Exception: "url" and "tool_definitions_only" methods are inherently file-less —
+		// scanners analyze the URL endpoint or tool descriptions, so 0 files is expected.
 		if agg.ScanComplete && len(agg.Findings) == 0 && job.ScanContext != nil {
-			if job.ScanContext.TotalFiles == 0 && job.ScanContext.ToolsExported == 0 {
+			method := job.ScanContext.SourceMethod
+			filelessMethod := method == "url" || method == "tool_definitions_only"
+			if job.ScanContext.TotalFiles == 0 && job.ScanContext.ToolsExported == 0 && !filelessMethod {
 				agg.ScanComplete = false
 				agg.EmptyScan = true
 			}

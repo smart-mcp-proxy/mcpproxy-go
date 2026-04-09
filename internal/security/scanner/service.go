@@ -542,8 +542,13 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	}
 
 	// Abort scan if we have no source files AND no tool definitions to scan.
-	// This prevents running 6 scanners on an empty directory (wasting time).
-	if scanCtx.SourceMethod == "tool_definitions_only" && scanCtx.ToolsExported == 0 {
+	// This prevents running scanners on an empty directory (wasting time).
+	// Covers both:
+	//   - "tool_definitions_only": stdio servers with no source dir
+	//   - "url": HTTP/SSE servers where source is the URL (no local files)
+	noSourceFiles := scanCtx.SourceMethod == "tool_definitions_only" ||
+		(scanCtx.SourceMethod == "url" && scanCtx.TotalFiles == 0)
+	if noSourceFiles && scanCtx.ToolsExported == 0 {
 		// Clean up the empty temp dir
 		if resolvedCleanup != nil {
 			resolvedCleanup()
