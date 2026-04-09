@@ -1577,60 +1577,22 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.logger.Warn("Failed to update tool stats", zap.String("tool_name", toolName), zap.Error(err))
 	}
 
-	// Convert result to JSON string
-	jsonResult, err := json.Marshal(result)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
-	}
+	// Forward content blocks (preserving ImageContent, AudioContent, etc.)
+	// while applying truncation only to TextContent. See issue #368.
+	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, toolName, args)
 
-	response := string(jsonResult)
-
-	// Apply truncation if configured
-	if p.truncator.ShouldTruncate(response) {
-		truncResult := p.truncator.Truncate(response, toolName, args)
-
-		// Track truncation in token metrics
-		if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
-			tokenizer := p.mainServer.runtime.Tokenizer()
-			if tokenizer != nil {
-				// Count tokens in original response
-				originalTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
-				if err == nil {
-					// Count tokens in truncated response
-					truncatedTokens, err := tokenizer.CountTokensForModel(truncResult.TruncatedContent, tokenMetrics.Model)
-					if err == nil {
-						tokenMetrics.WasTruncated = true
-						tokenMetrics.TruncatedTokens = originalTokens - truncatedTokens
-						// Update output tokens to reflect truncated size
-						tokenMetrics.OutputTokens = truncatedTokens
-						tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
-						toolCallRecord.Metrics = tokenMetrics
-					}
-				}
+	// Track truncation in token metrics
+	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			truncatedTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
+			if err == nil {
+				tokenMetrics.WasTruncated = true
+				tokenMetrics.OutputTokens = truncatedTokens
+				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+				toolCallRecord.Metrics = tokenMetrics
 			}
 		}
-
-		// If caching is available, store the full response
-		if truncResult.CacheAvailable {
-			if err := p.cacheManager.Store(
-				truncResult.CacheKey,
-				toolName,
-				args,
-				response,
-				truncResult.RecordPath,
-				truncResult.TotalRecords,
-			); err != nil {
-				p.logger.Error("Failed to cache response",
-					zap.String("tool_name", toolName),
-					zap.String("cache_key", truncResult.CacheKey),
-					zap.Error(err))
-				// Fall back to simple truncation if caching fails
-				truncResult.TruncatedContent = p.truncator.Truncate(response, toolName, args).TruncatedContent
-				truncResult.CacheAvailable = false
-			}
-		}
-
-		response = truncResult.TruncatedContent
 	}
 
 	// Store successful tool call in history
@@ -1655,7 +1617,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
 	p.emitActivityInternalToolCall(internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "success", "", time.Since(internalStartTime).Milliseconds(), activityArgs, result, intentMap, "")
 
-	return mcp.NewToolResultText(response), nil
+	return forwarded, nil
 }
 
 // handleCallTool is the LEGACY call_tool handler - returns error directing to new variants (Spec 018)
@@ -1977,60 +1939,22 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		p.logger.Warn("Failed to update tool stats", zap.String("tool_name", toolName), zap.Error(err))
 	}
 
-	// Convert result to JSON string
-	jsonResult, err := json.Marshal(result)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
-	}
+	// Forward content blocks (preserving ImageContent, AudioContent, etc.)
+	// while applying truncation only to TextContent. See issue #368.
+	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, toolName, args)
 
-	response := string(jsonResult)
-
-	// Apply truncation if configured
-	if p.truncator.ShouldTruncate(response) {
-		truncResult := p.truncator.Truncate(response, toolName, args)
-
-		// Track truncation in token metrics
-		if tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
-			tokenizer := p.mainServer.runtime.Tokenizer()
-			if tokenizer != nil {
-				// Count tokens in original response
-				originalTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
-				if err == nil {
-					// Count tokens in truncated response
-					truncatedTokens, err := tokenizer.CountTokensForModel(truncResult.TruncatedContent, tokenMetrics.Model)
-					if err == nil {
-						tokenMetrics.WasTruncated = true
-						tokenMetrics.TruncatedTokens = originalTokens - truncatedTokens
-						// Update output tokens to reflect truncated size
-						tokenMetrics.OutputTokens = truncatedTokens
-						tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
-						toolCallRecord.Metrics = tokenMetrics
-					}
-				}
+	// Track truncation in token metrics
+	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizer := p.mainServer.runtime.Tokenizer()
+		if tokenizer != nil {
+			truncatedTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
+			if err == nil {
+				tokenMetrics.WasTruncated = true
+				tokenMetrics.OutputTokens = truncatedTokens
+				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
+				toolCallRecord.Metrics = tokenMetrics
 			}
 		}
-
-		// If caching is available, store the full response
-		if truncResult.CacheAvailable {
-			if err := p.cacheManager.Store(
-				truncResult.CacheKey,
-				toolName,
-				args,
-				response,
-				truncResult.RecordPath,
-				truncResult.TotalRecords,
-			); err != nil {
-				p.logger.Error("Failed to cache response",
-					zap.String("tool_name", toolName),
-					zap.String("cache_key", truncResult.CacheKey),
-					zap.Error(err))
-				// Fall back to simple truncation if caching fails
-				truncResult.TruncatedContent = p.truncator.Truncate(response, toolName, args).TruncatedContent
-				truncResult.CacheAvailable = false
-			}
-		}
-
-		response = truncResult.TruncatedContent
 	}
 
 	// Store successful tool call in history
@@ -2047,7 +1971,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
 	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "")
 
-	return mcp.NewToolResultText(response), nil
+	return forwarded, nil
 }
 
 // handleQuarantinedToolCall handles tool calls to quarantined servers with security analysis
