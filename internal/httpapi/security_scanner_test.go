@@ -261,7 +261,7 @@ func TestSecurityHandlerInstallScanner(t *testing.T) {
 
 	var resp map[string]string
 	secParseData(t, w.Body, &resp)
-	assert.Equal(t, "installed", resp["status"])
+	assert.Equal(t, "enabled", resp["status"])
 	assert.Equal(t, "mcp-scan", resp["id"])
 }
 
@@ -305,7 +305,7 @@ func TestSecurityHandlerRemoveScanner(t *testing.T) {
 
 	var resp map[string]string
 	secParseData(t, w.Body, &resp)
-	assert.Equal(t, "removed", resp["status"])
+	assert.Equal(t, "disabled", resp["status"])
 }
 
 func TestSecurityHandlerConfigureScanner(t *testing.T) {

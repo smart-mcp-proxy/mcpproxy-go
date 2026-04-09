@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -48,6 +49,10 @@ type EventEmitter interface {
 	EmitSecurityScanCompleted(serverName string, findingsSummary map[string]int)
 	EmitSecurityScanFailed(serverName, scannerID, errMsg string)
 	EmitSecurityIntegrityAlert(serverName, alertType, action string)
+	// EmitSecurityScannerChanged signals that a scanner plugin's state has
+	// changed (e.g., background pull started/finished/failed) so the web UI
+	// can refresh its scanner list without polling.
+	EmitSecurityScannerChanged(scannerID, status, errMsg string)
 }
 
 // NoopEmitter is a no-op implementation of EventEmitter
@@ -58,6 +63,7 @@ func (n *NoopEmitter) EmitSecurityScanProgress(string, string, string, int) {}
 func (n *NoopEmitter) EmitSecurityScanCompleted(string, map[string]int)     {}
 func (n *NoopEmitter) EmitSecurityScanFailed(string, string, string)        {}
 func (n *NoopEmitter) EmitSecurityIntegrityAlert(string, string, string)    {}
+func (n *NoopEmitter) EmitSecurityScannerChanged(string, string, string)    {}
 
 // ServerInfoProvider resolves server configuration for auto-source resolution
 type ServerInfoProvider interface {
@@ -77,11 +83,12 @@ type Service struct {
 	engine         *Engine
 	registry       *Registry
 	docker         *DockerRunner
-	emitter        EventEmitter
+	emitter        atomic.Pointer[EventEmitter]
 	sourceResolver *SourceResolver
 	serverInfo     ServerInfoProvider
 	secretStore    SecretStore
 	queue          *ScanQueue
+	pulls          *pullManager
 	logger         *zap.Logger
 
 	// In-memory scan summary cache — avoids expensive BBolt reads per server
@@ -97,20 +104,33 @@ func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataD
 		engine:         engine,
 		registry:       registry,
 		docker:         docker,
-		emitter:        &NoopEmitter{},
 		sourceResolver: NewSourceResolver(logger),
 		queue:          NewScanQueue(logger),
 		summaryCache:   make(map[string]*ScanSummary),
 		logger:         logger,
 	}
+	var noop EventEmitter = &NoopEmitter{}
+	svc.emitter.Store(&noop)
+	svc.pulls = newPullManager(docker, storage, registry, logger, svc.emit)
 	// Restore installed scanner state from storage (survives restart)
 	svc.syncRegistryFromStorage()
+	// Heal scanners that were left in the "pulling" state after a crash.
+	svc.resumePendingPulls()
 	return svc
 }
 
-// SetEmitter sets the event emitter for the service
+// SetEmitter sets the event emitter for the service.
 func (s *Service) SetEmitter(emitter EventEmitter) {
-	s.emitter = emitter
+	s.emitter.Store(&emitter)
+}
+
+// emit returns the most recently configured EventEmitter. Always returns a
+// non-nil value; callers can invoke methods on it directly.
+func (s *Service) emit() EventEmitter {
+	if e := s.emitter.Load(); e != nil {
+		return *e
+	}
+	return &NoopEmitter{}
 }
 
 // SetServerInfoProvider sets the provider for resolving server configuration
@@ -185,6 +205,12 @@ func (s *Service) ListScanners(ctx context.Context) ([]*ScannerPlugin, error) {
 		}
 	}
 
+	// Stable, alphabetical order by ID so the web UI, CLI, and API all
+	// agree on the same order.
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
+
 	return result, nil
 }
 
@@ -198,47 +224,125 @@ func (s *Service) GetScanner(ctx context.Context, id string) (*ScannerPlugin, er
 	return s.registry.Get(id)
 }
 
-// InstallScanner pulls the Docker image and saves scanner as installed
+// InstallScanner enables a scanner and kicks off a background Docker image
+// pull. Returns immediately — the UI tracks progress via SSE events
+// (security.scanner_changed) or by polling GET /api/v1/security/scanners.
+//
+// Behavior:
+//  1. If the image is already present locally, the scanner is marked
+//     "installed" synchronously and the function returns nil.
+//  2. Otherwise the scanner is marked "pulling" and a goroutine performs the
+//     actual docker pull. On success status → "installed"; on failure
+//     status → "error" with ErrorMsg set.
+//  3. If Docker itself is not running, the scanner is marked "error" so the
+//     user gets clear feedback.
 func (s *Service) InstallScanner(ctx context.Context, id string) error {
 	scanner, err := s.registry.Get(id)
 	if err != nil {
 		return fmt.Errorf("scanner not found in registry: %w", err)
 	}
 
-	// Check Docker availability
-	if !s.docker.IsDockerAvailable(ctx) {
-		return fmt.Errorf("Docker is not available; scanner installation requires Docker")
+	// Reuse any previously-stored configured env / image override so that
+	// toggling the scanner off and back on doesn't wipe the user's API keys.
+	if existing, err := s.storage.GetScanner(id); err == nil && existing != nil {
+		if len(existing.ConfiguredEnv) > 0 {
+			scanner.ConfiguredEnv = existing.ConfiguredEnv
+		}
+		if existing.ImageOverride != "" {
+			scanner.ImageOverride = existing.ImageOverride
+		}
 	}
 
-	// Pull Docker image (skip if already exists locally)
-	if s.docker.ImageExists(ctx, scanner.DockerImage) {
-		s.logger.Info("Docker image already exists locally, skipping pull",
-			zap.String("image", scanner.DockerImage))
-	} else if err := s.docker.PullImage(ctx, scanner.DockerImage); err != nil {
+	image := scanner.EffectiveImage()
+
+	// Fast path: image already present → no need to pull at all.
+	if s.docker != nil && s.docker.ImageExists(ctx, image) {
+		scanner.Status = targetStatusAfterPull(scanner)
+		scanner.InstalledAt = time.Now()
+		scanner.ErrorMsg = ""
+		if err := s.storage.SaveScanner(scanner); err != nil {
+			return fmt.Errorf("failed to save scanner: %w", err)
+		}
+		_ = s.registry.UpdateStatus(id, scanner.Status)
+		s.emit().EmitSecurityScannerChanged(id, scanner.Status, "")
+		return nil
+	}
+
+	// Docker daemon must be running to pull anything.
+	if s.docker != nil && !s.docker.IsDockerAvailable(ctx) {
 		scanner.Status = ScannerStatusError
-		scanner.ErrorMsg = err.Error()
+		scanner.ErrorMsg = "Docker is not available; start Docker Desktop and try again"
 		_ = s.storage.SaveScanner(scanner)
-		return fmt.Errorf("failed to pull Docker image: %w", err)
+		_ = s.registry.UpdateStatus(id, ScannerStatusError)
+		s.emit().EmitSecurityScannerChanged(id, ScannerStatusError, scanner.ErrorMsg)
+		return fmt.Errorf("%s", scanner.ErrorMsg)
 	}
 
-	// Save as installed
-	scanner.Status = ScannerStatusInstalled
-	scanner.InstalledAt = time.Now()
+	// Mark as "pulling" and return immediately. The pullManager will flip
+	// the state to installed/configured or error when it's done.
+	scanner.Status = ScannerStatusPulling
 	scanner.ErrorMsg = ""
 	if err := s.storage.SaveScanner(scanner); err != nil {
 		return fmt.Errorf("failed to save scanner: %w", err)
 	}
-
-	// Update registry status
-	_ = s.registry.UpdateStatus(id, ScannerStatusInstalled)
+	_ = s.registry.UpdateStatus(id, ScannerStatusPulling)
+	s.emit().EmitSecurityScannerChanged(id, ScannerStatusPulling, "")
+	s.pulls.Enqueue(id, targetStatusAfterPull(scanner))
 	return nil
 }
 
-// RemoveScanner removes a scanner, its Docker image, and stored configuration
+// targetStatusAfterPull picks the success status for a scanner once its
+// image has been pulled. Scanners with stored env vars land in "configured";
+// everything else lands in "installed".
+func targetStatusAfterPull(sc *ScannerPlugin) string {
+	if len(sc.ConfiguredEnv) > 0 {
+		return ScannerStatusConfigured
+	}
+	return ScannerStatusInstalled
+}
+
+// resumePendingPulls scans the persistent scanner table at startup and
+// either reschedules or heals scanners that were left in the "pulling"
+// state after a crash. Without this, a scanner that was pulling when
+// mcpproxy died would be stuck in that state forever.
+func (s *Service) resumePendingPulls() {
+	scanners, err := s.storage.ListScanners()
+	if err != nil || s.pulls == nil || s.docker == nil {
+		return
+	}
+	for _, sc := range scanners {
+		if sc.Status != ScannerStatusPulling {
+			continue
+		}
+		image := sc.EffectiveImage()
+		// If the image already exists locally, just fix the status.
+		if image != "" && s.docker.ImageExists(context.Background(), image) {
+			sc.Status = targetStatusAfterPull(sc)
+			sc.ErrorMsg = ""
+			_ = s.storage.SaveScanner(sc)
+			_ = s.registry.UpdateStatus(sc.ID, sc.Status)
+			continue
+		}
+		// Otherwise re-queue the pull so it finishes in the background.
+		s.logger.Info("Resuming interrupted scanner image pull",
+			zap.String("scanner", sc.ID),
+			zap.String("image", image),
+		)
+		s.pulls.Enqueue(sc.ID, targetStatusAfterPull(sc))
+	}
+}
+
+// RemoveScanner removes a scanner, its Docker image, and stored configuration.
+// If a background pull is in progress for this scanner it is cancelled.
 func (s *Service) RemoveScanner(ctx context.Context, id string) error {
 	sc, err := s.storage.GetScanner(id)
 	if err != nil {
 		return fmt.Errorf("scanner not installed: %w", err)
+	}
+
+	// Stop any in-flight background pull for this scanner.
+	if s.pulls != nil {
+		s.pulls.cancelPending(id)
 	}
 
 	// Remove Docker image (best effort)
@@ -251,8 +355,9 @@ func (s *Service) RemoveScanner(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to delete scanner: %w", err)
 	}
 
-	// Update registry status
+	// Update registry status and broadcast the change.
 	_ = s.registry.UpdateStatus(id, ScannerStatusAvailable)
+	s.emit().EmitSecurityScannerChanged(id, ScannerStatusAvailable, "")
 	return nil
 }
 
@@ -274,8 +379,14 @@ func (s *Service) SetSecretStore(store SecretStore) {
 	}
 }
 
-// ConfigureScanner sets environment variables (API keys) for a scanner.
-// Secret values are stored in the OS keyring; only references are kept in config.
+// ConfigureScanner sets environment variables (API keys) and/or an image
+// override for a scanner. Secret values are stored in the OS keyring; only
+// references are kept in config.
+//
+// If the effective Docker image changes (user set a new override) and the
+// new image is not already cached locally, the scanner is transitioned to
+// the "pulling" state and a background pull is kicked off. The call returns
+// immediately — the UI tracks the pull via SSE or polling.
 func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[string]string, dockerImage string) error {
 	sc, err := s.storage.GetScanner(id)
 	if err != nil {
@@ -307,24 +418,45 @@ func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[strin
 		}
 	}
 
-	// Apply Docker image override
+	// Track whether the effective image changed so we know when to re-pull.
+	prevImage := sc.EffectiveImage()
 	if dockerImage != "" {
 		sc.ImageOverride = dockerImage
 	}
+	newImage := sc.EffectiveImage()
+	imageChanged := newImage != prevImage
 
-	sc.Status = ScannerStatusConfigured
+	// Pick the resting status. If we have to pull, we'll override this to
+	// "pulling" just below.
+	sc.Status = targetStatusAfterPull(sc)
+	sc.ErrorMsg = ""
+
+	// Only kick off a background pull if the effective image actually
+	// changed. If the user is just updating env vars we trust the previous
+	// installation (status "installed"/"configured"/"error" handled via
+	// retry/Install, not here).
+	needsPull := imageChanged && newImage != "" && s.docker != nil
+	if needsPull {
+		sc.Status = ScannerStatusPulling
+	}
 
 	if err := s.storage.SaveScanner(sc); err != nil {
 		return fmt.Errorf("failed to save scanner config: %w", err)
 	}
 
-	_ = s.registry.UpdateStatus(id, ScannerStatusConfigured)
+	_ = s.registry.UpdateStatus(id, sc.Status)
 
 	// Also update the registry's ConfiguredEnv and ImageOverride so the engine
 	// picks up changes without requiring a restart
 	if reg, err := s.registry.Get(id); err == nil {
 		reg.ConfiguredEnv = sc.ConfiguredEnv
 		reg.ImageOverride = sc.ImageOverride
+	}
+
+	s.emit().EmitSecurityScannerChanged(id, sc.Status, "")
+
+	if needsPull {
+		s.pulls.Enqueue(id, targetStatusAfterPull(sc))
 	}
 
 	return nil
@@ -360,25 +492,25 @@ type scanCallbackAdapter struct {
 
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
 	_ = a.service.storage.SaveScanJob(job)
-	a.service.emitter.EmitSecurityScanStarted(job.ServerName, job.Scanners, job.ID)
+	a.service.emit().EmitSecurityScanStarted(job.ServerName, job.Scanners, job.ID)
 	// Invalidate cached summary so server list shows "scanning"
 	a.service.invalidateScanSummaryCache(job.ServerName)
 }
 
 func (a *scanCallbackAdapter) OnScannerStarted(job *ScanJob, scannerID string) {
 	_ = a.service.storage.SaveScanJob(job)
-	a.service.emitter.EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusRunning, 0)
+	a.service.emit().EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusRunning, 0)
 }
 
 func (a *scanCallbackAdapter) OnScannerCompleted(job *ScanJob, scannerID string, report *ScanReport) {
 	_ = a.service.storage.SaveScanReport(report)
 	_ = a.service.storage.SaveScanJob(job)
-	a.service.emitter.EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusCompleted, 100)
+	a.service.emit().EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusCompleted, 100)
 }
 
 func (a *scanCallbackAdapter) OnScannerFailed(job *ScanJob, scannerID string, err error) {
 	_ = a.service.storage.SaveScanJob(job)
-	a.service.emitter.EmitSecurityScanFailed(job.ServerName, scannerID, err.Error())
+	a.service.emit().EmitSecurityScanFailed(job.ServerName, scannerID, err.Error())
 }
 
 func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanReport) {
@@ -392,7 +524,7 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 			summary[f.Severity]++
 		}
 	}
-	a.service.emitter.EmitSecurityScanCompleted(job.ServerName, summary)
+	a.service.emit().EmitSecurityScanCompleted(job.ServerName, summary)
 	// Cleanup auto-resolved source directory
 	if a.cleanup != nil {
 		a.cleanup()
@@ -1110,7 +1242,7 @@ func (s *Service) CheckIntegrity(ctx context.Context, serverName string) (*Integ
 				Expected: baseline.ImageDigest,
 				Actual:   currentDigest,
 			})
-			s.emitter.EmitSecurityIntegrityAlert(serverName, "digest_mismatch", "re-quarantine")
+			s.emit().EmitSecurityIntegrityAlert(serverName, "digest_mismatch", "re-quarantine")
 		}
 	}
 

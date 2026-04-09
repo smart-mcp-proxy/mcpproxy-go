@@ -86,13 +86,13 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 	}
 
 	// Determine which scanners to use
-	scanners, err := e.resolveScanners(req.ScannerIDs)
+	resolved, err := e.resolveScanners(req.ScannerIDs)
 	if err != nil {
 		e.mu.Unlock()
 		return nil, err
 	}
 
-	if len(scanners) == 0 {
+	if len(resolved) == 0 {
 		e.mu.Unlock()
 		return nil, fmt.Errorf("no scanners available; install scanners with 'mcpproxy security install <scanner-id>'")
 	}
@@ -107,15 +107,15 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		ServerName:  req.ServerName,
 		Status:      ScanJobStatusRunning,
 		ScanPass:    scanPass,
-		Scanners:    make([]string, len(scanners)),
+		Scanners:    make([]string, len(resolved)),
 		StartedAt:   time.Now(),
 		DryRun:      req.DryRun,
 		ScanContext: req.ScanContext,
 	}
-	for i, s := range scanners {
-		job.Scanners[i] = s.ID
+	for i, rs := range resolved {
+		job.Scanners[i] = rs.plugin.ID
 		job.ScannerStatuses = append(job.ScannerStatuses, ScannerJobStatus{
-			ScannerID: s.ID,
+			ScannerID: rs.plugin.ID,
 			Status:    ScanJobStatusPending,
 		})
 	}
@@ -127,7 +127,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 
 	// Run scanners in background with detached context
 	// (the HTTP request context may be cancelled after the response is sent)
-	go e.executeScan(context.Background(), job, scanners, req, callback)
+	go e.executeScan(context.Background(), job, resolved, req, callback)
 
 	return job, nil
 }
@@ -154,46 +154,91 @@ func (e *Engine) GetActiveJob(serverName string) *ScanJob {
 	return e.activeScans[serverName]
 }
 
-// resolveScanners determines which scanners to use
-func (e *Engine) resolveScanners(requestedIDs []string) ([]*ScannerPlugin, error) {
+// resolvedScanner pairs a plugin with a precomputed error that will cause
+// the scan job to mark it as failed without actually running docker. This
+// lets resolveScanners report "image missing" as a first-class failure in
+// the scan report instead of silently dropping the scanner.
+type resolvedScanner struct {
+	plugin  *ScannerPlugin
+	prefail string // non-empty → mark as failed with this message and skip execution
+}
+
+// resolveScanners determines which scanners to use.
+//
+// Unlike the old behaviour (silently dropping scanners with missing Docker
+// images), this now includes every enabled scanner in the result. When a
+// scanner's image is absent locally it is flagged with prefail so the
+// executeScan loop records it as a failed scanner in the job. That way the
+// aggregated scan report shows "X of Y scanners failed" instead of pretending
+// nothing is wrong.
+func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, error) {
 	all := e.registry.List()
 
+	// Helper: check whether a scanner's image is present locally. Returns a
+	// prefail message if it is missing (caller marks the scanner failed).
+	checkImage := func(s *ScannerPlugin) string {
+		if e.docker == nil {
+			return ""
+		}
+		if s.Status == ScannerStatusPulling {
+			return fmt.Sprintf("scanner %s is still pulling its Docker image; try again in a moment", s.ID)
+		}
+		image := s.EffectiveImage()
+		if image == "" {
+			return fmt.Sprintf("scanner %s has no Docker image configured", s.ID)
+		}
+		if !e.docker.ImageExists(context.Background(), image) {
+			return fmt.Sprintf("Docker image %s is not available locally. Toggle the scanner off and on in the Security page to pull it, or run `docker pull %s` manually.", image, image)
+		}
+		return ""
+	}
+
 	if len(requestedIDs) > 0 {
-		// Use specifically requested scanners
-		var result []*ScannerPlugin
+		// Use specifically requested scanners.
+		var result []resolvedScanner
 		for _, id := range requestedIDs {
 			s, err := e.registry.Get(id)
 			if err != nil {
 				return nil, fmt.Errorf("scanner %s not found", id)
 			}
-			if s.Status != ScannerStatusInstalled && s.Status != ScannerStatusConfigured {
-				return nil, fmt.Errorf("scanner %s is not installed (status: %s)", id, s.Status)
+			if s.Status != ScannerStatusInstalled && s.Status != ScannerStatusConfigured && s.Status != ScannerStatusError && s.Status != ScannerStatusPulling {
+				return nil, fmt.Errorf("scanner %s is not enabled (status: %s)", id, s.Status)
 			}
-			result = append(result, s)
+			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
 		}
 		return result, nil
 	}
 
-	// Use all installed/configured scanners whose Docker images exist locally
-	var result []*ScannerPlugin
+	// Default: every enabled scanner, including pulling/error ones so the
+	// user sees what happened to them in the scan report.
+	var result []resolvedScanner
 	for _, s := range all {
-		if s.Status == ScannerStatusInstalled || s.Status == ScannerStatusConfigured {
-			// Verify Docker image exists before adding to scan list
-			if e.docker != nil && !e.docker.ImageExists(context.Background(), s.EffectiveImage()) {
-				e.logger.Warn("Skipping scanner: Docker image not found locally",
-					zap.String("scanner", s.ID),
-					zap.String("image", s.EffectiveImage()),
-				)
-				continue
+		switch s.Status {
+		case ScannerStatusInstalled, ScannerStatusConfigured:
+			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
+		case ScannerStatusPulling:
+			result = append(result, resolvedScanner{
+				plugin:  s,
+				prefail: fmt.Sprintf("scanner %s is still pulling its Docker image; try again once the pull completes", s.ID),
+			})
+		case ScannerStatusError:
+			// Surface the original error so the user knows why this scanner
+			// didn't run this time.
+			msg := s.ErrorMsg
+			if msg == "" {
+				msg = "scanner is in error state; reconfigure it from the Security page"
 			}
-			result = append(result, s)
+			result = append(result, resolvedScanner{plugin: s, prefail: msg})
 		}
 	}
 	return result, nil
 }
 
-// executeScan runs all scanners in parallel and collects results
-func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*ScannerPlugin, req ScanRequest, callback ScanCallback) {
+// executeScan runs all scanners in parallel and collects results.
+// Scanners marked with a non-empty prefail message are recorded as failed
+// immediately and skipped — this keeps missing-image scanners visible in
+// the aggregated scan report instead of being silently dropped.
+func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resolvedScanner, req ScanRequest, callback ScanCallback) {
 	defer func() {
 		e.mu.Lock()
 		delete(e.activeScans, req.ServerName)
@@ -206,12 +251,28 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*Scan
 		wg      sync.WaitGroup
 	)
 
-	for i, s := range scanners {
+	for i, rs := range scanners {
 		wg.Add(1)
-		go func(idx int, scanner *ScannerPlugin) {
+		go func(idx int, item resolvedScanner) {
 			defer wg.Done()
 
+			scanner := item.plugin
 			callback.OnScannerStarted(job, scanner.ID)
+
+			// Fast-fail for prefailed scanners (e.g. missing Docker image).
+			// We still emit started/failed callbacks so the UI sees the
+			// scanner in the job's ScannerStatuses with a real error.
+			if item.prefail != "" {
+				e.logger.Warn("Scanner skipped (prefail)",
+					zap.String("scanner", scanner.ID),
+					zap.String("server", req.ServerName),
+					zap.String("reason", item.prefail),
+				)
+				e.updateScannerStatus(job, scanner.ID, ScanJobStatusFailed, time.Now(), time.Now(), item.prefail, 0)
+				callback.OnScannerFailed(job, scanner.ID, fmt.Errorf("%s", item.prefail))
+				return
+			}
+
 			e.updateScannerStatus(job, scanner.ID, ScanJobStatusRunning, time.Now(), time.Time{}, "", 0)
 
 			report, scanLogs, err := e.runSingleScanner(ctx, scanner, req)
@@ -238,7 +299,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []*Scan
 			e.updateScannerStatus(job, scanner.ID, ScanJobStatusCompleted, time.Time{}, time.Now(), "", len(report.Findings))
 			e.setScannerLogs(job, scanner.ID, scanLogs)
 			callback.OnScannerCompleted(job, scanner.ID, report)
-		}(i, s)
+		}(i, rs)
 	}
 
 	wg.Wait()

@@ -390,8 +390,8 @@ func TestEngineResolveScanners(t *testing.T) {
 	if len(scanners) != 1 {
 		t.Errorf("expected 1 installed scanner, got %d", len(scanners))
 	}
-	if scanners[0].ID != "mcp-scan" {
-		t.Errorf("expected mcp-scan, got %s", scanners[0].ID)
+	if scanners[0].plugin.ID != "mcp-scan" {
+		t.Errorf("expected mcp-scan, got %s", scanners[0].plugin.ID)
 	}
 
 	// Resolve specific

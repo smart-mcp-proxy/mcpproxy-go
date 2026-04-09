@@ -163,10 +163,17 @@
                   </td>
                   <td>
                     <div class="flex flex-col gap-1">
-                      <span class="badge badge-sm" :class="statusBadgeClass(scanner.status)">{{ scannerDisplayStatus(scanner.status) }}</span>
+                      <span class="badge badge-sm gap-1" :class="statusBadgeClass(scanner.status)">
+                        <span v-if="scanner.status === 'pulling'" class="loading loading-spinner loading-xs"></span>
+                        {{ scannerDisplayStatus(scanner.status) }}
+                      </span>
                       <!-- Error details -->
-                      <span v-if="scanner.status === 'error' && scanner.error_message" class="text-xs text-error max-w-xs truncate" :title="scanner.error_message">
+                      <span v-if="scanner.status === 'error' && scanner.error_message" class="text-xs text-error max-w-xs" :title="scanner.error_message">
                         {{ scanner.error_message }}
+                      </span>
+                      <!-- Pulling hint with image name -->
+                      <span v-else-if="scanner.status === 'pulling'" class="text-xs text-info max-w-xs truncate font-mono" :title="scanner.image_override || scanner.docker_image">
+                        pulling {{ scanner.image_override || scanner.docker_image }}
                       </span>
                       <!-- Missing required API key hint -->
                       <span v-else-if="scannerNeedsApiKey(scanner)" class="text-xs text-warning">
@@ -179,14 +186,14 @@
                       <input
                         type="checkbox"
                         class="toggle toggle-sm toggle-primary"
-                        :checked="scanner.status !== 'available'"
-                        :disabled="installing === scanner.id"
+                        :checked="scanner.status !== 'available' && scanner.status !== 'error'"
+                        :disabled="installing === scanner.id || scanner.status === 'pulling'"
                         @change="toggleScanner(scanner)"
                       />
                       <span v-if="installing === scanner.id" class="loading loading-spinner loading-xs"></span>
                       <button
                         v-if="scanner.status === 'error'"
-                        @click="toggleScanner(scanner)"
+                        @click="retryScanner(scanner)"
                         :disabled="installing === scanner.id"
                         class="btn btn-sm btn-error btn-outline"
                       >
@@ -195,6 +202,7 @@
                       <button
                         v-else-if="scannerNeedsApiKey(scanner)"
                         @click="openConfigDialog(scanner)"
+                        :disabled="scanner.status === 'pulling'"
                         class="btn btn-sm btn-warning btn-outline"
                       >
                         Set API Key
@@ -202,6 +210,7 @@
                       <button
                         v-else
                         @click="openConfigDialog(scanner)"
+                        :disabled="scanner.status === 'pulling'"
                         class="btn btn-sm btn-outline"
                       >
                         Configure
@@ -455,6 +464,7 @@ function statusBadgeClass(status: string) {
   switch (status) {
     case 'configured': return 'badge-success'
     case 'installed': return 'badge-success'
+    case 'pulling': return 'badge-info'
     case 'available': return 'badge-ghost'
     case 'error': return 'badge-error'
     default: return 'badge-ghost'
@@ -466,6 +476,8 @@ function scannerDisplayStatus(status: string): string {
     case 'installed':
     case 'configured':
       return 'enabled'
+    case 'pulling':
+      return 'pulling image…'
     case 'available':
       return 'disabled'
     case 'error':
@@ -496,7 +508,14 @@ async function refresh() {
       api.listScanners(),
       api.getSecurityOverview(),
     ])
-    if (scannersRes.success) scanners.value = scannersRes.data || []
+    if (scannersRes.success) {
+      const list = (scannersRes.data || []) as any[]
+      // Defensive sort: the backend already returns scanners alphabetically
+      // by ID, but sorting here guarantees the UI stays stable even if a
+      // caller hits an older backend or a proxy reorders the JSON.
+      list.sort((a, b) => String(a.id).localeCompare(String(b.id)))
+      scanners.value = list
+    }
     if (overviewRes.success) overview.value = overviewRes.data || {}
   } catch (e: any) {
     error.value = e.message
@@ -508,17 +527,36 @@ async function refresh() {
 async function toggleScanner(scanner: any) {
   installing.value = scanner.id
   try {
+    // 'available' → enable. Any other non-error status → disable.
+    // 'error' is handled by the dedicated Retry button (retryScanner).
     if (scanner.status === 'available') {
       const res = await api.installScanner(scanner.id)
       if (!res.success) {
         error.value = `Failed to enable: ${res.error}`
       }
-    } else {
+    } else if (scanner.status !== 'error') {
       await api.removeScanner(scanner.id)
     }
     await refresh()
     // Refresh shared scanner-status cache so other pages (Servers,
     // ServerDetail) update their scan-button visibility immediately.
+    await refreshSecurityScannerStatus()
+  } finally {
+    installing.value = null
+  }
+}
+
+// retryScanner re-runs the enable flow for a scanner that previously failed
+// (typically because a Docker pull did not succeed). This is bound to the
+// "Retry" button that shows up next to error-state scanners.
+async function retryScanner(scanner: any) {
+  installing.value = scanner.id
+  try {
+    const res = await api.installScanner(scanner.id)
+    if (!res.success) {
+      error.value = `Retry failed: ${res.error}`
+    }
+    await refresh()
     await refreshSecurityScannerStatus()
   } finally {
     installing.value = null
@@ -698,8 +736,31 @@ async function cancelAllScans() {
   }
 }
 
+// Listener for live scanner status updates (background image pulls).
+// The system store forwards security.scanner_changed SSE events as a
+// CustomEvent on window so we don't have to wire an EventSource here.
+function handleScannerChanged(e: Event) {
+  const detail = (e as CustomEvent).detail
+  if (!detail) return
+  // Apply the update inline so the user sees an instant transition from
+  // "pulling…" to "enabled" without waiting for a full refetch.
+  const idx = scanners.value.findIndex((s: any) => s.id === detail.scanner_id)
+  if (idx >= 0) {
+    scanners.value[idx] = {
+      ...scanners.value[idx],
+      status: detail.status,
+      error_message: detail.error || '',
+    }
+  }
+  // Then do a full refresh for overview counters + shared caches.
+  refresh()
+  refreshSecurityScannerStatus()
+}
+
 onMounted(async () => {
   await Promise.all([refresh(), loadHistory()])
+  // Subscribe to live scanner updates.
+  window.addEventListener('mcpproxy:scanner-changed', handleScannerChanged)
   // Check if a batch scan is already running
   try {
     const res = await api.getQueueProgress()
@@ -716,5 +777,6 @@ onMounted(async () => {
 onUnmounted(() => {
   stopQueuePolling()
   if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
+  window.removeEventListener('mcpproxy:scanner-changed', handleScannerChanged)
 })
 </script>

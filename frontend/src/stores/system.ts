@@ -172,6 +172,17 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for security.scanner_changed events so the Security page can
+    // refresh the scanner list when a background image pull finishes (spec 039).
+    es.addEventListener('security.scanner_changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:scanner-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE security.scanner_changed event:', error)
+      }
+    })
+
     // Listen for activity events (tool calls, policy decisions, etc.)
     es.addEventListener('activity.tool_call.started', (event) => {
       try {

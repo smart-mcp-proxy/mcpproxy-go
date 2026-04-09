@@ -303,3 +303,17 @@ func (r *Runtime) EmitSecurityIntegrityAlert(serverName, alertType, action strin
 	}
 	r.publishEvent(newEvent(EventTypeSecurityIntegrityAlert, payload))
 }
+
+// EmitSecurityScannerChanged emits an event when a scanner plugin's state
+// changes — notably while a Docker image is being pulled in the background
+// (Spec 039). The UI listens for this and refreshes its scanner list.
+func (r *Runtime) EmitSecurityScannerChanged(scannerID, status, errMsg string) {
+	payload := map[string]any{
+		"scanner_id": scannerID,
+		"status":     status,
+	}
+	if errMsg != "" {
+		payload["error"] = errMsg
+	}
+	r.publishEvent(newEvent(EventTypeSecurityScannerChanged, payload))
+}

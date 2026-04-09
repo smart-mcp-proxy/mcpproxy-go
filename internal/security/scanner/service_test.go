@@ -282,6 +282,15 @@ func (e *mockEmitter) EmitSecurityIntegrityAlert(serverName, alertType, action s
 	})
 }
 
+func (e *mockEmitter) EmitSecurityScannerChanged(scannerID, status, errMsg string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.events = append(e.events, mockEvent{
+		eventType: "scanner_changed",
+		data:      map[string]interface{}{"scanner_id": scannerID, "status": status, "error": errMsg},
+	})
+}
+
 func (e *mockEmitter) eventCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1067,11 +1076,13 @@ func TestServiceNoopEmitterDefault(t *testing.T) {
 	svc := NewService(store, registry, docker, t.TempDir(), logger)
 
 	// Default emitter should be NoopEmitter - should not panic
-	svc.emitter.EmitSecurityScanStarted("test", []string{"s1"}, "j1")
-	svc.emitter.EmitSecurityScanCompleted("test", map[string]int{"high": 1})
-	svc.emitter.EmitSecurityScanFailed("test", "s1", "error")
-	svc.emitter.EmitSecurityScanProgress("test", "s1", "running", 50)
-	svc.emitter.EmitSecurityIntegrityAlert("test", "mismatch", "quarantine")
+	em := svc.emit()
+	em.EmitSecurityScanStarted("test", []string{"s1"}, "j1")
+	em.EmitSecurityScanCompleted("test", map[string]int{"high": 1})
+	em.EmitSecurityScanFailed("test", "s1", "error")
+	em.EmitSecurityScanProgress("test", "s1", "running", 50)
+	em.EmitSecurityIntegrityAlert("test", "mismatch", "quarantine")
+	em.EmitSecurityScannerChanged("s1", "installed", "")
 }
 
 // --- Two-pass scanning tests ---

@@ -58,6 +58,9 @@ const (
 	EventTypeSecurityScanFailed EventType = "security.scan_failed"
 	// EventTypeSecurityIntegrityAlert is emitted for integrity violations.
 	EventTypeSecurityIntegrityAlert EventType = "security.integrity_alert"
+	// EventTypeSecurityScannerChanged is emitted when a scanner plugin's state
+	// changes (e.g., background image pull started, completed, or failed).
+	EventTypeSecurityScannerChanged EventType = "security.scanner_changed"
 )
 
 // Event is a typed notification published by the runtime event bus.

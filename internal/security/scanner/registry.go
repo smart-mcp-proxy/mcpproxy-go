@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"go.uber.org/zap"
@@ -68,7 +69,8 @@ func (r *Registry) loadUserRegistry() {
 	}
 }
 
-// List returns all known scanners (bundled + user)
+// List returns all known scanners (bundled + user) sorted by ID so that
+// API consumers, CLI output, and the web UI all see a deterministic order.
 func (r *Registry) List() []*ScannerPlugin {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -76,6 +78,9 @@ func (r *Registry) List() []*ScannerPlugin {
 	for _, s := range r.scanners {
 		result = append(result, s)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ID < result[j].ID
+	})
 	return result
 }
 

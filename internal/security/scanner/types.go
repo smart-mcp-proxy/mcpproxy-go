@@ -7,10 +7,21 @@ import (
 
 // Scanner status constants
 const (
-	ScannerStatusAvailable  = "available"
-	ScannerStatusInstalled  = "installed"
+	// ScannerStatusAvailable means the scanner is known to mcpproxy but
+	// not enabled. Toggling it on moves it into ScannerStatusPulling.
+	ScannerStatusAvailable = "available"
+	// ScannerStatusPulling means the Docker image is currently being
+	// downloaded in the background. UI should show a spinner.
+	ScannerStatusPulling = "pulling"
+	// ScannerStatusInstalled means the image is present locally and the
+	// scanner is ready to run. No required API keys are configured yet.
+	ScannerStatusInstalled = "installed"
+	// ScannerStatusConfigured means the image is present AND user-supplied
+	// env (e.g. API keys) have been stored.
 	ScannerStatusConfigured = "configured"
-	ScannerStatusError      = "error"
+	// ScannerStatusError means the last operation (typically a pull) failed.
+	// ErrorMsg carries the reason. The UI should offer a "Retry" button.
+	ScannerStatusError = "error"
 )
 
 // Scan job status constants
