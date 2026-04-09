@@ -2,8 +2,13 @@
   <div id="app" class="drawer lg:drawer-open">
     <input id="sidebar-drawer" type="checkbox" class="drawer-toggle" />
 
-    <!-- Main content area -->
-    <div class="drawer-content grid grid-rows-[auto_1fr] h-screen bg-base-200 lg:pl-64">
+    <!-- Main content area. The left padding is bound to sidebar collapsed
+         state so the content fluidly reclaims space when the sidebar shrinks
+         to its icon rail. -->
+    <div
+      class="drawer-content grid grid-rows-[auto_1fr] h-screen bg-base-200 transition-[padding] duration-200 ease-out"
+      :class="systemStore.sidebarCollapsed ? 'lg:pl-14' : 'lg:pl-64'"
+    >
       <!-- Top Header -->
       <TopHeader />
 

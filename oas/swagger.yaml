@@ -99,6 +99,8 @@ components:
             Routing mode (Spec 031): how MCP tools are exposed to clients
             Valid values: "retrieve_tools" (default), "direct", "code_execution"
           type: string
+        security:
+          $ref: '#/components/schemas/config.SecurityConfig'
         sensitive_data_detection:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         telemetry:
@@ -151,6 +153,9 @@ components:
             type: string
           description: Map of runtime type to Docker image
           type: object
+        enable_cache_volume:
+          description: 'Mount shared cache volumes for faster restarts (default: true)'
+          type: boolean
         enabled:
           description: Global enable/disable for Docker isolation
           type: boolean
@@ -364,6 +369,24 @@ components:
           type: array
           uniqueItems: false
         url:
+          type: string
+      type: object
+    config.SecurityConfig:
+      description: Security scanner settings (Spec 039)
+      properties:
+        auto_scan_quarantined:
+          type: boolean
+        integrity_check_interval:
+          type: string
+        integrity_check_on_restart:
+          type: boolean
+        runtime_read_only:
+          type: boolean
+        runtime_tmpfs_size:
+          type: string
+        scan_timeout_default:
+          type: string
+        scanner_registry_url:
           type: string
       type: object
     config.SensitiveDataDetectionConfig:
@@ -787,6 +810,20 @@ components:
           type: string
         success:
           type: boolean
+      type: object
+    contracts.FindingCounts:
+      properties:
+        dangerous:
+          description: Tool poisoning, active prompt injection
+          type: integer
+        info:
+          description: Low-severity CVEs, informational
+          type: integer
+        total:
+          type: integer
+        warning:
+          description: Rug pull, supply chain CVEs with exploits
+          type: integer
       type: object
     contracts.GetConfigResponse:
       properties:
@@ -1287,6 +1324,21 @@ components:
         total:
           type: integer
       type: object
+    contracts.SecurityScanSummary:
+      description: Latest security scan results summary
+      properties:
+        finding_counts:
+          $ref: '#/components/schemas/contracts.FindingCounts'
+        last_scan_at:
+          type: string
+        risk_score:
+          description: 0-100
+          type: integer
+        status:
+          description: '"clean", "warnings", "dangerous", "failed", "not_scanned",
+            "scanning"'
+          type: string
+      type: object
     contracts.Server:
       properties:
         args:
@@ -1350,6 +1402,8 @@ components:
           type: boolean
         retry_count:
           type: integer
+        security_scan:
+          $ref: '#/components/schemas/contracts.SecurityScanSummary'
         should_retry:
           type: boolean
         status:

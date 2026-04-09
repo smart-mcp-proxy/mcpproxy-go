@@ -380,6 +380,20 @@ func (mc *Client) ShouldRetry() bool {
 	return mc.StateManager.ShouldRetry()
 }
 
+// IsDockerIsolated returns true if this server will use Docker isolation.
+// Used to select appropriate connect timeouts (Docker containers need more time for package installation).
+func (mc *Client) IsDockerIsolated() bool {
+	if mc.globalConfig == nil || mc.globalConfig.DockerIsolation == nil || !mc.globalConfig.DockerIsolation.Enabled {
+		return false
+	}
+	// Check if server has isolation explicitly disabled
+	if mc.Config.Isolation != nil && mc.Config.Isolation.Enabled != nil && !*mc.Config.Isolation.Enabled {
+		return false
+	}
+	// Only stdio servers with commands get Docker-isolated
+	return mc.Config.Command != ""
+}
+
 // SetUserLoggedOut marks that the user has explicitly logged out
 // This prevents automatic reconnection until cleared (e.g., by explicit login)
 func (mc *Client) SetUserLoggedOut(loggedOut bool) {
@@ -695,13 +709,25 @@ func (mc *Client) performHealthCheck() {
 	}
 
 	// Check if client is in error state and should retry connection (non-OAuth errors)
-	if mc.StateManager.GetState() == types.StateError && mc.ShouldRetry() {
-		mc.logger.Info("Attempting automatic reconnection with exponential backoff",
-			zap.String("server", mc.Config.Name),
-			zap.Int("retry_count", mc.StateManager.GetConnectionInfo().RetryCount))
+	if mc.StateManager.GetState() == types.StateError {
+		info := mc.StateManager.GetConnectionInfo()
+		if info.GaveUp {
+			// Log once at WARN then suppress — server needs manual reconnect
+			if info.RetryCount == types.MaxConnectionRetries {
+				mc.logger.Warn("Giving up automatic reconnection after max retries — use manual reconnect or reconnect-on-use",
+					zap.String("server", mc.Config.Name),
+					zap.Int("retry_count", info.RetryCount))
+			}
+			return
+		}
+		if mc.ShouldRetry() {
+			mc.logger.Info("Attempting automatic reconnection with exponential backoff",
+				zap.String("server", mc.Config.Name),
+				zap.Int("retry_count", info.RetryCount))
 
-		mc.tryReconnect()
-		return
+			mc.tryReconnect()
+			return
+		}
 	}
 
 	// Skip health checks if not connected
@@ -798,6 +824,8 @@ func (mc *Client) ForceReconnect(reason string) {
 		zap.String("reason", reason),
 		zap.String("state", mc.StateManager.GetState().String()))
 
+	// Full Reset clears retryCount so a "gave up" server can be retried
+	mc.StateManager.Reset()
 	go mc.tryReconnect()
 }
 
@@ -845,8 +873,8 @@ func (mc *Client) tryReconnect() {
 			zap.Error(err))
 	}
 
-	// Reset state to disconnected before attempting reconnection
-	mc.StateManager.Reset()
+	// Transition to disconnected for reconnect, preserving retryCount for backoff
+	mc.StateManager.ResetForReconnect()
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management

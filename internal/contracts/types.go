@@ -15,40 +15,57 @@ type APIResponse struct {
 
 // Server represents an upstream MCP server configuration and status
 type Server struct {
-	ID                string            `json:"id"`
-	Name              string            `json:"name"`
-	URL               string            `json:"url,omitempty"`
-	Protocol          string            `json:"protocol"`
-	Command           string            `json:"command,omitempty"`
-	Args              []string          `json:"args,omitempty"`
-	WorkingDir        string            `json:"working_dir,omitempty"`
-	Env               map[string]string `json:"env,omitempty"`
-	Headers           map[string]string `json:"headers,omitempty"`
-	OAuth             *OAuthConfig      `json:"oauth,omitempty"`
-	Enabled           bool              `json:"enabled"`
-	Quarantined       bool              `json:"quarantined"`
-	Connected         bool              `json:"connected"`
-	Connecting        bool              `json:"connecting"`
-	Status            string            `json:"status"`
-	LastError         string            `json:"last_error,omitempty"`
-	ConnectedAt       *time.Time        `json:"connected_at,omitempty"`
-	LastReconnectAt   *time.Time        `json:"last_reconnect_at,omitempty"`
-	ReconnectCount    int               `json:"reconnect_count"`
-	ToolCount         int               `json:"tool_count"`
-	Created           time.Time         `json:"created"`
-	Updated           time.Time         `json:"updated"`
-	Isolation         *IsolationConfig  `json:"isolation,omitempty"`
-	Authenticated     bool              `json:"authenticated"`                  // OAuth authentication status
-	OAuthStatus       string            `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
-	TokenExpiresAt    *time.Time        `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
-	ToolListTokenSize int               `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
-	ShouldRetry       bool              `json:"should_retry,omitempty"`
-	RetryCount        int               `json:"retry_count,omitempty"`
-	LastRetryTime     *time.Time        `json:"last_retry_time,omitempty"`
-	UserLoggedOut     bool              `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
-	Health            *HealthStatus     `json:"health,omitempty"`           // Unified health status calculated by the backend
-	Quarantine        *QuarantineStats  `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
-	ReconnectOnUse    bool              `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
+	ID                string               `json:"id"`
+	Name              string               `json:"name"`
+	URL               string               `json:"url,omitempty"`
+	Protocol          string               `json:"protocol"`
+	Command           string               `json:"command,omitempty"`
+	Args              []string             `json:"args,omitempty"`
+	WorkingDir        string               `json:"working_dir,omitempty"`
+	Env               map[string]string    `json:"env,omitempty"`
+	Headers           map[string]string    `json:"headers,omitempty"`
+	OAuth             *OAuthConfig         `json:"oauth,omitempty"`
+	Enabled           bool                 `json:"enabled"`
+	Quarantined       bool                 `json:"quarantined"`
+	Connected         bool                 `json:"connected"`
+	Connecting        bool                 `json:"connecting"`
+	Status            string               `json:"status"`
+	LastError         string               `json:"last_error,omitempty"`
+	ConnectedAt       *time.Time           `json:"connected_at,omitempty"`
+	LastReconnectAt   *time.Time           `json:"last_reconnect_at,omitempty"`
+	ReconnectCount    int                  `json:"reconnect_count"`
+	ToolCount         int                  `json:"tool_count"`
+	Created           time.Time            `json:"created"`
+	Updated           time.Time            `json:"updated"`
+	Isolation         *IsolationConfig     `json:"isolation,omitempty"`
+	Authenticated     bool                 `json:"authenticated"`                  // OAuth authentication status
+	OAuthStatus       string               `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
+	TokenExpiresAt    *time.Time           `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
+	ToolListTokenSize int                  `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
+	ShouldRetry       bool                 `json:"should_retry,omitempty"`
+	RetryCount        int                  `json:"retry_count,omitempty"`
+	LastRetryTime     *time.Time           `json:"last_retry_time,omitempty"`
+	UserLoggedOut     bool                 `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
+	Health            *HealthStatus        `json:"health,omitempty"`           // Unified health status calculated by the backend
+	Quarantine        *QuarantineStats     `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
+	ReconnectOnUse    bool                 `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
+	SecurityScan      *SecurityScanSummary `json:"security_scan,omitempty"`    // Latest security scan results summary
+}
+
+// SecurityScanSummary provides a compact scan status for the server list view.
+type SecurityScanSummary struct {
+	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
+	RiskScore     int            `json:"risk_score"` // 0-100
+	Status        string         `json:"status"`     // "clean", "warnings", "dangerous", "failed", "not_scanned", "scanning"
+	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
+}
+
+// FindingCounts groups findings by user-facing threat category.
+type FindingCounts struct {
+	Dangerous int `json:"dangerous"` // Tool poisoning, active prompt injection
+	Warning   int `json:"warning"`   // Rug pull, supply chain CVEs with exploits
+	Info      int `json:"info"`      // Low-severity CVEs, informational
+	Total     int `json:"total"`
 }
 
 // QuarantineStats represents tool quarantine metrics for a server.

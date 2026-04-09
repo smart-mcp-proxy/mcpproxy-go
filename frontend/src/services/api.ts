@@ -767,6 +767,112 @@ class APIService {
     })
   }
 
+  // Security Scanner Management (Spec 039)
+  async listScanners(): Promise<APIResponse<any[]>> {
+    return this.request<any[]>('/api/v1/security/scanners')
+  }
+
+  async installScanner(id: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/enable`, {
+      method: 'POST',
+    })
+  }
+
+  async removeScanner(id: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/disable`, {
+      method: 'POST',
+    })
+  }
+
+  async configureScanner(id: string, env: Record<string, string>, dockerImage?: string): Promise<APIResponse<void>> {
+    const payload: any = { env }
+    if (dockerImage) payload.docker_image = dockerImage
+    return this.request<void>(`/api/v1/security/scanners/${encodeURIComponent(id)}/config`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    })
+  }
+
+  async getScannerStatus(id: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/security/scanners/${encodeURIComponent(id)}/status`)
+  }
+
+  async startScan(serverName: string, dryRun = false, scannerIds: string[] = []): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan`, {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: dryRun, scanner_ids: scannerIds }),
+    })
+  }
+
+  async getScanStatus(serverName: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/status`)
+  }
+
+  async getScanReport(serverName: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/report`)
+  }
+
+  async getScanFiles(serverName: string, limit = 100, offset = 0, pass = 1): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/files?limit=${limit}&offset=${offset}&pass=${pass}`)
+  }
+
+  async cancelScan(serverName: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  async securityApprove(serverName: string, force = false): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    })
+  }
+
+  async securityReject(serverName: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/reject`, {
+      method: 'POST',
+    })
+  }
+
+  async checkIntegrity(serverName: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/integrity`)
+  }
+
+  async getSecurityOverview(): Promise<APIResponse<any>> {
+    return this.request<any>('/api/v1/security/overview')
+  }
+
+  async scanAll(scannerIds: string[] = []): Promise<APIResponse<any>> {
+    return this.request<any>('/api/v1/security/scan-all', {
+      method: 'POST',
+      body: JSON.stringify({ scanner_ids: scannerIds }),
+    })
+  }
+
+  async getQueueProgress(): Promise<APIResponse<any>> {
+    return this.request<any>('/api/v1/security/queue')
+  }
+
+  async cancelAllScans(): Promise<APIResponse<void>> {
+    return this.request<void>('/api/v1/security/cancel-all', { method: 'POST' })
+  }
+
+  async listScanHistory(params?: { sort?: string; order?: string; limit?: number; offset?: number; status?: string }): Promise<APIResponse<{ scans: any[]; total: number }>> {
+    const q = new URLSearchParams()
+    if (params?.sort) q.set('sort', params.sort)
+    if (params?.order) q.set('order', params.order)
+    if (params?.limit) q.set('limit', String(params.limit))
+    if (params?.offset) q.set('offset', String(params.offset))
+    if (params?.status) q.set('status', params.status)
+    const qs = q.toString()
+    return this.request<{ scans: any[]; total: number }>(`/api/v1/security/scans${qs ? '?' + qs : ''}`)
+  }
+
+  async getScanReportByJobId(jobId: string): Promise<APIResponse<any>> {
+    return this.request<any>(`/api/v1/security/scans/${encodeURIComponent(jobId)}/report`)
+  }
+
   // Utility methods
   async testConnection(): Promise<boolean> {
     try {

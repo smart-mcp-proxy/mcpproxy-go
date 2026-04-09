@@ -99,12 +99,12 @@ func isLocalFilePath(path string) bool {
 	// Check if it looks like a file path with extension
 	// (e.g., script.py, index.js, but not git+https://...)
 	if !strings.Contains(path, "://") &&
-	   (strings.HasSuffix(path, ".py") ||
-	    strings.HasSuffix(path, ".js") ||
-	    strings.HasSuffix(path, ".ts") ||
-	    strings.HasSuffix(path, ".sh") ||
-	    strings.HasSuffix(path, ".rb") ||
-	    strings.HasSuffix(path, ".php")) {
+		(strings.HasSuffix(path, ".py") ||
+			strings.HasSuffix(path, ".js") ||
+			strings.HasSuffix(path, ".ts") ||
+			strings.HasSuffix(path, ".sh") ||
+			strings.HasSuffix(path, ".rb") ||
+			strings.HasSuffix(path, ".php")) {
 		return true
 	}
 
@@ -161,7 +161,7 @@ func (im *IsolationManager) DetectRuntimeType(command string) string {
 
 	// Handle common runtime commands
 	switch cmdName {
-	case cmdPython, cmdPython3, "python3.11", "python3.12":
+	case cmdPython, cmdPython3, "python3.11", "python3.12", "python3.13":
 		return cmdPython
 	case cmdUvx:
 		return cmdUvx
@@ -315,6 +315,15 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 		args = append(args, "--cpus", im.globalConfig.CPULimit)
 	}
 
+	// Add package cache volume to speed up container restarts
+	// This persists downloaded packages so containers don't re-download on every start
+	if im.globalConfig.EnableCacheVolume {
+		cacheVolume, cachePath := getCacheVolumeForRuntime(runtimeType)
+		if cacheVolume != "" {
+			args = append(args, "-v", fmt.Sprintf("%s:%s", cacheVolume, cachePath))
+		}
+	}
+
 	// Add working directory if specified
 	if serverConfig.Isolation != nil && serverConfig.Isolation.WorkingDir != "" {
 		args = append(args, "--workdir", serverConfig.Isolation.WorkingDir)
@@ -346,9 +355,8 @@ func (im *IsolationManager) TransformCommandForContainer(command string, args []
 		// For Python commands, use python directly in container
 		return cmdPython, args
 	case cmdUvx:
-		// For uvx, we need to install it first, then run it
-		installCmd := fmt.Sprintf("pip install uv && uvx %s", strings.Join(shellescapeArgs(args), " "))
-		return cmdSh, []string{"-c", installCmd}
+		// With ghcr.io/astral-sh/uv image, uvx is pre-installed — run directly
+		return cmdUvx, args
 	case cmdPip, cmdPipx:
 		// Use pip directly
 		return cmdPip, args
@@ -382,27 +390,6 @@ func (im *IsolationManager) TransformCommandForContainer(command string, args []
 		// This assumes the binary is available in the container
 		return command, args
 	}
-}
-
-// shellescapeArgs escapes arguments for shell execution
-func shellescapeArgs(args []string) []string {
-	var escaped []string
-	for _, arg := range args {
-		if arg == "" {
-			escaped = append(escaped, "''")
-			continue
-		}
-
-		// If string contains no special characters, return as-is
-		if !strings.ContainsAny(arg, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
-			escaped = append(escaped, arg)
-			continue
-		}
-
-		// Use single quotes and escape any single quotes in the string
-		escaped = append(escaped, "'"+strings.ReplaceAll(arg, "'", "'\"'\"'")+"'")
-	}
-	return escaped
 }
 
 // generateContainerName creates a Docker container name from server name with random suffix
@@ -474,4 +461,19 @@ func generateRandomSuffix() string {
 	}
 
 	return string(result)
+}
+
+// getCacheVolumeForRuntime returns a (volume_name, container_path) pair for package caching.
+// Returns empty strings for runtimes that don't benefit from caching.
+func getCacheVolumeForRuntime(runtimeType string) (string, string) {
+	switch runtimeType {
+	case cmdUvx, cmdPip, cmdPipx, cmdPython, cmdPython3:
+		return "mcpproxy-uv-cache", "/root/.cache/uv"
+	case cmdNpm, cmdNpx, cmdYarn, cmdNode:
+		return "mcpproxy-npm-cache", "/root/.npm"
+	case cmdGo:
+		return "mcpproxy-go-cache", "/go/pkg/mod"
+	default:
+		return "", ""
+	}
 }

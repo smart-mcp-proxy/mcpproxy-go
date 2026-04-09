@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCPProxy Security Scanner QA Report</title>
+<style>
+  :root { --bg: #0f172a; --card: #1e293b; --border: #334155; --text: #e2e8f0; --muted: #94a3b8; --accent: #3b82f6; --green: #22c55e; --red: #ef4444; --yellow: #eab308; --orange: #f97316; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: var(--bg); color: var(--text); line-height: 1.6; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+  h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+  h2 { font-size: 1.5rem; margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 2px solid var(--accent); }
+  h3 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; color: var(--accent); }
+  .subtitle { color: var(--muted); margin-bottom: 2rem; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+  .badge-critical { background: var(--red); color: white; }
+  .badge-high { background: var(--orange); color: white; }
+  .badge-medium { background: var(--yellow); color: #000; }
+  .badge-low { background: var(--accent); color: white; }
+  .badge-fixed { background: var(--green); color: white; }
+  .badge-open { background: var(--red); color: white; }
+  .badge-fp { background: #8b5cf6; color: white; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; text-align: center; }
+  .stat-value { font-size: 2rem; font-weight: 700; }
+  .stat-label { color: var(--muted); font-size: 0.85rem; }
+  .stat-value.green { color: var(--green); }
+  .stat-value.red { color: var(--red); }
+  .stat-value.yellow { color: var(--yellow); }
+  .stat-value.blue { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid var(--border); font-size: 0.9rem; }
+  th { background: var(--card); font-weight: 600; color: var(--muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; }
+  tr:hover { background: rgba(59,130,246,0.05); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+  .card-title { font-weight: 600; margin-bottom: 0.5rem; }
+  code { background: rgba(59,130,246,0.1); padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+  .evidence { background: #1a1a2e; border-left: 3px solid var(--yellow); padding: 0.75rem; margin: 0.5rem 0; font-size: 0.85rem; white-space: pre-wrap; max-height: 100px; overflow-y: auto; }
+  .fix-diff { background: #0d1117; border-radius: 6px; padding: 1rem; font-family: monospace; font-size: 0.8rem; overflow-x: auto; margin: 0.5rem 0; }
+  .fix-diff .add { color: var(--green); }
+  .fix-diff .del { color: var(--red); }
+  .server-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 1rem; }
+  .server-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+  .server-name { font-weight: 600; font-size: 1.1rem; margin-bottom: 0.25rem; }
+  .server-meta { color: var(--muted); font-size: 0.8rem; }
+  .scanner-status { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; padding: 0.25rem 0; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot-green { background: var(--green); }
+  .dot-red { background: var(--red); }
+  .toc { background: var(--card); border-radius: 8px; padding: 1.5rem; margin: 1.5rem 0; }
+  .toc a { color: var(--accent); text-decoration: none; display: block; padding: 0.25rem 0; }
+  .toc a:hover { text-decoration: underline; }
+  .separator { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>MCPProxy Security Scanner QA Report</h1>
+<p class="subtitle">Comprehensive audit of scanning feature across all server types | 2026-04-06 | Branch: feat/039-security-scanner-plugins</p>
+
+<div class="toc">
+  <strong>Table of Contents</strong>
+  <a href="#overview">1. Executive Overview</a>
+  <a href="#testing">2. Testing Coverage</a>
+  <a href="#server-results">3. Server-by-Server Scan Results</a>
+  <a href="#bugs-found">4. Bugs Found (42 total)</a>
+  <a href="#bugs-fixed">5. Bugs Fixed (6 implemented)</a>
+  <a href="#false-positives">6. False Positive Analysis</a>
+  <a href="#remaining">7. Remaining Issues</a>
+  <a href="#recommendations">8. Recommendations</a>
+</div>
+
+<!-- =================== EXECUTIVE OVERVIEW =================== -->
+<h2 id="overview">1. Executive Overview</h2>
+
+<div class="stats-grid">
+  <div class="stat-card">
+    <div class="stat-value blue">11</div>
+    <div class="stat-label">Servers Tested</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value blue">6</div>
+    <div class="stat-label">Scanners Installed</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value blue">214</div>
+    <div class="stat-label">Total Scans Run</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value yellow">42</div>
+    <div class="stat-label">Total Bugs Found</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value green">6</div>
+    <div class="stat-label">Bugs Fixed</div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value red">1,899</div>
+    <div class="stat-label">Total Findings</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Findings by Severity (Global Overview)</div>
+  <table>
+    <tr><th>Level</th><th>Count</th><th>Percentage</th></tr>
+    <tr><td><span class="badge badge-critical">Critical</span></td><td>14</td><td>0.7%</td></tr>
+    <tr><td><span class="badge badge-high">High</span></td><td>631</td><td>33.2%</td></tr>
+    <tr><td><span class="badge badge-medium">Medium</span></td><td>1,163</td><td>61.2%</td></tr>
+    <tr><td><span class="badge badge-low">Low</span></td><td>91</td><td>4.8%</td></tr>
+  </table>
+  <p style="margin-top:0.5rem; font-size:0.85rem; color:var(--muted)">
+    Threat classification: <strong>247</strong> dangerous, <strong>473</strong> warnings, <strong>1,179</strong> informational
+  </p>
+</div>
+
+<!-- =================== TESTING COVERAGE =================== -->
+<h2 id="testing">2. Testing Coverage</h2>
+
+<div class="card">
+  <div class="card-title">QA Methodology</div>
+  <table>
+    <tr><th>Phase</th><th>Method</th><th>Scope</th></tr>
+    <tr><td>API Testing</td><td>curl + jq</td><td>72 API tests across all scan endpoints</td></tr>
+    <tr><td>Frontend Code Review</td><td>Static analysis</td><td>ServerDetail.vue (2,000+ lines), Security.vue, api.ts</td></tr>
+    <tr><td>Backend Code Review</td><td>Static analysis</td><td>service.go, engine.go, source_resolver.go, registry_bundled.go, security_scanner.go</td></tr>
+    <tr><td>Visual UI Testing</td><td>Chrome screenshots</td><td>Global Security page, server detail security tabs</td></tr>
+    <tr><td>Scanner Quality</td><td>False positive analysis</td><td>All findings from cisco-mcp-scanner, trivy, semgrep</td></tr>
+  </table>
+</div>
+
+<div class="card">
+  <div class="card-title">Server Types Tested</div>
+  <table>
+    <tr><th>Type</th><th>Servers</th><th>Source Method</th><th>Scanners Run</th></tr>
+    <tr><td>HTTP (remote)</td><td>context7, hugginface, kaggle, supabase</td><td>url</td><td>1-6</td></tr>
+    <tr><td>Streamable-HTTP (remote)</td><td>kubic, synapbus</td><td>url</td><td>1-3</td></tr>
+    <tr><td>Stdio (local)</td><td>demo-filesystem</td><td>working_dir</td><td>6</td></tr>
+    <tr><td>Stdio (Docker)</td><td>perplexity, screenshot-website-fast</td><td>docker_extract</td><td>3-6</td></tr>
+    <tr><td>Stdio (quarantined)</td><td>malicious-demo</td><td>uvx_cache</td><td>6 (1 failed)</td></tr>
+    <tr><td>Stdio (disconnected)</td><td>everything-server</td><td>npx_cache</td><td>6</td></tr>
+  </table>
+</div>
+
+<!-- =================== SERVER RESULTS =================== -->
+<h2 id="server-results">3. Server-by-Server Scan Results</h2>
+
+<div class="server-grid">
+
+<div class="server-card">
+  <div class="server-name">context7</div>
+  <div class="server-meta">HTTP | https://mcp.context7.com/mcp | 2 tools</div>
+  <div style="margin:0.5rem 0"><span class="badge badge-high">Risk: 60</span> <span class="badge badge-fp">2 False Positives</span></div>
+  <div class="scanner-status"><span class="dot dot-green"></span> cisco-mcp-scanner: 2 findings (PROMPT INJECTION)</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> semgrep-mcp: 0 findings</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> trivy-mcp: 0 findings</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> ramparts: 0 findings</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> nova-proximity: 0 findings</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> mcp-scan: 0 findings</div>
+</div>
+
+<div class="server-card">
+  <div class="server-name">demo-filesystem</div>
+  <div class="server-meta">Stdio (local) | working_dir | 14 tools</div>
+  <div style="margin:0.5rem 0"><span class="badge badge-high">Risk: 31</span> <span class="badge badge-high">7 Findings</span></div>
+  <div class="scanner-status"><span class="dot dot-green"></span> trivy-mcp: 5 findings (secrets)</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> semgrep-mcp: 2 findings (secrets)</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> cisco-mcp-scanner: 0 findings</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> ramparts/nova/mcp-scan: 0 findings</div>
+</div>
+
+<div class="server-card">
+  <div class="server-name">perplexity</div>
+  <div class="server-meta">Stdio (Docker) | docker_extract | 3 tools</div>
+  <div style="margin:0.5rem 0"><span class="badge badge-medium">Risk: 20</span> <span class="badge badge-high">2 CVEs</span></div>
+  <div class="scanner-status"><span class="dot dot-green"></span> trivy-mcp: 2 findings (MCP SDK CVEs)</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> All other scanners: 0 findings</div>
+  <p style="font-size:0.8rem; color:var(--muted); margin-top:0.5rem">CVE-2025-66414 (DNS rebinding), CVE-2026-0621 (ReDoS) in @modelcontextprotocol/sdk</p>
+</div>
+
+<div class="server-card">
+  <div class="server-name">malicious-demo</div>
+  <div class="server-meta">Stdio (quarantined) | uvx_cache | 0 tools (disconnected)</div>
+  <div style="margin:0.5rem 0"><span class="badge badge-low">Risk: 0</span> <span class="badge badge-open">Scan Incomplete</span></div>
+  <div class="scanner-status"><span class="dot dot-red"></span> cisco-mcp-scanner: FAILED (tools.json not found)</div>
+  <div class="scanner-status"><span class="dot dot-green"></span> All other scanners: 0 findings</div>
+  <p style="font-size:0.8rem; color:var(--red); margin-top:0.5rem">Tool poisoning detector could not run - server failed to connect for tool export</p>
+</div>
+
+<div class="server-card">
+  <div class="server-name">ElevenLabs</div>
+  <div class="server-meta">Stdio | Error state | 0 tools</div>
+  <div style="margin:0.5rem 0"><span class="badge badge-critical">Risk: 100</span> <span class="badge badge-fp">16 False Positives</span></div>
+  <div class="scanner-status"><span class="dot dot-green"></span> cisco-mcp-scanner: 16 findings (SYSTEM MANIPULATION)</div>
+  <p style="font-size:0.8rem; color:var(--muted); margin-top:0.5rem">Audio processing tools incorrectly flagged as system manipulation</p>
+</div>
+
+<div class="server-card">
+  <div class="server-name">hugginface / kaggle / supabase / kubic / synapbus</div>
+  <div class="server-meta">HTTP/Streamable-HTTP | url | 5-58 tools</div>
+  <div style="margin:0.5rem 0"><span class="badge badge-low">Risk: 0</span> <span class="badge badge-fixed">Clean</span></div>
+  <p style="font-size:0.8rem; color:var(--muted); margin-top:0.5rem">Note: supabase and kubic had 2 failed scanners each (cisco, trivy) due to tools.json not exported at time of scan</p>
+</div>
+
+</div>
+
+<!-- =================== BUGS FOUND =================== -->
+<h2 id="bugs-found">4. All Bugs Found (42 total)</h2>
+
+<h3>API / Backend Bugs (27)</h3>
+<table>
+  <tr><th>#</th><th>Severity</th><th>Category</th><th>Description</th><th>Status</th></tr>
+  <tr><td>1</td><td><span class="badge badge-high">High</span></td><td>API</td><td>Concurrent scan returns 500 instead of 409 Conflict</td><td><span class="badge badge-fixed">Fixed</span></td></tr>
+  <tr><td>2</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>Duplicate findings when merging Pass 1 + Pass 2 reports (same CVE appears twice)</td><td><span class="badge badge-fixed">Fixed</span></td></tr>
+  <tr><td>3</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>Security overview threat levels all zero (dangerous/warnings/info_level not aggregated)</td><td><span class="badge badge-fixed">Fixed</span></td></tr>
+  <tr><td>4</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>malicious-demo tools.json not exported - cisco scanner fails, server shows "clean"</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>5</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>CancelScan doesn't cancel running Docker containers (uses context.Background())</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>6</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>Race condition between Pass 1 completion and Pass 2 start</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>7</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>Report directory (scanner-reports/) never cleaned up</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>8</td><td><span class="badge badge-high">High</span></td><td>Backend</td><td>No scanner-source matching: all scanners run on all source types</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>9</td><td><span class="badge badge-medium">Medium</span></td><td>API</td><td>handleStartScan silently ignores JSON decode errors</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>10</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>Pass 1 cleanup removes temp dir before Pass 2 can use it</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>11</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>Race condition reading/writing job.Status without lock</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>12</td><td><span class="badge badge-medium">Medium</span></td><td>API</td><td>POST scan for nonexistent server returns 500 instead of 404</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>13</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>tools_exported inconsistently null for some servers</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>14</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>Inconsistent scanner count: some servers get 6 scanners, others only 1-3</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>15</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>Docker cache mount at /root/.cache may conflict with scanner-specific paths</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>16</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>extractTopLevelDir includes /usr, /var for Docker - too broad for supply chain audit</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>17</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>cancel-all wipes scan job data for servers with active scans</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>18</td><td><span class="badge badge-medium">Medium</span></td><td>Backend</td><td>Scan report has duplicate scanner entries for multi-scanned servers</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>19</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>ValidateManifest requires Command non-empty, but 3 bundled scanners have nil Command</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>20</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>parseResults silently treats unparseable scanner output as 'clean'</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>21</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>File-to-findings path matching uses flawed normalization</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>22</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>GetScanSummary doesn't check for active Pass 2 scans</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>23</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>Cisco scanner hardcodes --tools /scan/source/tools.json path</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>24</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>Docker-extracted scans report total_files=0 despite scanning extracted files</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>25</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>Argument-based source resolution matches non-flag args as file paths incorrectly</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>26</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>Job ID collision risk with time.Now().UnixNano() generation</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>27</td><td><span class="badge badge-low">Low</span></td><td>Backend</td><td>handleGetScanFiles retrieves report independently of job (potential mismatch)</td><td><span class="badge badge-open">Open</span></td></tr>
+</table>
+
+<h3>Frontend / UI Bugs (15)</h3>
+<table>
+  <tr><th>#</th><th>Severity</th><th>Category</th><th>Description</th><th>Status</th></tr>
+  <tr><td>28</td><td><span class="badge badge-high">High</span></td><td>UI</td><td>No Cancel button during active scan (API exists but UI doesn't expose it)</td><td><span class="badge badge-fixed">Fixed</span></td></tr>
+  <tr><td>29</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>Scanned Files section visible for tool_definitions_only source method</td><td><span class="badge badge-fixed">Fixed</span></td></tr>
+  <tr><td>30</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>No retry button after scan failure</td><td><span class="badge badge-fixed">Fixed</span></td></tr>
+  <tr><td>31</td><td><span class="badge badge-high">High</span></td><td>UI</td><td>Race condition: polling completion fires before scanReport loads</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>32</td><td><span class="badge badge-high">High</span></td><td>UI</td><td>"Already in progress" error extracts job ID with fragile regex</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>33</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>No debounce on Scan Now button (rapid clicks can cause issues)</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>34</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>Polling continues silently on network errors with no max retry</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>35</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>Scan error alert has no dismiss action</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>36</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>Approve/Reject only shown with findings (can't approve clean servers)</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>37</td><td><span class="badge badge-medium">Medium</span></td><td>UI</td><td>Active scan state lost on page navigation and return</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>38</td><td><span class="badge badge-low">Low</span></td><td>UI</td><td>Inconsistent risk score color thresholds between pages</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>39</td><td><span class="badge badge-low">Low</span></td><td>UI</td><td>Failed scanners counted as "completed" in progress bar</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>40</td><td><span class="badge badge-low">Low</span></td><td>UI</td><td>Scanner Execution Logs depend on scanStatus populated at wrong time</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>41</td><td><span class="badge badge-low">Low</span></td><td>UI</td><td>No explanation of Risk Score metric anywhere</td><td><span class="badge badge-open">Open</span></td></tr>
+  <tr><td>42</td><td><span class="badge badge-low">Low</span></td><td>UI</td><td>No "last scanned" timestamp shown prominently</td><td><span class="badge badge-open">Open</span></td></tr>
+</table>
+
+<!-- =================== BUGS FIXED =================== -->
+<h2 id="bugs-fixed">5. Bugs Fixed (6 implemented)</h2>
+
+<div class="card">
+  <div class="card-title">Fix 1: Concurrent scan returns 409 Conflict <span class="badge badge-fixed">Verified</span></div>
+  <p>File: <code>internal/httpapi/security_scanner.go</code></p>
+  <p>When a scan is already running for a server and another scan is triggered, the API now returns HTTP 409 Conflict instead of 500 Internal Server Error.</p>
+  <div class="fix-diff">
+    <div class="del">- s.writeError(w, r, http.StatusInternalServerError, err.Error())</div>
+    <div class="add">+ if strings.Contains(err.Error(), "already in progress") {</div>
+    <div class="add">+     s.writeError(w, r, http.StatusConflict, err.Error())</div>
+    <div class="add">+ } else {</div>
+    <div class="add">+     s.writeError(w, r, http.StatusInternalServerError, err.Error())</div>
+    <div class="add">+ }</div>
+  </div>
+  <p style="font-size:0.85rem; color:var(--green)">Validated: POST /scan returns 409 with "scan already in progress" message</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Fix 2: Deduplicate Pass 1/Pass 2 findings <span class="badge badge-fixed">Verified</span></div>
+  <p>File: <code>internal/security/scanner/service.go</code></p>
+  <p>When merging Pass 1 (security scan) and Pass 2 (supply chain audit) reports, duplicate findings (same scanner + rule + title) are now removed. Pass 1 findings take priority.</p>
+  <p>Example: Perplexity had 4 findings (2 duplicated). Now correctly shows 2.</p>
+  <p style="font-size:0.85rem; color:var(--green)">Validated: perplexity report shows 2 findings (was 4)</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Fix 3: Security overview threat level aggregation <span class="badge badge-fixed">Verified</span></div>
+  <p>File: <code>internal/security/scanner/service.go</code></p>
+  <p>The global security overview now correctly counts findings by threat level (dangerous, warnings, info_level). Previously these were all zero because ClassifyFinding() wasn't called during overview aggregation.</p>
+  <p style="font-size:0.85rem; color:var(--green)">Validated: Overview shows dangerous=247, warnings=473, info_level=1179 (was all 0)</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Fix 4: Cancel button in security tab <span class="badge badge-fixed">Verified</span></div>
+  <p>File: <code>frontend/src/views/ServerDetail.vue</code></p>
+  <p>Added a "Cancel" button that appears during active scans. Calls the existing cancelScan API endpoint, stops polling, and resets scan state.</p>
+  <p style="font-size:0.85rem; color:var(--green)">Validated: Cancel button renders, calls API correctly</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Fix 5: Scanned Files section visibility <span class="badge badge-fixed">Verified</span></div>
+  <p>File: <code>frontend/src/views/ServerDetail.vue</code></p>
+  <p>The Scanned Files collapsible section is now hidden for HTTP servers and tool_definitions_only source methods (no filesystem to show files for).</p>
+  <p style="font-size:0.85rem; color:var(--green)">Validated: Section hidden for url, url_full, and tool_definitions_only</p>
+</div>
+
+<div class="card">
+  <div class="card-title">Fix 6: Retry button after scan error <span class="badge badge-fixed">Verified</span></div>
+  <p>File: <code>frontend/src/views/ServerDetail.vue</code></p>
+  <p>Added a "Retry" button to the scan error alert, allowing users to easily re-trigger a scan after failure without refreshing the page.</p>
+  <p style="font-size:0.85rem; color:var(--green)">Validated: Retry button clears error and re-triggers scan</p>
+</div>
+
+<!-- =================== FALSE POSITIVES =================== -->
+<h2 id="false-positives">6. False Positive Analysis</h2>
+
+<div class="card" style="border-color: #8b5cf6;">
+  <div class="card-title">False Positive: context7 "PROMPT INJECTION" (Risk: 60)</div>
+  <p><strong>Scanner:</strong> cisco-mcp-scanner | <strong>Findings:</strong> 2</p>
+  <p><strong>What was flagged:</strong></p>
+  <div class="evidence">Tool: resolve-library-id
+Evidence: "You MUST call this function before 'Query Documentation' tool to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID..."</div>
+  <p style="margin-top:0.5rem"><strong>Analysis:</strong> This is standard MCP tool description pattern. Context7 instructs the LLM to call resolve-library-id before query-docs. The phrase "You MUST call" triggers the prompt injection detector, but this is normal tool orchestration guidance, not malicious prompt injection.</p>
+  <p style="color:#8b5cf6"><strong>Verdict: FALSE POSITIVE</strong> &mdash; Cisco scanner is too aggressive with imperative language in tool descriptions.</p>
+</div>
+
+<div class="card" style="border-color: #8b5cf6;">
+  <div class="card-title">False Positive: ElevenLabs "SYSTEM MANIPULATION" (Risk: 100)</div>
+  <p><strong>Scanner:</strong> cisco-mcp-scanner | <strong>Findings:</strong> 16 (2 dangerous + 14 warning)</p>
+  <p><strong>What was flagged:</strong> All audio tools (text_to_speech, speech_to_text, text_to_sound_effects, isolate_audio, speech_to_speech, etc.) flagged as "SYSTEM MANIPULATION"</p>
+  <p style="margin-top:0.5rem"><strong>Analysis:</strong> ElevenLabs is a legitimate audio processing API. Its tools interact with audio data, not system resources. The scanner's description of system manipulation ("unsolicited modification or deletion of files, registries") does not match what these tools do.</p>
+  <p style="color:#8b5cf6"><strong>Verdict: FALSE POSITIVE</strong> &mdash; Cisco scanner misclassifies media processing as system manipulation.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">True Positives (Confirmed Real Issues)</div>
+  <table>
+    <tr><th>Server</th><th>Findings</th><th>Assessment</th></tr>
+    <tr><td>demo-filesystem</td><td>7 findings (Stripe key, GitHub PAT, private keys)</td><td>TRUE POSITIVE - real secrets in filesystem</td></tr>
+    <tr><td>perplexity</td><td>2 CVEs (DNS rebinding, ReDoS in MCP SDK)</td><td>TRUE POSITIVE - real vulnerabilities in dependencies</td></tr>
+  </table>
+</div>
+
+<!-- =================== REMAINING ISSUES =================== -->
+<h2 id="remaining">7. Remaining Issues (Not Fixed)</h2>
+
+<div class="card">
+  <div class="card-title">Critical: malicious-demo tool poisoning not detected</div>
+  <p>The quarantined malicious-demo server can't have its tool definitions exported because it fails to connect (MCP initialize timeout). The cisco-mcp-scanner, which is the primary tool poisoning detector, requires <code>/scan/source/tools.json</code> which can't be created without a connection.</p>
+  <p><strong>Impact:</strong> Quarantined servers that are truly malicious can't be scanned for tool poisoning — the exact scenario this feature is designed for.</p>
+  <p><strong>Suggested fix:</strong> Cache tool definitions when they are first discovered (before quarantine), so scanning can use cached definitions even when the server refuses to connect.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">High: Inconsistent scanner count across servers</div>
+  <p>Some servers get 6 scanners, others only 1-3. The scanner selection logic doesn't match scanner capabilities to source types. For example, hugginface (HTTP, 8 tools) only ran semgrep, while context7 (HTTP, 2 tools) ran all 6.</p>
+  <p><strong>Impact:</strong> Inconsistent security coverage across servers.</p>
+  <p><strong>Suggested fix:</strong> Implement scanner-to-source capability matching based on scanner input requirements.</p>
+</div>
+
+<div class="card">
+  <div class="card-title">High: False positive rate from cisco-mcp-scanner</div>
+  <p>The Cisco MCP Scanner produces a high false positive rate for standard MCP tool descriptions. Imperative language ("You MUST call", "always use") and media processing tools are incorrectly flagged.</p>
+  <p><strong>Impact:</strong> Risk score of 60-100 for legitimate servers, eroding user trust.</p>
+  <p><strong>Suggested fix:</strong> Implement scanner result post-processing to filter known false positive patterns, or adjust cisco scanner configuration thresholds.</p>
+</div>
+
+<!-- =================== RECOMMENDATIONS =================== -->
+<h2 id="recommendations">8. Recommendations</h2>
+
+<div class="card">
+  <h3>Priority 1 (Next Sprint)</h3>
+  <ul style="margin-top:0.5rem; padding-left:1.5rem;">
+    <li>Cache tool definitions for quarantined servers to enable tool poisoning detection</li>
+    <li>Implement scanner-source capability matching to avoid running irrelevant scanners</li>
+    <li>Add false positive suppression rules for cisco-mcp-scanner (imperative language patterns)</li>
+    <li>Fix CancelScan to actually terminate Docker containers</li>
+    <li>Fix Pass 1/Pass 2 race condition (Pass 2 starts before Pass 1 cleanup)</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Priority 2 (Future)</h3>
+  <ul style="margin-top:0.5rem; padding-left:1.5rem;">
+    <li>Add report directory cleanup (TTL-based or max-size)</li>
+    <li>Add Risk Score explanation tooltip in the UI</li>
+    <li>Show "last scanned" timestamp prominently</li>
+    <li>Add scan history view (past scans comparison)</li>
+    <li>Improve error handling for nonexistent servers (404 instead of 500)</li>
+    <li>Add scanner input/output type enforcement during installation</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h3>Priority 3 (Polish)</h3>
+  <ul style="margin-top:0.5rem; padding-left:1.5rem;">
+    <li>Standardize risk score color thresholds across all pages</li>
+    <li>Add debounce to Scan Now button</li>
+    <li>Add polling error limit (stop after N consecutive failures)</li>
+    <li>Show scanner capability badges in the scanner list</li>
+    <li>Improve progress bar to distinguish failed vs completed scanners</li>
+  </ul>
+</div>
+
+<hr class="separator">
+<p style="text-align: center; color: var(--muted); font-size: 0.85rem;">
+  Generated 2026-04-06 | MCPProxy v0.23.1 | Branch: feat/039-security-scanner-plugins
+  <br>QA Coverage: 72 API tests, 15 UI bugs, 20 backend bugs, 8 design issues, 10 UX improvements
+</p>
+
+</div>
+</body>
+</html>

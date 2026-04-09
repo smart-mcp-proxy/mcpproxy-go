@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 
 	"go.etcd.io/bbolt"
 	bboltErrors "go.etcd.io/bbolt/errors"
@@ -427,6 +428,168 @@ func (m *Manager) DeleteServerToolApprovals(serverName string) error {
 	defer m.mu.Unlock()
 
 	return m.db.DeleteServerToolApprovals(serverName)
+}
+
+// Security Scanner methods (Spec 039)
+
+// SaveScanner saves a scanner plugin record
+func (m *Manager) SaveScanner(s *scanner.ScannerPlugin) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveScanner(s)
+}
+
+// GetScanner retrieves a scanner plugin by ID
+func (m *Manager) GetScanner(id string) (*scanner.ScannerPlugin, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetScanner(id)
+}
+
+// ListScanners returns all scanner plugin records
+func (m *Manager) ListScanners() ([]*scanner.ScannerPlugin, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListScanners()
+}
+
+// DeleteScanner deletes a scanner plugin by ID
+func (m *Manager) DeleteScanner(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteScanner(id)
+}
+
+// SaveScanJob saves a scan job record
+func (m *Manager) SaveScanJob(job *scanner.ScanJob) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveScanJob(job)
+}
+
+// GetScanJob retrieves a scan job by ID
+func (m *Manager) GetScanJob(id string) (*scanner.ScanJob, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetScanJob(id)
+}
+
+// ListScanJobs returns scan jobs, optionally filtered by server name
+func (m *Manager) ListScanJobs(serverName string) ([]*scanner.ScanJob, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListScanJobs(serverName)
+}
+
+// GetLatestScanJob returns the most recent scan job for a server
+func (m *Manager) GetLatestScanJob(serverName string) (*scanner.ScanJob, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetLatestScanJob(serverName)
+}
+
+// DeleteScanJob deletes a scan job by ID
+func (m *Manager) DeleteScanJob(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteScanJob(id)
+}
+
+// DeleteServerScanJobs deletes all scan jobs for a server
+func (m *Manager) DeleteServerScanJobs(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteServerScanJobs(serverName)
+}
+
+// SaveScanReport saves a scan report record
+func (m *Manager) SaveScanReport(report *scanner.ScanReport) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveScanReport(report)
+}
+
+// GetScanReport retrieves a scan report by ID
+func (m *Manager) GetScanReport(id string) (*scanner.ScanReport, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetScanReport(id)
+}
+
+// ListScanReports returns scan reports, optionally filtered by server name
+func (m *Manager) ListScanReports(serverName string) ([]*scanner.ScanReport, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListScanReports(serverName)
+}
+
+// ListScanReportsByJob returns all scan reports for a specific scan job
+func (m *Manager) ListScanReportsByJob(jobID string) ([]*scanner.ScanReport, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListScanReportsByJob(jobID)
+}
+
+// DeleteScanReport deletes a scan report by ID
+func (m *Manager) DeleteScanReport(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteScanReport(id)
+}
+
+// DeleteServerScanReports deletes all scan reports for a server
+func (m *Manager) DeleteServerScanReports(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteServerScanReports(serverName)
+}
+
+// SaveIntegrityBaseline saves an integrity baseline record
+func (m *Manager) SaveIntegrityBaseline(baseline *scanner.IntegrityBaseline) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveIntegrityBaseline(baseline)
+}
+
+// GetIntegrityBaseline retrieves an integrity baseline by server name
+func (m *Manager) GetIntegrityBaseline(serverName string) (*scanner.IntegrityBaseline, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetIntegrityBaseline(serverName)
+}
+
+// DeleteIntegrityBaseline deletes an integrity baseline by server name
+func (m *Manager) DeleteIntegrityBaseline(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.DeleteIntegrityBaseline(serverName)
+}
+
+// ListIntegrityBaselines returns all integrity baseline records
+func (m *Manager) ListIntegrityBaselines() ([]*scanner.IntegrityBaseline, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListIntegrityBaselines()
 }
 
 // Docker recovery state operations

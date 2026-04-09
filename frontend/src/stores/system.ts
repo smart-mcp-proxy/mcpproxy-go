@@ -9,6 +9,15 @@ export const useSystemStore = defineStore('system', () => {
   const eventSource = ref<EventSource | null>(null)
   const connected = ref(false)
   const currentTheme = ref<string>('corporate')
+  const sidebarCollapsed = ref<boolean>(
+    (() => {
+      try {
+        return localStorage.getItem('mcpproxy-sidebar-collapsed') === '1'
+      } catch {
+        return false
+      }
+    })()
+  )
   const toasts = ref<Toast[]>([])
   const info = ref<InfoResponse | null>(null)
   const routing = ref<RoutingInfo | null>(null)
@@ -163,6 +172,17 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Listen for security.scanner_changed events so the Security page can
+    // refresh the scanner list when a background image pull finishes (spec 039).
+    es.addEventListener('security.scanner_changed', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        window.dispatchEvent(new CustomEvent('mcpproxy:scanner-changed', { detail: data }))
+      } catch (error) {
+        console.error('Failed to parse SSE security.scanner_changed event:', error)
+      }
+    })
+
     // Listen for activity events (tool calls, policy decisions, etc.)
     es.addEventListener('activity.tool_call.started', (event) => {
       try {
@@ -310,6 +330,18 @@ export const useSystemStore = defineStore('system', () => {
     }
   }
 
+  function toggleSidebar() {
+    sidebarCollapsed.value = !sidebarCollapsed.value
+    try {
+      localStorage.setItem(
+        'mcpproxy-sidebar-collapsed',
+        sidebarCollapsed.value ? '1' : '0'
+      )
+    } catch {
+      // localStorage unavailable (private browsing, etc.) — just keep in-memory
+    }
+  }
+
   function addToast(toast: Omit<Toast, 'id'>): string {
     const id = Math.random().toString(36).substr(2, 9)
     const newToast: Toast = {
@@ -385,12 +417,14 @@ export const useSystemStore = defineStore('system', () => {
     updateAvailable,
     latestVersion,
     routingMode,
+    sidebarCollapsed,
 
     // Actions
     connectEventSource,
     disconnectEventSource,
     setTheme,
     loadTheme,
+    toggleSidebar,
     addToast,
     removeToast,
     clearToasts,

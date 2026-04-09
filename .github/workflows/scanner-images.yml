@@ -1,0 +1,97 @@
+name: scanner-images
+
+# Build and publish the custom security scanner Docker images to
+# ghcr.io/smart-mcp-proxy/scanner-*. Vendor images (trivy, semgrep, the
+# AI scanner which lives in a separate repo) are NOT built here.
+#
+# Triggers:
+#   - push to main that touches docker/scanners/** or this workflow file
+#   - manual dispatch (for ad-hoc rebuilds)
+#   - pull requests: builds without pushing (to catch Dockerfile drift)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/scanners/**'
+      - '.github/workflows/scanner-images.yml'
+  pull_request:
+    paths:
+      - 'docker/scanners/**'
+      - '.github/workflows/scanner-images.yml'
+  workflow_dispatch:
+    inputs:
+      scanner:
+        description: 'Scanner id to rebuild (blank = all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: snyk
+            image: ghcr.io/smart-mcp-proxy/scanner-snyk
+            context: docker/scanners/snyk
+          - id: cisco
+            image: ghcr.io/smart-mcp-proxy/scanner-cisco
+            context: docker/scanners/cisco
+          - id: ramparts
+            image: ghcr.io/smart-mcp-proxy/scanner-ramparts
+            context: docker/scanners/ramparts
+          - id: proximity
+            image: ghcr.io/smart-mcp-proxy/scanner-proximity
+            context: docker/scanners/proximity
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip if not selected
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.scanner != '' && inputs.scanner != matrix.id }}
+        run: echo "Skipping ${{ matrix.id }} (workflow_dispatch selected ${{ inputs.scanner }})" && exit 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags
+        id: tags
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:7}"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            echo "tags=${{ matrix.image }}:latest,${{ matrix.image }}:$short_sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${{ matrix.image }}:pr-${{ github.event.pull_request.number || 'dev' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=scanner-${{ matrix.id }}
+          cache-to: type=gha,scope=scanner-${{ matrix.id }},mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/smart-mcp-proxy/mcpproxy-go
+            org.opencontainers.image.revision=${{ github.sha }}

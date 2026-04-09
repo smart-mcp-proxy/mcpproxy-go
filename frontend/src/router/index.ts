@@ -100,6 +100,23 @@ const router = createRouter({
       },
     },
     {
+      path: '/security',
+      name: 'security',
+      component: () => import('@/views/Security.vue'),
+      meta: {
+        title: 'Security',
+      },
+    },
+    {
+      path: '/security/scans/:jobId',
+      name: 'scan-report',
+      component: () => import('@/views/ScanReport.vue'),
+      props: true,
+      meta: {
+        title: 'Scan Report',
+      },
+    },
+    {
       path: '/tokens',
       name: 'tokens',
       component: () => import('@/views/AgentTokens.vue'),

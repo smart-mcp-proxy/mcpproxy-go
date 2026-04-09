@@ -14,7 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 )
 
-const connectAttemptTimeout = 45 * time.Second
+const connectAttemptTimeout = 3*time.Minute + 15*time.Second // Must exceed per-server Docker timeout (3min)
 
 // StartBackgroundInitialization kicks off configuration sync and background loops.
 func (r *Runtime) StartBackgroundInitialization() {

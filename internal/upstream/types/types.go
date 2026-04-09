@@ -49,6 +49,11 @@ func (s ConnectionState) String() string {
 }
 
 // ConnectionInfo holds information about the current connection state
+// MaxConnectionRetries is the maximum number of consecutive connection failures
+// before giving up automatic reconnection. The server can still be reconnected
+// manually or via reconnect-on-use.
+const MaxConnectionRetries = 20
+
 type ConnectionInfo struct {
 	State            ConnectionState `json:"state"`
 	LastError        error           `json:"last_error,omitempty"`
@@ -59,6 +64,7 @@ type ConnectionInfo struct {
 	LastOAuthAttempt time.Time       `json:"last_oauth_attempt,omitempty"`
 	OAuthRetryCount  int             `json:"oauth_retry_count"`
 	IsOAuthError     bool            `json:"is_oauth_error"`
+	GaveUp           bool            `json:"gave_up"` // True when max retries exceeded
 }
 
 // StateManager manages the state transitions for an upstream connection
@@ -122,6 +128,7 @@ func (sm *StateManager) GetConnectionInfo() ConnectionInfo {
 		LastOAuthAttempt: sm.lastOAuthAttempt,
 		OAuthRetryCount:  sm.oauthRetryCount,
 		IsOAuthError:     sm.isOAuthError,
+		GaveUp:           sm.retryCount >= MaxConnectionRetries,
 	}
 }
 
@@ -237,6 +244,11 @@ func (sm *StateManager) ShouldRetry() bool {
 		return false
 	}
 
+	// Stop retrying after max consecutive failures
+	if sm.retryCount >= MaxConnectionRetries {
+		return false
+	}
+
 	if sm.retryCount == 0 {
 		return true
 	}
@@ -335,6 +347,39 @@ func (sm *StateManager) Reset() {
 	callback := sm.onStateChange
 
 	// Call the callback outside the lock to avoid deadlocks
+	if callback != nil {
+		go callback(oldState, StateDisconnected, &info)
+	}
+}
+
+// ResetForReconnect transitions to Disconnected state for a reconnection attempt
+// while PRESERVING retryCount and lastRetryTime so exponential backoff is not defeated.
+// Use this instead of Reset() when retrying a failed connection.
+func (sm *StateManager) ResetForReconnect() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	oldState := sm.currentState
+	sm.currentState = StateDisconnected
+	sm.lastError = nil
+	// Preserve: retryCount, lastRetryTime — these drive exponential backoff
+	sm.serverName = ""
+	sm.serverVersion = ""
+
+	info := ConnectionInfo{
+		State:            sm.currentState,
+		LastError:        sm.lastError,
+		RetryCount:       sm.retryCount,
+		LastRetryTime:    sm.lastRetryTime,
+		ServerName:       sm.serverName,
+		ServerVersion:    sm.serverVersion,
+		LastOAuthAttempt: sm.lastOAuthAttempt,
+		OAuthRetryCount:  sm.oauthRetryCount,
+		IsOAuthError:     sm.isOAuthError,
+	}
+
+	callback := sm.onStateChange
+
 	if callback != nil {
 		go callback(oldState, StateDisconnected, &info)
 	}

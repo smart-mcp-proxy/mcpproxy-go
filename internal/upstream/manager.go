@@ -1102,7 +1102,15 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		go func(id string, c *managed.Client) {
 			defer wg.Done()
 
-			if err := c.Connect(ctx); err != nil {
+			// Use a longer timeout for Docker-isolated servers that need package installation
+			connectCtx := ctx
+			if c.IsDockerIsolated() {
+				var cancel context.CancelFunc
+				connectCtx, cancel = context.WithTimeout(ctx, 3*time.Minute)
+				defer cancel()
+			}
+
+			if err := c.Connect(connectCtx); err != nil {
 				m.logger.Error("Failed to connect to upstream server",
 					zap.String("id", id),
 					zap.String("name", c.Config.Name),

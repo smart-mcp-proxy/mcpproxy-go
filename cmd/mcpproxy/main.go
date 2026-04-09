@@ -178,6 +178,9 @@ func main() {
 	// Add feedback command (Spec 036)
 	feedbackCmd := GetFeedbackCommand()
 
+	// Add security command (Spec 039: Security scanner plugins)
+	securityCmd := GetSecurityCommand()
+
 	// Add connect/disconnect commands
 	connectCmd := GetConnectCommand()
 	disconnectCmd := GetDisconnectCommand()
@@ -199,6 +202,7 @@ func main() {
 	rootCmd.AddCommand(tokenCmd)
 	rootCmd.AddCommand(telemetryCmd)
 	rootCmd.AddCommand(feedbackCmd)
+	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
 

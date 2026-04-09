@@ -29,6 +29,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -68,6 +69,9 @@ type Server struct {
 
 	// Spec 024: Track server start time for lifecycle events
 	startTime time.Time
+
+	// Spec 039: Security scanner service (for scan summaries in server list)
+	securityScanner *scanner.Service
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
@@ -847,7 +851,7 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
 
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":            serverStatus.Name,
 			"url":             url,
 			"command":         command,
@@ -866,7 +870,17 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"retry_count":     serverStatus.RetryCount,
 			"last_retry_time": nil,          // Actor tracks this internally
 			"health":          healthStatus, // Spec 013: Health is source of truth
-		})
+		}
+
+		// Spec 039: Add security scan summary if available
+		if s.securityScanner != nil {
+			scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name)
+			if scanSummary != nil {
+				serverMap["security_scan"] = scanSummary
+			}
+		}
+
+		result = append(result, serverMap)
 	}
 
 	s.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
@@ -1647,6 +1661,23 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
 		httpAPIServer.SetConnectService(connectSvc)
 	}
+	// Wire security scanner service (Spec 039)
+	if sm := s.runtime.StorageManager(); sm != nil {
+		cfg := s.runtime.Config()
+		dataDir := ""
+		if cfg != nil {
+			dataDir = cfg.DataDir
+		}
+		secRegistry := scanner.NewRegistry(dataDir, s.logger)
+		secDocker := scanner.NewDockerRunner(s.logger)
+		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
+		secService.SetEmitter(s.runtime)
+		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
+		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
+		secService.CleanupStaleJobs()
+		httpAPIServer.SetSecurityController(secService)
+		s.securityScanner = secService
+	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
 	wireTeamsOAuth(s, httpAPIServer)
 	mux.Handle("/api/", httpAPIServer)
@@ -2336,4 +2367,96 @@ func (s *Server) GetToolApprovalStatus(serverName, toolName string) (string, err
 		return "", err
 	}
 	return string(record.Status), nil
+}
+
+// keyringSecretStore adapts secret.Resolver to scanner.SecretStore for API key management.
+type keyringSecretStore struct {
+	resolver *secret.Resolver
+}
+
+func (k *keyringSecretStore) StoreSecret(ctx context.Context, name, value string) error {
+	ref := secret.Ref{Type: "keyring", Name: name}
+	return k.resolver.Store(ctx, ref, value)
+}
+
+func (k *keyringSecretStore) ResolveSecret(ctx context.Context, refStr string) (string, error) {
+	ref, err := secret.ParseSecretRef(refStr)
+	if err != nil {
+		return "", err
+	}
+	return k.resolver.Resolve(ctx, *ref)
+}
+
+// configServerInfoProvider implements scanner.ServerInfoProvider using the config and server.
+type configServerInfoProvider struct {
+	cfg    *config.Config
+	server *Server
+}
+
+func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.ServerInfo, error) {
+	if p.cfg == nil {
+		return nil, fmt.Errorf("no config available")
+	}
+	for _, sc := range p.cfg.Servers {
+		if sc.Name == serverName {
+			return &scanner.ServerInfo{
+				Name:       sc.Name,
+				Protocol:   sc.Protocol,
+				Command:    sc.Command,
+				Args:       sc.Args,
+				WorkingDir: sc.WorkingDir,
+				URL:        sc.URL,
+				Env:        sc.Env,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("server %q not found in config", serverName)
+}
+
+func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	if p.server != nil {
+		return p.server.GetServerTools(serverName)
+	}
+	return nil, fmt.Errorf("server tools not available")
+}
+
+// EnsureConnected attempts to connect a disconnected server so tool definitions
+// can be retrieved for security scanning. For quarantined servers, grants a
+// temporary inspection exemption so the supervisor allows the connection.
+func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverName string) error {
+	if p.server == nil {
+		return fmt.Errorf("server instance not available")
+	}
+
+	// For quarantined servers, grant inspection exemption before restart.
+	// Without this, the supervisor refuses to connect quarantined servers.
+	supervisor := p.server.runtime.Supervisor()
+	if supervisor != nil {
+		snapshot := supervisor.StateView().Snapshot()
+		if ss, exists := snapshot.Servers[serverName]; exists && ss.Quarantined {
+			if err := supervisor.RequestInspectionExemption(serverName, 15*time.Minute); err != nil {
+				p.server.logger.Warn("Failed to grant inspection exemption for scan",
+					zap.String("server", serverName), zap.Error(err))
+			}
+		}
+	}
+
+	return p.server.runtime.RestartServer(serverName)
+}
+
+// IsConnected checks if the server has an active MCP connection via the stateview.
+func (p *configServerInfoProvider) IsConnected(serverName string) bool {
+	if p.server == nil {
+		return false
+	}
+	supervisor := p.server.runtime.Supervisor()
+	if supervisor == nil {
+		return false
+	}
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return false
+	}
+	return serverStatus.Connected
 }

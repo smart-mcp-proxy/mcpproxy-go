@@ -26,6 +26,95 @@ export interface QuarantineStats {
   changed_count: number
 }
 
+// Security scan summary (Spec 039)
+export type SecurityScanStatus = 'clean' | 'warnings' | 'dangerous' | 'failed' | 'not_scanned' | 'scanning'
+
+export interface SecurityScanFindingCounts {
+  dangerous: number
+  warning: number
+  info: number
+  total: number
+}
+
+export interface SecurityScanSummary {
+  last_scan_at?: string
+  risk_score: number
+  status: SecurityScanStatus
+  finding_counts?: SecurityScanFindingCounts
+}
+
+// Security scan finding (Spec 039)
+export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code'
+export type ThreatLevel = 'dangerous' | 'warning' | 'info'
+
+export interface SecurityScanFinding {
+  rule_id?: string
+  severity?: string             // critical, high, medium, low, info
+  category?: string
+  threat_type: ThreatType
+  threat_level: ThreatLevel
+  title: string
+  description: string
+  location?: string
+  scanner?: string              // Scanner that found this
+  help_uri?: string             // Link to CVE/advisory
+  cvss_score?: number           // CVSS score (0-10)
+  package_name?: string
+  installed_version?: string
+  fixed_version?: string        // Version with fix
+  scan_pass?: number            // 1 = security scan, 2 = supply chain audit
+  evidence?: string             // Text/content that triggered the finding
+}
+
+export interface SecurityScanReport {
+  job_id?: string
+  server_name: string
+  status: SecurityScanStatus
+  risk_score: number
+  findings: SecurityScanFinding[]
+  finding_counts: SecurityScanFindingCounts
+  summary: SecurityScanReportSummary
+  scanned_at: string
+  duration_ms?: number
+  scanners_used?: string[]
+  // Scan completion tracking
+  scanners_run?: number     // How many scanners actually produced results
+  scanners_failed?: number  // How many scanners failed
+  scanners_total?: number   // Total scanners attempted
+  scan_complete?: boolean   // True only if at least one scanner succeeded
+  empty_scan?: boolean      // True when scanners ran but had no files to analyze
+  // Two-pass scan tracking
+  pass1_complete?: boolean  // Security scan (fast) done
+  pass2_complete?: boolean  // Supply chain audit done
+  pass2_running?: boolean   // Supply chain audit in progress
+}
+
+// Scan job summary for history listing
+export interface ScanJobSummary {
+  id: string
+  server_name: string
+  status: string
+  scan_pass: number
+  started_at: string
+  completed_at?: string
+  findings_count: number
+  risk_score: number
+  scanners: string[]
+}
+
+// Summary from the aggregated report API (matches Go ReportSummary)
+export interface SecurityScanReportSummary {
+  critical: number
+  high: number
+  medium: number
+  low: number
+  info: number
+  total: number
+  dangerous: number   // Threat level counts
+  warnings: number
+  info_level: number
+}
+
 // Server types
 export interface Server {
   name: string
@@ -50,6 +139,7 @@ export interface Server {
   user_logged_out?: boolean // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus // Unified health status calculated by the backend
   quarantine?: QuarantineStats // Tool-level quarantine stats (Spec 032)
+  security_scan?: SecurityScanSummary // Security scan summary (Spec 039)
 }
 
 // Tool Annotation types
