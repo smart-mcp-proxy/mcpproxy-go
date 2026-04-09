@@ -863,7 +863,10 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test adding a command-based server (using echo to avoid external dependencies)
+	// Test adding a command-based server (using echo to avoid external dependencies).
+	// Pass quarantined=true explicitly: the E2E test env disables QuarantineEnabled
+	// globally to skip Spec 032 tool-level approval, but this test specifically
+	// verifies the quarantine-by-default server-level behaviour.
 	addRequest := mcp.CallToolRequest{}
 	addRequest.Params.Name = "upstream_servers"
 	addRequest.Params.Arguments = map[string]interface{}{
@@ -876,7 +879,8 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 		"env": map[string]interface{}{
 			"TEST_KEY": "test_value_123",
 		},
-		"enabled": false, // Disabled to prevent actual connection attempts
+		"enabled":     false, // Disabled to prevent actual connection attempts
+		"quarantined": true,
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)
@@ -1005,15 +1009,18 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Add server (will be automatically quarantined)
+	// Add server quarantined. The E2E test env disables QuarantineEnabled
+	// globally (to skip Spec 032 tool-level approval), so we must ask for
+	// server-level quarantine explicitly here.
 	addRequest := mcp.CallToolRequest{}
 	addRequest.Params.Name = "upstream_servers"
 	addRequest.Params.Arguments = map[string]interface{}{
-		"operation": "add",
-		"name":      "quarantined-server",
-		"url":       mockServer.addr,
-		"protocol":  "streamable-http",
-		"enabled":   true,
+		"operation":   "add",
+		"name":        "quarantined-server",
+		"url":         mockServer.addr,
+		"protocol":    "streamable-http",
+		"enabled":     true,
+		"quarantined": true,
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)
