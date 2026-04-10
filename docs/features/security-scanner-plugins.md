@@ -37,8 +37,6 @@ Every scanner is a plugin — there is no built-in scanner. MCPProxy exposes a u
 - `security scan` blocking mode has a real wait loop (no more hangs) with a hard timeout.
 - `scanner status` vocabulary unified between table and JSON: `available` / `pulling` / `installed` / `configured` / `error`.
 
-For the full QA report and the cross-check of every fix see [docs/qa/security-scanners-2026-04-10.html](../qa/security-scanners-2026-04-10.html) (untracked local file).
-
 ## Quick start
 
 ### 1. List available scanners
@@ -310,15 +308,13 @@ The Security page at `/security` in the Web UI mirrors the CLI and provides:
 - **Scanner table** — every scanner in the registry with its current status, vendor link, and configure button.
 - **Scan All Servers** — batch scan trigger with live progress.
 - **Scan report viewer** at `/security/scans/{jobId}` — risk-score badge, finding detail cards with rule/location/scanner, per-scanner execution logs including stderr from failed scanners, and scan context (source method + path + file count).
-- **Approve Server / Force Approve / Reject** — scanner-gated approval dialog that requires a completed scan (or explicit force) before calling the approval endpoint. See [QA report §F-04](../qa/security-scanners-2026-04-10.html) for the historical context.
+- **Approve Server / Force Approve / Reject** — scanner-gated approval dialog that requires a completed scan (or explicit force) before calling the approval endpoint.
 
 ## Known limitations
 
 - **Ramparts on arm64 macOS** — the upstream scanner image ships a binary linked against a newer GLIBC than the image base and fails every run on arm64. Track the [scanner-ramparts image rebuild](https://github.com/smart-mcp-proxy/mcpproxy-go/issues) for a fix. Other 6 of 7 scanners work out of the box on arm64 macOS.
 - **Cisco scanner output has a hardcoded `server_url`** header in its stdout (`https://mcp.deepwiki.com/mcp`). Cosmetic, does not affect findings.
 - **Pass 2 (supply-chain audit)** currently requires Docker isolation to be enabled, otherwise it fails source resolution. The UI doesn't yet surface this precondition.
-
-See the [QA report §9](../qa/security-scanners-2026-04-10.html) for the full list of residual items and recommendations.
 
 ## Related reading
 

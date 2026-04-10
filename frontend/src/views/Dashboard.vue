@@ -211,19 +211,20 @@
 
         <!-- Security Status -->
         <div class="z-10 w-full max-w-[300px] space-y-2 mt-4">
-          <!-- Docker Isolation -->
-          <div class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
-               :class="dockerStatus?.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
+          <!-- Docker Isolation (hidden until status has been fetched to avoid
+               flashing a false "disabled" state on initial page load) -->
+          <div v-if="dockerStatus" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
+               :class="dockerStatus.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
             <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
-            <span v-if="dockerStatus?.available" class="font-medium">Docker isolation active</span>
+            <span v-if="dockerStatus.available" class="font-medium">Docker isolation active</span>
             <span v-else class="font-medium">Docker isolation disabled — enable Docker to protect your system</span>
           </div>
 
-          <!-- Quarantine -->
-          <div class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
+          <!-- Quarantine (hidden until config fetch completes) -->
+          <div v-if="quarantineEnabled !== null" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
                :class="quarantineEnabled ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
             <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -458,7 +459,10 @@ const loadActivitySummary = async () => {
 
 // --- Security status ---
 const dockerStatus = ref<{available: boolean, version?: string} | null>(null)
-const quarantineEnabled = ref(false)
+// quarantineEnabled is null until the config fetch completes so the template
+// can skip rendering the "Quarantine disabled" warning on initial load. A
+// plain `false` default would briefly display the warning before data arrives.
+const quarantineEnabled = ref<boolean | null>(null)
 
 // Security scanner totals for the "Security Scan" dashboard chip (F-12).
 // We reuse the shared composable so we don't double-fetch /security/overview.

@@ -383,7 +383,7 @@ Before running any scanner, mcpproxy determines *what to scan*. The resolver ord
 The `source_method` and `source_path` are recorded on the scan job and shown in both the text and JSON report. This is how you verify a scanner is examining the right directory.
 
 :::warning Don't confuse a config path with source code
-Prior to v0.23.x the resolver would pick *any* positional arg that happened to be a directory — including the data directory passed to `@modelcontextprotocol/server-filesystem`. That led to false positives on unrelated user files. The modern resolver tries the package cache first and only falls back to arg-based source if the arg directory contains recognizable source markers. See [docs/qa/security-scanners-2026-04-10.html](../qa/security-scanners-2026-04-10.html) §F-02 for the historical detail.
+Prior to v0.23.x the resolver would pick *any* positional arg that happened to be a directory — including the data directory passed to `@modelcontextprotocol/server-filesystem`. That led to false positives on unrelated user files. The modern resolver tries the package cache first and only falls back to arg-based source if the arg directory contains recognizable source markers.
 :::
 
 ---

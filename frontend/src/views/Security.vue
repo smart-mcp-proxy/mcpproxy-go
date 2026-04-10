@@ -99,8 +99,8 @@
       </div>
     </div>
 
-    <!-- Docker unavailable warning -->
-    <div v-if="overview && !overview.docker_available" class="alert alert-warning">
+    <!-- Docker unavailable warning (only after overview has loaded) -->
+    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning">
       <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
       </svg>
@@ -127,7 +127,7 @@
       <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
           <h2 class="card-title">Security Scanners</h2>
-          <p class="text-sm text-base-content/70 mb-4">Scanners are Docker-based plugins powered by third-party security tools. Enable or disable individual scanners and configure their API keys.</p>
+          <p class="text-sm text-base-content/70 mb-4">Each scanner is a third-party security tool that runs inside an isolated Docker container — sandboxed from your host, with no access to your filesystem or network beyond what the scan requires. Enable or disable individual scanners and configure their API keys below.</p>
 
           <div v-if="scanners.length === 0" class="text-center py-8 text-base-content/50">
             No scanners available. Check Docker connectivity.
@@ -257,9 +257,6 @@
                   <th class="cursor-pointer select-none" @click="toggleSort('findings_count')">
                     Findings {{ sortIndicator('findings_count') }}
                   </th>
-                  <th class="cursor-pointer select-none tooltip tooltip-bottom" data-tip="Experimental heuristic score. Not a definitive safety assessment." @click="toggleSort('risk_score')">
-                    Risk* {{ sortIndicator('risk_score') }}
-                  </th>
                   <th></th>
                 </tr>
               </thead>
@@ -284,10 +281,6 @@
                   </td>
                   <td>
                     <span :class="{ 'font-bold': (scan.findings_count || 0) > 0 }">{{ scan.findings_count || 0 }}</span>
-                  </td>
-                  <td>
-                    <span v-if="scan.risk_score != null" :class="riskScoreClass(scan.risk_score)">{{ scan.risk_score }}</span>
-                    <span v-else class="text-base-content/30">-</span>
                   </td>
                   <td>
                     <router-link
@@ -405,6 +398,11 @@ const loading = ref(false)
 const error = ref('')
 const scanners = ref<any[]>([])
 const overview = ref<any>({})
+// overviewLoaded stays false until the first successful /security/overview
+// response arrives. Template guards like the "Docker not running" banner use
+// this to avoid flashing a false warning while the initial request is still
+// in flight (overview.docker_available is undefined before the fetch lands).
+const overviewLoaded = ref(false)
 const installing = ref<string | null>(null)
 
 // Scan history state
@@ -494,12 +492,6 @@ function scannerNeedsApiKey(scanner: any): boolean {
   return scanner.required_env.some((env: any) => !configured[env.key])
 }
 
-function riskScoreClass(score: number) {
-  if (score >= 70) return 'text-error'
-  if (score >= 40) return 'text-warning'
-  return 'text-success'
-}
-
 async function refresh() {
   loading.value = true
   error.value = ''
@@ -516,7 +508,10 @@ async function refresh() {
       list.sort((a, b) => String(a.id).localeCompare(String(b.id)))
       scanners.value = list
     }
-    if (overviewRes.success) overview.value = overviewRes.data || {}
+    if (overviewRes.success) {
+      overview.value = overviewRes.data || {}
+      overviewLoaded.value = true
+    }
   } catch (e: any) {
     error.value = e.message
   } finally {
