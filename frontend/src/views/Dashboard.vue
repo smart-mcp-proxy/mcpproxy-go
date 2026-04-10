@@ -300,13 +300,14 @@
             </svg>
             Browse Registry
           </router-link>
-          <div class="btn btn-ghost btn-sm w-full btn-disabled opacity-40 gap-1">
+          <router-link to="/security" class="btn btn-ghost btn-sm w-full gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
             Security Scan
-            <span class="badge badge-ghost badge-xs ml-1">soon</span>
-          </div>
+            <span v-if="securityScannerLoaded && securityTotalScans === 0" class="badge badge-ghost badge-xs ml-1">Run first scan</span>
+            <span v-else-if="securityTotalFindings > 0" class="badge badge-warning badge-xs ml-1">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
+          </router-link>
         </div>
       </div>
     </div>
@@ -385,6 +386,7 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import api from '@/services/api'
 import logoSvg from '@/assets/logo.svg'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -457,6 +459,14 @@ const loadActivitySummary = async () => {
 // --- Security status ---
 const dockerStatus = ref<{available: boolean, version?: string} | null>(null)
 const quarantineEnabled = ref(false)
+
+// Security scanner totals for the "Security Scan" dashboard chip (F-12).
+// We reuse the shared composable so we don't double-fetch /security/overview.
+const {
+  totalFindings: securityTotalFindings,
+  totalScans: securityTotalScans,
+  loaded: securityScannerLoaded,
+} = useSecurityScannerStatus()
 
 const loadSecurityStatus = async () => {
   try {
@@ -766,6 +776,8 @@ onMounted(() => {
   loadActivitySummary()
   loadSessions()
   loadSecurityStatus()
+  // Populate security scanner totals for the Security Scan chip (F-12).
+  void refreshSecurityScannerStatus()
   serversStore.fetchServers().then(() => loadPendingTools())
 
   // Auto-refresh every 30 seconds
@@ -775,6 +787,7 @@ onMounted(() => {
     loadActivitySummary()
     loadSessions()
     loadSecurityStatus()
+    void refreshSecurityScannerStatus()
     loadPendingTools()
   }, 30000)
 

@@ -315,6 +315,169 @@ func TestResolveUvxCacheGitCheckout(t *testing.T) {
 	}
 }
 
+// TestSourceResolverNpxFilesystemArgNotPicked verifies that a filesystem-style
+// positional argument (e.g. `/tmp/mydata` for @modelcontextprotocol/server-filesystem)
+// is NOT picked up as the server's source directory. Package-runner commands
+// must resolve via the package cache; if the cache has the package, we use it.
+func TestSourceResolverNpxFilesystemArgNotPicked(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	// Seed the npx cache with a fake filesystem server package
+	pkgDir := filepath.Join(homeDir, ".npm", "_npx", "deadbeef", "node_modules", "@modelcontextprotocol", "server-filesystem")
+	os.MkdirAll(pkgDir, 0755)
+	os.WriteFile(filepath.Join(pkgDir, "package.json"), []byte(`{"name":"@modelcontextprotocol/server-filesystem"}`), 0644)
+	os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte("// server"), 0644)
+
+	// Create a bogus "data dir" (the arg the user passes — NOT source code).
+	dataDir := t.TempDir()
+	os.WriteFile(filepath.Join(dataDir, "notes.txt"), []byte("my private notes"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.Resolve(context.Background(), ServerInfo{
+		Name:     "fs-server",
+		Protocol: "stdio",
+		Command:  "npx",
+		Args:     []string{"-y", "@modelcontextprotocol/server-filesystem", dataDir},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if result.SourceDir != pkgDir {
+		t.Errorf("expected source_dir %q (package cache), got %q", pkgDir, result.SourceDir)
+	}
+	if result.SourceDir == dataDir {
+		t.Errorf("regression: resolver picked the data directory %q", dataDir)
+	}
+	if result.Method != "npx_cache" {
+		t.Errorf("expected method 'npx_cache', got %q", result.Method)
+	}
+	result.Cleanup()
+}
+
+// TestSourceResolverNpxDataDirFallsThroughWhenNoCache verifies that when
+// the package cache is EMPTY and the only arg is a plain data directory
+// (no source markers), the resolver reports no source rather than wrongly
+// picking the data dir.
+func TestSourceResolverNpxDataDirFallsThroughWhenNoCache(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	// Data directory without any source markers
+	dataDir := t.TempDir()
+	os.WriteFile(filepath.Join(dataDir, "notes.txt"), []byte("notes"), 0644)
+	os.WriteFile(filepath.Join(dataDir, "data.csv"), []byte("a,b,c"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.Resolve(context.Background(), ServerInfo{
+		Name:     "fs-server",
+		Protocol: "stdio",
+		Command:  "npx",
+		Args:     []string{"-y", "@modelcontextprotocol/server-filesystem", dataDir},
+	})
+	if err == nil {
+		t.Fatal("expected error when no cache and no source markers, got nil")
+	}
+}
+
+// TestSourceResolverPythonScriptArgPreserved verifies that the existing
+// "python server.py" behavior still resolves to the script's parent directory.
+func TestSourceResolverPythonScriptArgPreserved(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "server.py")
+	os.WriteFile(scriptPath, []byte("# test"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.Resolve(context.Background(), ServerInfo{
+		Name:     "py-stdio",
+		Protocol: "stdio",
+		Command:  "python",
+		Args:     []string{scriptPath},
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if result.SourceDir != dir {
+		t.Errorf("expected source_dir %q, got %q", dir, result.SourceDir)
+	}
+	result.Cleanup()
+}
+
+// TestSourceResolverStdioNoSource verifies that a stdio server with no
+// resolvable source (no container, no working_dir, no package cache, no
+// source-like args) returns an error cleanly.
+func TestSourceResolverStdioNoSource(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.Resolve(context.Background(), ServerInfo{
+		Name:     "ghost",
+		Protocol: "stdio",
+		Command:  "/usr/bin/does-not-exist",
+		Args:     []string{"--flag"},
+	})
+	if err == nil {
+		t.Fatal("expected error for stdio server with no resolvable source")
+	}
+}
+
+func TestDirLooksLikeSource(t *testing.T) {
+	// Dir with package.json → source
+	sourceDir := t.TempDir()
+	os.WriteFile(filepath.Join(sourceDir, "package.json"), []byte("{}"), 0644)
+	if !dirLooksLikeSource(sourceDir) {
+		t.Error("expected dir with package.json to look like source")
+	}
+
+	// Dir with only a .py file → source
+	pyDir := t.TempDir()
+	os.WriteFile(filepath.Join(pyDir, "main.py"), []byte("# test"), 0644)
+	if !dirLooksLikeSource(pyDir) {
+		t.Error("expected dir with .py file to look like source")
+	}
+
+	// Empty dir → not source
+	emptyDir := t.TempDir()
+	if dirLooksLikeSource(emptyDir) {
+		t.Error("expected empty dir to NOT look like source")
+	}
+
+	// Data dir → not source
+	dataDir := t.TempDir()
+	os.WriteFile(filepath.Join(dataDir, "notes.txt"), []byte("a"), 0644)
+	os.WriteFile(filepath.Join(dataDir, "image.png"), []byte{0}, 0644)
+	if dirLooksLikeSource(dataDir) {
+		t.Error("expected plain data dir to NOT look like source")
+	}
+}
+
+func TestIsPackageRunnerCommand(t *testing.T) {
+	tests := []struct {
+		cmd  string
+		want bool
+	}{
+		{"npx", true},
+		{"/usr/local/bin/npx", true},
+		{"uvx", true},
+		{"pipx", true},
+		{"bunx", true},
+		{"python", false},
+		{"node", false},
+		{"./server", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.cmd, func(t *testing.T) {
+			if got := isPackageRunnerCommand(tt.cmd); got != tt.want {
+				t.Errorf("isPackageRunnerCommand(%q) = %v, want %v", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSanitizeForDocker(t *testing.T) {
 	tests := []struct {
 		input string

@@ -77,6 +77,19 @@ type ServerInfoProvider interface {
 	IsConnected(serverName string) bool
 }
 
+// ServerUnquarantiner performs the full unquarantine workflow for a server.
+// Implementations are expected to:
+//   - Clear the quarantined flag in storage and persist config
+//   - Trigger a tool (re)index for the server
+//   - Emit the same events/activity entries that the normal unquarantine path
+//     emits
+//
+// This interface is intentionally small so the scanner service does not need
+// to depend on the full runtime package.
+type ServerUnquarantiner interface {
+	UnquarantineServer(serverName string) error
+}
+
 // Service coordinates scanner management, scan execution, and approval workflow
 type Service struct {
 	storage        Storage
@@ -86,6 +99,7 @@ type Service struct {
 	emitter        atomic.Pointer[EventEmitter]
 	sourceResolver *SourceResolver
 	serverInfo     ServerInfoProvider
+	unquarantiner  ServerUnquarantiner
 	secretStore    SecretStore
 	queue          *ScanQueue
 	pulls          *pullManager
@@ -136,6 +150,13 @@ func (s *Service) emit() EventEmitter {
 // SetServerInfoProvider sets the provider for resolving server configuration
 func (s *Service) SetServerInfoProvider(provider ServerInfoProvider) {
 	s.serverInfo = provider
+}
+
+// SetServerUnquarantiner wires the unquarantine callback used by ApproveServer.
+// If not set, ApproveServer will still succeed in storing a baseline but will
+// log a warning because it cannot actually unquarantine the server.
+func (s *Service) SetServerUnquarantiner(u ServerUnquarantiner) {
+	s.unquarantiner = u
 }
 
 // syncRegistryFromStorage updates the in-memory registry status from
@@ -1176,6 +1197,27 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 
 	if err := s.storage.SaveIntegrityBaseline(baseline); err != nil {
 		return fmt.Errorf("failed to save integrity baseline: %w", err)
+	}
+
+	// Actually unquarantine the server: clear the flag in storage, persist
+	// config, trigger a tool (re)index, and emit the same events the normal
+	// unquarantine path emits. This is the primary user-visible effect of
+	// approval — without it, the server stays quarantined forever and the
+	// approval is cosmetic.
+	if s.unquarantiner != nil {
+		if err := s.unquarantiner.UnquarantineServer(serverName); err != nil {
+			// Report the error to the caller but keep the baseline we just
+			// saved — the caller can retry via the normal unquarantine path.
+			s.logger.Error("Failed to unquarantine server after approval",
+				zap.String("server", serverName),
+				zap.Error(err),
+			)
+			return fmt.Errorf("failed to unquarantine server %q after saving baseline: %w", serverName, err)
+		}
+	} else {
+		s.logger.Warn("ApproveServer: no unquarantiner configured; server will not be unquarantined automatically",
+			zap.String("server", serverName),
+		)
 	}
 
 	s.logger.Info("Server approved after security scan",

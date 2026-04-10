@@ -91,6 +91,23 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 		)
 	}
 
+	// For package-runner commands (npx, uvx, pipx, bunx, pnpm dlx, yarn dlx),
+	// ALWAYS try the package cache FIRST before arg scanning. This prevents
+	// a server like `npx @modelcontextprotocol/server-filesystem /tmp/data`
+	// from picking up the user's data dir (`/tmp/data`) as the server
+	// source — the arg is the filesystem server's allowed root, not code.
+	if info.Command != "" && isPackageRunnerCommand(info.Command) {
+		if resolved, err := r.resolveFromPackageCache(ctx, info); err == nil {
+			return resolved, nil
+		} else {
+			r.logger.Debug("Package cache lookup failed, falling through",
+				zap.String("server", info.Name),
+				zap.String("command", info.Command),
+				zap.Error(err),
+			)
+		}
+	}
+
 	// Fallback: use working_dir
 	if info.WorkingDir != "" {
 		if stat, err := os.Stat(info.WorkingDir); err == nil && stat.IsDir() {
@@ -106,42 +123,145 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 		}
 	}
 
-	// Fallback: use directory of the command itself
+	// Fallback: use directory of the command itself.
+	// When we fall back to this arg-scan heuristic we require the candidate
+	// directory to look like source code. Otherwise, a generic "path argument"
+	// (e.g. a data directory passed to a filesystem server) would be
+	// misclassified as code and fed to scanners.
 	if info.Command != "" {
-		// Check if any args reference a local file/directory
 		for _, arg := range info.Args {
-			if !strings.HasPrefix(arg, "-") {
-				absPath := arg
-				if !filepath.IsAbs(arg) && info.WorkingDir != "" {
-					absPath = filepath.Join(info.WorkingDir, arg)
-				}
-				if stat, err := os.Stat(absPath); err == nil {
-					dir := absPath
-					if !stat.IsDir() {
-						dir = filepath.Dir(absPath)
-					}
-					r.logger.Info("Resolved source from command argument",
-						zap.String("server", info.Name),
-						zap.String("path", dir),
-					)
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			absPath := arg
+			if !filepath.IsAbs(arg) && info.WorkingDir != "" {
+				absPath = filepath.Join(info.WorkingDir, arg)
+			}
+			stat, err := os.Stat(absPath)
+			if err != nil {
+				continue
+			}
+			dir := absPath
+			if !stat.IsDir() {
+				// For a concrete file arg (e.g. `python server.py`), the parent
+				// directory is the source tree by convention. If the file is
+				// a source file (.py/.js/.ts/.go/.rs) we accept it directly to
+				// preserve the existing behavior for interpreter servers.
+				if isSourceFile(absPath) {
 					return &ResolvedSource{
-						SourceDir: dir,
+						SourceDir: filepath.Dir(absPath),
 						Method:    "working_dir",
 						Cleanup:   func() {},
 					}, nil
 				}
+				dir = filepath.Dir(absPath)
 			}
+			if !dirLooksLikeSource(dir) {
+				r.logger.Debug("Arg path does not look like source tree, skipping",
+					zap.String("server", info.Name),
+					zap.String("arg", arg),
+					zap.String("path", dir),
+				)
+				continue
+			}
+			r.logger.Info("Resolved source from command argument",
+				zap.String("server", info.Name),
+				zap.String("path", dir),
+			)
+			return &ResolvedSource{
+				SourceDir: dir,
+				Method:    "working_dir",
+				Cleanup:   func() {},
+			}, nil
 		}
 	}
 
-	// Fallback: resolve from local package manager cache (npx, uvx, pipx)
-	if info.Command != "" {
+	// Last resort: try the package cache for any other command (e.g. the user
+	// has an absolute path to node_modules that we didn't match above).
+	if info.Command != "" && !isPackageRunnerCommand(info.Command) {
 		if resolved, err := r.resolveFromPackageCache(ctx, info); err == nil {
 			return resolved, nil
 		}
 	}
 
 	return nil, fmt.Errorf("could not resolve source for server %s: no Docker container found, no working_dir configured, and no local file paths in command args", info.Name)
+}
+
+// isPackageRunnerCommand returns true for commands that execute a package from
+// a remote registry rather than running local source code. For these, the
+// server source lives in the package manager's cache, not in any positional
+// argument.
+func isPackageRunnerCommand(command string) bool {
+	base := strings.ToLower(filepath.Base(command))
+	switch base {
+	case "npx", "uvx", "pipx", "bunx":
+		return true
+	}
+	return false
+}
+
+// isSourceFile returns true if the path looks like a source-code file by
+// extension. Used so interpreter servers (`python server.py`) still resolve
+// cleanly to the script's parent directory.
+func isSourceFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".rs", ".rb", ".php", ".sh":
+		return true
+	}
+	return false
+}
+
+// dirLooksLikeSource heuristically decides whether a directory is a source
+// tree vs. e.g. a data directory passed as a filesystem-server root.
+// A directory qualifies if it contains a known manifest file or at least one
+// source file within two directory levels.
+func dirLooksLikeSource(dir string) bool {
+	markers := []string{
+		"package.json", "pyproject.toml", "setup.py", "Cargo.toml",
+		"go.mod", "composer.json", "Gemfile",
+	}
+	for _, m := range markers {
+		if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+			return true
+		}
+	}
+	// Walk up to depth 2 looking for at least one source file.
+	found := false
+	const maxDepth = 2
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil {
+			return nil //nolint:nilerr // ignore walk errors, treat as "no source"
+		}
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil {
+			return nil
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(filepath.Separator)) + 1
+		}
+		if info.IsDir() {
+			if depth > maxDepth {
+				return filepath.SkipDir
+			}
+			// Skip noisy dirs
+			name := info.Name()
+			if name == ".git" || name == "node_modules" || name == "__pycache__" || name == ".venv" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if depth > maxDepth {
+			return nil
+		}
+		if isSourceFile(path) {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // findServerContainer finds the running Docker container for a server

@@ -418,12 +418,33 @@
               </button>
               <button
                 v-if="serverAdminState === 'quarantined'"
-                @click="unquarantineServer"
-                :disabled="actionLoading"
+                @click="approveServer"
+                :disabled="actionLoading || hasUnresolvedCritical"
                 class="btn btn-success btn-sm"
+                :title="hasUnresolvedCritical ? 'Unresolved critical findings — use Force Approve' : 'Approve and unquarantine this server'"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                Unquarantine Server
+                Approve Server
+              </button>
+              <button
+                v-if="serverAdminState === 'quarantined' && hasUnresolvedCritical"
+                @click="forceApproveServer"
+                :disabled="actionLoading"
+                class="btn btn-error btn-sm"
+                title="Bypass the scanner gate and approve despite critical findings"
+              >
+                <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+                Force Approve
+              </button>
+              <button
+                v-if="serverAdminState === 'quarantined'"
+                @click="rejectServer"
+                :disabled="actionLoading"
+                class="btn btn-outline btn-warning btn-sm"
+                title="Reject the scan and keep the server quarantined"
+              >
+                <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+                Reject
               </button>
             </div>
           </div>
@@ -436,7 +457,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import api from '@/services/api'
+import { useServersStore } from '@/stores/servers'
+import { useSystemStore } from '@/stores/system'
 import type { SecurityScanFinding, ThreatType } from '@/types/api'
+
+const serversStore = useServersStore()
+const systemStore = useSystemStore()
 
 const props = defineProps<{
   jobId: string
@@ -619,13 +645,78 @@ async function quarantineServer() {
   }
 }
 
-async function unquarantineServer() {
+// F-04: Go through the security-aware approval path instead of the legacy
+// unquarantine endpoint. hasUnresolvedCritical disables the primary Approve
+// button so the user must use Force Approve explicitly.
+const hasUnresolvedCritical = computed(() => {
+  return (report.value?.summary?.critical ?? 0) > 0
+})
+
+async function approveServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Unquarantine ${report.value.server_name}? This will re-enable the server.`)) return
+  if (!confirm(`Approve ${report.value.server_name}? This will unquarantine and re-enable the server.`)) return
   actionLoading.value = true
   try {
-    await api.unquarantineServer(report.value.server_name)
+    await serversStore.securityApproveServer(report.value.server_name, false)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Approved',
+      message: `${report.value.server_name} has been approved and unquarantined`,
+    })
     await loadServerStatus()
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Approve Failed',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    })
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+async function forceApproveServer() {
+  if (!report.value?.server_name) return
+  if (!confirm(`Force-approve ${report.value.server_name}? This bypasses the scanner gate despite ${report.value.summary?.critical ?? 0} critical finding(s).`)) return
+  actionLoading.value = true
+  try {
+    await serversStore.securityApproveServer(report.value.server_name, true)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Force-Approved',
+      message: `${report.value.server_name} was force-approved despite critical findings`,
+    })
+    await loadServerStatus()
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Force Approve Failed',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    })
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+async function rejectServer() {
+  if (!report.value?.server_name) return
+  if (!confirm(`Reject the scan for ${report.value.server_name}? The server will remain quarantined.`)) return
+  actionLoading.value = true
+  try {
+    const res = await api.securityReject(report.value.server_name)
+    if (!res.success) throw new Error(res.error || 'Failed to reject scan')
+    systemStore.addToast({
+      type: 'success',
+      title: 'Scan Rejected',
+      message: `${report.value.server_name} remains quarantined`,
+    })
+    await loadServerStatus()
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Reject Failed',
+      message: err instanceof Error ? err.message : 'Unknown error',
+    })
   } finally {
     actionLoading.value = false
   }
