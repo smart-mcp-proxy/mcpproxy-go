@@ -1673,6 +1673,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
+		secService.SetServerUnquarantiner(&serverUnquarantinerAdapter{server: s})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
@@ -2367,6 +2368,21 @@ func (s *Server) GetToolApprovalStatus(serverName, toolName string) (string, err
 		return "", err
 	}
 	return string(record.Status), nil
+}
+
+// serverUnquarantinerAdapter adapts *Server to scanner.ServerUnquarantiner so
+// the security scanner service can unquarantine a server after ApproveServer
+// succeeds. Reuses the existing Server.UnquarantineServer path so the behavior
+// stays identical to the REST API and tray code.
+type serverUnquarantinerAdapter struct {
+	server *Server
+}
+
+func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error {
+	if a.server == nil {
+		return fmt.Errorf("server unavailable")
+	}
+	return a.server.UnquarantineServer(serverName)
 }
 
 // keyringSecretStore adapts secret.Resolver to scanner.SecretStore for API key management.

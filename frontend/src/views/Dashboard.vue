@@ -211,19 +211,20 @@
 
         <!-- Security Status -->
         <div class="z-10 w-full max-w-[300px] space-y-2 mt-4">
-          <!-- Docker Isolation -->
-          <div class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
-               :class="dockerStatus?.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
+          <!-- Docker Isolation (hidden until status has been fetched to avoid
+               flashing a false "disabled" state on initial page load) -->
+          <div v-if="dockerStatus" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
+               :class="dockerStatus.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
             <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
-            <span v-if="dockerStatus?.available" class="font-medium">Docker isolation active</span>
+            <span v-if="dockerStatus.available" class="font-medium">Docker isolation active</span>
             <span v-else class="font-medium">Docker isolation disabled — enable Docker to protect your system</span>
           </div>
 
-          <!-- Quarantine -->
-          <div class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
+          <!-- Quarantine (hidden until config fetch completes) -->
+          <div v-if="quarantineEnabled !== null" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
                :class="quarantineEnabled ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
             <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -300,13 +301,14 @@
             </svg>
             Browse Registry
           </router-link>
-          <div class="btn btn-ghost btn-sm w-full btn-disabled opacity-40 gap-1">
+          <router-link to="/security" class="btn btn-ghost btn-sm w-full gap-1">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
             Security Scan
-            <span class="badge badge-ghost badge-xs ml-1">soon</span>
-          </div>
+            <span v-if="securityScannerLoaded && securityTotalScans === 0" class="badge badge-ghost badge-xs ml-1">Run first scan</span>
+            <span v-else-if="securityTotalFindings > 0" class="badge badge-warning badge-xs ml-1">{{ securityTotalFindings }} issue{{ securityTotalFindings === 1 ? '' : 's' }}</span>
+          </router-link>
         </div>
       </div>
     </div>
@@ -385,6 +387,7 @@
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import api from '@/services/api'
 import logoSvg from '@/assets/logo.svg'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
@@ -456,7 +459,18 @@ const loadActivitySummary = async () => {
 
 // --- Security status ---
 const dockerStatus = ref<{available: boolean, version?: string} | null>(null)
-const quarantineEnabled = ref(false)
+// quarantineEnabled is null until the config fetch completes so the template
+// can skip rendering the "Quarantine disabled" warning on initial load. A
+// plain `false` default would briefly display the warning before data arrives.
+const quarantineEnabled = ref<boolean | null>(null)
+
+// Security scanner totals for the "Security Scan" dashboard chip (F-12).
+// We reuse the shared composable so we don't double-fetch /security/overview.
+const {
+  totalFindings: securityTotalFindings,
+  totalScans: securityTotalScans,
+  loaded: securityScannerLoaded,
+} = useSecurityScannerStatus()
 
 const loadSecurityStatus = async () => {
   try {
@@ -766,6 +780,8 @@ onMounted(() => {
   loadActivitySummary()
   loadSessions()
   loadSecurityStatus()
+  // Populate security scanner totals for the Security Scan chip (F-12).
+  void refreshSecurityScannerStatus()
   serversStore.fetchServers().then(() => loadPendingTools())
 
   // Auto-refresh every 30 seconds
@@ -775,6 +791,7 @@ onMounted(() => {
     loadActivitySummary()
     loadSessions()
     loadSecurityStatus()
+    void refreshSecurityScannerStatus()
     loadPendingTools()
   }, 30000)
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	"golang.org/x/term"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
@@ -74,10 +75,25 @@ Examples:
 }
 
 // newSecurityCLIClient creates a cliclient.Client connected to the running MCPProxy.
+//
+// Honors the package-level --config and --data-dir flags from main.go so that
+// `mcpproxy security ...` commands behave consistently with `mcpproxy serve`,
+// `mcpproxy status`, and `mcpproxy upstream ...`.
 func newSecurityCLIClient() (*cliclient.Client, *config.Config, error) {
-	cfg, err := config.Load()
+	var (
+		cfg *config.Config
+		err error
+	)
+	if configFile != "" {
+		cfg, err = config.LoadFromFile(configFile)
+	} else {
+		cfg, err = config.Load()
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	if dataDir != "" {
+		cfg.DataDir = dataDir
 	}
 	cfg.EnsureAPIKey()
 
@@ -382,14 +398,23 @@ func runSecurityScanners(_ *cobra.Command, _ []string) error {
 		id := getMapString(sc, "id")
 		name := getMapString(sc, "name")
 		vendor := getMapString(sc, "vendor")
-		status := scannerDisplayStatus(getMapString(sc, "status"))
+		rawStatus := getMapString(sc, "status")
+		status := scannerDisplayStatus(rawStatus)
+		colorOpen, colorReset := scannerStatusColor(rawStatus)
 		inputs := secJoinSlice(sc, "inputs")
 
-		fmt.Printf("%-20s %-22s %-22s %-12s %-s\n",
+		// Pad status BEFORE applying color so column alignment isn't broken
+		// by invisible escape sequences.
+		paddedStatus := fmt.Sprintf("%-12s", status)
+		if colorOpen != "" {
+			paddedStatus = colorOpen + paddedStatus + colorReset
+		}
+
+		fmt.Printf("%-20s %-22s %-22s %s %-s\n",
 			secTruncate(id, 20),
 			secTruncate(name, 22),
 			secTruncate(vendor, 22),
-			status,
+			paddedStatus,
 			inputs)
 	}
 
@@ -493,8 +518,17 @@ func runSecurityConfigure(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// F-15: bumped from 10s -> 60s. Configure can be slow when the scanner
+	// engine validates credentials against an upstream provider.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+
+	// F-15: client-side prefetch — confirm the scanner exists before issuing
+	// the (potentially slow) PUT, so a typo'd id fails fast with a 404 instead
+	// of hanging the user for 60s.
+	if err := securityVerifyScannerExists(ctx, client, scannerID); err != nil {
+		return err
+	}
 
 	resp, err := client.DoRaw(ctx, http.MethodPut, "/api/v1/security/scanners/"+scannerID+"/config", body)
 	if err != nil {
@@ -523,6 +557,23 @@ func runSecurityConfigure(_ *cobra.Command, args []string) error {
 	return nil
 }
 
+// securityVerifyScannerExists pings the scanner status endpoint and returns
+// a friendly "not found" error before the caller commits to a slower request.
+func securityVerifyScannerExists(ctx context.Context, client *cliclient.Client, scannerID string) error {
+	statusCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := client.DoRaw(statusCtx, http.MethodGet, "/api/v1/security/scanners/"+scannerID, nil)
+	if err != nil {
+		// Network error: don't block — let the real call surface the issue.
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("scanner %q not found", scannerID)
+	}
+	return nil
+}
+
 func runSecurityScan(_ *cobra.Command, args []string) error {
 	// Handle --all flag
 	if secScanAll {
@@ -534,12 +585,20 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("server name is required (or use --all to scan all servers)")
 	}
 
-	client, _, err := newSecurityCLIClient()
+	client, cfg, err := newSecurityCLIClient()
 	if err != nil {
 		return err
 	}
 
 	serverName := args[0]
+
+	// F-06: --dry-run never starts a real scan. Instead, fetch the scanner
+	// inventory + (best-effort) the server's last scan context, and print a
+	// human-readable plan describing what *would* run. We still exit 0 so
+	// the dry-run is scriptable.
+	if secScanDryRun {
+		return printScanDryRunPlan(client, serverName, secScanners)
+	}
 
 	// Build request body
 	reqBody := map[string]interface{}{
@@ -554,7 +613,11 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// Compute a sane hard timeout for the whole scan operation:
+	//   per-scanner-timeout * scanner_count + 30s margin, capped at 30 min
+	// (or default to 15 min if we can't infer it).
+	hardTimeout := computeScanHardTimeout(cfg, secScanners)
+	ctx, cancel := context.WithTimeout(context.Background(), hardTimeout)
 	defer cancel()
 
 	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/scan", body)
@@ -605,12 +668,29 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Synchronous mode: poll until done
-	fmt.Printf("Scanning %q...\n", serverName)
+	// Synchronous mode: poll until done.
+	//
+	// F-05 fixes:
+	//   1. Unwrap the API envelope (`{success,data}`) before reading status —
+	//      the previous loop read `status` from the envelope and never saw
+	//      "completed", causing infinite spin.
+	//   2. Use a 750ms ticker (no tight loop, no 2s lag).
+	//   3. Honor a hard timeout based on the configured per-scanner timeout.
+	//   4. Print one progress line per tick with run/running/failed counts.
+	fmt.Printf("Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
 	scanStart := time.Now()
 
+	ticker := time.NewTicker(750 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastProgressLen int
 	for {
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			return fmt.Errorf("scan timed out after %s for %q (job %s); use 'mcpproxy security status %s' to inspect", hardTimeout, serverName, jobID, serverName)
+		case <-ticker.C:
+		}
 
 		statusResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
 		if err != nil {
@@ -627,6 +707,13 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			return parseAPIError(statusBody, statusResp.StatusCode, "check scan status")
 		}
 
+		// CRITICAL: unwrap the API envelope. The previous implementation
+		// read job fields directly from the envelope and never observed
+		// the "completed" terminal state.
+		statusBody, err = unwrapAPIResponse(statusBody)
+		if err != nil {
+			return fmt.Errorf("API error: %w", err)
+		}
 		var status map[string]interface{}
 		if err := json.Unmarshal(statusBody, &status); err != nil {
 			return fmt.Errorf("failed to parse status response: %w", err)
@@ -635,50 +722,256 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		jobStatus := getMapString(status, "status")
 		elapsed := time.Since(scanStart).Truncate(time.Second)
 
-		// Show progress from per-scanner statuses
+		// Aggregate per-scanner counts so the user sees forward progress.
+		var run, running, failed, total int
+		var runningNames []string
 		if scannerStatuses, ok := status["scanner_statuses"].([]interface{}); ok {
-			var running, done int
-			var runningNames []string
+			total = len(scannerStatuses)
 			for _, s := range scannerStatuses {
-				if ss, ok := s.(map[string]interface{}); ok {
-					switch getMapString(ss, "status") {
-					case "completed", "failed":
-						done++
-					case "running":
-						running++
-						if name := getMapString(ss, "scanner_id"); name != "" {
-							runningNames = append(runningNames, name)
-						}
+				ss, ok := s.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				switch getMapString(ss, "status") {
+				case "completed":
+					run++
+				case "failed":
+					failed++
+				case "running":
+					running++
+					if name := getMapString(ss, "scanner_id"); name != "" {
+						runningNames = append(runningNames, name)
 					}
 				}
 			}
-			total := len(scannerStatuses)
-			if total > 0 {
-				progress := fmt.Sprintf("\r  [%s] %d/%d scanners complete, %d running", elapsed, done, total, running)
-				if len(runningNames) > 0 {
-					progress += fmt.Sprintf(" (%s)", strings.Join(runningNames, ", "))
-				}
-				fmt.Print(progress)
+		}
+
+		progress := fmt.Sprintf("  [%s] %d run, %d running, %d failed of %d", elapsed, run, running, failed, total)
+		if len(runningNames) > 0 {
+			progress += fmt.Sprintf(" (running: %s)", strings.Join(runningNames, ", "))
+		}
+		// Erase previous line on TTY for a clean rolling display; on a pipe
+		// just print one progress line per tick.
+		if stdoutIsTTY() {
+			pad := ""
+			if lastProgressLen > len(progress) {
+				pad = strings.Repeat(" ", lastProgressLen-len(progress))
 			}
+			fmt.Print("\r" + progress + pad)
+			lastProgressLen = len(progress)
+		} else {
+			fmt.Println(progress)
 		}
 
 		switch jobStatus {
 		case "completed":
-			fmt.Printf("\n  Scan completed in %s\n", elapsed)
+			if stdoutIsTTY() {
+				fmt.Println()
+			}
+			fmt.Printf("  Scan completed in %s\n", elapsed)
 			return printScanSummary(client, ctx, serverName)
 		case "failed":
-			fmt.Printf("\n  Scan failed after %s\n", elapsed)
+			if stdoutIsTTY() {
+				fmt.Println()
+			}
+			fmt.Printf("  Scan failed after %s\n", elapsed)
 			errMsg := getMapString(status, "error")
 			if errMsg != "" {
 				return fmt.Errorf("scan failed: %s", errMsg)
 			}
 			return fmt.Errorf("scan failed for %q", serverName)
 		case "cancelled":
-			fmt.Printf("\n  Scan cancelled after %s\n", elapsed)
+			if stdoutIsTTY() {
+				fmt.Println()
+			}
+			fmt.Printf("  Scan cancelled after %s\n", elapsed)
 			return fmt.Errorf("scan was cancelled for %q", serverName)
 		}
 		// pending or running: continue polling
 	}
+}
+
+// computeScanHardTimeout returns a sensible upper bound for a scan operation:
+//
+//	per_scanner_timeout * num_scanners + 30s margin, capped at 30 minutes.
+//
+// If the config does not specify a per-scanner timeout, falls back to 15 min.
+func computeScanHardTimeout(cfg *config.Config, scannerFlag string) time.Duration {
+	const fallback = 15 * time.Minute
+	const cap = 30 * time.Minute
+
+	if cfg == nil || cfg.Security == nil || time.Duration(cfg.Security.ScanTimeoutDefault) <= 0 {
+		return fallback
+	}
+	per := time.Duration(cfg.Security.ScanTimeoutDefault)
+
+	count := 0
+	if scannerFlag != "" {
+		count = len(splitAndTrim(scannerFlag))
+	}
+	if count <= 0 {
+		// We don't know how many scanners are installed; assume up to 8.
+		count = 8
+	}
+	total := per*time.Duration(count) + 30*time.Second
+	if total > cap {
+		return cap
+	}
+	if total < fallback {
+		return fallback
+	}
+	return total
+}
+
+// printScanDryRunPlan implements the F-06 frontend dry-run: instead of asking
+// the engine to "simulate" a scan (which today still launches containers),
+// fetch the scanner inventory and the server's last scan context, then print
+// a plan describing what *would* execute.
+func printScanDryRunPlan(client *cliclient.Client, serverName, scannerFlag string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	// 1. Fetch all scanners so we can show docker images / commands.
+	scanResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/security/scanners", nil)
+	if err != nil {
+		return fmt.Errorf("failed to list scanners: %w", err)
+	}
+	scanRaw, err := io.ReadAll(scanResp.Body)
+	scanResp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("failed to read scanners response: %w", err)
+	}
+	if scanResp.StatusCode != http.StatusOK {
+		return parseAPIError(scanRaw, scanResp.StatusCode, "list scanners")
+	}
+	scanRaw, err = unwrapAPIResponse(scanRaw)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
+	var allScanners []map[string]interface{}
+	if err := json.Unmarshal(scanRaw, &allScanners); err != nil {
+		return fmt.Errorf("failed to parse scanners response: %w", err)
+	}
+
+	// 2. Filter scanners: explicit --scanners flag wins, otherwise pick the
+	//    ones that are configured/installed (i.e. the engine would run them).
+	var selected []map[string]interface{}
+	if scannerFlag != "" {
+		wanted := make(map[string]bool)
+		for _, id := range splitAndTrim(scannerFlag) {
+			wanted[id] = true
+		}
+		for _, sc := range allScanners {
+			if wanted[getMapString(sc, "id")] {
+				selected = append(selected, sc)
+			}
+		}
+	} else {
+		for _, sc := range allScanners {
+			st := getMapString(sc, "status")
+			if st == "installed" || st == "configured" {
+				selected = append(selected, sc)
+			}
+		}
+	}
+
+	// 3. Best-effort: fetch the server's last scan context for source info.
+	//    This may 404 if the server has never been scanned — that's fine.
+	var scanContext map[string]interface{}
+	filesResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/files", nil)
+	if err == nil {
+		filesRaw, _ := io.ReadAll(filesResp.Body)
+		filesResp.Body.Close()
+		if filesResp.StatusCode == http.StatusOK {
+			if unwrapped, uerr := unwrapAPIResponse(filesRaw); uerr == nil {
+				_ = json.Unmarshal(unwrapped, &scanContext)
+			}
+		}
+	}
+
+	format := ResolveOutputFormat()
+	plan := map[string]interface{}{
+		"server":   serverName,
+		"dry_run":  true,
+		"scanners": selected,
+	}
+	if scanContext != nil {
+		plan["source"] = map[string]interface{}{
+			"method":           getMapString(scanContext, "source_method"),
+			"path":             getMapString(scanContext, "source_path"),
+			"docker_isolation": scanContext["docker_isolation"],
+			"total_files":      scanContext["total_files"],
+		}
+	}
+
+	if format == "json" || format == "yaml" {
+		return formatAndPrint(format, plan)
+	}
+
+	// Human-readable plan
+	fmt.Printf("Dry-run plan for %q\n", serverName)
+	fmt.Println(strings.Repeat("-", 60))
+	if scanContext != nil {
+		fmt.Println("Source (from last scan):")
+		fmt.Printf("  Method:           %s\n", getMapString(scanContext, "source_method"))
+		fmt.Printf("  Path:             %s\n", getMapString(scanContext, "source_path"))
+		if di, ok := scanContext["docker_isolation"].(bool); ok {
+			fmt.Printf("  Docker isolation: %t\n", di)
+		}
+		if tf, ok := scanContext["total_files"].(float64); ok {
+			fmt.Printf("  Files (last):     %d\n", int(tf))
+		}
+	} else {
+		fmt.Println("Source: (no prior scan context — source will be resolved at scan time)")
+	}
+	fmt.Println()
+
+	if len(selected) == 0 {
+		fmt.Println("No scanners would run.")
+		if scannerFlag != "" {
+			fmt.Println("(no scanners matched --scanners filter)")
+		} else {
+			fmt.Println("(no scanners are installed/configured — run `mcpproxy security enable <id>`)")
+		}
+		return nil
+	}
+
+	fmt.Printf("Scanners that would run (%d):\n", len(selected))
+	for _, sc := range selected {
+		id := getMapString(sc, "id")
+		name := getMapString(sc, "name")
+		status := getMapString(sc, "status")
+		image := getMapString(sc, "docker_image")
+		if override := getMapString(sc, "image_override"); override != "" {
+			image = override
+		}
+		timeout := getMapString(sc, "timeout")
+		fmt.Printf("  - %s (%s) [%s]\n", id, name, status)
+		if image != "" {
+			fmt.Printf("      image:   %s\n", image)
+		}
+		if timeout != "" {
+			fmt.Printf("      timeout: %s\n", timeout)
+		}
+		if cmd, ok := sc["command"].([]interface{}); ok && len(cmd) > 0 {
+			parts := make([]string, len(cmd))
+			for i, p := range cmd {
+				parts[i] = fmt.Sprintf("%v", p)
+			}
+			fmt.Printf("      command: %s\n", strings.Join(parts, " "))
+		}
+		if inputs, ok := sc["inputs"].([]interface{}); ok && len(inputs) > 0 {
+			parts := make([]string, len(inputs))
+			for i, p := range inputs {
+				parts[i] = fmt.Sprintf("%v", p)
+			}
+			fmt.Printf("      inputs:  %s\n", strings.Join(parts, ", "))
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("Dry-run only — no scanners executed. Re-run without --dry-run to scan.")
+	return nil
 }
 
 // runSecurityScanAll handles the --all flag: starts a batch scan and polls for progress.
@@ -728,9 +1021,20 @@ func runSecurityScanAll() error {
 		return nil
 	}
 
-	// Poll for progress
+	// F-16: poll on a steady ticker; on a TTY redraw the table in place using
+	// ANSI cursor escapes. On a pipe, fall back to one status line per tick so
+	// the output is grep/awk friendly.
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	tty := stdoutIsTTY()
+	var prevLines int
 	for {
-		time.Sleep(3 * time.Second)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("batch scan timed out after 30m; use 'mcpproxy security cancel-all' to abort")
+		case <-ticker.C:
+		}
 
 		qResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/security/queue", nil)
 		if err != nil {
@@ -763,10 +1067,13 @@ func runSecurityScanAll() error {
 			return nil
 		}
 
-		// JSON/YAML output for final state
+		// Final state — print the final table without redraw, then exit.
 		if queueStatus == "completed" || queueStatus == "cancelled" {
 			if format == "json" || format == "yaml" {
 				return formatAndPrint(format, progress)
+			}
+			if tty && prevLines > 0 {
+				clearPreviousLines(prevLines)
 			}
 			printQueueProgressTable(progress)
 			fmt.Println()
@@ -778,60 +1085,108 @@ func runSecurityScanAll() error {
 			return nil
 		}
 
-		// Show progress table (clear screen with carriage returns for terminal)
-		printQueueProgressTable(progress)
+		if tty {
+			if prevLines > 0 {
+				clearPreviousLines(prevLines)
+			}
+			prevLines = printQueueProgressTable(progress)
+		} else {
+			printQueueProgressOneLine(progress)
+		}
 	}
 }
 
-// printQueueProgressTable prints the progress table for a batch scan.
-func printQueueProgressTable(progress map[string]interface{}) {
+// clearPreviousLines uses ANSI escapes to move the cursor up `n` lines and
+// erase from the cursor to the end of screen. Used to redraw the batch-scan
+// progress table in place.
+func clearPreviousLines(n int) {
+	if n <= 0 {
+		return
+	}
+	// CUU n: move cursor up; ED 0: clear from cursor to end of screen.
+	fmt.Printf("\x1b[%dA\x1b[J", n)
+}
+
+// printQueueProgressTable prints the progress table for a batch scan and
+// returns the number of lines printed (so the caller can erase them next tick).
+func printQueueProgressTable(progress map[string]interface{}) int {
 	total := int(getMapFloat(progress, "total"))
 	completed := int(getMapFloat(progress, "completed"))
 	running := int(getMapFloat(progress, "running"))
 	skipped := int(getMapFloat(progress, "skipped"))
 	failed := int(getMapFloat(progress, "failed"))
 
-	fmt.Printf("\nScanning all servers (%d/%d completed, %d running", completed, total, running)
+	lines := 0
+
+	header := fmt.Sprintf("Scanning all servers (%d/%d completed, %d running", completed, total, running)
 	if skipped > 0 {
-		fmt.Printf(", %d skipped", skipped)
+		header += fmt.Sprintf(", %d skipped", skipped)
 	}
 	if failed > 0 {
-		fmt.Printf(", %d failed", failed)
+		header += fmt.Sprintf(", %d failed", failed)
 	}
-	fmt.Println(")...")
+	header += ")..."
+	fmt.Println(header)
+	lines++
 
 	// Table header
 	fmt.Printf("%-24s %-12s %-10s %s\n", "SERVER", "STATUS", "FINDINGS", "ERROR")
+	lines++
 	fmt.Println(strings.Repeat("-", 70))
+	lines++
 
 	// Items
 	if items, ok := progress["items"].([]interface{}); ok {
 		for _, item := range items {
-			if it, ok := item.(map[string]interface{}); ok {
-				name := getMapString(it, "server_name")
-				status := getMapString(it, "status")
-				errMsg := getMapString(it, "error")
-				skipReason := getMapString(it, "skip_reason")
-				findings := "-"
-
-				// Show error or skip reason
-				msg := errMsg
-				if skipReason != "" {
-					msg = skipReason
-				}
-				if len(msg) > 30 {
-					msg = msg[:27] + "..."
-				}
-
-				fmt.Printf("%-24s %-12s %-10s %s\n",
-					secTruncate(name, 24),
-					status,
-					findings,
-					msg,
-				)
+			it, ok := item.(map[string]interface{})
+			if !ok {
+				continue
 			}
+			name := getMapString(it, "server_name")
+			status := getMapString(it, "status")
+			errMsg := getMapString(it, "error")
+			skipReason := getMapString(it, "skip_reason")
+
+			// F-16: pull findings_count from the per-item job status so the
+			// FINDINGS column shows real numbers instead of "-".
+			findings := "-"
+			if fc, ok := it["findings_count"].(float64); ok {
+				findings = fmt.Sprintf("%d", int(fc))
+			} else if fc, ok := it["findings"].(float64); ok {
+				findings = fmt.Sprintf("%d", int(fc))
+			}
+
+			// Show error or skip reason
+			msg := errMsg
+			if skipReason != "" {
+				msg = skipReason
+			}
+			if len(msg) > 30 {
+				msg = msg[:27] + "..."
+			}
+
+			fmt.Printf("%-24s %-12s %-10s %s\n",
+				secTruncate(name, 24),
+				status,
+				findings,
+				msg,
+			)
+			lines++
 		}
 	}
+	return lines
+}
+
+// printQueueProgressOneLine prints a single-line summary of batch progress.
+// Used in non-TTY mode (e.g. when stdout is piped) to keep output greppable.
+func printQueueProgressOneLine(progress map[string]interface{}) {
+	total := int(getMapFloat(progress, "total"))
+	completed := int(getMapFloat(progress, "completed"))
+	running := int(getMapFloat(progress, "running"))
+	skipped := int(getMapFloat(progress, "skipped"))
+	failed := int(getMapFloat(progress, "failed"))
+	fmt.Printf("[batch] %d/%d completed, %d running, %d skipped, %d failed\n",
+		completed, total, running, skipped, failed)
 }
 
 func newSecurityCancelAllCmd() *cobra.Command {
@@ -1037,7 +1392,54 @@ func runSecurityReport(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	return printReportTable(serverName, report)
+	// F-10: also fetch /scan/status (best-effort) so we can name the scanners
+	// that failed. The aggregated report has counts but only sometimes carries
+	// per-scanner names; the live job status is the authoritative source.
+	failedNames := fetchFailedScannerNames(client, ctx, serverName)
+	return printReportTable(serverName, report, failedNames)
+}
+
+// fetchFailedScannerNames returns the IDs of scanners that did not complete
+// in the most recent scan job for `serverName`. Returns nil on any error so
+// the caller can render the report without per-scanner names.
+func fetchFailedScannerNames(client *cliclient.Client, ctx context.Context, serverName string) []string {
+	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+	body, err = unwrapAPIResponse(body)
+	if err != nil {
+		return nil
+	}
+	var status map[string]interface{}
+	if err := json.Unmarshal(body, &status); err != nil {
+		return nil
+	}
+	scannerStatuses, ok := status["scanner_statuses"].([]interface{})
+	if !ok {
+		return nil
+	}
+	var failed []string
+	for _, s := range scannerStatuses {
+		ss, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if getMapString(ss, "status") == "failed" {
+			if name := getMapString(ss, "scanner_id"); name != "" {
+				failed = append(failed, name)
+			}
+		}
+	}
+	return failed
 }
 
 func runSecurityApprove(_ *cobra.Command, args []string) error {
@@ -1150,6 +1552,11 @@ func runSecurityOverview(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	// F-14: scrub Go zero-time from last_scan_at so neither the table nor the
+	// JSON/YAML serializers show "0001-01-01 00:00:00". We keep the field in
+	// the schema (as nil) so consumers don't break, but represent "never".
+	normalizeOverviewLastScan(overview)
+
 	format := ResolveOutputFormat()
 	if format == "json" || format == "yaml" {
 		return formatAndPrint(format, overview)
@@ -1161,8 +1568,14 @@ func runSecurityOverview(_ *cobra.Command, _ []string) error {
 	fmt.Printf("  Servers scanned:    %s\n", secFormatInt(overview, "servers_scanned"))
 	fmt.Printf("  Total scans:        %s\n", secFormatInt(overview, "total_scans"))
 	fmt.Printf("  Active scans:       %s\n", secFormatInt(overview, "active_scans"))
-	if lastScan := getMapString(overview, "last_scan_at"); lastScan != "" {
-		fmt.Printf("  Last scan:          %s\n", formatTimestamp(lastScan))
+	if v, present := overview["last_scan_at"]; present && v != nil {
+		if lastScan, ok := v.(string); ok && lastScan != "" {
+			fmt.Printf("  Last scan:          %s\n", formatTimestamp(lastScan))
+		} else {
+			fmt.Printf("  Last scan:          %s\n", "never")
+		}
+	} else {
+		fmt.Printf("  Last scan:          %s\n", "never")
 	}
 	fmt.Println()
 
@@ -1292,11 +1705,17 @@ func printScanSummary(client *cliclient.Client, ctx context.Context, serverName 
 	}
 
 	fmt.Printf("Scan completed for %q.\n\n", serverName)
-	return printReportTable(serverName, report)
+	failedNames := fetchFailedScannerNames(client, ctx, serverName)
+	return printReportTable(serverName, report, failedNames)
 }
 
 // printReportTable prints a human-readable report with two-pass scan support.
-func printReportTable(serverName string, report map[string]interface{}) error {
+//
+// failedScannerNames (F-10) is the list of scanner IDs that failed in the most
+// recent scan job, sourced from /scan/status (the report itself only carries
+// counts). When non-empty, the table shows a "Scanners: X run, Y failed" line
+// and a yellow warn line about incomplete coverage.
+func printReportTable(serverName string, report map[string]interface{}, failedScannerNames []string) error {
 	riskScore := "?"
 	if rs, ok := report["risk_score"].(float64); ok {
 		riskScore = fmt.Sprintf("%d", int(rs))
@@ -1313,7 +1732,32 @@ func printReportTable(serverName string, report map[string]interface{}) error {
 	if scannedAt != "" {
 		fmt.Printf("Scanned:     %s\n", formatTimestamp(scannedAt))
 	}
+
+	// F-10: scanner coverage line. Pull counts from the aggregated report.
+	scannersRun := int(getMapFloat(report, "scanners_run"))
+	scannersFailed := int(getMapFloat(report, "scanners_failed"))
+	scannersTotal := int(getMapFloat(report, "scanners_total"))
+	if scannersTotal > 0 {
+		line := fmt.Sprintf("Scanners:    %d run, %d failed", scannersRun, scannersFailed)
+		if scannersFailed > 0 && len(failedScannerNames) > 0 {
+			line += " (" + strings.Join(failedScannerNames, ", ") + ")"
+		}
+		line += fmt.Sprintf(" of %d", scannersTotal)
+		fmt.Println(line)
+	}
 	fmt.Println()
+
+	// F-10: warn the user when coverage is incomplete so they don't approve
+	// a server based on a "0 findings" result that's actually 5 of 7 scanners
+	// silently failing.
+	if scannersFailed > 0 && scannersTotal > 0 {
+		warn := fmt.Sprintf("WARNING: Scan coverage incomplete: %d of %d scanners did not run", scannersFailed, scannersTotal)
+		if stdoutIsTTY() {
+			warn = "\x1b[33m" + warn + "\x1b[0m"
+		}
+		fmt.Println(warn)
+		fmt.Println()
+	}
 
 	// Separate findings by scan pass
 	var pass1Findings, pass2Findings []interface{}
@@ -1546,17 +1990,88 @@ func secFormatInt(m map[string]interface{}, key string) string {
 	return "0"
 }
 
-// scannerDisplayStatus maps API status to user-friendly display status
+// scannerDisplayStatus normalizes the scanner status to a single vocabulary
+// shared between table and JSON/YAML output (F-09).
+//
+// Vocabulary (richest set kept consistent across formats):
+//
+//	available  - registry entry, image not pulled
+//	pulling    - docker pull in progress
+//	installed  - image present, but required env vars not yet set
+//	configured - image present and required secrets set (ready to run)
+//	error      - last operation failed; see error_message
+//
+// Unknown values are returned verbatim so future statuses do not get hidden.
 func scannerDisplayStatus(status string) string {
 	switch status {
-	case "installed", "configured":
-		return "enabled"
-	case "available":
-		return "disabled"
-	case "error":
-		return "error"
+	case "available", "pulling", "installed", "configured", "error":
+		return status
+	case "":
+		return "unknown"
 	default:
 		return status
+	}
+}
+
+// scannerStatusColor returns an ANSI color escape for a scanner status, plus
+// the matching reset sequence. Returns empty strings when stdout is not a TTY
+// so that piped output stays clean.
+func scannerStatusColor(status string) (open, reset string) {
+	if !stdoutIsTTY() {
+		return "", ""
+	}
+	switch status {
+	case "configured":
+		return "\x1b[32m", "\x1b[0m" // green
+	case "installed":
+		return "\x1b[36m", "\x1b[0m" // cyan
+	case "pulling":
+		return "\x1b[33m", "\x1b[0m" // yellow
+	case "error":
+		return "\x1b[31m", "\x1b[0m" // red
+	case "available":
+		return "\x1b[90m", "\x1b[0m" // bright black / grey
+	default:
+		return "", ""
+	}
+}
+
+// stdoutIsTTY returns true when stdout is connected to an interactive terminal.
+// Used to gate ANSI escapes (colors, cursor moves) so piped output stays clean.
+func stdoutIsTTY() bool {
+	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// normalizeOverviewLastScan replaces a Go zero-time `last_scan_at` value with
+// JSON null so neither the table nor the JSON/YAML serializers display
+// "0001-01-01T00:00:00Z" to the user (F-14). The key is preserved (as nil) so
+// existing consumers don't see a missing field.
+func normalizeOverviewLastScan(overview map[string]interface{}) {
+	if overview == nil {
+		return
+	}
+	v, present := overview["last_scan_at"]
+	if !present {
+		// Insert nil so JSON output still has the field for schema stability.
+		overview["last_scan_at"] = nil
+		return
+	}
+	s, ok := v.(string)
+	if !ok || s == "" {
+		overview["last_scan_at"] = nil
+		return
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil && t.IsZero() {
+		overview["last_scan_at"] = nil
+		return
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil && t.IsZero() {
+		overview["last_scan_at"] = nil
+		return
+	}
+	// Also catch the literal stdlib zero serialization.
+	if strings.HasPrefix(s, "0001-01-01") {
+		overview["last_scan_at"] = nil
 	}
 }
 

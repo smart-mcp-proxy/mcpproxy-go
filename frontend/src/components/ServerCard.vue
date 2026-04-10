@@ -113,7 +113,7 @@
         <!-- Primary action button based on health.action -->
         <button
           v-if="healthAction === 'approve'"
-          @click="unquarantine"
+          @click="handleApproveClick"
           :disabled="loading"
           class="btn btn-sm btn-warning"
         >
@@ -232,6 +232,51 @@
       </div>
     </div>
 
+    <!-- Approve Confirmation Modal (F-04: security scanner gated) -->
+    <div v-if="showApproveConfirmation" class="modal modal-open">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">
+          {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Critical Findings Detected' }}
+        </h3>
+        <p v-if="approveDialogMode === 'critical'" class="mb-4">
+          <strong>{{ server.name }}</strong> has
+          <span class="text-error font-semibold">{{ criticalFindingCount }} critical finding{{ criticalFindingCount === 1 ? '' : 's' }}</span>
+          in its most recent security scan. Approving this server will allow it to run despite these warnings.
+        </p>
+        <p v-else class="mb-4">
+          No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
+        </p>
+        <p class="text-sm text-base-content/70 mb-6">
+          The security scanner is an experimental heuristic. Force-approving a server bypasses the scanner gate and is irreversible from this dialog.
+        </p>
+        <div class="modal-action">
+          <button
+            @click="showApproveConfirmation = false"
+            :disabled="loading"
+            class="btn btn-outline"
+          >
+            Cancel
+          </button>
+          <router-link
+            v-if="approveDialogMode === 'no_scan'"
+            :to="`/servers/${server.name}?tab=security`"
+            class="btn btn-primary"
+            @click="showApproveConfirmation = false"
+          >
+            Scan First
+          </router-link>
+          <button
+            @click="confirmForceApprove"
+            :disabled="loading"
+            class="btn btn-error"
+          >
+            <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+            Force Approve
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Delete Confirmation Modal -->
     <div v-if="showDeleteConfirmation" class="modal modal-open">
       <div class="modal-box">
@@ -282,6 +327,8 @@ const systemStore = useSystemStore()
 const { hasEnabledScanners } = useSecurityScannerStatus()
 const loading = ref(false)
 const showDeleteConfirmation = ref(false)
+const showApproveConfirmation = ref(false)
+const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
 
 const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
@@ -585,24 +632,65 @@ async function triggerLogout() {
   }
 }
 
-async function unquarantine() {
+// Counts critical findings from the scan summary if available. Used to gate
+// the Approve button behind an extra confirmation (F-04).
+const criticalFindingCount = computed(() => {
+  const scan = props.server.security_scan as any
+  if (!scan) return 0
+  // finding_counts.critical is populated from the latest report summary.
+  const fc = scan.finding_counts as Record<string, number> | undefined
+  if (fc && typeof fc.critical === 'number') return fc.critical
+  return 0
+})
+
+// True when a scan has actually been run (has a last_scan_at timestamp).
+const hasCompletedScan = computed(() => {
+  const scan = props.server.security_scan
+  if (!scan) return false
+  return !!scan.last_scan_at
+})
+
+// Primary approve click handler. Chooses the right flow based on scan state:
+//   1. No scan run yet → open "Scan first / Force approve" dialog
+//   2. Scan run with critical findings → open "Force approve?" dialog
+//   3. Clean scan → call securityApproveServer directly
+function handleApproveClick() {
+  if (!hasCompletedScan.value) {
+    approveDialogMode.value = 'no_scan'
+    showApproveConfirmation.value = true
+    return
+  }
+  if (criticalFindingCount.value > 0) {
+    approveDialogMode.value = 'critical'
+    showApproveConfirmation.value = true
+    return
+  }
+  void doSecurityApprove(false)
+}
+
+async function doSecurityApprove(force: boolean) {
   loading.value = true
   try {
-    await serversStore.unquarantineServer(props.server.name)
+    await serversStore.securityApproveServer(props.server.name, force)
     systemStore.addToast({
       type: 'success',
-      title: 'Server Unquarantined',
-      message: `${props.server.name} has been removed from quarantine`,
+      title: 'Server Approved',
+      message: `${props.server.name} has been approved and unquarantined`,
     })
+    showApproveConfirmation.value = false
   } catch (error) {
     systemStore.addToast({
       type: 'error',
-      title: 'Unquarantine Failed',
+      title: 'Approve Failed',
       message: error instanceof Error ? error.message : 'Unknown error',
     })
   } finally {
     loading.value = false
   }
+}
+
+function confirmForceApprove() {
+  void doSecurityApprove(true)
 }
 
 async function confirmDelete() {

@@ -277,6 +277,31 @@ export const useServersStore = defineStore('servers', () => {
     }
   }
 
+  // Security-aware approval path (Spec 039 / F-04). Goes through
+  // POST /api/v1/servers/{name}/security/approve which enforces the
+  // scanner gate before unquarantining the server. Use this — not
+  // unquarantineServer — for all user-facing "Approve" buttons.
+  async function securityApproveServer(serverName: string, force = false) {
+    try {
+      const response = await api.securityApprove(serverName, force)
+      if (response.success) {
+        // Optimistic update: the backend will also unquarantine the server
+        // on a successful approve, so reflect that in local state. SSE
+        // refresh will reconcile any remaining fields shortly after.
+        const server = servers.value.find(s => s.name === serverName)
+        if (server) {
+          server.quarantined = false
+        }
+        return true
+      } else {
+        throw new Error(response.error || 'Failed to approve server')
+      }
+    } catch (error) {
+      console.error('Failed to approve server via security scanner:', error)
+      throw error
+    }
+  }
+
   async function deleteServer(serverName: string) {
     try {
       const response = await api.deleteServer(serverName)
@@ -371,6 +396,7 @@ export const useServersStore = defineStore('servers', () => {
     triggerOAuthLogout,
     quarantineServer,
     unquarantineServer,
+    securityApproveServer,
     deleteServer,
     updateServerStatus,
     getServerByName,

@@ -13,6 +13,8 @@ import api from '@/services/api'
 const enabledCount = ref<number | null>(null)
 const dockerAvailable = ref<boolean>(true)
 const loaded = ref(false)
+const totalFindings = ref<number>(0)
+const totalScans = ref<number>(0)
 let inflight: Promise<void> | null = null
 
 export async function refreshSecurityScannerStatus(): Promise<void> {
@@ -28,6 +30,12 @@ export async function refreshSecurityScannerStatus(): Promise<void> {
       const enabled = data.scanners_enabled ?? data.scanners_installed ?? 0
       enabledCount.value = typeof enabled === 'number' ? enabled : 0
       dockerAvailable.value = data.docker_available !== false
+      // Aggregated finding count from the /security/overview endpoint used by
+      // the Dashboard security chip (F-12). The backend returns this under
+      // `findings_by_severity.total`.
+      const fbs = data.findings_by_severity ?? {}
+      totalFindings.value = typeof fbs.total === 'number' ? fbs.total : 0
+      totalScans.value = typeof data.total_scans === 'number' ? data.total_scans : 0
       loaded.value = true
     } catch {
       // On error, keep current values; the UI will fall back to dockerAvailable
@@ -48,8 +56,12 @@ export function useSecurityScannerStatus() {
     enabledCount,
     dockerAvailable,
     loaded,
+    totalFindings,
+    totalScans,
     /** True when at least one scanner is enabled and docker is available. */
     hasEnabledScanners: () => (enabledCount.value ?? 0) > 0,
+    /** True when at least one scan has completed (ever). */
+    hasAnyScans: () => totalScans.value > 0,
     refresh: refreshSecurityScannerStatus,
   }
 }

@@ -291,6 +291,28 @@ func (e *mockEmitter) EmitSecurityScannerChanged(scannerID, status, errMsg strin
 	})
 }
 
+// mockUnquarantiner records UnquarantineServer calls for test assertions.
+type mockUnquarantiner struct {
+	mu    sync.Mutex
+	calls []string
+	err   error
+}
+
+func (m *mockUnquarantiner) UnquarantineServer(serverName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, serverName)
+	return m.err
+}
+
+func (m *mockUnquarantiner) Calls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.calls))
+	copy(out, m.calls)
+	return out
+}
+
 // helper to create a service with test registry and mock storage
 func newTestService(t *testing.T) (*Service, *mockStorage, *mockEmitter) {
 	t.Helper()
@@ -626,6 +648,107 @@ func TestServiceApproveServerNoScanNoForce(t *testing.T) {
 	err := svc.ApproveServer(context.Background(), "new-server", false, "admin@test.com")
 	if err == nil {
 		t.Fatal("expected error when no scan results and no force")
+	}
+}
+
+// TestServiceApproveServerCallsUnquarantiner verifies that a successful
+// approval actually invokes the wired ServerUnquarantiner so the server is
+// removed from quarantine (Bug F-01).
+func TestServiceApproveServerCallsUnquarantiner(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	unq := &mockUnquarantiner{}
+	svc.SetServerUnquarantiner(unq)
+
+	// Set up a clean scan (no critical findings)
+	job := &ScanJob{
+		ID:         "job-approve",
+		ServerName: "qs-server",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now().Add(-1 * time.Minute),
+	}
+	_ = store.SaveScanJob(job)
+	_ = store.SaveScanReport(&ScanReport{
+		ID:         "report-approve",
+		JobID:      "job-approve",
+		ServerName: "qs-server",
+		ScannerID:  "test-scanner",
+		Findings: []ScanFinding{
+			{RuleID: "L1", Severity: SeverityLow, Title: "Low issue"},
+		},
+		ScannedAt: time.Now(),
+	})
+
+	if err := svc.ApproveServer(context.Background(), "qs-server", false, "admin@test.com"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := unq.Calls()
+	if len(calls) != 1 || calls[0] != "qs-server" {
+		t.Fatalf("expected unquarantiner called once for 'qs-server', got %v", calls)
+	}
+
+	// Baseline should still be saved
+	if _, err := store.GetIntegrityBaseline("qs-server"); err != nil {
+		t.Errorf("expected baseline saved: %v", err)
+	}
+}
+
+// TestServiceApproveServerCriticalDoesNotUnquarantine verifies the
+// critical-findings guard still blocks approval before touching state.
+func TestServiceApproveServerCriticalDoesNotUnquarantine(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	unq := &mockUnquarantiner{}
+	svc.SetServerUnquarantiner(unq)
+
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "job-crit2",
+		ServerName: "risky",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  time.Now(),
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID:         "report-crit2",
+		JobID:      "job-crit2",
+		ServerName: "risky",
+		ScannerID:  "test-scanner",
+		Findings: []ScanFinding{
+			{RuleID: "C1", Severity: SeverityCritical, Title: "Critical vuln"},
+		},
+		ScannedAt: time.Now(),
+	})
+
+	if err := svc.ApproveServer(context.Background(), "risky", false, "admin@test.com"); err == nil {
+		t.Fatal("expected critical-findings guard to block approval")
+	}
+
+	if calls := unq.Calls(); len(calls) != 0 {
+		t.Errorf("unquarantiner must not be called when approval is blocked, got %v", calls)
+	}
+	if _, err := store.GetIntegrityBaseline("risky"); err == nil {
+		t.Error("baseline must not be created when approval is blocked")
+	}
+}
+
+// TestServiceApproveServerUnquarantinerError verifies that an unquarantiner
+// error is surfaced to the caller and the baseline is still recorded (so the
+// user can retry).
+func TestServiceApproveServerUnquarantinerError(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	unq := &mockUnquarantiner{err: fmt.Errorf("boom")}
+	svc.SetServerUnquarantiner(unq)
+
+	if err := svc.ApproveServer(context.Background(), "retry-server", true, "admin@test.com"); err == nil {
+		t.Fatal("expected error from unquarantiner to surface")
+	}
+
+	// Baseline should still have been saved before the unquarantine call
+	if _, err := store.GetIntegrityBaseline("retry-server"); err != nil {
+		t.Errorf("expected baseline to be saved even when unquarantine fails: %v", err)
+	}
+	if calls := unq.Calls(); len(calls) != 1 {
+		t.Errorf("expected exactly 1 unquarantiner call, got %v", calls)
 	}
 }
 

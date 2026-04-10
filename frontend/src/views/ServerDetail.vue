@@ -93,9 +93,9 @@
                 </button>
               </li>
               <li>
-                <button @click="server.quarantined ? unquarantineServer() : quarantineServer()" :disabled="actionLoading">
+                <button @click="server.quarantined ? handleApproveClick() : quarantineServer()" :disabled="actionLoading">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  {{ server.quarantined ? 'Unquarantine' : 'Quarantine' }}
+                  {{ server.quarantined ? 'Approve' : 'Quarantine' }}
                 </button>
               </li>
               <li>
@@ -186,10 +186,55 @@
             <h3 class="font-bold">Security Quarantine</h3>
             <div class="text-sm">This server is quarantined and requires manual approval before tools can be executed.</div>
           </div>
-          <button @click="unquarantineServer" :disabled="actionLoading" class="btn btn-sm btn-warning">
+          <button @click="handleApproveClick" :disabled="actionLoading" class="btn btn-sm btn-warning">
             <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-            Unquarantine
+            Approve
           </button>
+        </div>
+      </div>
+
+      <!-- Approve Confirmation Modal (F-04: security scanner gated) -->
+      <div v-if="showApproveConfirmation" class="modal modal-open">
+        <div class="modal-box">
+          <h3 class="font-bold text-lg mb-4">
+            {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Critical Findings Detected' }}
+          </h3>
+          <p v-if="approveDialogMode === 'critical'" class="mb-4">
+            <strong>{{ server.name }}</strong> has
+            <span class="text-error font-semibold">{{ criticalFindingCount }} critical finding{{ criticalFindingCount === 1 ? '' : 's' }}</span>
+            in its most recent security scan. Approving will allow this server to run despite these warnings.
+          </p>
+          <p v-else class="mb-4">
+            No security scan has been run for <strong>{{ server.name }}</strong>. We strongly recommend running a scan first.
+          </p>
+          <p class="text-sm text-base-content/70 mb-6">
+            The security scanner is an experimental heuristic. Force-approving bypasses the scanner gate.
+          </p>
+          <div class="modal-action">
+            <button
+              @click="showApproveConfirmation = false"
+              :disabled="actionLoading"
+              class="btn btn-outline"
+            >
+              Cancel
+            </button>
+            <button
+              v-if="approveDialogMode === 'no_scan'"
+              @click="scanFirstFromDialog"
+              :disabled="actionLoading"
+              class="btn btn-primary"
+            >
+              Scan First
+            </button>
+            <button
+              @click="confirmForceApprove"
+              :disabled="actionLoading"
+              class="btn btn-error"
+            >
+              <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+              Force Approve
+            </button>
+          </div>
         </div>
       </div>
 
@@ -591,18 +636,18 @@
             <!-- Scan Context Banner -->
             <div v-if="scanContext" class="mt-2">
               <!-- No Docker Isolation (local process) -->
-              <div v-if="!scanContext.docker_isolation && !isUrlSourceMethod && scanContext.source_method !== 'none' && scanContext.source_method !== 'tool_definitions_only'" class="alert alert-warning">
-                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              <div v-if="!scanContext.docker_isolation && !isUrlSourceMethod && scanContext.source_method !== 'none' && scanContext.source_method !== 'tool_definitions_only'" class="flex items-start gap-3 p-4 rounded-lg bg-base-200/60 border border-base-300">
+                <svg class="w-5 h-5 shrink-0 mt-0.5 text-base-content/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
-                <div>
-                  <h3 class="font-bold">No Docker Isolation</h3>
-                  <p class="text-sm">This server runs locally without Docker isolation.</p>
-                  <p class="text-sm">
+                <div class="min-w-0 flex-1">
+                  <h3 class="font-semibold text-sm">Local Process</h3>
+                  <p class="text-sm text-base-content/70">Running directly on the host, without Docker isolation.</p>
+                  <p class="text-sm text-base-content/70">
                     Source: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
                     <span v-if="scanContext.total_files"> ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})</span>
                   </p>
-                  <p class="text-sm text-base-content/70">
+                  <p class="text-sm text-base-content/60">
                     Protocol: {{ scanContext.server_protocol }}
                     <span v-if="scanContext.server_command"> &bull; Command: {{ scanContext.server_command }}</span>
                   </p>
@@ -610,20 +655,20 @@
               </div>
 
               <!-- Docker Isolated -->
-              <div v-else-if="scanContext.docker_isolation" class="alert alert-info">
-                <svg class="w-6 h-6 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <div v-else-if="scanContext.docker_isolation" class="flex items-start gap-3 p-4 rounded-lg bg-base-200/60 border border-base-300">
+                <svg class="w-5 h-5 shrink-0 mt-0.5 text-base-content/60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />
                 </svg>
-                <div>
-                  <h3 class="font-bold">Docker Isolated</h3>
-                  <p class="text-sm">
+                <div class="min-w-0 flex-1">
+                  <h3 class="font-semibold text-sm">Docker Isolated</h3>
+                  <p class="text-sm text-base-content/70">
                     Source extracted from container<span v-if="scanContext.container_id">: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.container_id.substring(0, 12) }}...</code></span>
                   </p>
-                  <p class="text-sm">
+                  <p class="text-sm text-base-content/70">
                     Source: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
                     <span v-if="scanContext.total_files"> ({{ scanContext.total_files }} files, {{ formatFileSize(scanContext.total_size_bytes) }})</span>
                   </p>
-                  <p class="text-sm text-base-content/70">
+                  <p class="text-sm text-base-content/60">
                     Protocol: {{ scanContext.server_protocol }}
                     <span v-if="scanContext.server_command"> &bull; Command: {{ scanContext.server_command }}</span>
                   </p>
@@ -631,17 +676,17 @@
               </div>
 
               <!-- HTTP Server (url, url_full, or tool_definitions_only for http protocol) -->
-              <div v-else-if="isUrlSourceMethod || scanContext.source_method === 'tool_definitions_only'" class="alert alert-info">
-                <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div v-else-if="isUrlSourceMethod || scanContext.source_method === 'tool_definitions_only'" class="flex items-start gap-3 p-4 rounded-lg bg-base-200/60 border border-base-300">
+                <svg class="w-5 h-5 shrink-0 mt-0.5 text-base-content/60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
                 </svg>
-                <div>
-                  <h3 class="font-bold">{{ isUrlSourceMethod ? 'HTTP Server' : 'Tool Definitions Only' }}</h3>
-                  <p class="text-sm">{{ isUrlSourceMethod ? 'Tool description scanning only (no filesystem to scan)' : 'Scanning tool descriptions for poisoning and injection attacks' }}</p>
-                  <p v-if="isUrlSourceMethod && scanContext.source_path" class="text-sm">
+                <div class="min-w-0 flex-1">
+                  <h3 class="font-semibold text-sm">{{ isUrlSourceMethod ? 'HTTP Server' : 'Tool Definitions Only' }}</h3>
+                  <p class="text-sm text-base-content/70">{{ isUrlSourceMethod ? 'Tool description scanning only (no filesystem to scan)' : 'Scanning tool descriptions for poisoning and injection attacks' }}</p>
+                  <p v-if="isUrlSourceMethod && scanContext.source_path" class="text-sm text-base-content/70">
                     URL: <code class="bg-base-300 px-1 rounded text-xs">{{ scanContext.source_path }}</code>
                   </p>
-                  <p v-if="scanContext.tools_exported" class="text-sm text-base-content/70">
+                  <p v-if="scanContext.tools_exported" class="text-sm text-base-content/60">
                     {{ scanContext.tools_exported }} tool definitions exported for analysis
                   </p>
                 </div>
@@ -1256,6 +1301,79 @@ async function unquarantineServer() {
   } finally {
     actionLoading.value = false
   }
+}
+
+// --- Security-aware approval flow (F-04) ---
+// Approve buttons go through POST /security/approve which enforces the
+// scanner gate before unquarantining the server. Force is only used after
+// the user explicitly confirms in the dialog.
+const showApproveConfirmation = ref(false)
+const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
+
+const criticalFindingCount = computed(() => {
+  // Prefer the loaded scan report summary if available; otherwise fall back
+  // to finding_counts on the server's security_scan summary (if populated).
+  const rep = scanReport.value as any
+  if (rep?.summary?.critical != null) return rep.summary.critical as number
+  const scan = server.value?.security_scan as any
+  if (scan?.finding_counts?.critical != null) return scan.finding_counts.critical as number
+  return 0
+})
+
+const hasCompletedScanForApprove = computed(() => {
+  if (scanReport.value) return true
+  return !!server.value?.security_scan?.last_scan_at
+})
+
+function handleApproveClick() {
+  if (!server.value) return
+  if (!hasCompletedScanForApprove.value) {
+    approveDialogMode.value = 'no_scan'
+    showApproveConfirmation.value = true
+    return
+  }
+  if (criticalFindingCount.value > 0) {
+    approveDialogMode.value = 'critical'
+    showApproveConfirmation.value = true
+    return
+  }
+  void doSecurityApprove(false)
+}
+
+async function doSecurityApprove(force: boolean) {
+  if (!server.value) return
+  actionLoading.value = true
+  try {
+    await serversStore.securityApproveServer(server.value.name, force)
+    systemStore.addToast({
+      type: 'success',
+      title: 'Server Approved',
+      message: `${server.value.name} has been approved and unquarantined`,
+    })
+    showApproveConfirmation.value = false
+    await serversStore.fetchServers()
+    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+  } catch (error) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Approve Failed',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    })
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+function confirmForceApprove() {
+  void doSecurityApprove(true)
+}
+
+async function scanFirstFromDialog() {
+  showApproveConfirmation.value = false
+  activeTab.value = 'security'
+  // Kick off a scan; the Security tab will show progress. User can return to
+  // approve once the scan completes.
+  await startSecurityScan()
 }
 
 async function refreshData() {
