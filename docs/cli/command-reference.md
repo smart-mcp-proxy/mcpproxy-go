@@ -566,3 +566,25 @@ mcpproxy trust-cert <certificate-path> [flags]
 ```bash
 mcpproxy trust-cert /path/to/cert.pem --keychain=system
 ```
+
+## Security Scanner Commands
+
+MCPProxy integrates Docker-based security scanners that analyze quarantined upstream MCP servers for tool poisoning, prompt injection, CVEs, and other supply-chain risks. All commands live under `mcpproxy security` and cover three workflows:
+
+1. **Scanner lifecycle** — `scanners`, `enable`, `disable`, `configure`
+2. **Scan operations** — `scan` (with `--all`, `--async`, `--dry-run`, `--scanners`), `rescan`, `status`, `report`, `cancel-all`
+3. **Approval & integrity** — `approve`, `reject`, `integrity`, `overview`
+
+Quick examples:
+
+```bash
+mcpproxy security scanners                      # list registry + status
+mcpproxy security enable mcp-scan               # pull the scanner image
+mcpproxy security configure mcp-scan --env SNYK_TOKEN=xxx
+mcpproxy security scan github-server            # blocking, live progress
+mcpproxy security scan github-server --dry-run  # print plan, no containers
+mcpproxy security report github-server          # aggregated findings
+mcpproxy security approve github-server         # unquarantine + index tools
+```
+
+For the full reference — every flag, every status vocabulary, all output formats (`table` / `json` / `yaml` / `sarif`), workflow recipes, and troubleshooting — see **[Security Commands](/cli/security-commands)**. For the underlying feature architecture see [Security Scanner Plugin System](/features/security-scanner-plugins).
