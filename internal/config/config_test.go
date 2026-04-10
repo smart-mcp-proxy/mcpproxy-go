@@ -982,6 +982,36 @@ func TestConfig_IsQuarantineEnabled(t *testing.T) {
 	}
 }
 
+func TestConfig_DefaultQuarantineForNewServer(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   Config
+		expected bool
+	}{
+		{
+			name:     "nil pointer: secure by default (true)",
+			config:   Config{QuarantineEnabled: nil},
+			expected: true,
+		},
+		{
+			name:     "explicit true: quarantine new servers",
+			config:   Config{QuarantineEnabled: boolPtr(true)},
+			expected: true,
+		},
+		{
+			name:     "explicit false: auto-approve new servers (issue #370)",
+			config:   Config{QuarantineEnabled: boolPtr(false)},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.DefaultQuarantineForNewServer())
+		})
+	}
+}
+
 func TestServerConfig_IsQuarantineSkipped(t *testing.T) {
 	tests := []struct {
 		name     string

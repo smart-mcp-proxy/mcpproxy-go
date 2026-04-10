@@ -175,17 +175,8 @@ See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 
 ## Disabling Quarantine
 
-**Not recommended**, but you can disable automatic quarantine:
-
-```json
-{
-  "features": {
-    "enable_quarantine": false
-  }
-}
-```
-
-To disable tool-level quarantine separately:
+**Not recommended**, but you can opt out of quarantine globally by setting a
+single top-level flag in `~/.mcpproxy/mcp_config.json`:
 
 ```json
 {
@@ -193,4 +184,17 @@ To disable tool-level quarantine separately:
 }
 ```
 
-Warning: Disabling quarantine exposes your system to Tool Poisoning Attacks.
+When `quarantine_enabled` is `false`:
+
+- Servers added dynamically via the `upstream_servers` MCP tool or the
+  `POST /api/v1/servers` REST endpoint default to **not quarantined**.
+- Tool-level quarantine (per-tool SHA-256 approval of descriptions and
+  schemas, see [Tool Quarantine](./tool-quarantine.md)) is skipped.
+
+An explicit `quarantined` field in an add-server request still wins over
+the default, so client code can always override on a per-server basis.
+Per-server `skip_quarantine: true` continues to apply at the tool level.
+
+Warning: Disabling quarantine exposes your system to Tool Poisoning
+Attacks. Only do this on machines where every MCP server you connect to
+is already trusted.

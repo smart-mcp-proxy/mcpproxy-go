@@ -808,7 +808,9 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Test 1: Add a server (should be quarantined by default)
+	// Test 1: Add a server quarantined. The E2E test env disables
+	// QuarantineEnabled globally (to skip Spec 032 tool-level approval),
+	// so we must ask for server-level quarantine explicitly here.
 	mockServer := env.CreateMockUpstreamServer("quarantine-test", []mcp.Tool{
 		{
 			Name:        "test_tool",
@@ -819,11 +821,12 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 	addRequest := mcp.CallToolRequest{}
 	addRequest.Params.Name = "upstream_servers"
 	addRequest.Params.Arguments = map[string]interface{}{
-		"operation": "add",
-		"name":      "quarantine-test",
-		"url":       mockServer.addr,
-		"protocol":  "streamable-http",
-		"enabled":   true,
+		"operation":   "add",
+		"name":        "quarantine-test",
+		"url":         mockServer.addr,
+		"protocol":    "streamable-http",
+		"enabled":     true,
+		"quarantined": true,
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)
@@ -972,7 +975,9 @@ func TestE2E_PatchCannotUnquarantineServer(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Step 1: Add a server (will be quarantined by default)
+	// Step 1: Add a server quarantined. The E2E test env disables
+	// QuarantineEnabled globally (to skip Spec 032 tool-level approval),
+	// so we must ask for server-level quarantine explicitly here.
 	mockServer := env.CreateMockUpstreamServer("patch-quarantine-test", []mcp.Tool{
 		{Name: "test_tool", Description: "A test tool"},
 	})
@@ -980,11 +985,12 @@ func TestE2E_PatchCannotUnquarantineServer(t *testing.T) {
 	addRequest := mcp.CallToolRequest{}
 	addRequest.Params.Name = "upstream_servers"
 	addRequest.Params.Arguments = map[string]interface{}{
-		"operation": "add",
-		"name":      "patch-quarantine-test",
-		"url":       mockServer.addr,
-		"protocol":  "streamable-http",
-		"enabled":   true,
+		"operation":   "add",
+		"name":        "patch-quarantine-test",
+		"url":         mockServer.addr,
+		"protocol":    "streamable-http",
+		"enabled":     true,
+		"quarantined": true,
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)

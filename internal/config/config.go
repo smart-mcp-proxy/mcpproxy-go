@@ -137,10 +137,17 @@ type Config struct {
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
 
-	// Tool-level quarantine settings (Spec 032)
-	// QuarantineEnabled controls whether tool-level quarantine is active.
-	// When nil (default), quarantine is enabled (secure by default).
-	// Set to explicit false to disable tool-level quarantine.
+	// QuarantineEnabled controls whether quarantine is active. It gates two
+	// things together:
+	//   1. Server-level auto-quarantine for newly added servers (issue #370).
+	//      When true, servers added via the upstream_servers MCP tool or the
+	//      REST API default to quarantined=true; when false, they default to
+	//      quarantined=false. Explicit per-request values always win.
+	//   2. Tool-level quarantine (Spec 032): per-tool SHA-256 approval of
+	//      tool descriptions/schemas.
+	// When nil (default), quarantine is enabled (secure by default). Set to
+	// explicit false to opt out of both. Per-server SkipQuarantine still
+	// applies for the tool-level check on individual servers.
 	QuarantineEnabled *bool `json:"quarantine_enabled,omitempty" mapstructure:"quarantine-enabled"`
 
 	// Security scanner settings (Spec 039)
@@ -768,13 +775,23 @@ func (s APIKeySource) String() string {
 	}
 }
 
-// IsQuarantineEnabled returns whether tool-level quarantine is enabled.
-// Defaults to true (secure by default) when not explicitly set.
+// IsQuarantineEnabled returns whether quarantine (both server-level
+// auto-quarantine and tool-level approval) is enabled. Defaults to true
+// (secure by default) when not explicitly set.
 func (c *Config) IsQuarantineEnabled() bool {
 	if c.QuarantineEnabled == nil {
 		return true
 	}
 	return *c.QuarantineEnabled
+}
+
+// DefaultQuarantineForNewServer returns the default value for the
+// Quarantined field when a new server is added via an API that does not
+// explicitly specify it (MCP upstream_servers tool, REST /api/v1/servers).
+// Secure by default: true unless the operator has disabled quarantine
+// globally via quarantine_enabled=false.
+func (c *Config) DefaultQuarantineForNewServer() bool {
+	return c.IsQuarantineEnabled()
 }
 
 // IsQuarantineSkipped returns whether this server should skip tool-level quarantine.

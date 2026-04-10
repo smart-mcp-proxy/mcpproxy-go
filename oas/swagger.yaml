@@ -78,10 +78,17 @@ components:
           type: number
         quarantine_enabled:
           description: |-
-            Tool-level quarantine settings (Spec 032)
-            QuarantineEnabled controls whether tool-level quarantine is active.
-            When nil (default), quarantine is enabled (secure by default).
-            Set to explicit false to disable tool-level quarantine.
+            QuarantineEnabled controls whether quarantine is active. It gates two
+            things together:
+              1. Server-level auto-quarantine for newly added servers (issue #370).
+                 When true, servers added via the upstream_servers MCP tool or the
+                 REST API default to quarantined=true; when false, they default to
+                 quarantined=false. Explicit per-request values always win.
+              2. Tool-level quarantine (Spec 032): per-tool SHA-256 approval of
+                 tool descriptions/schemas.
+            When nil (default), quarantine is enabled (secure by default). Set to
+            explicit false to opt out of both. Per-server SkipQuarantine still
+            applies for the tool-level check on individual servers.
           type: boolean
         read_only_mode:
           type: boolean
