@@ -62,7 +62,6 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 			LastStartupOutcome:   "success",
 		},
 		EnableSocket:        true,
-		EnableTray:          true,
 		EnablePrompts:       false,
 		RequireMCPAuth:      true,
 		EnableCodeExecution: false,
@@ -124,8 +123,7 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 	if payload.FeatureFlags == nil {
 		t.Fatal("feature_flags is nil")
 	}
-	if !payload.FeatureFlags.EnableSocket || !payload.FeatureFlags.EnableTray ||
-		!payload.FeatureFlags.RequireMCPAuth {
+	if !payload.FeatureFlags.EnableSocket || !payload.FeatureFlags.RequireMCPAuth {
 		t.Errorf("feature flags did not propagate: %+v", payload.FeatureFlags)
 	}
 

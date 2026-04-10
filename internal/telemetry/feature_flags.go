@@ -10,7 +10,6 @@ import (
 // the daily heartbeat. Spec 042 User Story 4.
 type FeatureFlagSnapshot struct {
 	EnableSocket                  bool     `json:"enable_socket"`
-	EnableTray                    bool     `json:"enable_tray"`
 	EnablePrompts                 bool     `json:"enable_prompts"`
 	RequireMCPAuth                bool     `json:"require_mcp_auth"`
 	EnableCodeExecution           bool     `json:"enable_code_execution"`
@@ -30,7 +29,6 @@ func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 
 	snap := &FeatureFlagSnapshot{
 		EnableSocket:        cfg.EnableSocket,
-		EnableTray:          cfg.EnableTray,
 		EnablePrompts:       cfg.EnablePrompts,
 		RequireMCPAuth:      cfg.RequireMCPAuth,
 		EnableCodeExecution: cfg.EnableCodeExecution,

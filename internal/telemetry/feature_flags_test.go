@@ -21,7 +21,6 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	enabledTrue := true
 	cfg := &config.Config{
 		EnableSocket:        true,
-		EnableTray:          false,
 		EnablePrompts:       true,
 		RequireMCPAuth:      false,
 		EnableCodeExecution: true,
@@ -55,9 +54,6 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	snap := BuildFeatureFlagSnapshot(cfg)
 	if !snap.EnableSocket {
 		t.Error("EnableSocket should be true")
-	}
-	if snap.EnableTray {
-		t.Error("EnableTray should be false")
 	}
 	if !snap.EnablePrompts {
 		t.Error("EnablePrompts should be true")
