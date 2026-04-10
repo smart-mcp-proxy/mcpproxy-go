@@ -507,12 +507,24 @@ components:
         anonymous_id:
           description: Auto-generated UUIDv4
           type: string
+        anonymous_id_created_at:
+          description: Spec 042 (Tier 2) additions — all default-zero, all backwards-compatible.
+          type: string
         enabled:
           description: 'Default: true (opt-out)'
           type: boolean
         endpoint:
           description: Override for testing
           type: string
+        last_reported_version:
+          description: Upgrade funnel
+          type: string
+        last_startup_outcome:
+          description: success|port_conflict|db_locked|...
+          type: string
+        notice_shown:
+          description: First-run notice flag
+          type: boolean
       type: object
     config.TokenizerConfig:
       description: Tokenizer configuration for token counting
