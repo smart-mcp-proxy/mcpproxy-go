@@ -572,6 +572,11 @@ actor APIClient {
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
+        // Spec 042: telemetry surface header so the daemon can attribute
+        // requests to the macOS tray for the surface_requests counter.
+        let trayVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+        request.setValue("tray/\(trayVersion)", forHTTPHeaderField: "X-MCPProxy-Client")
+
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")

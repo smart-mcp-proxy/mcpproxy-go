@@ -2593,6 +2593,9 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Spec 042: aggregate doctor results into the telemetry registry.
+		recordDoctorTelemetry(s.telemetryRegistry, diag)
+
 		s.writeSuccess(w, diag)
 		return
 	}

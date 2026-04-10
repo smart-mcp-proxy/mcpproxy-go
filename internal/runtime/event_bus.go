@@ -1,6 +1,24 @@
 package runtime
 
-import "time"
+import (
+	"strings"
+	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+)
+
+// containsAny reports whether s contains any of the listed substrings (case-insensitive).
+// Used by Spec 042 telemetry classification on error messages — only the
+// resulting enum category is ever recorded; the message itself is never.
+func containsAny(s string, substrs ...string) bool {
+	low := strings.ToLower(s)
+	for _, sub := range substrs {
+		if strings.Contains(low, strings.ToLower(sub)) {
+			return true
+		}
+	}
+	return false
+}
 
 const defaultEventBuffer = 256 // Increased from 16 to prevent event dropping when many servers.changed events flood the bus
 
@@ -77,6 +95,9 @@ func (r *Runtime) EmitOAuthTokenRefreshed(serverName string, expiresAt time.Time
 // EmitOAuthRefreshFailed emits an event when proactive token refresh fails after retries.
 // This is used by the RefreshManager to notify subscribers that re-authentication is needed.
 func (r *Runtime) EmitOAuthRefreshFailed(serverName string, errorMsg string) {
+	// Spec 042: increment the error category counter (no message recorded).
+	telemetry.RecordErrorOn(r.TelemetryRegistry(), telemetry.ErrCatOAuthRefreshFailed)
+
 	payload := map[string]any{
 		"server_name": serverName,
 		"error":       errorMsg,
@@ -106,6 +127,19 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
 func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string) {
+	// Spec 042: classify failed tool calls into the upstream error categories.
+	// We never record the error message itself; only a fixed enum value.
+	if status == "error" && errorMsg != "" {
+		switch {
+		case containsAny(errorMsg, "i/o timeout", "context deadline exceeded", "connect: timeout"):
+			telemetry.RecordErrorOn(r.TelemetryRegistry(), telemetry.ErrCatUpstreamConnectTimeout)
+		case containsAny(errorMsg, "connection refused", "connect: refused"):
+			telemetry.RecordErrorOn(r.TelemetryRegistry(), telemetry.ErrCatUpstreamConnectRefused)
+		case containsAny(errorMsg, "handshake", "tls:"):
+			telemetry.RecordErrorOn(r.TelemetryRegistry(), telemetry.ErrCatUpstreamHandshakeFailed)
+		}
+	}
+
 	payload := map[string]any{
 		"server_name":        serverName,
 		"tool_name":          toolName,
@@ -138,6 +172,12 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 
 // EmitActivityPolicyDecision emits an event when a policy blocks a tool call.
 func (r *Runtime) EmitActivityPolicyDecision(serverName, toolName, sessionID, decision, reason string) {
+	// Spec 042: classify policy blocks as a tool quarantine error category.
+	// "blocked" decisions are user-visible reliability events worth counting.
+	if decision == "blocked" || decision == "block" {
+		telemetry.RecordErrorOn(r.TelemetryRegistry(), telemetry.ErrCatToolQuarantineBlocked)
+	}
+
 	payload := map[string]any{
 		"server_name": serverName,
 		"tool_name":   toolName,
