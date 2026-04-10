@@ -23,6 +23,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -319,6 +320,35 @@ func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[st
 		enriched["_auth_"+k] = v
 	}
 	return enriched
+}
+
+// telemetryRegistry returns the Tier 2 counter registry, or nil if telemetry
+// is not initialized. Spec 042. The Record* helpers in the telemetry package
+// are nil-safe so callers do not need to nil-check the return value.
+func (p *MCPProxyServer) telemetryRegistry() *telemetry.CounterRegistry {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return nil
+	}
+	return p.mainServer.runtime.TelemetryRegistry()
+}
+
+// recordMCPSurface increments the surface counter for an MCP request. Always
+// SurfaceMCP regardless of any header. Spec 042 User Story 1.
+func (p *MCPProxyServer) recordMCPSurface() {
+	telemetry.RecordSurfaceOn(p.telemetryRegistry(), telemetry.SurfaceMCP)
+}
+
+// recordBuiltinTool increments the built-in tool histogram for the given
+// tool name. Unknown names are silently dropped at the registry level.
+// Spec 042 User Story 2.
+func (p *MCPProxyServer) recordBuiltinTool(name string) {
+	telemetry.RecordBuiltinToolOn(p.telemetryRegistry(), name)
+}
+
+// recordUpstreamTool increments the upstream tool call counter without ever
+// recording the tool name. Spec 042 User Story 2.
+func (p *MCPProxyServer) recordUpstreamTool() {
+	telemetry.RecordUpstreamToolOn(p.telemetryRegistry())
 }
 
 // emitActivityEvent safely emits an activity event if runtime is available
@@ -876,6 +906,10 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 // handleRetrieveToolsWithMode implements the retrieve_tools functionality with mode-aware instructions.
 func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, request mcp.CallToolRequest, routingMode string) (*mcp.CallToolResult, error) {
+	// Spec 042: telemetry counters.
+	p.recordMCPSurface()
+	p.recordBuiltinTool("retrieve_tools")
+
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)
@@ -1145,21 +1179,30 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 // handleCallToolRead implements the call_tool_read functionality (Spec 018)
 func (p *MCPProxyServer) handleCallToolRead(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	p.recordBuiltinTool("call_tool_read")
 	return p.handleCallToolVariant(ctx, request, contracts.ToolVariantRead)
 }
 
 // handleCallToolWrite implements the call_tool_write functionality (Spec 018)
 func (p *MCPProxyServer) handleCallToolWrite(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	p.recordBuiltinTool("call_tool_write")
 	return p.handleCallToolVariant(ctx, request, contracts.ToolVariantWrite)
 }
 
 // handleCallToolDestructive implements the call_tool_destructive functionality (Spec 018)
 func (p *MCPProxyServer) handleCallToolDestructive(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	p.recordBuiltinTool("call_tool_destructive")
 	return p.handleCallToolVariant(ctx, request, contracts.ToolVariantDestructive)
 }
 
 // handleCallToolVariant is the common handler for all call_tool_* variants (Spec 018)
 func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.CallToolRequest, toolVariant string) (callResult *mcp.CallToolResult, callErr error) {
+	// Spec 042: every call_tool_* invocation is an MCP request, and the actual
+	// upstream call happens inside this function — we count it as an upstream
+	// tool call (no name recorded).
+	p.recordMCPSurface()
+	p.recordUpstreamTool()
+
 	// Spec 024: Track start time and context for internal tool call logging
 	internalStartTime := time.Now()
 
@@ -2029,6 +2072,8 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 
 // handleUpstreamServers implements upstream server management
 func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	p.recordMCPSurface()
+	p.recordBuiltinTool("upstream_servers")
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)
@@ -2144,6 +2189,8 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 // handleQuarantineSecurity implements the quarantine_security functionality
 func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	p.recordMCPSurface()
+	p.recordBuiltinTool("quarantine_security")
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)

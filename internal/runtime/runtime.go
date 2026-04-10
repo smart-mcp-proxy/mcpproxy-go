@@ -2029,6 +2029,16 @@ func (r *Runtime) TelemetryService() *telemetry.Service {
 	return r.telemetryService
 }
 
+// TelemetryRegistry returns the Tier 2 counter registry, or nil if telemetry
+// has not been initialized yet. Callers can record events without nil-checking
+// — use telemetry.RecordSurfaceOn(reg, ...) which is nil-safe.
+func (r *Runtime) TelemetryRegistry() *telemetry.CounterRegistry {
+	if r.telemetryService == nil {
+		return nil
+	}
+	return r.telemetryService.Registry()
+}
+
 // GetServerCount returns the total number of configured servers (implements telemetry.RuntimeStats).
 func (r *Runtime) GetServerCount() int {
 	r.mu.RLock()

@@ -27,6 +27,7 @@ import (
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
@@ -142,6 +143,18 @@ type Server struct {
 	feedbackSubmitter  FeedbackSubmitter  // Feedback submission (Spec 036)
 	connectService     *connect.Service   // Client connect/disconnect operations
 	securityController SecurityController // Security scanner operations (Spec 039)
+
+	// telemetryRegistry is the Tier 2 counter aggregator (Spec 042). May be
+	// nil before SetTelemetryRegistry is called; middlewares use the nil-safe
+	// telemetry helpers so the call sites do not need to nil-check.
+	telemetryRegistry *telemetry.CounterRegistry
+}
+
+// SetTelemetryRegistry attaches the Tier 2 counter registry. Spec 042. Must
+// be called before the router serves requests for the surface and REST
+// endpoint counters to populate.
+func (s *Server) SetTelemetryRegistry(reg *telemetry.CounterRegistry) {
+	s.telemetryRegistry = reg
 }
 
 // NewServer creates a new HTTP API server
@@ -458,6 +471,10 @@ func (s *Server) setupRoutes() {
 		// Apply timeout and API key authentication middleware to API routes only
 		r.Use(middleware.Timeout(60 * time.Second))
 		r.Use(s.apiKeyAuthMiddleware())
+		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
+		// a closure so the registry can be installed after route setup.
+		r.Use(SurfaceClassifierMiddleware(func() *telemetry.CounterRegistry { return s.telemetryRegistry }))
+		r.Use(RESTEndpointHistogramMiddleware(func() *telemetry.CounterRegistry { return s.telemetryRegistry }))
 
 		// Status endpoint
 		r.Get("/status", s.handleGetStatus)

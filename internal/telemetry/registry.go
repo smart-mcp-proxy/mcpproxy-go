@@ -129,6 +129,50 @@ func (r *CounterRegistry) RecordSurface(s Surface) {
 	r.surfaceCounts[s].Add(1)
 }
 
+// Nil-safe convenience wrappers. Many integration points may receive a nil
+// registry (telemetry not initialized yet); these helpers let callers skip
+// the nil check.
+
+// RecordSurfaceOn calls reg.RecordSurface(s) if reg is non-nil.
+func RecordSurfaceOn(reg *CounterRegistry, s Surface) {
+	if reg == nil {
+		return
+	}
+	reg.RecordSurface(s)
+}
+
+// RecordBuiltinToolOn calls reg.RecordBuiltinTool(name) if reg is non-nil.
+func RecordBuiltinToolOn(reg *CounterRegistry, name string) {
+	if reg == nil {
+		return
+	}
+	reg.RecordBuiltinTool(name)
+}
+
+// RecordUpstreamToolOn calls reg.RecordUpstreamTool() if reg is non-nil.
+func RecordUpstreamToolOn(reg *CounterRegistry) {
+	if reg == nil {
+		return
+	}
+	reg.RecordUpstreamTool()
+}
+
+// RecordRESTRequestOn calls reg.RecordRESTRequest(...) if reg is non-nil.
+func RecordRESTRequestOn(reg *CounterRegistry, method, template, statusClass string) {
+	if reg == nil {
+		return
+	}
+	reg.RecordRESTRequest(method, template, statusClass)
+}
+
+// RecordErrorOn calls reg.RecordError(c) if reg is non-nil.
+func RecordErrorOn(reg *CounterRegistry, c ErrorCategory) {
+	if reg == nil {
+		return
+	}
+	reg.RecordError(c)
+}
+
 // RecordBuiltinTool increments the counter for the named built-in tool.
 // Unknown names (i.e., upstream tool names) are silently dropped.
 func (r *CounterRegistry) RecordBuiltinTool(name string) {
