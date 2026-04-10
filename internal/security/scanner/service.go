@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -401,14 +400,29 @@ func (s *Service) SetSecretStore(store SecretStore) {
 }
 
 // ConfigureScanner sets environment variables (API keys) and/or an image
-// override for a scanner. Secret values are stored in the OS keyring; only
-// references are kept in config.
+// override for a scanner.
+//
+// Scanner env values are stored DIRECTLY in the scanner's ConfiguredEnv
+// map in BBolt, NOT in the OS keyring. Previous versions attempted to write
+// to the OS keyring and fall back on failure, but that path is unsafe on
+// macOS: keyring.Set (which wraps Security.framework under the hood) can
+// pop a blocking "Keychain Not Found" system modal when the user's default
+// keychain is in an unusual state, and the underlying goroutine cannot be
+// cancelled once started (it stays live until it hits the real backend,
+// which may never happen). The scanner env values end up in the container's
+// /proc/environ at scan time anyway, so keyring storage adds no meaningful
+// confidentiality — it's a trust-boundary we don't actually have.
+//
+// Users who want OS-keyring storage for a specific secret can still use a
+// `${keyring:my-secret-name}` reference as the env value. The resolver
+// expands it at scan time via a read-only keyring Get, which is safe on
+// all platforms.
 //
 // If the effective Docker image changes (user set a new override) and the
 // new image is not already cached locally, the scanner is transitioned to
 // the "pulling" state and a background pull is kicked off. The call returns
 // immediately — the UI tracks the pull via SSE or polling.
-func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[string]string, dockerImage string) error {
+func (s *Service) ConfigureScanner(_ context.Context, id string, env map[string]string, dockerImage string) error {
 	sc, err := s.storage.GetScanner(id)
 	if err != nil {
 		// If not in storage yet (just registered in registry), create from registry
@@ -423,20 +437,12 @@ func (s *Service) ConfigureScanner(ctx context.Context, id string, env map[strin
 		sc.ConfiguredEnv = make(map[string]string)
 	}
 
-	// Store secrets in keyring, keep references in config
+	// Store scanner env values directly in the scanner record. Do NOT call
+	// keyring.Set — see the doc comment above for the reason. Values that
+	// look like `${keyring:name}` references are passed through as-is; the
+	// resolver expands them via a read-only Get at scan time.
 	for k, v := range env {
-		if s.secretStore != nil && v != "" {
-			keyringName := fmt.Sprintf("scanner_%s_%s", id, strings.ToLower(k))
-			if err := s.secretStore.StoreSecret(ctx, keyringName, v); err != nil {
-				s.logger.Warn("Failed to store secret in keyring, storing as reference",
-					zap.String("key", k), zap.Error(err))
-				sc.ConfiguredEnv[k] = v // Fallback: store directly
-			} else {
-				sc.ConfiguredEnv[k] = fmt.Sprintf("${keyring:%s}", keyringName)
-			}
-		} else {
-			sc.ConfiguredEnv[k] = v
-		}
+		sc.ConfiguredEnv[k] = v
 	}
 
 	// Track whether the effective image changed so we know when to re-pull.

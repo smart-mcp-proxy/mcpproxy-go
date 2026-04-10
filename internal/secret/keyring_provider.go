@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -43,6 +44,14 @@ const (
 // config-file, etc.) rather than propagating the error.
 var ErrKeyringTimeout = errors.New("keyring operation timed out (backend unresponsive — likely waiting on a user prompt)")
 
+// ErrKeyringUnavailable is returned by write operations (Store/Delete) when
+// a previous IsAvailable() call determined the keyring backend is not
+// usable on this system. We refuse to call keyring.Set in that state
+// because on macOS it pops a system modal ("Keychain Not Found") whose
+// default action is destructive. Callers MUST fall back to an alternative
+// secret store.
+var ErrKeyringUnavailable = errors.New("keyring unavailable (backend not usable on this system — refusing to write to avoid OS modal prompts)")
+
 // Package-level function variables allow tests to inject a fake/hanging
 // keyring without reaching into the real OS keychain.
 var (
@@ -51,9 +60,28 @@ var (
 	keyringDelFn = keyring.Delete
 )
 
+// availabilityState captures the cached result of an IsAvailable() probe.
+// Values: 0 = unknown (probe not yet run), 1 = available, 2 = unavailable.
+const (
+	availUnknown int32 = 0
+	availYes     int32 = 1
+	availNo      int32 = 2
+)
+
 // KeyringProvider resolves secrets from OS keyring (Keychain, Secret Service, WinCred)
 type KeyringProvider struct {
 	serviceName string
+
+	// availability is the cached result of the most recent IsAvailable()
+	// probe. Read/written atomically. When availNo, all write operations
+	// short-circuit to ErrKeyringUnavailable so we NEVER call keyring.Set
+	// on a broken/unusable keychain — which is what pops the macOS modal.
+	availability int32
+
+	// writeOverride allows tests (and future programmatic opt-in) to force
+	// the macOS write gate without going through env vars. 0 = respect
+	// env, 1 = force enabled, 2 = force disabled. Read/written atomically.
+	writeOverride int32
 }
 
 // NewKeyringProvider creates a new keyring provider
@@ -61,6 +89,27 @@ func NewKeyringProvider() *KeyringProvider {
 	return &KeyringProvider{
 		serviceName: ServiceName,
 	}
+}
+
+// markUnavailable records that the keyring is not usable. After this call,
+// all Store/Delete operations will return ErrKeyringUnavailable without
+// touching the OS keyring backend.
+func (p *KeyringProvider) markUnavailable() {
+	atomic.StoreInt32(&p.availability, availNo)
+}
+
+// markAvailable records that the keyring has been successfully probed and
+// is safe to write to.
+func (p *KeyringProvider) markAvailable() {
+	atomic.StoreInt32(&p.availability, availYes)
+}
+
+// isKnownUnavailable returns true if a previous probe determined the
+// keyring is not usable. Returns false for both "known available" AND
+// "not yet probed" so callers can optimistically attempt a first-time
+// write before the cache is populated.
+func (p *KeyringProvider) isKnownUnavailable() bool {
+	return atomic.LoadInt32(&p.availability) == availNo
 }
 
 // CanResolve returns true if this provider can handle the given secret type
@@ -110,16 +159,68 @@ func (p *KeyringProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	return secret, nil
 }
 
-// Store saves a secret to the OS keyring and updates the registry
+// Store saves a secret to the OS keyring and updates the registry.
+//
+// By default on macOS this method does NOT actually call keyring.Set —
+// it returns ErrKeyringUnavailable immediately. Rationale: on macOS
+// keyring.Set wraps Security.framework under the hood; if the user's
+// default keychain is missing/locked/in an unusual state, Security.framework
+// pops a system modal ("Keychain Not Found" with a destructive default
+// button). The underlying call is blocking and the goroutine we'd wrap it
+// in cannot be cancelled once started — it keeps running until Security.
+// framework finally responds, which may involve the user clicking buttons.
+// No wrapper / timeout / probe can prevent the modal from appearing, so
+// the only safe option is to not call keyring.Set at all.
+//
+// Users who want keyring-backed storage on macOS can opt in by setting the
+// environment variable MCPPROXY_KEYRING_WRITE=1 or calling
+// EnableKeyringWrites(true) on the provider. When opted in, Store runs a
+// three-layer guard (known-unavailable cache, first-time probe, failure
+// cache) plus a 3s runWithTimeout wrapper — but note that the wrapper only
+// protects the CALLING goroutine from blocking; it cannot prevent the
+// modal from appearing on the user's screen once keyring.Set is called.
+//
+// On non-macOS platforms (Linux Secret Service, Windows Credential
+// Manager), Store goes through the three-layer guard without requiring
+// the opt-in, because those backends don't have the same modal issue.
+//
+// Callers MUST treat ErrKeyringUnavailable as "fall back to in-config /
+// in-memory storage" and surface a clear log message.
 func (p *KeyringProvider) Store(_ context.Context, ref Ref, value string) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot store secret type: %s", ref.Type)
+	}
+
+	// macOS-specific hard gate: do not call keyring.Set unless the caller
+	// has explicitly opted in. The opt-in can be global via the
+	// MCPPROXY_KEYRING_WRITE env var (value "1", "true", or "yes"), or
+	// per-provider via SetWritesEnabled(true).
+	if runtime.GOOS == "darwin" && !p.writesEnabled() {
+		p.markUnavailable()
+		return ErrKeyringUnavailable
+	}
+
+	// Layer 1: if we already know the keyring is broken, bail out without
+	// touching it.
+	if p.isKnownUnavailable() {
+		return ErrKeyringUnavailable
+	}
+
+	// Layer 2: if we haven't probed yet, do it now — BEFORE calling Set.
+	// IsAvailable uses a read-only Get probe which is safe on all platforms.
+	if atomic.LoadInt32(&p.availability) == availUnknown {
+		if !p.IsAvailable() {
+			return ErrKeyringUnavailable
+		}
 	}
 
 	err := runWithTimeout(func() error {
 		return keyringSetFn(p.serviceName, ref.Name, value)
 	})
 	if err != nil {
+		// Layer 3: cache the failure so subsequent writes don't retry and
+		// risk popping another modal.
+		p.markUnavailable()
 		return fmt.Errorf("failed to store secret %s in keyring: %w", ref.Name, err)
 	}
 
@@ -131,16 +232,56 @@ func (p *KeyringProvider) Store(_ context.Context, ref Ref, value string) error 
 	return nil
 }
 
-// Delete removes a secret from the OS keyring and updates the registry
+// writesEnabled reports whether this provider is allowed to call
+// keyring.Set on the current platform. On non-macOS systems writes are
+// always enabled. On macOS writes require an explicit opt-in via the
+// MCPPROXY_KEYRING_WRITE env var or a test-only override.
+func (p *KeyringProvider) writesEnabled() bool {
+	if runtime.GOOS != "darwin" {
+		return true
+	}
+	if p.writeOverride != 0 {
+		return p.writeOverride == 1
+	}
+	v := strings.ToLower(os.Getenv("MCPPROXY_KEYRING_WRITE"))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+// SetWritesEnabled is a test-only helper that forces the opt-in state
+// regardless of env vars. Pass true to allow keyring.Set, false to
+// disallow. It is safe to call at any time — Store checks the override
+// synchronously.
+func (p *KeyringProvider) SetWritesEnabled(enabled bool) {
+	if enabled {
+		atomic.StoreInt32(&p.writeOverride, 1)
+	} else {
+		atomic.StoreInt32(&p.writeOverride, 2)
+	}
+}
+
+// Delete removes a secret from the OS keyring and updates the registry.
+// Same three-layer guard as Store: known-unavailable short-circuit,
+// first-time probe, and failure cache.
 func (p *KeyringProvider) Delete(_ context.Context, ref Ref) error {
 	if !p.CanResolve(ref.Type) {
 		return fmt.Errorf("keyring provider cannot delete secret type: %s", ref.Type)
+	}
+
+	if p.isKnownUnavailable() {
+		return ErrKeyringUnavailable
+	}
+
+	if atomic.LoadInt32(&p.availability) == availUnknown {
+		if !p.IsAvailable() {
+			return ErrKeyringUnavailable
+		}
 	}
 
 	err := runWithTimeout(func() error {
 		return keyringDelFn(p.serviceName, ref.Name)
 	})
 	if err != nil {
+		p.markUnavailable()
 		return fmt.Errorf("failed to delete secret %s from keyring: %w", ref.Name, err)
 	}
 
@@ -188,13 +329,16 @@ func (p *KeyringProvider) List(_ context.Context) ([]Ref, error) {
 	return refs, nil
 }
 
-// IsAvailable checks if the keyring is available on the current system.
+// IsAvailable checks if the keyring is available on the current system,
+// and caches the result. Subsequent calls to Store/Delete will short-circuit
+// to ErrKeyringUnavailable WITHOUT calling keyring.Set if the probe decided
+// the keyring is not usable — this is the key property that prevents the
+// macOS "Keychain Not Found" modal from ever being shown to the user.
 //
 // This is deliberately conservative and NEVER calls keyring.Set as a probe:
 // on macOS, Set triggers the "Keychain Not Found" system modal when the
 // user's default keychain is missing/locked/corrupted, whose default button
-// is the destructive "Reset To Defaults" action. That used to block the
-// server process on every scanner-configure call.
+// is the destructive "Reset To Defaults" action.
 //
 // Instead, we:
 //  1. Skip the probe entirely in obvious headless/CI environments.
@@ -204,11 +348,14 @@ func (p *KeyringProvider) List(_ context.Context) ([]Ref, error) {
 //     as "unavailable".
 //  3. Run the Get inside a goroutine with a 2s hard timeout so a hung
 //     keychain backend cannot stall the caller.
+//  4. Cache the result via markAvailable/markUnavailable so Store/Delete
+//     can short-circuit on the fast path.
 func (p *KeyringProvider) IsAvailable() bool {
 	// Heuristic fast-path: if we're clearly running headless (CI, no
 	// X display on Linux, etc.) don't even try the keychain — it will
 	// either fail or prompt.
 	if isHeadlessEnvironment() {
+		p.markUnavailable()
 		return false
 	}
 
@@ -242,10 +389,16 @@ func (p *KeyringProvider) IsAvailable() bool {
 
 	select {
 	case r := <-ch:
+		if r.ok {
+			p.markAvailable()
+		} else {
+			p.markUnavailable()
+		}
 		return r.ok
 	case <-time.After(keyringProbeTimeout):
 		// The keychain is wedged. Bail out — the caller should fall back
 		// to in-memory / config-only secret storage.
+		p.markUnavailable()
 		return false
 	}
 }
