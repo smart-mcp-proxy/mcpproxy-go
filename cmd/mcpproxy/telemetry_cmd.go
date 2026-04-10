@@ -16,10 +16,11 @@ import (
 
 // TelemetryStatus holds status data for display.
 type TelemetryStatus struct {
-	Enabled     bool   `json:"enabled"`
-	AnonymousID string `json:"anonymous_id,omitempty"`
-	Endpoint    string `json:"endpoint"`
-	EnvOverride bool   `json:"env_override,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	AnonymousID     string `json:"anonymous_id,omitempty"`
+	Endpoint        string `json:"endpoint"`
+	EnvOverride     bool   `json:"env_override,omitempty"`
+	EnvOverrideName string `json:"env_override_name,omitempty"`
 }
 
 // GetTelemetryCommand returns the telemetry management command.
@@ -118,8 +119,11 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 		status.AnonymousID = id
 	}
 
-	if os.Getenv("MCPPROXY_TELEMETRY") == "false" {
+	// Spec 042: env vars override config (DO_NOT_TRACK > CI > MCPPROXY_TELEMETRY).
+	if disabled, reason := telemetry.IsDisabledByEnv(); disabled {
 		status.EnvOverride = true
+		status.EnvOverrideName = string(reason)
+		status.Enabled = false
 	}
 
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
@@ -148,7 +152,7 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Printf("  %-14s %s\n", "Status:", enabledStr)
 		if status.EnvOverride {
-			fmt.Printf("  %-14s %s\n", "Override:", "MCPPROXY_TELEMETRY=false")
+			fmt.Printf("  %-14s %s\n", "Override:", status.EnvOverrideName)
 		}
 		if status.AnonymousID != "" {
 			fmt.Printf("  %-14s %s\n", "Anonymous ID:", status.AnonymousID)
