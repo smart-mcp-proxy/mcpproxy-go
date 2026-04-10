@@ -16,8 +16,14 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
+// SchemaVersion is the heartbeat payload schema version. v1 payloads have no
+// such field; receivers can route by absence vs presence.
+const SchemaVersion = 2
+
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
+// Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
 type HeartbeatPayload struct {
+	// v1 fields (preserved unchanged)
 	AnonymousID          string `json:"anonymous_id"`
 	Version              string `json:"version"`
 	Edition              string `json:"edition"`
@@ -31,6 +37,20 @@ type HeartbeatPayload struct {
 	RoutingMode          string `json:"routing_mode"`
 	QuarantineEnabled    bool   `json:"quarantine_enabled"`
 	Timestamp            string `json:"timestamp"`
+
+	// Spec 042 (Tier 2) additions
+	SchemaVersion               int                         `json:"schema_version,omitempty"`
+	AnonymousIDCreatedAt        string                      `json:"anonymous_id_created_at,omitempty"`
+	CurrentVersion              string                      `json:"current_version,omitempty"`
+	PreviousVersion             string                      `json:"previous_version"`
+	LastStartupOutcome          string                      `json:"last_startup_outcome,omitempty"`
+	SurfaceRequests             map[string]int64            `json:"surface_requests,omitempty"`
+	BuiltinToolCalls            map[string]int64            `json:"builtin_tool_calls,omitempty"`
+	UpstreamToolCallCountBucket string                      `json:"upstream_tool_call_count_bucket,omitempty"`
+	RESTEndpointCalls           map[string]map[string]int64 `json:"rest_endpoint_calls,omitempty"`
+	FeatureFlags                *FeatureFlagSnapshot        `json:"feature_flags,omitempty"`
+	ErrorCategoryCounts         map[string]int64            `json:"error_category_counts,omitempty"`
+	DoctorChecks                map[string]DoctorCounts     `json:"doctor_checks,omitempty"`
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -57,6 +77,12 @@ type Service struct {
 	// Feedback rate limiter (max 5 per hour)
 	feedbackLimiter *RateLimiter
 
+	// Spec 042: Tier 2 counter aggregator. Always non-nil after New.
+	registry *CounterRegistry
+
+	// Spec 042: env-based opt-out reason captured at construction time.
+	envDisabledReason EnvDisabledReason
+
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
 	heartbeatInterval time.Duration
@@ -64,6 +90,7 @@ type Service struct {
 
 // New creates a new telemetry service.
 func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logger) *Service {
+	_, envReason := IsDisabledByEnv()
 	return &Service{
 		config:            cfg,
 		cfgPath:           cfgPath,
@@ -74,9 +101,23 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		startTime:         time.Now(),
 		client:            &http.Client{Timeout: 10 * time.Second},
 		feedbackLimiter:   NewRateLimiter(5),
+		registry:          NewCounterRegistry(),
+		envDisabledReason: envReason,
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
 	}
+}
+
+// Registry returns the counter registry for Tier 2 telemetry events. Always
+// non-nil after New, even if telemetry is disabled — that way callers can
+// always Record* without nil checks; the data simply never leaves the process.
+func (s *Service) Registry() *CounterRegistry {
+	return s.registry
+}
+
+// EnvDisabledReason returns the env-var reason telemetry is disabled, if any.
+func (s *Service) EnvDisabledReason() EnvDisabledReason {
+	return s.envDisabledReason
 }
 
 // SetRuntimeStats sets the runtime stats provider (called after runtime is fully initialized).
@@ -86,6 +127,13 @@ func (s *Service) SetRuntimeStats(stats RuntimeStats) {
 
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
 func (s *Service) Start(ctx context.Context) {
+	// Spec 042: env vars override config. DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY=false
+	if s.envDisabledReason != EnvDisabledNone {
+		s.logger.Info("Telemetry disabled by environment variable",
+			zap.String("reason", string(s.envDisabledReason)))
+		return
+	}
+
 	// Skip if telemetry is disabled
 	if !s.config.IsTelemetryEnabled() {
 		s.logger.Info("Telemetry disabled by configuration")
@@ -158,18 +206,60 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 	defer resp.Body.Close()
 
 	s.logger.Debug("Heartbeat sent", zap.Int("status", resp.StatusCode))
+
+	// Spec 042: only on a successful 2xx send do we (a) reset counters and
+	// (b) advance the upgrade funnel cursor. Failures preserve state for retry.
+	if resp.StatusCode/100 == 2 {
+		s.registry.Reset()
+		s.advanceUpgradeFunnel()
+	}
+}
+
+// advanceUpgradeFunnel persists the current version as last_reported_version.
+// Called only on successful heartbeat send.
+func (s *Service) advanceUpgradeFunnel() {
+	if s.config.Telemetry == nil {
+		s.config.Telemetry = &config.TelemetryConfig{}
+	}
+	if s.config.Telemetry.LastReportedVersion == s.version {
+		return
+	}
+	s.config.Telemetry.LastReportedVersion = s.version
+	if s.cfgPath != "" {
+		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
+			s.logger.Debug("Failed to persist last_reported_version", zap.Error(err))
+		}
+	}
+}
+
+// BuildPayload renders the heartbeat payload at the current point in time.
+// It is exported so the `mcpproxy telemetry show-payload` command can render
+// the same payload that would next be sent, without making a network call.
+func (s *Service) BuildPayload() HeartbeatPayload {
+	return s.buildHeartbeat()
 }
 
 func (s *Service) buildHeartbeat() HeartbeatPayload {
+	// Spec 042: rotate the anonymous ID if it's older than 365 days.
+	s.maybeRotateAnonymousID(time.Now().UTC())
+
 	payload := HeartbeatPayload{
-		AnonymousID: s.config.GetAnonymousID(),
-		Version:     s.version,
-		Edition:     s.edition,
-		OS:          runtime.GOOS,
-		Arch:        runtime.GOARCH,
-		GoVersion:   runtime.Version(),
-		UptimeHours: int(time.Since(s.startTime).Hours()),
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		AnonymousID:    s.config.GetAnonymousID(),
+		Version:        s.version,
+		Edition:        s.edition,
+		OS:             runtime.GOOS,
+		Arch:           runtime.GOARCH,
+		GoVersion:      runtime.Version(),
+		UptimeHours:    int(time.Since(s.startTime).Hours()),
+		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		SchemaVersion:  SchemaVersion,
+		CurrentVersion: s.version,
+	}
+
+	if s.config.Telemetry != nil {
+		payload.AnonymousIDCreatedAt = s.config.Telemetry.AnonymousIDCreatedAt
+		payload.PreviousVersion = s.config.Telemetry.LastReportedVersion
+		payload.LastStartupOutcome = s.config.Telemetry.LastStartupOutcome
 	}
 
 	if s.stats != nil {
@@ -180,11 +270,30 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.QuarantineEnabled = s.stats.IsQuarantineEnabled()
 	}
 
+	// Spec 042: feature-flag snapshot.
+	payload.FeatureFlags = BuildFeatureFlagSnapshot(s.config)
+
+	// Spec 042: counter snapshot.
+	if s.registry != nil {
+		snap := s.registry.Snapshot()
+		payload.SurfaceRequests = snap.SurfaceCounts
+		payload.BuiltinToolCalls = snap.BuiltinToolCalls
+		payload.UpstreamToolCallCountBucket = snap.UpstreamToolCallCountBucket
+		payload.RESTEndpointCalls = snap.RESTEndpointCalls
+		payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
+		payload.DoctorChecks = snap.DoctorChecks
+	}
+
 	return payload
 }
 
 func (s *Service) ensureAnonymousID() {
 	if s.config.GetAnonymousID() != "" {
+		// Spec 042: legacy installs need created_at initialized for rotation.
+		if s.config.Telemetry != nil && s.config.Telemetry.AnonymousIDCreatedAt == "" {
+			s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
+			s.persistConfig("Initialized anonymous_id_created_at for legacy install")
+		}
 		return
 	}
 
@@ -196,6 +305,7 @@ func (s *Service) ensureAnonymousID() {
 		s.config.Telemetry = &config.TelemetryConfig{}
 	}
 	s.config.Telemetry.AnonymousID = newID
+	s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
 
 	// Save config to disk
 	if s.cfgPath != "" {
@@ -207,6 +317,53 @@ func (s *Service) ensureAnonymousID() {
 				zap.String("id", newID))
 		}
 	}
+}
+
+// maybeRotateAnonymousID rotates the anonymous ID once it's older than 365
+// days. Spec 042 (User Story 8). Clock skew (created_at in the future) is
+// treated as "not yet expired".
+func (s *Service) maybeRotateAnonymousID(now time.Time) {
+	if s.config.Telemetry == nil || s.config.Telemetry.AnonymousID == "" {
+		return
+	}
+	createdAtStr := s.config.Telemetry.AnonymousIDCreatedAt
+	if createdAtStr == "" {
+		// Legacy install — initialize without rotating.
+		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfig("Initialized anonymous_id_created_at")
+		return
+	}
+	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
+	if err != nil {
+		// Corrupt timestamp: reset to now without rotating.
+		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfig("Reset corrupt anonymous_id_created_at")
+		return
+	}
+	if !createdAt.Before(now) {
+		// Future timestamp (clock skew) — do not rotate.
+		return
+	}
+	if now.Sub(createdAt) <= 365*24*time.Hour {
+		return
+	}
+
+	// Rotate.
+	newID := uuid.New().String()
+	s.config.Telemetry.AnonymousID = newID
+	s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+	s.persistConfig("Rotated anonymous_id (annual)")
+}
+
+func (s *Service) persistConfig(reason string) {
+	if s.cfgPath == "" {
+		return
+	}
+	if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
+		s.logger.Debug("Failed to persist telemetry config", zap.String("reason", reason), zap.Error(err))
+		return
+	}
+	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
 }
 
 // isValidSemver checks if the version string is a valid semantic version.
