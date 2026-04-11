@@ -27,6 +27,7 @@ func TestPayloadHasNoForbiddenSubstrings(t *testing.T) {
 	cfg := &config.Config{
 		EnableSocket:           true,
 		EnablePrompts:          true,
+		Features:               &config.FeatureFlags{EnableWebUI: true},
 		RequireMCPAuth:         true,
 		EnableCodeExecution:    true,
 		QuarantineEnabled:      &enabledTrue,

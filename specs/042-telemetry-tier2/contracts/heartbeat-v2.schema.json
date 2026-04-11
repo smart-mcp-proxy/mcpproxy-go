@@ -149,6 +149,7 @@
       "type": "object",
       "required": [
         "enable_web_ui",
+        "enable_prompts",
         "enable_socket",
         "require_mcp_auth",
         "enable_code_execution",
@@ -159,6 +160,7 @@
       "additionalProperties": false,
       "properties": {
         "enable_web_ui":                    { "type": "boolean" },
+        "enable_prompts":                   { "type": "boolean" },
         "enable_socket":                    { "type": "boolean" },
         "require_mcp_auth":                 { "type": "boolean" },
         "enable_code_execution":            { "type": "boolean" },
