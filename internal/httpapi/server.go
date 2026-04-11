@@ -148,6 +148,12 @@ type Server struct {
 	// nil before SetTelemetryRegistry is called; middlewares use the nil-safe
 	// telemetry helpers so the call sites do not need to nil-check.
 	telemetryRegistry *telemetry.CounterRegistry
+
+	// telemetryPayloadProvider returns the live telemetry.Service so the
+	// /api/v1/telemetry/payload endpoint can render the next heartbeat payload
+	// with runtime stats attached. May be nil before SetTelemetryPayloadProvider
+	// is called.
+	telemetryPayloadProvider func() *telemetry.Service
 }
 
 // SetTelemetryRegistry attaches the Tier 2 counter registry. Spec 042. Must
@@ -155,6 +161,13 @@ type Server struct {
 // endpoint counters to populate.
 func (s *Server) SetTelemetryRegistry(reg *telemetry.CounterRegistry) {
 	s.telemetryRegistry = reg
+}
+
+// SetTelemetryPayloadProvider attaches a provider that returns the live
+// telemetry service. Used by the /api/v1/telemetry/payload endpoint to render
+// the next heartbeat payload with runtime stats. Spec 042.
+func (s *Server) SetTelemetryPayloadProvider(fn func() *telemetry.Service) {
+	s.telemetryPayloadProvider = fn
 }
 
 // NewServer creates a new HTTP API server
@@ -546,6 +559,10 @@ func (s *Server) setupRoutes() {
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
 		r.Get("/doctor", s.handleGetDiagnostics) // Alias for consistency with CLI command
+
+		// Telemetry payload preview (Spec 042) — renders the next heartbeat
+		// payload with runtime stats attached. No network call is made.
+		r.Get("/telemetry/payload", s.handleGetTelemetryPayload)
 
 		// Token statistics
 		r.Get("/stats/tokens", s.handleGetTokenStats)
@@ -2658,6 +2675,37 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleGetTelemetryPayload godoc
+// @Summary Preview next telemetry heartbeat payload
+// @Description Render the exact JSON heartbeat payload that mcpproxy would next send to the telemetry endpoint, without making a network call. Counters in the payload reflect the current in-memory state. Spec 042.
+// @Tags telemetry
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse "Telemetry heartbeat payload"
+// @Failure 503 {object} contracts.ErrorResponse "Telemetry service unavailable"
+// @Router /api/v1/telemetry/payload [get]
+func (s *Server) handleGetTelemetryPayload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, r, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if s.telemetryPayloadProvider == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, "telemetry service unavailable")
+		return
+	}
+
+	svc := s.telemetryPayloadProvider()
+	if svc == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, "telemetry service unavailable")
+		return
+	}
+
+	payload := svc.BuildPayload()
+	s.writeSuccess(w, payload)
 }
 
 // handleGetTokenStats godoc

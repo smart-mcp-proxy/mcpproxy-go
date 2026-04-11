@@ -4050,6 +4050,30 @@ paths:
       summary: Get server status
       tags:
       - status
+  /api/v1/telemetry/payload:
+    get:
+      description: Render the exact JSON heartbeat payload that mcpproxy would next
+        send to the telemetry endpoint, without making a network call. Counters in
+        the payload reflect the current in-memory state. Spec 042.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Telemetry heartbeat payload
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Telemetry service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Preview next telemetry heartbeat payload
+      tags:
+      - telemetry
   /api/v1/tool-calls:
     get:
       description: Retrieves paginated tool call history across all upstream servers

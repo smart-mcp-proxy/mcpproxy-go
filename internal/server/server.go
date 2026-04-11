@@ -31,6 +31,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
@@ -1659,6 +1660,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// middlewares record into this.
 		httpAPIServer.SetTelemetryRegistry(ts.Registry())
 	}
+	// Spec 042: provide live telemetry service to /api/v1/telemetry/payload
+	// handler via a closure so `mcpproxy telemetry show-payload` can render
+	// the next heartbeat with runtime stats attached.
+	httpAPIServer.SetTelemetryPayloadProvider(func() *telemetry.Service {
+		return s.runtime.TelemetryService()
+	})
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
 		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
