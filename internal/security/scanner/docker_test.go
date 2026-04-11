@@ -225,3 +225,42 @@ func TestStopContainerEmptyName(t *testing.T) {
 		t.Errorf("StopContainer with empty name should return nil, got: %v", err)
 	}
 }
+
+// TestDockerRunnerDoesNotLeakAmbientSecrets verifies that the scanner's
+// Docker subprocess is invoked with a minimal, allow-listed environment so
+// credentials in the parent process environment (AWS, GitHub, Anthropic,
+// …) cannot leak into containers that run untrusted scanner images.
+func TestDockerRunnerDoesNotLeakAmbientSecrets(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
+	t.Setenv("GITHUB_TOKEN", "ghp_test_dummy_token_1234567890abcdef")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-dummy-not-real")
+
+	logger := zap.NewNop()
+	d := NewDockerRunner(logger)
+
+	cmd := d.getDockerCmd(context.Background(), "version")
+
+	if cmd.Env == nil {
+		t.Fatal("cmd.Env must be explicitly set (non-nil) so it does not inherit os.Environ()")
+	}
+
+	joined := strings.Join(cmd.Env, "\n")
+	forbidden := []string{"AWS_ACCESS_KEY_ID", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"}
+	for _, key := range forbidden {
+		if strings.Contains(joined, key) {
+			t.Errorf("scanner docker command leaked %q into cmd.Env", key)
+		}
+	}
+
+	// PATH must still be present so the docker binary is actually runnable.
+	hasPath := false
+	for _, kv := range cmd.Env {
+		if strings.HasPrefix(kv, "PATH=") {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		t.Error("scanner docker command must retain PATH so 'docker' is discoverable")
+	}
+}

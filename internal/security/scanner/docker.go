@@ -7,14 +7,26 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
-// DockerRunner executes Docker operations for scanner containers
+// DockerRunner executes Docker operations for scanner containers.
+//
+// Security note: the scanner runs untrusted container images (vulnerability
+// scanners, SBOM generators, etc). It MUST NOT inherit the user's ambient
+// credentials (AWS, GitHub, Anthropic tokens, …). We therefore:
+//  1. Resolve the docker binary once via shellwrap.ResolveDockerPath — this
+//     picks up Homebrew / Docker Desktop / Colima installs even when mcpproxy
+//     was launched from a GUI with a minimal PATH, WITHOUT re-spawning a
+//     login shell on every invocation (important for hot paths like the
+//     ~2s health check loop).
+//  2. Invoke docker directly with cmd.Env set to a minimal PATH+HOME
+//     allowlist via shellwrap.MinimalEnv, so environment-based secrets do
+//     not leak into the docker CLI's subprocess tree.
 type DockerRunner struct {
 	logger *zap.Logger
 }
@@ -24,28 +36,25 @@ func NewDockerRunner(logger *zap.Logger) *DockerRunner {
 	return &DockerRunner{logger: logger}
 }
 
-// getDockerCmd creates an exec.Cmd for Docker, inheriting user PATH via login shell
+// getDockerCmd creates an exec.Cmd for Docker with a minimal, allow-listed
+// environment so ambient secrets (AWS creds, GitHub tokens, …) cannot leak
+// into the security scanner's subprocess. The docker binary is resolved once
+// via shellwrap and then cached for the process lifetime.
 func (d *DockerRunner) getDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
-	var commandParts []string
-	commandParts = append(commandParts, "docker")
-	if runtime.GOOS == "windows" {
-		for _, arg := range args {
-			commandParts = append(commandParts, `"`+strings.Trim(arg, `"`)+`"`)
+	dockerBin, err := shellwrap.ResolveDockerPath(d.logger)
+	if err != nil || dockerBin == "" {
+		// Fall back to plain "docker" so exec returns a clear ENOENT the
+		// caller can surface. We still set the minimal env to avoid leaking
+		// secrets even in the error path.
+		dockerBin = "docker"
+		if d.logger != nil {
+			d.logger.Debug("scanner docker: falling back to bare 'docker' lookup",
+				zap.Error(err))
 		}
-		commandString := strings.Join(commandParts, " ")
-		return exec.CommandContext(ctx, "cmd", "/c", commandString)
-	} else {
-		for _, arg := range args {
-			if arg == "" {
-				commandParts = append(commandParts, "''")
-				continue
-			}
-			escaped := "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
-			commandParts = append(commandParts, escaped)
-		}
-		commandString := strings.Join(commandParts, " ")
-		return exec.CommandContext(ctx, "sh", "-l", "-c", commandString)
 	}
+	cmd := exec.CommandContext(ctx, dockerBin, args...)
+	cmd.Env = shellwrap.MinimalEnv()
+	return cmd
 }
 
 // IsDockerAvailable checks if Docker daemon is running
