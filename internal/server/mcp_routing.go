@@ -342,75 +342,19 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),
 	})
 
-	// call_tool_read
-	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
-		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. This is the DEFAULT choice when unsure."),
-		mcp.WithTitleAnnotation("Call Tool (Read)"),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). Use exact names from retrieve_tools results."),
-		),
-		mcp.WithString("args_json",
-			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
-		),
-		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Classify data: public, internal, private, or unknown."),
-		),
-		mcp.WithString("intent_reason",
-			mcp.Description("Why is this tool being called? Provide context."),
-		),
-	)
+	// call_tool_read / call_tool_write / call_tool_destructive — all three
+	// built from the shared helper in mcp.go so schema stays in sync across
+	// the default and retrieve_tools routing modes.
 	tools = append(tools, mcpserver.ServerTool{
-		Tool:    callToolReadTool,
+		Tool:    buildCallToolVariantTool(contracts.ToolVariantRead),
 		Handler: p.handleCallToolRead,
 	})
-
-	// call_tool_write
-	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
-		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit. Use only when explicitly modifying state."),
-		mcp.WithTitleAnnotation("Call Tool (Write)"),
-		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). Use exact names from retrieve_tools results."),
-		),
-		mcp.WithString("args_json",
-			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
-		),
-		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Classify data: public, internal, private, or unknown."),
-		),
-		mcp.WithString("intent_reason",
-			mcp.Description("Why is this modification needed? Provide context."),
-		),
-	)
 	tools = append(tools, mcpserver.ServerTool{
-		Tool:    callToolWriteTool,
+		Tool:    buildCallToolVariantTool(contracts.ToolVariantWrite),
 		Handler: p.handleCallToolWrite,
 	})
-
-	// call_tool_destructive
-	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
-		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. Use this for: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, terminate. Use for irreversible or high-impact operations."),
-		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
-		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). Use exact names from retrieve_tools results."),
-		),
-		mcp.WithString("args_json",
-			mcp.Description("Arguments as JSON string. Refer to the tool's inputSchema from retrieve_tools."),
-		),
-		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Classify data: public, internal, private, or unknown."),
-		),
-		mcp.WithString("intent_reason",
-			mcp.Description("Why is this deletion needed? Provide justification."),
-		),
-	)
 	tools = append(tools, mcpserver.ServerTool{
-		Tool:    callToolDestructiveTool,
+		Tool:    buildCallToolVariantTool(contracts.ToolVariantDestructive),
 		Handler: p.handleCallToolDestructive,
 	})
 

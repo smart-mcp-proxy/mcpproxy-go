@@ -387,6 +387,70 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 	}
 }
 
+// buildCallToolVariantTool constructs the mcp.Tool definition for a single
+// call_tool_* variant (read/write/destructive). Factored out so both
+// registerTools and schema tests exercise the same builder.
+func buildCallToolVariantTool(variant string) mcp.Tool {
+	var description, title, nameExample, sensitivityDesc, reasonDesc string
+	var opts []mcp.ToolOption
+
+	switch variant {
+	case contracts.ToolVariantRead:
+		description = "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."
+		title = "Call Tool (Read)"
+		nameExample = "github:get_user"
+		sensitivityDesc = "Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns."
+		reasonDesc = "Why is this tool being called? Provide context like 'User asked to check status' or 'Gathering data for report'."
+		opts = []mcp.ToolOption{mcp.WithReadOnlyHintAnnotation(true)}
+	case contracts.ToolVariantWrite:
+		description = "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."
+		title = "Call Tool (Write)"
+		nameExample = "github:create_issue"
+		sensitivityDesc = "Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes."
+		reasonDesc = "Why is this modification needed? Provide context like 'User requested update' or 'Fixing reported issue'."
+		opts = []mcp.ToolOption{mcp.WithDestructiveHintAnnotation(false)}
+	case contracts.ToolVariantDestructive:
+		description = "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."
+		title = "Call Tool (Destructive)"
+		nameExample = "github:delete_repo"
+		sensitivityDesc = "Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data."
+		reasonDesc = "Why is this deletion needed? Provide justification like 'User confirmed cleanup' or 'Removing obsolete data'."
+		opts = []mcp.ToolOption{mcp.WithDestructiveHintAnnotation(true)}
+	default:
+		description = "Execute a tool."
+		title = "Call Tool"
+		nameExample = "server:tool"
+		sensitivityDesc = "Classify data sensitivity."
+		reasonDesc = "Why is this tool being called?"
+	}
+
+	allOpts := []mcp.ToolOption{
+		mcp.WithDescription(description),
+		mcp.WithTitleAnnotation(title),
+	}
+	allOpts = append(allOpts, opts...)
+	allOpts = append(allOpts,
+		mcp.WithString("name",
+			mcp.Required(),
+			mcp.Description(fmt.Sprintf("Tool name in format 'server:tool' (e.g., '%s'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.", nameExample)),
+		),
+		mcp.WithObject("args",
+			mcp.Description("Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects."),
+		),
+		mcp.WithString("args_json",
+			mcp.Description("Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility."),
+		),
+		mcp.WithString("intent_data_sensitivity",
+			mcp.Description(sensitivityDesc),
+		),
+		mcp.WithString("intent_reason",
+			mcp.Description(reasonDesc),
+		),
+	)
+
+	return mcp.NewTool(variant, allOpts...)
+}
+
 // registerTools registers all proxy tools with the MCP server
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
@@ -416,69 +480,13 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
 	// that enable granular IDE permission control and require explicit intent declaration.
-
-	// call_tool_read - Read-only operations
-	// NOTE: Intent parameters are flattened (not nested objects) for Gemini 3 Pro compatibility
-	callToolReadTool := mcp.NewTool(contracts.ToolVariantRead,
-		mcp.WithDescription("Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."),
-		mcp.WithTitleAnnotation("Call Tool (Read)"),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:get_user'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail."),
-		),
-		mcp.WithString("args_json",
-			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
-		),
-		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns."),
-		),
-		mcp.WithString("intent_reason",
-			mcp.Description("Why is this tool being called? Provide context like 'User asked to check status' or 'Gathering data for report'."),
-		),
-	)
+	callToolReadTool := buildCallToolVariantTool(contracts.ToolVariantRead)
 	p.server.AddTool(callToolReadTool, p.handleCallToolRead)
 
-	// call_tool_write - State-modifying operations
-	callToolWriteTool := mcp.NewTool(contracts.ToolVariantWrite,
-		mcp.WithDescription("Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."),
-		mcp.WithTitleAnnotation("Call Tool (Write)"),
-		mcp.WithDestructiveHintAnnotation(false),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:create_issue'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail."),
-		),
-		mcp.WithString("args_json",
-			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
-		),
-		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes."),
-		),
-		mcp.WithString("intent_reason",
-			mcp.Description("Why is this modification needed? Provide context like 'User requested update' or 'Fixing reported issue'."),
-		),
-	)
+	callToolWriteTool := buildCallToolVariantTool(contracts.ToolVariantWrite)
 	p.server.AddTool(callToolWriteTool, p.handleCallToolWrite)
 
-	// call_tool_destructive - Irreversible operations
-	callToolDestructiveTool := mcp.NewTool(contracts.ToolVariantDestructive,
-		mcp.WithDescription("Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."),
-		mcp.WithTitleAnnotation("Call Tool (Destructive)"),
-		mcp.WithDestructiveHintAnnotation(true),
-		mcp.WithString("name",
-			mcp.Required(),
-			mcp.Description("Tool name in format 'server:tool' (e.g., 'github:delete_repo'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail."),
-		),
-		mcp.WithString("args_json",
-			mcp.Description("Arguments to pass to the tool as JSON string. Refer to the tool's inputSchema from retrieve_tools for required parameters."),
-		),
-		mcp.WithString("intent_data_sensitivity",
-			mcp.Description("Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data."),
-		),
-		mcp.WithString("intent_reason",
-			mcp.Description("Why is this deletion needed? Provide justification like 'User confirmed cleanup' or 'Removing obsolete data'."),
-		),
-	)
+	callToolDestructiveTool := buildCallToolVariantTool(contracts.ToolVariantDestructive)
 	p.server.AddTool(callToolDestructiveTool, p.handleCallToolDestructive)
 
 	// read_cache - Access paginated data when responses are truncated
