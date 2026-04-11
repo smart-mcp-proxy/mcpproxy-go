@@ -6,11 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
-	"runtime"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
@@ -331,92 +331,28 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	return nil
 }
 
-// wrapWithUserShell wraps a command with the user's login shell to inherit full environment
+// wrapWithUserShell wraps a command with the user's login shell to inherit
+// the full interactive environment. This is a thin wrapper around
+// shellwrap.WrapWithUserShell — the canonical implementation now lives in
+// internal/shellwrap so the security scanner can share it.
+//
+// The client-scoped debug log (with server name) is retained here for
+// continuity with historical log output.
 func (c *Client) wrapWithUserShell(command string, args []string) (shellCommand string, shellArgs []string) {
-	// Get the user's default shell
-	shell, _ := c.envManager.GetSystemEnvVar("SHELL")
-	if shell == "" {
-		// Fallback to common shells based on OS
-		if runtime.GOOS == osWindows {
-			shell = "cmd"
-		} else {
-			shell = pathBinBash // Default fallback
-		}
-	}
-
-	// Build the command string that will be executed by the shell
-	// We need to properly escape the command and arguments for shell execution
-	var commandParts []string
-	commandParts = append(commandParts, shellescape(command))
-	for _, arg := range args {
-		commandParts = append(commandParts, shellescape(arg))
-	}
-	commandString := strings.Join(commandParts, " ")
-
-	// Log what we're doing for debugging
+	shellCommand, shellArgs = shellwrap.WrapWithUserShell(c.logger, command, args)
 	c.logger.Debug("Wrapping command with user shell for full environment inheritance",
 		zap.String("server", c.config.Name),
 		zap.String("original_command", command),
 		zap.Strings("original_args", args),
-		zap.String("shell", shell),
-		zap.String("wrapped_command", commandString))
-
-	// Return shell with appropriate flags
-	// Check if the shell is bash (even on Windows with Git Bash)
-	isBash := strings.Contains(strings.ToLower(shell), "bash") ||
-		strings.Contains(strings.ToLower(shell), "sh")
-
-	if runtime.GOOS == osWindows && !isBash {
-		// Windows cmd.exe uses /c flag to execute command string
-		return shell, []string{"/c", commandString}
-	}
-	// Unix shells (and Git Bash on Windows) use -l (login) flag to load user's full environment
-	// The -c flag executes the command string
-	return shell, []string{"-l", "-c", commandString}
+		zap.String("shell", shellCommand))
+	return shellCommand, shellArgs
 }
 
-// shellescape escapes a string for safe shell execution
+// shellescape is retained as a package-local alias for backward
+// compatibility with existing tests (internal/upstream/core/shell_test.go).
+// It delegates to shellwrap.Shellescape.
 func shellescape(s string) string {
-	if s == "" {
-		if runtime.GOOS == osWindows {
-			return `""`
-		}
-		return "''"
-	}
-
-	// If string contains no special characters, return as-is
-	if runtime.GOOS == osWindows {
-		// Windows cmd.exe special characters
-		if !strings.ContainsAny(s, " \t\n\r\"&|<>()^%") {
-			return s
-		}
-
-		// IMPORTANT: cmd.exe uses DIFFERENT escaping than Unix shells
-		// - Backslash is NOT an escape character in cmd.exe
-		// - To include a literal quote in a quoted string, you must:
-		//   1. End the quoted string
-		//   2. Add an escaped quote (\")
-		//   3. Start a new quoted string
-		//
-		// However, for our use case with cmd /c "command args", we wrap
-		// the entire command line once, and individual components should
-		// NOT contain quotes. If they do, we need special handling.
-		//
-		// Strategy: If string already contains quotes, strip them first
-		// This handles the case where users put quotes in JSON config
-		cleaned := strings.Trim(s, `"`)
-
-		// Now wrap in quotes for cmd.exe
-		// Any remaining internal quotes are from the actual path and will cause issues
-		// For now, we just quote the cleaned string
-		return `"` + cleaned + `"`
-	}
-	// Unix shell special characters
-	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
-		return s
-	}
-	// Use single quotes and escape any single quotes in the string
-	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+	return shellwrap.Shellescape(s)
 }
 
 // hasCommand checks if a command is available in PATH

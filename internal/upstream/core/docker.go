@@ -8,11 +8,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
-// newDockerCmd creates an exec.Cmd for Docker, wrapped in the user's shell to inherit PATH
+// newDockerCmd creates an exec.Cmd for Docker. The docker binary itself is
+// resolved once via shellwrap.ResolveDockerPath (cached process-wide) so
+// that hot paths like checkDockerContainerHealth / GetConnectionDiagnostics
+// — which fire every few seconds — do not re-spawn a login shell to
+// re-read .zshrc/.bashrc on every invocation.
+//
+// If docker cannot be resolved directly (rare: uncommon install layout) we
+// fall back to wrapping with the user's login shell to preserve the
+// original PR's "Docker works when launched from Launchpad" fix.
 func (c *Client) newDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
+	if dockerBin, err := shellwrap.ResolveDockerPath(c.logger); err == nil && dockerBin != "" {
+		cmd := exec.CommandContext(ctx, dockerBin, args...)
+		if c.envManager != nil {
+			cmd.Env = c.envManager.BuildSecureEnvironment()
+		}
+		return cmd
+	}
+
+	// Fallback: login-shell wrap so the child process picks up the full
+	// interactive PATH the user sees in Terminal.
 	shell, shellArgs := c.wrapWithUserShell("docker", args)
 	cmd := exec.CommandContext(ctx, shell, shellArgs...)
 	if c.envManager != nil {
