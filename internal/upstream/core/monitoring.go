@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -312,7 +311,7 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
+		cmd := c.newDockerCmd(ctx, "version", "--format", "{{.Server.Version}}")
 		if err := cmd.Run(); err != nil {
 			diagnostics["docker_daemon_reachable"] = false
 			diagnostics["docker_daemon_error"] = err.Error()
@@ -322,7 +321,7 @@ func (c *Client) GetConnectionDiagnostics() map[string]interface{} {
 
 		// Check if container is still running
 		if c.containerID != "" {
-			inspectCmd := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.State.Running}}", c.containerID)
+			inspectCmd := c.newDockerCmd(ctx, "inspect", "--format", "{{.State.Running}}", c.containerID)
 			if output, err := inspectCmd.Output(); err == nil {
 				diagnostics["container_running"] = strings.TrimSpace(string(output)) == "true"
 			}

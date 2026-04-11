@@ -10,10 +10,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
-// DockerRunner executes Docker operations for scanner containers
+// DockerRunner executes Docker operations for scanner containers.
+//
+// Security note: the scanner runs untrusted container images (vulnerability
+// scanners, SBOM generators, etc). It MUST NOT inherit the user's ambient
+// credentials (AWS, GitHub, Anthropic tokens, …). We therefore:
+//  1. Resolve the docker binary once via shellwrap.ResolveDockerPath — this
+//     picks up Homebrew / Docker Desktop / Colima installs even when mcpproxy
+//     was launched from a GUI with a minimal PATH, WITHOUT re-spawning a
+//     login shell on every invocation (important for hot paths like the
+//     ~2s health check loop).
+//  2. Invoke docker directly with cmd.Env set to a minimal PATH+HOME
+//     allowlist via shellwrap.MinimalEnv, so environment-based secrets do
+//     not leak into the docker CLI's subprocess tree.
 type DockerRunner struct {
 	logger *zap.Logger
 }
@@ -23,9 +36,30 @@ func NewDockerRunner(logger *zap.Logger) *DockerRunner {
 	return &DockerRunner{logger: logger}
 }
 
+// getDockerCmd creates an exec.Cmd for Docker with a minimal, allow-listed
+// environment so ambient secrets (AWS creds, GitHub tokens, …) cannot leak
+// into the security scanner's subprocess. The docker binary is resolved once
+// via shellwrap and then cached for the process lifetime.
+func (d *DockerRunner) getDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
+	dockerBin, err := shellwrap.ResolveDockerPath(d.logger)
+	if err != nil || dockerBin == "" {
+		// Fall back to plain "docker" so exec returns a clear ENOENT the
+		// caller can surface. We still set the minimal env to avoid leaking
+		// secrets even in the error path.
+		dockerBin = "docker"
+		if d.logger != nil {
+			d.logger.Debug("scanner docker: falling back to bare 'docker' lookup",
+				zap.Error(err))
+		}
+	}
+	cmd := exec.CommandContext(ctx, dockerBin, args...)
+	cmd.Env = shellwrap.MinimalEnv()
+	return cmd
+}
+
 // IsDockerAvailable checks if Docker daemon is running
 func (d *DockerRunner) IsDockerAvailable(ctx context.Context) bool {
-	cmd := exec.CommandContext(ctx, "docker", "info")
+	cmd := d.getDockerCmd(ctx, "info")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run() == nil
@@ -34,7 +68,7 @@ func (d *DockerRunner) IsDockerAvailable(ctx context.Context) bool {
 // PullImage pulls a Docker image with progress logging
 func (d *DockerRunner) PullImage(ctx context.Context, image string) error {
 	d.logger.Info("Pulling Docker image", zap.String("image", image))
-	cmd := exec.CommandContext(ctx, "docker", "pull", image)
+	cmd := d.getDockerCmd(ctx, "pull", image)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -46,7 +80,7 @@ func (d *DockerRunner) PullImage(ctx context.Context, image string) error {
 
 // ImageExists checks if a Docker image exists locally
 func (d *DockerRunner) ImageExists(ctx context.Context, image string) bool {
-	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
+	cmd := d.getDockerCmd(ctx, "image", "inspect", image)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run() == nil
@@ -54,7 +88,7 @@ func (d *DockerRunner) ImageExists(ctx context.Context, image string) bool {
 
 // RemoveImage removes a Docker image
 func (d *DockerRunner) RemoveImage(ctx context.Context, image string) error {
-	cmd := exec.CommandContext(ctx, "docker", "rmi", "-f", image)
+	cmd := d.getDockerCmd(ctx, "rmi", "-f", image)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -156,7 +190,7 @@ func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (st
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(runCtx, "docker", args...)
+	cmd := d.getDockerCmd(runCtx, args...)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
@@ -186,7 +220,7 @@ func (d *DockerRunner) KillContainer(ctx context.Context, name string) error {
 	if name == "" {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "kill", name)
+	cmd := d.getDockerCmd(ctx, "kill", name)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run()
@@ -197,7 +231,7 @@ func (d *DockerRunner) StopContainer(ctx context.Context, name string, timeout i
 	if name == "" {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "stop", "-t", fmt.Sprintf("%d", timeout), name)
+	cmd := d.getDockerCmd(ctx, "stop", "-t", fmt.Sprintf("%d", timeout), name)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run()
@@ -224,7 +258,7 @@ func (d *DockerRunner) ReadReportFile(reportDir string) ([]byte, error) {
 
 // GetImageDigest returns the Docker image digest
 func (d *DockerRunner) GetImageDigest(ctx context.Context, image string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", image)
+	cmd := d.getDockerCmd(ctx, "inspect", "--format", "{{.Id}}", image)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {

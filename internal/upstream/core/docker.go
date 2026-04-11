@@ -8,8 +8,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
+
+// newDockerCmd creates an exec.Cmd for Docker. The docker binary itself is
+// resolved once via shellwrap.ResolveDockerPath (cached process-wide) so
+// that hot paths like checkDockerContainerHealth / GetConnectionDiagnostics
+// — which fire every few seconds — do not re-spawn a login shell to
+// re-read .zshrc/.bashrc on every invocation.
+//
+// If docker cannot be resolved directly (rare: uncommon install layout) we
+// fall back to wrapping with the user's login shell to preserve the
+// original PR's "Docker works when launched from Launchpad" fix.
+func (c *Client) newDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
+	if dockerBin, err := shellwrap.ResolveDockerPath(c.logger); err == nil && dockerBin != "" {
+		cmd := exec.CommandContext(ctx, dockerBin, args...)
+		if c.envManager != nil {
+			cmd.Env = c.envManager.BuildSecureEnvironment()
+		}
+		return cmd
+	}
+
+	// Fallback: login-shell wrap so the child process picks up the full
+	// interactive PATH the user sees in Terminal.
+	shell, shellArgs := c.wrapWithUserShell("docker", args)
+	cmd := exec.CommandContext(ctx, shell, shellArgs...)
+	if c.envManager != nil {
+		cmd.Env = c.envManager.BuildSecureEnvironment()
+	}
+	return cmd
+}
 
 // readContainerIDWithContext reads the container ID from cidfile for tracking with context cancellation
 func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string) {
@@ -73,7 +102,7 @@ func (c *Client) readContainerIDWithContext(ctx context.Context, cidFile string)
 
 	// Fallback: Find container by name
 	if c.containerName != "" {
-		listCmd := exec.CommandContext(ctx, "docker", "ps",
+		listCmd := c.newDockerCmd(ctx, "ps",
 			"--filter", fmt.Sprintf("name=^%s$", c.containerName),
 			"--format", "{{.ID}}")
 
@@ -141,7 +170,7 @@ func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 		zap.String("server", c.config.Name),
 		zap.String("container_id", containerID[:12]))
 
-	stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+	stopCmd := c.newDockerCmd(ctx, "stop", containerID)
 	c.logger.Debug("Executing docker stop command",
 		zap.String("server", c.config.Name),
 		zap.String("container_id", containerID[:12]))
@@ -157,7 +186,7 @@ func (c *Client) killDockerContainerWithContext(ctx context.Context) {
 			zap.String("server", c.config.Name),
 			zap.String("container_id", containerID[:12]))
 
-		killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+		killCmd := c.newDockerCmd(ctx, "kill", containerID)
 		c.logger.Debug("Executing docker kill command",
 			zap.String("server", c.config.Name),
 			zap.String("container_id", containerID[:12]))
@@ -242,7 +271,7 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 		zap.String("image_name", imageName))
 
 	// Get list of running containers with image and created time
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "--format", "{{.ID}}\t{{.Image}}\t{{.CreatedAt}}")
+	listCmd := c.newDockerCmd(ctx, "ps", "--format", "{{.ID}}\t{{.Image}}\t{{.CreatedAt}}")
 	output, err := listCmd.Output()
 	if err != nil {
 		c.logger.Error("Failed to list Docker containers for cleanup",
@@ -294,10 +323,10 @@ func (c *Client) killDockerContainerByCommandWithContext(ctx context.Context) {
 		}
 
 		// First try graceful stop
-		stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+		stopCmd := c.newDockerCmd(ctx, "stop", containerID)
 		if err := stopCmd.Run(); err != nil {
 			// Force kill if graceful stop fails
-			killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+			killCmd := c.newDockerCmd(ctx, "kill", containerID)
 			if err := killCmd.Run(); err != nil {
 				c.logger.Error("Failed to kill matching Docker container",
 					zap.String("server", c.config.Name),
@@ -327,7 +356,7 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 		zap.String("name_pattern", namePattern))
 
 	// Get list of containers with name filter
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "name="+namePattern, "--format", "{{.ID}}\t{{.Names}}")
+	listCmd := c.newDockerCmd(ctx, "ps", "-a", "--filter", "name="+namePattern, "--format", "{{.ID}}\t{{.Names}}")
 	output, err := listCmd.Output()
 	if err != nil {
 		c.logger.Debug("Failed to list Docker containers by name pattern",
@@ -380,10 +409,10 @@ func (c *Client) killDockerContainersByNamePatternWithContext(ctx context.Contex
 		}
 
 		// First try graceful stop
-		stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+		stopCmd := c.newDockerCmd(ctx, "stop", containerID)
 		if err := stopCmd.Run(); err != nil {
 			// Force kill if graceful stop fails
-			killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+			killCmd := c.newDockerCmd(ctx, "kill", containerID)
 			if err := killCmd.Run(); err != nil {
 				c.logger.Error("Failed to kill container by name pattern",
 					zap.String("server", c.config.Name),
@@ -411,7 +440,7 @@ func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, conta
 		zap.String("container_name", containerName))
 
 	// Get container ID by exact name match
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a", "--filter", "name=^"+containerName+"$", "--format", "{{.ID}}")
+	listCmd := c.newDockerCmd(ctx, "ps", "-a", "--filter", "name=^"+containerName+"$", "--format", "{{.ID}}")
 	output, err := listCmd.Output()
 	if err != nil {
 		c.logger.Debug("Failed to find Docker container by name",
@@ -441,10 +470,10 @@ func (c *Client) killDockerContainerByNameWithContext(ctx context.Context, conta
 	}
 
 	// First try graceful stop
-	stopCmd := exec.CommandContext(ctx, "docker", "stop", containerID)
+	stopCmd := c.newDockerCmd(ctx, "stop", containerID)
 	if err := stopCmd.Run(); err != nil {
 		// Force kill if graceful stop fails
-		killCmd := exec.CommandContext(ctx, "docker", "kill", containerID)
+		killCmd := c.newDockerCmd(ctx, "kill", containerID)
 		if err := killCmd.Run(); err != nil {
 			c.logger.Error("Failed to kill container by name",
 				zap.String("server", c.config.Name),
@@ -478,7 +507,7 @@ func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
 		zap.String("name_pattern", namePattern))
 
 	// Find ALL containers matching our server (running or stopped)
-	listCmd := exec.CommandContext(ctx, "docker", "ps", "-a",
+	listCmd := c.newDockerCmd(ctx, "ps", "-a",
 		"--filter", "name="+namePattern,
 		"--format", "{{.ID}}\t{{.Names}}\t{{.Status}}")
 
@@ -530,7 +559,7 @@ func (c *Client) ensureNoExistingContainers(ctx context.Context) error {
 			}
 
 			// Force remove (works for running and stopped containers)
-			rmCmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+			rmCmd := c.newDockerCmd(ctx, "rm", "-f", containerID)
 			if err := rmCmd.Run(); err != nil {
 				c.logger.Error("Failed to remove existing container",
 					zap.String("container_id", containerID),
@@ -560,7 +589,7 @@ func (c *Client) checkDockerContainerHealth() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}")
+	cmd := c.newDockerCmd(ctx, "version", "--format", "{{.Server.Version}}")
 	if err := cmd.Run(); err != nil {
 		c.logger.Warn("Docker daemon appears to be unreachable",
 			zap.String("server", c.config.Name),
