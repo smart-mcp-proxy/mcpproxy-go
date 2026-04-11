@@ -30,6 +30,11 @@ func (m *mockRuntimeStats) GetRoutingMode() string       { return m.routingMode 
 func (m *mockRuntimeStats) IsQuarantineEnabled() bool    { return m.quarantine }
 
 func TestHeartbeatSend(t *testing.T) {
+	// Clear env vars that would disable telemetry (GitHub Actions sets CI=true).
+	t.Setenv("CI", "")
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
 	var received atomic.Int32
 	var lastPayload HeartbeatPayload
 
@@ -242,6 +247,11 @@ func TestEnsureAnonymousID(t *testing.T) {
 }
 
 func TestMultipleHeartbeats(t *testing.T) {
+	// Clear env vars that would disable telemetry (GitHub Actions sets CI=true).
+	t.Setenv("CI", "")
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
 	var received atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
