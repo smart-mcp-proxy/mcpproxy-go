@@ -8,6 +8,7 @@
 
 import Foundation
 import AppKit
+import Darwin
 
 // MARK: - Update Service
 
@@ -57,6 +58,33 @@ final class UpdateService: ObservableObject {
         } else {
             checkWithGitHub()
         }
+    }
+
+    /// Returns the release-asset architecture token for the host machine
+    /// ("arm64" on Apple Silicon, "amd64" on Intel). Rosetta-translated
+    /// processes report the underlying Apple Silicon machine so the user
+    /// is offered the native build.
+    static func hostArchToken() -> String {
+        // Detect Rosetta: Intel binary running on Apple Silicon.
+        var translated: Int32 = 0
+        var translatedSize = MemoryLayout<Int32>.size
+        if sysctlbyname("sysctl.proc_translated", &translated, &translatedSize, nil, 0) == 0,
+           translated == 1 {
+            return "arm64"
+        }
+        // Read hw.machine — "arm64" on Apple Silicon, "x86_64" on Intel.
+        var size: size_t = 0
+        sysctlbyname("hw.machine", nil, &size, nil, 0)
+        if size > 0 {
+            var buf = [CChar](repeating: 0, count: size)
+            if sysctlbyname("hw.machine", &buf, &size, nil, 0) == 0 {
+                let machine = String(cString: buf)
+                if machine == "arm64" || machine.hasPrefix("arm") {
+                    return "arm64"
+                }
+            }
+        }
+        return "amd64"
     }
 
     /// Open the download page in the browser.
@@ -109,15 +137,26 @@ final class UpdateService: ObservableObject {
 
                 // Simple version comparison (works for semver)
                 if !remoteVersion.isEmpty && !localVersion.isEmpty && remoteVersion != localVersion {
-                    // Find macOS DMG asset
+                    // Find macOS DMG asset matching the host CPU architecture.
+                    // Release assets are published as:
+                    //   mcpproxy-<ver>-darwin-arm64.dmg / -amd64.dmg            (unsigned)
+                    //   mcpproxy-<ver>-darwin-arm64-installer.dmg / -amd64-installer.dmg  (signed + notarized)
+                    let arch = Self.hostArchToken()
                     var dmgURL = htmlURL
                     if let assets = json["assets"] as? [[String: Any]] {
-                        for asset in assets {
-                            if let name = asset["name"] as? String,
-                               name.contains("darwin") && name.hasSuffix(".dmg") {
-                                dmgURL = asset["browser_download_url"] as? String ?? htmlURL
-                                break
-                            }
+                        let matches: [(name: String, url: String)] = assets.compactMap { asset in
+                            guard let name = asset["name"] as? String,
+                                  let url = asset["browser_download_url"] as? String,
+                                  name.contains("darwin"),
+                                  name.contains(arch),
+                                  name.hasSuffix(".dmg") else { return nil }
+                            return (name, url)
+                        }
+                        // Prefer signed & notarized installer DMG when available.
+                        if let installer = matches.first(where: { $0.name.contains("-installer.dmg") }) {
+                            dmgURL = installer.url
+                        } else if let first = matches.first {
+                            dmgURL = first.url
                         }
                     }
 
