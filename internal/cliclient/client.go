@@ -554,6 +554,50 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 	return apiResp.Data, nil
 }
 
+// GetTelemetryPayload retrieves the next telemetry heartbeat payload that
+// mcpproxy would send, rendered with live runtime stats attached. Spec 042.
+// No network call is made by the daemon — the payload reflects the current
+// in-memory state.
+func (c *Client) GetTelemetryPayload(ctx context.Context) (map[string]interface{}, error) {
+	url := c.baseURL + "/api/v1/telemetry/payload"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call telemetry payload API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool                   `json:"success"`
+		Data      map[string]interface{} `json:"data"`
+		Error     string                 `json:"error"`
+		RequestID string                 `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data, nil
+}
+
 // GetStatus retrieves server status including running state, listen address, and upstream stats.
 func (c *Client) GetStatus(ctx context.Context) (map[string]interface{}, error) {
 	url := c.baseURL + "/api/v1/status"
