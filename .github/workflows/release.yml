@@ -1348,12 +1348,63 @@ jobs:
           echo "Formula created successfully:"
           cat Formula/mcpproxy.rb
 
+      - name: Download installer DMGs and calculate SHA256 for cask
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+
+          for ARCH in arm64 amd64; do
+            DMG="mcpproxy-${VERSION}-darwin-${ARCH}-installer.dmg"
+            URL="${BASE_URL}/${DMG}"
+            echo "Downloading ${DMG}..."
+            for i in {1..5}; do
+              echo "  Attempt ${i}/5..."
+              if curl -fsSL "${URL}" -o "${DMG}"; then
+                echo "  Download successful"
+                break
+              else
+                echo "  Download failed, retrying in 10 seconds..."
+                sleep 10
+              fi
+              if [ $i -eq 5 ]; then
+                echo "All download attempts failed for ${DMG}"
+                curl -I "${URL}" || true
+                exit 1
+              fi
+            done
+            SHA=$(sha256sum "${DMG}" | cut -d' ' -f1)
+            VAR_NAME="SHA256_CASK_$(echo ${ARCH} | tr '[:lower:]' '[:upper:]')"
+            echo "${VAR_NAME}=${SHA}" >> $GITHUB_ENV
+            echo "  SHA256: ${SHA}"
+            rm -f "${DMG}"
+          done
+
+      - name: Update Homebrew cask
+        run: |
+          cd tap
+          mkdir -p Casks
+          CASK_FILE="Casks/mcpproxy.rb"
+
+          if [ ! -f "${CASK_FILE}" ]; then
+            echo "Cask file not found at ${CASK_FILE}, skipping cask update"
+            exit 0
+          fi
+
+          # Bump version and both sha256 values in place
+          sed -i "s/version \"[^\"]*\"/version \"${VERSION}\"/" "${CASK_FILE}"
+          # arm64 sha256 is the first occurrence, amd64 is the second
+          sed -i "0,/sha256 \"[^\"]*\"/{s/sha256 \"[^\"]*\"/sha256 \"${SHA256_CASK_ARM64}\"/}" "${CASK_FILE}"
+          sed -i "0,/sha256 \"${SHA256_CASK_ARM64}\"/{b}; s/sha256 \"[^\"]*\"/sha256 \"${SHA256_CASK_AMD64}\"/" "${CASK_FILE}"
+
+          echo "Cask updated:"
+          cat "${CASK_FILE}"
+
       - name: Commit and push changes
         run: |
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/mcpproxy.rb
+          git add Formula/mcpproxy.rb Casks/mcpproxy.rb
 
           # Check if there are changes to commit
           if git diff --staged --quiet; then
