@@ -1163,11 +1163,17 @@ func OAuthConfigChanged(old, new *OAuthConfig) bool {
 	return false
 }
 
-// TelemetryConfig controls anonymous usage telemetry (Spec 036)
+// TelemetryConfig controls anonymous usage telemetry (Spec 036, extended in Spec 042).
 type TelemetryConfig struct {
 	Enabled     *bool  `json:"enabled,omitempty" mapstructure:"enabled"`           // Default: true (opt-out)
 	AnonymousID string `json:"anonymous_id,omitempty" mapstructure:"anonymous-id"` // Auto-generated UUIDv4
 	Endpoint    string `json:"endpoint,omitempty" mapstructure:"endpoint"`         // Override for testing
+
+	// Spec 042 (Tier 2) additions — all default-zero, all backwards-compatible.
+	AnonymousIDCreatedAt string `json:"anonymous_id_created_at,omitempty" mapstructure:"anonymous-id-created-at"` // RFC3339; for annual rotation
+	LastReportedVersion  string `json:"last_reported_version,omitempty" mapstructure:"last-reported-version"`     // Upgrade funnel
+	LastStartupOutcome   string `json:"last_startup_outcome,omitempty" mapstructure:"last-startup-outcome"`       // success|port_conflict|db_locked|...
+	NoticeShown          bool   `json:"notice_shown,omitempty" mapstructure:"notice-shown"`                       // First-run notice flag
 }
 
 // IsTelemetryEnabled returns whether telemetry is enabled.

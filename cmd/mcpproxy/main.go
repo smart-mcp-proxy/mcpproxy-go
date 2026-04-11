@@ -40,6 +40,7 @@ import (
 	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
@@ -47,6 +48,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	_ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Import generated swagger docs
 )
 
@@ -497,6 +499,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Pass edition and version to internal packages
 	httpapi.SetEdition(Edition)
 	server.SetMCPServerVersion(version)
+	// Spec 042: surface header for outbound CLI HTTP requests.
+	cliclient.SetClientVersion(version)
 
 	// Override other settings from command line
 	cfg.DebugSearch = cmdDebugSearch
@@ -591,7 +595,16 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger)
 	if err != nil {
+		// Spec 042: classify the failure into a startup outcome enum.
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
 		return fmt.Errorf("failed to create server: %w", err)
+	}
+
+	// Spec 042: print the one-time first-run telemetry notice on stderr (if
+	// the user has not already seen it). Persist the flag so we never nag
+	// twice.
+	if telemetry.MaybePrintFirstRunNotice(cfg, os.Stderr) {
+		_ = config.SaveConfig(cfg, actualConfigPath)
 	}
 
 	// Setup signal handling for graceful shutdown
@@ -637,8 +650,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Start the server
 	logger.Info("Starting mcpproxy server")
 	if err := srv.StartServer(ctx); err != nil {
+		// Spec 042: classify the failure into a startup outcome enum.
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
 		return fmt.Errorf("failed to start server: %w", err)
 	}
+	// Spec 042: clean start.
+	recordStartupOutcome(cfg, actualConfigPath, "success")
 
 	// Wait for context to be cancelled
 	<-ctx.Done()

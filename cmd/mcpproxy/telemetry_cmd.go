@@ -6,17 +6,21 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 // TelemetryStatus holds status data for display.
 type TelemetryStatus struct {
-	Enabled     bool   `json:"enabled"`
-	AnonymousID string `json:"anonymous_id,omitempty"`
-	Endpoint    string `json:"endpoint"`
-	EnvOverride bool   `json:"env_override,omitempty"`
+	Enabled         bool   `json:"enabled"`
+	AnonymousID     string `json:"anonymous_id,omitempty"`
+	Endpoint        string `json:"endpoint"`
+	EnvOverride     bool   `json:"env_override,omitempty"`
+	EnvOverrideName string `json:"env_override_name,omitempty"`
 }
 
 // GetTelemetryCommand returns the telemetry management command.
@@ -39,8 +43,41 @@ Examples:
 	telemetryCmd.AddCommand(getTelemetryStatusCommand())
 	telemetryCmd.AddCommand(getTelemetryEnableCommand())
 	telemetryCmd.AddCommand(getTelemetryDisableCommand())
+	telemetryCmd.AddCommand(getTelemetryShowPayloadCommand())
 
 	return telemetryCmd
+}
+
+func getTelemetryShowPayloadCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "show-payload",
+		Short: "Print the next telemetry payload as JSON (no network call)",
+		Long: `Print the exact JSON heartbeat payload that mcpproxy would next
+send to the telemetry endpoint, without making any network call. Counters in
+the payload reflect the current in-memory state. Spec 042.
+
+Use this command to audit what telemetry mcpproxy collects on your install.`,
+		RunE: runTelemetryShowPayload,
+	}
+}
+
+func runTelemetryShowPayload(_ *cobra.Command, _ []string) error {
+	cfg, err := loadTelemetryConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	configPath := config.GetConfigPath(cfg.DataDir)
+
+	// Build a non-running telemetry service. We never call Start, so no
+	// goroutine is launched and no network call is made.
+	svc := telemetry.New(cfg, configPath, httpapi.GetBuildVersion(), Edition, zap.NewNop())
+	payload := svc.BuildPayload()
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal payload: %w", err)
+	}
+	fmt.Println(string(data))
+	return nil
 }
 
 func getTelemetryStatusCommand() *cobra.Command {
@@ -82,8 +119,11 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 		status.AnonymousID = id
 	}
 
-	if os.Getenv("MCPPROXY_TELEMETRY") == "false" {
+	// Spec 042: env vars override config (DO_NOT_TRACK > CI > MCPPROXY_TELEMETRY).
+	if disabled, reason := telemetry.IsDisabledByEnv(); disabled {
 		status.EnvOverride = true
+		status.EnvOverrideName = string(reason)
+		status.Enabled = false
 	}
 
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
@@ -112,7 +152,7 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 		}
 		fmt.Printf("  %-14s %s\n", "Status:", enabledStr)
 		if status.EnvOverride {
-			fmt.Printf("  %-14s %s\n", "Override:", "MCPPROXY_TELEMETRY=false")
+			fmt.Printf("  %-14s %s\n", "Override:", status.EnvOverrideName)
 		}
 		if status.AnonymousID != "" {
 			fmt.Printf("  %-14s %s\n", "Anonymous ID:", status.AnonymousID)

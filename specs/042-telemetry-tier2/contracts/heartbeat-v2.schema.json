@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/schemas/telemetry/heartbeat-v2.json",
+  "title": "MCPProxy Telemetry Heartbeat v2",
+  "description": "Anonymous telemetry payload sent once per 24 hours from mcpproxy installs. Purely additive over v1: v1 fields are preserved.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "anonymous_id",
+    "version",
+    "edition",
+    "os",
+    "arch",
+    "go_version",
+    "server_count",
+    "connected_server_count",
+    "tool_count",
+    "uptime_hours",
+    "routing_mode",
+    "quarantine_enabled",
+    "timestamp",
+    "surface_requests",
+    "builtin_tool_calls",
+    "upstream_tool_call_count_bucket",
+    "rest_endpoint_calls",
+    "feature_flags",
+    "previous_version",
+    "current_version",
+    "error_category_counts",
+    "doctor_checks",
+    "anonymous_id_created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2
+    },
+    "anonymous_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Per-install UUIDv4. Rotated annually."
+    },
+    "anonymous_id_created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 timestamp when the current anonymous_id was generated."
+    },
+    "version": {
+      "type": "string",
+      "description": "Binary version, e.g. v0.21.0"
+    },
+    "current_version": {
+      "type": "string",
+      "description": "Same as version. Included explicitly for upgrade-funnel queries."
+    },
+    "previous_version": {
+      "type": "string",
+      "description": "Last successfully reported version. Empty string on first heartbeat after install."
+    },
+    "edition": {
+      "type": "string",
+      "enum": ["personal", "server"]
+    },
+    "os": {
+      "type": "string",
+      "enum": ["darwin", "linux", "windows", "freebsd", "openbsd", "netbsd"]
+    },
+    "arch": {
+      "type": "string",
+      "enum": ["amd64", "arm64", "386", "arm"]
+    },
+    "go_version": {
+      "type": "string",
+      "pattern": "^go[0-9]+\\.[0-9]+(\\.[0-9]+)?$"
+    },
+    "server_count": { "type": "integer", "minimum": 0 },
+    "connected_server_count": { "type": "integer", "minimum": 0 },
+    "tool_count": { "type": "integer", "minimum": 0 },
+    "uptime_hours": { "type": "integer", "minimum": 0 },
+    "routing_mode": {
+      "type": "string",
+      "enum": ["dynamic", "static"]
+    },
+    "quarantine_enabled": { "type": "boolean" },
+    "timestamp": { "type": "string", "format": "date-time" },
+
+    "surface_requests": {
+      "type": "object",
+      "required": ["mcp", "cli", "webui", "tray", "unknown"],
+      "additionalProperties": false,
+      "properties": {
+        "mcp":     { "type": "integer", "minimum": 0 },
+        "cli":     { "type": "integer", "minimum": 0 },
+        "webui":   { "type": "integer", "minimum": 0 },
+        "tray":    { "type": "integer", "minimum": 0 },
+        "unknown": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "builtin_tool_calls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "retrieve_tools":        { "type": "integer", "minimum": 0 },
+        "call_tool_read":        { "type": "integer", "minimum": 0 },
+        "call_tool_write":       { "type": "integer", "minimum": 0 },
+        "call_tool_destructive": { "type": "integer", "minimum": 0 },
+        "upstream_servers":      { "type": "integer", "minimum": 0 },
+        "quarantine_security":   { "type": "integer", "minimum": 0 },
+        "code_execution":        { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "upstream_tool_call_count_bucket": {
+      "type": "string",
+      "enum": ["0", "1-10", "11-100", "101-1000", "1000+"]
+    },
+
+    "rest_endpoint_calls": {
+      "type": "object",
+      "description": "Map of \"METHOD ROUTE_TEMPLATE\" → status class → count. The literal key UNMATCHED is used for requests that did not match any registered Chi route.",
+      "patternProperties": {
+        "^(UNMATCHED|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) /[^?# ]*$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "2xx": { "type": "integer", "minimum": 0 },
+            "3xx": { "type": "integer", "minimum": 0 },
+            "4xx": { "type": "integer", "minimum": 0 },
+            "5xx": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "^UNMATCHED$": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "2xx": { "type": "integer", "minimum": 0 },
+            "3xx": { "type": "integer", "minimum": 0 },
+            "4xx": { "type": "integer", "minimum": 0 },
+            "5xx": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "feature_flags": {
+      "type": "object",
+      "required": [
+        "enable_web_ui",
+        "enable_socket",
+        "require_mcp_auth",
+        "enable_code_execution",
+        "quarantine_enabled",
+        "sensitive_data_detection_enabled",
+        "oauth_provider_types"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enable_web_ui":                    { "type": "boolean" },
+        "enable_socket":                    { "type": "boolean" },
+        "require_mcp_auth":                 { "type": "boolean" },
+        "enable_code_execution":            { "type": "boolean" },
+        "quarantine_enabled":               { "type": "boolean" },
+        "sensitive_data_detection_enabled": { "type": "boolean" },
+        "oauth_provider_types": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["google", "github", "microsoft", "generic"]
+          }
+        }
+      }
+    },
+
+    "last_startup_outcome": {
+      "type": "string",
+      "enum": [
+        "",
+        "success",
+        "port_conflict",
+        "db_locked",
+        "config_error",
+        "permission_error",
+        "other_error"
+      ]
+    },
+
+    "error_category_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "oauth_refresh_failed":       { "type": "integer", "minimum": 1 },
+        "oauth_token_expired":        { "type": "integer", "minimum": 1 },
+        "upstream_connect_timeout":   { "type": "integer", "minimum": 1 },
+        "upstream_connect_refused":   { "type": "integer", "minimum": 1 },
+        "upstream_handshake_failed":  { "type": "integer", "minimum": 1 },
+        "tool_quarantine_blocked":    { "type": "integer", "minimum": 1 },
+        "docker_pull_failed":         { "type": "integer", "minimum": 1 },
+        "docker_run_failed":          { "type": "integer", "minimum": 1 },
+        "index_rebuild_failed":       { "type": "integer", "minimum": 1 },
+        "config_reload_failed":       { "type": "integer", "minimum": 1 },
+        "socket_bind_failed":         { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "doctor_checks": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_][a-z0-9_]*$": {
+          "type": "object",
+          "required": ["pass", "fail"],
+          "additionalProperties": false,
+          "properties": {
+            "pass": { "type": "integer", "minimum": 0 },
+            "fail": { "type": "integer", "minimum": 0 }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

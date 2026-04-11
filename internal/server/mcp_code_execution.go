@@ -20,6 +20,8 @@ import (
 
 // handleCodeExecution executes JavaScript code that orchestrates multiple upstream tools
 func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	p.recordMCPSurface()
+	p.recordBuiltinTool("code_execution")
 	p.logger.Debug("code_execution tool called")
 
 	// Parse arguments

@@ -25,6 +25,40 @@ type Client struct {
 	logger     *zap.SugaredLogger
 }
 
+// clientVersion holds the build-time version reported in X-MCPProxy-Client.
+// Set via SetClientVersion at process startup. Defaults to "dev" so tests
+// run without an explicit setup step. Spec 042 User Story 1.
+var clientVersion = "dev"
+
+// SetClientVersion sets the version reported in the X-MCPProxy-Client header.
+func SetClientVersion(v string) {
+	if v != "" {
+		clientVersion = v
+	}
+}
+
+// surfaceHeaderTransport wraps another http.RoundTripper to inject the
+// X-MCPProxy-Client header on every outbound request. The header value is
+// "cli/<version>". Spec 042 User Story 1.
+type surfaceHeaderTransport struct {
+	base http.RoundTripper
+}
+
+func (t *surfaceHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("X-MCPProxy-Client") == "" {
+		// Clone the header map so we don't mutate caller-owned state.
+		newHeaders := req.Header.Clone()
+		if newHeaders == nil {
+			newHeaders = http.Header{}
+		}
+		newHeaders.Set("X-MCPProxy-Client", "cli/"+clientVersion)
+		reqCopy := req.Clone(req.Context())
+		reqCopy.Header = newHeaders
+		req = reqCopy
+	}
+	return t.base.RoundTrip(req)
+}
+
 // APIError represents an error from the API that includes request_id for log correlation.
 // T023: Added for CLI error display with request ID
 type APIError struct {
@@ -103,8 +137,10 @@ func NewClientWithAPIKey(endpoint, apiKey string, logger *zap.SugaredLogger) *Cl
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout:   5 * time.Minute, // Generous timeout for long operations
-			Transport: transport,
+			Timeout: 5 * time.Minute, // Generous timeout for long operations
+			// Spec 042: wrap transport so every request carries the
+			// X-MCPProxy-Client: cli/<version> header.
+			Transport: &surfaceHeaderTransport{base: transport},
 		},
 		logger: logger,
 	}

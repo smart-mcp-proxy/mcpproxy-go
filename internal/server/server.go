@@ -1655,6 +1655,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// Wire feedback submitter (Spec 036)
 	if ts := s.runtime.TelemetryService(); ts != nil {
 		httpAPIServer.SetFeedbackSubmitter(ts)
+		// Spec 042: Tier 2 counter registry — surface and REST endpoint
+		// middlewares record into this.
+		httpAPIServer.SetTelemetryRegistry(ts.Registry())
 	}
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {

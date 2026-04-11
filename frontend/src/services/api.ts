@@ -139,6 +139,12 @@ class APIService {
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        // Spec 042: telemetry surface header so the daemon can attribute
+        // requests to the web UI for the surface_requests counter. Version
+        // is intentionally a constant string — the daemon already reports
+        // its own build version separately and we don't want to leak the
+        // browser/UA fingerprint into telemetry.
+        'X-MCPProxy-Client': 'webui/web',
       }
 
       // Merge headers from options if they exist
