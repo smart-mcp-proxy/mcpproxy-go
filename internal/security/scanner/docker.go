@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -23,9 +24,33 @@ func NewDockerRunner(logger *zap.Logger) *DockerRunner {
 	return &DockerRunner{logger: logger}
 }
 
+// getDockerCmd creates an exec.Cmd for Docker, inheriting user PATH via login shell
+func (d *DockerRunner) getDockerCmd(ctx context.Context, args ...string) *exec.Cmd {
+	var commandParts []string
+	commandParts = append(commandParts, "docker")
+	if runtime.GOOS == "windows" {
+		for _, arg := range args {
+			commandParts = append(commandParts, `"`+strings.Trim(arg, `"`)+`"`)
+		}
+		commandString := strings.Join(commandParts, " ")
+		return exec.CommandContext(ctx, "cmd", "/c", commandString)
+	} else {
+		for _, arg := range args {
+			if arg == "" {
+				commandParts = append(commandParts, "''")
+				continue
+			}
+			escaped := "'" + strings.ReplaceAll(arg, "'", "'\"'\"'") + "'"
+			commandParts = append(commandParts, escaped)
+		}
+		commandString := strings.Join(commandParts, " ")
+		return exec.CommandContext(ctx, "sh", "-l", "-c", commandString)
+	}
+}
+
 // IsDockerAvailable checks if Docker daemon is running
 func (d *DockerRunner) IsDockerAvailable(ctx context.Context) bool {
-	cmd := exec.CommandContext(ctx, "docker", "info")
+	cmd := d.getDockerCmd(ctx, "info")
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run() == nil
@@ -34,7 +59,7 @@ func (d *DockerRunner) IsDockerAvailable(ctx context.Context) bool {
 // PullImage pulls a Docker image with progress logging
 func (d *DockerRunner) PullImage(ctx context.Context, image string) error {
 	d.logger.Info("Pulling Docker image", zap.String("image", image))
-	cmd := exec.CommandContext(ctx, "docker", "pull", image)
+	cmd := d.getDockerCmd(ctx, "pull", image)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -46,7 +71,7 @@ func (d *DockerRunner) PullImage(ctx context.Context, image string) error {
 
 // ImageExists checks if a Docker image exists locally
 func (d *DockerRunner) ImageExists(ctx context.Context, image string) bool {
-	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", image)
+	cmd := d.getDockerCmd(ctx, "image", "inspect", image)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run() == nil
@@ -54,7 +79,7 @@ func (d *DockerRunner) ImageExists(ctx context.Context, image string) bool {
 
 // RemoveImage removes a Docker image
 func (d *DockerRunner) RemoveImage(ctx context.Context, image string) error {
-	cmd := exec.CommandContext(ctx, "docker", "rmi", "-f", image)
+	cmd := d.getDockerCmd(ctx, "rmi", "-f", image)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -156,7 +181,7 @@ func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (st
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(runCtx, "docker", args...)
+	cmd := d.getDockerCmd(runCtx, args...)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
@@ -186,7 +211,7 @@ func (d *DockerRunner) KillContainer(ctx context.Context, name string) error {
 	if name == "" {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "kill", name)
+	cmd := d.getDockerCmd(ctx, "kill", name)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run()
@@ -197,7 +222,7 @@ func (d *DockerRunner) StopContainer(ctx context.Context, name string, timeout i
 	if name == "" {
 		return nil
 	}
-	cmd := exec.CommandContext(ctx, "docker", "stop", "-t", fmt.Sprintf("%d", timeout), name)
+	cmd := d.getDockerCmd(ctx, "stop", "-t", fmt.Sprintf("%d", timeout), name)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Run()
@@ -224,7 +249,7 @@ func (d *DockerRunner) ReadReportFile(reportDir string) ([]byte, error) {
 
 // GetImageDigest returns the Docker image digest
 func (d *DockerRunner) GetImageDigest(ctx context.Context, image string) (string, error) {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Id}}", image)
+	cmd := d.getDockerCmd(ctx, "inspect", "--format", "{{.Id}}", image)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
