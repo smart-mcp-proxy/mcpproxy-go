@@ -192,7 +192,7 @@ func runTelemetryEnable(cmd *cobra.Command, _ []string) error {
 	enabled := true
 	cfg.Telemetry.Enabled = &enabled
 
-	configPath := config.GetConfigPath(cfg.DataDir)
+	configPath := telemetryConfigSavePath(cfg)
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -216,7 +216,7 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	disabled := false
 	cfg.Telemetry.Enabled = &disabled
 
-	configPath := config.GetConfigPath(cfg.DataDir)
+	configPath := telemetryConfigSavePath(cfg)
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -244,4 +244,16 @@ func loadTelemetryConfig() (*config.Config, error) {
 		cfg.DataDir = dataDir
 	}
 	return cfg, nil
+}
+
+// telemetryConfigSavePath returns the config path that telemetry subcommands
+// should write to. It mirrors loadTelemetryConfig: when the user passed
+// --config, that exact file is used; otherwise the default derived from
+// DataDir. This fixes a bug where enable/disable always wrote to the default
+// location regardless of --config (pre-existing from PR #345 / Spec 036).
+func telemetryConfigSavePath(cfg *config.Config) string {
+	if configFile != "" {
+		return configFile
+	}
+	return config.GetConfigPath(cfg.DataDir)
 }
