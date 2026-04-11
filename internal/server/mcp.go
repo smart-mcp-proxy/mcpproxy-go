@@ -208,6 +208,14 @@ func NewMCPProxyServer(
 		)
 	})
 
+	// Annotate every tool in tools/list responses with
+	// `_meta.anthropic/maxResultSizeChars`. Claude Code and other clients
+	// that honor this annotation raise their inline-response ceiling from
+	// the default 50k chars up to the declared value (max 500k), so large
+	// upstream tool responses flow through inline instead of being spilled
+	// to disk as a 2KB preview. No-op when config is 0.
+	registerMaxResultSizeHook(hooks, config.MaxResultSizeChars)
+
 	// Create MCP server with capabilities and hooks
 	capabilities := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),

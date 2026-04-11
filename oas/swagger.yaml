@@ -68,6 +68,11 @@ components:
           type: string
         logging:
           $ref: '#/components/schemas/config.LogConfig'
+        max_result_size_chars:
+          description: Advertised on every tool as `_meta.anthropic/maxResultSizeChars`;
+            raises Claude Code's inline-response ceiling from 50k to up to 500k chars.
+            Set to 0 to disable.
+          type: integer
         mcpServers:
           items:
             $ref: '#/components/schemas/config.ServerConfig'
