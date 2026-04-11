@@ -62,7 +62,7 @@ func TestHeartbeatPayloadV2Marshal(t *testing.T) {
 			LastStartupOutcome:   "success",
 		},
 		EnableSocket:        true,
-		EnablePrompts:       false,
+		Features:            &config.FeatureFlags{EnableWebUI: false},
 		RequireMCPAuth:      true,
 		EnableCodeExecution: false,
 	}

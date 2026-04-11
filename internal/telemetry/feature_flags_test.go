@@ -21,7 +21,7 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	enabledTrue := true
 	cfg := &config.Config{
 		EnableSocket:        true,
-		EnablePrompts:       true,
+		Features:            &config.FeatureFlags{EnableWebUI: true},
 		RequireMCPAuth:      false,
 		EnableCodeExecution: true,
 		QuarantineEnabled:   &enabledTrue,
@@ -55,8 +55,8 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	if !snap.EnableSocket {
 		t.Error("EnableSocket should be true")
 	}
-	if !snap.EnablePrompts {
-		t.Error("EnablePrompts should be true")
+	if !snap.EnableWebUI {
+		t.Error("EnableWebUI should be true")
 	}
 	if snap.RequireMCPAuth {
 		t.Error("RequireMCPAuth should be false")
@@ -74,6 +74,22 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	want := []string{"generic", "github", "google"}
 	if !reflect.DeepEqual(snap.OAuthProviderTypes, want) {
 		t.Errorf("OAuthProviderTypes = %v, want %v", snap.OAuthProviderTypes, want)
+	}
+}
+
+func TestBuildFeatureFlagSnapshotNilFeatures(t *testing.T) {
+	// When cfg.Features is nil, EnableWebUI should fall back to false rather
+	// than panic. Guards against a nil-pointer deref in the emitter.
+	cfg := &config.Config{
+		EnableSocket: true,
+		// Features intentionally omitted (nil).
+	}
+	snap := BuildFeatureFlagSnapshot(cfg)
+	if snap == nil {
+		t.Fatal("expected non-nil snapshot")
+	}
+	if snap.EnableWebUI {
+		t.Error("EnableWebUI should be false when cfg.Features is nil")
 	}
 }
 

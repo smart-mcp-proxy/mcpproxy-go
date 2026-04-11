@@ -10,7 +10,7 @@ import (
 // the daily heartbeat. Spec 042 User Story 4.
 type FeatureFlagSnapshot struct {
 	EnableSocket                  bool     `json:"enable_socket"`
-	EnablePrompts                 bool     `json:"enable_prompts"`
+	EnableWebUI                   bool     `json:"enable_web_ui"`
 	RequireMCPAuth                bool     `json:"require_mcp_auth"`
 	EnableCodeExecution           bool     `json:"enable_code_execution"`
 	QuarantineEnabled             bool     `json:"quarantine_enabled"`
@@ -29,10 +29,17 @@ func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 
 	snap := &FeatureFlagSnapshot{
 		EnableSocket:        cfg.EnableSocket,
-		EnablePrompts:       cfg.EnablePrompts,
 		RequireMCPAuth:      cfg.RequireMCPAuth,
 		EnableCodeExecution: cfg.EnableCodeExecution,
 		QuarantineEnabled:   cfg.IsQuarantineEnabled(),
+	}
+	// Read EnableWebUI from the legacy Features block. The Features struct is
+	// flagged as deprecated for runtime purposes, but it is still the canonical
+	// source for user-facing UI toggles and remains the only field that maps
+	// to the heartbeat-v2 `enable_web_ui` signal. Nil-guarded so telemetry
+	// gracefully reports `false` when Features is unset.
+	if cfg.Features != nil { //nolint:staticcheck // SA1019: telemetry reads deprecated Features for the web UI signal.
+		snap.EnableWebUI = cfg.Features.EnableWebUI //nolint:staticcheck // SA1019: see above.
 	}
 
 	if cfg.SensitiveDataDetection != nil {
