@@ -63,10 +63,11 @@ type Config struct {
 	DebugSearch bool            `json:"debug_search" mapstructure:"debug-search"`
 	Servers     []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
-	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
-	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
-	ToolResponseLimit int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
-	CallToolTimeout   Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
+	TopK               int      `json:"top_k,omitempty" mapstructure:"top-k"`
+	ToolsLimit         int      `json:"tools_limit" mapstructure:"tools-limit"`
+	ToolResponseLimit  int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+	CallToolTimeout    Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
+	MaxResultSizeChars int      `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"` // Advertised on every tool as `_meta.anthropic/maxResultSizeChars`; raises Claude Code's inline-response ceiling from 50k to up to 500k chars. Set to 0 to disable.
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -611,14 +612,15 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Listen:            defaultPort,
-		EnableSocket:      true, // Enable Unix socket/named pipe by default for local IPC
-		DataDir:           "",   // Will be set to ~/.mcpproxy by loader
-		DebugSearch:       false,
-		Servers:           []*ServerConfig{},
-		ToolsLimit:        15,
-		ToolResponseLimit: 20000,                     // Default 20000 characters
-		CallToolTimeout:   Duration(2 * time.Minute), // Default 2 minutes for tool calls
+		Listen:             defaultPort,
+		EnableSocket:       true, // Enable Unix socket/named pipe by default for local IPC
+		DataDir:            "",   // Will be set to ~/.mcpproxy by loader
+		DebugSearch:        false,
+		Servers:            []*ServerConfig{},
+		ToolsLimit:         15,
+		ToolResponseLimit:  20000,                     // Default 20000 characters
+		CallToolTimeout:    Duration(2 * time.Minute), // Default 2 minutes for tool calls
+		MaxResultSizeChars: 500000,                    // Claude Code's inline-response hard max
 
 		// Default secure environment configuration
 		Environment: secureenv.DefaultEnvConfig(),
