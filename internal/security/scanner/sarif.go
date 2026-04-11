@@ -464,3 +464,14 @@ func ClassifyAllFindings(findings []ScanFinding) {
 		ClassifyThreat(&findings[i])
 	}
 }
+
+// isSupplyChainAudit reports whether a finding is a real CVE/package vulnerability
+// that should render in the "Supply Chain Audit (CVEs)" UI section. The criteria are
+// intentionally narrow — broad keyword matching (e.g. description contains "vulnerability")
+// would miscategorize AI-scanner output as CVEs.
+func isSupplyChainAudit(f *ScanFinding) bool {
+	if f.PackageName != "" {
+		return true
+	}
+	return strings.HasPrefix(strings.ToLower(f.RuleID), "cve-")
+}

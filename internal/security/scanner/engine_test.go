@@ -62,6 +62,83 @@ func TestAggregateReports(t *testing.T) {
 	}
 }
 
+func TestAggregateReportsSupplyChainAuditFlag(t *testing.T) {
+	reports := []*ScanReport{
+		{
+			ID:        "r1",
+			ScannerID: "trivy-mcp",
+			Findings: []ScanFinding{
+				// CVE-prefixed rule ID → should be flagged.
+				{
+					RuleID:      "CVE-2023-12345",
+					Severity:    SeverityHigh,
+					Title:       "CVE in lodash",
+					Description: "Prototype pollution",
+					PackageName: "lodash",
+					ScanPass:    ScanPassSupplyChainAudit,
+				},
+				// PackageName populated, no CVE prefix → should be flagged.
+				{
+					RuleID:      "GHSA-xxxx-yyyy-zzzz",
+					Severity:    SeverityMedium,
+					Title:       "Known advisory",
+					PackageName: "express",
+					ScanPass:    ScanPassSupplyChainAudit,
+				},
+			},
+		},
+		{
+			ID:        "r2",
+			ScannerID: "mcp-ai-scanner",
+			Findings: []ScanFinding{
+				// AI scanner finding promoted to Pass 2 via full-filesystem rescan.
+				// No CVE prefix, no PackageName → must NOT be flagged as supply chain.
+				{
+					RuleID:      "AI-01-001",
+					Severity:    SeverityHigh,
+					Title:       "get-env dumps process.env",
+					Description: "Data exfiltration via environment dump",
+					Location:    "target/dist/tools/get-env.js",
+					ScanPass:    ScanPassSupplyChainAudit,
+				},
+				// Pass 1 AI finding, also not a CVE.
+				{
+					RuleID:      "AI-02-001",
+					Severity:    SeverityMedium,
+					Title:       "SSRF in gzip-file-as-resource",
+					Description: "Server-side request forgery",
+					Location:    "target/dist/tools/gzip-file-as-resource.js",
+					ScanPass:    ScanPassSecurityScan,
+				},
+			},
+		},
+	}
+
+	agg := AggregateReports("job-supply-chain", "test-server", reports)
+
+	if len(agg.Findings) != 4 {
+		t.Fatalf("expected 4 findings, got %d", len(agg.Findings))
+	}
+
+	byRule := map[string]ScanFinding{}
+	for _, f := range agg.Findings {
+		byRule[f.RuleID] = f
+	}
+
+	if !byRule["CVE-2023-12345"].SupplyChainAudit {
+		t.Error("CVE-prefixed rule should be flagged SupplyChainAudit=true")
+	}
+	if !byRule["GHSA-xxxx-yyyy-zzzz"].SupplyChainAudit {
+		t.Error("finding with PackageName should be flagged SupplyChainAudit=true")
+	}
+	if byRule["AI-01-001"].SupplyChainAudit {
+		t.Error("AI scanner finding (no CVE prefix, no PackageName) must not be flagged as SupplyChainAudit even when ScanPass=2")
+	}
+	if byRule["AI-02-001"].SupplyChainAudit {
+		t.Error("Pass 1 AI finding must not be flagged as SupplyChainAudit")
+	}
+}
+
 func TestAggregateReportsEmpty(t *testing.T) {
 	agg := AggregateReports("job-1", "server", nil)
 	if agg.RiskScore != 0 {

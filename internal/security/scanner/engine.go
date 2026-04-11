@@ -635,6 +635,13 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 	// Classify findings that lack threat_type/threat_level (legacy data)
 	ClassifyAllFindings(agg.Findings)
 
+	// Flag findings that belong in the Supply Chain Audit (CVEs) UI section.
+	// Match only real CVE/package vulnerabilities so AI-scanner output from Pass 2
+	// doesn't get routed into the CVE section.
+	for i := range agg.Findings {
+		agg.Findings[i].SupplyChainAudit = isSupplyChainAudit(&agg.Findings[i])
+	}
+
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
 

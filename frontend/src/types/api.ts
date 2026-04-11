@@ -44,7 +44,7 @@ export interface SecurityScanSummary {
 }
 
 // Security scan finding (Spec 039)
-export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code'
+export type ThreatType = 'tool_poisoning' | 'prompt_injection' | 'rug_pull' | 'supply_chain' | 'malicious_code' | 'uncategorized'
 export type ThreatLevel = 'dangerous' | 'warning' | 'info'
 
 export interface SecurityScanFinding {
@@ -64,6 +64,7 @@ export interface SecurityScanFinding {
   fixed_version?: string        // Version with fix
   scan_pass?: number            // 1 = security scan, 2 = supply chain audit
   evidence?: string             // Text/content that triggered the finding
+  supply_chain_audit?: boolean  // True for real CVE/package findings — routes to the Supply Chain (CVEs) section regardless of scan_pass
 }
 
 export interface SecurityScanReport {

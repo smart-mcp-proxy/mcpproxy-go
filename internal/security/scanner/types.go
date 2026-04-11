@@ -191,6 +191,12 @@ type ScanFinding struct {
 	FixedVersion     string  `json:"fixed_version,omitempty"`     // Version with fix
 	ScanPass         int     `json:"scan_pass,omitempty"`         // 1 = security scan, 2 = supply chain audit
 	Evidence         string  `json:"evidence,omitempty"`          // The text/content that triggered the finding
+	// SupplyChainAudit marks findings that belong in the "Supply Chain Audit (CVEs)"
+	// UI section regardless of which pass produced them. True only for real CVE/package
+	// vulnerabilities (CVE-prefixed rule ID or a populated PackageName). AI scanner and
+	// other non-package findings stay false so the UI can route them to their proper
+	// threat_type group instead of the CVE section.
+	SupplyChainAudit bool `json:"supply_chain_audit,omitempty"`
 }
 
 // ScanReport represents aggregated scan results for a server

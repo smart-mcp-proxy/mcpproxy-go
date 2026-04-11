@@ -251,24 +251,26 @@
         </div>
       </div>
 
-      <!-- Supply Chain Audit (Pass 2) -->
+      <!-- Supply Chain Audit -->
+      <!-- Pass 2 in-progress banner (shown independently of existing findings) -->
       <div v-if="report.pass2_running" class="alert alert-info">
         <span class="loading loading-spinner loading-sm"></span>
         <div>
           <h3 class="font-bold">Supply Chain Audit</h3>
-          <p class="text-sm">Deep dependency analysis running in background. Results will appear here when complete.</p>
+          <p class="text-sm">Deep dependency analysis running in background. Additional CVEs will appear here when complete.</p>
         </div>
       </div>
-      <div v-else-if="report.pass2_complete && pass2Findings.length > 0" class="space-y-4">
+      <!-- CVE/package findings from any pass (flagged by backend) -->
+      <div v-if="supplyChainFindings.length > 0" class="space-y-4">
         <div class="collapse collapse-arrow bg-base-100 shadow-md">
           <input type="checkbox" />
           <div class="collapse-title font-medium flex items-center gap-2">
             <span>Supply Chain Audit (CVEs)</span>
-            <span class="badge badge-sm" :class="pass2HasDangerous ? 'badge-error' : pass2HasWarnings ? 'badge-warning' : 'badge-info'">{{ pass2Findings.length }}</span>
+            <span class="badge badge-sm" :class="supplyChainHasDangerous ? 'badge-error' : supplyChainHasWarnings ? 'badge-warning' : 'badge-info'">{{ supplyChainFindings.length }}</span>
           </div>
           <div class="collapse-content">
             <div class="space-y-2">
-              <div v-for="(finding, idx) in pass2Findings" :key="'p2-' + idx"
+              <div v-for="(finding, idx) in supplyChainFindings" :key="'sc-' + idx"
                 class="collapse collapse-arrow bg-base-200 rounded-lg"
               >
                 <input type="checkbox" />
@@ -344,15 +346,11 @@
           </div>
         </div>
       </div>
-      <div v-else-if="report.pass2_complete && pass2Findings.length === 0"
-        class="alert"
-        :class="pass1SupplyChainCount > 0 ? 'alert-info' : 'alert-success'"
-      >
+      <div v-else-if="report.pass2_complete" class="alert alert-success">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
         </svg>
-        <span v-if="pass1SupplyChainCount > 0">Supply chain audit complete. No additional CVEs beyond the {{ pass1SupplyChainCount }} already reported above.</span>
-        <span v-else>Supply chain audit complete. No CVEs found in dependencies.</span>
+        <span>Supply chain audit complete. No CVEs found in dependencies.</span>
       </div>
 
       <!-- Scanner Execution Logs -->
@@ -520,19 +518,24 @@ const riskScoreClass = computed(() => {
   return 'badge-success'
 })
 
-// Threat type grouping (same logic as ServerDetail.vue)
-const threatTypeLabels: Record<ThreatType, string> = {
+// Threat type grouping. Real CVE/package findings are routed to the dedicated
+// Supply Chain Audit section via the `supply_chain_audit` flag instead of the
+// `supply_chain` threat type, so they are filtered out of `groupedFindings`.
+// 'uncategorized' is rendered as "Other Findings" so AI-scanner output that
+// ClassifyThreat can't pattern-match stays visible instead of silently vanishing.
+const threatTypeLabels: Record<Exclude<ThreatType, 'supply_chain'>, string> = {
   tool_poisoning: 'Tool Poisoning',
   prompt_injection: 'Prompt Injection',
   rug_pull: 'Rug Pull Detection',
-  supply_chain: 'Supply Chain (CVEs)',
   malicious_code: 'Malicious Code',
+  uncategorized: 'Other Findings',
 }
 
-const dangerousTypes: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
+type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
+const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
 
 interface FindingGroup {
-  type: ThreatType
+  type: DisplayThreatType
   label: string
   findings: SecurityScanFinding[]
   defaultOpen: boolean
@@ -542,19 +545,27 @@ interface FindingGroup {
 const groupedFindings = computed<FindingGroup[]>(() => {
   if (!report.value?.findings) return []
 
-  const pass1Findings = report.value.findings.filter(
-    (f: SecurityScanFinding) => !f.scan_pass || f.scan_pass === 1
+  // Pull out CVE/package findings; they render in the Supply Chain Audit section.
+  // Everything else is grouped by threat_type regardless of which pass produced it,
+  // so AI-scanner findings that only surface during the deep Pass 2 scan land in
+  // their proper category instead of the CVE list.
+  const nonCveFindings = report.value.findings.filter(
+    (f: SecurityScanFinding) => !f.supply_chain_audit
   )
 
-  const groups = new Map<ThreatType, SecurityScanFinding[]>()
-  for (const f of pass1Findings) {
-    const type = (f.threat_type || 'supply_chain') as ThreatType
+  const groups = new Map<DisplayThreatType, SecurityScanFinding[]>()
+  for (const f of nonCveFindings) {
+    const rawType = (f.threat_type || 'uncategorized') as ThreatType
+    // Legacy data may still carry threat_type === 'supply_chain' on a non-CVE
+    // finding. Fold it into 'uncategorized' so it stays visible instead of
+    // being silently dropped.
+    const type: DisplayThreatType = rawType === 'supply_chain' ? 'uncategorized' : rawType
     if (!groups.has(type)) groups.set(type, [])
     groups.get(type)!.push(f)
   }
 
   const result: FindingGroup[] = []
-  const typeOrder: ThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'supply_chain']
+  const typeOrder: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'uncategorized']
   for (const type of typeOrder) {
     const findings = groups.get(type)
     if (!findings) continue
@@ -570,24 +581,17 @@ const groupedFindings = computed<FindingGroup[]>(() => {
   return result
 })
 
-const pass1SupplyChainCount = computed(() => {
-  if (!report.value?.findings) return 0
-  return report.value.findings.filter(
-    (f: SecurityScanFinding) => (!f.scan_pass || f.scan_pass === 1) && f.threat_type === 'supply_chain'
-  ).length
-})
-
-const pass2Findings = computed<SecurityScanFinding[]>(() => {
+const supplyChainFindings = computed<SecurityScanFinding[]>(() => {
   if (!report.value?.findings) return []
-  return report.value.findings.filter((f: SecurityScanFinding) => f.scan_pass === 2)
+  return report.value.findings.filter((f: SecurityScanFinding) => f.supply_chain_audit === true)
 })
 
-const pass2HasDangerous = computed(() => {
-  return pass2Findings.value.some(f => f.threat_level === 'dangerous')
+const supplyChainHasDangerous = computed(() => {
+  return supplyChainFindings.value.some(f => f.threat_level === 'dangerous')
 })
 
-const pass2HasWarnings = computed(() => {
-  return pass2Findings.value.some(f => f.threat_level === 'warning')
+const supplyChainHasWarnings = computed(() => {
+  return supplyChainFindings.value.some(f => f.threat_level === 'warning')
 })
 
 function formatDate(dateStr: string): string {
