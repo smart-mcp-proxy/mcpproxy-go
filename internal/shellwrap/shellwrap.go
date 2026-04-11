@@ -191,6 +191,104 @@ func resetDockerPathCacheForTest() {
 	dockerPathErr = nil
 }
 
+// --- Login-shell PATH capture --------------------------------------------
+
+var (
+	loginShellPathOnce sync.Once
+	loginShellPathVal  string
+)
+
+// LoginShellPATH returns the PATH value emitted by the user's login shell.
+// It is captured exactly once per process via
+// `<shell> -l -c 'printf %s "$PATH"'` and cached for the rest of the
+// process lifetime.
+//
+// Why this exists: when mcpproxy runs as a macOS App Bundle or LaunchAgent,
+// os.Getenv("PATH") is often `/usr/bin:/bin`. That is enough for Go's
+// exec.LookPath to find a docker binary once shellwrap.ResolveDockerPath
+// has cached its absolute path, but it is NOT enough for the docker CLI
+// itself, which re-execs credential helpers like `docker-credential-desktop`
+// via its own $PATH lookup. Those helpers typically live in
+// /usr/local/bin or /opt/homebrew/bin — directories that only exist in
+// the interactive login PATH.
+//
+// On Windows, this function returns "" (credential-helper PATH drift is
+// not the same problem there, and interactive-shell PATH capture would
+// require cmd.exe or PowerShell gymnastics we explicitly avoid).
+//
+// Callers should treat an empty return value as "no override available"
+// and fall back to os.Getenv("PATH").
+func LoginShellPATH(logger *zap.Logger) string {
+	loginShellPathOnce.Do(func() {
+		if runtime.GOOS == osWindows {
+			return
+		}
+		shell := resolveLoginShell()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// `-l -c 'printf %s "$PATH"'` works on bash, zsh, dash, sh.
+		// We deliberately build the argv ourselves rather than going
+		// through WrapWithUserShell because shellescape would quote
+		// the `$PATH` and suppress expansion.
+		cmd := exec.CommandContext(ctx, shell, "-l", "-c", `printf %s "$PATH"`)
+		out, err := cmd.Output()
+		if err != nil {
+			if logger != nil {
+				logger.Debug("shellwrap: login-shell PATH capture failed",
+					zap.String("shell", shell),
+					zap.Error(err))
+			}
+			return
+		}
+		captured := strings.TrimSpace(string(out))
+		if captured == "" {
+			return
+		}
+		loginShellPathVal = captured
+		if logger != nil {
+			logger.Debug("shellwrap: captured login-shell PATH",
+				zap.String("shell", shell),
+				zap.Int("path_length", len(captured)))
+		}
+	})
+	return loginShellPathVal
+}
+
+// mergePathUnique joins two PATH-style strings into one, preserving the
+// order of `primary` (highest priority) followed by any entries of
+// `secondary` that were not already present. Empty segments are dropped.
+func mergePathUnique(primary, secondary, sep string) string {
+	if primary == "" {
+		return secondary
+	}
+	if secondary == "" {
+		return primary
+	}
+	seen := make(map[string]struct{}, 16)
+	parts := make([]string, 0, 16)
+	add := func(list string) {
+		for _, p := range strings.Split(list, sep) {
+			if p == "" {
+				continue
+			}
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			parts = append(parts, p)
+		}
+	}
+	add(primary)
+	add(secondary)
+	return strings.Join(parts, sep)
+}
+
+// resetLoginShellPathCacheForTest is only referenced from shellwrap_test.go.
+func resetLoginShellPathCacheForTest() {
+	loginShellPathOnce = sync.Once{}
+	loginShellPathVal = ""
+}
+
 // --- Minimal environment for scanner subprocesses ------------------------
 
 // MinimalEnv returns a minimal, allow-listed environment suitable for
@@ -200,10 +298,28 @@ func resetDockerPathCacheForTest() {
 //
 // Callers that need TLS or Docker-specific variables (DOCKER_HOST,
 // DOCKER_CONFIG, …) should append them explicitly.
+//
+// On Unix, PATH is built by merging the user's login-shell PATH
+// (captured once via LoginShellPATH) with the process's ambient PATH.
+// Login-shell entries come first so that docker's own credential-helper
+// lookups can find binaries installed in /opt/homebrew/bin or
+// /usr/local/bin even when mcpproxy was started from a LaunchAgent with
+// a minimal inherited PATH. See issue #381.
 func MinimalEnv() []string {
+	return minimalEnvWithLogger(nil)
+}
+
+// MinimalEnvWithLogger is MinimalEnv with an optional logger used while
+// capturing the login-shell PATH on the first call. Subsequent calls
+// return the cached value without logging.
+func MinimalEnvWithLogger(logger *zap.Logger) []string {
+	return minimalEnvWithLogger(logger)
+}
+
+func minimalEnvWithLogger(logger *zap.Logger) []string {
 	env := make([]string, 0, 8)
-	if v := os.Getenv("PATH"); v != "" {
-		env = append(env, "PATH="+v)
+	if path := buildMinimalPath(logger); path != "" {
+		env = append(env, "PATH="+path)
 	}
 	if runtime.GOOS == osWindows {
 		if v := os.Getenv("USERPROFILE"); v != "" {
@@ -221,4 +337,21 @@ func MinimalEnv() []string {
 		}
 	}
 	return env
+}
+
+// buildMinimalPath returns the PATH value that MinimalEnv should set on
+// child processes. On Unix it merges the login-shell PATH with ambient
+// PATH so that docker credential helpers (e.g. docker-credential-desktop)
+// installed in /opt/homebrew/bin or /usr/local/bin are resolvable — see
+// issue #381. On Windows it returns the ambient PATH unchanged.
+func buildMinimalPath(logger *zap.Logger) string {
+	ambient := os.Getenv("PATH")
+	if runtime.GOOS == osWindows {
+		return ambient
+	}
+	login := LoginShellPATH(logger)
+	if login == "" {
+		return ambient
+	}
+	return mergePathUnique(login, ambient, string(os.PathListSeparator))
 }
