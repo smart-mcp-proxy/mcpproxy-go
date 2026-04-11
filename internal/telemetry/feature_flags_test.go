@@ -21,6 +21,7 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	enabledTrue := true
 	cfg := &config.Config{
 		EnableSocket:        true,
+		EnablePrompts:       true,
 		Features:            &config.FeatureFlags{EnableWebUI: true},
 		RequireMCPAuth:      false,
 		EnableCodeExecution: true,
@@ -57,6 +58,9 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	}
 	if !snap.EnableWebUI {
 		t.Error("EnableWebUI should be true")
+	}
+	if !snap.EnablePrompts {
+		t.Error("EnablePrompts should be true")
 	}
 	if snap.RequireMCPAuth {
 		t.Error("RequireMCPAuth should be false")

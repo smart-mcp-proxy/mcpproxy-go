@@ -11,6 +11,7 @@ import (
 type FeatureFlagSnapshot struct {
 	EnableSocket                  bool     `json:"enable_socket"`
 	EnableWebUI                   bool     `json:"enable_web_ui"`
+	EnablePrompts                 bool     `json:"enable_prompts"`
 	RequireMCPAuth                bool     `json:"require_mcp_auth"`
 	EnableCodeExecution           bool     `json:"enable_code_execution"`
 	QuarantineEnabled             bool     `json:"quarantine_enabled"`
@@ -29,6 +30,7 @@ func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 
 	snap := &FeatureFlagSnapshot{
 		EnableSocket:        cfg.EnableSocket,
+		EnablePrompts:       cfg.EnablePrompts,
 		RequireMCPAuth:      cfg.RequireMCPAuth,
 		EnableCodeExecution: cfg.EnableCodeExecution,
 		QuarantineEnabled:   cfg.IsQuarantineEnabled(),
