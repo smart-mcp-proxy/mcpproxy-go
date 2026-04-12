@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -195,6 +196,9 @@ func TestCleanDeprecatedFields_InvalidJSON(t *testing.T) {
 }
 
 func TestCleanDeprecatedFields_PreservesFilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix file permissions not applicable on Windows")
+	}
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "mcp_config.json")
 	err := os.WriteFile(cfgPath, []byte(`{"listen": ":8080", "top_k": 5}`), 0600)
@@ -211,6 +215,9 @@ func TestCleanDeprecatedFields_PreservesFilePermissions(t *testing.T) {
 }
 
 func TestCleanDeprecatedFields_ReadOnlyDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory permissions not applicable on Windows")
+	}
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "mcp_config.json")
 	err := os.WriteFile(cfgPath, []byte(`{"listen": ":8080", "top_k": 5}`), 0644)
