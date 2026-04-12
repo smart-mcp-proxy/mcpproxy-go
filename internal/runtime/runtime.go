@@ -188,12 +188,17 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			zap.Int("cleanup_interval_min", cfg.ActivityCleanupIntervalMin))
 	}
 
-	// Log warnings for deprecated config fields
-	if deprecated := config.CheckDeprecatedFields(cfgPath); len(deprecated) > 0 {
-		for _, df := range deprecated {
-			logger.Warn("Deprecated config field",
+	// Auto-clean deprecated config fields (backup created at .bak before modification).
+	if removed, err := config.CleanDeprecatedFields(cfgPath); err != nil {
+		logger.Warn("Failed to auto-clean deprecated config fields", zap.Error(err))
+	} else if len(removed) > 0 {
+		logger.Info("Auto-cleaned deprecated config fields",
+			zap.String("backup", cfgPath+".bak"),
+			zap.Int("fields_removed", len(removed)))
+		for _, df := range removed {
+			logger.Info("Removed deprecated field",
 				zap.String("field", df.JSONKey),
-				zap.String("message", df.Message),
+				zap.String("reason", df.Message),
 				zap.String("replacement", df.Replacement))
 		}
 	}
