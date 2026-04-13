@@ -412,6 +412,12 @@ jobs:
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
+      - name: Build Linux .deb and .rpm packages
+        if: matrix.goos == 'linux'
+        uses: ./.github/actions/build-linux-packages
+        with:
+          goarch: ${{ matrix.goarch }}
+
       - name: Install Inno Setup (Windows)
         if: matrix.goos == 'windows'
         shell: pwsh
@@ -770,6 +776,13 @@ jobs:
           find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
+          done
+
+          # Copy Linux .deb and .rpm packages
+          find dist -path "*/linux-packages-*" \( -name "*.deb" -o -name "*.rpm" \) | while read pkg_file; do
+            filename=$(basename "$pkg_file")
+            echo "Found Linux package: $filename"
+            cp "$pkg_file" "release-files/$filename"
           done
 
           # Copy Windows installer files (.exe)

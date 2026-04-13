@@ -1,0 +1,77 @@
+# nfpm config for MCPProxy Linux packages (.deb, .rpm, .apk)
+#
+# This file is rendered by nfpm at build time. Two environment variables drive it:
+#
+#   NFPM_VERSION : package version, e.g. "0.24.2" (no leading "v")
+#   NFPM_ARCH    : nfpm architecture, "amd64" or "arm64"
+#
+# Build:
+#   NFPM_VERSION=0.24.2 NFPM_ARCH=amd64 \
+#     nfpm package --config packaging/linux/nfpm.yaml --packager deb --target dist/
+#
+# The binary at ./mcpproxy must already be built for the matching arch.
+
+name: mcpproxy
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+section: net
+priority: optional
+maintainer: "MCPProxy Maintainers <hello@mcpproxy.app>"
+description: |
+  Smart proxy for AI agents using the Model Context Protocol (MCP).
+  Provides intelligent tool discovery, token savings, and a built-in
+  security quarantine for upstream MCP servers.
+vendor: "smart-mcp-proxy"
+homepage: "https://mcpproxy.app"
+license: "MIT"
+
+contents:
+  - src: ./mcpproxy
+    dst: /usr/bin/mcpproxy
+    file_info:
+      mode: 0755
+
+  - src: ./packaging/linux/mcpproxy.service
+    dst: /lib/systemd/system/mcpproxy.service
+    file_info:
+      mode: 0644
+
+  - src: ./packaging/linux/mcp_config.json.example
+    dst: /etc/mcpproxy/mcp_config.json.example
+    file_info:
+      mode: 0644
+
+  # Default config — never overwritten on upgrade. The mcpproxy group is
+  # created by the preinstall script before files are unpacked.
+  - src: ./packaging/linux/mcp_config.json.example
+    dst: /etc/mcpproxy/mcp_config.json
+    type: "config|noreplace"
+    file_info:
+      mode: 0640
+      owner: root
+      group: mcpproxy
+
+  - src: ./LICENSE
+    dst: /usr/share/doc/mcpproxy/LICENSE
+    file_info:
+      mode: 0644
+
+  - src: ./README.md
+    dst: /usr/share/doc/mcpproxy/README.md
+    file_info:
+      mode: 0644
+
+scripts:
+  preinstall:  ./packaging/linux/preinstall.sh
+  postinstall: ./packaging/linux/postinstall.sh
+  preremove:   ./packaging/linux/preremove.sh
+  postremove:  ./packaging/linux/postremove.sh
+
+deb:
+  fields:
+    Bugs: "https://github.com/smart-mcp-proxy/mcpproxy-go/issues"
+
+rpm:
+  group: Applications/Internet
+  summary: "Smart proxy for AI agents using the Model Context Protocol"

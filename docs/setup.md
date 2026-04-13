@@ -27,6 +27,18 @@ Download the DMG installer from [GitHub Releases](https://github.com/smart-mcp-p
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
 
+**Linux (Debian / Ubuntu):**
+
+```bash
+VERSION=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest \
+  | grep -oE '"tag_name": *"v[^"]+"' | sed -E 's/.*"v([^"]+)"/\1/')
+ARCH=$(dpkg --print-architecture)
+curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_${VERSION}_${ARCH}.deb"
+sudo apt install "./mcpproxy_${VERSION}_${ARCH}.deb"
+```
+
+The `.deb` ships a systemd unit and starts the service automatically, bound to `127.0.0.1:8080` by default. To reach it from other machines on your LAN, edit `/etc/mcpproxy/mcp_config.json`, switch `listen` to `0.0.0.0:8080`, set a strong `api_key`, and restart the service. See [Installation › Network exposure](/getting-started/installation#network-exposure-localhost-by-default) for the full security checklist, and [Installation › Linux](/getting-started/installation#linux) for `.rpm`, ARM64, and tarball options.
+
 **Go Install:**
 
 ```bash
@@ -85,6 +97,7 @@ MCPProxy looks for configuration in these locations (in order):
 | **macOS**   | `~/.mcpproxy/mcp_config.json`             |
 | **Windows** | `%USERPROFILE%\.mcpproxy\mcp_config.json` |
 | **Linux**   | `~/.mcpproxy/mcp_config.json`             |
+| **Linux (.deb / .rpm)** | `/etc/mcpproxy/mcp_config.json` (system service) |
 
 **Sample Configuration:**
 
