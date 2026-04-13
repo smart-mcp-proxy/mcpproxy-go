@@ -139,7 +139,7 @@ curl -H "X-API-Key: ${API_KEY}" http://<server-ip>:8080/api/v1/status
 
 :::
 
-For a deeper dive on auth, agent tokens, and the security model, see [Configuration › Security Settings](/configuration#security-settings) and the [REST API reference](/api/rest-api).
+For a deeper dive on auth, agent tokens, and the security model, see the [Configuration Reference](/configuration/config-file) and the [REST API reference](/api/rest-api).
 
 ### Fedora / RHEL / CentOS / openSUSE (.rpm)
 
