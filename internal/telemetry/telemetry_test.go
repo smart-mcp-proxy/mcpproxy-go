@@ -214,6 +214,54 @@ func TestIsValidSemver(t *testing.T) {
 	}
 }
 
+func TestNormalizeVersion(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"already prefixed", "v0.24.2", "v0.24.2"},
+		{"missing prefix added", "0.22.0", "v0.22.0"},
+		{"invalid unchanged", "dev", "dev"},
+		{"empty unchanged", "", ""},
+		{"prerelease already prefixed", "v1.2.3-rc.1", "v1.2.3-rc.1"},
+		{"prerelease missing prefix added", "1.2.3-rc.1", "v1.2.3-rc.1"},
+		{"garbage unchanged", "development", "development"},
+		{"latest unchanged", "latest", "latest"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeVersion(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeVersion(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestNewNormalizesVersion verifies that the New constructor applies
+// normalizeVersion to s.version so downstream payloads never see a
+// bare "0.22.0" form.
+func TestNewNormalizesVersion(t *testing.T) {
+	cfg := &config.Config{}
+	logger := zap.NewNop()
+
+	svc := New(cfg, "", "0.22.0", "personal", logger)
+	if svc.version != "v0.22.0" {
+		t.Errorf("Expected s.version=v0.22.0 after normalization, got %q", svc.version)
+	}
+
+	svc2 := New(cfg, "", "v0.22.0", "personal", logger)
+	if svc2.version != "v0.22.0" {
+		t.Errorf("Expected prefixed version to remain v0.22.0, got %q", svc2.version)
+	}
+
+	svc3 := New(cfg, "", "dev", "personal", logger)
+	if svc3.version != "dev" {
+		t.Errorf("Expected invalid 'dev' to remain unchanged, got %q", svc3.version)
+	}
+}
+
 func TestEnsureAnonymousID(t *testing.T) {
 	cfg := &config.Config{}
 
