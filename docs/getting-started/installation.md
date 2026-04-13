@@ -83,6 +83,64 @@ sudo nano /etc/mcpproxy/mcp_config.json   # edit config (then restart)
 sudo systemctl restart mcpproxy
 ```
 
+### Network exposure: localhost by default
+
+Both `.deb` and `.rpm` packages ship a default config that binds **only to `127.0.0.1:8080`** — meaning the service is reachable only from the same machine. This is intentional: MCPProxy proxies tools that can read your filesystem, call paid APIs, and execute code, so a wide-open default would be unsafe.
+
+You can confirm the default in the shipped example:
+
+```bash
+cat /etc/mcpproxy/mcp_config.json
+# {
+#   "listen": "127.0.0.1:8080",
+#   ...
+# }
+```
+
+#### Reaching it from another host on your LAN
+
+If you're installing on a server (a homelab box, a VPS, a Raspberry Pi) and you want other machines to connect to it, you need to do **two** things:
+
+1. **Switch the listen address** from `127.0.0.1:8080` to `0.0.0.0:8080` (all interfaces) or to a specific LAN IP.
+2. **Set an `api_key`** so the REST API and tray-style endpoints aren't anonymously accessible. MCPProxy auto-generates one on first start if you leave the field empty, but for a network-exposed install you should set it explicitly to a strong random value.
+
+Example:
+
+```bash
+# Generate a strong random API key
+API_KEY=$(openssl rand -hex 32)
+
+# Edit the config
+sudo tee /etc/mcpproxy/mcp_config.json >/dev/null <<EOF
+{
+  "listen": "0.0.0.0:8080",
+  "api_key": "${API_KEY}",
+  "data_dir": "/var/lib/mcpproxy",
+  "enable_socket": true,
+  "enable_web_ui": true,
+  "require_mcp_auth": false,
+  "mcpServers": []
+}
+EOF
+
+# Restart so the new bind takes effect
+sudo systemctl restart mcpproxy
+
+# From another machine on the LAN:
+curl -H "X-API-Key: ${API_KEY}" http://<server-ip>:8080/api/v1/status
+```
+
+:::caution Security checklist before exposing on a LAN
+
+- **Always set a non-empty `api_key`.** The REST API enforces it, but a network-reachable instance with an obvious or empty key is one `curl` away from full tool execution.
+- **Put a firewall in front.** If only one workstation needs access, prefer binding to a single LAN IP (e.g. `"listen": "192.168.1.10:8080"`) or restrict port 8080 in `ufw`/`firewalld` to known source addresses.
+- **Consider `require_mcp_auth: true`** if you also want the `/mcp` endpoint to require the API key. It's `false` by default for AI-client compatibility.
+- **Don't expose to the public internet without TLS in front.** Run nginx/Caddy/Traefik as a reverse proxy with HTTPS, or tunnel via Tailscale/WireGuard/SSH. The built-in HTTP server is not designed to be a public ingress.
+
+:::
+
+For a deeper dive on auth, agent tokens, and the security model, see [Configuration › Security Settings](/configuration#security-settings) and the [REST API reference](/api/rest-api).
+
 ### Fedora / RHEL / CentOS / openSUSE (.rpm)
 
 **One-liner (auto-detects latest version):**
@@ -135,8 +193,7 @@ You can then run `mcpproxy serve` directly, or wire up your own systemd unit mod
 | `/lib/systemd/system/mcpproxy.service` | Hardened systemd unit (runs as `mcpproxy` user) |
 | `/etc/mcpproxy/mcp_config.json` | Config (`config|noreplace` — never overwritten on upgrade) |
 | `/etc/mcpproxy/mcp_config.json.example` | Reference example, refreshed on upgrade |
-| `/var/lib/mcpproxy/` | Data dir (BBolt DB, search index) |
-| `/var/log/mcpproxy/` | Log directory |
+| `/var/lib/mcpproxy/` | Data dir (BBolt DB, search index, per-server logs) |
 | `/usr/share/doc/mcpproxy/{LICENSE,README.md}` | Documentation |
 
 The systemd unit launches mcpproxy with `--config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy` and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, and friends.

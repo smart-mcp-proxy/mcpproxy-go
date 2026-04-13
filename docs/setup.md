@@ -37,7 +37,7 @@ curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/downlo
 sudo apt install "./mcpproxy_${VERSION}_${ARCH}.deb"
 ```
 
-The `.deb` ships a systemd unit and starts the service automatically. See [Installation › Linux](/getting-started/installation#linux) for `.rpm`, ARM64, and tarball options.
+The `.deb` ships a systemd unit and starts the service automatically, bound to `127.0.0.1:8080` by default. To reach it from other machines on your LAN, edit `/etc/mcpproxy/mcp_config.json`, switch `listen` to `0.0.0.0:8080`, set a strong `api_key`, and restart the service. See [Installation › Network exposure](/getting-started/installation#network-exposure-localhost-by-default) for the full security checklist, and [Installation › Linux](/getting-started/installation#linux) for `.rpm`, ARM64, and tarball options.
 
 **Go Install:**
 
