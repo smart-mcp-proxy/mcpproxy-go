@@ -94,7 +94,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 	return &Service{
 		config:            cfg,
 		cfgPath:           cfgPath,
-		version:           version,
+		version:           normalizeVersion(version),
 		edition:           edition,
 		endpoint:          cfg.GetTelemetryEndpoint(),
 		logger:            logger,
@@ -376,4 +376,31 @@ func isValidSemver(v string) bool {
 		v = "v" + v
 	}
 	return semver.IsValid(v)
+}
+
+// normalizeVersion ensures semver version strings carry a leading "v" prefix.
+//
+// Official mcpproxy releases embed versions like "v0.22.0", but third-party
+// builds (e.g. custom Dockerfiles using `--build-arg VERSION=0.22.0`) drop the
+// prefix. Without normalization, the telemetry dashboard shows both forms as
+// separate rows. We normalize on the emit side so both collapse into one.
+//
+// Rules:
+//   - Empty string is returned unchanged.
+//   - If the string is already a valid semver with "v" prefix, returned unchanged.
+//   - If the string becomes a valid semver once prefixed, the prefixed form is returned.
+//   - Otherwise (not a valid semver at all, e.g. "dev"), returned unchanged so that
+//     downstream isValidSemver filtering still rejects it and debug logs retain the
+//     original garbage value.
+func normalizeVersion(v string) string {
+	if v == "" {
+		return v
+	}
+	if strings.HasPrefix(v, "v") {
+		return v
+	}
+	if semver.IsValid("v" + v) {
+		return "v" + v
+	}
+	return v
 }
