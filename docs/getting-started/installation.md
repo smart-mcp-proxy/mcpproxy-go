@@ -4,7 +4,7 @@ title: Installation
 sidebar_label: Installation
 sidebar_position: 1
 description: Install MCPProxy on macOS, Windows, or Linux
-keywords: [install, setup, homebrew, dmg, windows, linux]
+keywords: [install, setup, homebrew, dmg, windows, linux, deb, rpm, apt, dnf]
 ---
 
 # Installation
@@ -46,19 +46,76 @@ The installer will:
 
 ## Linux
 
-### Binary Download
+### Debian / Ubuntu (.deb)
 
-Download the appropriate binary for your architecture from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases):
-
-- `mcpproxy-linux-amd64` for x86_64
-- `mcpproxy-linux-arm64` for ARM64
+Download the latest `.deb` from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and install it with `apt`:
 
 ```bash
-# Download and install
-curl -L https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-linux-amd64 -o mcpproxy
-chmod +x mcpproxy
-sudo mv mcpproxy /usr/local/bin/
+# AMD64 (x86_64)
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_<version>_amd64.deb
+sudo apt install ./mcpproxy_<version>_amd64.deb
+
+# ARM64 (Raspberry Pi, AWS Graviton, etc.)
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_<version>_arm64.deb
+sudo apt install ./mcpproxy_<version>_arm64.deb
 ```
+
+The package installs `mcpproxy` to `/usr/bin`, ships a hardened systemd unit at `/lib/systemd/system/mcpproxy.service`, and creates a dedicated `mcpproxy` system user. The service is **enabled and started automatically** on first install. Subsequent upgrades preserve your config and `try-restart` the unit.
+
+After install:
+
+```bash
+sudo systemctl status mcpproxy
+sudo journalctl -u mcpproxy -f      # tail logs
+sudo nano /etc/mcpproxy/mcp_config.json   # edit config (then restart)
+sudo systemctl restart mcpproxy
+```
+
+### Fedora / RHEL / CentOS / openSUSE (.rpm)
+
+```bash
+# AMD64 (x86_64)
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-<version>-1.x86_64.rpm
+sudo dnf install ./mcpproxy-<version>-1.x86_64.rpm
+
+# ARM64 (aarch64)
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-<version>-1.aarch64.rpm
+sudo dnf install ./mcpproxy-<version>-1.aarch64.rpm
+```
+
+The same `systemctl` workflow applies. On systems without `dnf`, use `sudo rpm -i ./mcpproxy-*.rpm` or `sudo zypper install ./mcpproxy-*.rpm`.
+
+### Tarball (any distro)
+
+If you don't want a system service or you're on a distro without `.deb`/`.rpm` support, grab the raw binary tarball:
+
+```bash
+# AMD64
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz
+tar -xzf mcpproxy-latest-linux-amd64.tar.gz
+sudo install -m 0755 mcpproxy /usr/local/bin/
+
+# ARM64
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz
+tar -xzf mcpproxy-latest-linux-arm64.tar.gz
+sudo install -m 0755 mcpproxy /usr/local/bin/
+```
+
+You can then run `mcpproxy serve` directly, or wire up your own systemd unit modelled on the one shipped in the `.deb`/`.rpm`.
+
+### Package layout (.deb / .rpm)
+
+| Path | Purpose |
+|------|---------|
+| `/usr/bin/mcpproxy` | Binary |
+| `/lib/systemd/system/mcpproxy.service` | Hardened systemd unit (runs as `mcpproxy` user) |
+| `/etc/mcpproxy/mcp_config.json` | Config (`config|noreplace` — never overwritten on upgrade) |
+| `/etc/mcpproxy/mcp_config.json.example` | Reference example, refreshed on upgrade |
+| `/var/lib/mcpproxy/` | Data dir (BBolt DB, search index) |
+| `/var/log/mcpproxy/` | Log directory |
+| `/usr/share/doc/mcpproxy/{LICENSE,README.md}` | Documentation |
+
+The systemd unit launches mcpproxy with `--config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy` and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, and friends.
 
 ## Verify Installation
 

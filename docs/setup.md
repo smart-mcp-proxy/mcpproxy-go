@@ -27,6 +27,15 @@ Download the DMG installer from [GitHub Releases](https://github.com/smart-mcp-p
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
 
+**Linux (Debian / Ubuntu):**
+
+```bash
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_<version>_amd64.deb
+sudo apt install ./mcpproxy_<version>_amd64.deb
+```
+
+The `.deb` ships a systemd unit and starts the service automatically. See [Installation › Linux](/getting-started/installation#linux) for `.rpm`, ARM64, and tarball options.
+
 **Go Install:**
 
 ```bash
@@ -85,6 +94,7 @@ MCPProxy looks for configuration in these locations (in order):
 | **macOS**   | `~/.mcpproxy/mcp_config.json`             |
 | **Windows** | `%USERPROFILE%\.mcpproxy\mcp_config.json` |
 | **Linux**   | `~/.mcpproxy/mcp_config.json`             |
+| **Linux (.deb / .rpm)** | `/etc/mcpproxy/mcp_config.json` (system service) |
 
 **Sample Configuration:**
 

@@ -60,8 +60,18 @@ macOS (Homebrew):
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
 
+Linux (Debian/Ubuntu):
+```bash
+sudo apt install ./mcpproxy_<version>_amd64.deb
+```
+Linux (Fedora/RHEL):
+```bash
+sudo dnf install ./mcpproxy-<version>-1.x86_64.rpm
+```
+Both packages ship a hardened `systemd` unit and start the service automatically. Grab `.deb`/`.rpm` for `amd64` and `arm64` from the [latest release](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest).
+
 Manual download (all platforms):
-- **Linux**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
+- **Linux tarball**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)
 - **Windows**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-amd64.zip) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-windows-arm64.zip)
 
 **Prerelease Builds (Latest Features):**
