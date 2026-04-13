@@ -1,0 +1,8 @@
+{
+  "listen": "127.0.0.1:8080",
+  "data_dir": "/var/lib/mcpproxy",
+  "enable_socket": true,
+  "enable_web_ui": true,
+  "require_mcp_auth": false,
+  "mcpServers": []
+}

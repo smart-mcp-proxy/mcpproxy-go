@@ -644,6 +644,37 @@ jobs:
             tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
+      - name: Install nfpm (Linux)
+        if: matrix.goos == 'linux' && matrix.edition != 'server'
+        run: |
+          NFPM_VERSION="2.41.3"
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build .deb and .rpm packages (Linux)
+        if: matrix.goos == 'linux' && matrix.edition != 'server'
+        env:
+          NFPM_ARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF#refs/tags/v}
+          export NFPM_VERSION="${VERSION}"
+
+          mkdir -p linux-packages
+          nfpm package --config packaging/linux/nfpm.yaml --packager deb --target linux-packages/
+          nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target linux-packages/
+
+          echo "=== Built Linux packages ==="
+          ls -la linux-packages/
+
+      - name: Upload Linux packages artifact
+        if: matrix.goos == 'linux' && matrix.edition != 'server'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages-${{ matrix.goarch }}
+          path: linux-packages/*
+
       - name: Install Inno Setup (Windows)
         if: matrix.goos == 'windows'
         shell: pwsh
@@ -1070,6 +1101,13 @@ jobs:
             cp "$file" "release-files/$filename"
           done
 
+          # Copy Linux .deb and .rpm packages
+          find dist -path "*/linux-packages-*" \( -name "*.deb" -o -name "*.rpm" \) | while read pkg_file; do
+            filename=$(basename "$pkg_file")
+            echo "Found Linux package: $filename"
+            cp "$pkg_file" "release-files/$filename"
+          done
+
           # Copy Windows installer files (.exe)
           find dist -path "*/installer-windows-*" -name "*.exe" | while read installer_file; do
             filename=$(basename "$installer_file")
@@ -1144,8 +1182,12 @@ jobs:
             | **macOS (Intel)** | [**Download DMG**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-darwin-amd64-installer.dmg) | Signed & Notarized |
             | **Windows (64-bit)** | [**Download Setup**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-amd64.exe) | Setup wizard |
             | **Windows (ARM64)** | [**Download Setup**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-setup-${{ github.ref_name }}-arm64.exe) | For ARM Windows devices |
-            | **Linux (AMD64)** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz) | Binary package |
-            | **Linux (ARM64)** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz) | For ARM Linux |
+            | **Linux Debian/Ubuntu (AMD64)** | [**Download .deb**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy_${{ env.CLEAN_VERSION }}_amd64.deb) | `sudo apt install ./mcpproxy_*.deb` |
+            | **Linux Debian/Ubuntu (ARM64)** | [**Download .deb**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy_${{ env.CLEAN_VERSION }}_arm64.deb) | For ARM64 (Raspberry Pi etc.) |
+            | **Linux Fedora/RHEL (AMD64)** | [**Download .rpm**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-1.x86_64.rpm) | `sudo dnf install ./mcpproxy-*.rpm` |
+            | **Linux Fedora/RHEL (ARM64)** | [**Download .rpm**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-1.aarch64.rpm) | For ARM64 |
+            | **Linux (AMD64) — tarball** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-amd64.tar.gz) | Binary only |
+            | **Linux (ARM64) — tarball** | [**Download tar.gz**](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/mcpproxy-${{ env.CLEAN_VERSION }}-linux-arm64.tar.gz) | Binary only |
 
             **Homebrew (macOS/Linux):**
             ```bash

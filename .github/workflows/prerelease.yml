@@ -412,6 +412,37 @@ jobs:
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
           fi
 
+      - name: Install nfpm (Linux)
+        if: matrix.goos == 'linux'
+        run: |
+          NFPM_VERSION="2.41.3"
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+          nfpm --version
+
+      - name: Build .deb and .rpm packages (Linux)
+        if: matrix.goos == 'linux'
+        env:
+          NFPM_ARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          VERSION=${GITHUB_REF#refs/tags/v}
+          export NFPM_VERSION="${VERSION}"
+
+          mkdir -p linux-packages
+          nfpm package --config packaging/linux/nfpm.yaml --packager deb --target linux-packages/
+          nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target linux-packages/
+
+          echo "=== Built Linux packages ==="
+          ls -la linux-packages/
+
+      - name: Upload Linux packages artifact
+        if: matrix.goos == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages-${{ matrix.goarch }}
+          path: linux-packages/*
+
       - name: Install Inno Setup (Windows)
         if: matrix.goos == 'windows'
         shell: pwsh
@@ -770,6 +801,13 @@ jobs:
           find dist -name "*.tar.gz" -o -name "*.zip" | while read file; do
             filename=$(basename "$file")
             cp "$file" "release-files/$filename"
+          done
+
+          # Copy Linux .deb and .rpm packages
+          find dist -path "*/linux-packages-*" \( -name "*.deb" -o -name "*.rpm" \) | while read pkg_file; do
+            filename=$(basename "$pkg_file")
+            echo "Found Linux package: $filename"
+            cp "$pkg_file" "release-files/$filename"
           done
 
           # Copy Windows installer files (.exe)
