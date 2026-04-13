@@ -1,0 +1,49 @@
+name: Build Linux .deb and .rpm packages
+description: |
+  Installs nfpm, builds .deb and .rpm packages for the given goarch from
+  the ./mcpproxy binary already present in the working directory, and uploads
+  them as a `linux-packages-<goarch>` artifact.
+
+inputs:
+  goarch:
+    description: Target architecture (amd64 or arm64)
+    required: true
+  nfpm-version:
+    description: nfpm release version (without leading v)
+    required: false
+    default: "2.41.3"
+
+runs:
+  using: composite
+  steps:
+    - name: Install nfpm
+      shell: bash
+      env:
+        NFPM_RELEASE: ${{ inputs.nfpm-version }}
+      run: |
+        set -euo pipefail
+        curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_RELEASE}/nfpm_${NFPM_RELEASE}_Linux_x86_64.tar.gz" \
+          | sudo tar -xz -C /usr/local/bin nfpm
+        nfpm --version
+
+    - name: Build .deb and .rpm packages
+      shell: bash
+      env:
+        NFPM_ARCH: ${{ inputs.goarch }}
+      run: |
+        set -euo pipefail
+        VERSION=${GITHUB_REF#refs/tags/v}
+        export NFPM_VERSION="${VERSION}"
+
+        mkdir -p linux-packages
+        nfpm package --config packaging/linux/nfpm.yaml --packager deb --target linux-packages/
+        nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target linux-packages/
+
+        echo "=== Built Linux packages ==="
+        ls -la linux-packages/
+
+    - name: Upload Linux packages artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: linux-packages-${{ inputs.goarch }}
+        path: linux-packages/*

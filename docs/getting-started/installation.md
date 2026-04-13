@@ -48,16 +48,28 @@ The installer will:
 
 ### Debian / Ubuntu (.deb)
 
-Download the latest `.deb` from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and install it with `apt`:
+Download the latest `.deb` from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and install it with `apt`.
+
+**One-liner (auto-detects latest version):**
+
+```bash
+VERSION=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest \
+  | grep -oE '"tag_name": *"v[^"]+"' | sed -E 's/.*"v([^"]+)"/\1/')
+ARCH=$(dpkg --print-architecture)   # amd64 or arm64
+curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_${VERSION}_${ARCH}.deb"
+sudo apt install "./mcpproxy_${VERSION}_${ARCH}.deb"
+```
+
+**Or pin a specific version:**
 
 ```bash
 # AMD64 (x86_64)
-curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_<version>_amd64.deb
-sudo apt install ./mcpproxy_<version>_amd64.deb
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v0.24.2/mcpproxy_0.24.2_amd64.deb
+sudo apt install ./mcpproxy_0.24.2_amd64.deb
 
 # ARM64 (Raspberry Pi, AWS Graviton, etc.)
-curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_<version>_arm64.deb
-sudo apt install ./mcpproxy_<version>_arm64.deb
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v0.24.2/mcpproxy_0.24.2_arm64.deb
+sudo apt install ./mcpproxy_0.24.2_arm64.deb
 ```
 
 The package installs `mcpproxy` to `/usr/bin`, ships a hardened systemd unit at `/lib/systemd/system/mcpproxy.service`, and creates a dedicated `mcpproxy` system user. The service is **enabled and started automatically** on first install. Subsequent upgrades preserve your config and `try-restart` the unit.
@@ -73,14 +85,26 @@ sudo systemctl restart mcpproxy
 
 ### Fedora / RHEL / CentOS / openSUSE (.rpm)
 
+**One-liner (auto-detects latest version):**
+
+```bash
+VERSION=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest \
+  | grep -oE '"tag_name": *"v[^"]+"' | sed -E 's/.*"v([^"]+)"/\1/')
+ARCH=$(uname -m)   # x86_64 or aarch64
+curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-${VERSION}-1.${ARCH}.rpm"
+sudo dnf install "./mcpproxy-${VERSION}-1.${ARCH}.rpm"
+```
+
+**Or pin a specific version:**
+
 ```bash
 # AMD64 (x86_64)
-curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-<version>-1.x86_64.rpm
-sudo dnf install ./mcpproxy-<version>-1.x86_64.rpm
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v0.24.2/mcpproxy-0.24.2-1.x86_64.rpm
+sudo dnf install ./mcpproxy-0.24.2-1.x86_64.rpm
 
 # ARM64 (aarch64)
-curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-<version>-1.aarch64.rpm
-sudo dnf install ./mcpproxy-<version>-1.aarch64.rpm
+curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v0.24.2/mcpproxy-0.24.2-1.aarch64.rpm
+sudo dnf install ./mcpproxy-0.24.2-1.aarch64.rpm
 ```
 
 The same `systemctl` workflow applies. On systems without `dnf`, use `sudo rpm -i ./mcpproxy-*.rpm` or `sudo zypper install ./mcpproxy-*.rpm`.

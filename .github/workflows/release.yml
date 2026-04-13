@@ -644,36 +644,11 @@ jobs:
             tar -czf "${LATEST_ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
-      - name: Install nfpm (Linux)
+      - name: Build Linux .deb and .rpm packages
         if: matrix.goos == 'linux' && matrix.edition != 'server'
-        run: |
-          NFPM_VERSION="2.41.3"
-          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin nfpm
-          nfpm --version
-
-      - name: Build .deb and .rpm packages (Linux)
-        if: matrix.goos == 'linux' && matrix.edition != 'server'
-        env:
-          NFPM_ARCH: ${{ matrix.goarch }}
-        run: |
-          set -euo pipefail
-          VERSION=${GITHUB_REF#refs/tags/v}
-          export NFPM_VERSION="${VERSION}"
-
-          mkdir -p linux-packages
-          nfpm package --config packaging/linux/nfpm.yaml --packager deb --target linux-packages/
-          nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target linux-packages/
-
-          echo "=== Built Linux packages ==="
-          ls -la linux-packages/
-
-      - name: Upload Linux packages artifact
-        if: matrix.goos == 'linux' && matrix.edition != 'server'
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/build-linux-packages
         with:
-          name: linux-packages-${{ matrix.goarch }}
-          path: linux-packages/*
+          goarch: ${{ matrix.goarch }}
 
       - name: Install Inno Setup (Windows)
         if: matrix.goos == 'windows'

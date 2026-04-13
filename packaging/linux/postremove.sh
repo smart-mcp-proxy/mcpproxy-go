@@ -6,7 +6,7 @@ ACTION="${1:-}"
 case "$ACTION" in
     purge)
         # Debian purge: remove data and the service user
-        rm -rf /var/lib/mcpproxy /var/log/mcpproxy /etc/mcpproxy
+        rm -rf /var/lib/mcpproxy /etc/mcpproxy
         if getent passwd mcpproxy >/dev/null 2>&1; then
             userdel mcpproxy || true
         fi

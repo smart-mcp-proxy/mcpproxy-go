@@ -42,12 +42,15 @@ contents:
     file_info:
       mode: 0644
 
-  # Default config — never overwritten on upgrade
+  # Default config — never overwritten on upgrade. The mcpproxy group is
+  # created by the preinstall script before files are unpacked.
   - src: ./packaging/linux/mcp_config.json.example
     dst: /etc/mcpproxy/mcp_config.json
     type: "config|noreplace"
     file_info:
       mode: 0640
+      owner: root
+      group: mcpproxy
 
   - src: ./LICENSE
     dst: /usr/share/doc/mcpproxy/LICENSE
@@ -60,6 +63,7 @@ contents:
       mode: 0644
 
 scripts:
+  preinstall:  ./packaging/linux/preinstall.sh
   postinstall: ./packaging/linux/postinstall.sh
   preremove:   ./packaging/linux/preremove.sh
   postremove:  ./packaging/linux/postremove.sh

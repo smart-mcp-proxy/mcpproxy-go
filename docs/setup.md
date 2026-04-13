@@ -30,8 +30,11 @@ brew install smart-mcp-proxy/mcpproxy/mcpproxy
 **Linux (Debian / Ubuntu):**
 
 ```bash
-curl -LO https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_<version>_amd64.deb
-sudo apt install ./mcpproxy_<version>_amd64.deb
+VERSION=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest \
+  | grep -oE '"tag_name": *"v[^"]+"' | sed -E 's/.*"v([^"]+)"/\1/')
+ARCH=$(dpkg --print-architecture)
+curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_${VERSION}_${ARCH}.deb"
+sudo apt install "./mcpproxy_${VERSION}_${ARCH}.deb"
 ```
 
 The `.deb` ships a systemd unit and starts the service automatically. See [Installation › Linux](/getting-started/installation#linux) for `.rpm`, ARM64, and tarball options.
