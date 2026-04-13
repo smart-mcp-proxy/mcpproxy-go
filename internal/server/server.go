@@ -1681,6 +1681,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
+		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerDisableNoNewPrivileges {
+			secService.SetScannerDisableNoNewPrivileges(true)
+		}
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
 		secService.SetServerUnquarantiner(&serverUnquarantinerAdapter{server: s})
