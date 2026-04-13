@@ -111,75 +111,110 @@ type ScannerRunConfig struct {
 	ReadOnly      bool              // Read-only root filesystem
 	MemoryLimit   string            // e.g., "512m"
 	ExtraMounts   []string          // Additional -v mounts (e.g., "~/.claude:/app/.claude:ro")
+
+	// DisableNoNewPrivileges, when true, omits the
+	// `--security-opt no-new-privileges` flag. Required on hosts running
+	// snap-installed Docker where the AppArmor profile transition would
+	// otherwise fail with "operation not permitted". See
+	// SecurityConfig.ScannerDisableNoNewPrivileges in internal/config.
+	DisableNoNewPrivileges bool
 }
 
-// RunScanner runs a scanner container and returns the exit code and stdout/stderr
-func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (stdout, stderr string, exitCode int, err error) {
+// buildRunArgs assembles the `docker run ...` argument list for a scanner
+// container. Extracted from RunScanner so the argument logic is unit-testable
+// without invoking the docker binary.
+func buildRunArgs(cfg ScannerRunConfig) []string {
 	args := []string{"run", "--rm"}
 
-	// Container name
 	if cfg.ContainerName != "" {
 		args = append(args, "--name", cfg.ContainerName)
 	}
-
-	// Read-only root filesystem
 	if cfg.ReadOnly {
 		args = append(args, "--read-only")
 	}
-
-	// Network mode
 	if cfg.NetworkMode != "" {
 		args = append(args, "--network", cfg.NetworkMode)
 	}
-
-	// Memory limit
 	if cfg.MemoryLimit != "" {
 		args = append(args, "--memory", cfg.MemoryLimit)
 	}
 
-	// Security: no new privileges
-	args = append(args, "--security-opt", "no-new-privileges")
+	// Security: no new privileges. Intentionally omitted on hosts where
+	// snap-docker + AppArmor would otherwise deny the container entrypoint
+	// exec (EPERM). The scanner container still benefits from read-only fs,
+	// tmpfs /tmp, no-net default, and read-only source mounts, so dropping
+	// this single flag is an acceptable tradeoff for the affected users.
+	if !cfg.DisableNoNewPrivileges {
+		args = append(args, "--security-opt", "no-new-privileges")
+	}
 
 	// Tmpfs for temp files (500MB to accommodate scanner DB downloads like Trivy ~90MB)
 	args = append(args, "--tmpfs", "/tmp:rw,nosuid,size=500m")
 
-	// Mount source directory read-only
 	if cfg.SourceDir != "" {
 		args = append(args, "-v", cfg.SourceDir+":/scan/source:ro")
 		// Also mount at /src for scanners that expect it (e.g., Semgrep Docker image)
 		args = append(args, "-v", cfg.SourceDir+":/src:ro")
 	}
-
-	// Mount report directory writable
 	if cfg.ReportDir != "" {
 		args = append(args, "-v", cfg.ReportDir+":/scan/report:rw")
 	}
-
-	// Mount cache directory (persists scanner DB downloads between runs)
 	if cfg.CacheDir != "" {
 		args = append(args, "-v", cfg.CacheDir+":/root/.cache:rw")
 	}
-
-	// Extra mounts (e.g., Claude credentials for AI scanner)
 	for _, mount := range cfg.ExtraMounts {
 		args = append(args, "-v", mount)
 	}
-
-	// Environment variables
 	for k, v := range cfg.Env {
 		args = append(args, "-e", k+"="+v)
 	}
 
-	// Image
 	args = append(args, cfg.Image)
-
-	// Command
 	args = append(args, cfg.Command...)
+	return args
+}
+
+// ClassifyScannerExecFailure inspects a scanner's stderr and exit code and
+// returns a human-readable remediation hint when the failure matches a
+// well-known environment incompatibility. Returns an empty string when the
+// stderr does not match a known pattern.
+//
+// Currently recognised:
+//   - snap-docker × AppArmor × no-new-privileges: runc reports
+//     "exec /usr/local/bin/...: operation not permitted" (exit 255) when
+//     the dockerd snap profile blocks the inner profile transition.
+func ClassifyScannerExecFailure(stderr string, exitCode int) string {
+	if exitCode != 255 {
+		return ""
+	}
+	// runc prints "exec <path>: operation not permitted" when AppArmor
+	// denies the entrypoint exec. Match loosely so we catch variants like
+	// "exec /app/run.sh: operation not permitted" too.
+	if !strings.Contains(stderr, "operation not permitted") {
+		return ""
+	}
+	if !strings.Contains(stderr, "exec ") {
+		return ""
+	}
+	return "container exec was denied by the host (likely AppArmor on " +
+		"snap-installed Docker). Fix options: (1) replace snap docker with " +
+		"your distro's docker package (e.g. `sudo snap remove docker && " +
+		"sudo apt install docker.io`), or (2) set " +
+		"`security.scanner_disable_no_new_privileges: true` in your " +
+		"mcpproxy config to drop the `--security-opt no-new-privileges` " +
+		"flag, which restores the AppArmor profile transition at the cost " +
+		"of a small isolation reduction."
+}
+
+// RunScanner runs a scanner container and returns the exit code and stdout/stderr
+func (d *DockerRunner) RunScanner(ctx context.Context, cfg ScannerRunConfig) (stdout, stderr string, exitCode int, err error) {
+	args := buildRunArgs(cfg)
 
 	d.logger.Info("Running scanner container",
 		zap.String("name", cfg.ContainerName),
 		zap.String("image", cfg.Image),
 		zap.Strings("command", cfg.Command),
+		zap.Bool("no_new_privileges_disabled", cfg.DisableNoNewPrivileges),
 	)
 
 	// Create context with timeout

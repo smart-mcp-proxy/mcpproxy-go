@@ -137,6 +137,22 @@ func (s *Service) SetEmitter(emitter EventEmitter) {
 	s.emitter.Store(&emitter)
 }
 
+// SetScannerDisableNoNewPrivileges controls whether scanner containers are
+// launched without `--security-opt no-new-privileges`. This is the runtime
+// knob for SecurityConfig.ScannerDisableNoNewPrivileges. See the config
+// field doc for background on why a user might need to enable this.
+func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
+	if s.engine == nil {
+		return
+	}
+	s.engine.disableNoNewPrivileges = disable
+	if disable {
+		s.logger.Warn("Scanner containers will run WITHOUT --security-opt no-new-privileges " +
+			"(security.scanner_disable_no_new_privileges=true). This is a workaround for " +
+			"snap-docker + AppArmor hosts; prefer replacing snap docker with a distro package.")
+	}
+}
+
 // emit returns the most recently configured EventEmitter. Always returns a
 // non-nil value; callers can invoke methods on it directly.
 func (s *Service) emit() EventEmitter {

@@ -398,6 +398,24 @@ components:
           type: string
         scan_timeout_default:
           type: string
+        scanner_disable_no_new_privileges:
+          description: |-
+            ScannerDisableNoNewPrivileges, when true, omits the
+            `--security-opt no-new-privileges` flag from scanner container runs.
+
+            Background: snap-installed Docker on Ubuntu confines dockerd under the
+            `snap.docker.dockerd` AppArmor profile. When runc tries to transition
+            the container into the inner `docker-default` profile to exec the
+            entrypoint, AppArmor refuses the transition because NO_NEW_PRIVS
+            forbids privilege/profile changes on exec — the result is EPERM
+            ("operation not permitted") and every scanner fails immediately.
+
+            Set this to true ONLY on hosts hitting that incompatibility. Scanner
+            containers still run with read-only rootfs, tmpfs /tmp, no-network by
+            default, and read-only source mounts, so the marginal isolation loss
+            is small. The preferred fix remains replacing snap docker with a
+            distro-packaged docker.
+          type: boolean
         scanner_registry_url:
           type: string
       type: object

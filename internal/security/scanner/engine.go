@@ -24,6 +24,13 @@ type Engine struct {
 	dataDir        string
 	secretResolver SecretResolverFunc
 
+	// disableNoNewPrivileges controls whether scanner containers are
+	// launched with `--security-opt no-new-privileges`. Default (false)
+	// preserves the historical hardened behaviour; set to true via
+	// Service.SetScannerDisableNoNewPrivileges on hosts where the snap
+	// docker × AppArmor transition would otherwise deny entrypoint exec.
+	disableNoNewPrivileges bool
+
 	// Track active scans (one per server)
 	mu          sync.Mutex
 	activeScans map[string]*ScanJob // keyed by server name
@@ -442,18 +449,19 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 
 	// Run scanner container
 	cfg := ScannerRunConfig{
-		ContainerName: GenerateContainerName(s.ID, req.ServerName),
-		Image:         s.EffectiveImage(),
-		Command:       s.Command,
-		Env:           env,
-		SourceDir:     req.SourceDir,
-		ReportDir:     reportDir,
-		CacheDir:      cacheDir,
-		NetworkMode:   networkMode,
-		Timeout:       timeout,
-		ReadOnly:      false, // Scanner containers need to write cache/temp files
-		MemoryLimit:   "512m",
-		ExtraMounts:   extraMounts,
+		ContainerName:          GenerateContainerName(s.ID, req.ServerName),
+		Image:                  s.EffectiveImage(),
+		Command:                s.Command,
+		Env:                    env,
+		SourceDir:              req.SourceDir,
+		ReportDir:              reportDir,
+		CacheDir:               cacheDir,
+		NetworkMode:            networkMode,
+		Timeout:                timeout,
+		ReadOnly:               false, // Scanner containers need to write cache/temp files
+		MemoryLimit:            "512m",
+		ExtraMounts:            extraMounts,
+		DisableNoNewPrivileges: e.disableNoNewPrivileges,
 	}
 
 	stdout, stderr, exitCode, err := e.docker.RunScanner(ctx, cfg)
@@ -479,6 +487,18 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		if len(stdout) > 0 {
 			reportData = []byte(stdout)
 		} else {
+			// When the container never produced output, check for known
+			// host-side failure modes (e.g. snap-docker + AppArmor denying
+			// entrypoint exec) and surface a remediation hint so the user
+			// is not left staring at a bare "operation not permitted".
+			if hint := ClassifyScannerExecFailure(stderr, exitCode); hint != "" {
+				e.logger.Warn("Scanner failed to exec entrypoint",
+					zap.String("scanner", s.ID),
+					zap.Int("exit_code", exitCode),
+					zap.String("hint", hint),
+				)
+				return nil, logs, fmt.Errorf("scanner %s produced no output (exit code: %d, stderr: %s) — %s", s.ID, exitCode, truncate(stderr, 500), hint)
+			}
 			return nil, logs, fmt.Errorf("scanner %s produced no output (exit code: %d, stderr: %s)", s.ID, exitCode, truncate(stderr, 500))
 		}
 	}

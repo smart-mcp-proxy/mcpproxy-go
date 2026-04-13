@@ -206,6 +206,139 @@ func TestScannerRunConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestBuildRunArgsIncludesNoNewPrivilegesByDefault(t *testing.T) {
+	cfg := ScannerRunConfig{
+		ContainerName: "mcpproxy-scanner-test",
+		Image:         "scanner:latest",
+		Command:       []string{"scan"},
+	}
+	args := buildRunArgs(cfg)
+	if !containsPair(args, "--security-opt", "no-new-privileges") {
+		t.Errorf("expected --security-opt no-new-privileges in default args, got: %v", args)
+	}
+}
+
+func TestBuildRunArgsOmitsNoNewPrivilegesWhenDisabled(t *testing.T) {
+	cfg := ScannerRunConfig{
+		ContainerName:          "mcpproxy-scanner-test",
+		Image:                  "scanner:latest",
+		Command:                []string{"scan"},
+		DisableNoNewPrivileges: true,
+	}
+	args := buildRunArgs(cfg)
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--security-opt" && args[i+1] == "no-new-privileges" {
+			t.Errorf("--security-opt no-new-privileges should be absent when disabled, got: %v", args)
+		}
+	}
+	// Other security-relevant flags must still be present.
+	if !containsArg(args, "--tmpfs") {
+		t.Errorf("expected --tmpfs to remain present, got: %v", args)
+	}
+	if !containsArg(args, "--rm") {
+		t.Errorf("expected --rm to remain present, got: %v", args)
+	}
+}
+
+func TestBuildRunArgsImageAndCommandTrailing(t *testing.T) {
+	cfg := ScannerRunConfig{
+		Image:   "scanner:v1",
+		Command: []string{"--mode", "fast"},
+	}
+	args := buildRunArgs(cfg)
+	// Image must precede command, both must be the trailing tokens.
+	if len(args) < 3 {
+		t.Fatalf("args too short: %v", args)
+	}
+	if args[len(args)-3] != "scanner:v1" {
+		t.Errorf("expected image at args[-3], got %q in %v", args[len(args)-3], args)
+	}
+	if args[len(args)-2] != "--mode" || args[len(args)-1] != "fast" {
+		t.Errorf("expected command at tail, got %v", args[len(args)-2:])
+	}
+}
+
+func TestClassifyScannerExecFailureRecognisesAppArmorPattern(t *testing.T) {
+	cases := []struct {
+		name     string
+		stderr   string
+		exitCode int
+		wantHint bool
+	}{
+		{
+			name:     "snap docker apparmor python",
+			stderr:   "exec /usr/local/bin/python: operation not permitted\n",
+			exitCode: 255,
+			wantHint: true,
+		},
+		{
+			name:     "snap docker apparmor entrypoint",
+			stderr:   "exec /usr/local/bin/entrypoint.sh: operation not permitted\n",
+			exitCode: 255,
+			wantHint: true,
+		},
+		{
+			name:     "wrong exit code",
+			stderr:   "exec /usr/local/bin/python: operation not permitted\n",
+			exitCode: 1,
+			wantHint: false,
+		},
+		{
+			name:     "unrelated error",
+			stderr:   "scanner: bad config\n",
+			exitCode: 255,
+			wantHint: false,
+		},
+		{
+			name:     "operation not permitted but no exec prefix",
+			stderr:   "open /etc/foo: operation not permitted\n",
+			exitCode: 255,
+			wantHint: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hint := ClassifyScannerExecFailure(tc.stderr, tc.exitCode)
+			if tc.wantHint && hint == "" {
+				t.Errorf("expected a remediation hint, got empty string")
+			}
+			if !tc.wantHint && hint != "" {
+				t.Errorf("expected no hint, got: %s", hint)
+			}
+			if tc.wantHint {
+				// Sanity-check that the hint mentions both remediation paths
+				// so users have actionable guidance.
+				if !strings.Contains(hint, "snap") {
+					t.Errorf("hint should mention snap docker remediation: %s", hint)
+				}
+				if !strings.Contains(hint, "scanner_disable_no_new_privileges") {
+					t.Errorf("hint should mention the config flag: %s", hint)
+				}
+			}
+		})
+	}
+}
+
+// containsArg reports whether args contains the given single token.
+func containsArg(args []string, want string) bool {
+	for _, a := range args {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
+// containsPair reports whether args contains key followed immediately by value.
+func containsPair(args []string, key, value string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == key && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestKillContainerEmptyName(t *testing.T) {
 	logger := zap.NewNop()
 	d := NewDockerRunner(logger)
