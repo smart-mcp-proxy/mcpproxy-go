@@ -132,6 +132,75 @@ func TestClassifyOAuthProvider(t *testing.T) {
 	}
 }
 
+func TestBuildServerProtocolCounts(t *testing.T) {
+	// Schema v3: fixed-key protocol counter. Keys must be exactly
+	// stdio/http/sse/streamable_http/auto — the dashed form
+	// "streamable-http" from config is normalized to the underscored
+	// form. Empty and unknown values bucket into "auto".
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "s1", Protocol: "stdio"},
+			{Name: "s2", Protocol: "http"},
+			{Name: "s3", Protocol: "http"},
+			{Name: "s4", Protocol: "sse"},
+			{Name: "s5", Protocol: "streamable-http"},
+			{Name: "s6", Protocol: "auto"},
+			{Name: "s7", Protocol: ""},      // missing -> auto
+			{Name: "s8", Protocol: "bogus"}, // unknown -> auto
+			nil,                             // nil safety
+		},
+	}
+	got := buildServerProtocolCounts(cfg)
+	want := map[string]int{
+		"stdio":           1,
+		"http":            2,
+		"sse":             1,
+		"streamable_http": 1,
+		"auto":            3,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("buildServerProtocolCounts = %v, want %v", got, want)
+	}
+}
+
+func TestBuildServerProtocolCountsNilConfig(t *testing.T) {
+	got := buildServerProtocolCounts(nil)
+	if got == nil {
+		t.Fatal("expected non-nil map")
+	}
+	for k, v := range got {
+		if v != 0 {
+			t.Errorf("expected zero for %q, got %d", k, v)
+		}
+	}
+	// All five canonical keys must be present so dashboards can rely on them.
+	for _, k := range []string{"stdio", "http", "sse", "streamable_http", "auto"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("expected key %q in protocol-count map", k)
+		}
+	}
+}
+
+func TestFeatureFlagSnapshotDockerAvailable(t *testing.T) {
+	// Schema v3: DockerAvailable reflects the per-call snapshot value the
+	// caller supplies (runtime probe result). The snapshot itself does not
+	// execute `docker info`; it only stores what the runtime passed in.
+	cfg := &config.Config{}
+
+	off := BuildFeatureFlagSnapshot(cfg)
+	if off.DockerAvailable {
+		t.Error("DockerAvailable should default to false")
+	}
+
+	// When DockerIsolation is configured and enabled, the flag must still
+	// default to false until the runtime wiring fills it in at heartbeat time.
+	cfg.DockerIsolation = &config.DockerIsolationConfig{Enabled: true}
+	off2 := BuildFeatureFlagSnapshot(cfg)
+	if off2.DockerAvailable {
+		t.Error("DockerAvailable should default to false even when isolation is enabled — the value comes from runtime probe, not config")
+	}
+}
+
 func TestFeatureFlagSnapshotPayloadHasNoOAuthSecrets(t *testing.T) {
 	cfg := &config.Config{
 		Servers: []*config.ServerConfig{

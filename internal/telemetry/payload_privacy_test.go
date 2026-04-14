@@ -144,7 +144,7 @@ func TestPayloadHasNoForbiddenSubstrings(t *testing.T) {
 	// Sanity check: the payload should still contain the legitimate fields,
 	// otherwise we've over-redacted.
 	for _, required := range []string{
-		`"schema_version":2`,
+		`"schema_version":3`,
 		`"surface_requests"`,
 		`"builtin_tool_calls"`,
 		`"upstream_tool_call_count_bucket"`,
