@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -86,6 +87,15 @@ type Runtime struct {
 	// Tool discovery deduplication: tracks servers with in-progress reactive discovery
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
 	discoveryInProgress sync.Map
+
+	// Schema v3 (telemetry): memoized Docker daemon availability. Probed
+	// once lazily on first IsDockerAvailable() call and reused for the
+	// process lifetime — running `docker info` on every heartbeat would be
+	// wasteful. A startup-captured value is good enough for daily-cadence
+	// telemetry; if the user installs/uninstalls Docker mid-session we'll
+	// report the value from startup until the next process restart.
+	dockerProbeOnce   sync.Once
+	dockerProbeResult bool
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -2105,6 +2115,58 @@ func (r *Runtime) IsQuarantineEnabled() bool {
 		return true
 	}
 	return r.cfg.IsQuarantineEnabled()
+}
+
+// IsDockerAvailable reports whether the host has a reachable Docker daemon
+// (implements telemetry.RuntimeStats, schema v3). The probe runs at most
+// once per process via sync.Once — `docker info` has non-trivial cost and
+// daemon presence doesn't meaningfully change within a session. A
+// subsequent `docker` install/uninstall mid-process won't reflect here
+// until the next restart; acceptable trade-off for daily-cadence telemetry.
+func (r *Runtime) IsDockerAvailable() bool {
+	r.dockerProbeOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+		if err := cmd.Run(); err != nil {
+			r.dockerProbeResult = false
+			if r.logger != nil {
+				r.logger.Debug("docker daemon probe failed (telemetry)", zap.Error(err))
+			}
+			return
+		}
+		r.dockerProbeResult = true
+	})
+	return r.dockerProbeResult
+}
+
+// GetDockerIsolatedServerCount returns how many currently-configured servers
+// the runtime actually wraps in a Docker container (implements
+// telemetry.RuntimeStats, schema v3).
+//
+// Implementation note: we reuse core.IsolationManager.ShouldIsolate — the
+// same function the stdio connection path consults — so the count matches
+// the runtime's real behavior rather than a config-only approximation.
+// When DockerIsolation is nil or disabled globally, ShouldIsolate returns
+// false for every server, giving a count of 0.
+func (r *Runtime) GetDockerIsolatedServerCount() int {
+	r.mu.RLock()
+	cfg := r.cfg
+	r.mu.RUnlock()
+	if cfg == nil {
+		return 0
+	}
+	im := core.NewIsolationManager(cfg.DockerIsolation)
+	count := 0
+	for _, srv := range cfg.Servers {
+		if srv == nil {
+			continue
+		}
+		if im.ShouldIsolate(srv) {
+			count++
+		}
+	}
+	return count
 }
 
 // Activity logging methods (RFC-003)

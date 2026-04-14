@@ -29,11 +29,13 @@ func (m *telemetryPayloadController) GetCurrentConfig() any {
 // the rendered payload has non-zero runtime fields.
 type fakeRuntimeStats struct{}
 
-func (fakeRuntimeStats) GetServerCount() int          { return 7 }
-func (fakeRuntimeStats) GetConnectedServerCount() int { return 5 }
-func (fakeRuntimeStats) GetToolCount() int            { return 42 }
-func (fakeRuntimeStats) GetRoutingMode() string       { return "retrieve_tools" }
-func (fakeRuntimeStats) IsQuarantineEnabled() bool    { return true }
+func (fakeRuntimeStats) GetServerCount() int               { return 7 }
+func (fakeRuntimeStats) GetConnectedServerCount() int      { return 5 }
+func (fakeRuntimeStats) GetToolCount() int                 { return 42 }
+func (fakeRuntimeStats) GetRoutingMode() string            { return "retrieve_tools" }
+func (fakeRuntimeStats) IsQuarantineEnabled() bool         { return true }
+func (fakeRuntimeStats) IsDockerAvailable() bool           { return false }
+func (fakeRuntimeStats) GetDockerIsolatedServerCount() int { return 0 }
 
 func TestHandleGetTelemetryPayload_OK(t *testing.T) {
 	logger := zap.NewNop().Sugar()

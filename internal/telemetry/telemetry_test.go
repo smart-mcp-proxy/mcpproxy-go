@@ -16,11 +16,13 @@ import (
 
 // mockRuntimeStats implements RuntimeStats for testing.
 type mockRuntimeStats struct {
-	serverCount    int
-	connectedCount int
-	toolCount      int
-	routingMode    string
-	quarantine     bool
+	serverCount           int
+	connectedCount        int
+	toolCount             int
+	routingMode           string
+	quarantine            bool
+	dockerAvailable       bool
+	dockerIsolatedServers int
 }
 
 func (m *mockRuntimeStats) GetServerCount() int          { return m.serverCount }
@@ -28,6 +30,10 @@ func (m *mockRuntimeStats) GetConnectedServerCount() int { return m.connectedCou
 func (m *mockRuntimeStats) GetToolCount() int            { return m.toolCount }
 func (m *mockRuntimeStats) GetRoutingMode() string       { return m.routingMode }
 func (m *mockRuntimeStats) IsQuarantineEnabled() bool    { return m.quarantine }
+func (m *mockRuntimeStats) IsDockerAvailable() bool      { return m.dockerAvailable }
+func (m *mockRuntimeStats) GetDockerIsolatedServerCount() int {
+	return m.dockerIsolatedServers
+}
 
 func TestHeartbeatSend(t *testing.T) {
 	// Clear env vars that would disable telemetry (GitHub Actions sets CI=true).
@@ -291,6 +297,93 @@ func TestEnsureAnonymousID(t *testing.T) {
 	svc.ensureAnonymousID()
 	if cfg.GetAnonymousID() != firstID {
 		t.Error("Expected anonymous ID to remain stable on second call")
+	}
+}
+
+// TestSchemaVersionV3 verifies that HeartbeatPayload carries schema_version=3
+// once the v3 fields ship. This is a tripwire against accidental downgrades.
+func TestSchemaVersionV3(t *testing.T) {
+	if SchemaVersion != 3 {
+		t.Fatalf("SchemaVersion = %d, want 3", SchemaVersion)
+	}
+
+	cfg := &config.Config{}
+	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{})
+	payload := svc.BuildPayload()
+	if payload.SchemaVersion != 3 {
+		t.Errorf("payload.SchemaVersion = %d, want 3", payload.SchemaVersion)
+	}
+}
+
+// TestV3PayloadDockerAvailable verifies that the telemetry service forwards
+// the runtime IsDockerAvailable() probe into feature_flags.docker_available.
+func TestV3PayloadDockerAvailable(t *testing.T) {
+	cfg := &config.Config{}
+
+	// Docker NOT available on host.
+	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{dockerAvailable: false})
+	p1 := svc.BuildPayload()
+	if p1.FeatureFlags == nil {
+		t.Fatal("FeatureFlags nil")
+	}
+	if p1.FeatureFlags.DockerAvailable {
+		t.Error("DockerAvailable should be false when runtime reports false")
+	}
+
+	// Docker available on host.
+	svc2 := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	svc2.SetRuntimeStats(&mockRuntimeStats{dockerAvailable: true})
+	p2 := svc2.BuildPayload()
+	if p2.FeatureFlags == nil {
+		t.Fatal("FeatureFlags nil")
+	}
+	if !p2.FeatureFlags.DockerAvailable {
+		t.Error("DockerAvailable should be true when runtime reports true")
+	}
+}
+
+// TestV3PayloadServerProtocolCounts verifies that the payload carries
+// per-protocol counts for the configured servers.
+func TestV3PayloadServerProtocolCounts(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "a", Protocol: "stdio"},
+			{Name: "b", Protocol: "http"},
+			{Name: "c", Protocol: "streamable-http"},
+			{Name: "d", Protocol: ""},
+		},
+	}
+	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{})
+	p := svc.BuildPayload()
+	if p.ServerProtocolCounts == nil {
+		t.Fatal("ServerProtocolCounts nil")
+	}
+	if p.ServerProtocolCounts["stdio"] != 1 {
+		t.Errorf("stdio = %d, want 1", p.ServerProtocolCounts["stdio"])
+	}
+	if p.ServerProtocolCounts["http"] != 1 {
+		t.Errorf("http = %d, want 1", p.ServerProtocolCounts["http"])
+	}
+	if p.ServerProtocolCounts["streamable_http"] != 1 {
+		t.Errorf("streamable_http = %d, want 1", p.ServerProtocolCounts["streamable_http"])
+	}
+	if p.ServerProtocolCounts["auto"] != 1 {
+		t.Errorf("auto = %d, want 1 (missing protocol should bucket to auto)", p.ServerProtocolCounts["auto"])
+	}
+}
+
+// TestV3PayloadDockerIsolatedCount verifies that the payload forwards the
+// runtime's count of servers wrapped in Docker isolation.
+func TestV3PayloadDockerIsolatedCount(t *testing.T) {
+	cfg := &config.Config{}
+	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{dockerIsolatedServers: 4})
+	p := svc.BuildPayload()
+	if p.ServerDockerIsolatedCount != 4 {
+		t.Errorf("ServerDockerIsolatedCount = %d, want 4", p.ServerDockerIsolatedCount)
 	}
 }
 

@@ -18,7 +18,11 @@ import (
 
 // SchemaVersion is the heartbeat payload schema version. v1 payloads have no
 // such field; receivers can route by absence vs presence.
-const SchemaVersion = 2
+//
+// v3 (schema bump from 2): adds feature_flags.docker_available,
+// server_protocol_counts, and server_docker_isolated_count. Forward-compatible:
+// existing v2 consumers simply ignore the new fields.
+const SchemaVersion = 3
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -51,6 +55,17 @@ type HeartbeatPayload struct {
 	FeatureFlags                *FeatureFlagSnapshot        `json:"feature_flags,omitempty"`
 	ErrorCategoryCounts         map[string]int64            `json:"error_category_counts,omitempty"`
 	DoctorChecks                map[string]DoctorCounts     `json:"doctor_checks,omitempty"`
+
+	// Schema v3 additions.
+	// ServerProtocolCounts is a fixed-enum histogram over cfg.Servers by
+	// Protocol. Keys are exactly: stdio, http, sse, streamable_http, auto.
+	// Never contains server names, URLs, or unknown values (unknown/empty
+	// protocols bucket into "auto").
+	ServerProtocolCounts map[string]int `json:"server_protocol_counts,omitempty"`
+	// ServerDockerIsolatedCount is the number of configured servers the
+	// runtime actually wraps in Docker isolation. Distinct from "has Docker
+	// available" — an install can have Docker but never use it for isolation.
+	ServerDockerIsolatedCount int `json:"server_docker_isolated_count,omitempty"`
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -60,6 +75,14 @@ type RuntimeStats interface {
 	GetToolCount() int
 	GetRoutingMode() string
 	IsQuarantineEnabled() bool
+	// Schema v3 additions.
+	// IsDockerAvailable reports whether the host has a reachable Docker
+	// daemon. Implementations should memoize the probe result (running
+	// `docker info` on every heartbeat has cost) and return the cached value.
+	IsDockerAvailable() bool
+	// GetDockerIsolatedServerCount returns how many currently-configured
+	// servers the runtime is actually wrapping in a Docker container.
+	GetDockerIsolatedServerCount() int
 }
 
 // Service manages anonymous telemetry heartbeats and feedback submission.
@@ -268,10 +291,23 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.ToolCount = s.stats.GetToolCount()
 		payload.RoutingMode = s.stats.GetRoutingMode()
 		payload.QuarantineEnabled = s.stats.IsQuarantineEnabled()
+		// Schema v3 additions — forwarded from runtime wiring.
+		payload.ServerDockerIsolatedCount = s.stats.GetDockerIsolatedServerCount()
 	}
 
-	// Spec 042: feature-flag snapshot.
+	// Spec 042: feature-flag snapshot. Schema v3: BuildFeatureFlagSnapshot
+	// does not probe Docker — we splice the runtime probe result in here
+	// so the snapshot helper stays cheap and side-effect-free.
 	payload.FeatureFlags = BuildFeatureFlagSnapshot(s.config)
+	if s.stats != nil && payload.FeatureFlags != nil {
+		payload.FeatureFlags.DockerAvailable = s.stats.IsDockerAvailable()
+	}
+
+	// Schema v3: fixed-key per-protocol counter over cfg.Servers. Logs
+	// unknown values at debug level via the service logger (bucketed into
+	// "auto") so operators can spot mis-typed config without polluting the
+	// telemetry cardinality.
+	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
 
 	// Spec 042: counter snapshot.
 	if s.registry != nil {

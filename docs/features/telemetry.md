@@ -4,7 +4,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information:
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 3** (`schema_version: 3` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -19,6 +19,11 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `uptime_hours` | `47` | Usage patterns |
 | `routing_mode` | `retrieve_tools` | Feature adoption |
 | `quarantine_enabled` | `true` | Security feature adoption |
+| `feature_flags.docker_available` | `true` | Fraction of installs with a reachable Docker daemon (schema v3) |
+| `server_protocol_counts` | `{"stdio":3,"http":2,"sse":0,"streamable_http":1,"auto":0}` | Ratio of remote-HTTP vs local-stdio upstreams (schema v3) |
+| `server_docker_isolated_count` | `2` | How many configured servers the runtime actually wraps in Docker isolation (schema v3) |
+
+The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
 
 ## What is NOT collected
 
