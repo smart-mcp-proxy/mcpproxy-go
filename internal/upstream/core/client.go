@@ -302,6 +302,21 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			}
 		}
 
+		// Apply per-server annotation defaults for tools without annotations
+		if c.config.AnnotationDefaults != nil {
+			if toolMeta.Annotations == nil {
+				toolMeta.Annotations = &config.ToolAnnotations{
+					Title:           c.config.AnnotationDefaults.Title,
+					ReadOnlyHint:    c.config.AnnotationDefaults.ReadOnlyHint,
+					DestructiveHint: c.config.AnnotationDefaults.DestructiveHint,
+					IdempotentHint:  c.config.AnnotationDefaults.IdempotentHint,
+					OpenWorldHint:   c.config.AnnotationDefaults.OpenWorldHint,
+				}
+			} else {
+				mergeAnnotationDefaults(toolMeta.Annotations, c.config.AnnotationDefaults)
+			}
+		}
+
 		// Compute hash for tool change detection
 		// Hash is based on serverName + toolName + inputSchema
 		toolMeta.Hash = hash.ComputeToolHash(c.config.Name, tool.Name, tool.Description, tool.InputSchema)
@@ -725,4 +740,24 @@ func containsString(str, substr string) bool {
 		}
 	}
 	return false
+}
+
+// mergeAnnotationDefaults fills nil hint fields in dst from defaults.
+// Explicit upstream values are never overridden.
+func mergeAnnotationDefaults(dst, defaults *config.ToolAnnotations) {
+	if dst.ReadOnlyHint == nil && defaults.ReadOnlyHint != nil {
+		dst.ReadOnlyHint = defaults.ReadOnlyHint
+	}
+	if dst.DestructiveHint == nil && defaults.DestructiveHint != nil {
+		dst.DestructiveHint = defaults.DestructiveHint
+	}
+	if dst.IdempotentHint == nil && defaults.IdempotentHint != nil {
+		dst.IdempotentHint = defaults.IdempotentHint
+	}
+	if dst.OpenWorldHint == nil && defaults.OpenWorldHint != nil {
+		dst.OpenWorldHint = defaults.OpenWorldHint
+	}
+	if dst.Title == "" && defaults.Title != "" {
+		dst.Title = defaults.Title
+	}
 }
