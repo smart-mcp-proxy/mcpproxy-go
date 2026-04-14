@@ -138,6 +138,10 @@ type Config struct {
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
 
+	// Instructions text returned in the MCP initialize response to guide AI agents.
+	// When empty, a built-in default is used that explains retrieve_tools workflow.
+	Instructions string `json:"instructions,omitempty" mapstructure:"instructions"`
+
 	// QuarantineEnabled controls whether quarantine is active. It gates two
 	// things together:
 	//   1. Server-level auto-quarantine for newly added servers (issue #370).

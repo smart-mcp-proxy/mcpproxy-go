@@ -51,6 +51,15 @@ const (
 	operationListRegistries  = "list_registries"
 	operationSearchServers   = "search_servers"
 
+	// defaultInstructions is returned in the MCP initialize response when no
+	// custom instructions are configured. It guides AI agents on the correct
+	// workflow for discovering and calling tools through the proxy.
+	defaultInstructions = "This is mcpproxy-go, an MCP aggregator proxy that connects multiple upstream MCP servers. " +
+		"WORKFLOW: Use 'retrieve_tools' to search for tools by description across all connected upstream servers. " +
+		"Then call tools via 'call_tool_read', 'call_tool_write', or 'call_tool_destructive' based on the 'call_with' field in results. " +
+		"Do NOT use 'search_servers' to find existing tools — it searches external registries for adding NEW servers only. " +
+		"Use 'upstream_servers' with operation 'list' to see currently connected servers and their status."
+
 	// Connection status constants
 	statusError                = "error"
 	statusDisabled             = "disabled"
@@ -59,6 +68,14 @@ const (
 	messageServerDisabled      = "Server is disabled and will not connect"
 	messageConnectionCancelled = "Connection monitoring cancelled due to server shutdown"
 )
+
+// resolveInstructions returns custom instructions if set, otherwise the built-in default.
+func resolveInstructions(custom string) string {
+	if custom != "" {
+		return custom
+	}
+	return defaultInstructions
+}
 
 // proxyVersion holds the build version for MCP server identification.
 // Set via SetMCPServerVersion during startup.
@@ -227,6 +244,9 @@ func NewMCPProxyServer(
 	if config.EnablePrompts {
 		capabilities = append(capabilities, mcpserver.WithPromptCapabilities(true))
 	}
+
+	// Add server instructions for AI agent guidance
+	capabilities = append(capabilities, mcpserver.WithInstructions(resolveInstructions(config.Instructions)))
 
 	mcpServer := mcpserver.NewMCPServer(
 		"mcpproxy-go",
