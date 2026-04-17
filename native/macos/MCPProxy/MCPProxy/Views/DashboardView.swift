@@ -41,7 +41,7 @@ struct DashboardView: View {
                 recentSessionsSection
 
                 // Recent tool calls table
-                recentToolCallsSection
+                recentActivitySection
             }
             .padding(20)
         }
@@ -486,8 +486,19 @@ struct DashboardView: View {
                         byClient[key] = s
                     }
                 }
-                return byClient.values
-                    .sorted { ($0.toolCallCount ?? 0) > ($1.toolCallCount ?? 0) }
+                // Sort most-recently-active first, break ties by tool call count,
+                // then by session ID so the order is deterministic when timestamps
+                // and call counts match. `.values` iteration is random, so an
+                // explicit sort key is required to keep the UI stable.
+                return byClient.values.sorted { lhs, rhs in
+                    let lTime = lhs.lastActive ?? lhs.startTime ?? ""
+                    let rTime = rhs.lastActive ?? rhs.startTime ?? ""
+                    if lTime != rTime { return lTime > rTime }
+                    let lCalls = lhs.toolCallCount ?? 0
+                    let rCalls = rhs.toolCallCount ?? 0
+                    if lCalls != rCalls { return lCalls > rCalls }
+                    return lhs.id < rhs.id
+                }
             }()
             if sessions.isEmpty {
                 HStack {
@@ -558,16 +569,28 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Recent Tool Calls
+    // MARK: - Recent Activity
+    //
+    // Shows the full activity log on the dashboard (not just tool calls) so
+    // users with a quiet proxy still see something useful — security scans,
+    // tool quarantine changes, OAuth events, etc. System-level events
+    // (`system_start`, `system_stop`) are filtered out because they're noise
+    // on the dashboard.
+
+    private static let activityDashboardHiddenTypes: Set<String> = [
+        "system_start", "system_stop",
+    ]
 
     @ViewBuilder
-    private var recentToolCallsSection: some View {
-        let toolCalls = appState.recentActivity.filter { $0.type == "tool_call" || $0.type == "internal_tool_call" }
-        let recent = Array(toolCalls.prefix(10))
+    private var recentActivitySection: some View {
+        let entries = appState.recentActivity.filter { entry in
+            !Self.activityDashboardHiddenTypes.contains(entry.type)
+        }
+        let recent = Array(entries.prefix(10))
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label("Recent Tool Calls", systemImage: "wrench.and.screwdriver")
+                Label("Recent Activity", systemImage: "clock.arrow.circlepath")
                     .font(.scaled(.headline, scale: fontScale))
                 Spacer()
             }
@@ -575,7 +598,7 @@ struct DashboardView: View {
             if recent.isEmpty {
                 HStack {
                     Spacer()
-                    Text("No tool calls recorded")
+                    Text("No activity recorded")
                         .font(.scaled(.body, scale: fontScale))
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 20)
@@ -591,7 +614,7 @@ struct DashboardView: View {
                             .frame(width: 70, alignment: .leading)
                         Text("Server")
                             .frame(width: 120, alignment: .leading)
-                        Text("Tool")
+                        Text("Event")
                             .frame(maxWidth: .infinity, alignment: .leading)
                         Text("Status")
                             .frame(width: 80, alignment: .center)

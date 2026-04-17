@@ -1103,6 +1103,15 @@ func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, er
 		})
 	}
 
+	// Stable order for UI consumers: most-recently-active first, break ties
+	// by session ID so the list doesn't reshuffle on identical timestamps.
+	sort.SliceStable(sessions, func(i, j int) bool {
+		if !sessions[i].LastActivity.Equal(sessions[j].LastActivity) {
+			return sessions[i].LastActivity.After(sessions[j].LastActivity)
+		}
+		return sessions[i].ID < sessions[j].ID
+	})
+
 	return sessions, total, nil
 }
 
@@ -1796,6 +1805,16 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		result = append(result, serverMap)
 	}
+
+	// Stable alphabetical order by name — StateView is backed by a map, so
+	// iteration order is non-deterministic. UI consumers (tray, web) expect
+	// a stable list so the "Servers Needing Attention" and similar filtered
+	// views don't shuffle between polls.
+	sort.SliceStable(result, func(i, j int) bool {
+		ni, _ := result[i]["name"].(string)
+		nj, _ := result[j]["name"].(string)
+		return ni < nj
+	})
 
 	r.logger.Debug("GetAllServers completed", zap.Int("server_count", len(result)))
 	return result, nil

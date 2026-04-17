@@ -347,15 +347,29 @@
                           {{ tool.status }}
                         </span>
                       </div>
-                      <p class="text-sm text-base-content/70 mt-1">{{ tool.description }}</p>
-                      <!-- Show word-level diff for changed tools -->
-                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 text-xs">
-                        <div class="bg-base-300/50 px-2 py-1.5 rounded font-mono leading-relaxed">
-                          <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="i">
-                            <span v-if="part.type === 'removed'" class="bg-error/20 text-error line-through px-0.5 rounded">{{ part.text }}</span>
-                            <span v-else-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
-                            <span v-else>{{ part.text }}</span>
-                          </template>
+                      <p
+                        v-if="tool.status !== 'changed' || !tool.previous_description"
+                        class="text-sm text-base-content/70 mt-1"
+                      >{{ tool.description }}</p>
+                      <!-- Show before/after diff for changed tools -->
+                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 space-y-2 text-xs">
+                        <div>
+                          <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">Before (approved)</div>
+                          <div class="bg-error/5 border border-error/20 px-2 py-1.5 rounded font-mono leading-relaxed">
+                            <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="'b'+i">
+                              <span v-if="part.type === 'removed'" class="bg-error/20 text-error font-semibold px-0.5 rounded">{{ part.text }}</span>
+                              <span v-else-if="part.type === 'same'">{{ part.text }}</span>
+                            </template>
+                          </div>
+                        </div>
+                        <div>
+                          <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">After (current)</div>
+                          <div class="bg-success/5 border border-success/20 px-2 py-1.5 rounded font-mono leading-relaxed">
+                            <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="'a'+i">
+                              <span v-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
+                              <span v-else-if="part.type === 'same'">{{ part.text }}</span>
+                            </template>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -952,18 +966,18 @@ interface DiffPart {
   text: string
 }
 
-function computeWordDiff(oldText: string, newText: string): DiffPart[] {
-  const oldWords = oldText.split(/(\s+)/)
-  const newWords = newText.split(/(\s+)/)
+/// Generic LCS over arrays of strings (works for word tokens or single chars).
+function lcsDiff(oldElems: string[], newElems: string[]): DiffPart[] {
+  const m = oldElems.length
+  const n = newElems.length
+  if (m === 0 && n === 0) return []
+  if (m === 0) return newElems.map(t => ({ type: 'added', text: t }))
+  if (n === 0) return oldElems.map(t => ({ type: 'removed', text: t }))
 
-  // Longest Common Subsequence to find matching words
-  const m = oldWords.length
-  const n = newWords.length
   const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0))
-
   for (let i = 1; i <= m; i++) {
     for (let j = 1; j <= n; j++) {
-      if (oldWords[i - 1] === newWords[j - 1]) {
+      if (oldElems[i - 1] === newElems[j - 1]) {
         dp[i][j] = dp[i - 1][j - 1] + 1
       } else {
         dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1])
@@ -971,38 +985,75 @@ function computeWordDiff(oldText: string, newText: string): DiffPart[] {
     }
   }
 
-  // Backtrack to build diff
-  const parts: DiffPart[] = []
+  const out: DiffPart[] = []
   let i = m, j = n
-  const stack: DiffPart[] = []
-
   while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && oldWords[i - 1] === newWords[j - 1]) {
-      stack.push({ type: 'same', text: oldWords[i - 1] })
-      i--
-      j--
+    if (i > 0 && j > 0 && oldElems[i - 1] === newElems[j - 1]) {
+      out.push({ type: 'same', text: oldElems[i - 1] })
+      i--; j--
     } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      stack.push({ type: 'added', text: newWords[j - 1] })
+      out.push({ type: 'added', text: newElems[j - 1] })
       j--
     } else {
-      stack.push({ type: 'removed', text: oldWords[i - 1] })
+      out.push({ type: 'removed', text: oldElems[i - 1] })
       i--
     }
   }
+  return out.reverse()
+}
 
-  // Reverse since we built from end to start
-  stack.reverse()
+/// Char-level diff for short strings, with a safety cap on input length
+/// to keep the O(N×M) dp table bounded.
+function characterLevelDiff(oldText: string, newText: string, maxChars = 1500): DiffPart[] {
+  if (oldText.length > maxChars || newText.length > maxChars) {
+    return [
+      { type: 'removed', text: oldText },
+      { type: 'added', text: newText },
+    ]
+  }
+  return lcsDiff(Array.from(oldText), Array.from(newText))
+}
 
-  // Merge consecutive parts of the same type
-  for (const part of stack) {
-    if (parts.length > 0 && parts[parts.length - 1].type === part.type) {
-      parts[parts.length - 1].text += part.text
+function mergeSameKind(parts: DiffPart[]): DiffPart[] {
+  const out: DiffPart[] = []
+  for (const p of parts) {
+    const last = out[out.length - 1]
+    if (last && last.type === p.type) {
+      last.text += p.text
     } else {
-      parts.push({ ...part })
+      out.push({ ...p })
     }
   }
+  return out
+}
 
-  return parts
+/// Word-level diff with character-level refinement inside adjacent
+/// (removed, added) pairs. Keeps whole-token highlights for large docstring
+/// expansions while narrowing substring changes like "1 April" → "8 April"
+/// down to just the differing characters.
+function computeWordDiff(oldText: string, newText: string): DiffPart[] {
+  const oldWords = oldText.split(/(\s+)/).filter(t => t.length > 0)
+  const newWords = newText.split(/(\s+)/).filter(t => t.length > 0)
+  const wordDiff = mergeSameKind(lcsDiff(oldWords, newWords))
+
+  const refined: DiffPart[] = []
+  for (let idx = 0; idx < wordDiff.length; idx++) {
+    const current = wordDiff[idx]
+    const next = wordDiff[idx + 1]
+    if (
+      next &&
+      ((current.type === 'removed' && next.type === 'added') ||
+        (current.type === 'added' && next.type === 'removed'))
+    ) {
+      const removedText = current.type === 'removed' ? current.text : next.text
+      const addedText = current.type === 'added' ? current.text : next.text
+      refined.push(...characterLevelDiff(removedText, addedText))
+      idx++ // skip the paired part
+      continue
+    }
+    refined.push(current)
+  }
+  return mergeSameKind(refined)
 }
 
 // Methods
