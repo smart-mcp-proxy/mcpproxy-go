@@ -87,16 +87,18 @@ struct ActivityView: View {
     }
 
     // MARK: - Column widths
-    private let colTime: CGFloat = 60
-    private let colType: CGFloat = 100
-    private let colServer: CGFloat = 100
+    // Kept tight so that with the detail panel open the list can still coexist
+    // with the outer NavigationSplitView sidebar at the default 800pt window width.
+    private let colTime: CGFloat = 56
+    private let colType: CGFloat = 92
+    private let colServer: CGFloat = 96
     private let colDetails: CGFloat = 0  // flexible (minWidth enforced in layout)
-    private let colIntent: CGFloat = 60
-    private let colStatus: CGFloat = 70
-    private let colDuration: CGFloat = 60
+    private let colIntent: CGFloat = 52
+    private let colStatus: CGFloat = 64
+    private let colDuration: CGFloat = 56
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             // Left: activity table with filters
             VStack(alignment: .leading, spacing: 0) {
                 activityListHeader
@@ -145,17 +147,23 @@ struct ActivityView: View {
                     }
                 }
             }
-            .frame(minWidth: 560)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            // Right: detail panel
+            // Right: detail panel (only rendered when an entry is selected)
+            // NOTE: avoid HSplitView here — it fights the outer NavigationSplitView's
+            // sidebar column for width and can cause the app sidebar to collapse when
+            // the detail panel appears. A plain HStack with a fixed-width detail column
+            // keeps the sidebar stable.
             if let selectedID = selectedActivityID,
                let selected = activities.first(where: { $0.id == selectedID }) {
-                ActivityDetailView(entry: selected, recentSessions: appState.recentSessions)
-            } else {
-                Text("Select an activity entry")
-                    .font(.scaled(.body, scale: fontScale))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                ActivityDetailView(
+                    entry: selected,
+                    recentSessions: appState.recentSessions,
+                    onDismiss: { selectedActivityID = nil }
+                )
+                .frame(minWidth: 300, idealWidth: 380, maxWidth: 520, maxHeight: .infinity)
+                .layoutPriority(1)
             }
         }
         .task {
@@ -184,7 +192,7 @@ struct ActivityView: View {
                 .frame(width: colServer, alignment: .leading)
             Text("Details")
                 .lineLimit(1)
-                .frame(minWidth: 80, maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
             Text("Intent")
                 .frame(width: colIntent, alignment: .center)
             Text("Status")
@@ -489,7 +497,7 @@ struct ActivityTableRow: View {
                         .accessibilityLabel("Contains sensitive data")
                 }
             }
-            .frame(minWidth: 80, maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: 60, maxWidth: .infinity, alignment: .leading)
 
             // Intent column
             if let op = entry.intentOperationType {
@@ -695,6 +703,7 @@ struct IntentBadge: View {
 struct ActivityDetailView: View {
     let entry: ActivityEntry
     var recentSessions: [APIClient.MCPSession] = []
+    var onDismiss: (() -> Void)? = nil
     @Environment(\.fontScale) var fontScale
     @State private var copiedField: String?
 
@@ -830,6 +839,18 @@ struct ActivityDetailView: View {
                 }
             }
             Spacer()
+            if let onDismiss = onDismiss {
+                Button {
+                    onDismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Close detail panel")
+                .accessibilityLabel("Close detail panel")
+                .accessibilityIdentifier("activity-detail-close")
+            }
         }
     }
 
