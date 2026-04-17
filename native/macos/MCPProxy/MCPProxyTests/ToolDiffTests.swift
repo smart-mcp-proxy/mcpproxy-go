@@ -73,6 +73,49 @@ final class ToolDiffTests: XCTestCase {
         XCTAssertEqual(reconstructedAfter, after)
     }
 
+    func testCharLevelRefinementOnSingleCharChange() {
+        // The real screenshot case: date changed from "1 April" to "8 April".
+        // Word-level alone would highlight the "1" and "8" tokens. Char-level
+        // refinement produces the same result here (single-char tokens), but
+        // it also handles the common "gs_1234" → "gs_1235" style where the
+        // differing chars are in the MIDDLE of a word.
+        let before = "Knowledge up-to-date as at 1 April 2026."
+        let after = "Knowledge up-to-date as at 8 April 2026."
+        let parts = computeWordDiff(before, after)
+
+        let addedParts = parts.filter { $0.kind == .added }
+        let removedParts = parts.filter { $0.kind == .removed }
+
+        // Exactly one char each on each side — nothing else touched.
+        XCTAssertEqual(addedParts.map { $0.text }.joined(), "8")
+        XCTAssertEqual(removedParts.map { $0.text }.joined(), "1")
+
+        // Reconstruction still matches.
+        let recBefore = parts.compactMap { $0.kind == .added ? nil : $0.text }.joined()
+        let recAfter = parts.compactMap { $0.kind == .removed ? nil : $0.text }.joined()
+        XCTAssertEqual(recBefore, before)
+        XCTAssertEqual(recAfter, after)
+    }
+
+    func testCharLevelRefinementInsideWord() {
+        // Differing chars inside a single token — word-level alone would
+        // highlight the whole token ("version-1.2.3" vs "version-1.2.4"),
+        // char-level should narrow to just "3" → "4".
+        let before = "server version-1.2.3 release"
+        let after = "server version-1.2.4 release"
+        let parts = computeWordDiff(before, after)
+
+        let removed = parts.filter { $0.kind == .removed }.map { $0.text }.joined()
+        let added = parts.filter { $0.kind == .added }.map { $0.text }.joined()
+        XCTAssertEqual(removed, "3")
+        XCTAssertEqual(added, "4")
+
+        let recBefore = parts.compactMap { $0.kind == .added ? nil : $0.text }.joined()
+        let recAfter = parts.compactMap { $0.kind == .removed ? nil : $0.text }.joined()
+        XCTAssertEqual(recBefore, before)
+        XCTAssertEqual(recAfter, after)
+    }
+
     func testConsecutivePartsOfSameKindAreMerged() {
         let parts = computeWordDiff("one two three", "one two three four five")
         // Trailing addition should be a single merged part, not many tokens.

@@ -1393,20 +1393,18 @@ private func splitPreservingWhitespace(_ s: String) -> [String] {
     return tokens
 }
 
-/// Word-level diff via longest common subsequence. Returns parts in original order.
-func computeWordDiff(_ oldText: String, _ newText: String) -> [ToolDiffPart] {
-    let oldTokens = splitPreservingWhitespace(oldText)
-    let newTokens = splitPreservingWhitespace(newText)
-    let m = oldTokens.count
-    let n = newTokens.count
+/// Generic LCS diff over `Element` sequences (words or characters).
+private func lcsDiff<Element: Equatable>(_ oldElems: [Element], _ newElems: [Element]) -> [(kind: ToolDiffPart.Kind, elem: Element)] {
+    let m = oldElems.count
+    let n = newElems.count
     if m == 0 && n == 0 { return [] }
-    if m == 0 { return [ToolDiffPart(kind: .added, text: newText)] }
-    if n == 0 { return [ToolDiffPart(kind: .removed, text: oldText)] }
+    if m == 0 { return newElems.map { (.added, $0) } }
+    if n == 0 { return oldElems.map { (.removed, $0) } }
 
     var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
     for i in 1...m {
         for j in 1...n {
-            if oldTokens[i - 1] == newTokens[j - 1] {
+            if oldElems[i - 1] == newElems[j - 1] {
                 dp[i][j] = dp[i - 1][j - 1] + 1
             } else {
                 dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
@@ -1414,25 +1412,43 @@ func computeWordDiff(_ oldText: String, _ newText: String) -> [ToolDiffPart] {
         }
     }
 
-    var parts: [ToolDiffPart] = []
+    var out: [(ToolDiffPart.Kind, Element)] = []
     var i = m
     var j = n
     while i > 0 || j > 0 {
-        if i > 0 && j > 0 && oldTokens[i - 1] == newTokens[j - 1] {
-            parts.append(ToolDiffPart(kind: .same, text: oldTokens[i - 1]))
+        if i > 0 && j > 0 && oldElems[i - 1] == newElems[j - 1] {
+            out.append((.same, oldElems[i - 1]))
             i -= 1
             j -= 1
         } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
-            parts.append(ToolDiffPart(kind: .added, text: newTokens[j - 1]))
+            out.append((.added, newElems[j - 1]))
             j -= 1
         } else {
-            parts.append(ToolDiffPart(kind: .removed, text: oldTokens[i - 1]))
+            out.append((.removed, oldElems[i - 1]))
             i -= 1
         }
     }
-    parts.reverse()
+    out.reverse()
+    return out
+}
 
-    // Merge consecutive parts of the same kind to minimize attribute spans.
+/// Character-level diff between two strings. Falls back to the raw
+/// `removed → added` pair when either side exceeds `maxChars` to avoid
+/// quadratic blowup on very long runs.
+private func characterLevelDiff(_ oldText: String, _ newText: String, maxChars: Int = 1500) -> [ToolDiffPart] {
+    if oldText.count > maxChars || newText.count > maxChars {
+        return [
+            ToolDiffPart(kind: .removed, text: oldText),
+            ToolDiffPart(kind: .added, text: newText),
+        ]
+    }
+    let oldChars = Array(oldText)
+    let newChars = Array(newText)
+    return lcsDiff(oldChars, newChars).map { ToolDiffPart(kind: $0.kind, text: String($0.elem)) }
+}
+
+/// Merge consecutive parts of the same kind to minimize attribute spans.
+private func mergeSameKind(_ parts: [ToolDiffPart]) -> [ToolDiffPart] {
     var merged: [ToolDiffPart] = []
     for part in parts {
         if let last = merged.last, last.kind == part.kind {
@@ -1442,6 +1458,40 @@ func computeWordDiff(_ oldText: String, _ newText: String) -> [ToolDiffPart] {
         }
     }
     return merged
+}
+
+/// Word-level diff with character-level refinement inside adjacent
+/// (removed, added) pairs. This keeps whole-token highlights for large
+/// docstring expansions while narrowing substring changes like
+/// `"1 April"` → `"8 April"` down to just the `1`/`8` characters.
+func computeWordDiff(_ oldText: String, _ newText: String) -> [ToolDiffPart] {
+    let oldTokens = splitPreservingWhitespace(oldText)
+    let newTokens = splitPreservingWhitespace(newText)
+    let wordDiff = lcsDiff(oldTokens, newTokens).map { ToolDiffPart(kind: $0.kind, text: $0.elem) }
+
+    // First merge consecutive same-kind parts, then refine adjacent
+    // (removed, added) runs into character-level diffs.
+    let merged = mergeSameKind(wordDiff)
+    var refined: [ToolDiffPart] = []
+    var idx = 0
+    while idx < merged.count {
+        let current = merged[idx]
+        if idx + 1 < merged.count {
+            let next = merged[idx + 1]
+            if (current.kind == .removed && next.kind == .added) ||
+               (current.kind == .added && next.kind == .removed) {
+                let removedText = current.kind == .removed ? current.text : next.text
+                let addedText = current.kind == .added ? current.text : next.text
+                refined.append(contentsOf: characterLevelDiff(removedText, addedText))
+                idx += 2
+                continue
+            }
+        }
+        refined.append(current)
+        idx += 1
+    }
+
+    return mergeSameKind(refined)
 }
 
 // MARK: - Flow Layout (for wrapping annotation badges)
