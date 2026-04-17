@@ -347,15 +347,29 @@
                           {{ tool.status }}
                         </span>
                       </div>
-                      <p class="text-sm text-base-content/70 mt-1">{{ tool.description }}</p>
-                      <!-- Show word-level diff for changed tools -->
-                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 text-xs">
-                        <div class="bg-base-300/50 px-2 py-1.5 rounded font-mono leading-relaxed">
-                          <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="i">
-                            <span v-if="part.type === 'removed'" class="bg-error/20 text-error line-through px-0.5 rounded">{{ part.text }}</span>
-                            <span v-else-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
-                            <span v-else>{{ part.text }}</span>
-                          </template>
+                      <p
+                        v-if="tool.status !== 'changed' || !tool.previous_description"
+                        class="text-sm text-base-content/70 mt-1"
+                      >{{ tool.description }}</p>
+                      <!-- Show before/after diff for changed tools -->
+                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 space-y-2 text-xs">
+                        <div>
+                          <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">Before (approved)</div>
+                          <div class="bg-error/5 border border-error/20 px-2 py-1.5 rounded font-mono leading-relaxed">
+                            <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="'b'+i">
+                              <span v-if="part.type === 'removed'" class="bg-error/20 text-error font-semibold px-0.5 rounded">{{ part.text }}</span>
+                              <span v-else-if="part.type === 'same'">{{ part.text }}</span>
+                            </template>
+                          </div>
+                        </div>
+                        <div>
+                          <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">After (current)</div>
+                          <div class="bg-success/5 border border-success/20 px-2 py-1.5 rounded font-mono leading-relaxed">
+                            <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="'a'+i">
+                              <span v-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
+                              <span v-else-if="part.type === 'same'">{{ part.text }}</span>
+                            </template>
+                          </div>
                         </div>
                       </div>
                     </div>
