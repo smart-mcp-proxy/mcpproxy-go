@@ -1158,12 +1158,7 @@ struct ToolRow: View {
                         .foregroundStyle(.secondary)
 
                     if oldDesc != newDesc {
-                        if !oldDesc.isEmpty {
-                            diffLine(text: oldDesc, isOld: true)
-                        }
-                        if !newDesc.isEmpty {
-                            diffLine(text: newDesc, isOld: false)
-                        }
+                        diffBeforeAfter(previous: oldDesc, current: newDesc)
                     } else {
                         Text("No description changes")
                             .font(.scaled(.caption, scale: fontScale))
@@ -1188,12 +1183,7 @@ struct ToolRow: View {
                         .padding(.top, 4)
 
                     if oldSchema != newSchema {
-                        if !oldSchema.isEmpty {
-                            diffLine(text: oldSchema, isOld: true)
-                        }
-                        if !newSchema.isEmpty {
-                            diffLine(text: newSchema, isOld: false)
-                        }
+                        diffBeforeAfter(previous: oldSchema, current: newSchema)
                     } else {
                         Text("No schema changes")
                             .font(.scaled(.caption, scale: fontScale))
@@ -1219,20 +1209,78 @@ struct ToolRow: View {
     }
 
     @ViewBuilder
-    private func diffLine(text: String, isOld: Bool) -> some View {
-        HStack(alignment: .top, spacing: 4) {
-            Image(systemName: isOld ? "minus.circle.fill" : "plus.circle.fill")
-                .font(.scaled(.caption2, scale: fontScale))
-                .foregroundStyle(isOld ? .red : .green)
-            Text(text)
-                .font(.scaledMonospaced(.caption, scale: fontScale))
-                .foregroundStyle(isOld ? .secondary : .primary)
-                .lineLimit(isOld ? 6 : nil)
+    private func diffBeforeAfter(previous: String, current: String) -> some View {
+        let parts = computeWordDiff(previous, current)
+        VStack(alignment: .leading, spacing: 6) {
+            diffBox(
+                label: "BEFORE (APPROVED)",
+                attributed: renderDiffSide(parts, keep: .removed),
+                accent: .red,
+                isEmpty: previous.isEmpty
+            )
+            diffBox(
+                label: "AFTER (CURRENT)",
+                attributed: renderDiffSide(parts, keep: .added),
+                accent: .green,
+                isEmpty: current.isEmpty
+            )
         }
-        .padding(4)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background((isOld ? Color.red : Color.green).opacity(0.08))
-        .cornerRadius(4)
+    }
+
+    @ViewBuilder
+    private func diffBox(label: String, attributed: AttributedString, accent: Color, isEmpty: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.system(size: 9 * fontScale, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(.secondary)
+            if isEmpty {
+                Text("(empty)")
+                    .font(.scaledMonospaced(.caption, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(accent.opacity(0.04))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(accent.opacity(0.25), lineWidth: 1)
+                    )
+                    .cornerRadius(4)
+            } else {
+                Text(attributed)
+                    .font(.scaledMonospaced(.caption, scale: fontScale))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(6)
+                    .background(accent.opacity(0.04))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .strokeBorder(accent.opacity(0.25), lineWidth: 1)
+                    )
+                    .cornerRadius(4)
+            }
+        }
+    }
+
+    /// Build AttributedString for one side of the diff. `keep` is the change-type
+    /// (removed or added) that belongs in this side; same-type parts render plain
+    /// in both sides; the opposite change-type is dropped.
+    private func renderDiffSide(_ parts: [ToolDiffPart], keep: ToolDiffPart.Kind) -> AttributedString {
+        var result = AttributedString()
+        for part in parts {
+            switch part.kind {
+            case .same:
+                result += AttributedString(part.text)
+            case .added, .removed:
+                if part.kind != keep { continue }
+                var span = AttributedString(part.text)
+                let accent: Color = part.kind == .removed ? .red : .green
+                span.backgroundColor = accent.opacity(0.25)
+                span.foregroundColor = accent
+                result += span
+            }
+        }
+        return result
     }
 
     private func loadDiff() {
@@ -1312,6 +1360,88 @@ struct ToolRow: View {
         .background(color.opacity(0.1))
         .cornerRadius(4)
     }
+}
+
+// MARK: - Tool Description Word Diff
+
+struct ToolDiffPart {
+    enum Kind { case same, added, removed }
+    let kind: Kind
+    let text: String
+}
+
+/// Split a string into tokens, preserving runs of whitespace as their own tokens
+/// (matches the web UI's `split(/(\s+)/)` so the LCS behaves identically).
+private func splitPreservingWhitespace(_ s: String) -> [String] {
+    var tokens: [String] = []
+    var buffer = ""
+    var bufferIsWhitespace: Bool? = nil
+    for ch in s {
+        let chIsWhitespace = ch.isWhitespace
+        if bufferIsWhitespace == nil {
+            bufferIsWhitespace = chIsWhitespace
+            buffer.append(ch)
+        } else if bufferIsWhitespace == chIsWhitespace {
+            buffer.append(ch)
+        } else {
+            tokens.append(buffer)
+            buffer = String(ch)
+            bufferIsWhitespace = chIsWhitespace
+        }
+    }
+    if !buffer.isEmpty { tokens.append(buffer) }
+    return tokens
+}
+
+/// Word-level diff via longest common subsequence. Returns parts in original order.
+func computeWordDiff(_ oldText: String, _ newText: String) -> [ToolDiffPart] {
+    let oldTokens = splitPreservingWhitespace(oldText)
+    let newTokens = splitPreservingWhitespace(newText)
+    let m = oldTokens.count
+    let n = newTokens.count
+    if m == 0 && n == 0 { return [] }
+    if m == 0 { return [ToolDiffPart(kind: .added, text: newText)] }
+    if n == 0 { return [ToolDiffPart(kind: .removed, text: oldText)] }
+
+    var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+    for i in 1...m {
+        for j in 1...n {
+            if oldTokens[i - 1] == newTokens[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            } else {
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+            }
+        }
+    }
+
+    var parts: [ToolDiffPart] = []
+    var i = m
+    var j = n
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && oldTokens[i - 1] == newTokens[j - 1] {
+            parts.append(ToolDiffPart(kind: .same, text: oldTokens[i - 1]))
+            i -= 1
+            j -= 1
+        } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+            parts.append(ToolDiffPart(kind: .added, text: newTokens[j - 1]))
+            j -= 1
+        } else {
+            parts.append(ToolDiffPart(kind: .removed, text: oldTokens[i - 1]))
+            i -= 1
+        }
+    }
+    parts.reverse()
+
+    // Merge consecutive parts of the same kind to minimize attribute spans.
+    var merged: [ToolDiffPart] = []
+    for part in parts {
+        if let last = merged.last, last.kind == part.kind {
+            merged[merged.count - 1] = ToolDiffPart(kind: last.kind, text: last.text + part.text)
+        } else {
+            merged.append(part)
+        }
+    }
+    return merged
 }
 
 // MARK: - Flow Layout (for wrapping annotation badges)
