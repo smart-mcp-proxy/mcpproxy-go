@@ -135,3 +135,6 @@ website/npm-debug.log*
 website/yarn-error.log*
 __pycache__/
 native/macos/MCPProxy/.build/
+
+# Wrangler session cache
+.wrangler/
