@@ -87,6 +87,38 @@ final class UpdateService: ObservableObject {
         return "amd64"
     }
 
+    /// Compare two semver-ish version strings (no leading "v"). Returns:
+    /// - positive if `a` > `b`
+    /// - negative if `a` < `b`
+    /// - zero if equal or unparseable
+    ///
+    /// Pre-release identifiers (e.g. `1.2.3-rc.1`) sort *before* the matching
+    /// release per semver §11. Anything we can't parse is treated as equal so
+    /// the caller falls back to its existing behaviour.
+    static func compareSemver(_ a: String, _ b: String) -> Int {
+        func parse(_ s: String) -> (core: [Int], pre: String)? {
+            let parts = s.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            let coreParts = parts[0].split(separator: ".")
+            var core: [Int] = []
+            for p in coreParts {
+                guard let n = Int(p) else { return nil }
+                core.append(n)
+            }
+            while core.count < 3 { core.append(0) }
+            let pre = parts.count > 1 ? String(parts[1]) : ""
+            return (core, pre)
+        }
+        guard let pa = parse(a), let pb = parse(b) else { return 0 }
+        for i in 0..<min(pa.core.count, pb.core.count) {
+            if pa.core[i] != pb.core[i] { return pa.core[i] - pb.core[i] }
+        }
+        // Equal core: a release outranks any pre-release.
+        if pa.pre.isEmpty && !pb.pre.isEmpty { return 1 }
+        if !pa.pre.isEmpty && pb.pre.isEmpty { return -1 }
+        if pa.pre == pb.pre { return 0 }
+        return pa.pre < pb.pre ? -1 : 1
+    }
+
     /// Open the download page in the browser.
     func openDownloadPage() {
         let urlString = downloadURL ?? "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest"
@@ -135,8 +167,11 @@ final class UpdateService: ObservableObject {
                 let remoteVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
                 let localVersion = currentVersion.hasPrefix("v") ? String(currentVersion.dropFirst()) : currentVersion
 
-                // Simple version comparison (works for semver)
-                if !remoteVersion.isEmpty && !localVersion.isEmpty && remoteVersion != localVersion {
+                // Only suggest the remote version when it is *newer* than the running build.
+                // String inequality would otherwise allow a downgrade if GitHub `releases/latest`
+                // happens to lag behind a freshly published version.
+                if !remoteVersion.isEmpty && !localVersion.isEmpty &&
+                   Self.compareSemver(remoteVersion, localVersion) > 0 {
                     // Find macOS DMG asset matching the host CPU architecture.
                     // Release assets are published as:
                     //   mcpproxy-<ver>-darwin-arm64.dmg / -amd64.dmg            (unsigned)

@@ -83,8 +83,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Build initial menu (rebuildMenu creates the NSMenu and sets delegate)
         rebuildMenu()
 
-        // Subscribe to state changes — update icon, menu, and refresh servers periodically
-        appState.objectWillChange
+        // Subscribe to state changes — update icon, menu, and refresh servers periodically.
+        // Merge UpdateService changes so a fresh GitHub check repaints the menu immediately
+        // instead of waiting for the next server-poll cycle.
+        Publishers.Merge(
+            appState.objectWillChange.map { _ in () },
+            updateService.objectWillChange.map { _ in () }
+        )
             .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.updateStatusIcon()
@@ -102,6 +107,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                         await self.appState.updateServers(servers)
                     }
                 }
+            }
+            .store(in: &cancellables)
+
+        // Auto-check GitHub for a newer release as soon as the core reports its version,
+        // and again every hour. This avoids relying solely on the core's 4h cache, which
+        // can lag behind freshly published releases.
+        appState.$version
+            .removeDuplicates()
+            .filter { !$0.isEmpty }
+            .first()
+            .sink { [weak self] version in
+                guard let self else { return }
+                self.updateService.currentVersion = version
+                self.updateService.checkForUpdates()
+            }
+            .store(in: &cancellables)
+
+        Timer.publish(every: 3600, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self, !self.appState.version.isEmpty else { return }
+                self.updateService.currentVersion = self.appState.version
+                self.updateService.checkForUpdates()
             }
             .store(in: &cancellables)
 
@@ -597,8 +625,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         checkUpdates.isEnabled = updateService.canCheckForUpdates
         menu.addItem(checkUpdates)
 
-        // Show update from either appState (from core /api/v1/info) or UpdateService (GitHub check)
-        let updateVersion = appState.updateAvailable ?? updateService.latestVersion
+        // Show update from either appState (from core /api/v1/info) or UpdateService (direct
+        // GitHub check). Prefer whichever source advertises the newer version so a stale
+        // core cache never masks a freshly-published release.
+        let updateVersion: String? = {
+            switch (appState.updateAvailable, updateService.latestVersion) {
+            case let (.some(a), .some(b)):
+                return UpdateService.compareSemver(a, b) >= 0 ? a : b
+            case let (.some(a), .none):
+                return a
+            case let (.none, .some(b)):
+                return b
+            case (.none, .none):
+                return nil
+            }
+        }()
         if let available = updateVersion {
             let updateNote = NSMenuItem(title: "Update available: v\(available)", action: #selector(openDownloadPage), keyEquivalent: "")
             updateNote.target = self

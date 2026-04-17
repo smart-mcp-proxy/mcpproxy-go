@@ -451,7 +451,7 @@ actor CoreProcessManager {
             appState.version = info.version
             appState.webUIBaseURL = webUIBase
             if let update = info.update, update.available, let latest = update.latestVersion {
-                appState.updateAvailable = latest
+                appState.updateAvailable = latest.hasPrefix("v") ? String(latest.dropFirst()) : latest
             }
         }
 

@@ -303,7 +303,7 @@ struct TrayMenu: View {
         }
         .disabled(!updateService.canCheckForUpdates)
 
-        if let available = appState.updateAvailable {
+        if let available = appState.updateAvailable ?? updateService.latestVersion {
             Text("Update available: v\(available)")
                 .font(.caption)
                 .foregroundStyle(.blue)
