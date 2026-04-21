@@ -712,6 +712,7 @@ See `docs/prerelease-builds.md` for download instructions.
 - N/A (tray reads all state from core via REST API — no local persistence per Constitution III) (037-macos-swift-tray)
 - Go 1.24 (toolchain go1.24.10) — primary; Swift 5.9 — macOS tray header change only + `github.com/google/uuid` (existing), `github.com/go-chi/chi/v5` (existing, for `RoutePattern()`), `github.com/spf13/cobra` (existing, new subcommand), `go.uber.org/zap` (existing), stdlib `sync/atomic`, `sync`, `os` (042-telemetry-tier2)
 - Config file `~/.mcpproxy/mcp_config.json` only — counters live in memory and are never persisted between restarts (privacy constraint). No BBolt buckets, no new files. (042-telemetry-tier2)
+- Bash / GitHub Actions YAML for the CI job; Astro 4.x for the website; Markdown for docs. No Go code changes required. (043-linux-package-repos)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
