@@ -16,15 +16,21 @@ fi
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# AWS CLI v2.23+ sends CRC32 checksum headers by default on PutObject, which
+# Cloudflare R2 rejects with SignatureDoesNotMatch. Opt back into the pre-2.23
+# behaviour: only include checksums when the service actually requires them.
+export AWS_REQUEST_CHECKSUM_CALCULATION="when_required"
+export AWS_RESPONSE_CHECKSUM_VALIDATION="when_required"
+
 # Import key unless already imported (e.g. during local dry-run against user's
-# existing keyring).
+# existing keyring). We pin GNUPGHOME to a stable path so the child process
+# that does the import and the later processes that do the signing all share
+# the same keyring — without needing to shuttle env vars through $GITHUB_ENV.
 if [[ -n "${PACKAGES_GPG_PRIVATE_KEY:-}" ]]; then
-  "${here}/import-key.sh"
-  # If import-key.sh wrote GNUPGHOME to $GITHUB_ENV, reload it for this process
-  if [[ -n "${GITHUB_ENV:-}" && -f "${GITHUB_ENV}" ]]; then
-    # shellcheck source=/dev/null
-    eval "$(grep '^GNUPGHOME=' "${GITHUB_ENV}" | sed 's/^/export /')"
+  if [[ -z "${GNUPGHOME:-}" ]]; then
+    export GNUPGHOME="$(mktemp -d)"
   fi
+  "${here}/import-key.sh"
 else
   echo "publish: PACKAGES_GPG_PRIVATE_KEY not set; assuming key is already in GNUPGHOME (local dry-run mode)"
 fi

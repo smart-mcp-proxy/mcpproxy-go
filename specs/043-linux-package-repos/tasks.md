@@ -46,7 +46,7 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 - [X] T012 Registered GH secrets `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY`.
 - [X] T013 Registered GH variable `PACKAGES_GPG_KEY_ID` = `3B6FA1AD5D5359DA51F18DDCE1B59B9BA1CB8A3B`.
 - [X] T014 Uploaded `mcpproxy.gpg` and `mcpproxy.gpg.asc` to both buckets via `wrangler r2 object put`.
-- [ ] T015 Verify the public key is fetchable over HTTPS (DNS propagation in progress; rechecked at Phase 7).
+- [X] T015 Verified: `curl https://apt.mcpproxy.app/mcpproxy.gpg` and same for rpm return HTTP 200 with public key matching fingerprint `3B6F A1AD 5D53 59DA 51F1 8DDC E1B5 9B9B A1CB 8A3B`. Root cause of earlier 404: wrangler r2 object put defaults to local storage; must use `--remote` flag.
 
 ---
 
@@ -96,7 +96,7 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 ### Verification for User Story 1
 
-- [ ] T031 [US1] Execute manual end-to-end test on a fresh Docker container outside CI following the commands in `specs/043-linux-package-repos/quickstart.md` Step 8 for both `debian:stable-slim` and `fedora:latest`. Confirm `mcpproxy --version` returns the expected version and the GPG fingerprint of the fetched key matches the fingerprint recorded in T001.
+- [X] T031 [US1] End-to-end test: ran `publish.sh` locally against real R2 with v0.24.6 artifacts; apt install in debian:stable-slim and dnf install in fedora:latest both succeed, `mcpproxy --version` returns `0.24.6`, key fingerprint matches T001.
 
 **Checkpoint**: US1 is validated.
 

@@ -144,9 +144,11 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "  dry-run: final tree would be:"
   find "${workdir}" -type f | sort | sed "s|^${workdir}/|  |"
 else
-  # Metadata with short cache
+  # Metadata with short cache — must be under the time a client takes to
+  # fetch Release + Packages.gz together, so that a user running `apt update`
+  # never sees a Release referencing a stale Packages.gz.
   aws s3 sync "${workdir}/dists/" "s3://${APT_BUCKET}/dists/" \
-    --cache-control "public, max-age=300" --no-progress --delete
+    --cache-control "public, max-age=60, must-revalidate" --no-progress --delete
   # Pool artifacts are immutable
   aws s3 sync "${workdir}/pool/" "s3://${APT_BUCKET}/pool/" \
     --cache-control "public, max-age=31536000, immutable" --no-progress --delete

@@ -26,9 +26,14 @@ if [[ -z "${GPG_KEY_ID:-}" ]]; then
   exit 1
 fi
 
-scratch=$(mktemp -d)
-chmod 700 "${scratch}"
-export GNUPGHOME="${scratch}"
+# Honor GNUPGHOME if caller set one (e.g. publish.sh passes a stable path so
+# subsequent sub-processes in the same pipeline can find the key). Otherwise
+# create a scratch directory.
+if [[ -z "${GNUPGHOME:-}" ]]; then
+  export GNUPGHOME="$(mktemp -d)"
+fi
+mkdir -p "${GNUPGHOME}"
+chmod 700 "${GNUPGHOME}"
 
 # Start a gpg-agent with loopback pinentry so we can feed the passphrase
 # programmatically during signing. Must be configured before the first

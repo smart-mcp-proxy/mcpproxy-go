@@ -45,8 +45,8 @@ repo_gpgcheck=1
 
 | Path pattern | Cache-Control |
 |---|---|
-| `{x86_64,aarch64}/repodata/repomd.xml*` | `public, max-age=300` |
-| `{x86_64,aarch64}/repodata/*.xml.gz` | `public, max-age=300` |
+| `{x86_64,aarch64}/repodata/repomd.xml*` | `public, max-age=60, must-revalidate` |
+| `{x86_64,aarch64}/repodata/*.xml.gz` | `public, max-age=60, must-revalidate` |
 | `{x86_64,aarch64}/*.rpm` | `public, max-age=31536000, immutable` |
 | `mcpproxy.gpg*` | `public, max-age=86400` |
 | `mcpproxy.repo` | `public, max-age=3600` |

@@ -69,6 +69,37 @@ if (( found == 0 )); then
   exit 1
 fi
 
+# 2b. Sign newly-added RPMs. dnf with gpgcheck=1 verifies each package's
+# embedded signature — not just the repo metadata signature — so the RPM files
+# must be signed before createrepo_c is run.
+echo "[2b/7] signing new .rpm packages"
+
+# rpmsign reads the signing key via rpm macros; set them up against our GNUPGHOME.
+cat > "${HOME}/.rpmmacros" <<EOF
+%_signature gpg
+%_gpg_name ${GPG_KEY_ID}
+%_gpg_path ${GNUPGHOME}
+%__gpg_sign_cmd /usr/bin/gpg --batch --yes --pinentry-mode loopback --passphrase ${PACKAGES_GPG_PASSPHRASE} --no-armor --no-secmem-warning -u %{_gpg_name} -sbo %{__signature_filename} --digest-algo sha256 %{__plaintext_filename}
+EOF
+
+for arch in x86_64 aarch64; do
+  for rpm in "${workdir}/${arch}/"mcpproxy-*-1.${arch}.rpm; do
+    [[ -e "${rpm}" ]] || continue
+    # Skip if already signed (idempotent re-runs)
+    if rpm --checksig "${rpm}" 2>&1 | grep -q "pgp"; then
+      echo "  already signed: $(basename "${rpm}")"
+      continue
+    fi
+    rpmsign --addsign "${rpm}" > /dev/null 2>&1 || {
+      echo "error: rpmsign failed for ${rpm}" >&2
+      exit 1
+    }
+    echo "  signed: $(basename "${rpm}")"
+  done
+done
+
+rm -f "${HOME}/.rpmmacros"
+
 # 3. Prune per-arch to top RETAIN_N versions
 for arch in x86_64 aarch64; do
   echo "[3/7] pruning ${arch} to last ${RETAIN_N} versions"
@@ -126,7 +157,7 @@ else
   # Per-arch content: metadata short cache, rpms immutable
   for arch in x86_64 aarch64; do
     aws s3 sync "${workdir}/${arch}/repodata/" "s3://${RPM_BUCKET}/${arch}/repodata/" \
-      --cache-control "public, max-age=300" --no-progress --delete
+      --cache-control "public, max-age=60, must-revalidate" --no-progress --delete
     # rpms — upload individually with immutable cache (sync --cache-control is per-run)
     for f in "${workdir}/${arch}/"*.rpm; do
       [[ -e "${f}" ]] || continue

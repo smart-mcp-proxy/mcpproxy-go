@@ -60,9 +60,9 @@ Uploaders set HTTP cache metadata via `aws s3 cp --metadata-directive REPLACE --
 
 | Path pattern | Cache-Control |
 |---|---|
-| `dists/stable/Release*` | `public, max-age=300` (5 min) — changes on every release |
-| `dists/stable/InRelease` | `public, max-age=300` |
-| `dists/stable/**/Packages*` | `public, max-age=300` |
+| `dists/stable/Release*` | `public, max-age=60, must-revalidate` — changes on every release |
+| `dists/stable/InRelease` | `public, max-age=60, must-revalidate` |
+| `dists/stable/**/Packages*` | `public, max-age=60, must-revalidate` |
 | `pool/main/m/mcpproxy/*.deb` | `public, max-age=31536000, immutable` (forever) |
 | `mcpproxy.gpg*` | `public, max-age=86400` (1 day) |
 
