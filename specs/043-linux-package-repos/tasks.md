@@ -32,21 +32,21 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 **Purpose**: Generate the signing key, create R2 buckets, bind custom domains, and register GitHub Actions secrets. All one-time operations.
 
-- [ ] T001 Generate GPG signing key (RSA 4096, 5-year expiry, UID `MCPProxy Packages <mcpproxy-packages@mcpproxy.app>`) using the batch-file procedure in `specs/043-linux-package-repos/quickstart.md` Step 1. Record the fingerprint.
-- [ ] T002 Export ASCII-armored public key to `/Users/user/repos/mcpproxy-go/contrib/signing/mcpproxy-packages.asc`. Commit this file to the `043-linux-package-repos` branch.
-- [ ] T003 Write the GPG private-key backup to `~/repos/PACKAGES_GPG_PRIVATE_KEY.txt` (outside any git repo) using the exact template in `specs/043-linux-package-repos/quickstart.md` Step 2 (metadata header + instructions + armored key). `chmod 600` the file.
-- [ ] T004 [P] Create Cloudflare R2 bucket `mcpproxy-apt` via `wrangler r2 bucket create mcpproxy-apt`.
-- [ ] T005 [P] Create Cloudflare R2 bucket `mcpproxy-rpm` via `wrangler r2 bucket create mcpproxy-rpm`.
-- [ ] T006 Bind custom domain `apt.mcpproxy.app` to the `mcpproxy-apt` bucket via the Cloudflare dashboard (R2 → Buckets → Settings → Custom Domains). Confirm Cloudflare auto-creates the CNAME and issues a TLS certificate.
-- [ ] T007 Bind custom domain `rpm.mcpproxy.app` to the `mcpproxy-rpm` bucket via the Cloudflare dashboard. Same confirmation as T006.
-- [ ] T008 Create an R2 API token scoped to `mcpproxy-apt` and `mcpproxy-rpm` with read/write permissions. Capture the access key ID and secret.
-- [ ] T009 [P] Register GitHub Actions secret `PACKAGES_GPG_PRIVATE_KEY` from the backup file: `gh secret set PACKAGES_GPG_PRIVATE_KEY --repo smart-mcp-proxy/mcpproxy-go < ~/repos/PACKAGES_GPG_PRIVATE_KEY.txt`.
-- [ ] T010 [P] Register GitHub Actions secret `PACKAGES_GPG_PASSPHRASE` with the passphrase captured during T001.
-- [ ] T011 [P] Register GitHub Actions secret `R2_ACCOUNT_ID` with the Cloudflare account ID.
-- [ ] T012 [P] Register GitHub Actions secrets `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` from the token created in T008.
-- [ ] T013 [P] Register non-secret GitHub Actions variable `PACKAGES_GPG_KEY_ID` with the full fingerprint from T001.
-- [ ] T014 Upload the public signing key to both R2 buckets so that `https://apt.mcpproxy.app/mcpproxy.gpg` and `https://rpm.mcpproxy.app/mcpproxy.gpg` serve it. Use `aws s3 cp` with R2 endpoint (commands in `specs/043-linux-package-repos/quickstart.md` Step 5).
-- [ ] T015 Verify the public key is fetchable over HTTPS: `curl -fsSL https://apt.mcpproxy.app/mcpproxy.gpg | gpg --show-keys` must print the fingerprint matching T001. Same for `rpm.mcpproxy.app`.
+- [X] T001 Generate GPG signing key — fingerprint `3B6FA1AD5D5359DA51F18DDCE1B59B9BA1CB8A3B`, expires 2031-04-21.
+- [X] T002 Export ASCII-armored public key to `contrib/signing/mcpproxy-packages.asc` (3216 bytes).
+- [X] T003 Write GPG private-key backup to `~/repos/PACKAGES_GPG_PRIVATE_KEY.txt` (8472 bytes, mode 0600, outside all git repos).
+- [X] T004 Created R2 bucket `mcpproxy-apt` (Eastern Europe, Standard class).
+- [X] T005 Created R2 bucket `mcpproxy-rpm` (Eastern Europe, Standard class).
+- [X] T006 Bound custom domain `apt.mcpproxy.app` — CNAME `apt` → `mcpproxy-apt`, TLS 1.0 min, status Initializing.
+- [X] T007 Bound custom domain `rpm.mcpproxy.app` — CNAME `rpm` → `mcpproxy-rpm`, TLS 1.0 min, status Initializing.
+- [X] T008 Created R2 API token "MCPProxy Packages CI" — Object Read & Write, scoped to both buckets, Forever TTL.
+- [X] T009 Registered GH secret `PACKAGES_GPG_PRIVATE_KEY`.
+- [X] T010 Registered GH secret `PACKAGES_GPG_PASSPHRASE`.
+- [X] T011 Registered GH secret `R2_ACCOUNT_ID`.
+- [X] T012 Registered GH secrets `R2_ACCESS_KEY_ID` + `R2_SECRET_ACCESS_KEY`.
+- [X] T013 Registered GH variable `PACKAGES_GPG_KEY_ID` = `3B6FA1AD5D5359DA51F18DDCE1B59B9BA1CB8A3B`.
+- [X] T014 Uploaded `mcpproxy.gpg` and `mcpproxy.gpg.asc` to both buckets via `wrangler r2 object put`.
+- [ ] T015 Verify the public key is fetchable over HTTPS (DNS propagation in progress; rechecked at Phase 7).
 
 ---
 
@@ -56,11 +56,11 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T016 Create `/Users/user/repos/mcpproxy-go/contrib/linux-repos/` directory and a short `README.md` listing the scripts and their purposes.
-- [ ] T017 [P] Create `/Users/user/repos/mcpproxy-go/contrib/linux-repos/apt-ftparchive.conf` defining the suite layout (Suite `stable`, Codename `stable`, Architectures `amd64 arm64`, Components `main`, Origin/Label `MCPProxy`, Description, and `APT::FTPArchive::Release` section). Schema per `contracts/apt-bucket-layout.md`.
-- [ ] T018 [P] Create `/Users/user/repos/mcpproxy-go/contrib/linux-repos/mcpproxy.repo.template` containing the dnf source definition from `contracts/rpm-bucket-layout.md`. Published to `rpm.mcpproxy.app/mcpproxy.repo` during publish.
-- [ ] T019 Create `/Users/user/repos/mcpproxy-go/contrib/linux-repos/import-key.sh` that reads `PACKAGES_GPG_PRIVATE_KEY` env var (or stdin), imports into a scratch `GNUPGHOME`, sets `PACKAGES_GPG_PASSPHRASE` as the preset passphrase, and exports `GPG_KEY_ID` for downstream steps. Must be idempotent if run twice.
-- [ ] T020 [P] Create `/Users/user/repos/mcpproxy-go/contrib/linux-repos/check-key-expiry.sh` that reads the imported key's expiry and emits a GitHub Actions warning (`::warning::`) if within 60 days. Non-fatal. Implements FR-023.
+- [X] T016 Created `contrib/linux-repos/` with README.md.
+- [X] T017 Created `apt-ftparchive.conf`.
+- [X] T018 Created `mcpproxy.repo.template`.
+- [X] T019 Created `import-key.sh`.
+- [X] T020 Created `check-key-expiry.sh`.
 
 ---
 
@@ -74,16 +74,13 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 ### Implementation for User Story 2
 
-- [ ] T021 [US2] Write `/Users/user/repos/mcpproxy-go/contrib/linux-repos/apt-publish.sh` implementing the apt publish sequence: sync down bucket → copy new `.deb` files into `pool/main/m/mcpproxy/` → prune versions beyond top 10 by semver → run `apt-ftparchive packages` and `apt-ftparchive release` → sign with `gpg --detach-sign --armor` (Release.gpg) and `gpg --clearsign` (InRelease) → sync up with `aws s3 sync --delete` → set cache-control per `contracts/apt-bucket-layout.md`.
-- [ ] T022 [US2] Write `/Users/user/repos/mcpproxy-go/contrib/linux-repos/rpm-publish.sh` implementing the rpm publish sequence: sync down → copy new `.rpm` files into `{x86_64,aarch64}/` → prune versions beyond top 10 per arch → run `createrepo_c {x86_64,aarch64}/` → sign each `repodata/repomd.xml` with `gpg --detach-sign --armor` → upload `mcpproxy.repo` from template → sync up → set cache-control per `contracts/rpm-bucket-layout.md`.
-- [ ] T023 [US2] Write `/Users/user/repos/mcpproxy-go/contrib/linux-repos/publish.sh` top-level orchestrator that sequences `import-key.sh` → `check-key-expiry.sh` → `apt-publish.sh` → `rpm-publish.sh`. Supports a `--dry-run` flag that runs metadata generation locally but skips the final sync-up.
-- [ ] T024 [US2] Modify `/Users/user/repos/mcpproxy-go/.github/workflows/release.yml` to add the `publish-linux-repos` job per the contract in `contracts/publish-linux-repos.job.md`. Depends on `build` job, guarded by `startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')` (FR-022).
-- [ ] T025 [US2] In the new job, wire in the `Install repo tooling` step: `sudo apt-get install -y apt-utils createrepo-c gnupg`. AWS CLI v2 is pre-installed on ubuntu-latest.
-- [ ] T026 [US2] In the new job, wire in the `Download package artifacts` step using `actions/download-artifact@v4` with `pattern: linux-packages-*` and `merge-multiple: true`, landing files in `release-artifacts/`.
-- [ ] T027 [US2] In the new job, invoke `contrib/linux-repos/publish.sh release-artifacts` with all the required env vars (secrets, variables, R2 endpoint URL). Implements FR-009 through FR-013.
-- [ ] T028 [US2] Write `/Users/user/repos/mcpproxy-go/contrib/linux-repos/smoke-test-debian.sh VERSION` that runs a `debian:stable-slim` container, performs the documented install, asserts `mcpproxy --version` contains VERSION. Exits non-zero on mismatch. Implements half of FR-014.
-- [ ] T029 [US2] Write `/Users/user/repos/mcpproxy-go/contrib/linux-repos/smoke-test-fedora.sh VERSION` — same for `fedora:latest` + dnf. Implements the other half of FR-014.
-- [ ] T030 [US2] Add the two smoke-test steps to the `publish-linux-repos` job, each invoking its script with `"${GITHUB_REF_NAME#v}"` as the version argument. Both must succeed for the job to pass.
+- [X] T021 [US2] Wrote `apt-publish.sh` (5487 bytes).
+- [X] T022 [US2] Wrote `rpm-publish.sh` (5572 bytes).
+- [X] T023 [US2] Wrote `publish.sh` orchestrator (1171 bytes).
+- [X] T024-T027 [US2] Added `publish-linux-repos` job to `.github/workflows/release.yml` (needs [build, release], guarded on non-prerelease v* tags, wires in all env vars and secrets, invokes `contrib/linux-repos/publish.sh release-artifacts`, followed by Debian + Fedora smoke tests). YAML validated.
+- [X] T028 [US2] Wrote `smoke-test-debian.sh` (1291 bytes).
+- [X] T029 [US2] Wrote `smoke-test-fedora.sh` (1264 bytes).
+- [X] T030 [US2] Smoke-test steps wired into job (see T024-T027).
 
 **Checkpoint**: At this point, a `v*` tag push publishes to `apt.mcpproxy.app` and `rpm.mcpproxy.app`, metadata is signed, retention is enforced, and smoke tests prove installability. User Story 1 is automatically exercised by the smoke test.
 
@@ -113,12 +110,12 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 ### Implementation for User Story 4
 
-- [ ] T032 [P] [US4] Update `/Users/user/repos/mcpproxy.app-website/src/pages/docs/installation.astro`: add a new "Debian / Ubuntu (apt)" section as the primary Linux option (above direct .deb / .rpm downloads). Include: 4-command copy-paste block, GPG fingerprint from T001, link to `https://apt.mcpproxy.app/mcpproxy.gpg`, link to the feature doc. Implements FR-015, FR-016.
-- [ ] T033 [P] [US4] Update `/Users/user/repos/mcpproxy.app-website/src/pages/docs/installation.astro`: add a "Fedora / RHEL / Rocky / AlmaLinux (dnf)" section parallel to the apt section. Same trust-verification fields. Implements FR-015, FR-016.
-- [ ] T034 [US4] In the same `installation.astro` file, move the existing "Linux Binary Downloads" section (direct `.deb`/`.rpm` download links) below the new apt/dnf sections and reword the preamble to frame it as a fallback for air-gapped/offline installs. Implements FR-017.
-- [ ] T035 [P] [US4] Update `/Users/user/repos/mcpproxy-go/README.md` Linux install section: replace the current "download .deb / apt install ./foo.deb" snippet with the apt and dnf repo snippets. Link to the website install page. Implements FR-018.
-- [ ] T036 [P] [US4] Update `/Users/user/repos/mcpproxy-go/docs/getting-started/installation.md` to mirror the README changes (apt block, dnf block, fingerprint, link to feature doc). Implements FR-019.
-- [ ] T037 [US4] Create `/Users/user/repos/mcpproxy-go/docs/features/linux-package-repos.md` covering: how the repos are hosted (overview, not Cloudflare implementation details), the 10-release retention window, pinning a specific version with `apt install mcpproxy=X.Y.Z`, air-gapped mirror instructions, and common troubleshooting (GPG errors, 404, cache staleness). Implements FR-020.
+- [X] T032 [US4] Added apt section to `mcpproxy.app-website/src/pages/docs/installation.astro`.
+- [X] T033 [US4] Added dnf section to same file (paired with apt section above Homebrew block).
+- [X] T034 [US4] Existing "Linux Binary Downloads" remains below new sections; default flow now visits repo install first.
+- [X] T035 [US4] Updated `README.md` Linux install block.
+- [X] T036 [US4] Updated `docs/getting-started/installation.md` — apt/dnf repo sections promoted above direct-download fallback.
+- [X] T037 [US4] Created `docs/features/linux-package-repos.md`.
 
 **Checkpoint**: First-time visitors to the install page see apt/dnf as the obvious Linux option. US4 validated.
 
@@ -132,8 +129,8 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 ### Implementation for User Story 3
 
-- [ ] T038 [US3] Create `/Users/user/repos/mcpproxy-go/docs/operations/linux-package-repos-infrastructure.md` covering: R2 bucket configuration, custom domain binding, GitHub Actions secret/variable inventory, the step-by-step GPG key rotation procedure (generate → backup → secrets → commit public key → release), how to manually republish a single release, and how to purge a bad version. Implements FR-021.
-- [ ] T039 [US3] Cross-link the ops doc from the feature doc (T037) and from the backup file (`~/repos/PACKAGES_GPG_PRIVATE_KEY.txt`) so that a maintainer hitting the rotation path finds the runbook from either entry point.
+- [X] T038 [US3] Created `docs/operations/linux-package-repos-infrastructure.md`.
+- [X] T039 [US3] Cross-linked ops doc from feature doc; backup file already references ops runbook path.
 
 **Checkpoint**: Rotation runbook exists, is cross-linked, and can be dry-run executed.
 
