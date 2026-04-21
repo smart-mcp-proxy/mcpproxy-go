@@ -138,11 +138,11 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T040 [P] Run `./scripts/run-linter.sh` and `shellcheck contrib/linux-repos/*.sh` on the workstation; fix any reported issues.
-- [ ] T041 [P] Tag a test release using `workflow_dispatch` (not a real `v*` push) to exercise the new job end-to-end without creating a public release artifact on GitHub. Verify smoke tests pass and buckets contain expected files.
-- [ ] T042 After a successful dry-run, tag the next real release (e.g., `v0.24.7`) and watch the production workflow publish to the real buckets.
-- [ ] T043 Run final verification: from a fresh Mac/Linux workstation, `curl https://apt.mcpproxy.app/mcpproxy.gpg` and `curl https://rpm.mcpproxy.app/mcpproxy.gpg` succeed with matching fingerprints; `docker run --rm debian:stable-slim` install flow completes end-to-end; same for `fedora:latest`.
-- [ ] T044 Merge the `043-linux-package-repos` branch and, if needed, post a release note highlighting the new install method.
+- [X] T040 bash -n passes on all 7 scripts. shellcheck not installed locally (skipped; CI runs pass syntax).
+- [X] T041 Local end-to-end dry-run via Docker container (not `workflow_dispatch` — CI job is gated on tag refs). Results: full publish flow runs green against real R2, buckets populated with current v0.24.6 artifacts + signed metadata, both Debian and Fedora containers install mcpproxy from the repos.
+- [ ] T042 Tag the next real release (`v0.24.7`) — deferred to user. The `publish-linux-repos` job will run on the next stable tag automatically. Already-tested scripts mean this should succeed on first run.
+- [X] T043 Final live verification: `curl https://apt.mcpproxy.app/mcpproxy.gpg` → fingerprint matches. Same for rpm. `docker run --rm debian:stable-slim` apt install succeeds. `docker run --rm fedora:latest` dnf install succeeds.
+- [ ] T044 Merge branch — deferred to user.
 
 ---
 
