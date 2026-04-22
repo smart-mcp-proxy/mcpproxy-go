@@ -1432,6 +1432,59 @@ jobs:
             echo "Changes committed and pushed successfully"
           fi
 
+  # Publish signed apt/yum repositories to Cloudflare R2 (apt.mcpproxy.app, rpm.mcpproxy.app)
+  publish-linux-repos:
+    needs: [build, release]
+    # Stable channel only: skip pre-release tags (v*-rc1, v*-beta, etc.)
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    runs-on: ubuntu-latest
+    environment: production
+
+    env:
+      APT_BUCKET: mcpproxy-apt
+      RPM_BUCKET: mcpproxy-rpm
+      APT_BASE_URL: https://apt.mcpproxy.app
+      RPM_BASE_URL: https://rpm.mcpproxy.app
+      GPG_KEY_ID: ${{ vars.PACKAGES_GPG_KEY_ID }}
+      RETAIN_N: "10"
+      AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+      AWS_DEFAULT_REGION: auto
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
+      PACKAGES_GPG_PASSPHRASE: ${{ secrets.PACKAGES_GPG_PASSPHRASE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install repo tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq apt-utils createrepo-c gnupg rpm
+          aws --version
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          pattern: linux-packages-*
+          merge-multiple: true
+
+      - name: List downloaded artifacts
+        run: |
+          echo "Contents of release-artifacts:"
+          find release-artifacts -type f | sort
+
+      - name: Publish apt + rpm repositories to R2
+        run: contrib/linux-repos/publish.sh release-artifacts
+
+      - name: Smoke-test install (Debian)
+        run: contrib/linux-repos/smoke-test-debian.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Smoke-test install (Fedora)
+        run: contrib/linux-repos/smoke-test-fedora.sh "${GITHUB_REF_NAME#v}"
+
   # Deploy documentation to Cloudflare Pages
   deploy-docs:
     needs: release

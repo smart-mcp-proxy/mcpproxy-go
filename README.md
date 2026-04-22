@@ -60,23 +60,25 @@ macOS (Homebrew):
 brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
 
-Linux (Debian/Ubuntu — auto-detects latest version + arch):
+Linux (Debian/Ubuntu) — apt repository, auto-updates via `apt upgrade`:
 ```bash
-VERSION=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest \
-  | grep -oE '"tag_name": *"v[^"]+"' | sed -E 's/.*"v([^"]+)"/\1/')
-ARCH=$(dpkg --print-architecture)
-curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy_${VERSION}_${ARCH}.deb"
-sudo apt install "./mcpproxy_${VERSION}_${ARCH}.deb"
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://apt.mcpproxy.app/mcpproxy.gpg \
+  | sudo tee /etc/apt/keyrings/mcpproxy.gpg > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/mcpproxy.gpg] https://apt.mcpproxy.app stable main" \
+  | sudo tee /etc/apt/sources.list.d/mcpproxy.list > /dev/null
+sudo apt update && sudo apt install mcpproxy
 ```
-Linux (Fedora/RHEL):
+
+Linux (Fedora / RHEL / Rocky / AlmaLinux) — dnf repository, auto-updates via `dnf upgrade`:
 ```bash
-VERSION=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest \
-  | grep -oE '"tag_name": *"v[^"]+"' | sed -E 's/.*"v([^"]+)"/\1/')
-ARCH=$(uname -m)
-curl -fLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-${VERSION}-1.${ARCH}.rpm"
-sudo dnf install "./mcpproxy-${VERSION}-1.${ARCH}.rpm"
+sudo dnf config-manager --add-repo https://rpm.mcpproxy.app/mcpproxy.repo
+sudo dnf install -y mcpproxy
 ```
-Both packages ship a hardened `systemd` unit and start the service automatically. See the [latest release](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest) for direct downloads.
+
+Both packages ship a hardened `systemd` unit and start the service automatically. Repository signing key fingerprint: `3B6F A1AD 5D53 59DA 51F1  8DDC E1B5 9B9B A1CB 8A3B`.
+
+For one-off `.deb` / `.rpm` downloads (air-gapped installs), grab them from the [latest release](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest).
 
 Manual download (all platforms):
 - **Linux tarball**: [AMD64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-amd64.tar.gz) | [ARM64](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest/download/mcpproxy-latest-linux-arm64.tar.gz)

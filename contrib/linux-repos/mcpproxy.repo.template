@@ -1,0 +1,7 @@
+[mcpproxy]
+name=MCPProxy
+baseurl=https://rpm.mcpproxy.app/$basearch
+enabled=1
+gpgcheck=1
+gpgkey=https://rpm.mcpproxy.app/mcpproxy.gpg
+repo_gpgcheck=1

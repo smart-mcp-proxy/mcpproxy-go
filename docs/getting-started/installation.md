@@ -46,9 +46,36 @@ The installer will:
 
 ## Linux
 
-### Debian / Ubuntu (.deb)
+### Debian / Ubuntu — apt repository (recommended)
 
-Download the latest `.deb` from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and install it with `apt`.
+Add the MCPProxy apt repository once; `apt upgrade` handles updates from then on, like any other system package.
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://apt.mcpproxy.app/mcpproxy.gpg \
+  | sudo tee /etc/apt/keyrings/mcpproxy.gpg > /dev/null
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/mcpproxy.gpg] https://apt.mcpproxy.app stable main" \
+  | sudo tee /etc/apt/sources.list.d/mcpproxy.list > /dev/null
+sudo apt update
+sudo apt install mcpproxy
+```
+
+Supported architectures: `amd64`, `arm64`. See [Linux Package Repositories](../features/linux-package-repos.md) for details on retention, pinning older versions, mirroring, and troubleshooting.
+
+Repository signing key fingerprint: `3B6F A1AD 5D53 59DA 51F1  8DDC E1B5 9B9B A1CB 8A3B`. You can verify it with `gpg --show-keys` against the public key URL above.
+
+### Fedora / RHEL / Rocky / AlmaLinux — dnf repository (recommended)
+
+```bash
+sudo dnf config-manager --add-repo https://rpm.mcpproxy.app/mcpproxy.repo
+sudo dnf install -y mcpproxy
+```
+
+Supported architectures: `x86_64`, `aarch64`.
+
+### Debian / Ubuntu — direct `.deb` download (fallback)
+
+If the apt repository isn't reachable (air-gapped installs, behind corporate proxies blocking `mcpproxy.app`, etc.), download the `.deb` from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and install it locally.
 
 **One-liner (auto-detects latest version):**
 
@@ -141,7 +168,9 @@ curl -H "X-API-Key: ${API_KEY}" http://<server-ip>:8080/api/v1/status
 
 For a deeper dive on auth, agent tokens, and the security model, see the [Configuration Reference](/configuration/config-file) and the [REST API reference](/api/rest-api).
 
-### Fedora / RHEL / CentOS / openSUSE (.rpm)
+### Fedora / RHEL / CentOS / openSUSE — direct `.rpm` download (fallback)
+
+For air-gapped or offline installs where the dnf repository isn't reachable.
 
 **One-liner (auto-detects latest version):**
 
