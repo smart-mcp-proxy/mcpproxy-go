@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -44,13 +47,37 @@ const (
 // IsolationManager handles Docker isolation logic for MCP servers
 type IsolationManager struct {
 	globalConfig *config.DockerIsolationConfig
+	logger       *zap.Logger
+
+	// warnedServers dedups the "per-server isolation enabled but global is
+	// off" warning so we don't spam the log on every ShouldIsolate() call
+	// (which runs on each tool dispatch). Keyed by server name.
+	warnedServers sync.Map
 }
 
-// NewIsolationManager creates a new isolation manager
+// NewIsolationManager creates a new isolation manager.
 func NewIsolationManager(globalConfig *config.DockerIsolationConfig) *IsolationManager {
 	return &IsolationManager{
 		globalConfig: globalConfig,
 	}
+}
+
+// NewIsolationManagerWithLogger creates a new isolation manager with a
+// structured logger. The logger is optional — when nil, warnings about
+// ignored per-server isolation opt-ins are silently dropped (callers that
+// care about those warnings should pass a logger).
+func NewIsolationManagerWithLogger(globalConfig *config.DockerIsolationConfig, logger *zap.Logger) *IsolationManager {
+	return &IsolationManager{
+		globalConfig: globalConfig,
+		logger:       logger,
+	}
+}
+
+// SetLogger sets the logger on an existing IsolationManager. Intended for
+// call sites that build the manager before a logger is available (e.g. in
+// config-time code) but want per-server warnings at runtime.
+func (im *IsolationManager) SetLogger(logger *zap.Logger) {
+	im.logger = logger
 }
 
 // HasLocalFilePath checks if server arguments contain local file paths
@@ -130,6 +157,15 @@ func (im *IsolationManager) GetDockerIsolationWarning(serverConfig *config.Serve
 func (im *IsolationManager) ShouldIsolate(serverConfig *config.ServerConfig) bool {
 	// Check if global isolation is disabled
 	if im.globalConfig == nil || !im.globalConfig.Enabled {
+		// If the user explicitly opted THIS server into isolation (via
+		// isolation.enabled: true), warn them once that the per-server
+		// setting is being ignored because the global flag is off. Silent
+		// short-circuits here are a common cause of confusion — telemetry
+		// shows many users configure per-server opt-ins and then wonder why
+		// nothing runs in a container.
+		if im.hasExplicitPerServerOptIn(serverConfig) {
+			im.warnPerServerIgnoredOnce(serverConfig.Name)
+		}
 		return false
 	}
 
@@ -152,6 +188,32 @@ func (im *IsolationManager) ShouldIsolate(serverConfig *config.ServerConfig) boo
 	}
 
 	return true
+}
+
+// hasExplicitPerServerOptIn returns true when the server config explicitly
+// sets isolation.enabled = true. Nil / missing means "inherit global" —
+// that's NOT an opt-in for our warning purposes.
+func (im *IsolationManager) hasExplicitPerServerOptIn(serverConfig *config.ServerConfig) bool {
+	if serverConfig == nil || serverConfig.Isolation == nil {
+		return false
+	}
+	return serverConfig.Isolation.Enabled != nil && *serverConfig.Isolation.Enabled
+}
+
+// warnPerServerIgnoredOnce emits a one-time warning (deduped by server name)
+// when a per-server isolation opt-in is being ignored because the global
+// flag is off.
+func (im *IsolationManager) warnPerServerIgnoredOnce(serverName string) {
+	if im.logger == nil {
+		return
+	}
+	if _, loaded := im.warnedServers.LoadOrStore(serverName, struct{}{}); loaded {
+		return
+	}
+	im.logger.Warn("per-server docker isolation opt-in ignored: global docker_isolation.enabled is false",
+		zap.String("server", serverName),
+		zap.String("hint", "set docker_isolation.enabled=true in your config (or toggle it in the Web UI Security page) to honor per-server isolation settings"),
+	)
 }
 
 // DetectRuntimeType detects the runtime type based on the command
