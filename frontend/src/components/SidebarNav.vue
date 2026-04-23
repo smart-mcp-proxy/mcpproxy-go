@@ -42,6 +42,44 @@
         </svg>
       </button>
 
+      <!-- Version + Check for updates (expanded sidebar only) -->
+      <div
+        v-if="!collapsed && systemStore.version"
+        class="px-4 pt-2 pb-3 border-b border-base-300"
+        data-testid="sidebar-version-block"
+      >
+        <div class="flex items-center gap-2 text-xs text-base-content/60">
+          <span class="font-mono" data-testid="sidebar-version">v{{ displayVersion }}</span>
+          <span
+            v-if="systemStore.updateAvailable"
+            class="badge badge-xs badge-primary"
+            :title="latestVersionTitle"
+          >
+            update
+          </span>
+        </div>
+        <button
+          type="button"
+          @click="handleCheckForUpdates"
+          :disabled="systemStore.checkingForUpdates"
+          class="btn btn-ghost btn-xs mt-1 w-full justify-start gap-1.5 px-1 font-normal text-[11px] text-base-content/70 hover:text-base-content"
+          data-testid="sidebar-check-updates"
+          :title="updateStatusTitle"
+        >
+          <svg
+            v-if="!systemStore.checkingForUpdates"
+            class="w-3.5 h-3.5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0A8.003 8.003 0 014.582 15H9" />
+          </svg>
+          <span v-else class="loading loading-spinner loading-xs"></span>
+          <span>{{ systemStore.checkingForUpdates ? 'Checking…' : updateButtonLabel }}</span>
+        </button>
+      </div>
+
       <!-- Navigation Menu -->
       <nav
         class="flex-1 overflow-y-auto overflow-x-hidden"
@@ -232,17 +270,8 @@
         </div>
       </div>
 
-      <!-- Footer: version + theme + feedback -->
+      <!-- Footer: theme + feedback (version is shown under the logo at the top) -->
       <div class="border-t border-base-300 py-2" :class="collapsed ? 'px-1' : 'px-3'">
-        <!-- Version (hidden when collapsed) -->
-        <div
-          v-if="!collapsed && systemStore.version"
-          class="px-2 pt-1 pb-2 text-[11px] text-base-content/50 flex items-center gap-1.5"
-        >
-          <span class="font-mono">{{ systemStore.version }}</span>
-          <span v-if="systemStore.updateAvailable" class="badge badge-xs badge-primary">update</span>
-        </div>
-
         <!-- Action row: Theme + Feedback -->
         <div
           class="flex items-stretch gap-1"
@@ -318,6 +347,35 @@ const systemStore = useSystemStore()
 const authStore = useAuthStore()
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
+
+// Strip a leading "v" so the template can format consistently as `v<version>`.
+const displayVersion = computed(() => systemStore.version.replace(/^v/i, ''))
+
+const latestVersionTitle = computed(() => {
+  const latest = systemStore.latestVersion
+  return latest ? `Latest release: ${latest}` : 'Update available'
+})
+
+const updateButtonLabel = computed(() =>
+  systemStore.updateAvailable ? 'Update available — view release' : 'Check for updates'
+)
+
+const updateStatusTitle = computed(() => {
+  const ts = systemStore.updateCheckedAt
+  if (!ts) return 'Check for updates on GitHub'
+  const d = new Date(ts)
+  return `Last checked ${d.toLocaleString()}`
+})
+
+async function handleCheckForUpdates() {
+  // If an update is already known, open the release page instead of re-checking.
+  const releaseUrl = systemStore.info?.update?.release_url
+  if (systemStore.updateAvailable && releaseUrl) {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer')
+    return
+  }
+  await systemStore.checkForUpdates()
+}
 
 // --- Inline SVG icon components (Heroicons outline style, stroke=currentColor) ---
 // Kept local to this file so the sidebar remains self-contained. Each icon is a

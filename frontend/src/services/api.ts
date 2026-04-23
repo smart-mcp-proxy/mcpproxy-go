@@ -547,8 +547,9 @@ class APIService {
   }
 
   // Info endpoint (version and update information)
-  async getInfo(): Promise<APIResponse<InfoResponse>> {
-    return this.request<InfoResponse>('/api/v1/info')
+  async getInfo(opts?: { refresh?: boolean }): Promise<APIResponse<InfoResponse>> {
+    const url = opts?.refresh ? '/api/v1/info?refresh=true' : '/api/v1/info'
+    return this.request<InfoResponse>(url)
   }
 
   // Activity Log endpoints (RFC-003)
