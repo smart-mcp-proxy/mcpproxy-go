@@ -470,6 +470,16 @@ class APIService {
     })
   }
 
+  // setDockerIsolationEnabled flips the global docker_isolation.enabled
+  // flag without resending the full config. Mirrors the PATCH endpoint
+  // added on the backend.
+  async setDockerIsolationEnabled(enabled: boolean): Promise<APIResponse<ConfigApplyResult>> {
+    return this.request<ConfigApplyResult>('/api/v1/config/docker-isolation', {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled })
+    })
+  }
+
   // Token statistics endpoints
   async getTokenStats(): Promise<APIResponse<ServerTokenMetrics>> {
     return this.request<ServerTokenMetrics>('/api/v1/stats/tokens')
