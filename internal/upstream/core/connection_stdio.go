@@ -10,14 +10,40 @@ import (
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
+// packageRunnerNoArgs lists commands that behave as "runner for a package
+// named on the command line" — invoking them with no args prints help and
+// exits, which manifests downstream as an opaque "context deadline exceeded"
+// on MCP initialize. We fail fast instead.
+var packageRunnerNoArgs = map[string]string{
+	"uvx":  "the Python package to run (e.g. [\"obsidian-mcp\"])",
+	"npx":  "the npm package to run (e.g. [\"-y\", \"some-mcp-server\"])",
+	"pipx": "the subcommand and package (e.g. [\"run\", \"obsidian-mcp\"])",
+}
+
+// validateStdioConfig runs cheap pre-flight checks on a stdio server
+// configuration before launching a subprocess. Separated out so it can be
+// unit-tested without exercising the full connection path.
+func validateStdioConfig(cfg *config.ServerConfig) error {
+	if cfg.Command == "" {
+		return fmt.Errorf("no command specified for stdio transport")
+	}
+	if len(cfg.Args) == 0 {
+		if hint, ok := packageRunnerNoArgs[cfg.Command]; ok {
+			return fmt.Errorf("server %q: command %q has no args — %s is required", cfg.Name, cfg.Command, hint)
+		}
+	}
+	return nil
+}
+
 // connectStdio establishes a stdio transport connection to an MCP server
 func (c *Client) connectStdio(ctx context.Context) error {
-	if c.config.Command == "" {
-		return fmt.Errorf("no command specified for stdio transport")
+	if err := validateStdioConfig(c.config); err != nil {
+		return err
 	}
 
 	// Validate working directory if specified
@@ -240,7 +266,14 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			}
 			c.processGroupID = 0
 		}
-		return fmt.Errorf("MCP initialize failed for stdio transport: %w", err)
+		// Do not re-prefix with another "MCP initialize failed" — the
+		// inner error from initialize() already carries a human-readable
+		// message. Attach just the transport-level context (command that
+		// was launched and whether Docker isolation was in effect) so
+		// users can tell from one log line whether to look at the host
+		// command or the Docker layer.
+		return fmt.Errorf("stdio transport (command=%q, docker_isolation=%t): %w",
+			c.config.Command, c.isDockerCommand, err)
 	}
 
 	// CRITICAL FIX: Extract underlying process from mcp-go transport for lifecycle management

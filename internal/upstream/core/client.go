@@ -79,6 +79,13 @@ type Client struct {
 	stderrMonitoringCancel context.CancelFunc
 	stderrMonitoringWG     sync.WaitGroup
 
+	// Ring buffer of recent stderr lines from the subprocess.
+	// Populated by monitorStderr; surfaced in initialize failure messages so
+	// users don't have to hunt through server logs to see why the child
+	// process never responded.
+	recentStderrMu sync.Mutex
+	recentStderr   []string
+
 	// Process monitoring (for stdio transport)
 	processCmd           *exec.Cmd
 	processGroupID       int // Process group ID for proper cleanup
