@@ -955,6 +955,9 @@ struct ServerDetailView: View {
             try await client.updateServer(server.name, updates: updates)
             isEditing = false
             actionMessage = "Server configuration updated. Restart may be required."
+            // Pull the updated config back so the Config tab shows the newly
+            // saved values instead of the pre-edit snapshot.
+            await refreshServer()
         } catch {
             editError = "Failed to save: \(error.localizedDescription)"
         }

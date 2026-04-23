@@ -1302,6 +1302,21 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pre-fetch existing server so we can preserve bool fields the request
+	// did not explicitly set. `config.ServerConfig` uses non-pointer bools
+	// whose zero value cannot be distinguished from "not set" by the time
+	// the update reaches the controller — without this, a PATCH body like
+	// `{"args": [...]}` silently disables a previously-enabled server.
+	var existingSrv *config.ServerConfig
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil {
+		for _, sc := range cfg.Servers {
+			if sc != nil && sc.Name == serverName {
+				existingSrv = sc
+				break
+			}
+		}
+	}
+
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
@@ -1337,14 +1352,20 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		updates.Enabled = *req.Enabled
 		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.Enabled = existingSrv.Enabled
 	}
 	if req.Quarantined != nil {
 		updates.Quarantined = *req.Quarantined
 		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.Quarantined = existingSrv.Quarantined
 	}
 	if req.ReconnectOnUse != nil {
 		updates.ReconnectOnUse = *req.ReconnectOnUse
 		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.ReconnectOnUse = existingSrv.ReconnectOnUse
 	}
 	if req.Isolation != nil {
 		updates.Isolation = req.Isolation.toConfig()
