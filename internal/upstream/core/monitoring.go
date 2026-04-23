@@ -11,6 +11,17 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	// maxRecentStderrLines bounds the per-client ring buffer of recent
+	// stderr output. Kept small because this is meant for the last few
+	// lines before a failure — not a log archive.
+	maxRecentStderrLines = 20
+	// maxStderrLineLen truncates individual lines stored in the ring
+	// buffer to protect memory against a misbehaving child that spews
+	// huge single lines (e.g. a base64-encoded traceback).
+	maxStderrLineLen = 512
+)
+
 // StartStderrMonitoring starts monitoring stderr output and logging it
 func (c *Client) StartStderrMonitoring() {
 	if c.stderr == nil || c.transportType != transportStdio {
@@ -151,6 +162,8 @@ func (c *Client) monitorStderr() {
 			if c.upstreamLogger != nil {
 				c.upstreamLogger.Info("stderr", zap.String("message", line))
 			}
+
+			c.recordRecentStderr(line)
 		}
 	}
 
@@ -242,6 +255,52 @@ waitLoop:
 	c.logger.Debug("Docker logs monitoring ended",
 		zap.String("server", c.config.Name),
 		zap.String("container_id", shortContainerID(containerID)))
+}
+
+// recordRecentStderr appends a stderr line to the bounded ring buffer.
+func (c *Client) recordRecentStderr(line string) {
+	if line == "" {
+		return
+	}
+	if len(line) > maxStderrLineLen {
+		line = line[:maxStderrLineLen] + "…"
+	}
+	c.recentStderrMu.Lock()
+	defer c.recentStderrMu.Unlock()
+	c.recentStderr = append(c.recentStderr, line)
+	if overflow := len(c.recentStderr) - maxRecentStderrLines; overflow > 0 {
+		c.recentStderr = append([]string(nil), c.recentStderr[overflow:]...)
+	}
+}
+
+// RecentStderrSnapshot returns a copy of the recent stderr lines captured
+// from the child process. Returns nil if nothing has been captured yet.
+func (c *Client) RecentStderrSnapshot() []string {
+	c.recentStderrMu.Lock()
+	defer c.recentStderrMu.Unlock()
+	if len(c.recentStderr) == 0 {
+		return nil
+	}
+	out := make([]string, len(c.recentStderr))
+	copy(out, c.recentStderr)
+	return out
+}
+
+// formatRecentStderr returns a human-readable, indented block of recent
+// stderr lines suitable for embedding in an error message. Empty when no
+// stderr has been captured.
+func (c *Client) formatRecentStderr() string {
+	lines := c.RecentStderrSnapshot()
+	if len(lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString("  | ")
+		b.WriteString(l)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func shortContainerID(id string) string {

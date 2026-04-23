@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -27,6 +28,7 @@ func (c *Client) initialize(ctx context.Context) error {
 			zap.String("formatted_json", string(reqBytes)))
 	}
 
+	initStart := time.Now()
 	serverInfo, err := c.client.Initialize(ctx, initRequest)
 	if err != nil {
 		// Log initialization failure to server-specific log
@@ -45,7 +47,19 @@ func (c *Client) initialize(ctx context.Context) error {
 				zap.Error(err))
 		}
 
-		return fmt.Errorf("MCP initialize failed: %w", err)
+		// Surface the useful context that the raw "context deadline exceeded"
+		// swallows: how long we waited and whatever the child process wrote
+		// to stderr before dying. Non-timeout errors pass through unchanged.
+		if errors.Is(err, context.DeadlineExceeded) {
+			waited := time.Since(initStart).Round(100 * time.Millisecond)
+			stderrBlock := c.formatRecentStderr()
+			if stderrBlock != "" {
+				return fmt.Errorf("server did not respond to MCP initialize within %s (subprocess may have crashed or printed to stderr instead of stdout); recent stderr:\n%s", waited, stderrBlock)
+			}
+			return fmt.Errorf("server did not respond to MCP initialize within %s and produced no stderr output (check that the command starts an MCP server and not a help banner)", waited)
+		}
+
+		return err
 	}
 
 	// Log response for trace debugging - use main logger for CLI debug mode
