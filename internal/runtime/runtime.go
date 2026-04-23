@@ -88,14 +88,20 @@ type Runtime struct {
 	// Key: serverName, Value: struct{} (presence indicates discovery in progress)
 	discoveryInProgress sync.Map
 
-	// Schema v3 (telemetry): memoized Docker daemon availability. Probed
-	// once lazily on first IsDockerAvailable() call and reused for the
-	// process lifetime — running `docker info` on every heartbeat would be
-	// wasteful. A startup-captured value is good enough for daily-cadence
-	// telemetry; if the user installs/uninstalls Docker mid-session we'll
-	// report the value from startup until the next process restart.
-	dockerProbeOnce   sync.Once
+	// Schema v3 (telemetry): time-cached Docker daemon availability. The
+	// probe has a 2s `docker info` cost, so we don't want to run it on every
+	// heartbeat — but we also can't memoize it for the whole process lifetime:
+	// users often install or launch Docker Desktop after mcpproxy starts, and
+	// we want the next heartbeat to pick up the change. Cache semantics:
+	//   - Fresh positive result reused for up to 15 minutes.
+	//   - Fresh negative result reused for only 5 minutes so a late Docker
+	//     launch flips `server_docker_available_bool` promptly.
+	// A transition between states is logged at info level; steady-state
+	// probes stay silent to keep logs clean.
+	dockerProbeMu     sync.Mutex
 	dockerProbeResult bool
+	dockerProbedAt    time.Time
+	dockerProbeKnown  bool
 
 	appCtx    context.Context
 	appCancel context.CancelFunc
@@ -2136,26 +2142,55 @@ func (r *Runtime) IsQuarantineEnabled() bool {
 	return r.cfg.IsQuarantineEnabled()
 }
 
+// dockerProbeTTLPositive is how long a successful docker daemon probe stays
+// cached. 15m is a balance between avoiding the 2s `docker info` cost on
+// every heartbeat and not sitting on a stale "true" if the user stops Docker.
+const dockerProbeTTLPositive = 15 * time.Minute
+
+// dockerProbeTTLNegative is how long a failed probe stays cached. Kept short
+// (5m) so users who launch Docker Desktop *after* mcpproxy started see
+// `server_docker_available_bool` flip at the next heartbeat rather than the
+// next process restart.
+const dockerProbeTTLNegative = 5 * time.Minute
+
 // IsDockerAvailable reports whether the host has a reachable Docker daemon
-// (implements telemetry.RuntimeStats, schema v3). The probe runs at most
-// once per process via sync.Once — `docker info` has non-trivial cost and
-// daemon presence doesn't meaningfully change within a session. A
-// subsequent `docker` install/uninstall mid-process won't reflect here
-// until the next restart; acceptable trade-off for daily-cadence telemetry.
+// (implements telemetry.RuntimeStats, schema v3). Uses a time-based cache —
+// see dockerProbeTTLPositive / dockerProbeTTLNegative for reasoning.
 func (r *Runtime) IsDockerAvailable() bool {
-	r.dockerProbeOnce.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
-		if err := cmd.Run(); err != nil {
-			r.dockerProbeResult = false
-			if r.logger != nil {
-				r.logger.Debug("docker daemon probe failed (telemetry)", zap.Error(err))
-			}
-			return
+	r.dockerProbeMu.Lock()
+	defer r.dockerProbeMu.Unlock()
+
+	if r.dockerProbeKnown {
+		age := time.Since(r.dockerProbedAt)
+		ttl := dockerProbeTTLPositive
+		if !r.dockerProbeResult {
+			ttl = dockerProbeTTLNegative
 		}
-		r.dockerProbeResult = true
-	})
+		if age < ttl {
+			return r.dockerProbeResult
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+	err := cmd.Run()
+	newResult := err == nil
+
+	// Log only on state changes (or first probe) so repeated heartbeats don't
+	// spam the log. Rationale: users care about transitions ("Docker just
+	// became available") far more than steady-state telemetry probes.
+	if r.logger != nil && (!r.dockerProbeKnown || r.dockerProbeResult != newResult) {
+		if newResult {
+			r.logger.Info("docker daemon probe: available")
+		} else {
+			r.logger.Info("docker daemon probe: unavailable", zap.Error(err))
+		}
+	}
+
+	r.dockerProbeResult = newResult
+	r.dockerProbedAt = time.Now()
+	r.dockerProbeKnown = true
 	return r.dockerProbeResult
 }
 
