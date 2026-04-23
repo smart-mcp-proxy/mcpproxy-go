@@ -2,6 +2,18 @@
 
 MCPProxy provides Docker isolation for stdio MCP servers to enhance security by running each server in its own isolated container.
 
+> **Docker isolation is OFF by default.** To enable it, set the top-level `docker_isolation.enabled` flag in `~/.mcpproxy/mcp_config.json` (or toggle it from the **Security** page in the Web UI):
+>
+> ```json
+> {
+>   "docker_isolation": {
+>     "enabled": true
+>   }
+> }
+> ```
+>
+> Existing connections will re-wrap themselves in containers after the next server restart; new connections pick up isolation immediately.
+
 ## Overview
 
 Docker isolation automatically wraps stdio-based MCP servers in Docker containers, providing:
@@ -87,7 +99,7 @@ You can override isolation settings per server:
       "enabled": true
     },
     {
-      "name": "no-isolation-server", 
+      "name": "no-isolation-server",
       "command": "python",
       "args": ["-m", "trusted_server"],
       "isolation": {
@@ -99,6 +111,19 @@ You can override isolation settings per server:
 }
 ```
 
+## Gotcha: global flag gates per-server opt-ins
+
+Per-server `isolation.enabled: true` only takes effect when the global `docker_isolation.enabled` flag is also `true`. If the global flag is `false`, MCPProxy runs the server on the host even if you explicitly opted it into isolation in its per-server config.
+
+Starting in this release, MCPProxy emits a one-time warning in the main log when it detects this configuration (look for `per-server docker isolation opt-in ignored` in `~/.mcpproxy/logs/main.log`). To actually isolate those servers, flip the global flag on.
+
+## Telemetry
+
+When anonymous telemetry is enabled, MCPProxy reports two Docker-related counters at daily cadence:
+
+- `server_docker_available_bool` — whether the host has a reachable Docker daemon. Probed with `docker info --format {{.ServerVersion}}` and cached for up to 15 minutes (5 minutes when the previous probe failed, so a late Docker-Desktop launch is picked up promptly).
+- `server_docker_isolated_count` — how many of your configured stdio servers are **configured** for isolation, i.e. servers for which `ShouldIsolate()` returns true. This is a configuration metric, not a count of running containers; it goes to zero whenever the global flag is off regardless of per-server opt-ins.
+
 ## Runtime Detection
 
 MCPProxy automatically detects the runtime type based on the command:
@@ -108,7 +133,7 @@ MCPProxy automatically detects the runtime type based on the command:
 - `uvx` → `python:3.11` (includes uv package manager)
 - `pip`, `pipx` → `python:3.11`
 
-### Node.js Environments  
+### Node.js Environments
 - `node` → `node:20`
 - `npm`, `npx` → `node:20`
 - `yarn` → `node:20`
@@ -142,7 +167,7 @@ Environment variables from server configuration are automatically passed to cont
   "mcpServers": [
     {
       "name": "api-server",
-      "command": "uvx", 
+      "command": "uvx",
       "args": ["some-package"],
       "env": {
         "API_KEY": "your-secret-key",
