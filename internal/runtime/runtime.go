@@ -1740,6 +1740,37 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			"authenticated":   authenticated,
 		}
 
+		// Expose config fields the UI needs for edit mode (args, working
+		// dir, isolation overrides). These used to be dropped on the
+		// floor here, so the tray/webui could not round-trip stdio
+		// server configuration.
+		if serverStatus.Config != nil {
+			if len(serverStatus.Config.Args) > 0 {
+				serverMap["args"] = serverStatus.Config.Args
+			}
+			if serverStatus.Config.WorkingDir != "" {
+				serverMap["working_dir"] = serverStatus.Config.WorkingDir
+			}
+			if iso := serverStatus.Config.Isolation; iso != nil {
+				isoMap := map[string]interface{}{
+					"enabled": iso.IsEnabled(),
+				}
+				if iso.Image != "" {
+					isoMap["image"] = iso.Image
+				}
+				if iso.NetworkMode != "" {
+					isoMap["network_mode"] = iso.NetworkMode
+				}
+				if len(iso.ExtraArgs) > 0 {
+					isoMap["extra_args"] = iso.ExtraArgs
+				}
+				if iso.WorkingDir != "" {
+					isoMap["working_dir"] = iso.WorkingDir
+				}
+				serverMap["isolation"] = isoMap
+			}
+		}
+
 		// Add reconnect_on_use from config
 		if serverStatus.Config != nil && serverStatus.Config.ReconnectOnUse {
 			serverMap["reconnect_on_use"] = true

@@ -1025,9 +1025,16 @@ components:
           type: string
         enabled:
           type: boolean
+        extra_args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         image:
           type: string
         memory_limit:
+          type: string
+        network_mode:
           type: string
         timeout:
           type: string
@@ -1710,6 +1717,8 @@ components:
           additionalProperties:
             type: string
           type: object
+        isolation:
+          $ref: '#/components/schemas/httpapi.IsolationRequest'
         name:
           type: string
         protocol:
@@ -1853,6 +1862,27 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    httpapi.IsolationRequest:
+      description: |-
+        Isolation carries per-server Docker isolation overrides (image,
+        network_mode, extra_args, working_dir, enabled). A nil pointer
+        means "do not touch isolation config"; an empty-but-present
+        object on PATCH intentionally clears the overrides.
+      properties:
+        enabled:
+          type: boolean
+        extra_args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        image:
+          type: string
+        network_mode:
+          type: string
+        working_dir:
+          type: string
       type: object
     management.BulkOperationResult:
       properties:

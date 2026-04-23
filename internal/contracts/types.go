@@ -87,14 +87,19 @@ type OAuthConfig struct {
 	TokenValid     bool              `json:"token_valid,omitempty"`      // Whether token is currently valid
 }
 
-// IsolationConfig represents Docker isolation configuration
+// IsolationConfig represents Docker isolation configuration as it is
+// exposed over the REST API. Mirrors the per-server overrides in
+// config.IsolationConfig so the web UI and native tray can both edit
+// these fields without reaching into config-file internals.
 type IsolationConfig struct {
-	Enabled     bool   `json:"enabled"`
-	Image       string `json:"image,omitempty"`
-	MemoryLimit string `json:"memory_limit,omitempty"`
-	CPULimit    string `json:"cpu_limit,omitempty"`
-	WorkingDir  string `json:"working_dir,omitempty"`
-	Timeout     string `json:"timeout,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	Image       string   `json:"image,omitempty"`
+	NetworkMode string   `json:"network_mode,omitempty"`
+	ExtraArgs   []string `json:"extra_args,omitempty"`
+	MemoryLimit string   `json:"memory_limit,omitempty"`
+	CPULimit    string   `json:"cpu_limit,omitempty"`
+	WorkingDir  string   `json:"working_dir,omitempty"`
+	Timeout     string   `json:"timeout,omitempty"`
 }
 
 // ToolAnnotation represents MCP tool behavior hints

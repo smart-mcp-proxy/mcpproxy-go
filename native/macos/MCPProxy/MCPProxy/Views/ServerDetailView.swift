@@ -57,6 +57,11 @@ struct ServerDetailView: View {
     @State private var editQuarantined = false
     @State private var editDockerIsolation = false
     @State private var editSkipQuarantine = false
+    // Per-server Docker isolation overrides.
+    @State private var editIsolationImage = ""
+    @State private var editIsolationNetworkMode = ""
+    @State private var editIsolationExtraArgs = ""
+    @State private var editIsolationWorkingDir = ""
     @State private var isSavingEdit = false
     @State private var editError: String?
 
@@ -568,6 +573,57 @@ struct ServerDetailView: View {
                         }
                     }
 
+                    // Docker isolation overrides (only relevant for stdio servers).
+                    // The global "Docker Isolation" toggle in the General section
+                    // enables isolation for this server; these fields customize how
+                    // that isolation is provisioned.
+                    if server.protocol == "stdio" {
+                        configSection(title: "Docker Isolation Overrides") {
+                            if isEditing {
+                                configEditRow(
+                                    label: "Image",
+                                    text: $editIsolationImage,
+                                    placeholder: "python:3.11 (defaults from runtime detection)"
+                                )
+                                configEditRow(
+                                    label: "Network Mode",
+                                    text: $editIsolationNetworkMode,
+                                    placeholder: "bridge | none | host"
+                                )
+                                configEditRow(
+                                    label: "Extra docker args (one per line)",
+                                    text: $editIsolationExtraArgs,
+                                    placeholder: "-v\n/Users/you/data:/data:rw",
+                                    multiline: true
+                                )
+                                configEditRow(
+                                    label: "Container Working Dir",
+                                    text: $editIsolationWorkingDir,
+                                    placeholder: "/vault"
+                                )
+                            } else if let iso = server.isolation {
+                                if let img = iso.image, !img.isEmpty {
+                                    configRow(label: "Image", value: img)
+                                }
+                                if let nm = iso.networkMode, !nm.isEmpty {
+                                    configRow(label: "Network Mode", value: nm)
+                                }
+                                if let extra = iso.extraArgs, !extra.isEmpty {
+                                    configRow(label: "Extra Args", value: extra.joined(separator: " "))
+                                }
+                                if let wd = iso.workingDir, !wd.isEmpty {
+                                    configRow(label: "Container Working Dir", value: wd)
+                                }
+                                if (iso.image ?? "").isEmpty && (iso.networkMode ?? "").isEmpty
+                                    && (iso.extraArgs?.isEmpty ?? true) && (iso.workingDir ?? "").isEmpty {
+                                    configRow(label: "Overrides", value: "None (inherits global)")
+                                }
+                            } else {
+                                configRow(label: "Overrides", value: "None (inherits global)")
+                            }
+                        }
+                    }
+
                     configSection(title: "Status") {
                         configRow(label: "Connected", value: server.connected ? "Yes" : "No")
                         if let connectedAt = server.connectedAt {
@@ -780,8 +836,13 @@ struct ServerDetailView: View {
         editEnvVars = "" // env vars not in ServerStatus model, would need config API
         editEnabled = server.enabled
         editQuarantined = server.quarantined
-        editDockerIsolation = false // read from config if available
+        editDockerIsolation = server.isolation?.enabled ?? false
         editSkipQuarantine = false  // read from config if available
+        let iso = server.isolation
+        editIsolationImage = iso?.image ?? ""
+        editIsolationNetworkMode = iso?.networkMode ?? ""
+        editIsolationExtraArgs = (iso?.extraArgs ?? []).joined(separator: "\n")
+        editIsolationWorkingDir = iso?.workingDir ?? ""
         editError = nil
         isEditing = true
     }
@@ -834,6 +895,55 @@ struct ServerDetailView: View {
         // Boolean toggles
         if editEnabled != server.enabled { updates["enabled"] = editEnabled }
         if editQuarantined != server.quarantined { updates["quarantined"] = editQuarantined }
+
+        // Docker isolation (stdio only). Send any field that changed —
+        // we always include `enabled` because the handler tracks the
+        // boolean explicitly, and sending just the sub-fields without
+        // it would leave the isolation off on a server that never had
+        // it enabled before.
+        if server.protocol == "stdio" {
+            let existing = server.isolation
+            let newExtra = editIsolationExtraArgs
+                .components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let newImage = editIsolationImage.trimmingCharacters(in: .whitespaces)
+            let newNetwork = editIsolationNetworkMode.trimmingCharacters(in: .whitespaces)
+            let newWorkDir = editIsolationWorkingDir.trimmingCharacters(in: .whitespaces)
+
+            var iso: [String: Any] = [:]
+            var isoChanged = false
+
+            if editDockerIsolation != (existing?.enabled ?? false) {
+                iso["enabled"] = editDockerIsolation
+                isoChanged = true
+            }
+            if newImage != (existing?.image ?? "") {
+                iso["image"] = newImage
+                isoChanged = true
+            }
+            if newNetwork != (existing?.networkMode ?? "") {
+                iso["network_mode"] = newNetwork
+                isoChanged = true
+            }
+            if newExtra != (existing?.extraArgs ?? []) {
+                iso["extra_args"] = newExtra
+                isoChanged = true
+            }
+            if newWorkDir != (existing?.workingDir ?? "") {
+                iso["working_dir"] = newWorkDir
+                isoChanged = true
+            }
+
+            if isoChanged {
+                // Always include `enabled` alongside any sub-field change so
+                // the backend applies the full intended isolation state.
+                if iso["enabled"] == nil {
+                    iso["enabled"] = editDockerIsolation
+                }
+                updates["isolation"] = iso
+            }
+        }
 
         if updates.isEmpty {
             isEditing = false
