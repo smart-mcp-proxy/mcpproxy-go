@@ -2,7 +2,9 @@
 
 MCPProxy provides Docker isolation for stdio MCP servers to enhance security by running each server in its own isolated container.
 
-> **Docker isolation is OFF by default.** To enable it, set the top-level `docker_isolation.enabled` flag in `~/.mcpproxy/mcp_config.json` (or toggle it from the **Security** page in the Web UI):
+> **New installs:** Docker isolation is turned on automatically when mcpproxy creates its initial `mcp_config.json` and a Docker daemon is reachable (`docker info` responds within 2 seconds). If Docker isn't available at first run, isolation stays off so stdio servers still work — you can enable it later from the **Security** page in the Web UI or by editing the config below.
+>
+> **Existing installs:** Your current `docker_isolation.enabled` value is preserved on upgrade. To turn isolation on manually, set the top-level flag in `~/.mcpproxy/mcp_config.json` (or use the Web UI toggle):
 >
 > ```json
 > {

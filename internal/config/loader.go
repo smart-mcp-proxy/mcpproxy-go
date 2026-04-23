@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -414,6 +415,7 @@ func LoadOrCreateConfig(dataDir string) (*Config, error) {
 		// Config doesn't exist, create a new one
 		cfg := DefaultConfig()
 		cfg.DataDir = dataDir
+		applyFirstRunDockerIsolation(cfg)
 		if err := SaveConfig(cfg, configPath); err != nil {
 			return nil, fmt.Errorf("failed to create initial config: %w", err)
 		}
@@ -421,6 +423,41 @@ func LoadOrCreateConfig(dataDir string) (*Config, error) {
 	}
 
 	return LoadFromFile(configPath)
+}
+
+// applyFirstRunDockerIsolation turns on DockerIsolation.Enabled for a freshly
+// created config if (and only if) a Docker daemon is reachable at install
+// time. Existing installs are unaffected — DefaultConfig() still returns
+// Enabled=false so LoadFromFile's default-then-merge path preserves whatever
+// the user has (or doesn't have) in their config file.
+//
+// Probing here keeps new users secure-by-default without breaking the ~75%
+// of current users who don't have Docker: if `docker info` fails, we keep
+// isolation off and the user can flip it on later via the Web UI toggle or
+// by editing mcp_config.json.
+func applyFirstRunDockerIsolation(cfg *Config) {
+	if cfg == nil || cfg.DockerIsolation == nil {
+		return
+	}
+	if !dockerDaemonProbe() {
+		return
+	}
+	cfg.DockerIsolation.Enabled = true
+}
+
+// dockerDaemonProbe is the function used to detect Docker at first-run.
+// Tests override it to return deterministic values without spawning a
+// subprocess. Production code uses probeDockerDaemonAvailable.
+var dockerDaemonProbe = probeDockerDaemonAvailable
+
+// probeDockerDaemonAvailable runs `docker info` with a short timeout to check
+// whether the host has a reachable Docker daemon. Returns false on any
+// failure (binary missing, daemon down, permissions). Used only during
+// initial config creation — not on every start.
+func probeDockerDaemonAvailable() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}").Run() == nil
 }
 
 // CreateSampleConfig creates a sample configuration file
@@ -455,6 +492,7 @@ func createDefaultConfigFile(path string, cfg *Config) error {
 	defaultCfg := DefaultConfig()
 	defaultCfg.DataDir = cfg.DataDir
 	defaultCfg.Servers = []*ServerConfig{} // Empty servers list
+	applyFirstRunDockerIsolation(defaultCfg)
 
 	return SaveConfig(defaultCfg, path)
 }
