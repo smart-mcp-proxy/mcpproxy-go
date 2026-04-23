@@ -21,6 +21,8 @@ export const useSystemStore = defineStore('system', () => {
   const toasts = ref<Toast[]>([])
   const info = ref<InfoResponse | null>(null)
   const routing = ref<RoutingInfo | null>(null)
+  const checkingForUpdates = ref(false)
+  const updateCheckedAt = ref<string | null>(null)
 
   // Available themes
   const themes: Theme[] = [
@@ -378,9 +380,49 @@ export const useSystemStore = defineStore('system', () => {
       const response = await api.getInfo()
       if (response.success && response.data) {
         info.value = response.data
+        if (response.data.update?.checked_at) {
+          updateCheckedAt.value = response.data.update.checked_at
+        }
       }
     } catch (error) {
       console.error('Failed to fetch info:', error)
+    }
+  }
+
+  async function checkForUpdates(): Promise<{ ok: boolean; error?: string }> {
+    if (checkingForUpdates.value) return { ok: false, error: 'already checking' }
+    checkingForUpdates.value = true
+    try {
+      const response = await api.getInfo({ refresh: true })
+      if (response.success && response.data) {
+        info.value = response.data
+        updateCheckedAt.value = response.data.update?.checked_at ?? new Date().toISOString()
+        const checkErr = response.data.update?.check_error
+        if (checkErr) {
+          addToast({ type: 'error', title: 'Update check failed', message: checkErr })
+          return { ok: false, error: checkErr }
+        }
+        if (response.data.update?.available) {
+          addToast({
+            type: 'info',
+            title: 'Update available',
+            message: response.data.update.latest_version || '',
+          })
+        } else {
+          addToast({ type: 'success', title: 'You are running the latest version.' })
+        }
+        return { ok: true }
+      }
+      const err = response.error || 'Request failed'
+      addToast({ type: 'error', title: 'Update check failed', message: err })
+      return { ok: false, error: err }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      console.error('Failed to check for updates:', error)
+      addToast({ type: 'error', title: 'Update check failed', message: msg })
+      return { ok: false, error: msg }
+    } finally {
+      checkingForUpdates.value = false
     }
   }
 
@@ -407,6 +449,8 @@ export const useSystemStore = defineStore('system', () => {
     themes,
     info,
     routing,
+    checkingForUpdates,
+    updateCheckedAt,
 
     // Computed
     isRunning,
@@ -430,5 +474,6 @@ export const useSystemStore = defineStore('system', () => {
     clearToasts,
     fetchInfo,
     fetchRouting,
+    checkForUpdates,
   }
 })
