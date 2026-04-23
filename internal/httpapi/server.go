@@ -586,6 +586,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/config", s.handleGetConfig)
 		r.Post("/config/validate", s.handleValidateConfig)
 		r.Post("/config/apply", s.handleApplyConfig)
+		r.Patch("/config/docker-isolation", s.handlePatchDockerIsolation)
 
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
@@ -3166,6 +3167,72 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
 	}
 
+	s.writeSuccess(w, response)
+}
+
+// handlePatchDockerIsolation godoc
+// @Summary      Toggle global Docker isolation
+// @Description  Convenience endpoint to flip `docker_isolation.enabled` without resending the full config. Persists to disk via the existing config writer — the file watcher then hot-reloads the change. Returns the new state and whether a restart is required for existing connections to pick it up.
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Param        payload  body      object{enabled=bool}          true  "New isolation state"
+// @Success      200      {object}  contracts.ConfigApplyResult   "Isolation toggle applied"
+// @Failure      400      {object}  contracts.ErrorResponse       "Invalid JSON payload"
+// @Failure      401      {object}  contracts.ErrorResponse       "Unauthorized - missing or invalid API key"
+// @Failure      500      {object}  contracts.ErrorResponse       "Failed to apply configuration"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config/docker-isolation [patch]
+func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	if payload.Enabled == nil {
+		s.writeError(w, r, http.StatusBadRequest, "Field 'enabled' is required")
+		return
+	}
+
+	// Fetch current config, mutate the single field, and push it back through
+	// the existing apply pipeline so we benefit from validation, change
+	// detection, disk persistence, and hot-reload without duplicating any of
+	// that logic here.
+	cfg, err := s.controller.GetConfig()
+	if err != nil {
+		s.logger.Error("Failed to get configuration for docker-isolation patch", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
+		return
+	}
+	if cfg == nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
+		return
+	}
+
+	if cfg.DockerIsolation == nil {
+		cfg.DockerIsolation = config.DefaultDockerIsolationConfig()
+	}
+	cfg.DockerIsolation.Enabled = *payload.Enabled
+
+	cfgPath := s.controller.GetConfigPath()
+	result, err := s.controller.ApplyConfig(cfg, cfgPath)
+	if err != nil {
+		s.logger.Error("Failed to apply docker-isolation toggle", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		return
+	}
+
+	response := &contracts.ConfigApplyResult{
+		Success:            result.Success,
+		AppliedImmediately: result.AppliedImmediately,
+		RequiresRestart:    result.RequiresRestart,
+		RestartReason:      result.RestartReason,
+		ChangedFields:      result.ChangedFields,
+		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
+	}
 	s.writeSuccess(w, response)
 }
 

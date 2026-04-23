@@ -2452,6 +2452,53 @@ paths:
       summary: Apply configuration
       tags:
       - config
+  /api/v1/config/docker-isolation:
+    patch:
+      description: Convenience endpoint to flip `docker_isolation.enabled` without
+        resending the full config. Persists to disk via the existing config writer
+        — the file watcher then hot-reloads the change. Returns the new state and
+        whether a restart is required for existing connections to pick it up.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              properties:
+                enabled:
+                  type: boolean
+              type: object
+        description: New isolation state
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ConfigApplyResult'
+          description: Isolation toggle applied
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid JSON payload
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to apply configuration
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Toggle global Docker isolation
+      tags:
+      - config
   /api/v1/config/validate:
     post:
       description: Validates a provided MCPProxy configuration without applying it.
