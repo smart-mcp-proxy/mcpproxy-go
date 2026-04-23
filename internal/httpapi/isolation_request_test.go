@@ -74,9 +74,7 @@ func TestIsolationRequestToConfigExtraArgsCopies(t *testing.T) {
 	assert.Equal(t, "-v", src[0], "request slice must remain untouched after mutating config copy")
 }
 
-func TestIsolationRequestToConfigPreservesTypes(t *testing.T) {
-	// Sanity: toConfig returns config.IsolationConfig (not contracts.IsolationConfig).
-	r := &IsolationRequest{}
-	got := r.toConfig()
-	var _ *config.IsolationConfig = got
-}
+// Compile-time assertion that toConfig returns *config.IsolationConfig
+// (not contracts.IsolationConfig). Lives outside a test function so
+// static analysers don't flag the unused LHS inside a test body.
+var _ func(*IsolationRequest) *config.IsolationConfig = (*IsolationRequest).toConfig
