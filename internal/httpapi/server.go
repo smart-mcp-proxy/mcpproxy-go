@@ -1088,6 +1088,50 @@ type AddServerRequest struct {
 	Enabled        *bool             `json:"enabled,omitempty"`
 	Quarantined    *bool             `json:"quarantined,omitempty"`
 	ReconnectOnUse *bool             `json:"reconnect_on_use,omitempty"`
+	// Isolation carries per-server Docker isolation overrides (image,
+	// network_mode, extra_args, working_dir, enabled). A nil pointer
+	// means "do not touch isolation config"; an empty-but-present
+	// object on PATCH intentionally clears the overrides.
+	Isolation *IsolationRequest `json:"isolation,omitempty"`
+}
+
+// IsolationRequest is the request-body representation of
+// config.IsolationConfig, using pointer fields for PATCH semantics:
+// a nil pointer means "leave this field alone", a present value
+// (including empty string or empty slice) means "set it".
+type IsolationRequest struct {
+	Enabled     *bool     `json:"enabled,omitempty"`
+	Image       *string   `json:"image,omitempty"`
+	NetworkMode *string   `json:"network_mode,omitempty"`
+	ExtraArgs   *[]string `json:"extra_args,omitempty"`
+	WorkingDir  *string   `json:"working_dir,omitempty"`
+}
+
+// toConfig materializes the request into a config.IsolationConfig.
+// Fields left nil on the request do not appear on the resulting struct
+// so UpdateServer's merge logic (in Controller) can distinguish them
+// from explicit clears.
+func (r *IsolationRequest) toConfig() *config.IsolationConfig {
+	if r == nil {
+		return nil
+	}
+	out := &config.IsolationConfig{}
+	if r.Enabled != nil {
+		out.Enabled = config.BoolPtr(*r.Enabled)
+	}
+	if r.Image != nil {
+		out.Image = *r.Image
+	}
+	if r.NetworkMode != nil {
+		out.NetworkMode = *r.NetworkMode
+	}
+	if r.ExtraArgs != nil {
+		out.ExtraArgs = append([]string(nil), (*r.ExtraArgs)...)
+	}
+	if r.WorkingDir != nil {
+		out.WorkingDir = *r.WorkingDir
+	}
+	return out
 }
 
 // handleAddServer godoc
@@ -1300,6 +1344,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ReconnectOnUse != nil {
 		updates.ReconnectOnUse = *req.ReconnectOnUse
+		hasUpdates = true
+	}
+	if req.Isolation != nil {
+		updates.Isolation = req.Isolation.toConfig()
 		hasUpdates = true
 	}
 

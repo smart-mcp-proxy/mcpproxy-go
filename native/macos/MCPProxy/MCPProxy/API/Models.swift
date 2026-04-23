@@ -195,6 +195,24 @@ struct QuarantineStats: Codable, Equatable {
 
 // MARK: - Server Status
 
+/// Per-server Docker isolation overrides, surfaced by the API so the
+/// tray can both display and edit them. Mirrors the
+/// `contracts.IsolationConfig` struct on the Go side.
+struct IsolationConfigStatus: Codable, Equatable {
+    let enabled: Bool
+    let image: String?
+    let networkMode: String?
+    let extraArgs: [String]?
+    let workingDir: String?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, image
+        case networkMode = "network_mode"
+        case extraArgs = "extra_args"
+        case workingDir = "working_dir"
+    }
+}
+
 /// Represents an upstream MCP server's configuration and runtime status.
 /// Matches the Go `contracts.Server` struct serialized by `/api/v1/servers`.
 struct ServerStatus: Codable, Identifiable, Equatable {
@@ -222,6 +240,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let userLoggedOut: Bool?
     let health: HealthStatus?
     let quarantine: QuarantineStats?
+    let isolation: IsolationConfigStatus?
     let error: String?
 
     enum CodingKeys: String, CodingKey {
@@ -242,6 +261,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         case userLoggedOut = "user_logged_out"
         case health
         case quarantine
+        case isolation
         case error
     }
 

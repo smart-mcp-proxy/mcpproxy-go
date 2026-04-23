@@ -242,9 +242,47 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		}
 		if args, ok := srvRaw["args"].([]string); ok {
 			srv.Args = args
+		} else if argsI, ok := srvRaw["args"].([]interface{}); ok {
+			srv.Args = make([]string, 0, len(argsI))
+			for _, a := range argsI {
+				if s, ok := a.(string); ok {
+					srv.Args = append(srv.Args, s)
+				}
+			}
 		}
 		if workingDir, ok := srvRaw["working_dir"].(string); ok {
 			srv.WorkingDir = workingDir
+		}
+
+		// Extract isolation overrides if present. Like OAuth above, both
+		// typed and generic map shapes are accepted so this path works
+		// whether the runtime provides a map[string]interface{} directly
+		// or goes through a json round-trip first.
+		if isoRaw, ok := srvRaw["isolation"].(map[string]interface{}); ok && isoRaw != nil {
+			iso := &contracts.IsolationConfig{}
+			if enabled, ok := isoRaw["enabled"].(bool); ok {
+				iso.Enabled = enabled
+			}
+			if img, ok := isoRaw["image"].(string); ok {
+				iso.Image = img
+			}
+			if nm, ok := isoRaw["network_mode"].(string); ok {
+				iso.NetworkMode = nm
+			}
+			if extra, ok := isoRaw["extra_args"].([]string); ok {
+				iso.ExtraArgs = extra
+			} else if extraI, ok := isoRaw["extra_args"].([]interface{}); ok {
+				iso.ExtraArgs = make([]string, 0, len(extraI))
+				for _, a := range extraI {
+					if s, ok := a.(string); ok {
+						iso.ExtraArgs = append(iso.ExtraArgs, s)
+					}
+				}
+			}
+			if wd, ok := isoRaw["working_dir"].(string); ok {
+				iso.WorkingDir = wd
+			}
+			srv.Isolation = iso
 		}
 		if authenticated, ok := srvRaw["authenticated"].(bool); ok {
 			srv.Authenticated = authenticated
