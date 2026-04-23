@@ -107,6 +107,60 @@
       <span>Docker is not running. Security scanners require Docker to analyze MCP servers.</span>
     </div>
 
+    <!-- Docker isolation nudge: show only when Docker is available, global
+         isolation is OFF, user has at least one stdio server, and the user
+         hasn't dismissed this banner before. -->
+    <div v-if="showIsolationNudge" class="alert alert-info">
+      <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <div class="flex-1">
+        <div class="font-bold">Docker isolation is off.</div>
+        <div class="text-sm">
+          You have {{ stdioServerCount }} stdio server{{ stdioServerCount === 1 ? '' : 's' }} running directly on your host. Enable Docker isolation to sandbox them.
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button @click="enableIsolationFromNudge" :disabled="togglingIsolation" class="btn btn-sm btn-primary">
+          <span v-if="togglingIsolation" class="loading loading-spinner loading-xs"></span>
+          Enable
+        </button>
+        <a :href="DOCKER_ISOLATION_DOCS_URL" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-ghost">Learn more</a>
+        <button @click="dismissIsolationNudge" class="btn btn-sm btn-ghost">Dismiss</button>
+      </div>
+    </div>
+
+    <!-- Docker isolation toggle card: shown whenever Docker is available.
+         We don't show it when Docker is missing because the existing
+         "Docker not running" alert above already covers that case. -->
+    <div v-if="overviewLoaded && overview.docker_available === true" class="card bg-base-100 shadow-xl">
+      <div class="card-body flex-row justify-between items-center gap-4 flex-wrap">
+        <div class="flex-1 min-w-64">
+          <h2 class="card-title text-lg">Docker Isolation</h2>
+          <p class="text-sm text-base-content/70">
+            Wrap each stdio MCP server in its own Docker container so it can't touch the host filesystem.
+          </p>
+          <p class="text-xs text-base-content/50 mt-1">
+            Currently isolated: {{ isolatedServerCount }} of {{ stdioServerCount }} stdio server{{ stdioServerCount === 1 ? '' : 's' }}.
+            <a :href="DOCKER_ISOLATION_DOCS_URL" target="_blank" rel="noopener noreferrer" class="link link-hover">
+              Learn more
+            </a>
+          </p>
+        </div>
+        <div class="flex items-center gap-3">
+          <span v-if="togglingIsolation" class="loading loading-spinner loading-sm"></span>
+          <span class="text-sm text-base-content/60">{{ isolationEnabled ? 'On' : 'Off' }}</span>
+          <input
+            type="checkbox"
+            class="toggle toggle-primary"
+            :checked="isolationEnabled"
+            :disabled="togglingIsolation"
+            @change="onIsolationToggle"
+          />
+        </div>
+      </div>
+    </div>
+
     <!-- Loading -->
     <div v-if="loading" class="text-center py-12">
       <span class="loading loading-spinner loading-lg"></span>
@@ -393,6 +447,21 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import { useSystemStore } from '@/stores/system'
+
+const systemStore = useSystemStore()
+
+// Link to the canonical docs. Using the main-branch blob URL keeps this
+// working for anyone reading the shipped UI — the in-app router has no
+// route for arbitrary markdown docs, and we want to avoid hardcoding a
+// version-specific URL that would go stale on the next release.
+const DOCKER_ISOLATION_DOCS_URL = 'https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/docker-isolation.md'
+
+// Nudge dismissal is intentionally stored client-side in localStorage (not
+// in the server config) — it's a UI preference, not a policy setting, and
+// it's fine if it resets when the user clears browser data. Matches the
+// guidance in the spec to avoid inventing a new config-file schema.
+const NUDGE_DISMISSED_KEY = 'mcpproxy.dockerIsolationNudgeDismissed'
 
 const loading = ref(false)
 const error = ref('')
@@ -440,6 +509,117 @@ const customEnvValue = ref('')
 const configDockerImage = ref('')
 
 const totalFindings = computed(() => overview.value?.findings_by_severity?.total || 0)
+
+// Docker isolation state — populated from /api/v1/config + /api/v1/servers.
+const isolationEnabled = ref(false)
+const stdioServerCount = ref(0)
+const isolatedServerCount = ref(0)
+const togglingIsolation = ref(false)
+const nudgeDismissed = ref<boolean>(
+  // Read once synchronously on setup — template bindings are reactive via
+  // dismissIsolationNudge() flipping the ref.
+  typeof window !== 'undefined' && window.localStorage?.getItem(NUDGE_DISMISSED_KEY) === '1'
+)
+
+// showIsolationNudge is the conjunction the spec calls for: Docker present,
+// isolation off, ≥1 stdio server, not dismissed. We gate on overviewLoaded
+// so the banner doesn't flash during the initial fetch.
+const showIsolationNudge = computed(() =>
+  overviewLoaded.value &&
+  overview.value?.docker_available === true &&
+  !isolationEnabled.value &&
+  stdioServerCount.value > 0 &&
+  !nudgeDismissed.value
+)
+
+async function loadIsolationState() {
+  try {
+    const [cfgRes, serversRes] = await Promise.all([
+      api.getConfig(),
+      api.getServers(),
+    ])
+    if (cfgRes.success && cfgRes.data) {
+      // config is typed as `any` server-side; docker_isolation.enabled may
+      // be absent for very old configs, in which case we treat it as off.
+      isolationEnabled.value = Boolean(cfgRes.data.config?.docker_isolation?.enabled)
+    }
+    if (serversRes.success && serversRes.data?.servers) {
+      const servers = serversRes.data.servers
+      const stdio = servers.filter((s: any) => s.protocol === 'stdio')
+      stdioServerCount.value = stdio.length
+      // "Isolated" means the server is stdio AND global isolation is on AND
+      // the per-server opt-out (isolation.enabled=false) is not set. We
+      // can't see the per-server isolation block from the Server endpoint
+      // today, so this is a best-effort count that matches the common
+      // case: global-on implies all stdio servers are isolated.
+      isolatedServerCount.value = isolationEnabled.value ? stdio.length : 0
+    }
+  } catch {
+    // Non-fatal: the banner just won't show. Page's main refresh() already
+    // reports errors on the actual scanner endpoints.
+  }
+}
+
+async function setDockerIsolation(enabled: boolean) {
+  togglingIsolation.value = true
+  try {
+    const res = await api.setDockerIsolationEnabled(enabled)
+    if (!res.success) {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Failed to update Docker isolation',
+        message: res.error || 'Unknown error',
+      })
+      return false
+    }
+    isolationEnabled.value = enabled
+    // Refresh the isolated count immediately so the toggle card reflects
+    // the new state without waiting for the next full page refresh.
+    isolatedServerCount.value = enabled ? stdioServerCount.value : 0
+    systemStore.addToast({
+      type: 'success',
+      title: enabled ? 'Docker isolation enabled' : 'Docker isolation disabled',
+      message: enabled
+        ? 'New connections will isolate immediately. Existing connections will isolate after restart.'
+        : 'Servers will run directly on the host.',
+    })
+    return true
+  } catch (e: any) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Failed to update Docker isolation',
+      message: e?.message || String(e),
+    })
+    return false
+  } finally {
+    togglingIsolation.value = false
+  }
+}
+
+async function onIsolationToggle(event: Event) {
+  const target = event.target as HTMLInputElement
+  await setDockerIsolation(target.checked)
+}
+
+async function enableIsolationFromNudge() {
+  const ok = await setDockerIsolation(true)
+  if (ok) {
+    // The nudge disappears automatically (isolationEnabled is now true),
+    // but also set the dismissed flag so a later disable doesn't resurrect
+    // the banner uninvited.
+    dismissIsolationNudge()
+  }
+}
+
+function dismissIsolationNudge() {
+  nudgeDismissed.value = true
+  try {
+    window.localStorage?.setItem(NUDGE_DISMISSED_KEY, '1')
+  } catch {
+    // localStorage can throw in private-mode Safari — safe to ignore,
+    // banner will simply reappear next session.
+  }
+}
 
 const queueProgressPercent = computed(() => {
   const p = queueProgress.value
@@ -753,7 +933,7 @@ function handleScannerChanged(e: Event) {
 }
 
 onMounted(async () => {
-  await Promise.all([refresh(), loadHistory()])
+  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
   // Subscribe to live scanner updates.
   window.addEventListener('mcpproxy:scanner-changed', handleScannerChanged)
   // Check if a batch scan is already running

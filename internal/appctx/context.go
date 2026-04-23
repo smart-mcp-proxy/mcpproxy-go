@@ -74,9 +74,11 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 		logger:            logger,
 	}
 
-	// Initialize Docker isolation manager
+	// Initialize Docker isolation manager with a logger so that silent
+	// per-server short-circuits (global flag off, per-server opt-in true)
+	// surface as a one-time warning in the main log.
 	dockerIsolationManager := &DockerIsolationManagerImpl{
-		isolationManager: core.NewIsolationManager(cfg.DockerIsolation),
+		isolationManager: core.NewIsolationManagerWithLogger(cfg.DockerIsolation, logger),
 		config:           cfg,
 		logger:           logger,
 	}
