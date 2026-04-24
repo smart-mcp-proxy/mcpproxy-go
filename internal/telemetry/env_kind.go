@@ -142,8 +142,16 @@ func hasAnyEnv(env map[string]string, names []string) bool {
 
 // DetectEnvKind is the pure classifier that decides env_kind + env_markers
 // from an injected environment map, filesystem prober, OS name, and TTY
-// checker. Ordering is authoritative: CI wins over cloud-IDE wins over
-// container. See design §4.2 / research.md R1.
+// checker. Ordering is authoritative: cloud_ide wins over CI wins over
+// container.
+//
+// NOTE: This ordering deviates from the original design doc (§4.2 / research.md
+// R1) which put CI first. The change is motivated by gemini P1 cross-review:
+// GitHub Codespaces and Gitpod routinely set CI=true alongside their cloud-IDE
+// markers (CODESPACES, GITPOD_WORKSPACE_ID). Real humans in those ephemeral
+// cloud sessions were being classified as `ci`, artificially deflating the
+// Cloud IDE retention funnel. Prioritising cloud_ide over CI keeps interactive
+// human sessions in the right bucket while still catching ordinary CI runners.
 //
 // Inputs:
 //   - env: map of env-var name → value (caller builds this from os.Environ).
@@ -176,12 +184,14 @@ func DetectEnvKind(env map[string]string, fs FileProber, osName string, tty TTYC
 		markers.IsContainer = true
 	}
 
-	// Decision tree (first match wins).
+	// Decision tree (first match wins). cloud_ide is checked BEFORE ci because
+	// Codespaces / Gitpod set CI=true alongside their own markers — see
+	// function doc comment.
 	switch {
-	case markers.HasCIEnv:
-		return EnvKindCI, markers
 	case markers.HasCloudIDEEnv:
 		return EnvKindCloudIDE, markers
+	case markers.HasCIEnv:
+		return EnvKindCI, markers
 	case markers.IsContainer:
 		return EnvKindContainer, markers
 	}

@@ -143,6 +143,29 @@ func TestDetectEnvKind_DecisionTree(t *testing.T) {
 			wantMarkers: EnvMarkers{HasCloudIDEEnv: true},
 		},
 		{
+			// Gemini P1: GitHub Codespaces sets CI=true alongside CODESPACES.
+			// Must resolve to cloud_ide, NOT ci, because it's a real human in
+			// an interactive ephemeral session.
+			name:        "cloud-ide-codespaces-beats-ci",
+			env:         map[string]string{"CI": "true", "CODESPACES": "true"},
+			fs:          newFakeFS(),
+			osName:      "linux",
+			tty:         fakeTTY(false),
+			wantKind:    EnvKindCloudIDE,
+			wantMarkers: EnvMarkers{HasCIEnv: true, HasCloudIDEEnv: true},
+		},
+		{
+			// Gemini P1: Gitpod prebuilds run with CI=true but the workspace ID
+			// is present — still a cloud_ide session, not a CI runner.
+			name:        "cloud-ide-gitpod-prebuild-beats-ci",
+			env:         map[string]string{"CI": "true", "GITPOD_WORKSPACE_ID": "abc"},
+			fs:          newFakeFS(),
+			osName:      "linux",
+			tty:         fakeTTY(false),
+			wantKind:    EnvKindCloudIDE,
+			wantMarkers: EnvMarkers{HasCIEnv: true, HasCloudIDEEnv: true},
+		},
+		{
 			name:        "cloud-ide-gitpod",
 			env:         map[string]string{"GITPOD_WORKSPACE_ID": "abc"},
 			fs:          newFakeFS(),
