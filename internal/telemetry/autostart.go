@@ -102,15 +102,18 @@ func (r *AutostartReader) Read() *bool {
 
 	data, err := os.ReadFile(r.Path)
 	if err != nil {
-		// File absent → tray not running (or never launched). Cache nil.
+		// File absent → tray not running (or hasn't written the sidecar yet).
+		// Tray-core boot race: if core starts slightly before the tray, the
+		// first Read() sees ErrNotExist and would poison the 1h TTL with nil,
+		// causing AutostartEnabled to stay null for the whole first hour even
+		// after the tray publishes `true`. Do NOT mark cachedOnce so the next
+		// Read() re-probes. Gemini P1 cross-review.
 		if errors.Is(err, fs.ErrNotExist) {
 			r.cached = nil
-			r.cachedAt = now
-			r.cachedOnce = true
 			return nil
 		}
-		// Other errors (permissions, etc.): cache nil but don't poison the
-		// long TTL — use a short retry by not marking cachedOnce.
+		// Other errors (permissions, etc.): same short-retry behaviour — do
+		// not mark cachedOnce so the next heartbeat tries again.
 		r.cached = nil
 		return nil
 	}

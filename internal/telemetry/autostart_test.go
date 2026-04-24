@@ -114,6 +114,36 @@ func TestReadAutostart_CachedOneHour(t *testing.T) {
 	}
 }
 
+// TestReadAutostart_BootRaceDoesNotPoisonCache: gemini P1 — if the core's
+// first Read() happens BEFORE the tray writes the sidecar, a missing file
+// must NOT poison the 1h TTL. The next Read() should re-probe and see the
+// value the tray has since written.
+func TestReadAutostart_BootRaceDoesNotPoisonCache(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tray-autostart.json")
+	// File deliberately absent at first read — simulates core-starts-before-tray.
+
+	r := &AutostartReader{Path: path}
+	if got := r.Read(); got != nil {
+		t.Fatalf("first Read() = %v, want nil (file absent)", *got)
+	}
+
+	// Tray now writes the sidecar (the race has closed).
+	if err := os.WriteFile(path, []byte(`{"enabled": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second Read() within the 1h TTL must re-probe and see the new value.
+	// Before the fix, this returned nil (poisoned cache) for up to an hour.
+	got := r.Read()
+	if got == nil {
+		t.Fatalf("second Read() = nil, want *true (tray wrote sidecar after first read)")
+	}
+	if *got != true {
+		t.Fatalf("second Read() = %v, want true", *got)
+	}
+}
+
 // TestDefaultAutostartReader_PathResolution: the default constructor returns
 // a reader that does not panic on a missing sidecar.
 func TestDefaultAutostartReader_PathResolution(t *testing.T) {
