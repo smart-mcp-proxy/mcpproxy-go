@@ -193,6 +193,44 @@ struct QuarantineStats: Codable, Equatable {
     }
 }
 
+// MARK: - Diagnostics (Spec 044)
+
+/// REST-API representation of one fix step attached to a DiagnosticPayload.
+struct DiagnosticFixStep: Codable, Equatable {
+    let type: String       // "link" | "command" | "button"
+    let label: String
+    let command: String?
+    let url: String?
+    let fixerKey: String?
+    let destructive: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case type, label, command, url
+        case fixerKey = "fixer_key"
+        case destructive
+    }
+}
+
+/// Structured diagnostic error carried on each server record when the
+/// server is in a failed state. `code` is a stable identifier such as
+/// MCPX_STDIO_SPAWN_ENOENT that the tray can key off without parsing
+/// free-text error messages.
+struct DiagnosticPayload: Codable, Equatable {
+    let code: String
+    let severity: String   // "info" | "warn" | "error"
+    let cause: String?
+    let userMessage: String?
+    let fixSteps: [DiagnosticFixStep]?
+    let docsURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case code, severity, cause
+        case userMessage = "user_message"
+        case fixSteps = "fix_steps"
+        case docsURL = "docs_url"
+    }
+}
+
 // MARK: - Server Status
 
 /// Per-server Docker isolation overrides, surfaced by the API so the
@@ -242,6 +280,11 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let quarantine: QuarantineStats?
     let isolation: IsolationConfigStatus?
     let error: String?
+    /// Spec 044 — stable error code (e.g. MCPX_STDIO_SPAWN_ENOENT) and the
+    /// structured diagnostic payload. Present only when the server has an
+    /// active, classified failure.
+    let errorCode: String?
+    let diagnostic: DiagnosticPayload?
 
     enum CodingKeys: String, CodingKey {
         case id, name, url, command, args
@@ -263,6 +306,14 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         case quarantine
         case isolation
         case error
+        case errorCode = "error_code"
+        case diagnostic
+    }
+
+    /// True when the server has an attached diagnostic with warn/error severity.
+    var hasAttentionDiagnostic: Bool {
+        guard let d = diagnostic, !(d.code).isEmpty else { return false }
+        return d.severity == "warn" || d.severity == "error"
     }
 
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.
