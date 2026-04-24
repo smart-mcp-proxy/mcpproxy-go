@@ -59,6 +59,12 @@ mcp_config.json
 tmp/
 temp/
 
+# Ephemeral agent execution reports — must never land in the repo.
+# Agents write these as per-run logs; content worth keeping belongs in a
+# spec (specs/NNN/) or a design doc (docs/superpowers/specs/).
+tmp-agent-report-*.md
+/tmp-agent-report-*/
+
 # Build artifacts
 build/
 dist/
