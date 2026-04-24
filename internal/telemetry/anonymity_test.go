@@ -97,7 +97,7 @@ func TestScanForPII_AllBlockedPrefixes(t *testing.T) {
 	cases := map[string]string{
 		"/Users/":       `{"path":"/Users/bob/file"}`,
 		"/home/":        `{"path":"/home/bob/file"}`,
-		`C:\Users\`:     `{"path":"C:\\Users\\bob\\file"}`,
+		`C:\\Users\\`:   `{"path":"C:\\Users\\bob\\file"}`,
 		"/var/folders/": `{"path":"/var/folders/xx/yyy"}`,
 	}
 	for prefix, payload := range cases {

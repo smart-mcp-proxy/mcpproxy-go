@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -13,10 +15,13 @@ import (
 // Additional runtime-detected values (current hostname, home-dir basename,
 // env-var values from a blocked set) are appended by the telemetry service
 // at startup via BlockedValues — see T025 / spec 044.
+// NOTE on backslash form: telemetry payloads are JSON, and JSON encodes a
+// single backslash as two bytes (`\\`). So the Windows user-profile prefix
+// appears on the wire as `C:\\Users\\`. We match the JSON-escaped form here.
 var AnonymityBlockedPrefixes = []string{
 	"/Users/",
 	"/home/",
-	`C:\Users\`,
+	`C:\\Users\\`,
 	"/var/folders/",
 }
 
@@ -61,12 +66,80 @@ func (v *AnonymityViolation) Is(target error) bool {
 	return target == ErrAnonymityViolation
 }
 
+// anonymityScanEnvelope extracts env_markers into a strict bool-typed struct
+// so we can catch any widening of EnvMarkers fields to non-bool types in the
+// serialized payload.
+type anonymityScanEnvelope struct {
+	EnvMarkers *json.RawMessage `json:"env_markers"`
+}
+
 // ScanForPII scans a serialized v3 telemetry payload for PII leaks and
 // structural violations. Returns nil when the payload is clean; otherwise
-// returns an *AnonymityViolation wrapped against ErrAnonymityViolation.
+// returns an *AnonymityViolation. The returned error satisfies
+// errors.Is(err, ErrAnonymityViolation).
 //
-// Implementation lands in T010; this stub returns a "not implemented" error so
-// that T009 tests fail until T010 fills it in.
+// Rules (first-match wins):
+//  1. Any substring from AnonymityBlockedPrefixes appears in the payload.
+//  2. Any substring from BlockedValues appears in the payload.
+//  3. env_markers, if present, fails to unmarshal into a strict all-bool
+//     struct — meaning a field widened to a string/number/null.
+//
+// The implementation never logs the payload — it only reports which rule
+// tripped and the offending pattern (a small literal). Callers should log at
+// error level and skip the heartbeat.
 func ScanForPII(payloadJSON []byte) error {
-	return errors.New("ScanForPII: not implemented (T010 pending)")
+	// Rule 1: static blocked prefixes.
+	for _, p := range AnonymityBlockedPrefixes {
+		if bytes.Contains(payloadJSON, []byte(p)) {
+			return &AnonymityViolation{
+				Rule:    "blocked_prefix",
+				Pattern: p,
+				Reason:  fmt.Sprintf("payload contains blocked prefix %q", p),
+			}
+		}
+	}
+
+	// Rule 2: runtime-populated blocked values (hostnames, tokens, etc.).
+	for _, v := range BlockedValues {
+		if v == "" {
+			continue
+		}
+		if bytes.Contains(payloadJSON, []byte(v)) {
+			return &AnonymityViolation{
+				Rule:    "blocked_value",
+				Pattern: v,
+				Reason:  "payload contains a runtime-blocked value (hostname, token, or home-dir basename)",
+			}
+		}
+	}
+
+	// Rule 3: env_markers must serialize with all-bool fields. We use a
+	// strict decoder against EnvMarkers; any type mismatch is a violation.
+	var env anonymityScanEnvelope
+	if err := json.Unmarshal(payloadJSON, &env); err != nil {
+		// A malformed envelope is itself a structural problem — report it.
+		return &AnonymityViolation{
+			Rule:    "malformed_payload",
+			Pattern: "",
+			Reason:  fmt.Sprintf("payload failed envelope decode: %v", err),
+		}
+	}
+	if env.EnvMarkers != nil {
+		dec := json.NewDecoder(bytes.NewReader(*env.EnvMarkers))
+		dec.DisallowUnknownFields()
+		var m EnvMarkers
+		if err := dec.Decode(&m); err != nil {
+			return &AnonymityViolation{
+				Rule:    "env_markers_non_bool",
+				Pattern: "env_markers",
+				Reason:  fmt.Sprintf("env_markers has a non-bool or unknown field: %v", err),
+			}
+		}
+	}
+
+	return nil
 }
+
+// Compile-time guards so linters don't flag the unused imports if the file is
+// trimmed later.
+var _ = errors.New
