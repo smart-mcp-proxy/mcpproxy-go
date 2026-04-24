@@ -31,6 +31,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -2340,7 +2341,15 @@ func (r *Runtime) IsDockerAvailable() bool {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+	// Resolve docker via shellwrap so we find Docker Desktop / Homebrew /
+	// Colima installs even when mcpproxy was launched from a LaunchAgent /
+	// tray with a minimal inherited PATH (see issue: tray "Docker daemon not
+	// available" warning despite healthy daemon + socket).
+	dockerBin, resolveErr := shellwrap.ResolveDockerPath(r.logger)
+	if resolveErr != nil || dockerBin == "" {
+		dockerBin = "docker"
+	}
+	cmd := exec.CommandContext(ctx, dockerBin, "info", "--format", "{{.ServerVersion}}")
 	err := cmd.Run()
 	newResult := err == nil
 

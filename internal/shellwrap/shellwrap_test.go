@@ -88,6 +88,87 @@ func TestResolveDockerPath_CachedAcrossCalls(t *testing.T) {
 	}
 }
 
+// writeFakeDocker writes a no-op executable at <dir>/docker so ResolveDockerPath
+// can find "docker" on a controlled PATH.
+func writeFakeDocker(t *testing.T, dir string) string {
+	t.Helper()
+	script := "#!/bin/sh\nexit 0\n"
+	p := filepath.Join(dir, "docker")
+	require.NoError(t, os.WriteFile(p, []byte(script), 0o755))
+	return p
+}
+
+// TestResolveDockerPath_FastPath verifies that when docker is present on
+// ambient PATH, ResolveDockerPath returns it without invoking the login
+// shell fallback.
+func TestResolveDockerPath_FastPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	dir := t.TempDir()
+	want := writeFakeDocker(t, dir)
+	t.Setenv("PATH", dir)
+	// If the fast path were skipped and the shell fallback ran, it would
+	// invoke this (broken) shell and fail — the assertion below would catch it.
+	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err)
+	assert.Equal(t, want, got, "should resolve docker via exec.LookPath without shell fallback")
+}
+
+// TestResolveDockerPath_ShellFallback simulates the tray/LaunchAgent scenario:
+// docker is NOT on the ambient PATH but IS on the user's login-shell PATH.
+// The shell fallback must recover the absolute path.
+func TestResolveDockerPath_ShellFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("login-shell fallback is unix-only")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	// Stash the fake docker somewhere that is NOT on ambient PATH.
+	dockerDir := t.TempDir()
+	dockerPath := writeFakeDocker(t, dockerDir)
+
+	// Ambient PATH deliberately excludes dockerDir (mimicking launchd minimal PATH).
+	ambient := t.TempDir()
+	t.Setenv("PATH", ambient)
+
+	// Fake $SHELL emits the absolute path via `command -v docker` — the
+	// fallback issues `<shell> -l -c 'command -v docker'` and trims the output.
+	shellDir := t.TempDir()
+	fakeShell := writeFakeShell(t, shellDir, dockerPath)
+	t.Setenv("SHELL", fakeShell)
+
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err, "shell fallback must succeed when login shell emits the docker path")
+	assert.Equal(t, dockerPath, got, "should return the path emitted by the login shell")
+}
+
+// TestResolveDockerPath_NotFoundAnywhere verifies the error path when docker
+// is missing from both ambient PATH and the login shell.
+func TestResolveDockerPath_NotFoundAnywhere(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	t.Setenv("PATH", t.TempDir())
+	// Login shell that emits nothing — mimics `command -v docker` returning empty.
+	shellDir := t.TempDir()
+	fakeShell := writeFakeShell(t, shellDir, "")
+	t.Setenv("SHELL", fakeShell)
+
+	got, err := ResolveDockerPath(nil)
+	assert.Error(t, err, "should error when docker is neither on PATH nor in login shell")
+	assert.Empty(t, got)
+}
+
 func TestMinimalEnv_DropsSecrets(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
 	t.Setenv("GITHUB_TOKEN", "ghp_dummy_test_token_1234567890abcdef")

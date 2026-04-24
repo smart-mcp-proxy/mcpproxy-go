@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -2725,7 +2726,13 @@ func (p *MCPProxyServer) checkDockerAvailable() bool {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "info")
+	// Resolve docker via shellwrap so tray-launched processes with a minimal
+	// inherited PATH still find Docker Desktop / Homebrew / Colima installs.
+	dockerBin, resolveErr := shellwrap.ResolveDockerPath(p.logger)
+	if resolveErr != nil || dockerBin == "" {
+		dockerBin = "docker"
+	}
+	cmd := exec.CommandContext(ctx, dockerBin, "info")
 
 	err := cmd.Run()
 	available := err == nil
