@@ -10,6 +10,8 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -53,10 +55,22 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 		"status":    hit["status"],
 		"health":    hit["health"],
 	}
+	// The raw map values for diagnostic fields are typed
+	// (diagnostics.Code, diagnostics.Severity, []diagnostics.FixStep) which
+	// JSON-marshals correctly but some downstream clients expect a plain
+	// `code`/`severity` string. Normalize via a JSON round-trip.
 	if diag, ok := hit["diagnostic"]; ok && diag != nil {
-		resp["diagnostic"] = diag
+		var normalized map[string]interface{}
+		if raw, err := json.Marshal(diag); err == nil && len(raw) > 0 {
+			_ = json.Unmarshal(raw, &normalized)
+		}
+		if normalized != nil {
+			resp["diagnostic"] = normalized
+		} else {
+			resp["diagnostic"] = diag
+		}
 		if code, ok2 := hit["error_code"]; ok2 {
-			resp["error_code"] = code
+			resp["error_code"] = fmt.Sprintf("%v", code)
 		}
 	} else {
 		resp["diagnostic"] = nil

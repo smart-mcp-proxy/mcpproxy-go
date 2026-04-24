@@ -31,8 +31,10 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, transport stri
 		ServerID:  status.Name,
 	})
 	if code == "" {
-		status.Diagnostic = nil
-		return
+		// Classify always returns at least UnknownUnclassified for non-nil err,
+		// so reaching here means a logic regression. Defensive fallback keeps
+		// the UI useful instead of silently dropping the signal.
+		code = diagnostics.UnknownUnclassified
 	}
 	entry, _ := diagnostics.Get(code)
 	msg := err.Error()

@@ -65,11 +65,28 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 		return STDIOHandshakeTimeout
 	}
 
-	// String-match fallback for handshake invalid frames (mcp-go does not
-	// expose a structured error type for this at time of writing).
+	// String-match fallback for stdio failures when the raw error was
+	// wrapped by an intermediate layer (e.g. "failed to connect: stdio
+	// transport ... recent stderr: no such file or directory"). The upstream
+	// manager currently string-wraps spawn failures, so we can't rely on
+	// exec.Error being present. These matches are intentionally broad and
+	// err toward MCPX_STDIO_SPAWN_ENOENT / MCPX_STDIO_HANDSHAKE_TIMEOUT —
+	// both are strictly better than MCPX_UNKNOWN_UNCLASSIFIED for the user.
 	if hints.Transport == "stdio" {
 		msg := err.Error()
-		if strings.Contains(msg, "invalid handshake") || strings.Contains(msg, "malformed") {
+		lmsg := strings.ToLower(msg)
+		switch {
+		case strings.Contains(lmsg, "no such file or directory"),
+			strings.Contains(lmsg, "executable file not found"),
+			strings.Contains(lmsg, "command not found"):
+			return STDIOSpawnENOENT
+		case strings.Contains(lmsg, "permission denied"):
+			return STDIOSpawnEACCES
+		case strings.Contains(lmsg, "did not respond to mcp initialize"),
+			strings.Contains(lmsg, "handshake timeout"):
+			return STDIOHandshakeTimeout
+		case strings.Contains(lmsg, "invalid handshake"),
+			strings.Contains(lmsg, "malformed"):
 			return STDIOHandshakeInvalid
 		}
 	}
