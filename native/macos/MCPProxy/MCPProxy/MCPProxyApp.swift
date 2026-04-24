@@ -149,6 +149,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         Task {
             await startCore()
         }
+
+        // Spec 044 (T055+T056): publish current autostart state to the tray
+        // sidecar so the core's telemetry can emit autostart_enabled on the
+        // very next heartbeat. Then — if we've never done first-run before —
+        // present the first-run dialog with "Launch at login" default ON.
+        //
+        // Order: sidecar refresh first, so even if the user cancels the
+        // dialog the core has a non-null reading.
+        AutostartSidecarService.refresh()
+        DispatchQueue.main.async {
+            presentFirstRunDialogIfNeeded()
+        }
     }
 
     // MARK: - NSMenuDelegate
@@ -837,6 +849,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 appState.autoStartEnabled = true
             }
         } catch {}
+        // Spec 044 (T055): publish new state so the core's telemetry reader
+        // observes the change within its 1h TTL. We write the effective
+        // SMAppService state rather than the optimistic toggle value — that
+        // way a registration failure does not poison the sidecar.
+        AutostartSidecarService.refresh()
         rebuildMenu()
     }
 
