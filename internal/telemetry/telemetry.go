@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"runtime"
 	"strings"
@@ -220,6 +221,27 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		s.logger.Debug("Failed to marshal heartbeat", zap.Error(err))
+		return
+	}
+
+	// Spec 044 (FR-011): defense-in-depth anonymity scanner. Runs on the
+	// serialized payload before the HTTP POST. On violation: log at error
+	// level (WITHOUT the payload — that would leak the very thing we caught),
+	// increment the counter, and skip the heartbeat. This catches regressions
+	// where a future contributor accidentally widens a field to carry PII.
+	if err := ScanForPII(data); err != nil {
+		if s.registry != nil {
+			s.registry.RecordAnonymityViolation()
+		}
+		var v *AnonymityViolation
+		if errors.As(err, &v) {
+			s.logger.Error("telemetry anonymity violation (not transmitted)",
+				zap.String("rule", v.Rule),
+				zap.String("pattern", v.Pattern))
+		} else {
+			s.logger.Error("telemetry anonymity violation (not transmitted)",
+				zap.Error(err))
+		}
 		return
 	}
 
