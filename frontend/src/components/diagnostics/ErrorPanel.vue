@@ -85,10 +85,15 @@
 
             <!-- button fix step -->
             <div v-else-if="step.type === 'button' && step.fixer_key" class="flex items-center gap-2 flex-wrap">
+              <!--
+                Non-destructive fixes: single primary Execute button (no dry-run UX noise).
+                Destructive fixes: Preview (dry-run) + Execute (gated by window.confirm()).
+                Fix: gemini P1 — previously non-destructive fixes had no Execute path.
+              -->
               <button
+                v-if="step.destructive"
                 type="button"
-                class="btn btn-xs"
-                :class="step.destructive ? 'btn-warning' : 'btn-primary'"
+                class="btn btn-xs btn-warning"
                 :disabled="isFixing(step.fixer_key)"
                 :data-testid="`error-panel-fix-button-${idx}`"
                 @click="runFixer(step, 'dry_run')"
@@ -100,13 +105,19 @@
                 Preview (dry-run)
               </button>
               <button
-                v-if="step.destructive"
                 type="button"
-                class="btn btn-xs btn-outline btn-error"
+                class="btn btn-xs"
+                :class="step.destructive ? 'btn-outline btn-error' : 'btn-primary'"
                 :disabled="isFixing(step.fixer_key)"
                 :data-testid="`error-panel-execute-button-${idx}`"
-                @click="confirmAndExecute(step)"
-              >Execute</button>
+                @click="step.destructive ? confirmAndExecute(step) : runFixer(step, 'execute')"
+              >
+                <span
+                  v-if="!step.destructive && isFixing(step.fixer_key)"
+                  class="loading loading-spinner loading-xs"
+                ></span>
+                Execute
+              </button>
             </div>
           </li>
         </ol>

@@ -57,10 +57,10 @@ describe('ErrorPanel (spec 044)', () => {
       .toContain('configured command was not found')
   })
 
-  it('dispatches invokeDiagnosticFix with dry_run when Preview is clicked', async () => {
+  it('non-destructive fix: Execute button runs fixer with mode=execute (no Preview button)', async () => {
     ;(api.invokeDiagnosticFix as any).mockResolvedValue({
       success: true,
-      data: { outcome: 'success', duration_ms: 12, mode: 'dry_run', preview: 'tail unavailable' },
+      data: { outcome: 'success', duration_ms: 12, mode: 'execute', preview: 'last 20 log lines' },
     })
 
     const wrapper = mount(ErrorPanel, {
@@ -68,10 +68,13 @@ describe('ErrorPanel (spec 044)', () => {
       global: { plugins: [pinia] },
     })
 
-    // The button step index is 1 (command step was 0).
-    const btn = wrapper.find('[data-testid="error-panel-fix-button-1"]')
-    expect(btn.exists()).toBe(true)
-    await btn.trigger('click')
+    // The button step index is 1 (command step was 0). Non-destructive -> no Preview button.
+    expect(wrapper.find('[data-testid="error-panel-fix-button-1"]').exists()).toBe(false)
+
+    const execBtn = wrapper.find('[data-testid="error-panel-execute-button-1"]')
+    expect(execBtn.exists()).toBe(true)
+    expect(execBtn.attributes('disabled')).toBeUndefined()
+    await execBtn.trigger('click')
     await flushPromises()
 
     expect(api.invokeDiagnosticFix).toHaveBeenCalledTimes(1)
@@ -80,8 +83,63 @@ describe('ErrorPanel (spec 044)', () => {
       server: 'test-broken',
       code: 'MCPX_STDIO_SPAWN_ENOENT',
       fixer_key: 'stdio_show_last_logs',
-      mode: 'dry_run',
+      mode: 'execute',
     })
+  })
+
+  it('destructive fix: Preview sends dry_run, Execute is gated by window.confirm()', async () => {
+    ;(api.invokeDiagnosticFix as any).mockResolvedValue({
+      success: true,
+      data: { outcome: 'success', duration_ms: 12, mode: 'dry_run', preview: 'would remove oauth tokens' },
+    })
+
+    const destructiveDiag = makeDiag({
+      fix_steps: [
+        {
+          type: 'button',
+          label: 'Clear OAuth tokens',
+          fixer_key: 'oauth_clear_tokens',
+          destructive: true,
+        },
+      ],
+    })
+
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: destructiveDiag, serverName: 'test-broken' },
+      global: { plugins: [pinia] },
+    })
+
+    // Both Preview and Execute buttons exist for destructive.
+    const previewBtn = wrapper.find('[data-testid="error-panel-fix-button-0"]')
+    const execBtn = wrapper.find('[data-testid="error-panel-execute-button-0"]')
+    expect(previewBtn.exists()).toBe(true)
+    expect(execBtn.exists()).toBe(true)
+
+    // Preview sends dry_run.
+    await previewBtn.trigger('click')
+    await flushPromises()
+    expect((api.invokeDiagnosticFix as any).mock.calls[0][0]).toMatchObject({ mode: 'dry_run' })
+
+    // Execute is gated by window.confirm — reject path.
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await execBtn.trigger('click')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    // No second call to the API because the user cancelled.
+    expect(api.invokeDiagnosticFix).toHaveBeenCalledTimes(1)
+
+    // Execute is gated by window.confirm — accept path.
+    confirmSpy.mockReturnValue(true)
+    ;(api.invokeDiagnosticFix as any).mockResolvedValue({
+      success: true,
+      data: { outcome: 'success', duration_ms: 12, mode: 'execute' },
+    })
+    await execBtn.trigger('click')
+    await flushPromises()
+    expect(api.invokeDiagnosticFix).toHaveBeenCalledTimes(2)
+    expect((api.invokeDiagnosticFix as any).mock.calls[1][0]).toMatchObject({ mode: 'execute' })
+
+    confirmSpy.mockRestore()
   })
 
   it('maps severity to alert colour classes', async () => {
