@@ -84,6 +84,20 @@ type HeartbeatPayload struct {
 	// the BBolt activation bucket at heartbeat build time. nil when the store
 	// is not wired (e.g. in short-lived CLI commands).
 	Activation *ActivationState `json:"activation,omitempty"`
+
+	// LaunchSource: how the process was launched. One of "installer", "tray",
+	// "login_item", "cli", "unknown". Detected once at startup via
+	// DetectLaunchSourceOnce, with a one-shot "installer" override driven by
+	// the installer_heartbeat_pending BBolt flag (cleared after first heartbeat).
+	LaunchSource string `json:"launch_source,omitempty"`
+
+	// AutostartEnabled: tri-state login-item status.
+	//   - *true  : tray reports the app IS registered as a login item
+	//   - *false : tray reports the app is NOT registered
+	//   - nil    : unknown (tray not running, Linux, or sidecar absent)
+	// Pointer intentional so JSON null is distinguishable from false —
+	// receivers need this to separate "user disabled" from "we don't know".
+	AutostartEnabled *bool `json:"autostart_enabled"`
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -134,6 +148,11 @@ type Service struct {
 	// Spec 044: optional provider for configured IDE count. Populated by the
 	// runtime from internal/connect at wire-up time. nil-safe.
 	configuredIDECountProvider func() int
+
+	// Spec 044 (T049): autostart reader for the tray-owned sidecar. Lazy-
+	// initialized on first heartbeat; tests may inject a mock via
+	// SetAutostartReader.
+	autostartReader *AutostartReader
 
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
@@ -202,6 +221,43 @@ func (s *Service) ActivationDB() *bbolt.DB {
 // Typically supplied by internal/connect.Service.
 func (s *Service) SetConfiguredIDECountProvider(fn func() int) {
 	s.configuredIDECountProvider = fn
+}
+
+// SetAutostartReader overrides the default autostart reader (for tests). In
+// production the first heartbeat lazy-initializes DefaultAutostartReader.
+func (s *Service) SetAutostartReader(r *AutostartReader) {
+	s.autostartReader = r
+}
+
+// resolveLaunchSource returns the LaunchSource to emit in the current
+// heartbeat. Precedence:
+//  1. If the activation bucket's installer_heartbeat_pending flag is true,
+//     emit "installer" and clear the flag (one-shot). This handles crash-
+//     recovery between installer-driven startup and the first successful
+//     heartbeat.
+//  2. Otherwise, emit the cached DetectLaunchSourceOnce() result.
+//
+// Any BBolt error while inspecting/clearing the flag is logged at debug and
+// falls through to the runtime detector — this preserves liveness of the
+// heartbeat pipeline at the cost of losing the "installer" classification
+// for this one cycle.
+func (s *Service) resolveLaunchSource() LaunchSource {
+	if s.activationStore != nil && s.activationDB != nil {
+		pending, err := s.activationStore.IsInstallerPending(s.activationDB)
+		if err == nil && pending {
+			// Clear the flag synchronously so a crash before the HTTP POST
+			// still downgrades the next heartbeat to the runtime-detected
+			// source, rather than re-emitting "installer" forever.
+			if clearErr := s.activationStore.SetInstallerPending(s.activationDB, false); clearErr != nil {
+				s.logger.Debug("Failed to clear installer_heartbeat_pending", zap.Error(clearErr))
+			}
+			return LaunchSourceInstaller
+		}
+		if err != nil {
+			s.logger.Debug("Failed to read installer_heartbeat_pending", zap.Error(err))
+		}
+	}
+	return DetectLaunchSourceOnce()
 }
 
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
@@ -418,6 +474,23 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		} else {
 			s.logger.Debug("Failed to load activation state for heartbeat", zap.Error(err))
 		}
+	}
+
+	// Spec 044 (T051): LaunchSource. One-shot "installer" override consumes
+	// the installer_heartbeat_pending flag set at process startup when
+	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
+	// detector result (tray/login_item/cli/unknown) is emitted.
+	payload.LaunchSource = string(s.resolveLaunchSource())
+
+	// Spec 044 (T051): AutostartEnabled. Tri-state; nil when the tray sidecar
+	// is absent/unreachable/malformed (Linux always falls here).
+	if s.autostartReader != nil {
+		payload.AutostartEnabled = s.autostartReader.Read()
+	} else {
+		// Lazy-init the default reader on first heartbeat. The reader is
+		// safe to reuse across heartbeats (1h TTL cache inside).
+		s.autostartReader = DefaultAutostartReader()
+		payload.AutostartEnabled = s.autostartReader.Read()
 	}
 
 	// Spec 042: counter snapshot.

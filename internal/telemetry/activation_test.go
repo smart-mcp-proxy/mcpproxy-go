@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.etcd.io/bbolt"
+	"go.uber.org/zap"
 )
 
 // newTestActivationDB creates a temporary BBolt DB for a test and returns it
@@ -304,5 +305,55 @@ func TestInstallerPendingFlag(t *testing.T) {
 	}
 	if !pending {
 		t.Fatalf("expected true after set")
+	}
+}
+
+// TestInstallerPending_ClearedAfterFirstHeartbeat (T046) verifies the
+// one-shot lifecycle via a thin heartbeat-layer simulator. We don't
+// exercise the real HTTP Service here — instead we hit the same helper
+// the payload builder uses (resolveLaunchSource), which is the public
+// seam between the activation store and the LaunchSource emission.
+//
+// Contract: first resolveLaunchSource call after SetInstallerPending(true)
+// returns "installer" and clears the flag; subsequent calls return
+// whatever DetectLaunchSourceOnce() yields in the test environment
+// (typically "unknown" / "cli" with no TTY attached).
+func TestInstallerPending_ClearedAfterFirstHeartbeat(t *testing.T) {
+	db, cleanup := newTestActivationDB(t)
+	defer cleanup()
+
+	var store bboltActivationStore
+
+	// Simulate startup wire-up: env var present → SetInstallerPending(true).
+	if err := store.SetInstallerPending(db, true); err != nil {
+		t.Fatalf("SetInstallerPending: %v", err)
+	}
+
+	// Build a minimal Service with just the activation wiring. We skip the
+	// HTTP loop — resolveLaunchSource is the unit under test.
+	s := &Service{
+		logger:          zap.NewNop(),
+		activationStore: &store,
+		activationDB:    db,
+	}
+
+	// First call → "installer" and the pending flag must be cleared.
+	ls1 := s.resolveLaunchSource()
+	if ls1 != LaunchSourceInstaller {
+		t.Fatalf("first resolveLaunchSource = %q, want %q", ls1, LaunchSourceInstaller)
+	}
+	pending, err := store.IsInstallerPending(db)
+	if err != nil {
+		t.Fatalf("IsInstallerPending after first call: %v", err)
+	}
+	if pending {
+		t.Fatalf("installer_heartbeat_pending should be cleared after first heartbeat")
+	}
+
+	// Second call → no longer installer; should return the runtime
+	// detector's value (whatever it is in the test env), not installer.
+	ls2 := s.resolveLaunchSource()
+	if ls2 == LaunchSourceInstaller {
+		t.Fatalf("second resolveLaunchSource still returned installer — one-shot broken")
 	}
 }
