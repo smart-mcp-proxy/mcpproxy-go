@@ -66,6 +66,16 @@ type HeartbeatPayload struct {
 	// runtime actually wraps in Docker isolation. Distinct from "has Docker
 	// available" — an install can have Docker but never use it for isolation.
 	ServerDockerIsolatedCount int `json:"server_docker_isolated_count,omitempty"`
+
+	// Spec 044 additions. schema_version stays at 3 (set by spec 042); these
+	// fields are additive and forward-compatible.
+	//
+	// EnvKind: ground-truth classification of the process environment, computed
+	// once at startup by DetectEnvKindOnce. One of the EnvKind* constants.
+	EnvKind string `json:"env_kind,omitempty"`
+	// EnvMarkers: raw boolean observations feeding EnvKind. Fields are ALL
+	// booleans — the anonymity scanner re-asserts this on the serialized form.
+	EnvMarkers *EnvMarkers `json:"env_markers,omitempty"`
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -308,6 +318,15 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// "auto") so operators can spot mis-typed config without polluting the
 	// telemetry cardinality.
 	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
+
+	// Spec 044: ground-truth environment classification. Cached after first
+	// call so repeated heartbeats do not re-probe the filesystem.
+	envKind, envMarkers := DetectEnvKindOnce()
+	payload.EnvKind = string(envKind)
+	// Copy to a local so the omitempty pointer can be distinguished from the
+	// zero-value struct (data-model.md requires this).
+	markersCopy := envMarkers
+	payload.EnvMarkers = &markersCopy
 
 	// Spec 042: counter snapshot.
 	if s.registry != nil {
