@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/schemas/heartbeat-v3.json",
+  "title": "MCPProxy Heartbeat Payload v3 (spec 044 additions)",
+  "description": "JSON schema for the anonymous telemetry heartbeat payload after spec 044. Extends the v3 shape that spec 042 established. Only the five fields added by spec 044 are enumerated in detail here; existing v2/v3 fields are described as 'additionalProperties' passthrough to keep this contract focused on what changed.",
+  "type": "object",
+  "required": ["schema_version", "anonymous_id"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 3,
+      "description": "Stays at 3; spec 044 extends v3 without bumping."
+    },
+    "anonymous_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Locally generated UUIDv4. MUST be byte-identical to the v2 payload's value for the same install."
+    },
+    "env_kind": {
+      "type": "string",
+      "enum": ["interactive", "ci", "cloud_ide", "container", "headless", "unknown"],
+      "description": "Ground-truth classification of the runtime environment. Computed once at startup."
+    },
+    "launch_source": {
+      "type": "string",
+      "enum": ["tray", "login_item", "cli", "installer", "unknown"],
+      "description": "How this process was started."
+    },
+    "autostart_enabled": {
+      "type": ["boolean", "null"],
+      "description": "Tri-state: true/false on platforms where login-item state is readable (macOS, Windows); null on platforms where it is not applicable (Linux today) or when the tray is not running."
+    },
+    "activation": {
+      "type": "object",
+      "properties": {
+        "first_connected_server_ever": { "type": "boolean" },
+        "first_mcp_client_ever": { "type": "boolean" },
+        "first_retrieve_tools_call_ever": { "type": "boolean" },
+        "mcp_clients_seen_ever": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-_.]{0,63}$|^unknown$" },
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "retrieve_tools_calls_24h": { "type": "integer", "minimum": 0 },
+        "estimated_tokens_saved_24h_bucket": {
+          "type": "string",
+          "enum": ["0", "1_100", "100_1k", "1k_10k", "10k_100k", "100k_plus"]
+        },
+        "configured_ide_count": { "type": "integer", "minimum": 0 }
+      },
+      "required": [
+        "first_connected_server_ever",
+        "first_mcp_client_ever",
+        "first_retrieve_tools_call_ever",
+        "mcp_clients_seen_ever",
+        "retrieve_tools_calls_24h",
+        "estimated_tokens_saved_24h_bucket",
+        "configured_ide_count"
+      ],
+      "additionalProperties": false
+    },
+    "env_markers": {
+      "type": "object",
+      "properties": {
+        "has_ci_env": { "type": "boolean" },
+        "has_cloud_ide_env": { "type": "boolean" },
+        "is_container": { "type": "boolean" },
+        "has_tty": { "type": "boolean" },
+        "has_display": { "type": "boolean" }
+      },
+      "required": ["has_ci_env", "has_cloud_ide_env", "is_container", "has_tty", "has_display"],
+      "additionalProperties": false,
+      "description": "Booleans only. The payload builder self-check MUST reject any non-boolean value here."
+    }
+  },
+  "additionalProperties": true
+}

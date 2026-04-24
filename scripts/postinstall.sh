@@ -141,4 +141,15 @@ echo '  }'
 echo ""
 echo "📖 Get started: mcpproxy --help"
 
+# Spec 044 (T057/T058): launch the tray app tagged as installer-launched so
+# the first telemetry heartbeat reports launch_source=installer. The flag is
+# one-shot (cleared after the first heartbeat) and lives in the BBolt
+# activation bucket, so a crash between install and heartbeat is recovered
+# from on next startup. See packaging/macos/postinstall.sh for the standalone
+# version of this step.
+if [ -d "/Applications/MCPProxy.app" ]; then
+    log "Launching MCPProxy tray tagged as installer-launched"
+    open -a "/Applications/MCPProxy.app" --env MCPPROXY_LAUNCHED_BY=installer || true
+fi
+
 exit 0

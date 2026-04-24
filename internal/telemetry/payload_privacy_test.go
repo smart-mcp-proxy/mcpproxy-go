@@ -163,3 +163,94 @@ func TestPayloadHasNoForbiddenSubstrings(t *testing.T) {
 		t.Errorf("payload size %d bytes exceeds 8 KB privacy budget", len(data))
 	}
 }
+
+// TestPayloadV3_PassesScanForPII (Spec 044 T021) builds a full v3 payload and
+// runs the anonymity scanner against it. A well-formed payload MUST pass.
+func TestPayloadV3_PassesScanForPII(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("CI", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
+	// Reset env_kind cache so this test is hermetic.
+	ResetEnvKindForTest()
+	defer ResetEnvKindForTest()
+
+	enabledTrue := true
+	cfg := &config.Config{
+		EnableSocket:           true,
+		Features:               &config.FeatureFlags{EnableWebUI: true},
+		QuarantineEnabled:      &enabledTrue,
+		SensitiveDataDetection: &config.SensitiveDataDetectionConfig{Enabled: true},
+		Telemetry: &config.TelemetryConfig{
+			AnonymousID:          "550e8400-e29b-41d4-a716-446655440000",
+			AnonymousIDCreatedAt: "2026-04-10T12:00:00Z",
+		},
+	}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{
+		serverCount: 1, connectedCount: 1, toolCount: 10,
+		routingMode: "retrieve_tools", quarantine: true,
+	})
+	payload := svc.BuildPayload()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Clear any stale runtime blocked values so the scan is hermetic.
+	prev := BlockedValues
+	BlockedValues = nil
+	defer func() { BlockedValues = prev }()
+
+	if err := ScanForPII(data); err != nil {
+		t.Fatalf("well-formed v3 payload should pass ScanForPII, got: %v\npayload:\n%s", err, string(data))
+	}
+	// Sanity: confirm v3 additions are present.
+	if !strings.Contains(string(data), `"env_kind"`) {
+		t.Error("expected env_kind in payload")
+	}
+	if !strings.Contains(string(data), `"env_markers"`) {
+		t.Error("expected env_markers in payload")
+	}
+}
+
+// TestPayloadV3_CorruptedEnvMarkersRejected (Spec 044 T022) constructs a
+// synthetic payload where env_markers.has_ci_env is a string and asserts the
+// scanner rejects it.
+func TestPayloadV3_CorruptedEnvMarkersRejected(t *testing.T) {
+	corrupted := []byte(`{
+		"anonymous_id": "550e8400-e29b-41d4-a716-446655440000",
+		"schema_version": 3,
+		"env_kind": "interactive",
+		"env_markers": {
+			"has_ci_env": "yes",
+			"has_cloud_ide_env": false,
+			"is_container": false,
+			"has_tty": true,
+			"has_display": true
+		}
+	}`)
+	err := ScanForPII(corrupted)
+	if err == nil {
+		t.Fatal("expected scanner to reject env_markers with string field")
+	}
+	var v *AnonymityViolation
+	if !errorsAs(err, &v) {
+		t.Fatalf("expected *AnonymityViolation, got %T", err)
+	}
+	if v.Rule != "env_markers_non_bool" {
+		t.Errorf("expected rule=env_markers_non_bool, got %q", v.Rule)
+	}
+}
+
+// errorsAs is a thin local wrapper to avoid adding an import for errors.As in
+// multiple files. The real anonymity_test.go already uses errors.As.
+func errorsAs(err error, target **AnonymityViolation) bool {
+	if err == nil {
+		return false
+	}
+	if v, ok := err.(*AnonymityViolation); ok {
+		*target = v
+		return true
+	}
+	return false
+}

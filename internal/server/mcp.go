@@ -179,6 +179,14 @@ func NewMCPProxyServer(
 		// Store/update session information with capabilities
 		sessionStore.SetSession(sessionID, clientName, clientVersion, hasRoots, hasSampling, experimental)
 
+		// Spec 044 (T038): feed the activation funnel. Mark first-ever client
+		// + record the sanitized clientInfo.name in the capped seen-ever list.
+		// Plumbed via runtime → telemetry service → ActivationStore so the
+		// MCP layer stays unaware of BBolt details. nil-safe all the way down.
+		if mainServer != nil && mainServer.runtime != nil {
+			mainServer.runtime.RecordMCPClientForActivation(clientName)
+		}
+
 		logger.Info("MCP client initialized with capabilities",
 			zap.String("session_id", sessionID),
 			zap.String("client_name", clientName),
@@ -926,6 +934,13 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	p.recordMCPSurface()
 	p.recordBuiltinTool("retrieve_tools")
 
+	// Spec 044 (T039): activation funnel — bump the 24h retrieve_tools
+	// counter and mark the first-ever-call flag. Plumbed via runtime so the
+	// handler stays unaware of BBolt. nil-safe.
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.RecordRetrieveToolsCallForActivation()
+	}
+
 	startTime := time.Now()
 
 	// Extract session info for activity logging (Spec 024)
@@ -1106,6 +1121,22 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		}
 
 		mcpTools = append(mcpTools, mcpTool)
+	}
+
+	// Spec 044 (T039): estimate tokens saved by NOT exposing the full catalog.
+	// Assumption (documented here so it's easy to tune): every tool schema
+	// that mcpproxy hides from the client costs ~150 tokens if it were
+	// inlined. We count "hidden" as (total_indexed - results_returned) and
+	// clamp to 0. This is deliberately rough — the bucketing in the payload
+	// (see BucketTokens) absorbs an order-of-magnitude variance per FR-009.
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		total := p.getIndexedToolCount()
+		exposed := len(mcpTools)
+		hidden := total - exposed
+		if hidden > 0 {
+			const avgTokensPerToolSchema = 150
+			p.mainServer.runtime.RecordTokensSavedForActivation(hidden * avgTokensPerToolSchema)
+		}
 	}
 
 	// Build mode-aware usage instructions

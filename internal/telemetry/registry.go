@@ -102,6 +102,12 @@ type CounterRegistry struct {
 	// Atomic counters (lock-free hot path).
 	surfaceCounts [surfaceCount]atomic.Int64
 	upstreamTotal atomic.Int64
+	// Spec 044: counts anonymity-scanner rejections. Never transmitted in
+	// the heartbeat (that would defeat anonymity — the payload is
+	// discarded); exposed via Snapshot for observability tests + internal
+	// debugging. NOT reset on heartbeat success: this is a lifetime tally
+	// of the defense-in-depth scanner firing.
+	anonymityViolations atomic.Int64
 
 	// Locked maps for variable-cardinality counters.
 	mu              sync.RWMutex
@@ -188,6 +194,18 @@ func (r *CounterRegistry) RecordBuiltinTool(name string) {
 // itself is intentionally not accepted: only an aggregate count is recorded.
 func (r *CounterRegistry) RecordUpstreamTool() {
 	r.upstreamTotal.Add(1)
+}
+
+// RecordAnonymityViolation increments the anonymity-violation counter (Spec
+// 044). Called by the telemetry service when ScanForPII rejects a payload.
+func (r *CounterRegistry) RecordAnonymityViolation() {
+	r.anonymityViolations.Add(1)
+}
+
+// AnonymityViolationsTotal returns the lifetime count of anonymity-scanner
+// rejections. Not transmitted; for test + internal observability only.
+func (r *CounterRegistry) AnonymityViolationsTotal() int64 {
+	return r.anonymityViolations.Load()
 }
 
 // RecordRESTRequest increments the counter for the given route template and

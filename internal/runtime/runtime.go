@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -2092,6 +2093,35 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 
 	r.telemetryService = telemetry.New(r.cfg, r.cfgPath, version, edition, r.logger)
 	r.telemetryService.SetRuntimeStats(r)
+
+	// Spec 044: wire the activation store onto the shared BBolt DB. The
+	// bucket is created lazily on first write, but we proactively ensure it
+	// exists at startup to avoid write-race on concurrent first-ever events
+	// (MCP initialize + upstream connect-success can arrive in the same tick).
+	if r.storageManager != nil {
+		if db := r.storageManager.GetDB(); db != nil {
+			if err := telemetry.EnsureActivationBucket(db); err != nil {
+				r.logger.Warn("Failed to ensure activation bucket", zap.Error(err))
+			}
+			store := telemetry.NewActivationStore()
+			r.telemetryService.SetActivationStore(store, db)
+
+			// Spec 044 (T052): one-shot installer-launch marker. When the
+			// installer invokes mcpproxy with MCPPROXY_LAUNCHED_BY=installer,
+			// persist a pending flag so the first heartbeat (which may be
+			// minutes away) can emit launch_source=installer even across
+			// restarts. The flag is cleared the moment the heartbeat builder
+			// sees it (resolveLaunchSource).
+			if os.Getenv("MCPPROXY_LAUNCHED_BY") == "installer" {
+				if err := store.SetInstallerPending(db, true); err != nil {
+					r.logger.Debug("Failed to set installer_heartbeat_pending", zap.Error(err))
+				} else {
+					r.logger.Info("Installer-launched process: installer_heartbeat_pending=true")
+				}
+			}
+		}
+	}
+
 	r.logger.Info("Telemetry service initialized", zap.String("version", version), zap.String("edition", edition))
 }
 
@@ -2108,6 +2138,80 @@ func (r *Runtime) TelemetryRegistry() *telemetry.CounterRegistry {
 		return nil
 	}
 	return r.telemetryService.Registry()
+}
+
+// RecordMCPClientForActivation records a sanitized MCP client name and marks
+// the first-ever-client flag (Spec 044 US2). No-op if activation store not
+// wired or if the raw name cannot be plumbed through (nil-safe all the way
+// down). Intentionally takes the raw name; sanitization happens inside the
+// store.
+func (r *Runtime) RecordMCPClientForActivation(rawClientName string) {
+	if r.telemetryService == nil {
+		return
+	}
+	store := r.telemetryService.ActivationStore()
+	db := r.telemetryService.ActivationDB()
+	if store == nil || db == nil {
+		return
+	}
+	if err := store.MarkFirstMCPClient(db); err != nil {
+		r.logger.Debug("activation: MarkFirstMCPClient failed", zap.Error(err))
+	}
+	if err := store.RecordMCPClient(db, rawClientName); err != nil {
+		r.logger.Debug("activation: RecordMCPClient failed", zap.Error(err))
+	}
+}
+
+// RecordRetrieveToolsCallForActivation bumps the 24h retrieve_tools counter
+// and marks the first-ever-call flag (Spec 044 US2). No-op if the activation
+// store is not wired.
+func (r *Runtime) RecordRetrieveToolsCallForActivation() {
+	if r.telemetryService == nil {
+		return
+	}
+	store := r.telemetryService.ActivationStore()
+	db := r.telemetryService.ActivationDB()
+	if store == nil || db == nil {
+		return
+	}
+	if err := store.MarkFirstRetrieveToolsCall(db); err != nil {
+		r.logger.Debug("activation: MarkFirstRetrieveToolsCall failed", zap.Error(err))
+	}
+	if err := store.IncrementRetrieveToolsCall(db); err != nil {
+		r.logger.Debug("activation: IncrementRetrieveToolsCall failed", zap.Error(err))
+	}
+}
+
+// RecordTokensSavedForActivation adds n to the 24h tokens-saved estimator.
+// n <= 0 is a no-op. Spec 044 US2.
+func (r *Runtime) RecordTokensSavedForActivation(n int) {
+	if n <= 0 || r.telemetryService == nil {
+		return
+	}
+	store := r.telemetryService.ActivationStore()
+	db := r.telemetryService.ActivationDB()
+	if store == nil || db == nil {
+		return
+	}
+	if err := store.AddTokensSaved(db, n); err != nil {
+		r.logger.Debug("activation: AddTokensSaved failed", zap.Error(err))
+	}
+}
+
+// MarkFirstConnectedServerForActivation sets the first_connected_server_ever
+// flag. Called from the supervisor's connect-success callback. Spec 044 US2.
+func (r *Runtime) MarkFirstConnectedServerForActivation() {
+	if r.telemetryService == nil {
+		return
+	}
+	store := r.telemetryService.ActivationStore()
+	db := r.telemetryService.ActivationDB()
+	if store == nil || db == nil {
+		return
+	}
+	if err := store.MarkFirstConnectedServer(db); err != nil {
+		r.logger.Debug("activation: MarkFirstConnectedServer failed", zap.Error(err))
+	}
 }
 
 // GetServerCount returns the total number of configured servers (implements telemetry.RuntimeStats).

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
@@ -66,6 +68,36 @@ type HeartbeatPayload struct {
 	// runtime actually wraps in Docker isolation. Distinct from "has Docker
 	// available" — an install can have Docker but never use it for isolation.
 	ServerDockerIsolatedCount int `json:"server_docker_isolated_count,omitempty"`
+
+	// Spec 044 additions. schema_version stays at 3 (set by spec 042); these
+	// fields are additive and forward-compatible.
+	//
+	// EnvKind: ground-truth classification of the process environment, computed
+	// once at startup by DetectEnvKindOnce. One of the EnvKind* constants.
+	EnvKind string `json:"env_kind,omitempty"`
+	// EnvMarkers: raw boolean observations feeding EnvKind. Fields are ALL
+	// booleans — the anonymity scanner re-asserts this on the serialized form.
+	EnvMarkers *EnvMarkers `json:"env_markers,omitempty"`
+
+	// Activation is the retention funnel snapshot: monotonic first-ever flags,
+	// 24h sliding counters, and bucketed token-savings estimate. Loaded from
+	// the BBolt activation bucket at heartbeat build time. nil when the store
+	// is not wired (e.g. in short-lived CLI commands).
+	Activation *ActivationState `json:"activation,omitempty"`
+
+	// LaunchSource: how the process was launched. One of "installer", "tray",
+	// "login_item", "cli", "unknown". Detected once at startup via
+	// DetectLaunchSourceOnce, with a one-shot "installer" override driven by
+	// the installer_heartbeat_pending BBolt flag (cleared after first heartbeat).
+	LaunchSource string `json:"launch_source,omitempty"`
+
+	// AutostartEnabled: tri-state login-item status.
+	//   - *true  : tray reports the app IS registered as a login item
+	//   - *false : tray reports the app is NOT registered
+	//   - nil    : unknown (tray not running, Linux, or sidecar absent)
+	// Pointer intentional so JSON null is distinguishable from false —
+	// receivers need this to separate "user disabled" from "we don't know".
+	AutostartEnabled *bool `json:"autostart_enabled"`
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -105,6 +137,22 @@ type Service struct {
 
 	// Spec 042: env-based opt-out reason captured at construction time.
 	envDisabledReason EnvDisabledReason
+
+	// Spec 044: activation store (BBolt-backed) + BBolt DB handle. Optional —
+	// may be nil if the telemetry service is constructed for a short-lived CLI
+	// command (e.g. `telemetry show-payload` in-process fallback). When nil,
+	// Activation is simply omitted from the heartbeat.
+	activationStore ActivationStore
+	activationDB    *bbolt.DB
+
+	// Spec 044: optional provider for configured IDE count. Populated by the
+	// runtime from internal/connect at wire-up time. nil-safe.
+	configuredIDECountProvider func() int
+
+	// Spec 044 (T049): autostart reader for the tray-owned sidecar. Lazy-
+	// initialized on first heartbeat; tests may inject a mock via
+	// SetAutostartReader.
+	autostartReader *AutostartReader
 
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
@@ -148,6 +196,70 @@ func (s *Service) SetRuntimeStats(stats RuntimeStats) {
 	s.stats = stats
 }
 
+// SetActivationStore wires the BBolt-backed activation store and the shared
+// DB handle (Spec 044). Optional; when unset, heartbeat payloads omit the
+// activation object entirely. Safe to call once during startup.
+func (s *Service) SetActivationStore(store ActivationStore, db *bbolt.DB) {
+	s.activationStore = store
+	s.activationDB = db
+}
+
+// ActivationStore returns the wired store (or nil). Used by MCP and runtime
+// integration points that need to increment counters.
+func (s *Service) ActivationStore() ActivationStore {
+	return s.activationStore
+}
+
+// ActivationDB returns the BBolt DB handle associated with the activation
+// store (or nil). Callers pair this with ActivationStore() to perform writes.
+func (s *Service) ActivationDB() *bbolt.DB {
+	return s.activationDB
+}
+
+// SetConfiguredIDECountProvider wires a function that returns the number of
+// IDE client config files mcpproxy has registered itself into (Spec 044).
+// Typically supplied by internal/connect.Service.
+func (s *Service) SetConfiguredIDECountProvider(fn func() int) {
+	s.configuredIDECountProvider = fn
+}
+
+// SetAutostartReader overrides the default autostart reader (for tests). In
+// production the first heartbeat lazy-initializes DefaultAutostartReader.
+func (s *Service) SetAutostartReader(r *AutostartReader) {
+	s.autostartReader = r
+}
+
+// resolveLaunchSource returns the LaunchSource to emit in the current
+// heartbeat. Precedence:
+//  1. If the activation bucket's installer_heartbeat_pending flag is true,
+//     emit "installer" and clear the flag (one-shot). This handles crash-
+//     recovery between installer-driven startup and the first successful
+//     heartbeat.
+//  2. Otherwise, emit the cached DetectLaunchSourceOnce() result.
+//
+// Any BBolt error while inspecting/clearing the flag is logged at debug and
+// falls through to the runtime detector — this preserves liveness of the
+// heartbeat pipeline at the cost of losing the "installer" classification
+// for this one cycle.
+func (s *Service) resolveLaunchSource() LaunchSource {
+	if s.activationStore != nil && s.activationDB != nil {
+		pending, err := s.activationStore.IsInstallerPending(s.activationDB)
+		if err == nil && pending {
+			// Clear the flag synchronously so a crash before the HTTP POST
+			// still downgrades the next heartbeat to the runtime-detected
+			// source, rather than re-emitting "installer" forever.
+			if clearErr := s.activationStore.SetInstallerPending(s.activationDB, false); clearErr != nil {
+				s.logger.Debug("Failed to clear installer_heartbeat_pending", zap.Error(clearErr))
+			}
+			return LaunchSourceInstaller
+		}
+		if err != nil {
+			s.logger.Debug("Failed to read installer_heartbeat_pending", zap.Error(err))
+		}
+	}
+	return DetectLaunchSourceOnce()
+}
+
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
 func (s *Service) Start(ctx context.Context) {
 	// Spec 042: env vars override config. DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY=false
@@ -172,6 +284,11 @@ func (s *Service) Start(ctx context.Context) {
 
 	// Ensure anonymous ID exists
 	s.ensureAnonymousID()
+
+	// Spec 044 (T025): populate runtime-detected blocked values (hostname,
+	// username, sensitive env var values) so the anonymity scanner can catch
+	// leaks before they leave the machine. Idempotent.
+	PopulateBlockedValues()
 
 	s.logger.Info("Telemetry service starting",
 		zap.String("endpoint", s.endpoint),
@@ -210,6 +327,27 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		s.logger.Debug("Failed to marshal heartbeat", zap.Error(err))
+		return
+	}
+
+	// Spec 044 (FR-011): defense-in-depth anonymity scanner. Runs on the
+	// serialized payload before the HTTP POST. On violation: log at error
+	// level (WITHOUT the payload — that would leak the very thing we caught),
+	// increment the counter, and skip the heartbeat. This catches regressions
+	// where a future contributor accidentally widens a field to carry PII.
+	if err := ScanForPII(data); err != nil {
+		if s.registry != nil {
+			s.registry.RecordAnonymityViolation()
+		}
+		var v *AnonymityViolation
+		if errors.As(err, &v) {
+			s.logger.Error("telemetry anonymity violation (not transmitted)",
+				zap.String("rule", v.Rule),
+				zap.String("pattern", v.Pattern))
+		} else {
+			s.logger.Error("telemetry anonymity violation (not transmitted)",
+				zap.Error(err))
+		}
 		return
 	}
 
@@ -308,6 +446,52 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// "auto") so operators can spot mis-typed config without polluting the
 	// telemetry cardinality.
 	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
+
+	// Spec 044: ground-truth environment classification. Cached after first
+	// call so repeated heartbeats do not re-probe the filesystem.
+	envKind, envMarkers := DetectEnvKindOnce()
+	payload.EnvKind = string(envKind)
+	// Copy to a local so the omitempty pointer can be distinguished from the
+	// zero-value struct (data-model.md requires this).
+	markersCopy := envMarkers
+	payload.EnvMarkers = &markersCopy
+
+	// Spec 044: activation funnel snapshot. Load from BBolt (decay applied
+	// at read time); on any load error, omit the field rather than blocking
+	// the heartbeat.
+	if s.activationStore != nil && s.activationDB != nil {
+		if st, err := s.activationStore.Load(s.activationDB); err == nil {
+			// Splice in the configured-IDE count from the external provider.
+			if s.configuredIDECountProvider != nil {
+				st.ConfiguredIDECount = s.configuredIDECountProvider()
+			}
+			// Ensure the bucket string is always populated (Load already does
+			// this, but be defensive for forward-compat).
+			if st.EstimatedTokensSaved24hBucket == "" {
+				st.EstimatedTokensSaved24hBucket = BucketTokens(0)
+			}
+			payload.Activation = &st
+		} else {
+			s.logger.Debug("Failed to load activation state for heartbeat", zap.Error(err))
+		}
+	}
+
+	// Spec 044 (T051): LaunchSource. One-shot "installer" override consumes
+	// the installer_heartbeat_pending flag set at process startup when
+	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
+	// detector result (tray/login_item/cli/unknown) is emitted.
+	payload.LaunchSource = string(s.resolveLaunchSource())
+
+	// Spec 044 (T051): AutostartEnabled. Tri-state; nil when the tray sidecar
+	// is absent/unreachable/malformed (Linux always falls here).
+	if s.autostartReader != nil {
+		payload.AutostartEnabled = s.autostartReader.Read()
+	} else {
+		// Lazy-init the default reader on first heartbeat. The reader is
+		// safe to reuse across heartbeats (1h TTL cache inside).
+		s.autostartReader = DefaultAutostartReader()
+		payload.AutostartEnabled = s.autostartReader.Read()
+	}
 
 	// Spec 042: counter snapshot.
 	if s.registry != nil {
