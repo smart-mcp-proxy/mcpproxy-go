@@ -84,6 +84,10 @@ func (r *Runtime) StartBackgroundInitialization() {
 
 		// Set up reactive tool discovery callback with deduplication
 		r.supervisor.SetOnServerConnectedCallback(func(serverName string) {
+			// Spec 044 (T040): activation funnel — mark first-ever successful
+			// upstream connect. Monotonic; cheap; safe to call on every event.
+			r.MarkFirstConnectedServerForActivation()
+
 			// Deduplication: Check if discovery is already in progress for this server
 			if _, loaded := r.discoveryInProgress.LoadOrStore(serverName, struct{}{}); loaded {
 				r.logger.Debug("Tool discovery already in progress for server, skipping duplicate",
