@@ -39,6 +39,8 @@ Examples:
 	doctorOutput     string
 	doctorLogLevel   string
 	doctorConfigPath string
+	// Spec 044 — optional filter to scope diagnostics to a single server.
+	doctorServerFilter string
 )
 
 // GetDoctorCommand returns the doctor command for adding to the root command.
@@ -54,6 +56,7 @@ func init() {
 	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "pretty", "Output format (pretty, json)")
 	doctorCmd.Flags().StringVarP(&doctorLogLevel, "log-level", "l", "warn", "Log level")
 	doctorCmd.Flags().StringVarP(&doctorConfigPath, "config", "c", "", "Path to config file")
+	doctorCmd.Flags().StringVar(&doctorServerFilter, "server", "", "Limit health checks to a single upstream server (by name)")
 }
 
 func runDoctor(_ *cobra.Command, _ []string) error {
@@ -115,7 +118,74 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 	// Collect quarantine stats from servers
 	quarantineStats := collectQuarantineStats(ctx, client, logger)
 
+	// Spec 044 — optionally narrow to a single server. Applied after
+	// collection so the backend diagnostic shape is unchanged.
+	if doctorServerFilter != "" {
+		diag = filterDiagnosticsByServer(diag, doctorServerFilter)
+		quarantineStats = filterQuarantineStatsByServer(quarantineStats, doctorServerFilter)
+	}
+
 	return outputDiagnostics(diag, info, quarantineStats)
+}
+
+// filterDiagnosticsByServer returns a shallow copy of the diagnostics
+// payload where every per-server array is filtered to entries whose
+// server_name equals `serverName`. Unknown fields are passed through
+// unchanged. Spec 044.
+func filterDiagnosticsByServer(diag map[string]interface{}, serverName string) map[string]interface{} {
+	out := make(map[string]interface{}, len(diag))
+	perServerArrayFields := map[string]bool{
+		"upstream_errors":  true,
+		"oauth_required":   true,
+		"oauth_issues":     true,
+		"runtime_warnings": true,
+		"missing_secrets":  true,
+	}
+	total := 0
+	for k, v := range diag {
+		if perServerArrayFields[k] {
+			if arr, ok := v.([]interface{}); ok {
+				filtered := make([]interface{}, 0, len(arr))
+				for _, item := range arr {
+					if m, ok := item.(map[string]interface{}); ok {
+						name := getStringField(m, "server_name")
+						// missing_secrets uses `used_by` (array of server names).
+						if k == "missing_secrets" {
+							if usedBy := getArrayField(m, "used_by"); len(usedBy) > 0 {
+								for _, u := range usedBy {
+									if s, ok := u.(string); ok && s == serverName {
+										filtered = append(filtered, item)
+										break
+									}
+								}
+								continue
+							}
+						}
+						if name == serverName {
+							filtered = append(filtered, item)
+						}
+					}
+				}
+				out[k] = filtered
+				total += len(filtered)
+				continue
+			}
+		}
+		out[k] = v
+	}
+	out["total_issues"] = total
+	return out
+}
+
+// filterQuarantineStatsByServer keeps only the stats for the requested server.
+func filterQuarantineStatsByServer(stats []quarantineServerStats, serverName string) []quarantineServerStats {
+	out := make([]quarantineServerStats, 0, 1)
+	for _, s := range stats {
+		if s.ServerName == serverName {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // collectQuarantineStats queries each server's tool approvals to find pending tools.

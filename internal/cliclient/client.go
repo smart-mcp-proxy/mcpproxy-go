@@ -554,6 +554,72 @@ func (c *Client) GetDiagnostics(ctx context.Context) (map[string]interface{}, er
 	return apiResp.Data, nil
 }
 
+// DiagnosticFixResult is the response from POST /api/v1/diagnostics/fix. Spec 044.
+type DiagnosticFixResult struct {
+	Outcome    string `json:"outcome"` // "success" | "failed" | "blocked"
+	Mode       string `json:"mode"`    // "dry_run" | "execute"
+	Preview    string `json:"preview,omitempty"`
+	FailureMsg string `json:"failure_msg,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+}
+
+// InvokeDiagnosticFix runs a registered fixer via the daemon's fix endpoint.
+// Destructive fixers default to dry_run on the server side; callers must
+// pass mode="execute" to mutate state. Spec 044.
+func (c *Client) InvokeDiagnosticFix(ctx context.Context, server, code, fixerKey, mode string) (*DiagnosticFixResult, error) {
+	reqBody := map[string]interface{}{
+		"server":    server,
+		"code":      code,
+		"fixer_key": fixerKey,
+	}
+	if mode != "" {
+		reqBody["mode"] = mode
+	}
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	url := c.baseURL + "/api/v1/diagnostics/fix"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call fix endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var apiResp struct {
+		Success   bool                 `json:"success"`
+		Data      *DiagnosticFixResult `json:"data"`
+		Error     string               `json:"error"`
+		RequestID string               `json:"request_id"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	if apiResp.Data == nil {
+		return &DiagnosticFixResult{}, nil
+	}
+	return apiResp.Data, nil
+}
+
 // GetTelemetryPayload retrieves the next telemetry heartbeat payload that
 // mcpproxy would send, rendered with live runtime stats attached. Spec 042.
 // No network call is made by the daemon — the payload reflects the current

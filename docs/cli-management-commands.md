@@ -367,6 +367,7 @@ mcpproxy doctor [flags]
 - `--output, -o` - Output format (pretty, json) [default: pretty]
 - `--log-level, -l` - Log level [default: warn]
 - `--config, -c` - Path to config file
+- `--server` - Limit health checks to a single upstream server by name (Spec 044)
 
 **Requirements:**
 - Daemon must be running
@@ -378,6 +379,9 @@ mcpproxy doctor
 
 # JSON output for scripting
 mcpproxy doctor --output=json
+
+# Only show issues for a single server
+mcpproxy doctor --server=github
 ```
 
 **Health Checks:**
@@ -391,6 +395,44 @@ mcpproxy doctor --output=json
 - Total issue count
 - Categorized issues with actionable remediation steps
 - Exit code 0 even if issues found (for scripting)
+
+---
+
+### `mcpproxy doctor fix <CODE>` (Spec 044)
+
+Run a registered diagnostics fixer for a specific (server, code) pair.
+By default the fix runs as a non-destructive dry_run; pass `--execute`
+to apply mutating changes.
+
+**Usage:**
+```bash
+mcpproxy doctor fix <CODE> --server <name> [--execute] [--fixer-key <key>] [flags]
+```
+
+**Flags:**
+- `--server` - Upstream server name (required)
+- `--fixer-key` - Override the auto-resolved fixer_key (rare; needed only
+  when a code defines multiple button-type fix steps)
+- `--execute` - Apply the fix (default behaviour is dry_run)
+- `--output, -o` - Output format (pretty, json) [default: pretty]
+
+**Requirements:**
+- Daemon must be running
+
+**Examples:**
+```bash
+# Dry-run an OAuth re-login for the github server
+mcpproxy doctor fix MCPX_OAUTH_REFRESH_EXPIRED --server github
+
+# Actually re-run the OAuth flow (destructive)
+mcpproxy doctor fix MCPX_OAUTH_REFRESH_EXPIRED --server github --execute
+
+# JSON output for scripting / CI
+mcpproxy doctor fix MCPX_STDIO_SPAWN_ENOENT --server my-stdio -o json
+```
+
+**Error code reference:** run `mcpproxy doctor list-codes` for the full
+catalog with associated fix steps and fixer keys.
 
 ---
 
