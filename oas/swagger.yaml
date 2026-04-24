@@ -793,6 +793,46 @@ components:
         replacement:
           type: string
       type: object
+    contracts.Diagnostic:
+      description: |-
+        Spec 044 — structured diagnostic error and stable error code. Both
+        are populated when the server is in a failed state and the error
+        has been classified by internal/diagnostics. Healthy servers omit
+        these fields.
+      properties:
+        cause:
+          type: string
+        code:
+          type: string
+        detected_at:
+          type: string
+        docs_url:
+          type: string
+        fix_steps:
+          items:
+            $ref: '#/components/schemas/contracts.DiagnosticFixStep'
+          type: array
+          uniqueItems: false
+        severity:
+          type: string
+        user_message:
+          type: string
+      type: object
+    contracts.DiagnosticFixStep:
+      properties:
+        command:
+          type: string
+        destructive:
+          type: boolean
+        fixer_key:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+        url:
+          type: string
+      type: object
     contracts.Diagnostics:
       properties:
         deprecated_configs:
@@ -1408,12 +1448,16 @@ components:
           type: boolean
         created:
           type: string
+        diagnostic:
+          $ref: '#/components/schemas/contracts.Diagnostic'
         enabled:
           type: boolean
         env:
           additionalProperties:
             type: string
           type: object
+        error_code:
+          type: string
         headers:
           additionalProperties:
             type: string
