@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
@@ -77,6 +78,12 @@ type HeartbeatPayload struct {
 	// EnvMarkers: raw boolean observations feeding EnvKind. Fields are ALL
 	// booleans — the anonymity scanner re-asserts this on the serialized form.
 	EnvMarkers *EnvMarkers `json:"env_markers,omitempty"`
+
+	// Activation is the retention funnel snapshot: monotonic first-ever flags,
+	// 24h sliding counters, and bucketed token-savings estimate. Loaded from
+	// the BBolt activation bucket at heartbeat build time. nil when the store
+	// is not wired (e.g. in short-lived CLI commands).
+	Activation *ActivationState `json:"activation,omitempty"`
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -116,6 +123,17 @@ type Service struct {
 
 	// Spec 042: env-based opt-out reason captured at construction time.
 	envDisabledReason EnvDisabledReason
+
+	// Spec 044: activation store (BBolt-backed) + BBolt DB handle. Optional —
+	// may be nil if the telemetry service is constructed for a short-lived CLI
+	// command (e.g. `telemetry show-payload` in-process fallback). When nil,
+	// Activation is simply omitted from the heartbeat.
+	activationStore ActivationStore
+	activationDB    *bbolt.DB
+
+	// Spec 044: optional provider for configured IDE count. Populated by the
+	// runtime from internal/connect at wire-up time. nil-safe.
+	configuredIDECountProvider func() int
 
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
@@ -157,6 +175,33 @@ func (s *Service) EnvDisabledReason() EnvDisabledReason {
 // SetRuntimeStats sets the runtime stats provider (called after runtime is fully initialized).
 func (s *Service) SetRuntimeStats(stats RuntimeStats) {
 	s.stats = stats
+}
+
+// SetActivationStore wires the BBolt-backed activation store and the shared
+// DB handle (Spec 044). Optional; when unset, heartbeat payloads omit the
+// activation object entirely. Safe to call once during startup.
+func (s *Service) SetActivationStore(store ActivationStore, db *bbolt.DB) {
+	s.activationStore = store
+	s.activationDB = db
+}
+
+// ActivationStore returns the wired store (or nil). Used by MCP and runtime
+// integration points that need to increment counters.
+func (s *Service) ActivationStore() ActivationStore {
+	return s.activationStore
+}
+
+// ActivationDB returns the BBolt DB handle associated with the activation
+// store (or nil). Callers pair this with ActivationStore() to perform writes.
+func (s *Service) ActivationDB() *bbolt.DB {
+	return s.activationDB
+}
+
+// SetConfiguredIDECountProvider wires a function that returns the number of
+// IDE client config files mcpproxy has registered itself into (Spec 044).
+// Typically supplied by internal/connect.Service.
+func (s *Service) SetConfiguredIDECountProvider(fn func() int) {
+	s.configuredIDECountProvider = fn
 }
 
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
@@ -354,6 +399,26 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// zero-value struct (data-model.md requires this).
 	markersCopy := envMarkers
 	payload.EnvMarkers = &markersCopy
+
+	// Spec 044: activation funnel snapshot. Load from BBolt (decay applied
+	// at read time); on any load error, omit the field rather than blocking
+	// the heartbeat.
+	if s.activationStore != nil && s.activationDB != nil {
+		if st, err := s.activationStore.Load(s.activationDB); err == nil {
+			// Splice in the configured-IDE count from the external provider.
+			if s.configuredIDECountProvider != nil {
+				st.ConfiguredIDECount = s.configuredIDECountProvider()
+			}
+			// Ensure the bucket string is always populated (Load already does
+			// this, but be defensive for forward-compat).
+			if st.EstimatedTokensSaved24hBucket == "" {
+				st.EstimatedTokensSaved24hBucket = BucketTokens(0)
+			}
+			payload.Activation = &st
+		} else {
+			s.logger.Debug("Failed to load activation state for heartbeat", zap.Error(err))
+		}
+	}
 
 	// Spec 042: counter snapshot.
 	if s.registry != nil {
