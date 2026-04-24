@@ -523,6 +523,8 @@ func (s *Server) setupRoutes() {
 			r.Post("/discover-tools", s.handleDiscoverServerTools)
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
+			// Spec 044: per-server diagnostics with stable error_code.
+			r.Get("/diagnostics", s.handleGetServerDiagnostics)
 			r.Get("/tool-calls", s.handleGetServerToolCalls)
 
 			// Tool-level quarantine (Spec 032)
@@ -559,6 +561,8 @@ func (s *Server) setupRoutes() {
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
 		r.Get("/doctor", s.handleGetDiagnostics) // Alias for consistency with CLI command
+		// Spec 044: per-server diagnostics + fix invocation.
+		r.Post("/diagnostics/fix", s.handleInvokeFix)
 
 		// Telemetry payload preview (Spec 042) — renders the next heartbeat
 		// payload with runtime stats attached. No network call is made.
