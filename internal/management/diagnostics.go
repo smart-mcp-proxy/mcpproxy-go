@@ -7,9 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 )
 
 // extractHealthFromMap extracts health status from a server map.
@@ -168,7 +171,6 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	return diag, nil
 }
 
-
 // checkDockerDaemon checks if Docker daemon is available and returns status.
 // This implements T042: helper for checking Docker availability.
 func (s *service) checkDockerDaemon() *contracts.DockerStatus {
@@ -176,11 +178,22 @@ func (s *service) checkDockerDaemon() *contracts.DockerStatus {
 		Available: false,
 	}
 
-	// Try to run `docker info` to check daemon availability
+	// Try to run `docker info` to check daemon availability.
+	// Resolve docker via shellwrap so we find Docker Desktop / Homebrew /
+	// Colima installs even when mcpproxy was launched from a tray /
+	// LaunchAgent with a minimal inherited PATH.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "docker", "info", "--format", "{{.ServerVersion}}")
+	var logger *zap.Logger
+	if s.logger != nil {
+		logger = s.logger.Desugar()
+	}
+	dockerBin, resolveErr := shellwrap.ResolveDockerPath(logger)
+	if resolveErr != nil || dockerBin == "" {
+		dockerBin = "docker"
+	}
+	cmd := exec.CommandContext(ctx, dockerBin, "info", "--format", "{{.ServerVersion}}")
 	output, err := cmd.Output()
 
 	if err != nil {
@@ -221,4 +234,3 @@ func getStringFromMap(m map[string]interface{}, key string) string {
 	}
 	return ""
 }
-
