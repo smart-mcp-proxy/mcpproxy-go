@@ -92,24 +92,23 @@ func (s *Server) handleInvokeFix(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Determine mode. Destructive defaults to dry_run.
-	mode := body.Mode
-	if mode == "" {
-		if step.Destructive {
-			mode = diagnostics.ModeDryRun
-		} else {
-			mode = diagnostics.ModeExecute
-		}
-	}
-	if mode != diagnostics.ModeDryRun && mode != diagnostics.ModeExecute {
-		s.writeError(w, r, http.StatusBadRequest, "mode must be 'dry_run' or 'execute'")
+	// Destructive fixes require an explicit mode (dry_run or execute). An
+	// absent mode field on a destructive fixer returns 409 so the client is
+	// forced to declare intent. Previously the default-to-dry_run path masked
+	// this guard and made the check unreachable — gemini P2.
+	if step.Destructive && body.Mode == "" {
+		s.writeError(w, r, http.StatusConflict, "destructive fix requires explicit mode (dry_run or execute)")
 		return
 	}
 
-	// Block destructive execute without an explicit mode change. The client
-	// must send mode=execute intentionally.
-	if step.Destructive && mode == diagnostics.ModeExecute && body.Mode != diagnostics.ModeExecute {
-		s.writeError(w, r, http.StatusConflict, "destructive fix requires explicit mode=execute")
+	// Determine mode. Non-destructive fixes default to execute. (Destructive
+	// fixes never reach the default branch because of the 409 guard above.)
+	mode := body.Mode
+	if mode == "" {
+		mode = diagnostics.ModeExecute
+	}
+	if mode != diagnostics.ModeDryRun && mode != diagnostics.ModeExecute {
+		s.writeError(w, r, http.StatusBadRequest, "mode must be 'dry_run' or 'execute'")
 		return
 	}
 
