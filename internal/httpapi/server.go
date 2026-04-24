@@ -797,6 +797,22 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	response["env_kind"] = string(envKind)
 	response["env_markers"] = envMarkers
 
+	// Spec 044 (T041): expose the activation funnel snapshot alongside
+	// env_kind. Read-only — mutation happens on MCP/connect events, never
+	// through this endpoint. nil when the telemetry service (or activation
+	// store) is not wired (e.g. very early startup).
+	if s.telemetryPayloadProvider != nil {
+		if svc := s.telemetryPayloadProvider(); svc != nil {
+			if store := svc.ActivationStore(); store != nil {
+				if db := svc.ActivationDB(); db != nil {
+					if st, err := store.Load(db); err == nil {
+						response["activation"] = st
+					}
+				}
+			}
+		}
+	}
+
 	// Spec 044 (US3): expose launch_source + autostart_enabled. launch_source
 	// is the cached classifier result (no installer-clearing side-effect here
 	// — this endpoint is read-only). autostart_enabled reads the tray-owned

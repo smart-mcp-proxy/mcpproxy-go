@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.etcd.io/bbolt"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
@@ -23,6 +26,10 @@ type TelemetryStatus struct {
 	Endpoint        string `json:"endpoint"`
 	EnvOverride     bool   `json:"env_override,omitempty"`
 	EnvOverrideName string `json:"env_override_name,omitempty"`
+	// Spec 044 (T042): activation funnel snapshot, rendered from the BBolt
+	// store when reachable. Omitted (nil) when the DB is locked by a running
+	// daemon or not present.
+	Activation *telemetry.ActivationState `json:"activation,omitempty"`
 }
 
 // GetTelemetryCommand returns the telemetry management command.
@@ -143,6 +150,14 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 		status.Enabled = false
 	}
 
+	// Spec 044 (T042): try to render the activation funnel from the BBolt
+	// store when the DB is reachable. If a daemon has the DB locked, we
+	// silently omit — the same data is available via `/api/v1/status` when
+	// the daemon is running.
+	if snap, ok := loadActivationSnapshot(cfg.DataDir); ok {
+		status.Activation = &snap
+	}
+
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	switch format {
 	case "json":
@@ -175,9 +190,51 @@ func runTelemetryStatus(cmd *cobra.Command, _ []string) error {
 			fmt.Printf("  %-14s %s\n", "Anonymous ID:", status.AnonymousID)
 		}
 		fmt.Printf("  %-14s %s\n", "Endpoint:", status.Endpoint)
+		if status.Activation != nil {
+			a := status.Activation
+			fmt.Println()
+			fmt.Println("Activation Funnel")
+			fmt.Printf("  %-28s %v\n", "first_connected_server:", a.FirstConnectedServerEver)
+			fmt.Printf("  %-28s %v\n", "first_mcp_client:", a.FirstMCPClientEver)
+			fmt.Printf("  %-28s %v\n", "first_retrieve_tools:", a.FirstRetrieveToolsCallEver)
+			fmt.Printf("  %-28s %d\n", "retrieve_tools_calls_24h:", a.RetrieveToolsCalls24h)
+			fmt.Printf("  %-28s %s\n", "tokens_saved_24h_bucket:", a.EstimatedTokensSaved24hBucket)
+			if len(a.MCPClientsSeenEver) > 0 {
+				fmt.Printf("  %-28s %s\n", "mcp_clients_seen_ever:", strings.Join(a.MCPClientsSeenEver, ", "))
+			}
+			if a.ConfiguredIDECount > 0 {
+				fmt.Printf("  %-28s %d\n", "configured_ide_count:", a.ConfiguredIDECount)
+			}
+		}
 	}
 
 	return nil
+}
+
+// loadActivationSnapshot attempts to open the BBolt DB in read-only mode at
+// the standard path and load the activation bucket. Returns (zero, false)
+// when the DB file does not exist, is locked (daemon running), or read errs.
+// We use a short Timeout so a locked DB fails fast rather than hanging the
+// CLI.
+func loadActivationSnapshot(dataDir string) (telemetry.ActivationState, bool) {
+	if dataDir == "" {
+		return telemetry.ActivationState{}, false
+	}
+	dbPath := filepath.Join(dataDir, "config.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return telemetry.ActivationState{}, false
+	}
+	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{Timeout: 200 * time.Millisecond, ReadOnly: true})
+	if err != nil {
+		return telemetry.ActivationState{}, false
+	}
+	defer db.Close()
+	store := telemetry.NewActivationStore()
+	st, err := store.Load(db)
+	if err != nil {
+		return telemetry.ActivationState{}, false
+	}
+	return st, true
 }
 
 func runTelemetryEnable(cmd *cobra.Command, _ []string) error {
