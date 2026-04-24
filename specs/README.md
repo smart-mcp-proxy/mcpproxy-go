@@ -9,6 +9,10 @@ Every numbered directory under `specs/` is a feature specification produced with
 - `drafted` — spec/plan written, `tasks.md` empty or unchecked
 - `—` — no `tasks.md` in the directory (doc-only spec or pre-speckit draft)
 
+## Operational runbooks
+
+- [`docs/release-runbook.md`](../docs/release-runbook.md) — SPOFs in the release pipeline (macOS notarize, Windows sign, Claude notes, Cloudflare R2 apt/rpm, Homebrew tap, `next` branch hygiene)
+
 ## Related design docs
 
 Brainstormed design docs that feed future specs live under [`docs/superpowers/specs/`](../docs/superpowers/specs/):
