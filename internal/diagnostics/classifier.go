@@ -22,6 +22,16 @@ func Classify(err error, hints ClassifierHints) Code {
 		return ""
 	}
 
+	// Fast path: a producer opted into explicit code attribution via
+	// WrapError / CodedError. This is how OAUTH/DOCKER/CONFIG/QUARANTINE
+	// producers bypass free-text matching for their terminal errors.
+	var coded interface{ Code() Code }
+	if errors.As(err, &coded) {
+		if c := coded.Code(); c != "" {
+			return c
+		}
+	}
+
 	if c := classifyStdio(err, hints); c != "" {
 		return c
 	}
@@ -31,11 +41,105 @@ func Classify(err error, hints ClassifierHints) Code {
 	if c := classifyNetwork(err, hints); c != "" {
 		return c
 	}
-	// Domain-specific classifiers for OAUTH/DOCKER/CONFIG/QUARANTINE live in
-	// their respective files (to be populated in later phases). For now they
-	// fall through to UnknownUnclassified.
+	if c := classifyOAuth(err, hints); c != "" {
+		return c
+	}
+	if c := classifyDocker(err, hints); c != "" {
+		return c
+	}
+	if c := classifyConfig(err, hints); c != "" {
+		return c
+	}
+	if c := classifyQuarantine(err, hints); c != "" {
+		return c
+	}
 
 	return UnknownUnclassified
+}
+
+// classifyOAuth recognises OAuth 2.1 / PKCE failure surface-strings emitted
+// by the upstream manager and mcp-go. Producers that want deterministic
+// classification should wrap their terminal error with WrapError(code, err).
+func classifyOAuth(err error, _ ClassifierHints) Code {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "refresh_token") && strings.Contains(msg, "expired"),
+		strings.Contains(msg, "refresh token has expired"),
+		strings.Contains(msg, "refresh token is expired"):
+		return OAuthRefreshExpired
+	case strings.Contains(msg, "refresh") && strings.Contains(msg, "403"),
+		strings.Contains(msg, "refresh") && strings.Contains(msg, "invalid_grant"):
+		return OAuthRefresh403
+	case strings.Contains(msg, "oauth metadata unavailable"),
+		strings.Contains(msg, "oauth discovery failed"),
+		strings.Contains(msg, "discover") && strings.Contains(msg, "oauth"),
+		strings.Contains(msg, ".well-known/oauth"):
+		return OAuthDiscoveryFailed
+	case strings.Contains(msg, "oauth callback") && strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "authorization timeout"):
+		return OAuthCallbackTimeout
+	case strings.Contains(msg, "redirect_uri") && strings.Contains(msg, "mismatch"),
+		strings.Contains(msg, "redirect uri") && strings.Contains(msg, "mismatch"):
+		return OAuthCallbackMismatch
+	}
+	return ""
+}
+
+// classifyDocker recognises common Docker isolation failures the runtime
+// currently reports as plain errors. Typed opt-in via WrapError is still
+// preferred; these string matches are the last-resort fallback.
+func classifyDocker(err error, _ ClassifierHints) Code {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "cannot connect to the docker daemon"),
+		strings.Contains(msg, "is the docker daemon running"),
+		strings.Contains(msg, "docker daemon is not reachable"),
+		strings.Contains(msg, "docker.sock: connect: no such file"):
+		return DockerDaemonDown
+	case strings.Contains(msg, "snap") && strings.Contains(msg, "apparmor"),
+		strings.Contains(msg, "no-new-privileges") && strings.Contains(msg, "apparmor"):
+		return DockerSnapAppArmor
+	case strings.Contains(msg, "permission denied") && strings.Contains(msg, "docker"),
+		strings.Contains(msg, "got permission denied while trying to connect to the docker"):
+		return DockerNoPermission
+	case strings.Contains(msg, "pull access denied"),
+		strings.Contains(msg, "docker") && strings.Contains(msg, "image") && strings.Contains(msg, "pull") && strings.Contains(msg, "fail"),
+		strings.Contains(msg, "manifest unknown"):
+		return DockerImagePullFailed
+	}
+	return ""
+}
+
+// classifyConfig recognises configuration parsing / secret resolution failures.
+func classifyConfig(err error, _ ClassifierHints) Code {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "deprecated") && strings.Contains(msg, "field"),
+		strings.Contains(msg, "deprecated configuration"):
+		return ConfigDeprecatedField
+	case strings.Contains(msg, "unmarshal") && strings.Contains(msg, "config"),
+		strings.Contains(msg, "config parse"),
+		strings.Contains(msg, "invalid config"),
+		strings.Contains(msg, "config: ") && (strings.Contains(msg, "json") || strings.Contains(msg, "yaml") || strings.Contains(msg, "toml")):
+		return ConfigParseError
+	case strings.Contains(msg, "missing secret"),
+		strings.Contains(msg, "secret reference") && (strings.Contains(msg, "not found") || strings.Contains(msg, "unresolved")),
+		strings.Contains(msg, "unresolved secret"):
+		return ConfigMissingSecret
+	}
+	return ""
+}
+
+// classifyQuarantine recognises security-quarantine rejections.
+func classifyQuarantine(err error, _ ClassifierHints) Code {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "quarantine") && (strings.Contains(msg, "pending") || strings.Contains(msg, "requires approval") || strings.Contains(msg, "not approved")):
+		return QuarantinePendingApproval
+	case strings.Contains(msg, "tool") && strings.Contains(msg, "changed") && (strings.Contains(msg, "re-approval") || strings.Contains(msg, "reapprove") || strings.Contains(msg, "rug pull")):
+		return QuarantineToolChanged
+	}
+	return ""
 }
 
 // classifyStdio handles os/exec spawn errors and handshake failures.
