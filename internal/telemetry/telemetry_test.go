@@ -425,3 +425,35 @@ func TestMultipleHeartbeats(t *testing.T) {
 		t.Errorf("Expected at least 2 heartbeats, got %d", count)
 	}
 }
+
+// TestAnonymousIDStable_V2ToV3 (Spec 044 FR-017 / T023) asserts that moving
+// from a v2 payload (no env_kind / env_markers) to a v3 payload preserves the
+// exact anonymous_id byte string for the same fixture. If anonymous_id ever
+// changes due to a payload-builder refactor, the telemetry retention cohort
+// shifts silently and the dashboard can't join pre-044 rows to post-044 rows.
+func TestAnonymousIDStable_V2ToV3(t *testing.T) {
+	fixedID := "550e8400-e29b-41d4-a716-446655440000"
+	cfg := &config.Config{
+		Telemetry: &config.TelemetryConfig{
+			AnonymousID:          fixedID,
+			AnonymousIDCreatedAt: "2026-04-10T12:00:00Z",
+		},
+	}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{})
+
+	// Build twice; each build goes through maybeRotateAnonymousID. The ID
+	// must be byte-identical across builds and match the fixture input.
+	p1 := svc.BuildPayload()
+	p2 := svc.BuildPayload()
+	if p1.AnonymousID != fixedID {
+		t.Errorf("v3 payload anonymous_id=%q, want %q (FR-017 byte-identical)", p1.AnonymousID, fixedID)
+	}
+	if p1.AnonymousID != p2.AnonymousID {
+		t.Errorf("anonymous_id drifted between builds: %q vs %q", p1.AnonymousID, p2.AnonymousID)
+	}
+	// SchemaVersion must be 3 (spec 044 does not re-bump).
+	if p1.SchemaVersion != 3 {
+		t.Errorf("schema_version = %d, want 3 (spec 044 does NOT re-bump)", p1.SchemaVersion)
+	}
+}
