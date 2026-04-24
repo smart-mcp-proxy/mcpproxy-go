@@ -3,6 +3,7 @@ package telemetry
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -10,6 +11,9 @@ import (
 // TestReadAutostart_TrayRespondsTrue: when the tray-owned sidecar reports
 // enabled=true, the reader returns a non-nil pointer to true.
 func TestReadAutostart_TrayRespondsTrue(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("autostart sidecar is macOS/Windows-only; Linux short-circuits to nil")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tray-autostart.json")
 	if err := os.WriteFile(path, []byte(`{"enabled": true, "updated_at": "2026-04-24T10:00:00Z"}`), 0o644); err != nil {
@@ -29,6 +33,9 @@ func TestReadAutostart_TrayRespondsTrue(t *testing.T) {
 // TestReadAutostart_TrayRespondsFalse: when the tray-owned sidecar reports
 // enabled=false, the reader returns a non-nil pointer to false.
 func TestReadAutostart_TrayRespondsFalse(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("autostart sidecar is macOS/Windows-only; Linux short-circuits to nil")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tray-autostart.json")
 	if err := os.WriteFile(path, []byte(`{"enabled": false}`), 0o644); err != nil {
@@ -119,6 +126,9 @@ func TestReadAutostart_CachedOneHour(t *testing.T) {
 // must NOT poison the 1h TTL. The next Read() should re-probe and see the
 // value the tray has since written.
 func TestReadAutostart_BootRaceDoesNotPoisonCache(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("autostart sidecar is macOS/Windows-only; Linux short-circuits to nil")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tray-autostart.json")
 	// File deliberately absent at first read — simulates core-starts-before-tray.
