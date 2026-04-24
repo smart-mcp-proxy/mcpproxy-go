@@ -20,6 +20,18 @@ var AnonymityBlockedPrefixes = []string{
 	"/var/folders/",
 }
 
+// BlockedValues is the runtime-populated list of literal substrings that MUST
+// NOT appear in a payload. Populated at startup by the telemetry service from:
+//   - os.Hostname() (if non-empty)
+//   - last path component of os.UserHomeDir() (if non-empty)
+//   - values of env vars in the blocked set (GITHUB_TOKEN, GITLAB_TOKEN,
+//     OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY), when non-empty.
+//
+// The package-level var is intentionally mutable so tests can inject fake
+// values. Production code should call SetBlockedValues (added in T025) once
+// at startup; after that, treat the slice as read-only.
+var BlockedValues []string
+
 // AnonymityViolation identifies which rule the payload tripped. The Pattern
 // field is the offending substring (never the full payload: logging the whole
 // payload would defeat the purpose of the scan).
