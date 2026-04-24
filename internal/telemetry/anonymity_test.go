@@ -91,6 +91,67 @@ func TestScanForPII_EnvMarkersNonBool(t *testing.T) {
 	}
 }
 
+// TestPopulateBlockedValuesFrom (Spec 044 T025) verifies the runtime-value
+// appender collects hostname, home-dir basename, and sensitive env-var values
+// into BlockedValues, deduplicating and dropping entries shorter than 3 bytes.
+func TestPopulateBlockedValuesFrom(t *testing.T) {
+	prev := BlockedValues
+	BlockedValues = nil
+	defer func() { BlockedValues = prev }()
+
+	fakeHost := func() (string, error) { return "my-host.local", nil }
+	fakeHome := func() (string, error) { return "/Users/alice", nil }
+	fakeEnv := func(name string) string {
+		switch name {
+		case "GITHUB_TOKEN":
+			return "ghp_secret12345"
+		case "OPENAI_API_KEY":
+			return "sk-openaitestvalue"
+		case "ANTHROPIC_API_KEY":
+			return "" // absent
+		case "GOOGLE_API_KEY":
+			return "x" // too short, must be dropped
+		default:
+			return ""
+		}
+	}
+
+	populateBlockedValuesFrom(fakeHost, fakeHome, fakeEnv)
+
+	want := map[string]bool{
+		"my-host.local":      true,
+		"alice":              true, // basename of home dir
+		"ghp_secret12345":    true,
+		"sk-openaitestvalue": true,
+	}
+	got := map[string]bool{}
+	for _, v := range BlockedValues {
+		got[v] = true
+	}
+	for w := range want {
+		if !got[w] {
+			t.Errorf("BlockedValues missing %q (got %v)", w, BlockedValues)
+		}
+	}
+	for _, v := range BlockedValues {
+		if len(v) < 3 {
+			t.Errorf("BlockedValues contains short value %q (<3 bytes)", v)
+		}
+	}
+
+	// Running a second time must be idempotent: no duplicates.
+	populateBlockedValuesFrom(fakeHost, fakeHome, fakeEnv)
+	counts := map[string]int{}
+	for _, v := range BlockedValues {
+		counts[v]++
+	}
+	for v, c := range counts {
+		if c > 1 {
+			t.Errorf("BlockedValues has duplicate %q (count=%d)", v, c)
+		}
+	}
+}
+
 // TestScanForPII_AllBlockedPrefixes covers each of the default blocked
 // prefixes to guard against a regression that silently drops one.
 func TestScanForPII_AllBlockedPrefixes(t *testing.T) {

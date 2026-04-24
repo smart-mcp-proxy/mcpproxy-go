@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 )
 
 // AnonymityBlockedPrefixes is the fixed list of byte-prefix substrings that
@@ -143,3 +146,85 @@ func ScanForPII(payloadJSON []byte) error {
 // Compile-time guards so linters don't flag the unused imports if the file is
 // trimmed later.
 var _ = errors.New
+
+// sensitiveEnvVarNames is the fixed set of env-var names whose VALUES (when
+// non-empty) are appended to BlockedValues at startup. The names themselves
+// never appear in the payload; only the values would, and those are exactly
+// what we want the scanner to catch if leaked.
+var sensitiveEnvVarNames = []string{
+	"GITHUB_TOKEN",
+	"GITLAB_TOKEN",
+	"OPENAI_API_KEY",
+	"ANTHROPIC_API_KEY",
+	"GOOGLE_API_KEY",
+}
+
+// initBlockedValuesOnce guards PopulateBlockedValues so repeat calls are safe.
+var initBlockedValuesOnce sync.Once
+
+// PopulateBlockedValues (Spec 044 T025) scans the current process's OS-level
+// identity (hostname, user home dir, sensitive env vars) and appends any
+// non-empty literal to BlockedValues. Safe to call multiple times — only the
+// first call has effect.
+//
+// Inputs are read through function pointers so tests can inject fakes without
+// reshelling os.Hostname / os.Getenv.
+func PopulateBlockedValues() {
+	initBlockedValuesOnce.Do(func() {
+		populateBlockedValuesFrom(os.Hostname, os.UserHomeDir, os.Getenv)
+	})
+}
+
+// populateBlockedValuesFrom is the testable core of PopulateBlockedValues. It
+// appends to BlockedValues:
+//   - os.Hostname() result (if non-empty and distinguishable — we skip values
+//     shorter than 3 bytes to avoid false positives on generic strings).
+//   - The LAST path component of os.UserHomeDir() (i.e. the username), if
+//     non-empty. We deliberately do NOT blocklist the full home-dir path:
+//     that is already covered by AnonymityBlockedPrefixes (/Users/, /home/).
+//   - The value of each env var in sensitiveEnvVarNames, if non-empty.
+//
+// Duplicate values are coalesced. Short values (<3 bytes) are dropped to
+// avoid spurious matches against short tokens in normal payload JSON.
+func populateBlockedValuesFrom(
+	hostname func() (string, error),
+	userHomeDir func() (string, error),
+	getenv func(string) string,
+) {
+	seen := make(map[string]struct{}, len(BlockedValues)+8)
+	out := make([]string, 0, len(BlockedValues)+8)
+	// Preserve any pre-existing values (tests may inject fakes).
+	for _, v := range BlockedValues {
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+
+	add := func(v string) {
+		if len(v) < 3 {
+			return
+		}
+		if _, dup := seen[v]; dup {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+
+	if h, err := hostname(); err == nil {
+		add(h)
+	}
+	if home, err := userHomeDir(); err == nil && home != "" {
+		add(filepath.Base(home))
+	}
+	for _, name := range sensitiveEnvVarNames {
+		add(getenv(name))
+	}
+
+	BlockedValues = out
+}

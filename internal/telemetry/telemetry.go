@@ -184,6 +184,11 @@ func (s *Service) Start(ctx context.Context) {
 	// Ensure anonymous ID exists
 	s.ensureAnonymousID()
 
+	// Spec 044 (T025): populate runtime-detected blocked values (hostname,
+	// username, sensitive env var values) so the anonymity scanner can catch
+	// leaks before they leave the machine. Idempotent.
+	PopulateBlockedValues()
+
 	s.logger.Info("Telemetry service starting",
 		zap.String("endpoint", s.endpoint),
 		zap.Duration("initial_delay", s.initialDelay),
