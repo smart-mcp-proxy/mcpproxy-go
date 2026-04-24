@@ -790,6 +790,13 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 		"timestamp":      time.Now().Unix(),
 	}
 
+	// Spec 044 (FR-018): expose process-level env_kind + env_markers so the
+	// tray and CLI can surface the classifier verdict without waiting for the
+	// next heartbeat. DetectEnvKindOnce is cached, so repeated calls are free.
+	envKind, envMarkers := telemetry.DetectEnvKindOnce()
+	response["env_kind"] = string(envKind)
+	response["env_markers"] = envMarkers
+
 	s.writeSuccess(w, response)
 }
 
