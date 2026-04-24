@@ -797,6 +797,13 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 	response["env_kind"] = string(envKind)
 	response["env_markers"] = envMarkers
 
+	// Spec 044 (US3): expose launch_source + autostart_enabled. launch_source
+	// is the cached classifier result (no installer-clearing side-effect here
+	// — this endpoint is read-only). autostart_enabled reads the tray-owned
+	// sidecar with its 1h TTL; nil on Linux / tray not running / malformed.
+	response["launch_source"] = string(telemetry.DetectLaunchSourceOnce())
+	response["autostart_enabled"] = telemetry.DefaultAutostartReader().Read()
+
 	s.writeSuccess(w, response)
 }
 
