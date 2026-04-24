@@ -20,6 +20,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
@@ -1777,6 +1778,24 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["reconnect_on_use"] = true
 		}
 
+		// Spec 044: include structured diagnostic error when available.
+		if serverStatus.Diagnostic != nil {
+			d := serverStatus.Diagnostic
+			diagMap := map[string]interface{}{
+				"code":        d.Code,
+				"severity":    d.Severity,
+				"cause":       d.Cause,
+				"detected_at": d.DetectedAt,
+			}
+			if entry, ok := diagnostics.Get(d.Code); ok {
+				diagMap["user_message"] = entry.UserMessage
+				diagMap["fix_steps"] = entry.FixSteps
+				diagMap["docs_url"] = entry.DocsURL
+			}
+			serverMap["diagnostic"] = diagMap
+			serverMap["error_code"] = string(d.Code)
+		}
+
 		// Add OAuth status fields if available
 		if oauthStatus != "" {
 			serverMap["oauth_status"] = oauthStatus
@@ -2048,7 +2067,20 @@ func (r *Runtime) RefreshOAuthToken(serverName string) error {
 
 	// Delegate to upstream manager to refresh the token
 	if err := r.upstreamManager.RefreshOAuthToken(serverName); err != nil {
-		return fmt.Errorf("failed to refresh OAuth token: %w", err)
+		// Spec 044 — attribute terminal refresh outcomes to a stable
+		// diagnostics code so downstream consumers (web UI ErrorPanel,
+		// tray, doctor fix) don't have to re-parse free-text messages.
+		// The string-match classifier fallback catches these too, but
+		// explicit typing is cheaper and survives message rewording.
+		wrapped := fmt.Errorf("failed to refresh OAuth token: %w", err)
+		msg := strings.ToLower(err.Error())
+		switch {
+		case strings.Contains(msg, "expired") || strings.Contains(msg, "no refresh token"):
+			return diagnostics.WrapOAuthRefreshExpired(wrapped)
+		case strings.Contains(msg, "403") || strings.Contains(msg, "invalid_grant"):
+			return diagnostics.WrapOAuthRefresh403(wrapped)
+		}
+		return wrapped
 	}
 
 	return nil

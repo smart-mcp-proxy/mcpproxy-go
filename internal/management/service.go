@@ -4,6 +4,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -186,6 +187,26 @@ func (s *service) checkWriteGates() error {
 
 // ListServers returns all configured servers with aggregate statistics.
 // This is a read operation and never blocked by configuration gates.
+// stringifyDiagnosticField coerces a diagnostic code/severity field to a
+// plain string regardless of whether it was encoded as a Go named-string
+// type (diagnostics.Code, diagnostics.Severity) or a plain string after a
+// JSON round-trip. Spec 044.
+func stringifyDiagnosticField(v interface{}) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	default:
+		// Named string types (e.g. `type Code string`) won't match `string`
+		// above, but their underlying value is still a string. Use the
+		// generic `%v` formatter to extract it safely.
+		return fmt.Sprintf("%v", x)
+	}
+}
+
 func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
 	// Get servers from runtime
 	serversRaw, err := s.runtime.GetAllServers()
@@ -367,6 +388,44 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// Extract unified health status
 		if health, ok := srvRaw["health"].(*contracts.HealthStatus); ok {
 			srv.Health = health
+		}
+
+		// Spec 044 — extract structured diagnostic + stable error code.
+		// The runtime layer already encodes these as a map[string]interface{}
+		// alongside the raw code string.
+		if errCode, ok := srvRaw["error_code"].(string); ok && errCode != "" {
+			srv.ErrorCode = errCode
+		}
+		if diagRaw, ok := srvRaw["diagnostic"].(map[string]interface{}); ok && diagRaw != nil {
+			d := &contracts.Diagnostic{}
+			// Code arrives as diagnostics.Code (a named string type) when the
+			// map is produced directly by runtime.GetAllServers, and as a
+			// plain string after a JSON round-trip. Handle both.
+			d.Code = stringifyDiagnosticField(diagRaw["code"])
+			d.Severity = stringifyDiagnosticField(diagRaw["severity"])
+			if cause, ok := diagRaw["cause"].(string); ok {
+				d.Cause = cause
+			}
+			if detected, ok := diagRaw["detected_at"].(time.Time); ok && !detected.IsZero() {
+				t := detected
+				d.DetectedAt = &t
+			}
+			if um, ok := diagRaw["user_message"].(string); ok {
+				d.UserMessage = um
+			}
+			if docs, ok := diagRaw["docs_url"].(string); ok {
+				d.DocsURL = docs
+			}
+			// fix_steps arrives as the concrete []diagnostics.FixStep slice
+			// from runtime.GetAllServers, or as []interface{} after a JSON
+			// round-trip. Use a JSON round-trip that works for both shapes —
+			// it's cheap and sidesteps the type-assertion explosion.
+			if steps, ok := diagRaw["fix_steps"]; ok && steps != nil {
+				if raw, err := json.Marshal(steps); err == nil {
+					_ = json.Unmarshal(raw, &d.FixSteps)
+				}
+			}
+			srv.Diagnostic = d
 		}
 
 		servers = append(servers, srv)

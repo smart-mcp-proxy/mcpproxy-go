@@ -20,6 +20,12 @@ struct TrayMenu: View {
 
         Divider()
 
+        // MARK: - Spec 044 Fix Issues (classified diagnostics)
+        if !appState.serversWithDiagnostic.isEmpty {
+            fixIssuesSection
+            Divider()
+        }
+
         // MARK: - Attention / Quarantine
         if !appState.serversNeedingAttention.isEmpty {
             attentionSection
@@ -91,6 +97,37 @@ struct TrayMenu: View {
             if coreError.isRetryable {
                 Button("Retry") {
                     onRestart()
+                }
+            }
+        }
+    }
+
+    // MARK: - Fix Issues Section (Spec 044)
+
+    /// Renders the "Fix issues" group, one entry per server that has a
+    /// classified diagnostic with warn/error severity. Clicking opens the
+    /// server detail page in the web UI where ErrorPanel renders the
+    /// full fix_steps list.
+    @ViewBuilder
+    private var fixIssuesSection: some View {
+        let affected = appState.serversWithDiagnostic
+        Text("⚠ Fix issues (\(affected.count))")
+            .font(.caption)
+            .foregroundStyle(.orange)
+
+        ForEach(affected) { server in
+            Button {
+                openWebUI(path: "servers/\(server.name)")
+            } label: {
+                HStack {
+                    Image(systemName: severityIcon(for: server.diagnostic?.severity))
+                        .foregroundStyle(severityColor(for: server.diagnostic?.severity))
+                    VStack(alignment: .leading) {
+                        Text(server.name)
+                        Text(server.diagnostic?.code ?? "")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -329,6 +366,24 @@ struct TrayMenu: View {
             }
         }
         return server.connected ? .green : .red
+    }
+
+    /// Spec 044 — map a diagnostic severity string to an SF Symbol name.
+    private func severityIcon(for severity: String?) -> String {
+        switch severity {
+        case "error": return "xmark.octagon.fill"
+        case "warn":  return "exclamationmark.triangle.fill"
+        default:      return "info.circle"
+        }
+    }
+
+    /// Spec 044 — map a diagnostic severity string to a colour.
+    private func severityColor(for severity: String?) -> Color {
+        switch severity {
+        case "error": return .red
+        case "warn":  return .orange
+        default:      return .blue
+        }
     }
 
     private func actionIcon(for action: String) -> String {

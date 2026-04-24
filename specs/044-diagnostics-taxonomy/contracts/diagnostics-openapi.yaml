@@ -1,0 +1,182 @@
+openapi: 3.0.3
+info:
+  title: MCPProxy Diagnostics API (Spec 044)
+  version: 0.1.0
+  description: |
+    Additive endpoints for the diagnostics & error taxonomy feature.
+    Existing endpoints are unchanged; this fragment documents the new
+    per-server diagnostics route and the fix-invocation route.
+
+paths:
+  /api/v1/servers/{name}/diagnostics:
+    get:
+      summary: Per-server diagnostics, including stable error_code when failing
+      operationId: getServerDiagnostics
+      parameters:
+        - in: path
+          name: name
+          required: true
+          schema: { type: string }
+          description: Server name
+      security:
+        - ApiKey: []
+      responses:
+        "200":
+          description: Server diagnostics snapshot
+          headers:
+            X-Request-Id:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerDiagnosticsResponse"
+        "401": { description: Missing or invalid API key }
+        "404": { description: Server not found }
+
+  /api/v1/diagnostics/fix:
+    post:
+      summary: Invoke a registered fixer for a given (server, code) tuple
+      operationId: invokeFix
+      security:
+        - ApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FixRequest"
+      responses:
+        "200":
+          description: Fix result (dry-run preview or executed outcome)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FixResponse"
+        "400": { description: Unknown code, unknown fixer_key, or malformed body }
+        "401": { description: Missing or invalid API key }
+        "404": { description: Server not found }
+        "409": { description: Destructive fix requested without explicit execute mode }
+        "429":
+          description: Rate-limited — too many fix attempts for this (server, code)
+          headers:
+            Retry-After:
+              schema: { type: integer }
+
+components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    Severity:
+      type: string
+      enum: [info, warn, error]
+
+    FixStepType:
+      type: string
+      enum: [link, command, button]
+
+    FixStep:
+      type: object
+      required: [type, label]
+      properties:
+        type: { $ref: "#/components/schemas/FixStepType" }
+        label: { type: string }
+        command: { type: string }
+        url: { type: string }
+        fixer_key: { type: string }
+        destructive: { type: boolean, default: false }
+
+    CatalogEntry:
+      type: object
+      required: [code, severity, user_message, fix_steps, docs_url]
+      properties:
+        code:
+          type: string
+          pattern: '^MCPX_[A-Z]+_[A-Z0-9_]+$'
+        severity: { $ref: "#/components/schemas/Severity" }
+        user_message: { type: string }
+        fix_steps:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/FixStep" }
+        docs_url: { type: string }
+        deprecated: { type: boolean }
+        replaced_by: { type: string }
+
+    ServerDiagnosticsResponse:
+      type: object
+      required: [server, checks]
+      properties:
+        server:
+          type: string
+          description: Server name
+        checks:
+          type: array
+          items:
+            type: object
+            description: Existing per-check entries — unchanged by this feature
+        error_code:
+          type: string
+          nullable: true
+          description: |
+            Populated when the server currently has an active diagnostic.
+            Empty/null when the server is healthy.
+        severity:
+          $ref: "#/components/schemas/Severity"
+          nullable: true
+        user_message:
+          type: string
+          nullable: true
+        fix_steps:
+          type: array
+          items: { $ref: "#/components/schemas/FixStep" }
+        docs_url:
+          type: string
+          nullable: true
+        detected_at:
+          type: string
+          format: date-time
+          nullable: true
+        cause:
+          type: string
+          nullable: true
+          description: Truncated raw error message (for debug)
+
+    FixRequest:
+      type: object
+      required: [server, code, fixer_key]
+      properties:
+        server: { type: string }
+        code:
+          type: string
+          pattern: '^MCPX_[A-Z]+_[A-Z0-9_]+$'
+        fixer_key: { type: string }
+        mode:
+          type: string
+          enum: [dry_run, execute]
+          default: dry_run
+          description: |
+            Non-destructive fixes default to "execute". Destructive fixes
+            default to "dry_run"; explicit "execute" is required to mutate
+            state. Server returns 409 if destructive + dry_run default is
+            overridden without confirmation.
+
+    FixResponse:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [success, failed, blocked]
+        preview:
+          type: string
+          description: Populated when mode=dry_run
+        failure_msg:
+          type: string
+        duration_ms:
+          type: integer
+        request_id:
+          type: string

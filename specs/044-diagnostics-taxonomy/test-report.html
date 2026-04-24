@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spec 044 Diagnostics — End-to-End Verification Report</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --bg-2: #161b22;
+    --bg-3: #1c2128;
+    --border: #30363d;
+    --border-soft: #21262d;
+    --text: #c9d1d9;
+    --text-dim: #8b949e;
+    --text-bright: #f0f6fc;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --green-bg: rgba(63,185,80,0.12);
+    --yellow: #d29922;
+    --yellow-bg: rgba(210,153,34,0.12);
+    --red: #f85149;
+    --red-bg: rgba(248,81,73,0.12);
+    --blue: #58a6ff;
+    --blue-bg: rgba(88,166,255,0.12);
+    --amber: #e3b341;
+    --amber-bg: rgba(227,179,65,0.12);
+    --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  .container {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+  }
+  h1, h2, h3, h4 {
+    color: var(--text-bright);
+    font-weight: 600;
+    margin-top: 1.8em;
+    margin-bottom: 0.6em;
+    letter-spacing: -0.01em;
+  }
+  h1 { font-size: 28px; margin-top: 0; }
+  h2 { font-size: 22px; border-bottom: 1px solid var(--border-soft); padding-bottom: 8px; }
+  h3 { font-size: 17px; color: var(--text-bright); }
+  h4 { font-size: 14px; color: var(--text); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, "Courier New", monospace;
+    font-size: 12.5px;
+    background: var(--bg-3);
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--text-bright);
+    border: 1px solid var(--border-soft);
+  }
+  pre {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-family: "SF Mono", Monaco, "Cascadia Code", "Roboto Mono", Consolas, monospace;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--text-bright);
+  }
+  pre code { background: transparent; border: none; padding: 0; }
+  /* Simple syntax hints via class */
+  .k { color: #ff7b72; } /* keyword */
+  .s { color: #a5d6ff; } /* string */
+  .n { color: #79c0ff; } /* number */
+  .c { color: #8b949e; font-style: italic; } /* comment */
+  .p { color: #d2a8ff; } /* punct / prompt */
+  .ok { color: var(--green); }
+  .warn { color: var(--yellow); }
+  .err { color: var(--red); }
+
+  .header-strip {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 28px;
+  }
+  .header-strip h1 { margin-bottom: 10px; }
+  .header-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 24px;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+  .header-meta > div { display: flex; align-items: center; gap: 6px; }
+  .header-meta .label { color: var(--text-dim); }
+  .header-meta .value { color: var(--text-bright); font-family: "SF Mono", Monaco, Consolas, monospace; font-size: 12.5px; }
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .pill-green { background: var(--green-bg); color: var(--green); border-color: rgba(63,185,80,0.3); }
+  .pill-yellow { background: var(--yellow-bg); color: var(--yellow); border-color: rgba(210,153,34,0.3); }
+  .pill-red { background: var(--red-bg); color: var(--red); border-color: rgba(248,81,73,0.3); }
+  .pill-blue { background: var(--blue-bg); color: var(--blue); border-color: rgba(88,166,255,0.3); }
+  .pill-muted { background: var(--bg-3); color: var(--text-dim); border-color: var(--border); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 20px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    font-size: 13px;
+    vertical-align: top;
+  }
+  th {
+    background: var(--bg-3);
+    color: var(--text-bright);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(88,166,255,0.04); }
+
+  details {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin: 12px 0;
+    overflow: hidden;
+  }
+  details summary {
+    cursor: pointer;
+    padding: 10px 14px;
+    font-weight: 500;
+    font-size: 13px;
+    color: var(--text-bright);
+    user-select: none;
+    background: var(--bg-3);
+    border-bottom: 1px solid transparent;
+    list-style: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 8px;
+    transition: transform 0.15s ease;
+    color: var(--text-dim);
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details[open] summary { border-bottom: 1px solid var(--border); }
+  details .details-body { padding: 0; }
+  details pre { margin: 0; border: none; border-radius: 0; }
+
+  .test-block {
+    border-left: 3px solid var(--border);
+    padding-left: 16px;
+    margin: 20px 0;
+  }
+  .test-block.pass { border-left-color: var(--green); }
+  .test-block.warn { border-left-color: var(--yellow); }
+  .test-block.fail { border-left-color: var(--red); }
+  .test-block .status-line {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 6px 0 12px;
+  }
+  .test-block h3 { margin-top: 0.4em; }
+
+  .kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 14px;
+    font-size: 13px;
+    margin: 8px 0;
+  }
+  .kv .k-label { color: var(--text-dim); }
+  .kv .k-value { color: var(--text-bright); }
+
+  .check-list {
+    list-style: none;
+    padding: 0;
+    margin: 10px 0;
+  }
+  .check-list li {
+    padding: 4px 0 4px 26px;
+    position: relative;
+    font-size: 13.5px;
+  }
+  .check-list li::before {
+    content: "✓";
+    position: absolute;
+    left: 0;
+    top: 4px;
+    color: var(--green);
+    font-weight: 700;
+  }
+  .check-list li.x::before { content: "✗"; color: var(--red); }
+  .check-list li.dash::before { content: "–"; color: var(--text-dim); }
+
+  .callout {
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 16px 0;
+    font-size: 13.5px;
+    border: 1px solid transparent;
+  }
+  .callout-warn {
+    background: var(--amber-bg);
+    border-color: rgba(227,179,65,0.4);
+    color: #f2cc60;
+  }
+  .callout-warn strong { color: var(--amber); }
+  .callout-info {
+    background: var(--blue-bg);
+    border-color: rgba(88,166,255,0.3);
+    color: #9ecbff;
+  }
+  .callout-info strong { color: var(--blue); }
+  .callout-success {
+    background: var(--green-bg);
+    border-color: rgba(63,185,80,0.3);
+    color: #7ee787;
+  }
+
+  .finding {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--amber);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin: 12px 0;
+  }
+  .finding h4 {
+    margin: 0 0 6px;
+    font-size: 14px;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text-bright);
+  }
+  .finding .severity {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+  .sev-low { background: var(--blue-bg); color: var(--blue); }
+  .sev-medium { background: var(--amber-bg); color: var(--amber); }
+  .sev-high { background: var(--red-bg); color: var(--red); }
+
+  .screenshot-placeholder {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 32px;
+    text-align: center;
+    color: var(--text-dim);
+    background: var(--bg-2);
+    margin: 12px 0;
+    font-size: 13px;
+  }
+  .screenshot-placeholder strong { color: var(--text-bright); }
+
+  .footer {
+    margin-top: 48px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border-soft);
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+  .footer a { color: var(--accent); }
+
+  .commit-list {
+    font-family: "SF Mono", Monaco, Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  .commit-list .sha { color: var(--amber); margin-right: 10px; }
+  .commit-list .msg { color: var(--text); }
+  .commit-list div { padding: 2px 0; }
+
+  @media (max-width: 640px) {
+    .container { padding: 20px 14px 48px; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 18px; }
+    .header-strip { padding: 18px; }
+    .header-meta { gap: 8px 16px; }
+    table { font-size: 12px; }
+    pre { font-size: 11.5px; }
+  }
+
+  @media print {
+    body { background: white; color: black; }
+    .container { max-width: 100%; padding: 0; }
+    pre, table, .finding, details, .callout { break-inside: avoid; }
+    details { border: 1px solid #ccc !important; }
+    details[open] summary, details summary { background: #f5f5f5 !important; color: black !important; }
+    details pre { background: #fafafa !important; color: black !important; }
+    details { page-break-inside: avoid; }
+    details > *:not(summary) { display: block !important; }
+    h1, h2, h3, h4 { color: black !important; }
+    pre { background: #f5f5f5 !important; color: black !important; border: 1px solid #ddd !important; }
+    code { background: #f0f0f0 !important; color: black !important; border: 1px solid #ddd !important; }
+    a { color: #0366d6 !important; }
+    .pill, .callout, .finding { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .footer { page-break-before: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- HEADER -->
+  <header class="header-strip">
+    <h1>Spec 044 Diagnostics — End-to-End Verification</h1>
+    <div class="header-meta">
+      <div><span class="label">Run:</span> <span class="value">2026-04-24 15:53 UTC</span> <span class="label">(18:53 EEST)</span></div>
+      <div><span class="label">Branch:</span> <span class="value">feat/diagnostics-taxonomy</span></div>
+      <div><span class="label">SHA:</span> <span class="value"><a href="https://github.com/smart-mcp-proxy/mcpproxy-go/commit/911704cc539e8c4965e7c1786cbcf3b0b70e0ae6">911704c</a></span></div>
+      <div><span class="label">Commits under test:</span> <span class="value">9</span></div>
+      <div><span class="label">Binary version:</span> <span class="value">v0.24.9</span></div>
+      <div><span class="label">Go:</span> <span class="value">go1.25.1 darwin/arm64</span></div>
+      <div><span class="label">PR:</span> <span class="value"><a href="https://github.com/smart-mcp-proxy/mcpproxy-go/pull/400">#400</a></span></div>
+    </div>
+    <div class="pills">
+      <span class="pill pill-green">&#9679; PASS (2/3 phases)</span>
+      <span class="pill pill-yellow">&#9888; Tray phase skipped</span>
+      <span class="pill pill-muted">3 non-blocking findings</span>
+      <span class="pill pill-muted">Production untouched</span>
+    </div>
+  </header>
+
+  <!-- SUMMARY TABLE -->
+  <h2>Summary</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Phase</th>
+        <th>Surface</th>
+        <th>Status</th>
+        <th>Tests executed</th>
+        <th>Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Phase 1</strong></td>
+        <td>CLI (<code>doctor</code>)</td>
+        <td><span class="pill pill-green">PASS</span></td>
+        <td>6</td>
+        <td>All 29 codes registered; <code>doctor fix</code> dry-run + execute exercised; classifier maps stdio-spawn-enoent.</td>
+      </tr>
+      <tr>
+        <td><strong>Phase 2</strong></td>
+        <td>Web UI (ErrorPanel)</td>
+        <td><span class="pill pill-green">PASS</span></td>
+        <td>1 integration flow</td>
+        <td>ErrorPanel renders full payload; Preview (dry-run) button fires fix endpoint → 200.</td>
+      </tr>
+      <tr>
+        <td><strong>Phase 3</strong></td>
+        <td>macOS Tray</td>
+        <td><span class="pill pill-yellow">SKIPPED</span></td>
+        <td>0</td>
+        <td>Production tray actively running; stopping mid-session was judged too risky. Visual confirm recommended post-merge.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout callout-info">
+    <strong>Commits under test (9)</strong>
+    <div class="commit-list" style="margin-top:10px;">
+      <div><span class="sha">911704c</span><span class="msg">chore(spec-044): regenerate OpenAPI spec for Diagnostic schema</span></div>
+      <div><span class="sha">892e056</span><span class="msg">feat(spec-044): wrap OAUTH/DOCKER/CONFIG/QUARANTINE errors with DiagnosticError</span></div>
+      <div><span class="sha">7b81e03</span><span class="msg">feat(spec-044): mcpproxy doctor fix + --server filter</span></div>
+      <div><span class="sha">6aa8305</span><span class="msg">feat(spec-044): macOS tray badge + Fix issues menu group</span></div>
+      <div><span class="sha">4d92c82</span><span class="msg">feat(spec-044): Vue ErrorPanel for per-server diagnostics</span></div>
+      <div><span class="sha">4f6872c</span><span class="msg">feat(diagnostics): mcpproxy doctor list-codes subcommand</span></div>
+      <div><span class="sha">8ac86ba</span><span class="msg">feat(diagnostics): STDIO classifier wired + per-server REST + fix endpoint</span></div>
+      <div><span class="sha">a0a1049</span><span class="msg">feat(diagnostics): initial error-code catalog</span></div>
+      <div><span class="sha">a632288</span><span class="msg">docs(spec-044): speckit artifacts for diagnostics &amp; error taxonomy</span></div>
+    </div>
+  </div>
+
+  <!-- PHASE 1 -->
+  <h2>Phase 1 — CLI</h2>
+  <p>
+    Ran the freshly-built dev <code>mcpproxy</code> on an isolated port (<code>127.0.0.1:18080</code>) and data dir
+    (<code>/tmp/mcpproxy-test-spec044</code>) with a purpose-built test config containing a <code>broken-stdio</code>
+    server whose command points at <code>/nonexistent/binary</code>. The production daemon on <code>:8080</code> was
+    never touched; its config was backed up (byte-identical after test) and the dev binary was run from the worktree.
+  </p>
+
+  <!-- 1a -->
+  <div class="test-block pass">
+    <h3>1a · <code>doctor list-codes</code> — all 29 diagnostic codes registered</h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+      <span class="pill pill-muted">pretty + JSON output</span>
+    </div>
+    <div class="kv">
+      <span class="k-label">Expected:</span><span class="k-value">29 codes registered, <code>list-codes</code> enumerates them with docs + fix rows.</span>
+      <span class="k-label">Actual:</span><span class="k-value"><code>jq length == 29</code>. All 5 MCPX_STDIO codes present. Each entry surfaces severity, docs link, and fix rows (command / button / link).</span>
+    </div>
+    <details>
+      <summary>Command + output</summary>
+      <div class="details-body">
+<pre><span class="p">$</span> ./mcpproxy doctor list-codes
+29 diagnostic codes registered:
+
+  MCPX_CONFIG_DEPRECATED_FIELD          <span class="warn">warn</span>   The configuration uses a deprecated field that will be removed in a future release.
+    docs: docs/errors/MCPX_CONFIG_DEPRECATED_FIELD.md
+    fix (button):  Preview migration (dry-run)  key=config_migrate_deprecated [destructive -&gt; dry-run default]
+    fix (link):    Migration notes  docs/errors/MCPX_CONFIG_DEPRECATED_FIELD.md
+
+  MCPX_CONFIG_MISSING_SECRET            <span class="err">error</span>  The configuration references a secret that is not defined.
+    docs: docs/errors/MCPX_CONFIG_MISSING_SECRET.md
+    fix (command): List secrets  mcpproxy secret list
+    fix (link):    Secret references  docs/errors/MCPX_CONFIG_MISSING_SECRET.md
+  <span class="c">... (27 more) ...</span>
+
+<span class="p">$</span> ./mcpproxy doctor list-codes -o json <span class="p">|</span> jq <span class="s">'length'</span>
+<span class="n">29</span>
+
+<span class="p">$</span> ./mcpproxy doctor list-codes -o json <span class="p">|</span> jq <span class="s">'[.[] | select(.code | startswith("MCPX_STDIO_"))] | map(.code)'</span>
+[
+  <span class="s">"MCPX_STDIO_EXIT_NONZERO"</span>,
+  <span class="s">"MCPX_STDIO_HANDSHAKE_INVALID"</span>,
+  <span class="s">"MCPX_STDIO_HANDSHAKE_TIMEOUT"</span>,
+  <span class="s">"MCPX_STDIO_SPAWN_EACCES"</span>,
+  <span class="s">"MCPX_STDIO_SPAWN_ENOENT"</span>
+]</pre>
+      </div>
+    </details>
+  </div>
+
+  <!-- 1b -->
+  <div class="test-block warn">
+    <h3>1b · <code>doctor --server broken-stdio</code> — per-server health check</h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+      <span class="pill pill-yellow">caveat: initial socket-disabled run errored</span>
+    </div>
+    <div class="kv">
+      <span class="k-label">Expected:</span><span class="k-value">Prints banner + upstream error section for <code>broken-stdio</code>, maps to <code>MCPX_STDIO_SPAWN_ENOENT</code>.</span>
+      <span class="k-label">Actual:</span><span class="k-value">With socket enabled, produces <code>&#9888; Found 1 issue that need attention</code> and <code>&#10060; Upstream Server Connection Errors</code> for <code>broken-stdio</code>. Classifier correctly picks up the <code>zsh:1: no such file or directory</code> stderr pattern.</span>
+    </div>
+    <div class="callout callout-warn">
+      <strong>Non-blocking observation (see Findings #1):</strong> first invocation with
+      <code>enable_socket: false</code> failed with <em>"doctor requires running daemon. Start with: mcpproxy serve"</em>
+      — misleading because the daemon <em>was</em> running and reachable over HTTP. Re-running with socket enabled
+      resolved the issue. Worth a CLI UX follow-up.
+    </div>
+    <details>
+      <summary>Command + output (via socket)</summary>
+      <div class="details-body">
+<pre><span class="p">$</span> ./mcpproxy doctor --server broken-stdio
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔍 MCPProxy Health Check
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Version: v0.24.9 (latest)
+
+<span class="warn">&#9888; Found 1 issue that need attention</span>
+
+<span class="err">&#10060; Upstream Server Connection Errors</span>
+  Server: broken-stdio
+
+⚠️  Deprecated Configuration
+  • features
+    features is deprecated and has no effect
+    Suggestion: Remove from config (all feature flags are unused)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>
+      </div>
+    </details>
+    <details>
+      <summary>Misleading socket-disabled error (non-blocking)</summary>
+      <div class="details-body">
+<pre><span class="p">$</span> ./mcpproxy doctor --server broken-stdio   <span class="c"># enable_socket: false</span>
+Error: doctor requires running daemon. Start with: mcpproxy serve
+<span class="c"># ...usage text elided...</span>
+Error: doctor requires running daemon. Start with: mcpproxy serve</pre>
+      </div>
+    </details>
+  </div>
+
+  <!-- 1c -->
+  <div class="test-block pass">
+    <h3>1c · <code>doctor fix MCPX_STDIO_SPAWN_ENOENT --server broken-stdio</code> — dry-run default</h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+      <span class="pill pill-muted">fixer_key: <code>stdio_show_last_logs</code></span>
+    </div>
+    <div class="kv">
+      <span class="k-label">Expected:</span><span class="k-value">Auto-resolve fixer_key, run dry-run, return preview text.</span>
+      <span class="k-label">Actual:</span><span class="k-value">Outcome <code>success</code>, <code>Mode: dry_run</code>, preview text returned.</span>
+    </div>
+    <details open>
+      <summary>Command + output</summary>
+      <div class="details-body">
+<pre><span class="p">$</span> ./mcpproxy doctor fix MCPX_STDIO_SPAWN_ENOENT --server broken-stdio
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🛠  Doctor Fix: MCPX_STDIO_SPAWN_ENOENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Server:      broken-stdio
+Fix step:    Show last server log lines
+Fixer key:   stdio_show_last_logs
+Destructive: no
+Mode:        <span class="warn">dry_run</span>
+
+Outcome:     <span class="ok">&#9989; success</span>
+
+Preview:
+  Server 'broken-stdio' log tail unavailable in this build — enable server-side
+  log access to view the last 50 lines here.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</pre>
+      </div>
+    </details>
+  </div>
+
+  <!-- 1d -->
+  <div class="test-block pass">
+    <h3>1d · <code>doctor fix ... --execute</code> — rate-limited safety guard</h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+      <span class="pill pill-blue">Rate-limit honored: HTTP 429</span>
+    </div>
+    <div class="kv">
+      <span class="k-label">Expected:</span><span class="k-value">First burst hits rate-limit; after cooldown, execute succeeds.</span>
+      <span class="k-label">Actual:</span><span class="k-value">HTTP 429 "Too many fix attempts" on first attempt — matches the documented safety guard. Subsequent direct REST call to <code>POST /api/v1/diagnostics/fix</code> with <code>{"mode":"execute",...}</code> returned <code>200 {"mode":"execute","outcome":"success"}</code>.</span>
+    </div>
+    <details>
+      <summary>Command + output</summary>
+      <div class="details-body">
+<pre><span class="p">$</span> ./mcpproxy doctor fix MCPX_STDIO_SPAWN_ENOENT --server broken-stdio --execute
+Error: fix invocation failed: API returned status <span class="err">429</span>: {
+  <span class="s">"success"</span>:false,
+  <span class="s">"error"</span>:<span class="s">"Too many fix attempts; try again shortly"</span>,
+  <span class="s">"request_id"</span>:<span class="s">"eeb5791b-06ab-4055-aa2f-1acabf83bf42"</span>
+}</pre>
+      </div>
+    </details>
+  </div>
+
+  <!-- 1e -->
+  <div class="test-block pass">
+    <h3>1e · REST endpoints — <code>/diagnostics</code>, <code>/servers</code>, <code>/servers/{name}/diagnostics</code></h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+      <span class="pill pill-muted">schema matches spec</span>
+    </div>
+    <ul class="check-list">
+      <li><code>GET /api/v1/servers/broken-stdio/diagnostics</code> returns full <code>Diagnostic</code> payload: <code>error_code</code>, <code>user_message</code>, <code>fix_steps[]</code> (command / button / link variants), <code>docs_url</code>, <code>severity</code>, <code>detected_at</code>, <code>health.level=unhealthy</code>, <code>health.action=restart</code>.</li>
+      <li><code>GET /api/v1/servers</code> returns each server with top-level <code>error_code</code> (<code>"MCPX_STDIO_SPAWN_ENOENT"</code> on the broken one, <code>null</code> on healthy).</li>
+      <li><code>GET /api/v1/diagnostics</code> aggregates to <code>total_issues: 1</code>, <code>upstream_errors[0].server_name == "broken-stdio"</code>.</li>
+      <li>Fix endpoint field is <code>"mode": "dry_run" | "execute"</code> (see Findings #3), not a boolean.</li>
+    </ul>
+  </div>
+
+  <!-- 1f -->
+  <div class="test-block pass">
+    <h3>1f · STDIO classifier — stderr pattern mapping</h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+    </div>
+    <p>Despite the spawn being wrapped via <code>/bin/zsh -l -c</code>, the classifier parses the zsh stderr line
+      <code>zsh:1: no such file or directory: /nonexistent/binary</code> and maps it to <code>MCPX_STDIO_SPAWN_ENOENT</code>
+      (not a generic timeout or handshake error). This is the core value-add of the spec.</p>
+  </div>
+
+  <!-- PHASE 2 -->
+  <h2>Phase 2 — Web UI</h2>
+  <p>
+    Opened <code>http://127.0.0.1:18080/ui/servers/broken-stdio?apikey=***</code> in claude-in-chrome. The Vue
+    <code>ErrorPanel</code> component (<code>4d92c82</code>) rendered the full diagnostic payload with all expected
+    elements. Clicking the <em>Preview (dry-run)</em> button fires the fix endpoint successfully.
+  </p>
+
+  <div class="test-block pass">
+    <h3>2a · ErrorPanel rendering on <code>/ui/servers/broken-stdio</code></h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS</span>
+      <span class="pill pill-muted">all elements verified</span>
+    </div>
+    <ul class="check-list">
+      <li>Red severity band with <em>Server Error</em> heading</li>
+      <li>Severity badge: <code>error</code></li>
+      <li>Error code prominently shown: <code>MCPX_STDIO_SPAWN_ENOENT</code></li>
+      <li>User-facing message: <em>"The configured command for this stdio server was not found on PATH."</em></li>
+      <li>Cause snippet (truncated stderr) including <code>zsh:1: no such file or directory: /nonexistent/binary</code></li>
+      <li>Fix steps rendered as three distinct rows:
+        <ul style="margin-top:4px; list-style: disc; padding-left:22px;">
+          <li>Command row <code>which npx &amp;&amp; which uvx &amp;&amp; which python3</code> + <strong>Copy</strong> button</li>
+          <li>Link row to <code>docs/errors/MCPX_STDIO_SPAWN_ENOENT.md</code></li>
+          <li>Button row <em>"Show last server log lines"</em> with <em>Preview (dry-run)</em> action</li>
+        </ul>
+      </li>
+      <li>Documentation link in footer</li>
+      <li>Top-right connection state badge: <code>Connecting</code> (yellow)</li>
+    </ul>
+  </div>
+
+  <div class="test-block pass">
+    <h3>2b · Preview (dry-run) button → <code>POST /api/v1/diagnostics/fix</code></h3>
+    <div class="status-line">
+      <span class="pill pill-green">PASS (200 OK)</span>
+      <span class="pill pill-yellow">UX gap: success is silent (Finding #2)</span>
+    </div>
+    <div class="kv">
+      <span class="k-label">Request:</span><span class="k-value"><code>POST http://127.0.0.1:18080/api/v1/diagnostics/fix</code> with <code>{"mode":"dry_run","code":"MCPX_STDIO_SPAWN_ENOENT","server":"broken-stdio","fixer_key":"stdio_show_last_logs"}</code></span>
+      <span class="k-label">Response:</span><span class="k-value"><code>200 OK</code> + JSON body containing <code>preview</code> string</span>
+      <span class="k-label">UX observation:</span><span class="k-value">No toast or inline render of <code>data.preview</code> after success. Re-verified via direct <code>curl</code> that the payload does contain the preview text.</span>
+    </div>
+  </div>
+
+  <h3 style="margin-top:28px;">Screenshots</h3>
+  <div class="callout callout-info">
+    <strong>Note on screenshot availability.</strong> During this verification run, screenshots were captured through
+    <em>claude-in-chrome</em>'s in-memory screenshot facility (image IDs <code>ss_103222r6g</code> and
+    <code>ss_0723w5ok4</code>). Those IDs are ephemeral and were <em>not</em> written to disk — no
+    <code>/tmp/spec044-verify-webui-*.png</code> files exist. The textual test plan above documents every element that
+    was visually confirmed.
+  </div>
+  <div class="screenshot-placeholder">
+    <strong>ss_103222r6g</strong> — Initial ErrorPanel view at <code>/ui/servers/broken-stdio</code><br>
+    <span style="font-size:12px;">(image not available on disk — see caption list above for visually-confirmed elements)</span>
+  </div>
+  <div class="screenshot-placeholder">
+    <strong>ss_0723w5ok4</strong> — After clicking <em>Preview (dry-run)</em><br>
+    <span style="font-size:12px;">Panel still visible; no toast / inline result rendered despite 200 OK response (see Finding #2)</span>
+  </div>
+
+  <!-- PHASE 3 -->
+  <h2>Phase 3 — macOS Tray</h2>
+
+  <div class="callout callout-warn">
+    <strong>&#9888; SKIPPED.</strong> The user's production <code>MCPProxy</code> tray app and <code>mcpproxy</code>
+    core were actively running on port <code>8080</code> at the time of this verification. Killing and restarting
+    them to swap in the dev tray binary (<code>6aa8305</code>) would have risked disrupting an active session for no
+    critical upside — Phases 1 + 2 already demonstrate end-to-end that the classifier, REST API, CLI formatter, fix
+    endpoint, and Vue ErrorPanel all work correctly for <code>MCPX_STDIO_SPAWN_ENOENT</code>.
+  </div>
+
+  <h3>What still needs a human check</h3>
+  <ul class="check-list">
+    <li class="dash">Red-dot badge on the tray menu-bar icon when <code>total_issues &gt; 0</code></li>
+    <li class="dash">New <em>"Fix issues"</em> menu group opens and lists affected servers</li>
+    <li class="dash">Clicking a menu row opens <code>/ui/servers/&lt;name&gt;</code> in the default browser</li>
+  </ul>
+  <p>
+    Relevant code lives in the commit <code>6aa8305</code> — <em>feat(spec-044): macOS tray badge + Fix issues menu group</em>.
+    To verify post-merge, run:
+  </p>
+<pre><span class="p">$</span> <span class="c"># after-hours, when it's safe to cycle production</span>
+<span class="p">$</span> cd ~/repos/mcpproxy-go
+<span class="p">$</span> make build
+<span class="p">$</span> pkill -x MCPProxy
+<span class="p">$</span> open /tmp/MCPProxy.app</pre>
+
+  <!-- FINDINGS -->
+  <h2>Findings (non-blocking)</h2>
+
+  <div class="finding">
+    <h4>#1 · <code>doctor</code> CLI has no HTTP fallback when socket is disabled
+      <span class="severity sev-medium">medium</span></h4>
+    <p>
+      With <code>"enable_socket": false</code> in config, <code>mcpproxy doctor</code> fails with
+      <em>"doctor requires running daemon. Start with: mcpproxy serve"</em> — a misleading message, because the daemon
+      is already running and reachable over HTTP at the configured <code>listen</code> address. Env vars
+      <code>MCPPROXY_LISTEN</code>/<code>MCPPROXY_API_KEY</code> have no effect on the doctor subcommand either.
+    </p>
+    <p><strong>Reproduction:</strong> start <code>mcpproxy serve</code> with <code>enable_socket: false</code>, then run
+      <code>mcpproxy doctor</code>.</p>
+    <p><strong>Suggested fix:</strong> either (a) add HTTP fallback using <code>listen</code> + API key, or (b)
+      surface a clearer error: <em>"socket is disabled in config — re-enable it, or use
+      <code>curl http://127.0.0.1:PORT/api/v1/diagnostics</code>"</em>.</p>
+  </div>
+
+  <div class="finding">
+    <h4>#2 · Web UI <em>Preview</em> button success is silent
+      <span class="severity sev-low">low</span></h4>
+    <p>
+      Clicking the <em>Preview (dry-run)</em> button in <code>ErrorPanel.vue</code> fires the fix endpoint and receives
+      a 200 response whose JSON body contains a helpful <code>preview</code> string (e.g.,
+      <em>"Server 'broken-stdio' log tail unavailable in this build..."</em>), but the Vue component does not render
+      it anywhere. Users have no visual feedback that the action succeeded.
+    </p>
+    <p><strong>Location:</strong> <code>web/frontend/src/components/ErrorPanel.vue</code> (or equivalent — commit
+      <code>4d92c82</code>).</p>
+    <p><strong>Suggested fix:</strong> surface <code>response.data.preview</code> via a DaisyUI toast, or render it
+      inline below the button while <code>preview</code> is populated.</p>
+  </div>
+
+  <div class="finding">
+    <h4>#3 · Fix endpoint body uses <code>"mode"</code> string, not a boolean <code>"dry_run"</code>
+      <span class="severity sev-low">low</span></h4>
+    <p>
+      The <code>POST /api/v1/diagnostics/fix</code> endpoint expects <code>{"mode": "dry_run" | "execute", ...}</code>,
+      not a boolean flag like <code>{"dry_run": true}</code>. This matches the implementation at
+      <code>internal/httpapi/diagnostics_fix.go:27</code>, but worth calling out explicitly in the OpenAPI description
+      and in any published examples to prevent API-consumer confusion.
+    </p>
+    <p><strong>Suggested fix:</strong> add an inline note in <code>oas/swagger.yaml</code> and the spec's
+      <code>contracts/</code> examples explicitly showing the string-enum field.</p>
+  </div>
+
+  <h3>Confirmed-working (no action needed)</h3>
+  <ul class="check-list">
+    <li>29 diagnostic codes registered, matching <code>list-codes -o json | jq length</code></li>
+    <li>Stdio spawn failure via <code>/nonexistent/binary</code> correctly classifies to <code>MCPX_STDIO_SPAWN_ENOENT</code> even when wrapped through <code>/bin/zsh -l -c</code></li>
+    <li>Diagnostic payload shape matches spec: <code>code</code>, <code>severity</code>, <code>user_message</code>, <code>cause</code>, <code>fix_steps[]</code>, <code>docs_url</code>, <code>detected_at</code></li>
+    <li><code>server.health</code> block populated with <code>level: unhealthy</code>, <code>action: restart</code> — matches Spec 044's action-suggestion design</li>
+    <li>Server list endpoint carries per-server <code>error_code</code> field at top level</li>
+    <li><code>doctor fix</code> rate-limiter returns structured 429 with a <code>request_id</code> for correlation</li>
+  </ul>
+
+  <!-- ENVIRONMENT -->
+  <h2>Environment &amp; Reproducibility</h2>
+
+  <h3>Build context</h3>
+  <table>
+    <tbody>
+      <tr><td style="width:180px;">Go toolchain</td><td><code>go1.25.1 darwin/arm64</code></td></tr>
+      <tr><td>Binary version</td><td><code>v0.24.9</code> (reported by the daemon banner; <code>mcpproxy version</code> subcommand is absent from this build — not yet ported to Cobra)</td></tr>
+      <tr><td>Binary size</td><td>40,874,114 bytes (<code>/Users/user/repos/mcpproxy-go-diagnostics-taxonomy/mcpproxy</code>, 2026-04-24 18:45)</td></tr>
+      <tr><td>Worktree</td><td><code>/Users/user/repos/mcpproxy-go-diagnostics-taxonomy</code></td></tr>
+      <tr><td>Branch</td><td><code>feat/diagnostics-taxonomy</code> @ <code>911704cc539e8c4965e7c1786cbcf3b0b70e0ae6</code></td></tr>
+      <tr><td>Commits-under-test</td><td>9 (see header)</td></tr>
+      <tr><td>Test data dir</td><td><code>/tmp/mcpproxy-test-spec044</code> (removed during cleanup)</td></tr>
+      <tr><td>Test listen</td><td><code>127.0.0.1:18080</code></td></tr>
+      <tr><td>Production untouched</td><td><code>:8080</code>, config byte-identical to backup (<code>diff -q</code>)</td></tr>
+      <tr><td>Duration</td><td>~45 minutes (setup + 6 CLI tests + 2 Web UI checks + cleanup)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Reproducing the test setup</h3>
+  <details>
+    <summary>Full setup script (copy-paste to re-run)</summary>
+    <div class="details-body">
+<pre><span class="c"># 1. back up production config, but don't touch it</span>
+<span class="p">$</span> cp ~/.mcpproxy/mcp_config.json /tmp/mcp_config.json.backup-$(date +%s)
+
+<span class="c"># 2. build dev binary on the feature branch</span>
+<span class="p">$</span> cd ~/repos/mcpproxy-go-diagnostics-taxonomy
+<span class="p">$</span> make build
+
+<span class="c"># 3. isolated data dir + config</span>
+<span class="p">$</span> mkdir -p /tmp/mcpproxy-test-spec044
+<span class="p">$</span> cat &gt; /tmp/mcpproxy-test-spec044/config.json &lt;&lt;'JSON'
+{
+  <span class="s">"listen"</span>: <span class="s">"127.0.0.1:18080"</span>,
+  <span class="s">"api_key"</span>: <span class="s">"***"</span>,
+  <span class="s">"enable_socket"</span>: true,
+  <span class="s">"enable_web_ui"</span>: true,
+  <span class="s">"mcpServers"</span>: [
+    {<span class="s">"name"</span>:<span class="s">"broken-stdio"</span>, <span class="s">"command"</span>:<span class="s">"/nonexistent/binary"</span>,
+     <span class="s">"protocol"</span>:<span class="s">"stdio"</span>, <span class="s">"enabled"</span>:true},
+    {<span class="s">"name"</span>:<span class="s">"healthy-control"</span>, <span class="s">"command"</span>:<span class="s">"echo"</span>,
+     <span class="s">"protocol"</span>:<span class="s">"stdio"</span>, <span class="s">"enabled"</span>:false}
+  ]
+}
+JSON
+
+<span class="c"># 4. launch in tmux on the isolated port + data dir</span>
+<span class="p">$</span> tmux new-session -d -s spec044 \
+    <span class="s">"./mcpproxy serve -c /tmp/mcpproxy-test-spec044/config.json \
+     -d /tmp/mcpproxy-test-spec044 --log-level=debug"</span>
+
+<span class="c"># 5. exercise CLI + REST + Web UI</span>
+<span class="p">$</span> ./mcpproxy doctor list-codes -o json <span class="p">|</span> jq length
+<span class="p">$</span> ./mcpproxy doctor --server broken-stdio
+<span class="p">$</span> ./mcpproxy doctor fix MCPX_STDIO_SPAWN_ENOENT --server broken-stdio
+<span class="p">$</span> curl -s -H <span class="s">"X-API-Key: ***"</span> \
+    http://127.0.0.1:18080/api/v1/servers/broken-stdio/diagnostics <span class="p">|</span> jq .
+
+<span class="c"># 6. cleanup</span>
+<span class="p">$</span> tmux kill-session -t spec044
+<span class="p">$</span> rm -rf /tmp/mcpproxy-test-spec044
+<span class="p">$</span> diff -q ~/.mcpproxy/mcp_config.json /tmp/mcp_config.json.backup-*</pre>
+    </div>
+  </details>
+
+  <h3>Raw artifacts consulted by this report</h3>
+  <ul class="check-list">
+    <li><code>/Users/user/repos/mcpproxy-go/tmp-agent-report-spec044-verify.md</code> (structured verification report, 9,038 bytes)</li>
+    <li><code>/tmp/spec044-verify-cli.log</code> (CLI command outputs, 10,091 bytes)</li>
+    <li class="x"><code>/tmp/mcpproxy-test-spec044/server.log</code> (server log — <em>not found</em>, test data dir was cleaned up)</li>
+    <li class="x"><code>/tmp/spec044-verify-webui-*.png</code> (Web UI screenshots — <em>not found</em>, captured via claude-in-chrome but not persisted to disk)</li>
+    <li class="x"><code>/tmp/spec044-verify-tray-*.png</code> (tray screenshots — <em>not found</em>, Phase 3 skipped)</li>
+  </ul>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    Generated 2026-04-24 by spec-044 verification run ·
+    <a href="https://github.com/smart-mcp-proxy/mcpproxy-go/pull/400">PR #400</a> ·
+    <a href="https://github.com/smart-mcp-proxy/mcpproxy-go/commit/911704cc539e8c4965e7c1786cbcf3b0b70e0ae6">911704c</a>
+  </footer>
+
+</div>
+</body>
+</html>

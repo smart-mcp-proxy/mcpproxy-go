@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -303,6 +304,22 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		}
 		if lastReconnectAt, ok := generic["last_reconnect_at"].(time.Time); ok {
 			server.LastReconnectAt = &lastReconnectAt
+		}
+
+		// Spec 044 — carry structured diagnostic + stable error code through
+		// the legacy fallback path. The management service does the same for
+		// the happy path; this ensures the REST envelope never drops them.
+		if errCode, ok := generic["error_code"].(string); ok && errCode != "" {
+			server.ErrorCode = errCode
+		}
+		if diagRaw, ok := generic["diagnostic"].(map[string]interface{}); ok && diagRaw != nil {
+			d := &Diagnostic{}
+			// JSON round-trip handles both named-string types (diagnostics.Code,
+			// diagnostics.Severity) and plain strings (after a JSON decode).
+			if raw, err := json.Marshal(diagRaw); err == nil {
+				_ = json.Unmarshal(raw, d)
+			}
+			server.Diagnostic = d
 		}
 
 		servers = append(servers, server)

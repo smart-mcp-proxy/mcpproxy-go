@@ -107,6 +107,25 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Spec 044 — servers that have an attached, classified diagnostic with
+    /// warn/error severity. These drive the "Fix issues" menu group and the
+    /// tray badge tint.
+    var serversWithDiagnostic: [ServerStatus] {
+        servers.filter { $0.hasAttentionDiagnostic }
+    }
+
+    /// Highest-severity diagnostic across enabled servers. Returns nil when
+    /// no diagnostics are attached. Used by TrayIcon to colour the badge.
+    var worstDiagnosticSeverity: String? {
+        var sawWarn = false
+        for srv in servers where srv.enabled {
+            guard let d = srv.diagnostic else { continue }
+            if d.severity == "error" { return "error" }
+            if d.severity == "warn" { sawWarn = true }
+        }
+        return sawWarn ? "warn" : nil
+    }
+
     /// Aggregate health indicator for the tray icon badge.
     /// Only considers ENABLED servers. Disabled servers are intentional — don't flag them.
     /// Uses majority-based logic: green if most are healthy, yellow if some degraded,

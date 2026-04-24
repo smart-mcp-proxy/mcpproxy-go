@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, DiagnosticFixResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -413,6 +413,33 @@ class APIService {
     last_updated: string
   }>> {
     return this.request('/api/v1/diagnostics')
+  }
+
+  // Spec 044 — per-server diagnostics.
+  async getServerDiagnostic(serverName: string): Promise<APIResponse<{
+    server: string
+    connected: boolean
+    status: string
+    health: any
+    diagnostic: any | null
+    error_code: string | null
+    catalog_size: number
+  }>> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/diagnostics`)
+  }
+
+  // Spec 044 — invoke a registered fixer. Destructive fixers default to
+  // dry_run unless mode='execute' is supplied by the caller.
+  async invokeDiagnosticFix(params: {
+    server: string
+    code: string
+    fixer_key: string
+    mode?: 'dry_run' | 'execute'
+  }): Promise<APIResponse<DiagnosticFixResponse>> {
+    return this.request<DiagnosticFixResponse>('/api/v1/diagnostics/fix', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    })
   }
 
   // Tool Call History endpoints

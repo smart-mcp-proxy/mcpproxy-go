@@ -168,7 +168,17 @@
 
       <!-- Alerts -->
       <div class="space-y-4">
-        <div v-if="server.last_error" class="alert alert-error">
+        <!-- Spec 044 — structured diagnostic panel (shown when a diagnostic
+             with warn/error severity is attached). Replaces the generic
+             last_error alert for those cases. -->
+        <ErrorPanel
+          v-if="showDiagnosticPanel"
+          :diagnostic="server.diagnostic"
+          :server-name="server.name"
+          @fixed="handleDiagnosticFixed"
+        />
+
+        <div v-else-if="server.last_error" class="alert alert-error">
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -808,6 +818,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
+import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
@@ -891,6 +902,22 @@ const isHttpProtocol = computed(() => {
 const healthAction = computed(() => {
   return server.value?.health?.action || ''
 })
+
+// Spec 044 — render the structured diagnostic panel whenever a warn/error
+// diagnostic is attached. Info-level diagnostics are ignored (shown only in
+// verbose/admin views, per spec).
+const showDiagnosticPanel = computed(() => {
+  const d = server.value?.diagnostic
+  if (!d || !d.code) return false
+  return d.severity === 'warn' || d.severity === 'error'
+})
+
+function handleDiagnosticFixed(_payload: { fixerKey: string; mode: 'dry_run' | 'execute' }) {
+  // Trigger a silent refresh so the diagnostic disappears once the server
+  // reconnects. The SSE stream will also push an update, but an explicit
+  // refresh provides a more responsive UI when the user clicks "Execute".
+  void serversStore.fetchServers(true)
+}
 
 // Security scan computed properties
 const securityScanStatus = computed(() => {

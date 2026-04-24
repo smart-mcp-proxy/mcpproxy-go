@@ -12,10 +12,44 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
+
+// classifyAndAttach converts a raw connection error into a DiagnosticError and
+// stores it on the server status. Called from the supervisor's reconcile and
+// event paths. Spec 044.
+func classifyAndAttach(status *stateview.ServerStatus, err error, transport string) {
+	if err == nil {
+		status.Diagnostic = nil
+		return
+	}
+	code := diagnostics.Classify(err, diagnostics.ClassifierHints{
+		Transport: transport,
+		ServerID:  status.Name,
+	})
+	if code == "" {
+		// Classify always returns at least UnknownUnclassified for non-nil err,
+		// so reaching here means a logic regression. Defensive fallback keeps
+		// the UI useful instead of silently dropping the signal.
+		code = diagnostics.UnknownUnclassified
+	}
+	entry, _ := diagnostics.Get(code)
+	msg := err.Error()
+	const maxCause = 256
+	if len(msg) > maxCause {
+		msg = msg[:maxCause] + "..."
+	}
+	status.Diagnostic = &diagnostics.DiagnosticError{
+		Code:       code,
+		Severity:   entry.Severity,
+		Cause:      msg,
+		ServerID:   status.Name,
+		DetectedAt: time.Now(),
+	}
+}
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.
 // It subscribes to config changes and emits events when server states change.
@@ -616,6 +650,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		if state.Connected {
 			status.LastError = ""
 			status.LastErrorTime = nil
+			status.Diagnostic = nil
 		}
 
 		// Update connection info if available
@@ -629,6 +664,13 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 					errorStr = errorStr[:maxErrorLen] + "... (truncated)"
 				}
 				status.LastError = errorStr
+
+				// Spec 044: classify raw error into stable diagnostic code.
+				transport := ""
+				if state.Config != nil {
+					transport = string(state.Config.Protocol)
+				}
+				classifyAndAttach(status, state.ConnectionInfo.LastError, transport)
 
 				// Set last error time if available
 				if !state.ConnectionInfo.LastRetryTime.IsZero() {
@@ -857,6 +899,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					// This ensures stale OAuth/connection errors don't persist after successful reconnection
 					status.LastError = ""
 					status.LastErrorTime = nil
+					status.Diagnostic = nil
 				} else {
 					t := event.Timestamp
 					status.DisconnectedAt = &t
@@ -873,6 +916,13 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 							errorStr = errorStr[:maxErrorLen] + "... (truncated)"
 						}
 						status.LastError = errorStr
+
+						// Spec 044: classify raw error into stable diagnostic code.
+						transport := ""
+						if status.Config != nil {
+							transport = string(status.Config.Protocol)
+						}
+						classifyAndAttach(status, connInfo.LastError, transport)
 
 						if !connInfo.LastRetryTime.IsZero() {
 							t := connInfo.LastRetryTime

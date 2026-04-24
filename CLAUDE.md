@@ -715,6 +715,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - Bash / GitHub Actions YAML for the CI job; Astro 4.x for the website; Markdown for docs. No Go code changes required. (043-linux-package-repos)
 - Go 1.24 (toolchain go1.24.10), Swift 5.9+ (macOS tray only), Bash (DMG post-install script) + `go.etcd.io/bbolt` (existing), `go.uber.org/zap` (existing), `github.com/mark3labs/mcp-go` (existing MCP protocol lib), `github.com/google/uuid` (existing). macOS: `ServiceManagement.framework` (SMAppService, macOS 13+), existing `native/macos/MCPProxy` module. No new external dependencies. (044-retention-telemetry-v3)
 - BBolt (`~/.mcpproxy/config.db`) — new `activation` bucket alongside existing buckets; no migration required because absence of bucket means "fresh install, all flags false". (044-retention-telemetry-v3)
+- Go 1.24 (toolchain go1.24.10), TypeScript 5.9 / Vue 3.5, Swift 5.9 (macOS 13+) (044-diagnostics-taxonomy)
+- No new persistent storage. Diagnostic state lives on in-memory stateview snapshot. Fix-attempt audit rows reuse existing activity log (`ActivityBucket` in BBolt). Telemetry counters are in-memory only (consistent with spec 042). (044-diagnostics-taxonomy)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

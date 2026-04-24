@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mcpproxy.app/schemas/diagnostics-catalog-entry.json",
+  "title": "CatalogEntry",
+  "description": "A single entry in the diagnostics error-code catalog. Used by `doctor list-codes --json` output and docs tooling.",
+  "type": "object",
+  "required": ["code", "severity", "user_message", "fix_steps", "docs_url"],
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "type": "string",
+      "pattern": "^MCPX_(OAUTH|STDIO|HTTP|DOCKER|CONFIG|QUARANTINE|NETWORK|UNKNOWN)_[A-Z0-9_]+$"
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["info", "warn", "error"]
+    },
+    "user_message": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fix_steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["type", "label"],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["link", "command", "button"]
+          },
+          "label": { "type": "string", "minLength": 1 },
+          "command": { "type": "string" },
+          "url": { "type": "string", "format": "uri-reference" },
+          "fixer_key": { "type": "string" },
+          "destructive": { "type": "boolean", "default": false }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "type": { "const": "link" } } },
+            "then": { "required": ["url"] }
+          },
+          {
+            "if": { "properties": { "type": { "const": "command" } } },
+            "then": { "required": ["command"] }
+          },
+          {
+            "if": { "properties": { "type": { "const": "button" } } },
+            "then": { "required": ["fixer_key"] }
+          }
+        ]
+      }
+    },
+    "docs_url": {
+      "type": "string",
+      "pattern": "^(docs/errors/MCPX_[A-Z0-9_]+\\.md|https?://.+)$"
+    },
+    "deprecated": { "type": "boolean" },
+    "replaced_by": {
+      "type": "string",
+      "pattern": "^MCPX_[A-Z]+_[A-Z0-9_]+$"
+    }
+  }
+}

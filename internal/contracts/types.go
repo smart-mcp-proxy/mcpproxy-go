@@ -50,6 +50,34 @@ type Server struct {
 	Quarantine        *QuarantineStats     `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
 	ReconnectOnUse    bool                 `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
 	SecurityScan      *SecurityScanSummary `json:"security_scan,omitempty"`    // Latest security scan results summary
+	// Spec 044 — structured diagnostic error and stable error code. Both
+	// are populated when the server is in a failed state and the error
+	// has been classified by internal/diagnostics. Healthy servers omit
+	// these fields.
+	Diagnostic *Diagnostic `json:"diagnostic,omitempty"`
+	ErrorCode  string      `json:"error_code,omitempty"`
+}
+
+// Diagnostic is the REST-API representation of a classified server failure.
+// It is additive: clients that pre-date spec 044 simply ignore it.
+type Diagnostic struct {
+	Code        string              `json:"code"`
+	Severity    string              `json:"severity"`
+	Cause       string              `json:"cause,omitempty"`
+	DetectedAt  *time.Time          `json:"detected_at,omitempty"`
+	UserMessage string              `json:"user_message,omitempty"`
+	FixSteps    []DiagnosticFixStep `json:"fix_steps,omitempty"`
+	DocsURL     string              `json:"docs_url,omitempty"`
+}
+
+// DiagnosticFixStep mirrors internal/diagnostics.FixStep for the REST API.
+type DiagnosticFixStep struct {
+	Type        string `json:"type"`
+	Label       string `json:"label"`
+	Command     string `json:"command,omitempty"`
+	URL         string `json:"url,omitempty"`
+	FixerKey    string `json:"fixer_key,omitempty"`
+	Destructive bool   `json:"destructive,omitempty"`
 }
 
 // SecurityScanSummary provides a compact scan status for the server list view.

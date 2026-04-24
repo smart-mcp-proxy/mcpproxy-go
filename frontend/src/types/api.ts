@@ -141,6 +141,40 @@ export interface Server {
   health?: HealthStatus // Unified health status calculated by the backend
   quarantine?: QuarantineStats // Tool-level quarantine stats (Spec 032)
   security_scan?: SecurityScanSummary // Security scan summary (Spec 039)
+  // Spec 044: structured diagnostic error + stable error code
+  error_code?: string
+  diagnostic?: Diagnostic | null
+}
+
+// Spec 044 — diagnostics & error taxonomy types.
+export type DiagnosticSeverity = 'info' | 'warn' | 'error'
+export type DiagnosticFixStepType = 'link' | 'command' | 'button'
+
+export interface DiagnosticFixStep {
+  type: DiagnosticFixStepType
+  label: string
+  command?: string
+  url?: string
+  fixer_key?: string
+  destructive?: boolean
+}
+
+export interface Diagnostic {
+  code: string
+  severity: DiagnosticSeverity
+  cause?: string
+  detected_at?: string
+  user_message?: string
+  fix_steps?: DiagnosticFixStep[]
+  docs_url?: string
+}
+
+export interface DiagnosticFixResponse {
+  outcome: 'success' | 'failed' | 'blocked'
+  duration_ms: number
+  mode: 'dry_run' | 'execute'
+  preview?: string
+  failure_msg?: string
 }
 
 // Tool Annotation types
