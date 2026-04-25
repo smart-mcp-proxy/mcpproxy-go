@@ -15,29 +15,33 @@ type APIResponse struct {
 
 // Server represents an upstream MCP server configuration and status
 type Server struct {
-	ID                string               `json:"id"`
-	Name              string               `json:"name"`
-	URL               string               `json:"url,omitempty"`
-	Protocol          string               `json:"protocol"`
-	Command           string               `json:"command,omitempty"`
-	Args              []string             `json:"args,omitempty"`
-	WorkingDir        string               `json:"working_dir,omitempty"`
-	Env               map[string]string    `json:"env,omitempty"`
-	Headers           map[string]string    `json:"headers,omitempty"`
-	OAuth             *OAuthConfig         `json:"oauth,omitempty"`
-	Enabled           bool                 `json:"enabled"`
-	Quarantined       bool                 `json:"quarantined"`
-	Connected         bool                 `json:"connected"`
-	Connecting        bool                 `json:"connecting"`
-	Status            string               `json:"status"`
-	LastError         string               `json:"last_error,omitempty"`
-	ConnectedAt       *time.Time           `json:"connected_at,omitempty"`
-	LastReconnectAt   *time.Time           `json:"last_reconnect_at,omitempty"`
-	ReconnectCount    int                  `json:"reconnect_count"`
-	ToolCount         int                  `json:"tool_count"`
-	Created           time.Time            `json:"created"`
-	Updated           time.Time            `json:"updated"`
-	Isolation         *IsolationConfig     `json:"isolation,omitempty"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	URL             string            `json:"url,omitempty"`
+	Protocol        string            `json:"protocol"`
+	Command         string            `json:"command,omitempty"`
+	Args            []string          `json:"args,omitempty"`
+	WorkingDir      string            `json:"working_dir,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	OAuth           *OAuthConfig      `json:"oauth,omitempty"`
+	Enabled         bool              `json:"enabled"`
+	Quarantined     bool              `json:"quarantined"`
+	Connected       bool              `json:"connected"`
+	Connecting      bool              `json:"connecting"`
+	Status          string            `json:"status"`
+	LastError       string            `json:"last_error,omitempty"`
+	ConnectedAt     *time.Time        `json:"connected_at,omitempty"`
+	LastReconnectAt *time.Time        `json:"last_reconnect_at,omitempty"`
+	ReconnectCount  int               `json:"reconnect_count"`
+	ToolCount       int               `json:"tool_count"`
+	Created         time.Time         `json:"created"`
+	Updated         time.Time         `json:"updated"`
+	Isolation       *IsolationConfig  `json:"isolation,omitempty"`
+	// IsolationDefaults exposes the resolved baseline values that
+	// would apply when no per-server override is set. Populated on
+	// list/get responses; never consumed on PATCH requests.
+	IsolationDefaults *IsolationDefaults   `json:"isolation_defaults,omitempty"`
 	Authenticated     bool                 `json:"authenticated"`                  // OAuth authentication status
 	OAuthStatus       string               `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
 	TokenExpiresAt    *time.Time           `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
@@ -128,6 +132,26 @@ type IsolationConfig struct {
 	CPULimit    string   `json:"cpu_limit,omitempty"`
 	WorkingDir  string   `json:"working_dir,omitempty"`
 	Timeout     string   `json:"timeout,omitempty"`
+}
+
+// IsolationDefaults reports the resolved baseline Docker isolation
+// settings for a server's detected runtime. UI clients (web UI, macOS
+// tray) use this to render meaningful placeholders for the override
+// fields — e.g. when a Python/uvx server has no Image override, the
+// placeholder shows the actual image (`ghcr.io/astral-sh/uv:python3.13-...`)
+// that will be used. This makes the "empty = inherit" semantic
+// discoverable instead of mysterious.
+//
+// All fields are read-only outputs; clients must not echo them back on
+// PATCH requests. They are computed from the global DockerIsolationConfig
+// + the server's command (via runtime detection) on every server-list
+// response.
+type IsolationDefaults struct {
+	RuntimeType string   `json:"runtime_type,omitempty"`
+	Image       string   `json:"image,omitempty"`
+	NetworkMode string   `json:"network_mode,omitempty"`
+	ExtraArgs   []string `json:"extra_args,omitempty"`
+	WorkingDir  string   `json:"working_dir,omitempty"`
 }
 
 // ToolAnnotation represents MCP tool behavior hints

@@ -251,6 +251,27 @@ struct IsolationConfigStatus: Codable, Equatable {
     }
 }
 
+/// Resolved baseline isolation values for a server's detected runtime,
+/// computed by the backend from the global DockerIsolationConfig + the
+/// server's command. The tray uses these as field placeholders so the
+/// user can see exactly what an empty/cleared override resolves to.
+/// Mirrors `contracts.IsolationDefaults` on the Go side.
+struct IsolationDefaultsStatus: Codable, Equatable {
+    let runtimeType: String?
+    let image: String?
+    let networkMode: String?
+    let extraArgs: [String]?
+    let workingDir: String?
+
+    enum CodingKeys: String, CodingKey {
+        case runtimeType = "runtime_type"
+        case image
+        case networkMode = "network_mode"
+        case extraArgs = "extra_args"
+        case workingDir = "working_dir"
+    }
+}
+
 /// Represents an upstream MCP server's configuration and runtime status.
 /// Matches the Go `contracts.Server` struct serialized by `/api/v1/servers`.
 struct ServerStatus: Codable, Identifiable, Equatable {
@@ -279,6 +300,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let health: HealthStatus?
     let quarantine: QuarantineStats?
     let isolation: IsolationConfigStatus?
+    let isolationDefaults: IsolationDefaultsStatus?
     let error: String?
     /// Spec 044 — stable error code (e.g. MCPX_STDIO_SPAWN_ENOENT) and the
     /// structured diagnostic payload. Present only when the server has an
@@ -305,6 +327,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         case health
         case quarantine
         case isolation
+        case isolationDefaults = "isolation_defaults"
         case error
         case errorCode = "error_code"
         case diagnostic
