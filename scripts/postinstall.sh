@@ -77,40 +77,26 @@ if [ -n "$USER" ] && [ "$USER" != "root" ]; then
     fi
 fi
 
-# 4. Create LaunchAgent for auto-start (optional)
-LAUNCH_AGENT_DIR="/Library/LaunchAgents"
-LAUNCH_AGENT_FILE="$LAUNCH_AGENT_DIR/com.smartmcpproxy.mcpproxy.plist"
-
-mkdir -p "$LAUNCH_AGENT_DIR"
-
-# Create LaunchAgent plist file
-cat > "$LAUNCH_AGENT_FILE" << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.smartmcpproxy.mcpproxy</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>open</string>
-        <string>-a</string>
-        <string>/Applications/mcpproxy.app</string>
-    </array>
-    <key>RunAtLoad</key>
-    <false/>
-    <key>KeepAlive</key>
-    <false/>
-    <key>StandardOutPath</key>
-    <string>/tmp/mcpproxy.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/mcpproxy.error</string>
-</dict>
-</plist>
-EOF
-
-chmod 644 "$LAUNCH_AGENT_FILE"
-log "✅ LaunchAgent installed (disabled by default)"
+# 4. Auto-start configuration
+#
+# Auto-start (Launch at Login) is now managed by the macOS tray app via
+# `SMAppService.mainApp` (see native/macos/MCPProxy/MCPProxy/Services/AutoStartService.swift).
+# Users opt in via the first-run dialog or the tray menu's "Launch at Login"
+# toggle — this is the per-user, sandbox-friendly mechanism Apple recommends
+# for GUI tray apps on macOS 13+.
+#
+# Earlier installer versions wrote a system LaunchAgent at
+# /Library/LaunchAgents/com.smartmcpproxy.mcpproxy.plist that was labeled
+# "auto-start" but had RunAtLoad=false and KeepAlive=false (issue #405),
+# so it never actually started anything. Clean it up if present so users
+# upgrading from those builds don't have a stale, misleading plist on disk.
+LEGACY_LAUNCH_AGENT="/Library/LaunchAgents/com.smartmcpproxy.mcpproxy.plist"
+if [ -f "$LEGACY_LAUNCH_AGENT" ]; then
+    log "Removing legacy LaunchAgent left by older installer: $LEGACY_LAUNCH_AGENT"
+    launchctl unload -w "$LEGACY_LAUNCH_AGENT" 2>/dev/null || true
+    rm -f "$LEGACY_LAUNCH_AGENT"
+    log "✅ Legacy LaunchAgent removed (auto-start is now via the tray app's Launch-at-Login toggle)"
+fi
 
 # 5. Linux systemd service (if on Linux)
 if command -v systemctl >/dev/null 2>&1; then
