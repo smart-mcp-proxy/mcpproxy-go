@@ -329,6 +329,10 @@ actor CoreProcessManager {
         env.removeValue(forKey: "MCPPROXY_API_KEY")
         // Enable socket communication
         env["MCPPROXY_SOCKET"] = "true"
+        // Tray-launched core is allowed to write to macOS Keychain — user
+        // explicitly opened the GUI app, so OS prompts are expected.
+        // See issue #409 / internal/secret/keyring_provider.go.
+        env["MCPPROXY_KEYRING_WRITE"] = "1"
         proc.environment = env
 
         // Capture stderr for error diagnostics
