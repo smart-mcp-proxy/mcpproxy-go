@@ -287,6 +287,75 @@ func (im *IsolationManager) GetDockerImage(serverConfig *config.ServerConfig, ru
 	return im.buildFullImageName("alpine:3.18"), nil
 }
 
+// ResolvedIsolationDefaults captures the per-runtime default values that
+// would be used for a server when no per-server overrides are set. It is
+// used by the REST API to expose contextual placeholders to UI clients
+// (notably the macOS tray) so users can see exactly what an "empty"
+// override field will resolve to before deciding whether to override it.
+type ResolvedIsolationDefaults struct {
+	// RuntimeType is the runtime detected from the server command (e.g.
+	// "uvx", "npx", "python"). Useful for diagnostic display.
+	RuntimeType string
+
+	// Image is the fully-qualified Docker image that would be used,
+	// already including registry prefixes via buildFullImageName.
+	Image string
+
+	// NetworkMode is the network mode that would be used (typically
+	// inherited from the global DockerIsolationConfig).
+	NetworkMode string
+
+	// ExtraArgs is the global extra args list that the server would
+	// inherit. Per-server extra_args are appended on top, so this
+	// communicates the baseline.
+	ExtraArgs []string
+
+	// ContainerWorkingDir is the working directory that would be used
+	// inside the container. Empty when the global config does not
+	// specify one (Docker default applies).
+	ContainerWorkingDir string
+}
+
+// ResolveDefaults returns the resolved default isolation values for the
+// given server, computed from the detected runtime type and global
+// DockerIsolationConfig — without applying any per-server overrides.
+//
+// This intentionally does NOT short-circuit when isolation is disabled
+// for the server: the result describes what would be used if isolation
+// were active, which is what UI placeholders need to surface.
+//
+// Returns nil if the global config is missing (degenerate state).
+func (im *IsolationManager) ResolveDefaults(serverConfig *config.ServerConfig) *ResolvedIsolationDefaults {
+	if im == nil || im.globalConfig == nil || serverConfig == nil {
+		return nil
+	}
+
+	runtimeType := im.DetectRuntimeType(serverConfig.Command)
+
+	// Compute the default image without consulting per-server overrides.
+	// We deliberately avoid calling GetDockerImage(serverConfig, ...)
+	// because that prefers the override; here we want the *baseline*.
+	var image string
+	if img, exists := im.globalConfig.DefaultImages[runtimeType]; exists {
+		image = im.buildFullImageName(img)
+	} else {
+		image = im.buildFullImageName("alpine:3.18")
+	}
+
+	defaults := &ResolvedIsolationDefaults{
+		RuntimeType:         runtimeType,
+		Image:               image,
+		NetworkMode:         im.globalConfig.NetworkMode,
+		ContainerWorkingDir: "", // No global default for working dir
+	}
+
+	if len(im.globalConfig.ExtraArgs) > 0 {
+		defaults.ExtraArgs = append([]string(nil), im.globalConfig.ExtraArgs...)
+	}
+
+	return defaults
+}
+
 // buildFullImageName constructs the full image name with registry if needed
 func (im *IsolationManager) buildFullImageName(image string) string {
 	// If image already contains a registry (has a slash before the first colon), use as-is

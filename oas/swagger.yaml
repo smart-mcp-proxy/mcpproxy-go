@@ -1081,6 +1081,26 @@ components:
         working_dir:
           type: string
       type: object
+    contracts.IsolationDefaults:
+      description: |-
+        IsolationDefaults exposes the resolved baseline values that
+        would apply when no per-server override is set. Populated on
+        list/get responses; never consumed on PATCH requests.
+      properties:
+        extra_args:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        image:
+          type: string
+        network_mode:
+          type: string
+        runtime_type:
+          type: string
+        working_dir:
+          type: string
+      type: object
     contracts.LogEntry:
       properties:
         fields:
@@ -1468,6 +1488,8 @@ components:
           type: string
         isolation:
           $ref: '#/components/schemas/contracts.IsolationConfig'
+        isolation_defaults:
+          $ref: '#/components/schemas/contracts.IsolationDefaults'
         last_error:
           type: string
         last_reconnect_at:

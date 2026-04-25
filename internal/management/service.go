@@ -305,6 +305,26 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			}
 			srv.Isolation = iso
 		}
+
+		// Populate resolved isolation defaults so UI clients (macOS tray,
+		// web UI) can render meaningful placeholders for the override
+		// fields. Only meaningful for stdio servers — HTTP servers don't
+		// run in containers. We compute this regardless of whether the
+		// server is currently isolated; the UI uses it as a hint.
+		if srv.Protocol == "stdio" && srv.Command != "" && s.config != nil && s.config.DockerIsolation != nil {
+			im := core.NewIsolationManager(s.config.DockerIsolation)
+			tmpCfg := &config.ServerConfig{Name: srv.Name, Command: srv.Command}
+			if defaults := im.ResolveDefaults(tmpCfg); defaults != nil {
+				srv.IsolationDefaults = &contracts.IsolationDefaults{
+					RuntimeType: defaults.RuntimeType,
+					Image:       defaults.Image,
+					NetworkMode: defaults.NetworkMode,
+					ExtraArgs:   defaults.ExtraArgs,
+					WorkingDir:  defaults.ContainerWorkingDir,
+				}
+			}
+		}
+
 		if authenticated, ok := srvRaw["authenticated"].(bool); ok {
 			srv.Authenticated = authenticated
 		}

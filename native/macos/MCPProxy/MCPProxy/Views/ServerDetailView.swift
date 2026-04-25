@@ -580,26 +580,50 @@ struct ServerDetailView: View {
                     if server.protocol == "stdio" {
                         configSection(title: "Docker Isolation Overrides") {
                             if isEditing {
-                                configEditRow(
+                                let defaults = server.isolationDefaults
+                                let imagePlaceholder = isolationPlaceholder(
+                                    for: defaults?.image,
+                                    fallback: "Default image (resolved from runtime)"
+                                )
+                                let networkPlaceholder = isolationPlaceholder(
+                                    for: defaults?.networkMode,
+                                    fallback: "bridge | none | host"
+                                )
+                                let extraArgsPlaceholder: String = {
+                                    if let extra = defaults?.extraArgs, !extra.isEmpty {
+                                        return "Default: \(extra.joined(separator: " "))"
+                                    }
+                                    return "-v\n/Users/you/data:/data:rw"
+                                }()
+                                let workdirPlaceholder = isolationPlaceholder(
+                                    for: defaults?.workingDir,
+                                    fallback: "/vault (Docker default applies when empty)"
+                                )
+
+                                isolationOverrideRow(
                                     label: "Image",
                                     text: $editIsolationImage,
-                                    placeholder: "python:3.11 (defaults from runtime detection)"
+                                    placeholder: imagePlaceholder,
+                                    defaultValue: defaults?.image
                                 )
-                                configEditRow(
+                                isolationOverrideRow(
                                     label: "Network Mode",
                                     text: $editIsolationNetworkMode,
-                                    placeholder: "bridge | none | host"
+                                    placeholder: networkPlaceholder,
+                                    defaultValue: defaults?.networkMode
                                 )
-                                configEditRow(
+                                isolationOverrideRow(
                                     label: "Extra docker args (one per line)",
                                     text: $editIsolationExtraArgs,
-                                    placeholder: "-v\n/Users/you/data:/data:rw",
+                                    placeholder: extraArgsPlaceholder,
+                                    defaultValue: (defaults?.extraArgs ?? []).joined(separator: " "),
                                     multiline: true
                                 )
-                                configEditRow(
+                                isolationOverrideRow(
                                     label: "Container Working Dir",
                                     text: $editIsolationWorkingDir,
-                                    placeholder: "/vault"
+                                    placeholder: workdirPlaceholder,
+                                    defaultValue: defaults?.workingDir
                                 )
                             } else if let iso = server.isolation {
                                 if let img = iso.image, !img.isEmpty {
@@ -705,6 +729,85 @@ struct ServerDetailView: View {
                     .textFieldStyle(.roundedBorder)
             }
             Spacer()
+        }
+    }
+
+    /// Format a placeholder string for an isolation override field. When
+    /// the backend reports a resolved default we surface it explicitly so
+    /// the user knows what an empty field will resolve to.
+    private func isolationPlaceholder(for value: String?, fallback: String) -> String {
+        if let v = value, !v.isEmpty {
+            return "Default: \(v)"
+        }
+        return fallback
+    }
+
+    /// Renders one Docker isolation override field with a per-field clear
+    /// button and a "(using default)" caption. Each field is independently
+    /// clearable: tapping the clear button blanks the local edit binding,
+    /// and on Save the empty string is sent to the backend, which clears
+    /// the override under the existing PATCH semantics.
+    @ViewBuilder
+    private func isolationOverrideRow(
+        label: String,
+        text: Binding<String>,
+        placeholder: String,
+        defaultValue: String?,
+        multiline: Bool = false
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .top) {
+                Text(label)
+                    .font(.scaled(.subheadline, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 140, alignment: .trailing)
+                if multiline {
+                    ZStack(alignment: .topTrailing) {
+                        TextEditor(text: text)
+                            .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                            .frame(height: 60)
+                            .border(Color(nsColor: .separatorColor), width: 1)
+                        if !text.wrappedValue.isEmpty {
+                            Button(action: { text.wrappedValue = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear override (use default)")
+                            .padding(4)
+                        }
+                    }
+                } else {
+                    HStack(spacing: 4) {
+                        TextField(placeholder, text: text)
+                            .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                            .textFieldStyle(.roundedBorder)
+                        if !text.wrappedValue.isEmpty {
+                            Button(action: { text.wrappedValue = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Clear override (use default)")
+                        }
+                    }
+                }
+                Spacer()
+            }
+            // Caption beneath the field communicates which resolved default
+            // would apply when the field is empty. Subtle but discoverable.
+            if text.wrappedValue.isEmpty {
+                let caption: String = {
+                    if let d = defaultValue, !d.isEmpty {
+                        return "Using default: \(d)"
+                    }
+                    return "Using default (no override set)"
+                }()
+                Text(caption)
+                    .font(.scaled(.caption2, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 148)
+            }
         }
     }
 
