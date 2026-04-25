@@ -116,6 +116,15 @@ type Config struct {
 	CodeExecutionMaxToolCalls int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
 	CodeExecutionPoolSize     int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`           // JavaScript runtime pool size (default: 10)
 
+	// ToolResponseSessionRiskWarning controls whether the prose `warning` field
+	// is included in the `session_risk` object returned by `retrieve_tools`.
+	// The structured fields (level, lethal_trifecta, has_open_world_tools, etc.)
+	// are always included. Default: false (quiet for LLM clients) — see issue #406.
+	// Most tools lack annotations, so the MCP-spec defaults treat them as fully
+	// permissive across all three risk axes, which makes the prose warning fire
+	// on almost every call and wastes tokens.
+	ToolResponseSessionRiskWarning bool `json:"tool_response_session_risk_warning,omitempty" mapstructure:"tool-response-session-risk-warning"`
+
 	// Health status settings
 	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
 
@@ -732,6 +741,11 @@ func DefaultConfig() *Config {
 		CodeExecutionTimeoutMs:    120000, // 2 minutes (120,000ms)
 		CodeExecutionMaxToolCalls: 0,      // Unlimited by default (0 = no limit)
 		CodeExecutionPoolSize:     10,     // 10 JavaScript runtime instances
+
+		// Session risk warning prose disabled by default to reduce token overhead
+		// and LLM distraction in trusted setups (issue #406). Structured risk
+		// fields are still emitted; only the prose `warning` is gated.
+		ToolResponseSessionRiskWarning: false,
 
 		// Activity logging defaults (RFC-003)
 		ActivityRetentionDays:      90,     // 90 days retention

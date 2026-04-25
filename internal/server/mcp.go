@@ -491,6 +491,9 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithString("explain_tool",
 			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
 		),
+		mcp.WithBoolean("include_session_risk_warning",
+			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
+		),
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
@@ -1167,21 +1170,25 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// Spec 035 F2: Session risk analysis — analyze all connected servers' tool annotations
 	// to detect the "lethal trifecta" risk combination.
+	//
+	// The structured fields (level, lethal_trifecta, has_*) are always returned.
+	// The prose `warning` string is opt-in (issue #406): include it only when
+	// `tool_response_session_risk_warning` is true in config OR when the caller
+	// explicitly opts in via the `include_session_risk_warning` argument. This
+	// avoids burning tokens and distracting LLMs on every call in trusted setups,
+	// since most tools lack annotations and trigger the trifecta by default.
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if sup := p.mainServer.runtime.Supervisor(); sup != nil {
 			snapshot := sup.StateView().Snapshot()
 			risk := analyzeSessionRisk(snapshot)
-			sessionRisk := map[string]interface{}{
-				"level":                 risk.Level,
-				"has_open_world_tools":  risk.HasOpenWorld,
-				"has_destructive_tools": risk.HasDestructive,
-				"has_write_tools":       risk.HasWrite,
-				"lethal_trifecta":       risk.LethalTrifecta,
+			includeWarning := false
+			if p.config != nil && p.config.ToolResponseSessionRiskWarning {
+				includeWarning = true
 			}
-			if risk.Warning != "" {
-				sessionRisk["warning"] = risk.Warning
+			if request.GetBool("include_session_risk_warning", false) {
+				includeWarning = true
 			}
-			response["session_risk"] = sessionRisk
+			response["session_risk"] = buildSessionRiskResponse(risk, includeWarning)
 		}
 	}
 
