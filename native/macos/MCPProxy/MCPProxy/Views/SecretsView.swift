@@ -351,7 +351,7 @@ struct SecretsView: View {
                     .accessibilityIdentifier("secrets-success-copy")
                 }
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button {
                 successBannerTask?.cancel()
                 lastStoredReference = nil
@@ -383,9 +383,10 @@ struct SecretsView: View {
                 Text("This list shows secrets that are referenced from a server config (\u{0024}{keyring:NAME}). Adding a secret here stores its value — to make a server use it, also add the reference to that server's env block.")
                     .font(.scaled(.caption, scale: fontScale))
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(nil)
+                    .multilineTextAlignment(.leading)
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button {
                 showConfigFirstHint = false
             } label: {
