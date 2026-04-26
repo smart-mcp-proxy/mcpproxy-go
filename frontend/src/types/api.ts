@@ -117,10 +117,35 @@ export interface SecurityScanReportSummary {
 }
 
 // Server types
+export interface ServerIsolationConfig {
+  enabled: boolean
+  image?: string
+  network_mode?: string
+  extra_args?: string[]
+  memory_limit?: string
+  cpu_limit?: string
+  working_dir?: string
+  timeout?: string
+}
+
+// IsolationDefaults reports the resolved baseline Docker isolation
+// values the backend will apply when no per-server override is set.
+// Used as placeholders so "empty = inherit" is discoverable in the UI.
+export interface ServerIsolationDefaults {
+  runtime_type?: string
+  image?: string
+  network_mode?: string
+  extra_args?: string[]
+  working_dir?: string
+}
+
 export interface Server {
   name: string
   url?: string
   command?: string
+  args?: string[]
+  working_dir?: string
+  env?: Record<string, string>
   protocol: 'http' | 'stdio' | 'streamable-http'
   enabled: boolean
   quarantined: boolean
@@ -130,6 +155,11 @@ export interface Server {
   tool_count: number
   last_error?: string
   tool_list_token_size?: number
+  connected_at?: string // ISO 8601 timestamp of last successful connect
+  last_reconnect_at?: string // ISO 8601 timestamp of last reconnect attempt
+  reconnect_count?: number
+  isolation?: ServerIsolationConfig // Per-server Docker isolation override
+  isolation_defaults?: ServerIsolationDefaults // Resolved baseline values (read-only)
   oauth?: {
     client_id: string
     auth_url: string
