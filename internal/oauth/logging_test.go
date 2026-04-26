@@ -104,6 +104,58 @@ func TestRedactHeaders(t *testing.T) {
 	})
 }
 
+func TestRedactStringHeaders(t *testing.T) {
+	t.Run("redacts a bearer authorization", func(t *testing.T) {
+		headers := map[string]string{
+			"Authorization":  "Bearer fake-test-token-not-a-real-secret",
+			"X-MCP-Toolsets": "pull_requests",
+		}
+		got := RedactStringHeaders(headers)
+		assert.Equal(t, "***REDACTED***", got["Authorization"])
+		assert.Equal(t, "pull_requests", got["X-MCP-Toolsets"])
+	})
+
+	t.Run("redacts x-api-key", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{"X-Api-Key": "secret"})
+		assert.Equal(t, "***REDACTED***", got["X-Api-Key"])
+	})
+
+	t.Run("redacts cookie and set-cookie", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{
+			"Cookie":     "session=abc",
+			"Set-Cookie": "session=abc; Path=/",
+		})
+		assert.Equal(t, "***REDACTED***", got["Cookie"])
+		assert.Equal(t, "***REDACTED***", got["Set-Cookie"])
+	})
+
+	t.Run("preserves non-sensitive headers", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{"Content-Type": "application/json"})
+		assert.Equal(t, "application/json", got["Content-Type"])
+	})
+
+	t.Run("case insensitive header matching", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{"AUTHORIZATION": "Bearer x"})
+		assert.Equal(t, "***REDACTED***", got["AUTHORIZATION"])
+	})
+
+	t.Run("nil input returns nil", func(t *testing.T) {
+		assert.Nil(t, RedactStringHeaders(nil))
+	})
+
+	t.Run("empty input returns empty map", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{})
+		assert.NotNil(t, got)
+		assert.Empty(t, got)
+	})
+
+	t.Run("does not mutate input", func(t *testing.T) {
+		input := map[string]string{"Authorization": "Bearer secret"}
+		_ = RedactStringHeaders(input)
+		assert.Equal(t, "Bearer secret", input["Authorization"], "input should be unchanged")
+	})
+}
+
 func TestRedactURL(t *testing.T) {
 	t.Run("redacts access_token in URL", func(t *testing.T) {
 		url := "https://example.com/callback?access_token=secret123&state=xyz"
