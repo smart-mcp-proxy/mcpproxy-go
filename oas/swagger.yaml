@@ -123,16 +123,6 @@ components:
           $ref: '#/components/schemas/config.TokenizerConfig'
         tool_response_limit:
           type: integer
-        tool_response_session_risk_warning:
-          description: |-
-            ToolResponseSessionRiskWarning controls whether the prose `warning` field
-            is included in the `session_risk` object returned by `retrieve_tools`.
-            The structured fields (level, lethal_trifecta, has_open_world_tools, etc.)
-            are always included. Default: false (quiet for LLM clients) — see issue #406.
-            Most tools lack annotations, so the MCP-spec defaults treat them as fully
-            permissive across all three risk axes, which makes the prose warning fire
-            on almost every call and wastes tokens.
-          type: boolean
         tools_limit:
           type: integer
         top_k:
