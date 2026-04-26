@@ -79,9 +79,11 @@ jobs:
         id: generate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Pass via env to avoid shell injection from commit messages containing
+          # quotes, backticks, or other shell metacharacters (see release run 24950486759).
+          VERSION: ${{ github.ref_name }}
+          COMMITS: ${{ steps.commits.outputs.commits }}
         run: |
-          VERSION="${{ github.ref_name }}"
-          COMMITS="${{ steps.commits.outputs.commits }}"
 
           # Check if API key is configured
           if [ -z "$ANTHROPIC_API_KEY" ]; then
