@@ -133,9 +133,51 @@ echo "📖 Get started: mcpproxy --help"
 # activation bucket, so a crash between install and heartbeat is recovered
 # from on next startup. See packaging/macos/postinstall.sh for the standalone
 # version of this step.
+#
+# Critical: launch via `launchctl asuser <uid> env -i …` so the tray app
+# (and its core child) start in the user's GUI bootstrap context with a
+# clean env. A bare `open -a` from a postinstall script propagates the
+# PKInstallSandbox env (minimal PATH, SHELL=/bin/sh, INSTALLER_*) into the
+# long-running daemon — which broke Docker discovery in mcpproxy core. The
+# clean-env launch mimics what users get when they double-click from Finder.
+APP_BUNDLE=""
 if [ -d "/Applications/MCPProxy.app" ]; then
-    log "Launching MCPProxy tray tagged as installer-launched"
-    open -a "/Applications/MCPProxy.app" --env MCPPROXY_LAUNCHED_BY=installer || true
+    APP_BUNDLE="/Applications/MCPProxy.app"
+elif [ -d "/Applications/mcpproxy.app" ]; then
+    # Some build paths produce the lowercase-named bundle.
+    APP_BUNDLE="/Applications/mcpproxy.app"
+fi
+
+if [ -n "$APP_BUNDLE" ]; then
+    log "Launching mcpproxy tray (installer-tagged) with clean env: $APP_BUNDLE"
+
+    REAL_USER="${USER:-}"
+    if [ -z "$REAL_USER" ] || [ "$REAL_USER" = "root" ]; then
+        REAL_USER=$(stat -f%Su /dev/console 2>/dev/null || echo "")
+    fi
+    REAL_UID=""
+    USER_HOME=""
+    if [ -n "$REAL_USER" ]; then
+        REAL_UID=$(id -u "$REAL_USER" 2>/dev/null || echo "")
+        USER_HOME=$(/usr/bin/dscl . -read "/Users/$REAL_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+        [ -z "$USER_HOME" ] && USER_HOME=$(eval echo "~$REAL_USER")
+    fi
+
+    SANE_PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+    if [ -n "$REAL_UID" ] && [ "$REAL_UID" != "0" ]; then
+        /bin/launchctl asuser "$REAL_UID" /usr/bin/env -i \
+            HOME="$USER_HOME" \
+            USER="$REAL_USER" \
+            LOGNAME="$REAL_USER" \
+            PATH="$SANE_PATH" \
+            /usr/bin/open -a "$APP_BUNDLE" --env MCPPROXY_LAUNCHED_BY=installer || true
+    else
+        /usr/bin/env -i \
+            HOME="${USER_HOME:-/var/empty}" \
+            PATH="$SANE_PATH" \
+            /usr/bin/open -a "$APP_BUNDLE" --env MCPPROXY_LAUNCHED_BY=installer || true
+    fi
 fi
 
 exit 0
