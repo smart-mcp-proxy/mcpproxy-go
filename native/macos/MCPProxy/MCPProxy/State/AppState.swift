@@ -46,6 +46,13 @@ final class AppState: ObservableObject {
     @Published var totalServers: Int = 0
     @Published var totalTools: Int = 0
 
+    /// Set to true once the tray has received its first response from
+    /// `/api/v1/servers`. Used by `statusSummary` to distinguish "haven't
+    /// fetched yet" from "fetched and the list is genuinely empty", so the
+    /// menu shows "Loading…" instead of misleading "No servers configured"
+    /// during the cold-start window after the core becomes reachable.
+    @Published var serversLoaded: Bool = false
+
     // MARK: Activity & security (ActivityEntry from Models.swift)
 
     @Published var recentActivity: [ActivityEntry] = []
@@ -165,6 +172,9 @@ final class AppState: ObservableObject {
         if isStopped { return "Stopped" }
         switch coreState {
         case .connected:
+            if !serversLoaded {
+                return "Loading…"
+            }
             if totalServers == 0 {
                 return "No servers configured"
             }
@@ -195,6 +205,7 @@ final class AppState: ObservableObject {
         if connectedCount != newConnected { connectedCount = newConnected }
         if totalTools != newTools { totalTools = newTools }
         if quarantinedToolsCount != newQuarantined { quarantinedToolsCount = newQuarantined }
+        if !serversLoaded { serversLoaded = true }
     }
 
     /// Replace the recent activity list.
