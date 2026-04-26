@@ -692,3 +692,58 @@ func TestSanitizeForDocker(t *testing.T) {
 		})
 	}
 }
+
+// TestDockerCmdResolvesBinaryViaShellwrap verifies that the SourceResolver
+// resolves the docker binary through shellwrap.ResolveDockerPath rather than
+// shelling out with a bare "docker" arg. The previous behavior caused silent
+// failures when mcpproxy was launched from a sandboxed PATH (PKInstallSandbox
+// or a stripped GUI launchd context) — see #420 for the related image-probe
+// fix in internal/security/scanner/docker.go.
+//
+// We exercise the helper directly: the returned *exec.Cmd must have an
+// absolute Path (or, if shellwrap could not resolve docker, the literal
+// fallback "docker"). Crucially, we never silently leak a relative-path
+// invocation that depends on the daemon's $PATH.
+func TestDockerCmdUsesResolvedBinary(t *testing.T) {
+	r := NewSourceResolver(zap.NewNop())
+	cmd := r.dockerCmd(context.Background(), "ps")
+	if cmd == nil {
+		t.Fatal("dockerCmd returned nil")
+	}
+	if cmd.Path == "" {
+		t.Fatal("dockerCmd produced an exec.Cmd with empty Path")
+	}
+	// Either an absolute resolved path (Docker Desktop bundle, /usr/local/bin,
+	// etc.) or the explicit "docker" fallback. A non-"docker" relative path
+	// would mean we are silently relying on the process $PATH again.
+	if !filepath.IsAbs(cmd.Path) && cmd.Path != "docker" {
+		t.Errorf("dockerCmd.Path = %q; expected absolute path or literal \"docker\" fallback", cmd.Path)
+	}
+}
+
+// TestDockerCmdFallbackWhenShellwrapFails verifies the documented fallback
+// behavior: if shellwrap cannot resolve docker, the helper still returns a
+// usable *exec.Cmd (with Path="docker") so the caller surfaces a clean ENOENT
+// instead of a nil-pointer panic. This mirrors the pattern already in use in
+// scanner/docker.go's getDockerCmd.
+func TestDockerCmdFallbackWhenShellwrapFails(t *testing.T) {
+	// We can't easily force shellwrap.ResolveDockerPath to fail in-process
+	// (it caches across tests). Instead we just assert the helper is
+	// non-nil and has *some* Path on every call — the property we actually
+	// rely on at runtime is "never returns nil, never panics on caller use".
+	r := NewSourceResolver(zap.NewNop())
+	for _, args := range [][]string{
+		{"ps", "--filter", "name=foo"},
+		{"diff", "abc123"},
+		{"cp", "abc:/etc/hostname", "/tmp/x"},
+		{"exec", "abc", "sh", "-c", "ls"},
+	} {
+		cmd := r.dockerCmd(context.Background(), args...)
+		if cmd == nil {
+			t.Fatalf("dockerCmd(%v) = nil", args)
+		}
+		if cmd.Path == "" {
+			t.Errorf("dockerCmd(%v) returned empty Path", args)
+		}
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
@@ -24,6 +25,36 @@ type SourceResolver struct {
 // NewSourceResolver creates a new SourceResolver
 func NewSourceResolver(logger *zap.Logger) *SourceResolver {
 	return &SourceResolver{logger: logger}
+}
+
+// dockerCmd builds an exec.Cmd that invokes the resolved `docker` binary.
+//
+// The binary is looked up via shellwrap.ResolveDockerPath rather than relying
+// on $PATH directly. mcpproxy is frequently launched from a GUI bundle or a
+// PKInstallSandbox where $PATH does not include /usr/local/bin or
+// /opt/homebrew/bin, so a bare "docker" exec would silently fail and the
+// caller would see "no Docker container found" with no signal as to why. The
+// shellwrap helper probes well-known install locations (Docker Desktop bundle
+// binary, ~/.docker/bin, OrbStack, Homebrew, snap) and falls back to a login
+// shell — the same resolution the rest of the scanner already uses for the
+// image probe (see internal/security/scanner/docker.go).
+//
+// The minimal env is intentionally NOT applied here: source extraction runs
+// against user-trusted local containers (already running with the user's own
+// docker daemon) and `docker cp` of UTF-8 paths needs LANG/LC_* to round-trip
+// correctly. The narrower secret-leak concern handled in docker.go applies to
+// scanner containers we spawn, not to read-only `ps`/`diff`/`cp`/`exec` calls
+// against an existing container.
+func (r *SourceResolver) dockerCmd(ctx context.Context, args ...string) *exec.Cmd {
+	dockerBin, err := shellwrap.ResolveDockerPath(r.logger)
+	if err != nil || dockerBin == "" {
+		dockerBin = "docker"
+		if r.logger != nil {
+			r.logger.Debug("source resolver: falling back to bare 'docker' lookup",
+				zap.Error(err))
+		}
+	}
+	return exec.CommandContext(ctx, dockerBin, args...)
 }
 
 // ServerInfo contains the information needed to resolve a server's source
@@ -86,6 +117,18 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 			}, nil
 		}
 		r.logger.Warn("Failed to extract from container, trying fallback",
+			zap.String("server", info.Name),
+			zap.Error(err),
+		)
+	} else if err != nil {
+		// Surface the docker-ps failure so users can see why source extraction
+		// fell back to working_dir or tool_definitions_only. The most common
+		// cause in production has been mcpproxy launched from a sandboxed PATH
+		// where the bare "docker" binary couldn't be found — silently swallowing
+		// that produced the misleading "Local (no Docker)" badge in the UI even
+		// when the server WAS running in a container (see #420 for the related
+		// image-probe fix).
+		r.logger.Warn("Docker container lookup failed, will fall back to non-Docker source resolution",
 			zap.String("server", info.Name),
 			zap.Error(err),
 		)
@@ -268,7 +311,7 @@ func dirLooksLikeSource(dir string) bool {
 // MCPProxy names containers as: mcpproxy-<sanitized-server-name>-<suffix>
 func (r *SourceResolver) findServerContainer(ctx context.Context, serverName string) (string, error) {
 	// Use docker ps with filter to find matching containers
-	cmd := exec.CommandContext(ctx, "docker", "ps",
+	cmd := r.dockerCmd(ctx, "ps",
 		"--filter", fmt.Sprintf("name=mcpproxy-%s-", sanitizeForDocker(serverName)),
 		"--format", "{{.ID}}",
 		"--no-trunc",
@@ -316,7 +359,7 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID s
 	if targetDir := r.findContainerTargetDir(ctx, containerID, info); targetDir != "" {
 		destDir := filepath.Join(tempDir, "target")
 		_ = os.MkdirAll(destDir, 0755)
-		cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+targetDir+"/.", destDir)
+		cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+targetDir+"/.", destDir)
 		if err := cpCmd.Run(); err == nil {
 			r.logger.Info("Extracted target package from container",
 				zap.String("server", serverName),
@@ -333,7 +376,7 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID s
 	}
 
 	// Strategy 2: docker diff for any user-added app source.
-	cmd := exec.CommandContext(ctx, "docker", "diff", containerID)
+	cmd := r.dockerCmd(ctx, "diff", containerID)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	diffErr := cmd.Run()
@@ -357,7 +400,7 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID s
 			zap.String("container", containerID),
 		)
 		// Try UV git checkouts first (uvx --from pkg@git+URL)
-		uvCheckoutCmd := exec.CommandContext(ctx, "docker", "exec", containerID, "find", "/root/.cache/uv/git-v0/checkouts", "-maxdepth", "2", "-mindepth", "2", "-type", "d")
+		uvCheckoutCmd := r.dockerCmd(ctx, "exec", containerID, "find", "/root/.cache/uv/git-v0/checkouts", "-maxdepth", "2", "-mindepth", "2", "-type", "d")
 		var uvOut bytes.Buffer
 		uvCheckoutCmd.Stdout = &uvOut
 		if uvCheckoutCmd.Run() == nil {
@@ -367,7 +410,7 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID s
 				}
 				destDir := filepath.Join(tempDir, "source")
 				os.MkdirAll(destDir, 0755)
-				cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+				cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+dir+"/.", destDir)
 				if cpCmd.Run() == nil {
 					r.logger.Info("Extracted UV git checkout", zap.String("dir", dir))
 					return tempDir, cleanup, nil
@@ -376,7 +419,7 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID s
 		}
 		// Try common app dirs (NOT /root — too broad)
 		for _, dir := range []string{"/app", "/src", "/opt/app"} {
-			cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", filepath.Join(tempDir, filepath.Base(dir)))
+			cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+dir+"/.", filepath.Join(tempDir, filepath.Base(dir)))
 			if cpCmd.Run() == nil {
 				return tempDir, cleanup, nil
 			}
@@ -389,7 +432,7 @@ func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID s
 	for _, dir := range appDirs {
 		destDir := filepath.Join(tempDir, filepath.Base(dir))
 		os.MkdirAll(destDir, 0755)
-		cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+		cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+dir+"/.", destDir)
 		if err := cpCmd.Run(); err != nil {
 			r.logger.Debug("Failed to copy directory from container",
 				zap.String("dir", dir),
@@ -641,7 +684,7 @@ func (r *SourceResolver) findContainerTargetDir(ctx context.Context, containerID
 			"ls -d /root/.npm/_npx/*/node_modules/'%s' 2>/dev/null | head -n 1",
 			escaped,
 		)
-		if out, ok := dockerExecCapture(ctx, containerID, script); ok {
+		if out, ok := r.dockerExecCapture(ctx, containerID, script); ok {
 			if path := strings.TrimSpace(out); path != "" {
 				return path
 			}
@@ -680,7 +723,7 @@ func (r *SourceResolver) findContainerTargetDir(ctx context.Context, containerID
 			)
 		}
 		script := "for p in " + strings.Join(globs, " ") + "; do for d in $p; do [ -d \"$d\" ] && { echo \"$d\"; exit 0; }; done; done; exit 1"
-		if out, ok := dockerExecCapture(ctx, containerID, script); ok {
+		if out, ok := r.dockerExecCapture(ctx, containerID, script); ok {
 			if path := strings.TrimSpace(out); path != "" {
 				return path
 			}
@@ -691,8 +734,8 @@ func (r *SourceResolver) findContainerTargetDir(ctx context.Context, containerID
 
 // dockerExecCapture runs a shell command inside a container and returns its
 // stdout. Returns ok=false if the command fails or exits non-zero.
-func dockerExecCapture(ctx context.Context, containerID, script string) (string, bool) {
-	cmd := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", script)
+func (r *SourceResolver) dockerExecCapture(ctx context.Context, containerID, script string) (string, bool) {
+	cmd := r.dockerCmd(ctx, "exec", containerID, "sh", "-c", script)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	if err := cmd.Run(); err != nil {
@@ -778,7 +821,7 @@ func (r *SourceResolver) extractFullFromContainer(ctx context.Context, container
 	if targetDir := r.findContainerTargetDir(ctx, containerID, info); targetDir != "" {
 		destDir := filepath.Join(tempDir, "target")
 		_ = os.MkdirAll(destDir, 0755)
-		cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+targetDir+"/.", destDir)
+		cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+targetDir+"/.", destDir)
 		if err := cpCmd.Run(); err == nil {
 			r.logger.Info("Extracted target package from container (Pass 2)",
 				zap.String("server", serverName),
@@ -796,7 +839,7 @@ func (r *SourceResolver) extractFullFromContainer(ctx context.Context, container
 
 	// Strategy 2: docker diff for additional dependency subtrees that the
 	// server touched (e.g. anything at /app, /src, or installed site-packages).
-	cmd := exec.CommandContext(ctx, "docker", "diff", containerID)
+	cmd := r.dockerCmd(ctx, "diff", containerID)
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	diffErr := cmd.Run()
@@ -816,7 +859,7 @@ func (r *SourceResolver) extractFullFromContainer(ctx context.Context, container
 		for _, dir := range []string{"/app", "/src", "/opt/app"} {
 			destDir := filepath.Join(tempDir, filepath.Base(dir))
 			os.MkdirAll(destDir, 0755)
-			cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+			cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+dir+"/.", destDir)
 			if cpCmd.Run() == nil {
 				return tempDir, cleanup, nil
 			}
@@ -832,7 +875,7 @@ func (r *SourceResolver) extractFullFromContainer(ctx context.Context, container
 		destName := fmt.Sprintf("%d-%s", i, filepath.Base(dir))
 		destDir := filepath.Join(tempDir, destName)
 		os.MkdirAll(destDir, 0755)
-		cpCmd := exec.CommandContext(ctx, "docker", "cp", containerID+":"+dir+"/.", destDir)
+		cpCmd := r.dockerCmd(ctx, "cp", containerID+":"+dir+"/.", destDir)
 		if err := cpCmd.Run(); err != nil {
 			r.logger.Debug("Failed to copy directory from container (Pass 2)",
 				zap.String("dir", dir),
