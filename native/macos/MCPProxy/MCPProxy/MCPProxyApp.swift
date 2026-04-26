@@ -720,6 +720,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 appState.connectedCount = 0
                 appState.totalServers = 0
                 appState.totalTools = 0
+                appState.serversLoaded = false
                 appState.apiClient = nil
                 updateStatusIcon()
                 rebuildMenu()
