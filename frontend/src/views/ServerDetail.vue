@@ -497,70 +497,192 @@
           </div>
         </div>
 
-        <!-- Configuration Tab -->
+        <!-- Configuration Tab
+             Sections mirror the macOS tray (native/macos/MCPProxy/.../ServerDetailView.swift):
+             General, Connection/Process, Environment Variables, Docker Isolation
+             Overrides, Status, Health. All fields come from /api/v1/servers/{id} —
+             no new API surface needed. Read-only here; the existing Edit page is
+             the dedicated mutation surface. -->
         <div v-if="activeTab === 'config'">
           <div class="space-y-6">
-            <div>
-              <h3 class="text-lg font-semibold mb-4">Server Configuration</h3>
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div class="space-y-4">
-                  <div>
-                    <label class="label">
-                      <span class="label-text font-medium">Name</span>
-                    </label>
-                    <input :value="server.name" readonly class="input input-bordered w-full" />
-                  </div>
-                  <div>
-                    <label class="label">
-                      <span class="label-text font-medium">Protocol</span>
-                    </label>
-                    <input :value="server.protocol" readonly class="input input-bordered w-full" />
-                  </div>
-                  <div v-if="server.url">
-                    <label class="label">
-                      <span class="label-text font-medium">URL</span>
-                    </label>
-                    <input :value="server.url" readonly class="input input-bordered w-full" />
-                  </div>
-                  <div v-if="server.command">
-                    <label class="label">
-                      <span class="label-text font-medium">Command</span>
-                    </label>
-                    <input :value="server.command" readonly class="input input-bordered w-full" />
-                  </div>
-                </div>
-                <div class="space-y-4">
-                  <div class="form-control">
-                    <label class="label">
-                      <span class="label-text font-medium">Enabled</span>
-                    </label>
+            <!-- General -->
+            <div class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">General</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <dt class="text-base-content/60">Name</dt>
+                  <dd class="font-medium">{{ server.name }}</dd>
+                  <dt class="text-base-content/60">Protocol</dt>
+                  <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs">{{ server.protocol }}</code></dd>
+                  <dt class="text-base-content/60">Enabled</dt>
+                  <dd class="flex items-center gap-2">
                     <input
                       type="checkbox"
                       :checked="server.enabled"
                       @change="toggleEnabled"
-                      class="toggle"
+                      class="toggle toggle-sm"
                       :disabled="actionLoading"
                     />
-                  </div>
-                  <div class="form-control">
-                    <label class="label">
-                      <span class="label-text font-medium">Quarantined</span>
-                    </label>
-                    <input
-                      type="checkbox"
-                      :checked="server.quarantined"
-                      readonly
-                      class="toggle"
-                      disabled
-                    />
-                  </div>
-                  <div>
-                    <label class="label">
-                      <span class="label-text font-medium">Tools Count</span>
-                    </label>
-                    <input :value="server.tool_count" readonly class="input input-bordered w-full" />
-                  </div>
-                </div>
+                    <span class="text-base-content/70">{{ server.enabled ? 'Yes' : 'No' }}</span>
+                  </dd>
+                  <dt class="text-base-content/60">Quarantined</dt>
+                  <dd>
+                    <span :class="server.quarantined ? 'badge badge-warning badge-sm' : 'badge badge-ghost badge-sm'">
+                      {{ server.quarantined ? 'Yes' : 'No' }}
+                    </span>
+                  </dd>
+                </dl>
+              </div>
+            </div>
+
+            <!-- Connection (HTTP/SSE) -->
+            <div v-if="server.url" class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Connection</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <dt class="text-base-content/60">URL</dt>
+                  <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.url }}</code></dd>
+                </dl>
+              </div>
+            </div>
+
+            <!-- Process (stdio) -->
+            <div v-if="server.command" class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Process</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <dt class="text-base-content/60">Command</dt>
+                  <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs">{{ server.command }}</code></dd>
+                  <template v-if="server.args && server.args.length">
+                    <dt class="text-base-content/60">Args</dt>
+                    <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.args.join(' ') }}</code></dd>
+                  </template>
+                  <template v-if="server.working_dir">
+                    <dt class="text-base-content/60">Working Dir</dt>
+                    <dd><code class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.working_dir }}</code></dd>
+                  </template>
+                </dl>
+              </div>
+            </div>
+
+            <!-- Environment Variables: keys are listed; values masked to avoid
+                 shoulder-surfing leaks. Users can edit values via the dedicated
+                 Edit page if they need to inspect them. -->
+            <div v-if="server.env && Object.keys(server.env).length" class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Environment Variables</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <template v-for="(v, k) in server.env" :key="k">
+                    <dt><code class="font-mono text-xs">{{ k }}</code></dt>
+                    <dd class="text-base-content/60">{{ maskEnvValue(v) }}</dd>
+                  </template>
+                </dl>
+              </div>
+            </div>
+
+            <!-- Docker Isolation Overrides: show the per-server override when
+                 set, otherwise show the resolved default ('placeholder') so
+                 the user can see what's actually in effect. Mirrors the
+                 macOS tray's placeholder behavior. -->
+            <div v-if="hasIsolationData" class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Docker Isolation Overrides</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <dt class="text-base-content/60">Image</dt>
+                  <dd>
+                    <code v-if="server.isolation?.image" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.isolation.image }}</code>
+                    <span v-else-if="server.isolation_defaults?.image" class="text-base-content/40 text-xs italic">default: {{ server.isolation_defaults.image }}</span>
+                    <span v-else class="text-base-content/40 text-xs">—</span>
+                  </dd>
+                  <dt class="text-base-content/60">Network Mode</dt>
+                  <dd>
+                    <span v-if="server.isolation?.network_mode" class="badge badge-outline badge-sm">{{ server.isolation.network_mode }}</span>
+                    <span v-else-if="server.isolation_defaults?.network_mode" class="text-base-content/40 text-xs italic">default: {{ server.isolation_defaults.network_mode }}</span>
+                    <span v-else class="text-base-content/40 text-xs">—</span>
+                  </dd>
+                  <dt class="text-base-content/60">Extra Args</dt>
+                  <dd>
+                    <code v-if="server.isolation?.extra_args && server.isolation.extra_args.length" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ server.isolation.extra_args.join(' ') }}</code>
+                    <span v-else-if="server.isolation_defaults?.extra_args && server.isolation_defaults.extra_args.length" class="text-base-content/40 text-xs italic">default: {{ server.isolation_defaults.extra_args.join(' ') }}</span>
+                    <span v-else class="text-base-content/40 text-xs">—</span>
+                  </dd>
+                  <dt class="text-base-content/60">Container Working Dir</dt>
+                  <dd>
+                    <code v-if="server.isolation?.working_dir" class="bg-base-200 px-1.5 py-0.5 rounded text-xs">{{ server.isolation.working_dir }}</code>
+                    <span v-else-if="server.isolation_defaults?.working_dir" class="text-base-content/40 text-xs italic">default: {{ server.isolation_defaults.working_dir }}</span>
+                    <span v-else class="text-base-content/40 text-xs">—</span>
+                  </dd>
+                  <template v-if="server.isolation?.memory_limit">
+                    <dt class="text-base-content/60">Memory Limit</dt>
+                    <dd>{{ server.isolation.memory_limit }}</dd>
+                  </template>
+                  <template v-if="server.isolation?.cpu_limit">
+                    <dt class="text-base-content/60">CPU Limit</dt>
+                    <dd>{{ server.isolation.cpu_limit }}</dd>
+                  </template>
+                  <template v-if="server.isolation_defaults?.runtime_type">
+                    <dt class="text-base-content/60">Runtime</dt>
+                    <dd><span class="badge badge-ghost badge-sm">{{ server.isolation_defaults.runtime_type }}</span></dd>
+                  </template>
+                </dl>
+              </div>
+            </div>
+
+            <!-- Status (live runtime state) -->
+            <div class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Status</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <dt class="text-base-content/60">Connected</dt>
+                  <dd>
+                    <span :class="server.connected ? 'badge badge-success badge-sm' : 'badge badge-ghost badge-sm'">
+                      {{ server.connected ? 'Yes' : 'No' }}
+                    </span>
+                  </dd>
+                  <template v-if="server.connected_at">
+                    <dt class="text-base-content/60">Connected At</dt>
+                    <dd>{{ formatConfigTime(server.connected_at) }}</dd>
+                  </template>
+                  <template v-if="(server.reconnect_count ?? 0) > 0">
+                    <dt class="text-base-content/60">Reconnect Count</dt>
+                    <dd>{{ server.reconnect_count }}</dd>
+                  </template>
+                  <dt class="text-base-content/60">Tool Count</dt>
+                  <dd>{{ server.tool_count ?? 0 }}</dd>
+                  <template v-if="server.tool_list_token_size">
+                    <dt class="text-base-content/60">Tool List Tokens</dt>
+                    <dd>{{ server.tool_list_token_size }}</dd>
+                  </template>
+                  <template v-if="server.last_error">
+                    <dt class="text-base-content/60">Last Error</dt>
+                    <dd class="text-error/80 break-words whitespace-pre-wrap">{{ server.last_error }}</dd>
+                  </template>
+                </dl>
+              </div>
+            </div>
+
+            <!-- Health (calculated by backend; same shape consumed by macOS tray) -->
+            <div v-if="server.health" class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Health</h3>
+                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
+                  <dt class="text-base-content/60">Level</dt>
+                  <dd>
+                    <span :class="healthLevelBadgeClass(server.health.level)">{{ server.health.level }}</span>
+                  </dd>
+                  <dt class="text-base-content/60">Admin State</dt>
+                  <dd><span class="badge badge-ghost badge-sm">{{ server.health.admin_state }}</span></dd>
+                  <dt class="text-base-content/60">Summary</dt>
+                  <dd>{{ server.health.summary }}</dd>
+                  <template v-if="server.health.detail">
+                    <dt class="text-base-content/60">Detail</dt>
+                    <dd class="text-base-content/70 break-words whitespace-pre-wrap">{{ server.health.detail }}</dd>
+                  </template>
+                  <template v-if="server.health.action">
+                    <dt class="text-base-content/60">Suggested Action</dt>
+                    <dd><span class="badge badge-info badge-outline badge-sm">{{ server.health.action }}</span></dd>
+                  </template>
+                </dl>
               </div>
             </div>
           </div>
@@ -1562,6 +1684,60 @@ function formatRelativeTime(isoString: string): string {
   if (diffHr < 24) return `${diffHr}h ago`
   const diffDay = Math.floor(diffHr / 24)
   return `${diffDay}d ago`
+}
+
+// --- Config tab helpers ---
+// Mask env var values in the Config tab so a casual viewer can see WHICH
+// variables are set without exposing the secret values. Matches the
+// "ALL_CAPS_KEY shown, value hidden" pattern from the macOS tray.
+function maskEnvValue(value: string): string {
+  if (!value) return '(empty)'
+  if (value.length <= 4) return '••••'
+  return '••••' + value.slice(-2) + ` (${value.length} chars)`
+}
+
+// hasIsolationData is true when there's anything to show in the Docker
+// Isolation Overrides section — either a per-server override or a resolved
+// default the user might want to inspect. Stdio servers without docker
+// isolation enabled have neither and the section is hidden entirely.
+const hasIsolationData = computed(() => {
+  if (!server.value) return false
+  const iso = server.value.isolation
+  const def = server.value.isolation_defaults
+  if (iso && (iso.image || iso.network_mode || (iso.extra_args && iso.extra_args.length) || iso.working_dir || iso.memory_limit || iso.cpu_limit)) {
+    return true
+  }
+  if (def && (def.image || def.network_mode || (def.extra_args && def.extra_args.length) || def.working_dir || def.runtime_type)) {
+    return true
+  }
+  return false
+})
+
+// Locale-aware absolute timestamp for "Connected At" / similar fields.
+// We use the absolute form (not relative-time) because it matches what
+// users see in the macOS tray and in `mcpproxy upstream list` — a single
+// authoritative source-of-truth representation.
+function formatConfigTime(isoString: string | null | undefined): string {
+  if (!isoString) return ''
+  const date = new Date(isoString)
+  if (isNaN(date.getTime())) return isoString
+  return date.toLocaleString()
+}
+
+// healthLevelBadgeClass returns the daisyUI class set for a Health.Level
+// badge, mirroring the existing color choices used elsewhere in the app
+// (see e.g. server-list dot color logic).
+function healthLevelBadgeClass(level: string): string {
+  switch (level) {
+    case 'healthy':
+      return 'badge badge-success badge-sm'
+    case 'degraded':
+      return 'badge badge-warning badge-sm'
+    case 'unhealthy':
+      return 'badge badge-error badge-sm'
+    default:
+      return 'badge badge-ghost badge-sm'
+  }
 }
 
 function stopScanPolling() {
