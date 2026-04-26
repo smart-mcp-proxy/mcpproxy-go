@@ -60,6 +60,10 @@ struct SecretsView: View {
     @State private var newSecretName = ""
     @State private var newSecretValue = ""
     @State private var errorMessage: String?
+    @State private var lastStoredReference: String?
+    @State private var lastStoredName: String?
+    @State private var showConfigFirstHint = true
+    @State private var successBannerTask: Task<Void, Never>?
 
     private var apiClient: APIClient? { appState.apiClient }
 
@@ -112,6 +116,25 @@ struct SecretsView: View {
                 .accessibilityIdentifier("secrets-add-button")
             }
             .padding()
+
+            // Success banner — shown after a secret is stored, so the user
+            // can see the reference syntax even though the secret won't
+            // appear in the list until referenced from a server config.
+            if let ref = lastStoredReference, let name = lastStoredName {
+                successBanner(name: name, reference: ref)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("secrets-success-banner")
+            }
+
+            // Config-First workflow hint — explains that secrets only show
+            // up here once they're referenced from a server config.
+            if showConfigFirstHint {
+                configFirstHintBanner
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("secrets-config-first-hint")
+            }
 
             // Stats bar
             HStack(spacing: 20) {
@@ -184,14 +207,45 @@ struct SecretsView: View {
 
             TextField("Secret Name", text: $newSecretName)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("secrets-add-name")
 
             SecureField("Secret Value", text: $newSecretValue)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("secrets-add-value")
+
+            // Live reference preview so the user knows the exact string to
+            // paste into their server config to actually use the secret.
+            if !newSecretName.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.blue)
+                    Text("Reference in config:")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .foregroundStyle(.secondary)
+                    Text("${keyring:\(newSecretName)}")
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8)
+                .background(Color.blue.opacity(0.08))
+                .cornerRadius(6)
+                .accessibilityIdentifier("secrets-add-reference-preview")
+            }
+
+            // Reminder about the config-first workflow so users aren't
+            // surprised when their newly-saved secret doesn't appear in
+            // the list below.
+            Text("Tip: secrets only appear in this list once a server config references them.")
+                .font(.scaled(.caption, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             if let error = errorMessage {
                 Text(error)
                     .foregroundStyle(.red)
                     .font(.scaled(.caption, scale: fontScale))
+                    .accessibilityIdentifier("secrets-add-error")
             }
 
             HStack {
@@ -241,14 +295,113 @@ struct SecretsView: View {
         do {
             let body: [String: Any] = ["name": newSecretName, "value": newSecretValue]
             _ = try await client.postRaw(path: "/api/v1/secrets", body: body)
+            let storedName = newSecretName
             showAddSheet = false
             newSecretName = ""
             newSecretValue = ""
             errorMessage = nil
+            // Surface success: a freshly stored secret won't appear in the
+            // /api/v1/secrets/config list until a server config references
+            // it, so without this banner the user sees nothing happen and
+            // assumes the save failed.
+            showSuccessBanner(name: storedName)
             await loadSecrets()
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func showSuccessBanner(name: String) {
+        lastStoredName = name
+        lastStoredReference = "${keyring:\(name)}"
+        successBannerTask?.cancel()
+        successBannerTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 12_000_000_000) // 12s
+            if !Task.isCancelled {
+                lastStoredReference = nil
+                lastStoredName = nil
+            }
+        }
+    }
+
+    private func successBanner(name: String, reference: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.scaled(.title3, scale: fontScale))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Stored \"\(name)\" in Keychain")
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
+                HStack(spacing: 6) {
+                    Text("Reference in your server config:")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .foregroundStyle(.secondary)
+                    Text(reference)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(reference, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy reference")
+                    .accessibilityIdentifier("secrets-success-copy")
+                }
+            }
+            Spacer()
+            Button {
+                successBannerTask?.cancel()
+                lastStoredReference = nil
+                lastStoredName = nil
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.borderless)
+            .help("Dismiss")
+        }
+        .padding(10)
+        .background(Color.green.opacity(0.10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.green.opacity(0.35), lineWidth: 1)
+        )
+        .cornerRadius(8)
+    }
+
+    private var configFirstHintBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(.blue)
+                .font(.scaled(.title3, scale: fontScale))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Config-first workflow")
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
+                Text("This list shows secrets that are referenced from a server config (\u{0024}{keyring:NAME}). Adding a secret here stores its value — to make a server use it, also add the reference to that server's env block.")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Button {
+                showConfigFirstHint = false
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.borderless)
+            .help("Hide hint")
+        }
+        .padding(10)
+        .background(Color.blue.opacity(0.08))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.blue.opacity(0.25), lineWidth: 1)
+        )
+        .cornerRadius(8)
     }
 }
 
