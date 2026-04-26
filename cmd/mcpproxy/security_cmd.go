@@ -1393,16 +1393,27 @@ func runSecurityReport(_ *cobra.Command, args []string) error {
 	}
 
 	// F-10: also fetch /scan/status (best-effort) so we can name the scanners
-	// that failed. The aggregated report has counts but only sometimes carries
-	// per-scanner names; the live job status is the authoritative source.
-	failedNames := fetchFailedScannerNames(client, ctx, serverName)
-	return printReportTable(serverName, report, failedNames)
+	// that failed AND surface the per-scanner error message. The aggregated
+	// report has counts but only sometimes carries per-scanner names; the
+	// live job status is the authoritative source.
+	failed := fetchFailedScannerInfo(client, ctx, serverName)
+	return printReportTable(serverName, report, failed)
 }
 
-// fetchFailedScannerNames returns the IDs of scanners that did not complete
-// in the most recent scan job for `serverName`. Returns nil on any error so
-// the caller can render the report without per-scanner names.
-func fetchFailedScannerNames(client *cliclient.Client, ctx context.Context, serverName string) []string {
+// failedScannerInfo carries a failed scanner's ID and the error that the
+// scanner runtime recorded for it. The error is rendered in the human-readable
+// report so the user can tell e.g. that `ramparts` failed because of a glibc
+// version mismatch — previously the CLI showed only the scanner name and the
+// user had to dig into log files to find the cause.
+type failedScannerInfo struct {
+	ID    string
+	Error string
+}
+
+// fetchFailedScannerInfo returns information about scanners that did not
+// complete in the most recent scan job for `serverName`. Returns nil on any
+// error so the caller can render the report without per-scanner names.
+func fetchFailedScannerInfo(client *cliclient.Client, ctx context.Context, serverName string) []failedScannerInfo {
 	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
 	if err != nil {
 		return nil
@@ -1427,16 +1438,21 @@ func fetchFailedScannerNames(client *cliclient.Client, ctx context.Context, serv
 	if !ok {
 		return nil
 	}
-	var failed []string
+	var failed []failedScannerInfo
 	for _, s := range scannerStatuses {
 		ss, ok := s.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		if getMapString(ss, "status") == "failed" {
-			if name := getMapString(ss, "scanner_id"); name != "" {
-				failed = append(failed, name)
+			id := getMapString(ss, "scanner_id")
+			if id == "" {
+				continue
 			}
+			failed = append(failed, failedScannerInfo{
+				ID:    id,
+				Error: getMapString(ss, "error"),
+			})
 		}
 	}
 	return failed
@@ -1705,17 +1721,19 @@ func printScanSummary(client *cliclient.Client, ctx context.Context, serverName 
 	}
 
 	fmt.Printf("Scan completed for %q.\n\n", serverName)
-	failedNames := fetchFailedScannerNames(client, ctx, serverName)
-	return printReportTable(serverName, report, failedNames)
+	failed := fetchFailedScannerInfo(client, ctx, serverName)
+	return printReportTable(serverName, report, failed)
 }
 
 // printReportTable prints a human-readable report with two-pass scan support.
 //
-// failedScannerNames (F-10) is the list of scanner IDs that failed in the most
-// recent scan job, sourced from /scan/status (the report itself only carries
-// counts). When non-empty, the table shows a "Scanners: X run, Y failed" line
-// and a yellow warn line about incomplete coverage.
-func printReportTable(serverName string, report map[string]interface{}, failedScannerNames []string) error {
+// failedScanners (F-10) is the list of scanner IDs+errors that failed in the
+// most recent scan job, sourced from /scan/status (the report itself only
+// carries counts). When non-empty, the table shows a "Scanners: X run, Y
+// failed" line, a yellow warn line about incomplete coverage, and per-scanner
+// error reasons so the user can see WHY a scanner failed without grepping
+// log files.
+func printReportTable(serverName string, report map[string]interface{}, failedScanners []failedScannerInfo) error {
 	riskScore := "?"
 	if rs, ok := report["risk_score"].(float64); ok {
 		riskScore = fmt.Sprintf("%d", int(rs))
@@ -1739,12 +1757,26 @@ func printReportTable(serverName string, report map[string]interface{}, failedSc
 	scannersTotal := int(getMapFloat(report, "scanners_total"))
 	if scannersTotal > 0 {
 		line := fmt.Sprintf("Scanners:    %d run, %d failed", scannersRun, scannersFailed)
-		if scannersFailed > 0 && len(failedScannerNames) > 0 {
-			line += " (" + strings.Join(failedScannerNames, ", ") + ")"
+		if scannersFailed > 0 && len(failedScanners) > 0 {
+			names := make([]string, 0, len(failedScanners))
+			for _, f := range failedScanners {
+				names = append(names, f.ID)
+			}
+			line += " (" + strings.Join(names, ", ") + ")"
 		}
 		line += fmt.Sprintf(" of %d", scannersTotal)
 		fmt.Println(line)
 	}
+
+	// Scan context: show the user what was actually scanned. Without this the
+	// terse "0 findings" / "1 finding" output gives no signal as to whether
+	// the scan looked at real source code (docker_extract), a working_dir
+	// fallback, or just the synthetic tool definitions (tool_definitions_only).
+	// That distinction is critical when triaging a finding — a "Malicious
+	// Code" hit located at tools.json:85 means something very different from
+	// the same hit located at server.py:42.
+	printScanContextSection(report)
+
 	fmt.Println()
 
 	// F-10: warn the user when coverage is incomplete so they don't approve
@@ -1756,6 +1788,21 @@ func printReportTable(serverName string, report map[string]interface{}, failedSc
 			warn = "\x1b[33m" + warn + "\x1b[0m"
 		}
 		fmt.Println(warn)
+		// Show the actual error message for each failed scanner so users can
+		// diagnose without digging through ~/Library/Logs/mcpproxy/main.log.
+		for _, f := range failedScanners {
+			if f.Error == "" {
+				continue
+			}
+			msg := f.Error
+			if len(msg) > 240 {
+				msg = msg[:240] + "..."
+			}
+			// Single-line: replace newlines so a multi-line stderr capture
+			// doesn't break the indented layout.
+			msg = strings.ReplaceAll(msg, "\n", " ")
+			fmt.Printf("  - %s: %s\n", f.ID, msg)
+		}
 		fmt.Println()
 	}
 
@@ -1813,6 +1860,52 @@ func printReportTable(serverName string, report map[string]interface{}, failedSc
 	return nil
 }
 
+// printScanContextSection renders a one-block summary of *what* the scanners
+// looked at (source method, files, container, tool definitions exported).
+// This is the most important context for triaging a finding: a HIGH-severity
+// finding located at tools.json from a tool_definitions_only scan is a very
+// different signal from the same finding located at server.py from a
+// docker_extract scan.
+func printScanContextSection(report map[string]interface{}) {
+	ctx, ok := report["scan_context"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	method := getMapString(ctx, "source_method")
+	if method == "" && getMapString(ctx, "server_protocol") == "" {
+		return // nothing useful to render
+	}
+
+	fmt.Println()
+	fmt.Println("Scan Context")
+	if method != "" {
+		fmt.Printf("  Source:           %s\n", method)
+	}
+	if path := getMapString(ctx, "source_path"); path != "" {
+		fmt.Printf("  Path:             %s\n", path)
+	}
+	if proto := getMapString(ctx, "server_protocol"); proto != "" {
+		fmt.Printf("  Protocol:         %s\n", proto)
+	}
+	if di, ok := ctx["docker_isolation"].(bool); ok {
+		fmt.Printf("  Docker isolation: %t\n", di)
+	}
+	if cid := getMapString(ctx, "container_id"); cid != "" {
+		// Truncate full SHA256 container IDs to 12 chars (docker's standard).
+		short := cid
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		fmt.Printf("  Container:        %s\n", short)
+	}
+	if tf, ok := ctx["total_files"].(float64); ok && int(tf) > 0 {
+		fmt.Printf("  Files scanned:    %d\n", int(tf))
+	}
+	if te, ok := ctx["tools_exported"].(float64); ok && int(te) > 0 {
+		fmt.Printf("  Tools analyzed:   %d\n", int(te))
+	}
+}
+
 // printFindingsList prints a list of findings in the CLI report format.
 func printFindingsList(findings []interface{}) {
 	for _, f := range findings {
@@ -1823,12 +1916,16 @@ func printFindingsList(findings []interface{}) {
 		severity := strings.ToUpper(getMapString(finding, "severity"))
 		ruleID := getMapString(finding, "rule_id")
 		title := getMapString(finding, "title")
+		description := getMapString(finding, "description")
 		location := getMapString(finding, "location")
 		scannerName := getMapString(finding, "scanner")
 		helpURI := getMapString(finding, "help_uri")
 		pkg := getMapString(finding, "package_name")
 		installed := getMapString(finding, "installed_version")
 		fixed := getMapString(finding, "fixed_version")
+		threatLevel := getMapString(finding, "threat_level")
+		threatType := getMapString(finding, "threat_type")
+		category := getMapString(finding, "category")
 
 		// Main line: [SEVERITY] CVE-ID: title (scanner)
 		label := title
@@ -1836,14 +1933,53 @@ func printFindingsList(findings []interface{}) {
 			label = ruleID
 		}
 		line := fmt.Sprintf("  [%s] %s", severity, label)
+		if cvss, ok := finding["cvss_score"].(float64); ok && cvss > 0 {
+			line += fmt.Sprintf(" CVSS=%.1f", cvss)
+		}
 		if scannerName != "" {
 			line += " (" + scannerName + ")"
 		}
 		fmt.Println(line)
 
+		// Title (when ruleID is the headline label)
+		if title != "" && label == ruleID {
+			fmt.Println("         Title:    " + title)
+		}
+
+		// Description: this is the long-form rule explanation. Previously the
+		// CLI rendered ONLY the rule ID, leaving users to look up what e.g.
+		// "MCP-MC-001" meant. Showing the description here mirrors the Web UI.
+		if description != "" && description != title {
+			desc := description
+			if len(desc) > 240 {
+				desc = desc[:240] + "..."
+			}
+			desc = strings.ReplaceAll(desc, "\n", " ")
+			fmt.Println("         What:     " + desc)
+		}
+
+		// Threat classification context (already used in the Web UI but absent
+		// from CLI output until now). Helps users distinguish a tool-poisoning
+		// finding from an obfuscated-code finding from a CVE.
+		if threatType != "" || threatLevel != "" || category != "" {
+			parts := []string{}
+			if threatLevel != "" {
+				parts = append(parts, threatLevel)
+			}
+			if threatType != "" {
+				parts = append(parts, threatType)
+			}
+			if category != "" && category != threatType {
+				parts = append(parts, "category="+category)
+			}
+			if len(parts) > 0 {
+				fmt.Println("         Threat:   " + strings.Join(parts, " · "))
+			}
+		}
+
 		// Package info
 		if pkg != "" {
-			pkgLine := "         Package: " + pkg
+			pkgLine := "         Package:  " + pkg
 			if installed != "" {
 				pkgLine += " v" + installed
 			}
@@ -1860,7 +1996,7 @@ func printFindingsList(findings []interface{}) {
 
 		// Link to advisory
 		if helpURI != "" {
-			fmt.Println("         Details: " + helpURI)
+			fmt.Println("         Details:  " + helpURI)
 		}
 
 		// Evidence (triggering content)
