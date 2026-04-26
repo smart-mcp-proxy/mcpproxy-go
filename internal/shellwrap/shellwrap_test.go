@@ -138,6 +138,11 @@ func TestResolveDockerPath_ShellFallback(t *testing.T) {
 	ambient := t.TempDir()
 	t.Setenv("PATH", ambient)
 
+	// Stub well-known paths to nothing so the shell fallback is the path under test.
+	prev := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return nil }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+
 	// Fake $SHELL emits the absolute path via `command -v docker` — the
 	// fallback issues `<shell> -l -c 'command -v docker'` and trims the output.
 	shellDir := t.TempDir()
@@ -150,7 +155,8 @@ func TestResolveDockerPath_ShellFallback(t *testing.T) {
 }
 
 // TestResolveDockerPath_NotFoundAnywhere verifies the error path when docker
-// is missing from both ambient PATH and the login shell.
+// is missing from ambient PATH, the login shell, and well-known install
+// locations.
 func TestResolveDockerPath_NotFoundAnywhere(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix-only fixture")
@@ -164,9 +170,83 @@ func TestResolveDockerPath_NotFoundAnywhere(t *testing.T) {
 	fakeShell := writeFakeShell(t, shellDir, "")
 	t.Setenv("SHELL", fakeShell)
 
+	// Stub the well-known paths to a list that cannot exist.
+	prev := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return []string{filepath.Join(t.TempDir(), "no-such-docker")} }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+
 	got, err := ResolveDockerPath(nil)
-	assert.Error(t, err, "should error when docker is neither on PATH nor in login shell")
+	assert.Error(t, err, "should error when docker is missing from PATH, login shell, and well-known paths")
 	assert.Empty(t, got)
+}
+
+// TestResolveDockerPath_NegativeTTLRetry verifies that a failed resolution
+// is retried after dockerPathNegativeTTL elapses, so a transient install-time
+// failure does not permanently disable docker discovery for the daemon.
+func TestResolveDockerPath_NegativeTTLRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	// Make negative cache effectively immediate so the second call re-probes.
+	prevTTL := dockerPathNegativeTTL
+	dockerPathNegativeTTL = 0
+	t.Cleanup(func() { dockerPathNegativeTTL = prevTTL })
+
+	// Empty well-known list during the FIRST call so it fails.
+	prevPaths := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return nil }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prevPaths })
+
+	t.Setenv("PATH", t.TempDir())
+	shellDir := t.TempDir()
+	fakeShell := writeFakeShell(t, shellDir, "")
+	t.Setenv("SHELL", fakeShell)
+
+	_, err := ResolveDockerPath(nil)
+	require.Error(t, err, "first call should fail (no docker anywhere)")
+
+	// Now publish a fake docker via well-known paths. The cached failure
+	// must NOT block the retry.
+	dockerDir := t.TempDir()
+	want := writeFakeDocker(t, dockerDir)
+	wellKnownDockerPathsFn = func() []string { return []string{want} }
+
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err, "second call must retry after negative TTL elapses")
+	assert.Equal(t, want, got)
+}
+
+// TestResolveDockerPath_WellKnownPathFallback simulates a PKG-installer
+// context: docker is missing from $PATH and the login shell emits nothing,
+// but Docker Desktop installed a binary at a well-known path. The fallback
+// must find it without invoking the shell.
+func TestResolveDockerPath_WellKnownPathFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("well-known path fallback is unix-only")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	dockerDir := t.TempDir()
+	want := writeFakeDocker(t, dockerDir)
+
+	// Ambient PATH excludes dockerDir.
+	t.Setenv("PATH", t.TempDir())
+
+	// Stub well-known paths to point at our fake docker.
+	prev := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return []string{want} }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+
+	// Sabotage the shell so we can prove the well-known fallback ran first.
+	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err, "well-known fallback must succeed when docker exists at a known path")
+	assert.Equal(t, want, got)
 }
 
 func TestMinimalEnv_DropsSecrets(t *testing.T) {

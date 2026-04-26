@@ -571,7 +571,7 @@
           <div class="space-y-6">
             <!-- Header: Scan button + Risk Score -->
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-              <div class="tooltip tooltip-left" :data-tip="!dockerAvailable ? 'Docker is required to run security scanners' : (!hasEnabledScanners() ? 'No scanners enabled — install one from Security Scanners' : '')">
+              <div class="tooltip tooltip-bottom" :data-tip="!dockerAvailable ? 'Docker is required to run security scanners' : (!hasEnabledScanners() ? 'No scanners enabled — install one from Security Scanners' : '')">
                 <button
                   v-if="hasEnabledScanners()"
                   @click="startSecurityScan"
