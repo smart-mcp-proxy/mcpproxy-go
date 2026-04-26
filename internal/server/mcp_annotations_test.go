@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
@@ -385,4 +386,77 @@ func TestAnnotationFiltering_NoFiltersPassAll(t *testing.T) {
 	filtered := filterByAnnotations(tools, false, false, false)
 
 	assert.Len(t, filtered, 3)
+}
+
+// TestBuildSessionRiskResponse_WarningOmittedByDefault verifies that the prose
+// `warning` field is excluded from the session_risk map when the include flag
+// is false, even when the trifecta is detected. This is the issue #406 fix:
+// default-off behavior to reduce token overhead and LLM distraction.
+func TestBuildSessionRiskResponse_WarningOmittedByDefault(t *testing.T) {
+	risk := SessionRisk{
+		Level:          "high",
+		HasOpenWorld:   true,
+		HasDestructive: true,
+		HasWrite:       true,
+		LethalTrifecta: true,
+		Warning:        "LETHAL TRIFECTA DETECTED: ...",
+	}
+
+	out := buildSessionRiskResponse(risk, false)
+
+	// Structured fields are always present
+	assert.Equal(t, "high", out["level"])
+	assert.Equal(t, true, out["has_open_world_tools"])
+	assert.Equal(t, true, out["has_destructive_tools"])
+	assert.Equal(t, true, out["has_write_tools"])
+	assert.Equal(t, true, out["lethal_trifecta"])
+
+	// Warning prose must NOT appear when include flag is false
+	_, hasWarning := out["warning"]
+	assert.False(t, hasWarning, "warning prose must be omitted when includeWarning=false")
+}
+
+// TestBuildSessionRiskResponse_WarningIncludedWhenOptedIn verifies that the
+// prose `warning` field is present when the caller opts in (config flag or
+// per-call argument).
+func TestBuildSessionRiskResponse_WarningIncludedWhenOptedIn(t *testing.T) {
+	risk := SessionRisk{
+		Level:          "high",
+		HasOpenWorld:   true,
+		HasDestructive: true,
+		HasWrite:       true,
+		LethalTrifecta: true,
+		Warning:        "LETHAL TRIFECTA DETECTED: prose warning",
+	}
+
+	out := buildSessionRiskResponse(risk, true)
+
+	// Structured fields are always present
+	assert.Equal(t, "high", out["level"])
+	assert.Equal(t, true, out["lethal_trifecta"])
+
+	// Warning prose IS present when opted in
+	warning, hasWarning := out["warning"].(string)
+	require.True(t, hasWarning, "warning prose must be present when includeWarning=true")
+	assert.Contains(t, warning, "LETHAL TRIFECTA")
+}
+
+// TestBuildSessionRiskResponse_NoWarningWhenLowRisk verifies that the warning
+// field stays absent for low-risk sessions even when the include flag is true,
+// because analyzeSessionRisk only sets Warning for the trifecta case.
+func TestBuildSessionRiskResponse_NoWarningWhenLowRisk(t *testing.T) {
+	risk := SessionRisk{
+		Level:          "low",
+		HasOpenWorld:   false,
+		HasDestructive: false,
+		HasWrite:       false,
+		LethalTrifecta: false,
+		Warning:        "",
+	}
+
+	out := buildSessionRiskResponse(risk, true)
+
+	assert.Equal(t, "low", out["level"])
+	_, hasWarning := out["warning"]
+	assert.False(t, hasWarning, "warning must not be present when no trifecta")
 }

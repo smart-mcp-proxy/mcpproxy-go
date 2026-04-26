@@ -71,6 +71,25 @@ func analyzeSessionRisk(snapshot *stateview.ServerStatusSnapshot) SessionRisk {
 	return risk
 }
 
+// buildSessionRiskResponse converts a SessionRisk into the map shape returned
+// in the `session_risk` field of `retrieve_tools` responses. The structured
+// fields are always populated; the prose `warning` is included only when
+// includeWarning is true. See issue #406 — most tools lack annotations and
+// trigger the trifecta by default, so the prose warning is opt-in.
+func buildSessionRiskResponse(risk SessionRisk, includeWarning bool) map[string]interface{} {
+	out := map[string]interface{}{
+		"level":                 risk.Level,
+		"has_open_world_tools":  risk.HasOpenWorld,
+		"has_destructive_tools": risk.HasDestructive,
+		"has_write_tools":       risk.HasWrite,
+		"lethal_trifecta":       risk.LethalTrifecta,
+	}
+	if includeWarning && risk.Warning != "" {
+		out["warning"] = risk.Warning
+	}
+	return out
+}
+
 // classifyToolRisk updates the risk flags based on a single tool's annotations.
 // Nil hints are treated as their MCP spec defaults (most permissive).
 func classifyToolRisk(annotations *config.ToolAnnotations, hasOpenWorld, hasDestructive, hasWrite *bool) {
