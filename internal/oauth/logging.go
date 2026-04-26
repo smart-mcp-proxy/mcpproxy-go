@@ -90,6 +90,27 @@ func RedactHeaders(headers http.Header) map[string]string {
 	return redacted
 }
 
+// RedactStringHeaders is the map[string]string analogue of RedactHeaders, for
+// the per-server config form (cfg.Headers) used in the upstream_servers MCP
+// tool and the /api/v1/servers REST response. Returns a new map; the input
+// is not mutated. Returns nil for nil input so JSON callers can keep emitting
+// `null` rather than `{}` if they were doing so before.
+func RedactStringHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	redacted := make(map[string]string, len(headers))
+	for key, value := range headers {
+		lowerKey := strings.ToLower(key)
+		if sensitiveHeaders[lowerKey] {
+			redacted[key] = "***REDACTED***"
+		} else {
+			redacted[key] = RedactSensitiveData(value)
+		}
+	}
+	return redacted
+}
+
 // RedactURL redacts sensitive query parameters from a URL string.
 func RedactURL(urlStr string) string {
 	if urlStr == "" {

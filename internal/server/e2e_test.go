@@ -2380,10 +2380,15 @@ func TestE2E_PatchDeepMergesEnvAndHeaders(t *testing.T) {
 	assert.Equal(t, "another_value", envMap["ANOTHER_VAR"], "ANOTHER_VAR must be preserved")
 	assert.Equal(t, "new_value", envMap["NEW_VAR"], "NEW_VAR must be added")
 
-	// CRITICAL: Verify existing headers are preserved (deep merge)
+	// CRITICAL: Verify existing headers are preserved (deep merge).
+	// The Authorization value is redacted in the API response by default
+	// (see config.RevealSecretHeaders) — we assert the key is still present
+	// to confirm the merge kept it; non-sensitive headers retain their
+	// actual values, which confirms both that merge worked AND that
+	// redaction is scoped to sensitive header names only.
 	headersMap, ok := foundServer["headers"].(map[string]interface{})
 	require.True(t, ok, "Headers should be a map")
-	assert.Equal(t, "Bearer token", headersMap["Authorization"], "Authorization must be preserved")
+	assert.Equal(t, "***REDACTED***", headersMap["Authorization"], "Authorization should be present (key preserved by merge) but redacted in API output")
 	assert.Equal(t, "custom-value", headersMap["X-Custom"], "X-Custom must be preserved")
 	assert.Equal(t, "new-header-value", headersMap["X-New-Header"], "X-New-Header must be added")
 
@@ -2491,10 +2496,13 @@ func TestE2E_MultipleEnableDisablePreservesConfig(t *testing.T) {
 	assert.Equal(t, "secret", envMap["API_KEY"], "API_KEY must be preserved")
 	assert.Equal(t, "true", envMap["DEBUG"], "DEBUG must be preserved")
 
-	// Verify headers
+	// Verify headers — Authorization is redacted in API output by default
+	// (config.RevealSecretHeaders defaults to false). The key is still
+	// present, which confirms the underlying merge preserved the value
+	// across the 5 toggles.
 	headersMap, ok := foundServer["headers"].(map[string]interface{})
 	require.True(t, ok, "headers should be a map")
-	assert.Equal(t, "Bearer token", headersMap["Authorization"], "Authorization must be preserved")
+	assert.Equal(t, "***REDACTED***", headersMap["Authorization"], "Authorization key must be preserved across toggles (value redacted in API output)")
 
 	// Verify isolation - in list response, isolation is under docker_isolation.server_isolation
 	dockerIsolation, ok := foundServer["docker_isolation"].(map[string]interface{})

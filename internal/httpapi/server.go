@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -1041,6 +1042,12 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Redact sensitive header values unless explicitly opted out via
+		// `reveal_secret_headers: true` in config. See config.Config field
+		// for rationale — the same redaction is applied to the
+		// `upstream_servers` MCP tool's list output.
+		s.redactServerHeaders(serverValues)
+
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
 		if stats != nil {
@@ -1069,6 +1076,9 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Enrich with quarantine stats
 	s.enrichServersWithQuarantineStats(servers)
 
+	// See note above the management-service path for rationale.
+	s.redactServerHeaders(servers)
+
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
 
 	response := contracts.GetServersResponse{
@@ -1077,6 +1087,22 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// redactServerHeaders walks each server in the slice and replaces sensitive
+// header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
+// Skips redaction entirely when `reveal_secret_headers: true` is set in the
+// loaded config, matching the behaviour of the `upstream_servers` MCP tool.
+func (s *Server) redactServerHeaders(servers []contracts.Server) {
+	cfg, err := s.controller.GetConfig()
+	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
+		return
+	}
+	for i := range servers {
+		if len(servers[i].Headers) > 0 {
+			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
+		}
+	}
 }
 
 // enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)

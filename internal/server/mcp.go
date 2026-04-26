@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
@@ -2482,7 +2483,17 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 
 	// Enhance server list with connection status and Docker isolation info
 	enhancedServers := make([]map[string]interface{}, len(servers))
+	revealHeaders := p.config != nil && p.config.RevealSecretHeaders
 	for i, server := range servers {
+		// Redact sensitive header values (Authorization, X-API-Key, Cookie,
+		// etc.) before surfacing them through the MCP tool. An MCP agent
+		// inside a sandbox should never be able to read another upstream's
+		// Bearer token via `upstream_servers list`. Operators who genuinely
+		// need to see them can set `reveal_secret_headers: true` in config.
+		headers := server.Headers
+		if !revealHeaders {
+			headers = oauth.RedactStringHeaders(server.Headers)
+		}
 		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"protocol":    server.Protocol,
@@ -2490,7 +2501,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			"args":        server.Args,
 			"url":         server.URL,
 			"env":         server.Env,
-			"headers":     server.Headers,
+			"headers":     headers,
 			"enabled":     server.Enabled,
 			"quarantined": server.Quarantined,
 			"created":     server.Created,

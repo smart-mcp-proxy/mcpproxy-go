@@ -163,6 +163,15 @@ type Config struct {
 	// Security scanner settings (Spec 039)
 	Security *SecurityConfig `json:"security,omitempty" mapstructure:"security"`
 
+	// RevealSecretHeaders, when true, disables the redaction of sensitive
+	// header values (Authorization, X-API-Key, Cookie, …) in responses from
+	// the `upstream_servers` MCP tool and the `/api/v1/servers` REST API.
+	// Default false — sensitive header values are surfaced as
+	// `***REDACTED***` so an MCP agent cannot read Bearer tokens / API keys
+	// out of another upstream's config. Set to true if a downstream tool
+	// needs the raw values (e.g. a UI that round-trips PUT replaces).
+	RevealSecretHeaders bool `json:"reveal_secret_headers,omitempty" mapstructure:"reveal-secret-headers"`
+
 	// Server edition multi-user configuration (only meaningful with -tags server)
 	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
 }
