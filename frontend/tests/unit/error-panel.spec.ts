@@ -39,7 +39,7 @@ describe('ErrorPanel (spec 044)', () => {
           fixer_key: 'stdio_show_last_logs',
         },
       ],
-      docs_url: 'docs/errors/MCPX_STDIO_SPAWN_ENOENT.md',
+      docs_url: 'https://docs.mcpproxy.app/errors/MCPX_STDIO_SPAWN_ENOENT',
       ...overrides,
     }
   }

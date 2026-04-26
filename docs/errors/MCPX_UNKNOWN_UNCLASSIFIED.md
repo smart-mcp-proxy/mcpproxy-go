@@ -1,23 +1,50 @@
-# MCPX_UNKNOWN_UNCLASSIFIED
+---
+id: MCPX_UNKNOWN_UNCLASSIFIED
+title: MCPX_UNKNOWN_UNCLASSIFIED
+sidebar_label: UNCLASSIFIED
+description: mcpproxy could not classify this failure into a specific error code.
+---
 
-**Severity**: see `internal/diagnostics/registry.go` for the authoritative severity.
-**Registered in**: [`internal/diagnostics/registry.go`](../../internal/diagnostics/registry.go)
+# `MCPX_UNKNOWN_UNCLASSIFIED`
+
+**Severity:** error
+**Domain:** Unknown
 
 ## What happened
 
-mcpproxy classified a terminal failure as `MCPX_UNKNOWN_UNCLASSIFIED`. This page is a stub
-and will be expanded with cause, symptoms, and remediation guidance.
+mcpproxy's error classifier didn't recognise the underlying failure. This is a
+fallback code: every failure gets *some* code, but for novel error shapes the
+catalog doesn't have a specific one yet.
+
+When you see this code, it usually means **mcpproxy needs a new specific code**
+for the situation — please file a bug so we can add it.
 
 ## How to fix
 
-See the fix steps emitted by the CLI and web UI:
+### File a bug report
+
+The error panel includes a **Report a bug** fix-step that pre-fills the issue
+template. Or:
 
 ```bash
-mcpproxy doctor --server <name>
-mcpproxy doctor fix MCPX_UNKNOWN_UNCLASSIFIED --server <name>    # dry-run by default for destructive fixes
+mcpproxy feedback "MCPX_UNKNOWN_UNCLASSIFIED for <server-name>: <one-line summary>"
 ```
+
+Please include:
+
+- The full error text shown in the panel.
+- The output of `mcpproxy upstream logs <server-name> --tail 100`.
+- Your platform and mcpproxy version (`mcpproxy version`).
+- Whether the upstream is HTTP, stdio, isolated, etc.
+
+### Workarounds
+
+- Restart the affected server: `mcpproxy upstream restart <server-name>`.
+- Try Docker isolation, or temporarily disable it.
+- Use `mcpproxy doctor --server <name>` for an interactive walk-through —
+  it sometimes catches issues the runtime classifier misses.
 
 ## Related
 
-- [Spec 044 — Diagnostics & Error Taxonomy](../../specs/044-diagnostics-taxonomy/spec.md)
-- [Design doc](../superpowers/specs/2026-04-24-diagnostics-error-taxonomy-design.md)
+- [Filing a bug](../contributing.md)
+- [Diagnostics overview](README.md)

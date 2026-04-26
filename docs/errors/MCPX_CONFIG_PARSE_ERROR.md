@@ -1,23 +1,54 @@
-# MCPX_CONFIG_PARSE_ERROR
+---
+id: MCPX_CONFIG_PARSE_ERROR
+title: MCPX_CONFIG_PARSE_ERROR
+sidebar_label: PARSE_ERROR
+description: mcpproxy could not parse the configuration file as JSON.
+---
 
-**Severity**: see `internal/diagnostics/registry.go` for the authoritative severity.
-**Registered in**: [`internal/diagnostics/registry.go`](../../internal/diagnostics/registry.go)
+# `MCPX_CONFIG_PARSE_ERROR`
+
+**Severity:** error
+**Domain:** Config
 
 ## What happened
 
-mcpproxy classified a terminal failure as `MCPX_CONFIG_PARSE_ERROR`. This page is a stub
-and will be expanded with cause, symptoms, and remediation guidance.
+mcpproxy reads `~/.mcpproxy/mcp_config.json` (or the path you configured) on
+startup and on every change. The file failed JSON parsing — usually a
+trailing comma, an unquoted key, or a stray character.
+
+mcpproxy refuses to start with a broken config rather than silently loading a
+partial state.
 
 ## How to fix
 
-See the fix steps emitted by the CLI and web UI:
+### Validate the JSON
 
 ```bash
-mcpproxy doctor --server <name>
-mcpproxy doctor fix MCPX_CONFIG_PARSE_ERROR --server <name>    # dry-run by default for destructive fixes
+jq . ~/.mcpproxy/mcp_config.json
 ```
+
+`jq` will print the line/column of the first parse error. Common offenders:
+
+- Trailing comma after the last item in an array or object.
+- Smart quotes pasted from a doc tool instead of `"`.
+- Comment lines (JSON has no comments).
+- Two top-level objects without an enclosing wrapper.
+
+### Restore from backup
+
+mcpproxy writes `.bak` files when applying migrations / web-UI edits:
+
+```bash
+ls ~/.mcpproxy/*.bak
+cp ~/.mcpproxy/mcp_config.json.bak ~/.mcpproxy/mcp_config.json
+```
+
+### Edit via the web UI
+
+If you're not comfortable hand-editing JSON, edit through the web UI: it
+applies changes atomically and never leaves the file in a broken state.
 
 ## Related
 
-- [Spec 044 — Diagnostics & Error Taxonomy](../../specs/044-diagnostics-taxonomy/spec.md)
-- [Design doc](../superpowers/specs/2026-04-24-diagnostics-error-taxonomy-design.md)
+- [Configuration → config file](../configuration/config-file.md)
+- [`MCPX_CONFIG_MISSING_SECRET`](MCPX_CONFIG_MISSING_SECRET.md)

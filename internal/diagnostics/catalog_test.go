@@ -110,16 +110,17 @@ func TestCatalog_All_Stable(t *testing.T) {
 	}
 }
 
-// TestCatalog_DocsURL_MatchesCode — when DocsURL is relative, it must follow
-// the docs/errors/<CODE>.md convention.
+// TestCatalog_DocsURL_MatchesCode — DocsURL is published on docs.mcpproxy.app.
+// Each code must point to https://docs.mcpproxy.app/errors/<CODE>. Bug-report
+// pages and other absolute https:// URLs are also allowed for special cases
+// (e.g. UnknownUnclassified links to the issue tracker as a fix step, but its
+// own DocsURL still resolves to the catalog page).
 func TestCatalog_DocsURL_MatchesCode(t *testing.T) {
+	const prefix = "https://docs.mcpproxy.app/errors/"
 	for code, entry := range registry {
-		if strings.HasPrefix(entry.DocsURL, "http://") || strings.HasPrefix(entry.DocsURL, "https://") {
-			continue
-		}
-		expected := "docs/errors/" + string(code) + ".md"
+		expected := prefix + string(code)
 		if entry.DocsURL != expected {
-			t.Errorf("code %q has DocsURL %q, expected %q (or an absolute https:// URL)", code, entry.DocsURL, expected)
+			t.Errorf("code %q has DocsURL %q, expected %q", code, entry.DocsURL, expected)
 		}
 	}
 }
