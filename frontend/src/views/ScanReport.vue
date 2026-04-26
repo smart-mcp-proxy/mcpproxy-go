@@ -353,6 +353,137 @@
         <span>Supply chain audit complete. No CVEs found in dependencies.</span>
       </div>
 
+      <!-- Scanned Files: lazy-loaded list of every file the scanners actually
+           saw, with suspicious-file markers and inline finding titles. This
+           is the most important triage signal alongside the findings list —
+           if the scanner only saw `tools.json` (tool_definitions_only mode),
+           any "Malicious Code" finding here means very different things from
+           the same finding on a real source tree of 100 files. Backend
+           endpoint: GET /api/v1/servers/{id}/scan/files (already paginated).
+           File CONTENT is not persisted — the temp source dir is cleaned up
+           after the scan, so this viewer shows paths + finding attribution
+           only. Restoring full content viewing would require persisting the
+           extracted source alongside the scan record (separate spec). -->
+      <div class="collapse collapse-arrow bg-base-100 shadow-md">
+        <input type="checkbox" :checked="filesExpanded" @change="onScannedFilesToggle" />
+        <div class="collapse-title font-medium flex items-center gap-2 flex-wrap">
+          <span>Scanned Files</span>
+          <span v-if="scanFilesMeta.total > 0" class="badge badge-sm badge-ghost">{{ scanFilesMeta.total }} {{ scanFilesMeta.total === 1 ? 'file' : 'files' }}</span>
+          <span v-if="scanFilesMeta.suspicious_count > 0" class="badge badge-sm badge-error">
+            {{ scanFilesMeta.suspicious_count }} suspicious
+          </span>
+          <span v-if="scanContext?.source_method" class="badge badge-sm badge-outline">{{ scanContext.source_method }}</span>
+        </div>
+        <div class="collapse-content">
+          <div v-if="!filesLoaded && !scanFilesLoading" class="text-sm text-base-content/50 py-2">
+            Click to load the file list.
+          </div>
+          <div v-else-if="scanFilesLoading && scanFiles.length === 0" class="text-center py-6">
+            <span class="loading loading-spinner loading-md"></span>
+            <p class="mt-2 text-sm text-base-content/60">Loading file list…</p>
+          </div>
+          <div v-else>
+            <!-- Controls: pass selector + suspicious-only filter -->
+            <div class="flex flex-wrap items-center gap-3 mb-3 pb-3 border-b border-base-200">
+              <div class="join">
+                <button
+                  class="btn btn-xs join-item"
+                  :class="scanFilesPass === 1 ? 'btn-active' : 'btn-ghost'"
+                  @click="switchFilesPass(1)"
+                >Pass 1 — Security</button>
+                <button
+                  class="btn btn-xs join-item"
+                  :class="scanFilesPass === 2 ? 'btn-active' : 'btn-ghost'"
+                  @click="switchFilesPass(2)"
+                >Pass 2 — Supply Chain</button>
+              </div>
+              <label class="label cursor-pointer gap-2 py-0">
+                <input type="checkbox" v-model="suspiciousOnly" @change="onSuspiciousFilterChange" class="checkbox checkbox-xs" />
+                <span class="label-text text-xs">Suspicious only</span>
+              </label>
+              <span v-if="scanContext?.source_path" class="text-xs text-base-content/50 ml-auto font-mono break-all">
+                {{ scanContext.source_path }}
+              </span>
+            </div>
+
+            <!-- Empty / no-files states tailored to scan mode. The wording
+                 here matters for triage — "no source files" + a finding on
+                 tools.json should NOT make the user think the scan was
+                 useless; it just means we ran the AI scanner on the tool
+                 definitions only. -->
+            <div v-if="scanFiles.length === 0" class="text-sm text-base-content/50 py-4 italic">
+              <template v-if="suspiciousOnly">
+                No suspicious files in this pass. Untoggle "Suspicious only" to see all scanned files.
+              </template>
+              <template v-else-if="scanContext?.source_method === 'tool_definitions_only'">
+                No source files were extracted for this server — the AI scanner ran on
+                the exported tool definitions only. Findings located at <code class="bg-base-200 px-1 rounded">tools.json</code>
+                refer to that synthetic file, not real source code.
+              </template>
+              <template v-else-if="scanContext?.source_method === 'url'">
+                URL-based scan — no local files. Scanners connected to the server endpoint directly.
+              </template>
+              <template v-else>
+                No files in Pass {{ scanFilesPass }}.
+              </template>
+            </div>
+
+            <!-- File list: terminal-style ASCII tree with suspicious markers
+                 + inline finding-title chips. We don't try to render an
+                 actual nested tree — paginated flat list keeps the
+                 implementation simple and matches the previous version of
+                 this viewer (commit 409ca437). -->
+            <div v-else class="space-y-1 font-mono text-xs max-h-96 overflow-auto pr-2">
+              <div
+                v-for="(file, idx) in scanFiles"
+                :key="file.path"
+                class="flex items-start gap-2 py-0.5"
+                :class="file.suspicious ? 'bg-error/5 -mx-2 px-2 rounded' : ''"
+              >
+                <span class="text-base-content/30 select-none w-4 text-right flex-shrink-0">{{ idx === scanFiles.length - 1 ? '└' : '├' }}</span>
+                <span v-if="file.suspicious" class="text-error flex-shrink-0" title="File has at least one finding">●</span>
+                <span v-else class="text-base-content/20 flex-shrink-0">○</span>
+                <code
+                  class="break-all"
+                  :class="file.suspicious ? 'text-error font-medium' : 'text-base-content/80'"
+                >{{ file.path }}</code>
+                <div v-if="file.findings && file.findings.length" class="flex flex-wrap gap-1 ml-auto flex-shrink-0">
+                  <span
+                    v-for="(t, i) in file.findings.slice(0, 3)"
+                    :key="i"
+                    class="badge badge-xs badge-error badge-outline whitespace-nowrap"
+                    :title="t"
+                  >{{ truncateFindingTitle(t) }}</span>
+                  <span v-if="file.findings.length > 3" class="badge badge-xs badge-ghost">
+                    +{{ file.findings.length - 3 }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Pagination: load-more button when has_more, plus a small
+                 footer with totals. -->
+            <div v-if="scanFiles.length > 0" class="flex items-center justify-between mt-3 pt-2 border-t border-base-200 text-xs text-base-content/60">
+              <span>
+                Showing {{ scanFiles.length }} of {{ scanFilesMeta.total }}
+                <span v-if="scanContext && (scanContext.total_size_bytes ?? 0) > 0">
+                  · {{ formatFileSize(scanContext.total_size_bytes) }}
+                </span>
+              </span>
+              <button
+                v-if="scanFilesMeta.has_more"
+                class="btn btn-xs btn-ghost"
+                :disabled="scanFilesLoading"
+                @click="loadMoreFiles"
+              >
+                <span v-if="scanFilesLoading" class="loading loading-spinner loading-xs"></span>
+                Load more
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Scanner Execution Logs -->
       <div v-if="report.scanner_statuses && report.scanner_statuses.length > 0" class="collapse collapse-arrow bg-base-100 shadow-md">
         <input type="checkbox" />
@@ -724,6 +855,109 @@ async function rejectServer() {
   } finally {
     actionLoading.value = false
   }
+}
+
+// --- Scanned Files viewer ---
+// File viewer is lazy-loaded on first expand to avoid pulling potentially
+// 10K+ entries on every report view. Backend is paginated; we load 100 at
+// a time and surface a "Load more" button when has_more is set. Only the
+// file LIST (paths + per-file finding attribution) is shown — file content
+// is not persisted alongside the scan record (the temp source dir is
+// cleaned up after the scan), so a content viewer would require either
+// re-extracting on demand or persisting source.
+interface ScannedFile {
+  path: string
+  suspicious: boolean
+  findings?: string[]
+}
+
+const filesExpanded = ref(false)
+const filesLoaded = ref(false)
+const scanFiles = ref<ScannedFile[]>([])
+const scanFilesLoading = ref(false)
+const scanFilesPass = ref<1 | 2>(1)
+const suspiciousOnly = ref(false)
+const scanFilesMeta = ref<{
+  total: number
+  has_more: boolean
+  suspicious_count: number
+  offset: number
+}>({ total: 0, has_more: false, suspicious_count: 0, offset: 0 })
+
+async function loadScanFiles(offset: number) {
+  if (!report.value?.server_name) return
+  scanFilesLoading.value = true
+  try {
+    const response = await api.getScanFiles(
+      report.value.server_name,
+      100,
+      offset,
+      scanFilesPass.value,
+      suspiciousOnly.value,
+    )
+    if (response.success && response.data) {
+      const incoming = (response.data.files as ScannedFile[]) || []
+      scanFiles.value = offset === 0 ? incoming : [...scanFiles.value, ...incoming]
+      scanFilesMeta.value = {
+        total: response.data.total_files || 0,
+        has_more: response.data.has_more || false,
+        suspicious_count: response.data.suspicious_count || 0,
+        offset: offset + incoming.length,
+      }
+      filesLoaded.value = true
+    }
+  } catch {
+    // Silently fail — the rest of the report is still useful and the user
+    // can retry by toggling the disclosure or switching the pass selector.
+  } finally {
+    scanFilesLoading.value = false
+  }
+}
+
+async function onScannedFilesToggle(event: Event) {
+  const checkbox = event.target as HTMLInputElement
+  filesExpanded.value = checkbox.checked
+  if (checkbox.checked && !filesLoaded.value) {
+    await loadScanFiles(0)
+  }
+}
+
+async function loadMoreFiles() {
+  await loadScanFiles(scanFilesMeta.value.offset)
+}
+
+async function switchFilesPass(pass: 1 | 2) {
+  if (scanFilesPass.value === pass) return
+  scanFilesPass.value = pass
+  scanFiles.value = []
+  filesLoaded.value = false
+  await loadScanFiles(0)
+}
+
+async function onSuspiciousFilterChange() {
+  // Reset list and reload when the filter toggles. The backend applies the
+  // filter server-side so we don't accidentally hide a "suspicious_count"
+  // value from the unfiltered totals.
+  scanFiles.value = []
+  filesLoaded.value = false
+  await loadScanFiles(0)
+}
+
+// Heuristic: trim long finding titles so they fit in the inline chip
+// without overflowing. The full title is preserved in the chip's title
+// attribute (browser-native tooltip).
+function truncateFindingTitle(title: string): string {
+  if (!title) return ''
+  if (title.length <= 28) return title
+  return title.slice(0, 26) + '…'
+}
+
+function formatFileSize(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
 onMounted(async () => {

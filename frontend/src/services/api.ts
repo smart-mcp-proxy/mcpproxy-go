@@ -856,8 +856,22 @@ class APIService {
     return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/report`)
   }
 
-  async getScanFiles(serverName: string, limit = 100, offset = 0, pass = 1): Promise<APIResponse<any>> {
-    return this.request<any>(`/api/v1/servers/${encodeURIComponent(serverName)}/scan/files?limit=${limit}&offset=${offset}&pass=${pass}`)
+  async getScanFiles(
+    serverName: string,
+    limit = 100,
+    offset = 0,
+    pass = 1,
+    suspiciousOnly = false,
+  ): Promise<APIResponse<any>> {
+    const params = new URLSearchParams({
+      limit: String(limit),
+      offset: String(offset),
+      pass: String(pass),
+    })
+    if (suspiciousOnly) params.set('suspicious_only', 'true')
+    return this.request<any>(
+      `/api/v1/servers/${encodeURIComponent(serverName)}/scan/files?${params.toString()}`,
+    )
   }
 
   async cancelScan(serverName: string): Promise<APIResponse<void>> {
