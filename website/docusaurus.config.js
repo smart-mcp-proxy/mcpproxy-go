@@ -49,6 +49,7 @@ const config = {
             'web-ui/**/*.{md,mdx}',
             'features/**/*.{md,mdx}',
             'operations/**/*.{md,mdx}',
+            'errors/**/*.{md,mdx}',
             'development/**/*.{md,mdx}',
             'contributing.md',
           ],

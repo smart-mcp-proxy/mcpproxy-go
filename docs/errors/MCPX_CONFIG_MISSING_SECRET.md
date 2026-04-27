@@ -1,23 +1,65 @@
-# MCPX_CONFIG_MISSING_SECRET
+---
+id: MCPX_CONFIG_MISSING_SECRET
+title: MCPX_CONFIG_MISSING_SECRET
+sidebar_label: MISSING_SECRET
+description: An upstream config refers to a secret that does not exist in the secret store.
+---
 
-**Severity**: see `internal/diagnostics/registry.go` for the authoritative severity.
-**Registered in**: [`internal/diagnostics/registry.go`](../../internal/diagnostics/registry.go)
+# `MCPX_CONFIG_MISSING_SECRET`
+
+**Severity:** error
+**Domain:** Config
 
 ## What happened
 
-mcpproxy classified a terminal failure as `MCPX_CONFIG_MISSING_SECRET`. This page is a stub
-and will be expanded with cause, symptoms, and remediation guidance.
+The upstream config references a secret (typically via `${SECRET:NAME}` in
+`env` or `headers`), but the secret was not found in the active secret store
+when mcpproxy tried to start that server.
 
 ## How to fix
 
-See the fix steps emitted by the CLI and web UI:
+### List what's defined
 
 ```bash
-mcpproxy doctor --server <name>
-mcpproxy doctor fix MCPX_CONFIG_MISSING_SECRET --server <name>    # dry-run by default for destructive fixes
+mcpproxy secret list
+```
+
+If the name you referenced isn't there, add it.
+
+### Add the missing secret
+
+```bash
+mcpproxy secret set <NAME>           # prompts for the value, never echoed
+```
+
+Secrets are stored in the OS keychain on macOS / Windows and in an encrypted
+file on Linux.
+
+### Check the reference syntax
+
+```jsonc
+{
+  // env values support ${SECRET:NAME} expansion:
+  "env": { "GITHUB_TOKEN": "${SECRET:github_personal_token}" },
+
+  // headers do too:
+  "headers": { "Authorization": "Bearer ${SECRET:my_api_key}" }
+}
+```
+
+Plain string values are used as-is (no expansion).
+
+### Migration from inline secrets
+
+If you previously stored secrets inline and want to move them into the secret
+store:
+
+```bash
+mcpproxy secret set github_personal_token < /dev/stdin <<<"ghp_xxx"
+# Then update the config to use ${SECRET:github_personal_token}
 ```
 
 ## Related
 
-- [Spec 044 — Diagnostics & Error Taxonomy](../../specs/044-diagnostics-taxonomy/spec.md)
-- [Design doc](../superpowers/specs/2026-04-24-diagnostics-error-taxonomy-design.md)
+- [Configuration → environment variables](../configuration/environment-variables.md)
+- [`MCPX_CONFIG_PARSE_ERROR`](MCPX_CONFIG_PARSE_ERROR.md)

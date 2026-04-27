@@ -15,8 +15,12 @@ func init() {
 	seedUNKNOWN()
 }
 
+// docsURL returns the absolute URL of the error documentation page on
+// docs.mcpproxy.app. We emit absolute URLs (rather than repo-relative paths)
+// because the docs are not shipped with the binary — fix-step links must be
+// click-through openable from the web UI, tray, and CLI.
 func docsURL(c Code) string {
-	return "docs/errors/" + string(c) + ".md"
+	return "https://docs.mcpproxy.app/errors/" + string(c)
 }
 
 func register(e CatalogEntry) {

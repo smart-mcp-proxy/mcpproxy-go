@@ -1,23 +1,54 @@
-# MCPX_HTTP_5XX
+---
+id: MCPX_HTTP_5XX
+title: MCPX_HTTP_5XX
+sidebar_label: HTTP 5xx
+description: The MCP server responded with an HTTP 5xx status — upstream-side failure.
+---
 
-**Severity**: see `internal/diagnostics/registry.go` for the authoritative severity.
-**Registered in**: [`internal/diagnostics/registry.go`](../../internal/diagnostics/registry.go)
+# `MCPX_HTTP_5XX`
+
+**Severity:** warn
+**Domain:** HTTP
 
 ## What happened
 
-mcpproxy classified a terminal failure as `MCPX_HTTP_5XX`. This page is a stub
-and will be expanded with cause, symptoms, and remediation guidance.
+The upstream MCP server returned a 5xx status. mcpproxy classifies this as a
+server-side problem rather than a misconfiguration. Common subcategories:
+
+- `500 Internal Server Error` — uncaught exception in the upstream.
+- `502 Bad Gateway` / `504 Gateway Timeout` — load balancer in front of the
+  MCP server lost the backend.
+- `503 Service Unavailable` — the upstream is rate-limiting or under
+  maintenance.
 
 ## How to fix
 
-See the fix steps emitted by the CLI and web UI:
+### 1. Check the upstream's status page
+
+If the vendor publishes a status page, that's the fastest signal. Try again
+when they report the incident as resolved.
+
+### 2. Retry with backoff
+
+mcpproxy applies exponential backoff to upstream connections automatically. If
+the failure is transient you'll see the server flip back to *Ready* without
+intervention.
+
+### 3. Look at the response body
 
 ```bash
-mcpproxy doctor --server <name>
-mcpproxy doctor fix MCPX_HTTP_5XX --server <name>    # dry-run by default for destructive fixes
+mcpproxy activity show <id>
 ```
+
+Many upstreams put a useful diagnostic in the body even on 5xx (request id,
+correlation id) — quote that to upstream support.
+
+### 4. Persistent 5xx on a self-hosted upstream
+
+Check the server's own logs. The fix is on the upstream side; mcpproxy is just
+a faithful messenger.
 
 ## Related
 
-- [Spec 044 — Diagnostics & Error Taxonomy](../../specs/044-diagnostics-taxonomy/spec.md)
-- [Design doc](../superpowers/specs/2026-04-24-diagnostics-error-taxonomy-design.md)
+- [`MCPX_HTTP_CONN_REFUSED`](MCPX_HTTP_CONN_REFUSED.md) — connection rejected before HTTP
+- [Activity Log](../features/activity-log.md)

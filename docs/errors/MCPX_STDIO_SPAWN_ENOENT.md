@@ -1,23 +1,93 @@
-# MCPX_STDIO_SPAWN_ENOENT
+---
+id: MCPX_STDIO_SPAWN_ENOENT
+title: MCPX_STDIO_SPAWN_ENOENT
+sidebar_label: SPAWN_ENOENT
+description: The configured command for a stdio MCP server was not found on PATH.
+---
 
-**Severity**: see `internal/diagnostics/registry.go` for the authoritative severity.
-**Registered in**: [`internal/diagnostics/registry.go`](../../internal/diagnostics/registry.go)
+# `MCPX_STDIO_SPAWN_ENOENT`
+
+**Severity:** error
+**Domain:** STDIO
 
 ## What happened
 
-mcpproxy classified a terminal failure as `MCPX_STDIO_SPAWN_ENOENT`. This page is a stub
-and will be expanded with cause, symptoms, and remediation guidance.
+mcpproxy tried to spawn a stdio MCP server, but the operating system reported
+`ENOENT` — the configured command does not exist on the user's `PATH`. The
+subprocess never started, so the MCP `initialize` handshake timed out.
+
+A typical error chain looks like:
+
+```
+failed to connect: stdio transport (command="uvx", docker_isolation=false):
+  server did not respond to MCP initialize within 30s
+  recent stderr: zsh:1: command not found: uvx
+```
+
+## Common causes
+
+- **Tool not installed** — `uvx`, `npx`, `python3`, `bunx`, etc. are missing from the host.
+- **Wrong `PATH`** — the GUI launcher (Finder, systemd, launchd) doesn't see the
+  shell-only `PATH` that includes `~/.local/bin`, `/opt/homebrew/bin`, NodeSource paths, etc.
+- **Wrong working directory** — the command exists at a relative path that's only
+  valid inside the server's `working_dir`.
+- **Typo** in the `command` field of the upstream entry.
 
 ## How to fix
 
-See the fix steps emitted by the CLI and web UI:
+### 1. Check what mcpproxy's environment sees
 
 ```bash
-mcpproxy doctor --server <name>
-mcpproxy doctor fix MCPX_STDIO_SPAWN_ENOENT --server <name>    # dry-run by default for destructive fixes
+which npx && which uvx && which python3
+echo "$PATH"
 ```
+
+If the command is missing, install the runtime:
+
+```bash
+# uvx (Python tools) — recommended
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# npx (Node tools)
+brew install node            # macOS
+sudo apt install nodejs npm  # Debian/Ubuntu
+```
+
+### 2. Make the GUI inherit the shell PATH (macOS)
+
+The macOS tray launches mcpproxy with the user's login `PATH`, which is shorter
+than your interactive shell `PATH`. Either:
+
+- Move the binary to a system directory: `sudo ln -s "$(which uvx)" /usr/local/bin/uvx`, or
+- Set an absolute path in the upstream config: `"command": "/Users/you/.local/bin/uvx"`.
+
+### 3. Use Docker isolation
+
+If you don't want to install language runtimes on the host, enable Docker
+isolation for the server. mcpproxy will run the command inside a container
+that already has `uvx` / `npx` available.
+
+```json
+{
+  "name": "my-server",
+  "command": "uvx",
+  "args": ["some-mcp-server"],
+  "isolation": { "enabled": true }
+}
+```
+
+See [Docker Isolation](../features/docker-isolation.md).
+
+### 4. Inspect recent server logs
+
+```bash
+mcpproxy upstream logs <server-name> --tail 50
+```
+
+The last lines of stderr usually identify exactly which executable was missing.
 
 ## Related
 
-- [Spec 044 — Diagnostics & Error Taxonomy](../../specs/044-diagnostics-taxonomy/spec.md)
-- [Design doc](../superpowers/specs/2026-04-24-diagnostics-error-taxonomy-design.md)
+- [Docker Isolation](../features/docker-isolation.md)
+- [Configuration → upstream servers](../configuration/upstream-servers.md)
+- `mcpproxy doctor --server <name>` for an interactive walk-through
