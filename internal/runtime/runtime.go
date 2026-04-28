@@ -2442,3 +2442,19 @@ func (r *Runtime) GetToolApproval(serverName, toolName string) (*storage.ToolApp
 	}
 	return r.storageManager.GetToolApproval(serverName, toolName)
 }
+
+// GetOnboardingState returns the current wizard engagement state (Spec 046).
+func (r *Runtime) GetOnboardingState() (*storage.OnboardingState, error) {
+	if r.storageManager == nil {
+		return &storage.OnboardingState{}, nil
+	}
+	return r.storageManager.GetOnboardingState()
+}
+
+// SaveOnboardingState persists the wizard engagement state (Spec 046).
+func (r *Runtime) SaveOnboardingState(state *storage.OnboardingState) error {
+	if r.storageManager == nil {
+		return fmt.Errorf("storage not available")
+	}
+	return r.storageManager.SaveOnboardingState(state)
+}

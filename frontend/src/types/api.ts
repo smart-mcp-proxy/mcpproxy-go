@@ -674,3 +674,29 @@ export interface ConnectResult {
   message: string
   error?: string
 }
+
+// Onboarding wizard types (Spec 046)
+export interface OnboardingState {
+  engaged: boolean
+  first_shown_at?: string
+  engaged_at?: string
+  connect_step_status?: '' | 'completed' | 'skipped'
+  server_step_status?: '' | 'completed' | 'skipped'
+}
+
+export interface OnboardingStateResponse {
+  has_connected_client: boolean
+  has_configured_server: boolean
+  connected_client_count: number
+  connected_client_ids: string[]
+  configured_server_count: number
+  state: OnboardingState
+  should_show_wizard: boolean
+}
+
+export interface OnboardingMarkRequest {
+  engaged?: boolean
+  connect_step_status?: '' | 'completed' | 'skipped'
+  server_step_status?: '' | 'completed' | 'skipped'
+  mark_shown?: boolean
+}

@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -93,6 +94,7 @@ func (b *BoltDB) initBuckets() error {
 			ScanJobsBucket,
 			ScanReportsBucket,
 			IntegrityBaselinesBucket,
+			OnboardingBucket,
 		}
 
 		for _, bucket := range buckets {
@@ -601,4 +603,46 @@ func (b *BoltDB) ListOAuthTokens() ([]*OAuthTokenRecord, error) {
 	})
 
 	return records, err
+}
+
+// Onboarding wizard operations (Spec 046)
+
+// GetOnboardingState returns the current onboarding state.
+// If no state has been recorded, returns a zero-value OnboardingState
+// (i.e. Engaged=false) with nil error.
+func (b *BoltDB) GetOnboardingState() (*OnboardingState, error) {
+	state := &OnboardingState{}
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OnboardingBucket))
+		if bucket == nil {
+			return nil
+		}
+
+		data := bucket.Get([]byte(OnboardingStateKey))
+		if data == nil {
+			return nil
+		}
+
+		return json.Unmarshal(data, state)
+	})
+
+	return state, err
+}
+
+// SaveOnboardingState persists the wizard state.
+func (b *BoltDB) SaveOnboardingState(state *OnboardingState) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(OnboardingBucket))
+		if bucket == nil {
+			return fmt.Errorf("onboarding bucket not found")
+		}
+
+		data, err := json.Marshal(state)
+		if err != nil {
+			return err
+		}
+
+		return bucket.Put([]byte(OnboardingStateKey), data)
+	})
 }

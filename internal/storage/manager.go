@@ -1728,3 +1728,21 @@ func extractServerNameFromKey(key string) string {
 
 	return key[:lastUnderscore]
 }
+
+// Onboarding wizard operations (Spec 046)
+
+// GetOnboardingState returns the current wizard engagement state.
+func (m *Manager) GetOnboardingState() (*OnboardingState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.GetOnboardingState()
+}
+
+// SaveOnboardingState persists the wizard engagement state.
+func (m *Manager) SaveOnboardingState(state *OnboardingState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SaveOnboardingState(state)
+}
