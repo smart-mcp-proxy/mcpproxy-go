@@ -805,9 +805,10 @@ class APIService {
     })
   }
 
-  async disconnectClient(clientId: string): Promise<APIResponse<ConnectResult>> {
+  async disconnectClient(clientId: string, serverName = 'mcpproxy'): Promise<APIResponse<ConnectResult>> {
     return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'DELETE',
+      body: JSON.stringify({ server_name: serverName }),
     })
   }
 

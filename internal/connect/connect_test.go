@@ -11,6 +11,48 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+func TestConnect_OpenCode_AllowsTrailingCommaJSON(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{
+	  "theme": "dark",
+	  "mcp": {
+	  },
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Connect("opencode", "mcpproxy", false)
+	if err != nil {
+		t.Fatalf("expected OpenCode JSONC-style config to parse, got %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("expected normalized strict JSON output, got %v", err)
+	}
+	if data["theme"] != "dark" {
+		t.Fatalf("expected theme preserved, got %v", data["theme"])
+	}
+	servers, ok := data["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected mcp object")
+	}
+	if _, ok := servers["mcpproxy"]; !ok {
+		t.Fatal("expected mcpproxy entry")
+	}
+}
+
 // helper to create a service pointing at a temp home directory
 func testService(t *testing.T) (*Service, string) {
 	t.Helper()
@@ -24,6 +66,161 @@ func testServiceWithKey(t *testing.T) (*Service, string) {
 	homeDir := t.TempDir()
 	svc := NewServiceWithHome("127.0.0.1:8080", "test-key-123", homeDir)
 	return svc, homeDir
+}
+
+func TestFindClient_OpenCode(t *testing.T) {
+	client := FindClient("opencode")
+	if client == nil {
+		t.Fatal("expected opencode client definition")
+	}
+	if client.Format != "json" {
+		t.Fatalf("expected json format, got %s", client.Format)
+	}
+	if client.ServerKey != "mcp" {
+		t.Fatalf("expected mcp key, got %s", client.ServerKey)
+	}
+}
+
+func TestConfigPath_OpenCode_GlobalConfigPath(t *testing.T) {
+	home := "/tmp/home"
+	path := ConfigPath("opencode", home)
+	if runtime.GOOS == "windows" {
+		expected := filepath.Join(home, "AppData", "Local", "opencode", "opencode.json")
+		if os.Getenv("LOCALAPPDATA") != "" {
+			expected = filepath.Join(os.Getenv("LOCALAPPDATA"), "opencode", "opencode.json")
+		}
+		if path != expected {
+			t.Fatalf("expected %s, got %s", expected, path)
+		}
+		return
+	}
+	expected := filepath.Join(home, ".config", "opencode", "opencode.json")
+	if path != expected {
+		t.Fatalf("expected %s, got %s", expected, path)
+	}
+}
+
+func TestConnect_OpenCode_RequiresExistingConfigFile(t *testing.T) {
+	svc, _ := testService(t)
+
+	_, err := svc.Connect("opencode", "", false)
+	if err == nil {
+		t.Fatal("expected missing-config error for OpenCode")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestConnect_OpenCode_PreservesNonMCPRootKeys(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"theme":"dark","mcp":{}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := svc.Connect("opencode", "mcpproxy", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data["theme"] != "dark" {
+		t.Fatalf("expected theme preserved, got %v", data["theme"])
+	}
+}
+
+func TestConnect_OpenCode_AdoptsEquivalentEntryWithoutForce(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{
+	  "mcp": {
+	    "proxy-alt": {"type":"remote","url":"http://127.0.0.1:8080/mcp"}
+	  }
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Connect("opencode", "mcpproxy", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success || res.Action != "already_exists" {
+		t.Fatalf("expected idempotent already_exists success, got %+v", res)
+	}
+	if res.ServerName != "proxy-alt" {
+		t.Fatalf("expected adopted name proxy-alt, got %s", res.ServerName)
+	}
+}
+
+func TestConnect_OpenCode_ForceNormalizesAdoptedName(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{
+	  "mcp": {
+	    "proxy-alt": {"type":"remote","url":"http://127.0.0.1:8080/mcp"}
+	  }
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Connect("opencode", "mcpproxy", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success || res.Action != "updated" {
+		t.Fatalf("expected updated success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "proxy-alt") {
+		t.Fatal("expected alias removed after normalization")
+	}
+	if !strings.Contains(string(raw), "mcpproxy") {
+		t.Fatal("expected canonical entry written after normalization")
+	}
+}
+
+func TestDisconnect_OpenCode_RemovesAdoptedAliasWhenSpecified(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{
+	  "mcp": {
+	    "proxy-alt": {"type":"remote","url":"http://127.0.0.1:8080/mcp"}
+	  }
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Disconnect("opencode", "proxy-alt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got %+v", res)
+	}
 }
 
 // ---------- JSON client tests ----------
@@ -760,8 +957,8 @@ func TestFindClient(t *testing.T) {
 
 func TestGetAllClients(t *testing.T) {
 	clients := GetAllClients()
-	if len(clients) != 7 {
-		t.Errorf("Expected 7 clients, got %d", len(clients))
+	if len(clients) != 8 {
+		t.Errorf("Expected 8 clients, got %d", len(clients))
 	}
 
 	// Verify all have non-empty IDs and names

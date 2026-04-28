@@ -129,6 +129,9 @@ function clientIcon(client: ClientStatus): string {
     'cursor': '\u{1F4DD}',
     'vscode': '\u{1F4D0}',
     'windsurf': '\u{1F3C4}',
+    'opencode': '\u{1F9E0}',
+    'gemini': '\u264A',
+    'codex': '\u2318',
     'zed': '\u26A1',
     'cline': '\u{1F916}',
     'continue': '\u27A1\uFE0F',
@@ -163,9 +166,7 @@ async function connect(clientId: string) {
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
-      // Update local state
-      const client = clients.value.find(c => c.id === clientId)
-      if (client) client.connected = true
+      await fetchClients()
       systemStore.addToast({
         type: 'success',
         title: 'Client Connected',
@@ -188,13 +189,12 @@ async function disconnect(clientId: string) {
   resultMessage.value = ''
 
   try {
-    const response = await api.disconnectClient(clientId)
+    const client = clients.value.find(c => c.id === clientId)
+    const response = await api.disconnectClient(clientId, client?.server_name || 'mcpproxy')
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
-      // Update local state
-      const client = clients.value.find(c => c.id === clientId)
-      if (client) client.connected = false
+      await fetchClients()
       systemStore.addToast({
         type: 'info',
         title: 'Client Disconnected',

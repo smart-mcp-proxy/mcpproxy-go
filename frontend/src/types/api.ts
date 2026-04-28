@@ -661,6 +661,7 @@ export interface ClientStatus {
   supported: boolean
   reason?: string
   icon: string
+  server_name?: string
 }
 
 export interface ConnectResult {

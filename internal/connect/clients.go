@@ -78,6 +78,14 @@ var allClients = []ClientDef{
 		Supported: true,
 		Icon:      "gemini",
 	},
+	{
+		ID:        "opencode",
+		Name:      "OpenCode",
+		Format:    "json",
+		ServerKey: "mcp",
+		Supported: true,
+		Icon:      "opencode",
+	},
 }
 
 // GetAllClients returns the definitions of all known clients.
@@ -154,6 +162,16 @@ func ConfigPath(clientID, homeDir string) string {
 	case "gemini":
 		return filepath.Join(homeDir, ".gemini", "settings.json")
 
+	case "opencode":
+		if runtime.GOOS == "windows" {
+			localAppData := os.Getenv("LOCALAPPDATA")
+			if localAppData == "" {
+				localAppData = filepath.Join(homeDir, "AppData", "Local")
+			}
+			return filepath.Join(localAppData, "opencode", "opencode.json")
+		}
+		return filepath.Join(homeDir, ".config", "opencode", "opencode.json")
+
 	default:
 		return ""
 	}
@@ -186,6 +204,11 @@ func buildServerEntry(clientID, mcpURL string) map[string]interface{} {
 	case "gemini":
 		return map[string]interface{}{
 			"httpUrl": mcpURL,
+		}
+	case "opencode":
+		return map[string]interface{}{
+			"type": "remote",
+			"url":  mcpURL,
 		}
 	default:
 		// Fallback: generic HTTP entry
