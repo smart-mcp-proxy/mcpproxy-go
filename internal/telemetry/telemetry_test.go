@@ -300,19 +300,20 @@ func TestEnsureAnonymousID(t *testing.T) {
 	}
 }
 
-// TestSchemaVersionV3 verifies that HeartbeatPayload carries schema_version=3
-// once the v3 fields ship. This is a tripwire against accidental downgrades.
-func TestSchemaVersionV3(t *testing.T) {
-	if SchemaVersion != 3 {
-		t.Fatalf("SchemaVersion = %d, want 3", SchemaVersion)
+// TestSchemaVersionV4 verifies that HeartbeatPayload carries schema_version=4
+// once the Spec 046 onboarding fields ship. This is a tripwire against
+// accidental downgrades.
+func TestSchemaVersionV4(t *testing.T) {
+	if SchemaVersion != 4 {
+		t.Fatalf("SchemaVersion = %d, want 4", SchemaVersion)
 	}
 
 	cfg := &config.Config{}
 	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
 	svc.SetRuntimeStats(&mockRuntimeStats{})
 	payload := svc.BuildPayload()
-	if payload.SchemaVersion != 3 {
-		t.Errorf("payload.SchemaVersion = %d, want 3", payload.SchemaVersion)
+	if payload.SchemaVersion != 4 {
+		t.Errorf("payload.SchemaVersion = %d, want 4", payload.SchemaVersion)
 	}
 }
 
@@ -452,8 +453,8 @@ func TestAnonymousIDStable_V2ToV3(t *testing.T) {
 	if p1.AnonymousID != p2.AnonymousID {
 		t.Errorf("anonymous_id drifted between builds: %q vs %q", p1.AnonymousID, p2.AnonymousID)
 	}
-	// SchemaVersion must be 3 (spec 044 does not re-bump).
-	if p1.SchemaVersion != 3 {
-		t.Errorf("schema_version = %d, want 3 (spec 044 does NOT re-bump)", p1.SchemaVersion)
+	// SchemaVersion is 4 after spec 046's onboarding-funnel additions.
+	if p1.SchemaVersion != 4 {
+		t.Errorf("schema_version = %d, want 4 (spec 046 onboarding funnel)", p1.SchemaVersion)
 	}
 }

@@ -1715,6 +1715,25 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	if cfg := s.runtime.Config(); cfg != nil {
 		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
 		httpAPIServer.SetConnectService(connectSvc)
+
+		// Spec 046: wire the onboarding-funnel provider on the telemetry
+		// service so each heartbeat carries connected-client count + IDs
+		// (from connect.Service) and wizard engagement + per-step status
+		// (from BBolt OnboardingState). nil-safe at every layer.
+		if ts := s.runtime.TelemetryService(); ts != nil {
+			ts.SetOnboardingProvider(func() *telemetry.OnboardingSnapshot {
+				snap := &telemetry.OnboardingSnapshot{
+					ConnectedClientCount: connectSvc.GetConnectedCount(),
+					ConnectedClientIDs:   connectSvc.GetConnectedIDs(),
+				}
+				if state, err := s.runtime.GetOnboardingState(); err == nil && state != nil {
+					snap.WizardEngaged = state.Engaged
+					snap.WizardConnectStep = state.ConnectStepStatus
+					snap.WizardServerStep = state.ServerStepStatus
+				}
+				return snap
+			})
+		}
 	}
 	// Wire security scanner service (Spec 039)
 	if sm := s.runtime.StorageManager(); sm != nil {
