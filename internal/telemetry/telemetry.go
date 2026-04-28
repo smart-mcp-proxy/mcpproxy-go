@@ -22,9 +22,13 @@ import (
 // such field; receivers can route by absence vs presence.
 //
 // v3 (schema bump from 2): adds feature_flags.docker_available,
-// server_protocol_counts, and server_docker_isolated_count. Forward-compatible:
-// existing v2 consumers simply ignore the new fields.
-const SchemaVersion = 3
+// server_protocol_counts, and server_docker_isolated_count.
+//
+// v4 (schema bump from 3): adds onboarding-funnel fields per Spec 046 —
+// connected_client_count, connected_client_ids, wizard_engaged,
+// wizard_connect_step, wizard_server_step. Forward-compatible: existing
+// v3 consumers ignore the new fields.
+const SchemaVersion = 4
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -98,6 +102,47 @@ type HeartbeatPayload struct {
 	// Pointer intentional so JSON null is distinguishable from false —
 	// receivers need this to separate "user disabled" from "we don't know".
 	AutostartEnabled *bool `json:"autostart_enabled"`
+
+	// Spec 046 — onboarding funnel fields. All values are anonymous,
+	// fixed-enum, and inherit Spec 042 / Spec 044 privacy posture: no
+	// upstream-server names, no user-entered strings, no free text.
+
+	// ConnectedClientCount is the number of supported AI clients in which
+	// mcpproxy is currently registered (i.e. has the URL/auth in their
+	// native config file). Computed by connect.Service from the existing
+	// per-client adapter table.
+	ConnectedClientCount int `json:"connected_client_count,omitempty"`
+
+	// ConnectedClientIDs are the identifiers of supported clients currently
+	// pointing at mcpproxy. Drawn ONLY from the fixed adapter table
+	// (e.g. "claude-code", "cursor", "vscode", "windsurf", "codex",
+	// "gemini"). User-entered values, paths, and arbitrary strings MUST
+	// NEVER appear in this field — the anonymity scanner asserts this.
+	ConnectedClientIDs []string `json:"connected_client_ids,omitempty"`
+
+	// WizardEngaged is true once the user completed or explicitly skipped
+	// the first-run onboarding wizard. Once true, the wizard does not
+	// auto-show again, even if state regresses.
+	WizardEngaged bool `json:"wizard_engaged,omitempty"`
+
+	// WizardConnectStep is the per-step status for "Connect an AI client":
+	// one of "" (not shown to this install), "completed", or "skipped".
+	WizardConnectStep string `json:"wizard_connect_step,omitempty"`
+
+	// WizardServerStep is the per-step status for "Add an MCP server":
+	// one of "" (not shown to this install), "completed", or "skipped".
+	WizardServerStep string `json:"wizard_server_step,omitempty"`
+}
+
+// OnboardingSnapshot is the data the telemetry service needs to populate
+// Spec 046 fields on each heartbeat. Built fresh per heartbeat so changes
+// (e.g. user connects another client between heartbeats) are reflected.
+type OnboardingSnapshot struct {
+	ConnectedClientCount int
+	ConnectedClientIDs   []string
+	WizardEngaged        bool
+	WizardConnectStep    string
+	WizardServerStep     string
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -153,6 +198,12 @@ type Service struct {
 	// initialized on first heartbeat; tests may inject a mock via
 	// SetAutostartReader.
 	autostartReader *AutostartReader
+
+	// Spec 046: optional provider for the onboarding-funnel snapshot.
+	// Wired by the runtime at startup with a closure over connect.Service
+	// and the BBolt-backed OnboardingState. nil-safe: when unset the
+	// onboarding fields are simply omitted from the heartbeat.
+	onboardingProvider func() *OnboardingSnapshot
 
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
@@ -227,6 +278,14 @@ func (s *Service) SetConfiguredIDECountProvider(fn func() int) {
 // production the first heartbeat lazy-initializes DefaultAutostartReader.
 func (s *Service) SetAutostartReader(r *AutostartReader) {
 	s.autostartReader = r
+}
+
+// SetOnboardingProvider wires a function that returns an onboarding-funnel
+// snapshot for the next heartbeat (Spec 046). Each call should return fresh
+// data — connected-client count and wizard engagement state both change
+// between heartbeats. Returning nil omits the onboarding fields entirely.
+func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
+	s.onboardingProvider = fn
 }
 
 // resolveLaunchSource returns the LaunchSource to emit in the current
@@ -502,6 +561,19 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.RESTEndpointCalls = snap.RESTEndpointCalls
 		payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
 		payload.DoctorChecks = snap.DoctorChecks
+	}
+
+	// Spec 046: onboarding funnel snapshot. Provider closes over connect.Service
+	// (for the connected-client count + IDs) and the BBolt-backed onboarding
+	// state (for wizard engagement + per-step status). nil-safe.
+	if s.onboardingProvider != nil {
+		if snap := s.onboardingProvider(); snap != nil {
+			payload.ConnectedClientCount = snap.ConnectedClientCount
+			payload.ConnectedClientIDs = snap.ConnectedClientIDs
+			payload.WizardEngaged = snap.WizardEngaged
+			payload.WizardConnectStep = snap.WizardConnectStep
+			payload.WizardServerStep = snap.WizardServerStep
+		}
 	}
 
 	return payload
