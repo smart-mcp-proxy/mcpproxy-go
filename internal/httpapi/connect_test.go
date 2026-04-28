@@ -20,6 +20,9 @@ func TestHandleConnectClient_OpenCodeAdoptedAlreadyExistsReturns200(t *testing.T
 	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
 	srv := NewServer(mockCtrl, logger, nil)
 	home := t.TempDir()
+	// Pin %LOCALAPPDATA% under the test temp dir so OpenCode's Windows
+	// config-path lookup uses the same root as homeDir. No-op on macOS/Linux.
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 	svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
 	srv.SetConnectService(svc)
 
@@ -38,8 +41,8 @@ func TestHandleConnectClient_OpenCodeAdoptedAlreadyExistsReturns200(t *testing.T
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var resp struct {
-		Success bool                   `json:"success"`
-		Data    connect.ConnectResult  `json:"data"`
+		Success bool                  `json:"success"`
+		Data    connect.ConnectResult `json:"data"`
 	}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.True(t, resp.Success)
@@ -51,7 +54,11 @@ func TestHandleConnectClient_OpenCodeMissingConfigReturns400(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
 	srv := NewServer(mockCtrl, logger, nil)
-	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", t.TempDir()))
+	home := t.TempDir()
+	// Pin %LOCALAPPDATA% under the test temp dir so OpenCode's Windows
+	// config-path lookup uses the same root as homeDir. No-op on macOS/Linux.
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", home))
 
 	body, _ := json.Marshal(ConnectRequest{ServerName: "mcpproxy", Force: false})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/opencode", bytes.NewReader(body))
