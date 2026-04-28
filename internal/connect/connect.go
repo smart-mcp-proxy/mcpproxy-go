@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -132,6 +133,11 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
+	if client.ID == "opencode" {
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			return nil, fmt.Errorf("OpenCode config file %s does not exist", cfgPath)
+		}
+	}
 
 	mcpURL := s.mcpURL()
 
@@ -198,6 +204,23 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 		action = "updated"
 	}
 
+	if client.ID == "opencode" {
+		if adoptedName, found := findEquivalentJSONServerName(serversMap, mcpURL, serverName); found && adoptedName != serverName {
+			if !force {
+				return &ConnectResult{
+					Success:    true,
+					Client:     client.ID,
+					ConfigPath: cfgPath,
+					ServerName: adoptedName,
+					Action:     "already_exists",
+					Message:    fmt.Sprintf("%s already connected as %q", client.Name, adoptedName),
+				}, nil
+			}
+			delete(serversMap, adoptedName)
+			action = "updated"
+		}
+	}
+
 	// Create backup before modifying
 	backupPath, err := backupFile(cfgPath)
 	if err != nil {
@@ -253,7 +276,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	}
 
 	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
@@ -491,7 +514,7 @@ func readOrCreateJSON(path string) (map[string]interface{}, os.FileMode, error) 
 	}
 
 	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, perm, fmt.Errorf("parse JSON in %s: %w", path, err)
 	}
 
@@ -540,7 +563,7 @@ func verifyJSONEntry(path, serversKey, serverName string) error {
 		return fmt.Errorf("re-read %s: %w", path, err)
 	}
 	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return fmt.Errorf("re-parse %s: %w", path, err)
 	}
 	serversMap, ok := data[serversKey].(map[string]interface{})
@@ -551,6 +574,29 @@ func verifyJSONEntry(path, serversKey, serverName string) error {
 		return fmt.Errorf("entry %q missing after write", serverName)
 	}
 	return nil
+}
+
+func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, requestedServerName string) (string, bool) {
+	baseURL := strings.SplitN(mcpURL, "?", 2)[0]
+	for name, rawEntry := range serversMap {
+		entry, ok := rawEntry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
+			entryURL, ok := entry[field].(string)
+			if !ok {
+				continue
+			}
+			if entryURL == mcpURL || entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
+				return name, true
+			}
+		}
+		if name == requestedServerName {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // findEntry checks whether a config file contains an mcpproxy-like entry.
@@ -570,7 +616,7 @@ func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool)
 	}
 
 	var data map[string]interface{}
-	if err := json.Unmarshal(raw, &data); err != nil {
+	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return "", false
 	}
 
@@ -604,6 +650,16 @@ func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool)
 	}
 
 	return "", false
+}
+
+var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
+
+func unmarshalLenientJSON(raw []byte, out interface{}) error {
+	if err := json.Unmarshal(raw, out); err == nil {
+		return nil
+	}
+	cleaned := trailingCommaPattern.ReplaceAll(raw, []byte(`$1`))
+	return json.Unmarshal(cleaned, out)
 }
 
 // findEntryTOML looks for an entry in a TOML config that points to our MCP URL.

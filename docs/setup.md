@@ -216,6 +216,20 @@ Create `.vscode/mcp.json` in your workspace:
 
 ---
 
+### 🧩 OpenCode
+
+OpenCode can be connected through MCPProxy's Connect Clients flow.
+
+- Client ID: `opencode`
+- Config section: `mcp`
+- macOS/Linux global config path: `~/.config/opencode/opencode.json`
+- Windows global config path: `%LOCALAPPDATA%\opencode\opencode.json`
+- OpenCode config must already exist; MCPProxy does not create it for you.
+- On connect, MCPProxy writes or updates only the OpenCode `mcp` subtree and preserves unrelated root config.
+- MCPProxy treats endpoint-equivalent existing entries as already connected, even if they use a non-canonical server name.
+
+---
+
 ### 🤖 Claude Desktop
 
 Claude Desktop supports two different approaches depending on your plan:
