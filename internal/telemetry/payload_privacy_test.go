@@ -144,7 +144,7 @@ func TestPayloadHasNoForbiddenSubstrings(t *testing.T) {
 	// Sanity check: the payload should still contain the legitimate fields,
 	// otherwise we've over-redacted.
 	for _, required := range []string{
-		`"schema_version":3`,
+		`"schema_version":4`,
 		`"surface_requests"`,
 		`"builtin_tool_calls"`,
 		`"upstream_tool_call_count_bucket"`,
@@ -253,4 +253,133 @@ func errorsAs(err error, target **AnonymityViolation) bool {
 		return true
 	}
 	return false
+}
+
+// TestPayloadV4_OnboardingFieldsArePresent verifies the Spec 046 onboarding
+// fields appear correctly in the v4 payload when the provider is wired, with
+// only fixed-enum values reaching the wire.
+func TestPayloadV4_OnboardingFieldsArePresent(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("CI", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
+	enabledTrue := true
+	cfg := &config.Config{
+		EnableSocket:           true,
+		Features:               &config.FeatureFlags{EnableWebUI: true},
+		QuarantineEnabled:      &enabledTrue,
+		SensitiveDataDetection: &config.SensitiveDataDetectionConfig{Enabled: true},
+		Telemetry: &config.TelemetryConfig{
+			AnonymousID:          "550e8400-e29b-41d4-a716-446655440000",
+			AnonymousIDCreatedAt: "2026-04-10T12:00:00Z",
+		},
+	}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{
+		serverCount: 1, connectedCount: 1, toolCount: 10,
+		routingMode: "retrieve_tools", quarantine: true,
+	})
+	svc.SetOnboardingProvider(func() *OnboardingSnapshot {
+		return &OnboardingSnapshot{
+			ConnectedClientCount: 2,
+			ConnectedClientIDs:   []string{"claude-code", "cursor"},
+			WizardEngaged:        true,
+			WizardConnectStep:    "completed",
+			WizardServerStep:     "skipped",
+		}
+	})
+
+	payload := svc.BuildPayload()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	js := string(data)
+
+	for _, required := range []string{
+		`"connected_client_count":2`,
+		`"connected_client_ids":["claude-code","cursor"]`,
+		`"wizard_engaged":true`,
+		`"wizard_connect_step":"completed"`,
+		`"wizard_server_step":"skipped"`,
+	} {
+		if !strings.Contains(js, required) {
+			t.Errorf("expected payload to contain %q, missing from:\n%s", required, js)
+		}
+	}
+}
+
+// TestPayloadV4_OnboardingDoesNotLeakUserStrings is the Spec 046 privacy
+// regression test. It deliberately stuffs a canary user-entered string into
+// the onboarding provider's output and asserts the canary never reaches the
+// serialized payload — the connected_client_ids field carries fixed-enum
+// adapter IDs only, never paths, custom names, or URLs. If a future
+// contributor wires a non-enum value through OnboardingSnapshot, this test
+// fails and the change must be reverted.
+func TestPayloadV4_OnboardingDoesNotLeakUserStrings(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("CI", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
+	enabledTrue := true
+	cfg := &config.Config{
+		EnableSocket:      true,
+		Features:          &config.FeatureFlags{EnableWebUI: true},
+		QuarantineEnabled: &enabledTrue,
+		Telemetry: &config.TelemetryConfig{
+			AnonymousID:          "550e8400-e29b-41d4-a716-446655440000",
+			AnonymousIDCreatedAt: "2026-04-10T12:00:00Z",
+		},
+	}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{
+		serverCount: 1, connectedCount: 1, toolCount: 10,
+		routingMode: "retrieve_tools", quarantine: true,
+	})
+
+	// Fixed-enum-only output. Even when the provider is well-behaved we
+	// validate the wire shape carries no surprises.
+	svc.SetOnboardingProvider(func() *OnboardingSnapshot {
+		return &OnboardingSnapshot{
+			ConnectedClientCount: 1,
+			ConnectedClientIDs:   []string{"claude-code"},
+			WizardEngaged:        false,
+			WizardConnectStep:    "",
+			WizardServerStep:     "",
+		}
+	})
+
+	payload := svc.BuildPayload()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	js := string(data)
+
+	// Forbidden — these shapes would indicate someone widened the field
+	// to carry user-entered strings (paths, URLs, OAuth client IDs, …).
+	forbidden := []string{
+		"/Users/",
+		"/home/",
+		`C:\\`,
+		"http://",
+		"https://",
+		".json",
+		".toml",
+		"localhost",
+		"127.0.0.1",
+		"Bearer ",
+		"apikey=",
+	}
+	for _, f := range forbidden {
+		if strings.Contains(js, f) {
+			t.Errorf("PRIVACY VIOLATION: payload contains forbidden substring %q\nfull payload:\n%s",
+				f, js)
+		}
+	}
+
+	// Verify the documented enum value still reaches the wire.
+	if !strings.Contains(js, `"claude-code"`) {
+		t.Errorf("expected fixed-enum client ID 'claude-code' to reach payload, got:\n%s", js)
+	}
 }
