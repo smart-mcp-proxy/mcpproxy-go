@@ -129,7 +129,7 @@ function clientIcon(client: ClientStatus): string {
     'cursor': '\u{1F4DD}',
     'vscode': '\u{1F4D0}',
     'windsurf': '\u{1F3C4}',
-    'opencode': '\u{1F9E0}',
+    'opencode': '\u26A1',
     'gemini': '\u264A',
     'codex': '\u2318',
     'zed': '\u26A1',

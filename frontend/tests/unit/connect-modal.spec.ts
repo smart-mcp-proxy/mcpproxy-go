@@ -49,7 +49,7 @@ describe('ConnectModal', () => {
     expect(wrapper.text()).toContain('/Users/test/.config/opencode/opencode.json')
   })
 
-  it('renders icons for OpenCode, Gemini, and Codex', async () => {
+  it('renders emoji icons for OpenCode, Gemini, and Codex', async () => {
     ;(api.getConnectStatus as any).mockResolvedValue({
       success: true,
       data: [
@@ -91,7 +91,7 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('🧠')
+    expect(wrapper.text()).toContain('⚡')
     expect(wrapper.text()).toContain('♊')
     expect(wrapper.text()).toContain('⌘')
   })
