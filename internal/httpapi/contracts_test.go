@@ -341,6 +341,10 @@ func (m *MockServerController) GetToolApproval(_, _ string) (*storage.ToolApprov
 	return nil, nil
 }
 func (m *MockServerController) GetToolApprovalStatus(_, _ string) (string, error) { return "", nil }
+func (m *MockServerController) GetOnboardingState() (*storage.OnboardingState, error) {
+	return &storage.OnboardingState{}, nil
+}
+func (m *MockServerController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
 
 // Test contract compliance for API responses
 func TestAPIContractCompliance(t *testing.T) {

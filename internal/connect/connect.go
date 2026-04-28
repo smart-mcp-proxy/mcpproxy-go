@@ -79,6 +79,33 @@ func (s *Service) mcpURL() string {
 // defaultServerName is the key used in client config files.
 const defaultServerName = "mcpproxy"
 
+// GetConnectedCount returns the number of supported clients in which mcpproxy
+// is currently registered. Used as the "has any client connected?" wizard
+// predicate (Spec 046).
+func (s *Service) GetConnectedCount() int {
+	count := 0
+	for _, st := range s.GetAllStatus() {
+		if st.Connected {
+			count++
+		}
+	}
+	return count
+}
+
+// GetConnectedIDs returns the identifiers of supported clients in which
+// mcpproxy is currently registered. Identifiers come from the fixed
+// per-client adapter table; user-entered values never appear here.
+func (s *Service) GetConnectedIDs() []string {
+	statuses := s.GetAllStatus()
+	ids := make([]string, 0, len(statuses))
+	for _, st := range statuses {
+		if st.Connected {
+			ids = append(ids, st.ID)
+		}
+	}
+	return ids
+}
+
 // GetAllStatus returns the connection status for every known client.
 func (s *Service) GetAllStatus() []ClientStatus {
 	clients := GetAllClients()

@@ -2428,6 +2428,16 @@ func (s *Server) GetToolApprovalStatus(serverName, toolName string) (string, err
 	return string(record.Status), nil
 }
 
+// GetOnboardingState returns the wizard engagement state (Spec 046).
+func (s *Server) GetOnboardingState() (*storage.OnboardingState, error) {
+	return s.runtime.GetOnboardingState()
+}
+
+// SaveOnboardingState persists the wizard engagement state (Spec 046).
+func (s *Server) SaveOnboardingState(state *storage.OnboardingState) error {
+	return s.runtime.SaveOnboardingState(state)
+}
+
 // serverUnquarantinerAdapter adapts *Server to scanner.ServerUnquarantiner so
 // the security scanner service can unquarantine a server after ApproveServer
 // succeeds. Reuses the existing Server.UnquarantineServer path so the behavior

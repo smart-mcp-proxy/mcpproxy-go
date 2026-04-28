@@ -130,6 +130,10 @@ type ServerController interface {
 	ApproveTools(serverName string, toolNames []string, approvedBy string) error
 	ApproveAllTools(serverName string, approvedBy string) (int, error)
 	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
+
+	// Onboarding wizard (Spec 046)
+	GetOnboardingState() (*storage.OnboardingState, error)
+	SaveOnboardingState(state *storage.OnboardingState) error
 }
 
 // Server provides HTTP API endpoints with chi router
@@ -624,6 +628,10 @@ func (s *Server) setupRoutes() {
 		r.Get("/connect", s.handleGetConnectStatus)
 		r.Post("/connect/{client}", s.handleConnectClient)
 		r.Delete("/connect/{client}", s.handleDisconnectClient)
+
+		// Onboarding wizard (Spec 046)
+		r.Get("/onboarding/state", s.handleGetOnboardingState)
+		r.Post("/onboarding/mark", s.handleMarkOnboardingState)
 
 		// Security scanner management routes (Spec 039)
 		r.Route("/security", func(r chi.Router) {
