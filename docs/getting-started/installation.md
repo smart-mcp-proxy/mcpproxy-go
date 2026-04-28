@@ -87,10 +87,9 @@ cd mcpproxy-bin
 makepkg -si
 ```
 
-The package installs `mcpproxy` to `/usr/bin`, ships a systemd unit at `/usr/lib/systemd/system/mcpproxy.service` (using `DynamicUser=yes`), and places the config at `/etc/mcpproxy/mcp_config.json`. Enable on boot with `sudo systemctl enable --now mcpproxy`.
+The package installs `mcpproxy` to `/usr/bin` and ships a systemd user unit at `/usr/lib/systemd/user/mcpproxy.service`. 
 
-Supported architectures: `x86_64` only at the moment. `aarch64` support is planned — track [`mcpproxy-bin` on AUR](https://aur.archlinux.org/packages/mcpproxy-bin) for updates.
-
+Enable it with:
 :::note Update cadence
 
 Unlike the apt/dnf repositories above, AUR is community-driven: new versions land via the `mcpproxy-bin` PKGBUILD being bumped, not via a project-controlled mirror. The package is currently kept current by automation in the maintainer's [updater repo](https://github.com/JasonLandbridge/Arch-Linux-AUR-Packages-Updater), so bumps usually appear within a day of a GitHub release. If `yay` reports an old version after a recent release, you can flag the package "out-of-date" on AUR or fall back to the [Tarball install](#tarball-any-distro) below.
