@@ -4,7 +4,7 @@ title: Installation
 sidebar_label: Installation
 sidebar_position: 1
 description: Install MCPProxy on macOS, Windows, or Linux
-keywords: [install, setup, homebrew, dmg, windows, linux, deb, rpm, apt, dnf]
+keywords: [install, setup, homebrew, dmg, windows, linux, deb, rpm, apt, dnf, arch, aur]
 ---
 
 # Installation
@@ -72,6 +72,30 @@ sudo dnf install -y mcpproxy
 ```
 
 Supported architectures: `x86_64`, `aarch64`.
+
+### Arch Linux — AUR (community-maintained)
+
+MCPProxy is available on the [Arch User Repository](https://aur.archlinux.org/) as [`mcpproxy-bin`](https://aur.archlinux.org/packages/mcpproxy-bin), which installs the official upstream binary plus a hardened systemd unit.
+
+```bash
+# With an AUR helper (recommended)
+yay -S mcpproxy-bin
+
+# Or manually with makepkg
+git clone https://aur.archlinux.org/mcpproxy-bin.git
+cd mcpproxy-bin
+makepkg -si
+```
+
+The package installs `mcpproxy` to `/usr/bin`, ships a systemd unit at `/usr/lib/systemd/system/mcpproxy.service` (using `DynamicUser=yes`), and places the config at `/etc/mcpproxy/mcp_config.json`. Enable on boot with `sudo systemctl enable --now mcpproxy`.
+
+Supported architectures: `x86_64` only at the moment. `aarch64` support is planned — track [`mcpproxy-bin` on AUR](https://aur.archlinux.org/packages/mcpproxy-bin) for updates.
+
+:::note Update cadence
+
+Unlike the apt/dnf repositories above, AUR is community-driven: new versions land via the `mcpproxy-bin` PKGBUILD being bumped, not via a project-controlled mirror. The package is currently kept current by automation in the maintainer's [updater repo](https://github.com/JasonLandbridge/Arch-Linux-AUR-Packages-Updater), so bumps usually appear within a day of a GitHub release. If `yay` reports an old version after a recent release, you can flag the package "out-of-date" on AUR or fall back to the [Tarball install](#tarball-any-distro) below.
+
+:::
 
 ### Debian / Ubuntu — direct `.deb` download (fallback)
 
