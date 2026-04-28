@@ -76,6 +76,13 @@ sudo dnf config-manager --add-repo https://rpm.mcpproxy.app/mcpproxy.repo
 sudo dnf install -y mcpproxy
 ```
 
+Arch Linux (AUR): [`mcpproxy-bin`](https://aur.archlinux.org/packages/mcpproxy-bin)
+```bash
+yay -S mcpproxy-bin
+# or
+git clone https://aur.archlinux.org/mcpproxy-bin.git && cd mcpproxy-bin && makepkg -si
+```
+
 Both packages ship a hardened `systemd` unit and start the service automatically. Repository signing key fingerprint: `3B6F A1AD 5D53 59DA 51F1  8DDC E1B5 9B9B A1CB 8A3B`.
 
 For one-off `.deb` / `.rpm` downloads (air-gapped installs), grab them from the [latest release](https://github.com/smart-mcp-proxy/mcpproxy-go/releases/latest).
