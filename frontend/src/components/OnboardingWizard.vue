@@ -939,6 +939,12 @@ async function onBulkImport(quarantine: boolean) {
 }
 
 async function patchConfig(patch: Record<string, unknown>) {
+  // /api/v1/config/apply decodes the body directly into config.Config (no
+  // {config: ...} wrapper). Settings.vue calls applyConfig(config) the same
+  // bare way; the wizard's earlier {config: merged} wrap was sending an
+  // unrelated outer object that the backend rejected with a stale field-
+  // validation error ("tools_limit: must be between 1 and 1000"). Send
+  // the bare config to match the existing contract.
   securityBusy.value = true
   try {
     const cur = await api.getConfig()
@@ -946,7 +952,10 @@ async function patchConfig(patch: Record<string, unknown>) {
       throw new Error(cur.error ?? 'failed to read config')
     }
     const merged = { ...cur.data.config, ...patch }
-    await api.applyConfig({ config: merged })
+    const res = await api.applyConfig(merged)
+    if (!res.success) {
+      throw new Error(res.error ?? 'failed to apply config')
+    }
     await fetchSecurityState()
     systemStore.addToast({ type: 'success', title: 'Settings saved', message: 'Updated' })
   } catch (err) {
