@@ -47,23 +47,26 @@ export const useServersStore = defineStore('servers', () => {
       const existingServer = existingMap.get(incomingServer.name)
 
       if (existingServer) {
-        // Update existing server in-place (preserves object reference)
-        // Only update properties that have changed
-        let hasChanges = false
-
-        // IMPORTANT: Clear last_error if not present in incoming server
-        // Object.assign won't clear properties that are missing from source
-        if (!('last_error' in incomingServer) && existingServer.last_error) {
-          delete existingServer.last_error
-          hasChanges = true
+        // Update existing server in-place (preserves object reference so
+        // ServerCard's v-memo / consumers' computeds keep their identity).
+        //
+        // CRITICAL: the API response is authoritative — any field absent on
+        // the incoming server has been cleared on the backend and must be
+        // dropped from the existing reactive object. Object.assign alone
+        // would leak a stale `quarantine: { pending_count: 5 }` (and other
+        // conditionally-emitted fields) after the user approves all tools,
+        // because the backend stops emitting the field when its count hits
+        // zero (see internal/httpapi/server.go enrichServersWithQuarantineStats).
+        // This was the root cause of issue #438.
+        const existingKeys = Object.keys(existingServer) as (keyof Server)[]
+        const incomingKeys = new Set(Object.keys(incomingServer))
+        for (const key of existingKeys) {
+          if (!incomingKeys.has(key)) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            delete (existingServer as any)[key]
+          }
         }
-
         Object.assign(existingServer, incomingServer)
-        hasChanges = true
-
-        if (hasChanges) {
-          console.log(`Server ${existingServer.name} updated with changes`)
-        }
 
         result.push(existingServer)
       } else {
