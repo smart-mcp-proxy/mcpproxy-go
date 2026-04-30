@@ -4,7 +4,14 @@ import (
 	"os"
 	"runtime"
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 )
+
+// loginShellPATHFn captures the user's interactive login-shell $PATH.
+// Overridable in tests. Default delegates to shellwrap.LoginShellPATH which
+// caches the result for the process lifetime via sync.Once.
+var loginShellPATHFn = func() string { return shellwrap.LoginShellPATH(nil) }
 
 const (
 	osWindows = "windows"
@@ -195,11 +202,11 @@ func (m *Manager) discoverWindowsPaths() []string {
 
 	if homeDir != "" {
 		commonPaths = append(commonPaths,
-			homeDir+`\.cargo\bin`,                                    // Rust tools (cargo, uv)
-			homeDir+`\.local\bin`,                                    // Python user scripts
-			homeDir+`\go\bin`,                                        // Go binaries
-			homeDir+`\AppData\Roaming\npm`,                           // npm globals
-			homeDir+`\scoop\shims`,                                   // Scoop packages
+			homeDir+`\.cargo\bin`,          // Rust tools (cargo, uv)
+			homeDir+`\.local\bin`,          // Python user scripts
+			homeDir+`\go\bin`,              // Go binaries
+			homeDir+`\AppData\Roaming\npm`, // npm globals
+			homeDir+`\scoop\shims`,         // Scoop packages
 			homeDir+`\AppData\Local\Programs\Python\Python313\Scripts`, // Python 3.13
 			homeDir+`\AppData\Local\Programs\Python\Python312\Scripts`, // Python 3.12
 			homeDir+`\AppData\Local\Programs\Python\Python311\Scripts`, // Python 3.11
@@ -268,70 +275,78 @@ func (m *Manager) ensureComprehensivePath(envVars []string) []string {
 	return envVars
 }
 
-// buildEnhancedPath builds a comprehensive PATH by combining existing path with discovered paths
+// buildEnhancedPath builds a comprehensive PATH by combining (in priority
+// order) the user's interactive login-shell PATH, statically-discovered
+// well-known tool directories, and the existing PATH inherited from the
+// parent process.
+//
+// Enhancement is gated on EnvConfig.EnhancePath being explicitly opted in
+// (true today only for stdio upstream servers — see core/client.go) and on
+// the existing PATH NOT already containing a comprehensive tool directory.
+// Issue #439: the previous gate `len(pathParts) <= 2` blocked enhancement
+// for the launchd-handed `/usr/bin:/bin:/usr/sbin:/sbin` (4 entries), which
+// is exactly the bad PATH that triggers the bug. We drop that gate and
+// instead rely on login-shell capture + static discovery to enrich PATH
+// whenever it lacks /usr/local/bin or /opt/homebrew/bin.
 func (m *Manager) buildEnhancedPath(existingPath string) string {
-	// If existing path is empty, use discovered paths
+	sep := string(os.PathListSeparator)
+
 	if existingPath == "" {
-		return strings.Join(m.pathDiscovery.DiscoveredPaths, string(os.PathListSeparator))
+		return strings.Join(m.pathDiscovery.DiscoveredPaths, sep)
 	}
 
-	// Check if the existing PATH is missing common tool directories
-	// This indicates a Launchd-style minimal environment
-	pathParts := strings.Split(existingPath, string(os.PathListSeparator))
+	pathParts := strings.Split(existingPath, sep)
 
-	// Look for common tool directories that should contain Docker, etc.
+	// If PATH already contains a common tool directory the user is fine —
+	// don't pollute their carefully-set PATH with login-shell capture.
 	commonToolDirs := []string{"/usr/local/bin", "/opt/homebrew/bin"}
 	if runtime.GOOS == osWindows {
 		commonToolDirs = []string{`C:\Program Files\Docker\Docker\resources\bin`}
 	}
-
-	hasCommonToolDirs := false
 	for _, toolDir := range commonToolDirs {
 		for _, pathPart := range pathParts {
 			if pathPart == toolDir {
-				hasCommonToolDirs = true
-				break
+				return existingPath
 			}
-		}
-		if hasCommonToolDirs {
-			break
 		}
 	}
 
-	// Only enhance if explicitly enabled AND we're missing common tool directories AND the path is minimal
-	// This specifically targets Launchd scenarios while preserving normal behavior by default
-	shouldEnhance := m.config.EnhancePath && !hasCommonToolDirs && len(pathParts) <= 2
-	if shouldEnhance {
-		// Start with discovered paths for better tool discovery
-		enhancedParts := make([]string, 0, len(m.pathDiscovery.DiscoveredPaths)+len(pathParts))
-
-		// Add discovered paths first (prioritize them)
-		for _, discoveredPath := range m.pathDiscovery.DiscoveredPaths {
-			// Avoid duplicates
-			found := false
-			for _, existingPart := range pathParts {
-				if existingPart == discoveredPath {
-					found = true
-					break
-				}
-			}
-			if !found {
-				enhancedParts = append(enhancedParts, discoveredPath)
-			}
-		}
-
-		// Add existing path parts
-		for _, part := range pathParts {
-			if part != "" {
-				enhancedParts = append(enhancedParts, part)
-			}
-		}
-
-		return strings.Join(enhancedParts, string(os.PathListSeparator))
+	if !m.config.EnhancePath {
+		return existingPath
 	}
 
-	// For paths that already have common tool directories or are comprehensive, use as-is
-	return existingPath
+	// Compose: login-shell PATH first (highest priority — captures the
+	// user's actual interactive PATH including mise/asdf/Colima/custom
+	// shims), then statically-discovered well-known directories (deterministic
+	// floor when login-shell capture is empty / contaminated / unavailable),
+	// then the existing PATH (preserves anything the operator deliberately
+	// set on the daemon).
+	enhancedParts := make([]string, 0, len(m.pathDiscovery.DiscoveredPaths)+len(pathParts)+8)
+	seen := make(map[string]struct{}, len(enhancedParts))
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		enhancedParts = append(enhancedParts, p)
+	}
+
+	if loginShellPATHFn != nil {
+		for _, p := range strings.Split(loginShellPATHFn(), sep) {
+			add(p)
+		}
+	}
+	for _, p := range m.pathDiscovery.DiscoveredPaths {
+		add(p)
+	}
+	for _, p := range pathParts {
+		add(p)
+	}
+
+	return strings.Join(enhancedParts, sep)
 }
 
 // getFilteredSystemEnv retrieves allowed environment variables from the system
