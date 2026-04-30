@@ -372,19 +372,7 @@
                 data-test="toggle-docker-isolation"
               />
               <div class="flex-1 min-w-0">
-                <div class="font-medium text-sm flex items-center gap-2">
-                  <span>Docker isolation</span>
-                  <span
-                    v-if="dockerStatus === true"
-                    class="badge badge-success badge-xs"
-                    data-test="docker-detected-badge"
-                  >Docker detected</span>
-                  <span
-                    v-else-if="dockerStatus === false"
-                    class="badge badge-warning badge-xs"
-                    data-test="docker-missing-badge"
-                  >Docker not detected</span>
-                </div>
+                <div class="font-medium text-sm">Docker isolation</div>
                 <p class="text-xs opacity-70 mt-1 leading-relaxed">
                   Sandboxes every stdio server in a throwaway Docker container so a compromised server can't read or write your host files, env vars, or SSH keys. Recommended whenever you import servers from sources you don't fully control.
                 </p>
@@ -414,10 +402,7 @@
                 data-test="toggle-quarantine"
               />
               <div class="flex-1 min-w-0">
-                <div class="font-medium text-sm flex items-center gap-2">
-                  <span>Quarantine new servers</span>
-                  <span class="badge badge-primary badge-xs">Recommended</span>
-                </div>
+                <div class="font-medium text-sm">Quarantine new servers</div>
                 <p class="text-xs mt-1 leading-relaxed">
                   <strong>Recommended.</strong> Holds every newly added server in a quarantine zone until you explicitly approve it. Defends against tool-poisoning attacks where a malicious server smuggles instructions into tool descriptions. <strong>Important:</strong> your AI agent itself can add upstream servers via mcpproxy's built-in MCP tools — your approval is the only safety net.
                 </p>
