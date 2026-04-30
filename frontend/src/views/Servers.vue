@@ -33,27 +33,45 @@
       </div>
     </div>
 
-    <!-- Summary Stats -->
+    <!-- Summary Stats — clickable cards drive the filter row (issue #436) -->
     <div class="stats shadow bg-base-100 w-full">
-      <div class="stat">
+      <button
+        type="button"
+        data-test="kpi-card-total"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filter === 'all' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filter === 'all'"
+        @click="filter = 'all'"
+      >
         <div class="stat-title">Total Servers</div>
         <div class="stat-value">{{ serversStore.serverCount.total }}</div>
         <div class="stat-desc">{{ serversStore.serverCount.enabled }} enabled</div>
-      </div>
+      </button>
 
-      <div class="stat">
+      <button
+        type="button"
+        data-test="kpi-card-connected"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filter === 'connected' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filter === 'connected'"
+        @click="filter = filter === 'connected' ? 'all' : 'connected'"
+      >
         <div class="stat-title">Connected</div>
         <div class="stat-value text-success">{{ serversStore.serverCount.connected }}</div>
         <div class="stat-desc">{{ Math.round((serversStore.serverCount.connected / serversStore.serverCount.total) * 100) || 0 }}% online</div>
-      </div>
+      </button>
 
-      <div class="stat">
+      <button
+        type="button"
+        data-test="kpi-card-quarantined"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filter === 'quarantined' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filter === 'quarantined'"
+        @click="filter = filter === 'quarantined' ? 'all' : 'quarantined'"
+      >
         <div class="stat-title">Quarantined</div>
         <div class="stat-value text-warning">{{ serversStore.serverCount.quarantined }}</div>
         <div class="stat-desc">Need security review</div>
-      </div>
+      </button>
 
-      <div class="stat">
+      <div class="stat" data-test="kpi-card-total-tools">
         <div class="stat-title">Total Tools</div>
         <div class="stat-value text-info">{{ serversStore.totalTools }}</div>
         <div class="stat-desc">Available across all servers</div>
