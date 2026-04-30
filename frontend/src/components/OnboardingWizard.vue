@@ -355,7 +355,10 @@
           <summary class="cursor-pointer flex items-center gap-2 px-6 py-2.5 select-none hover:bg-base-200/70 transition-colors">
             <span class="transition-transform inline-block group-open:rotate-90 opacity-60">▸</span>
             <span class="text-sm font-medium">Runtime isolation and MCP server quarantine</span>
-            <span class="text-[11px] opacity-50 ml-auto">global settings — apply to every imported server</span>
+            <span class="ml-auto inline-flex items-center gap-2">
+              <span class="badge badge-primary badge-sm font-semibold">Global settings</span>
+              <span class="text-xs opacity-70 hidden sm:inline">saved to your mcpproxy config</span>
+            </span>
           </summary>
           <div class="px-6 py-4 space-y-4 bg-base-100">
             <!-- Docker isolation -->
