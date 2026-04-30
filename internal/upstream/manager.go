@@ -15,12 +15,29 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
+
+// dockerResolverFn returns the absolute path to the docker binary, or "" with
+// an error if it cannot be resolved. Overridable in tests.
+//
+// The default implementation delegates to shellwrap.ResolveDockerPath which
+// (a) tries exec.LookPath, (b) probes well-known install locations
+// (/Applications/Docker.app/..., /usr/local/bin/docker, /opt/homebrew/bin/docker,
+// ~/.docker/bin, ~/.orbstack/bin, /opt/podman/bin, …), and (c) finally asks the
+// user's login shell `command -v docker` for non-standard installs (mise, asdf,
+// Colima). This matters when mcpproxy boots from a macOS .app bundle / LoginItem
+// where launchd hands the parent process a minimal PATH=/usr/bin:/bin:/usr/sbin:/sbin
+// — bare exec.Command("docker") fails with `executable file not found in $PATH`
+// even though docker is installed at a standard location.
+var dockerResolverFn = func(logger *zap.Logger) (string, error) {
+	return shellwrap.ResolveDockerPath(logger)
+}
 
 // Docker recovery constants - internal implementation defaults
 const (
@@ -33,6 +50,21 @@ const (
 	dockerRetryInterval5     = 60 * time.Second // Fifth+ retry (max backoff)
 	dockerHealthCheckTimeout = 3 * time.Second  // Timeout for docker info command
 )
+
+// freshenLoadedDockerRecoveryState clears per-process retry counters from a
+// recovery state loaded from persistent storage at process startup. The
+// persisted FailureCount / AttemptsSinceUp / RecoveryMode describe the previous
+// process's situation; the new process must not inherit them as a depleted
+// retry budget. Telemetry fields (LastSuccessfulAt, LastError, LastAttempt,
+// DockerAvailable) are preserved so operators can still see the prior state.
+func freshenLoadedDockerRecoveryState(state *storage.DockerRecoveryState) {
+	if state == nil {
+		return
+	}
+	state.FailureCount = 0
+	state.AttemptsSinceUp = 0
+	state.RecoveryMode = false
+}
 
 // getDockerRetryInterval returns the retry interval for a given attempt number (exponential backoff)
 func getDockerRetryInterval(attempt int) time.Duration {
@@ -2041,13 +2073,22 @@ func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
 	defer m.shutdownWg.Done()
 	m.logger.Info("Starting Docker recovery monitor")
 
-	// Load existing recovery state (always persist for reliability)
+	// Load existing recovery state (always persist for reliability) but reset
+	// per-process retry counters. The persisted FailureCount belongs to the
+	// previous process — if it bled out at the retry limit, the new process
+	// would otherwise hit `attempt >= maxRetries` on its very first probe and
+	// give up without ever sleeping, producing the "10 attempts in 5ms" log
+	// pattern. A fresh boot deserves a fresh retry budget; the loaded state
+	// is kept only for telemetry (LastSuccessfulAt, LastError).
 	if m.storageMgr != nil {
 		if state, err := m.storageMgr.LoadDockerRecoveryState(); err == nil && state != nil {
+			previousFailureCount := state.FailureCount
+			freshenLoadedDockerRecoveryState(state)
 			m.dockerRecoveryMu.Lock()
 			m.dockerRecoveryState = state
 			m.dockerRecoveryMu.Unlock()
 			m.logger.Info("Loaded existing Docker recovery state",
+				zap.Int("previous_failure_count", previousFailureCount),
 				zap.Int("failure_count", state.FailureCount),
 				zap.Bool("docker_available", state.DockerAvailable),
 				zap.Time("last_attempt", state.LastAttempt))
@@ -2090,12 +2131,27 @@ func (m *Manager) startDockerRecoveryMonitor(ctx context.Context) {
 	}
 }
 
-// checkDockerAvailability checks if Docker daemon is running and responsive
+// checkDockerAvailability checks if Docker daemon is running and responsive.
+//
+// Resolves the docker binary via dockerResolverFn (shellwrap-backed by default)
+// rather than relying on the parent process's $PATH. This is essential when
+// mcpproxy is launched from a macOS .app bundle / LoginItem: launchd hands the
+// process PATH=/usr/bin:/bin:/usr/sbin:/sbin and a bare exec.Command("docker")
+// would fail with `executable file not found in $PATH` even though docker is
+// installed at /Applications/Docker.app/... or /usr/local/bin/docker.
 func (m *Manager) checkDockerAvailability(ctx context.Context) error {
 	checkCtx, cancel := context.WithTimeout(ctx, dockerHealthCheckTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(checkCtx, "docker", "info", "--format", "{{json .ServerVersion}}")
+	dockerBin, resolveErr := dockerResolverFn(m.logger)
+	if resolveErr != nil || dockerBin == "" {
+		// Fall back to bare "docker" — exec will surface the same lookup error
+		// the previous code path would have produced, preserving error behaviour
+		// when shellwrap also cannot find a docker binary anywhere.
+		dockerBin = "docker"
+	}
+
+	cmd := exec.CommandContext(checkCtx, dockerBin, "info", "--format", "{{json .ServerVersion}}")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker unavailable: %w", err)
 	}
