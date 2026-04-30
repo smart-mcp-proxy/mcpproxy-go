@@ -30,24 +30,48 @@
       </div>
     </div>
 
-    <!-- Summary Stats -->
+    <!-- Summary Stats — clickable, drive the Status filter (issue #436) -->
     <div v-if="summary" class="stats shadow bg-base-100 w-full">
-      <div class="stat">
+      <button
+        type="button"
+        data-test="kpi-card-total"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === '' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === ''"
+        @click="filterStatus = ''"
+      >
         <div class="stat-title">Total (24h)</div>
         <div class="stat-value text-2xl">{{ summary.total_count }}</div>
-      </div>
-      <div class="stat">
+      </button>
+      <button
+        type="button"
+        data-test="kpi-card-success"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'success' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === 'success'"
+        @click="filterStatus = filterStatus === 'success' ? '' : 'success'"
+      >
         <div class="stat-title">Success</div>
         <div class="stat-value text-2xl text-success">{{ summary.success_count }}</div>
-      </div>
-      <div class="stat">
+      </button>
+      <button
+        type="button"
+        data-test="kpi-card-errors"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'error' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === 'error'"
+        @click="filterStatus = filterStatus === 'error' ? '' : 'error'"
+      >
         <div class="stat-title">Errors</div>
         <div class="stat-value text-2xl text-error">{{ summary.error_count }}</div>
-      </div>
-      <div class="stat">
+      </button>
+      <button
+        type="button"
+        data-test="kpi-card-blocked"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'blocked' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === 'blocked'"
+        @click="filterStatus = filterStatus === 'blocked' ? '' : 'blocked'"
+      >
         <div class="stat-title">Blocked</div>
         <div class="stat-value text-2xl text-warning">{{ summary.blocked_count }}</div>
-      </div>
+      </button>
     </div>
 
     <!-- Filters -->

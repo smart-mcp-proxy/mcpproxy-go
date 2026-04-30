@@ -30,23 +30,41 @@
       </div>
     </div>
 
-    <!-- Summary Stats -->
+    <!-- Summary Stats — clickable cards drive the token filter (issue #436) -->
     <div class="stats shadow bg-base-100 w-full">
-      <div class="stat">
+      <button
+        type="button"
+        data-test="kpi-card-total"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', tokenFilter === 'all' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="tokenFilter === 'all'"
+        @click="tokenFilter = 'all'"
+      >
         <div class="stat-title">Total Tokens</div>
         <div class="stat-value">{{ tokens.length }}</div>
         <div class="stat-desc">All agent tokens</div>
-      </div>
-      <div class="stat">
+      </button>
+      <button
+        type="button"
+        data-test="kpi-card-active"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', tokenFilter === 'active' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="tokenFilter === 'active'"
+        @click="tokenFilter = tokenFilter === 'active' ? 'all' : 'active'"
+      >
         <div class="stat-title">Active</div>
         <div class="stat-value text-success">{{ activeCount }}</div>
         <div class="stat-desc">Currently valid</div>
-      </div>
-      <div class="stat">
+      </button>
+      <button
+        type="button"
+        data-test="kpi-card-expired"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', tokenFilter === 'expired' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="tokenFilter === 'expired'"
+        @click="tokenFilter = tokenFilter === 'expired' ? 'all' : 'expired'"
+      >
         <div class="stat-title">Expired / Revoked</div>
         <div class="stat-value text-warning">{{ expiredOrRevokedCount }}</div>
         <div class="stat-desc">No longer usable</div>
-      </div>
+      </button>
     </div>
 
     <!-- Loading State -->
@@ -86,6 +104,16 @@
       </button>
     </div>
 
+    <!-- Filter empty state: tokens exist but none match the active filter -->
+    <div v-else-if="filteredTokens.length === 0" class="text-center py-12" data-test="tokens-filter-empty">
+      <p class="text-base-content/70 mb-4">
+        No tokens match the <span class="font-semibold">{{ tokenFilter }}</span> filter.
+      </p>
+      <button @click="tokenFilter = 'all'" class="btn btn-sm btn-outline">
+        Show all
+      </button>
+    </div>
+
     <!-- Token List Table -->
     <div v-else class="overflow-x-auto">
       <table class="table table-zebra w-full">
@@ -102,7 +130,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="token in tokens" :key="token.name">
+          <tr v-for="token in filteredTokens" :key="token.name">
             <td class="font-medium">{{ token.name }}</td>
             <td>
               <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ token.token_prefix }}</code>
@@ -390,6 +418,19 @@ const activeCount = computed(() => {
 
 const expiredOrRevokedCount = computed(() => {
   return tokens.value.filter(t => t.revoked || isExpired(t)).length
+})
+
+// KPI-card-driven filter (issue #436): 'all' | 'active' | 'expired'
+const tokenFilter = ref<'all' | 'active' | 'expired'>('all')
+
+const filteredTokens = computed(() => {
+  if (tokenFilter.value === 'active') {
+    return tokens.value.filter(t => !t.revoked && !isExpired(t))
+  }
+  if (tokenFilter.value === 'expired') {
+    return tokens.value.filter(t => t.revoked || isExpired(t))
+  }
+  return tokens.value
 })
 
 // Helper functions
