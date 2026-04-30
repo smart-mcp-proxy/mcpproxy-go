@@ -224,62 +224,7 @@
             <span class="text-sm">{{ selectionImportMessage }}</span>
           </div>
 
-          <!-- Compact toggles (Spec 046 v2 FR-V07) -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
-            <label class="cursor-pointer flex items-start gap-3 p-3 rounded-lg border border-base-300">
-              <input
-                type="checkbox"
-                class="checkbox checkbox-sm mt-0.5"
-                :checked="dockerIsolationDefault"
-                :disabled="securityBusy"
-                @change="onToggleDockerIsolation(($event.target as HTMLInputElement).checked)"
-                data-test="toggle-docker-isolation"
-              />
-              <div class="flex-1 min-w-0">
-                <div class="font-medium text-sm">Docker isolation</div>
-                <div class="text-xs opacity-60 mt-0.5">
-                  Runs stdio servers in throwaway containers.
-                </div>
-                <div
-                  v-if="dockerIsolationDefault && dockerStatus !== null && !dockerStatus"
-                  class="alert alert-warning mt-2 py-2 px-3 text-xs"
-                  data-test="docker-warning"
-                >
-                  <span>⚠️ Docker isn't detected. Install or start Docker Desktop, or stdio servers will run unsandboxed.</span>
-                </div>
-              </div>
-            </label>
-            <label class="cursor-pointer flex items-start gap-3 p-3 rounded-lg border border-base-300">
-              <input
-                type="checkbox"
-                class="checkbox checkbox-sm mt-0.5"
-                :checked="quarantineEnabled"
-                :disabled="securityBusy"
-                @change="onToggleQuarantine(($event.target as HTMLInputElement).checked)"
-                data-test="toggle-quarantine"
-              />
-              <div class="flex-1 min-w-0">
-                <div class="font-medium text-sm">Quarantine new tools</div>
-                <div class="text-xs opacity-60 mt-0.5">
-                  Hold every newly added server in a safe zone until you approve it. Defends against tool poisoning and rug-pulls.
-                </div>
-              </div>
-            </label>
-          </div>
-
-          <!-- Scanner / post-hoc quarantine note (Spec 046 v2) -->
-          <div class="alert alert-info text-sm mb-4" data-test="scanner-note">
-            <div class="flex flex-col items-start gap-1">
-              <div class="font-semibold">Already imported a server?</div>
-              <div class="opacity-80">
-                You can run security scanners on any server and move it back into quarantine if anything looks off — open the server in
-                <router-link to="/servers" class="link link-primary">Servers</router-link> and use <em>Run scan</em>.
-                Scanners (Trivy, Semgrep, MCP Scan) flag tool-poisoning, prompt-injection, and supply-chain risks.
-              </div>
-            </div>
-          </div>
-
-          <details class="border border-base-300 rounded-lg p-3 text-sm">
+          <details class="border border-base-300 rounded-lg p-3 text-sm" data-test="manual-add-details">
             <summary class="cursor-pointer font-medium flex items-center gap-2 select-none">
               <span class="transition-transform group-open:rotate-90">▸</span>
               Add a single server manually instead
@@ -398,47 +343,134 @@
       <!-- Footer (sticky, non-scrollable) -->
       <!-- Servers tab gets a dedicated import-action footer when at least one
            detectable server source exists. The action buttons stay visible
-           even as the list above scrolls. -->
+           even as the list above scrolls. Above the buttons sits a
+           collapsed-by-default panel exposing global security settings
+           (Docker isolation + per-server quarantine) so the user can opt
+           into stricter or looser defaults without leaving the wizard. -->
       <div
         v-if="activeTab === 'servers' && importSourcesWithServers.length > 0"
-        class="flex items-center justify-between gap-3 px-6 py-3 border-t border-base-300 shrink-0 bg-base-200/40"
+        class="border-t border-base-300 shrink-0 bg-base-200/40"
       >
-        <div class="text-xs">
-          <span v-if="selectedCount === 0" class="opacity-50">Select at least one server to import</span>
-          <span v-else>
-            <span class="font-semibold text-primary">{{ selectedCount }}</span>
-            <span class="opacity-70"> selected</span>
-            <span v-if="conflictCount > 0" class="opacity-70">
-              · <span class="text-warning">{{ conflictCount }} renamed</span>
+        <details class="border-b border-base-300" data-test="security-panel">
+          <summary class="cursor-pointer flex items-center gap-2 px-6 py-2.5 select-none hover:bg-base-200/70 transition-colors">
+            <span class="transition-transform inline-block group-open:rotate-90 opacity-60">▸</span>
+            <span class="text-sm font-medium">Runtime isolation and MCP server quarantine</span>
+            <span class="text-[11px] opacity-50 ml-auto">global settings — apply to every imported server</span>
+          </summary>
+          <div class="px-6 py-4 space-y-4 bg-base-100">
+            <!-- Docker isolation -->
+            <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm mt-0.5"
+                :checked="dockerIsolationDefault"
+                :disabled="securityBusy || dockerStatus === false"
+                @change="onToggleDockerIsolation(($event.target as HTMLInputElement).checked)"
+                data-test="toggle-docker-isolation"
+              />
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-sm flex items-center gap-2">
+                  <span>Docker isolation</span>
+                  <span
+                    v-if="dockerStatus === true"
+                    class="badge badge-success badge-xs"
+                    data-test="docker-detected-badge"
+                  >Docker detected</span>
+                  <span
+                    v-else-if="dockerStatus === false"
+                    class="badge badge-warning badge-xs"
+                    data-test="docker-missing-badge"
+                  >Docker not detected</span>
+                </div>
+                <p class="text-xs opacity-70 mt-1 leading-relaxed">
+                  Sandboxes every stdio server in a throwaway Docker container so a compromised server can't read or write your host files, env vars, or SSH keys. Recommended whenever you import servers from sources you don't fully control.
+                </p>
+                <p
+                  v-if="dockerStatus === false"
+                  class="text-xs text-warning mt-2"
+                  data-test="docker-install-hint"
+                >
+                  Docker isn't running on this machine. Install
+                  <a href="https://www.docker.com/products/docker-desktop/" target="_blank" rel="noopener" class="link">Docker Desktop</a>
+                  (or start the Docker daemon) then come back to enable this — stdio servers run unsandboxed otherwise.
+                </p>
+                <p class="text-[11px] mt-2">
+                  <a href="https://docs.mcpproxy.app/security/docker-isolation/" target="_blank" rel="noopener" class="link link-primary">Learn more about Docker isolation →</a>
+                </p>
+              </div>
+            </label>
+
+            <!-- Quarantine new servers -->
+            <label class="flex items-start gap-3 p-3 rounded-lg border border-base-300 cursor-pointer">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-sm mt-0.5"
+                :checked="quarantineEnabled"
+                :disabled="securityBusy"
+                @change="onToggleQuarantine(($event.target as HTMLInputElement).checked)"
+                data-test="toggle-quarantine"
+              />
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-sm flex items-center gap-2">
+                  <span>Quarantine new servers</span>
+                  <span class="badge badge-primary badge-xs">Recommended</span>
+                </div>
+                <p class="text-xs mt-1 leading-relaxed">
+                  <strong>Recommended.</strong> Holds every newly added server in a quarantine zone until you explicitly approve it. Defends against tool-poisoning attacks where a malicious server smuggles instructions into tool descriptions. <strong>Important:</strong> your AI agent itself can add upstream servers via mcpproxy's built-in MCP tools — your approval is the only safety net.
+                </p>
+                <p class="text-xs opacity-70 mt-1.5 leading-relaxed">
+                  Combine with security scanners (Trivy, Semgrep, MCP Scan) on the
+                  <router-link to="/servers" class="link link-primary">Servers</router-link>
+                  page for deeper supply-chain checks before approving.
+                </p>
+                <p class="text-[11px] mt-2">
+                  <a href="https://docs.mcpproxy.app/security/quarantine/" target="_blank" rel="noopener" class="link link-primary">Learn more about quarantine →</a>
+                </p>
+              </div>
+            </label>
+          </div>
+        </details>
+
+        <!-- Action footer -->
+        <div class="flex items-center justify-between gap-3 px-6 py-3">
+          <div class="text-xs">
+            <span v-if="selectedCount === 0" class="opacity-50">Select at least one server to import</span>
+            <span v-else>
+              <span class="font-semibold text-primary">{{ selectedCount }}</span>
+              <span class="opacity-70"> selected</span>
+              <span v-if="conflictCount > 0" class="opacity-70">
+                · <span class="text-warning">{{ conflictCount }} renamed</span>
+              </span>
             </span>
-          </span>
-        </div>
-        <div class="flex items-center gap-2">
-          <button
-            class="btn btn-ghost btn-sm"
-            @click="dismiss"
-            data-test="close-wizard"
-          >Close</button>
-          <button
-            class="btn btn-secondary btn-sm gap-1 min-w-[180px]"
-            :disabled="selectedCount === 0 || importBusyAny"
-            @click="onBulkImport(false)"
-            data-test="bulk-import-active"
-          >
-            <span v-if="bulkImportBusy === 'active'" class="loading loading-spinner loading-xs"></span>
-            <span v-else>⚡</span>
-            Import as active
-          </button>
-          <button
-            class="btn btn-primary btn-sm gap-1 min-w-[180px]"
-            :disabled="selectedCount === 0 || importBusyAny"
-            @click="onBulkImport(true)"
-            data-test="bulk-import-quarantine"
-          >
-            <span v-if="bulkImportBusy === 'quarantine'" class="loading loading-spinner loading-xs"></span>
-            <span v-else>🛡</span>
-            Import &amp; quarantine
-          </button>
+          </div>
+          <div class="flex items-center gap-2">
+            <button
+              class="btn btn-ghost btn-sm"
+              @click="dismiss"
+              data-test="close-wizard"
+            >Close</button>
+            <button
+              class="btn btn-secondary btn-sm gap-1 min-w-[180px]"
+              :disabled="selectedCount === 0 || importBusyAny"
+              @click="onBulkImport(false)"
+              data-test="bulk-import-active"
+            >
+              <span v-if="bulkImportBusy === 'active'" class="loading loading-spinner loading-xs"></span>
+              <span v-else>⚡</span>
+              Import as active
+            </button>
+            <button
+              class="btn btn-primary btn-sm gap-1 min-w-[180px]"
+              :disabled="selectedCount === 0 || importBusyAny || !quarantineEnabled"
+              :title="!quarantineEnabled ? 'Re-enable Quarantine new servers above to use this option' : ''"
+              @click="onBulkImport(true)"
+              data-test="bulk-import-quarantine"
+            >
+              <span v-if="bulkImportBusy === 'quarantine'" class="loading loading-spinner loading-xs"></span>
+              <span v-else>🛡</span>
+              Import &amp; quarantine
+            </button>
+          </div>
         </div>
       </div>
       <!-- Default footer for other tabs / empty server state -->
