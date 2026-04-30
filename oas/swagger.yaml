@@ -1868,6 +1868,15 @@ components:
         path:
           description: File path to import from
           type: string
+        rename:
+          additionalProperties:
+            type: string
+          description: |-
+            Rename maps OriginalName → new name. Applied after parsing so the
+            caller can disambiguate cross-source name collisions (Spec 046 v2 —
+            e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys not present in the
+            imported set are ignored.
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:
@@ -1968,6 +1977,28 @@ components:
         network_mode:
           type: string
         working_dir:
+          type: string
+      type: object
+    httpapi.OnboardingMarkRequest:
+      properties:
+        connect_step_status:
+          description: |-
+            ConnectStepStatus is one of: "", "completed", "skipped". Empty
+            preserves the existing value.
+          type: string
+        engaged:
+          description: |-
+            Engaged marks the wizard as engaged (completed or explicitly skipped).
+            Once true, the wizard does not auto-show again.
+          type: boolean
+        mark_shown:
+          description: MarkShown records the wizard's first display time if not already
+            set.
+          type: boolean
+        server_step_status:
+          description: |-
+            ServerStepStatus is one of: "", "completed", "skipped". Empty
+            preserves the existing value.
           type: string
       type: object
     management.BulkOperationResult:
@@ -2979,6 +3010,68 @@ paths:
       summary: Get server information
       tags:
       - status
+  /api/v1/onboarding/mark:
+    post:
+      description: |-
+        Updates wizard engagement and per-step status. Once engaged is
+        true, the wizard does not auto-show again, even if state regresses.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.OnboardingMarkRequest'
+        description: Mark request
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Updated OnboardingStateResponse
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Mark onboarding wizard state (Spec 046)
+      tags:
+      - onboarding
+  /api/v1/onboarding/state:
+    get:
+      description: |-
+        Returns the wizard engagement record alongside live predicates
+        (whether any client is connected, whether any server is configured),
+        plus a derived ShouldShowWizard flag the frontend can rely on.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: OnboardingStateResponse
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get onboarding wizard state and predicates (Spec 046)
+      tags:
+      - onboarding
   /api/v1/registries:
     get:
       description: Retrieves list of all MCP server registries that can be browsed

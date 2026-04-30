@@ -131,6 +131,52 @@
 
         <!-- Personal Edition: Grouped Menu -->
         <template v-else>
+          <!-- Spec 046 v2: top-pinned Setup entry (above Dashboard).
+               Shows badge with count of incomplete tabs while > 0; collapses
+               to a quiet checkmark when all three tabs (clients/servers/verify)
+               are satisfied. Click reopens the wizard at the first
+               incomplete tab. -->
+          <ul class="menu menu-sm gap-0.5 p-0 mb-1">
+            <li>
+              <a
+                href="#"
+                class="rounded-lg font-medium relative group"
+                :class="setupIncomplete
+                  ? 'bg-gradient-to-r from-primary/10 to-secondary/10 hover:from-primary/15 hover:to-secondary/15'
+                  : 'text-base-content/60'"
+                :title="collapsed ? setupTitleAttr : ''"
+                data-test="sidebar-setup"
+                @click.prevent="onClickSetup"
+              >
+                <span class="relative inline-flex items-center justify-center">
+                  <IconSparkles
+                    class="w-5 h-5 shrink-0"
+                    :class="setupIncomplete ? 'text-primary' : 'text-base-content/40'"
+                  />
+                  <!-- Pulse halo when incomplete -->
+                  <span
+                    v-if="setupIncomplete"
+                    class="absolute inline-flex h-5 w-5 rounded-full bg-primary opacity-30 animate-ping"
+                    aria-hidden="true"
+                  ></span>
+                </span>
+                <span v-show="!collapsed" class="flex-1">
+                  <span v-if="setupIncomplete">Setup</span>
+                  <span v-else class="inline-flex items-center gap-1">
+                    <span>Setup</span>
+                    <span class="text-success text-xs">✓</span>
+                  </span>
+                </span>
+                <span
+                  v-if="setupIncomplete && setupCount > 0"
+                  class="badge badge-primary badge-sm"
+                  :class="collapsed ? 'absolute -top-1 -right-1 badge-xs' : ''"
+                  data-test="sidebar-setup-badge"
+                >{{ setupCount }}</span>
+              </a>
+            </li>
+          </ul>
+
           <!-- Dashboard (solo top row, no section label) -->
           <ul class="menu menu-sm gap-0.5 p-0">
             <li>
@@ -342,15 +388,45 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, type FunctionalComponent } from 'vue'
+import { computed, h, onMounted, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useAuthStore } from '@/stores/auth'
+import { useOnboardingStore } from '@/stores/onboarding'
 
 const route = useRoute()
 const router = useRouter()
 const systemStore = useSystemStore()
 const authStore = useAuthStore()
+const onboardingStore = useOnboardingStore()
+
+// Spec 046 v2: badge count drives the sidebar Setup entry's pulse + count.
+// Refetched on mount; the wizard itself drives subsequent updates while open.
+const setupCount = computed(() => onboardingStore.incompleteTabCount)
+const setupIncomplete = computed(() => setupCount.value > 0)
+const setupTitleAttr = computed(() =>
+  setupIncomplete.value
+    ? `Setup (${setupCount.value} step${setupCount.value === 1 ? '' : 's'} remaining)`
+    : 'Setup ✓'
+)
+
+function onClickSetup() {
+  // Open the wizard via the store. If the user is on a deep route, they stay
+  // there — the wizard is a modal and renders above whatever view is mounted.
+  if (route.path !== '/') {
+    router.push('/').then(() => onboardingStore.openWizard())
+  } else {
+    onboardingStore.openWizard()
+  }
+}
+
+onMounted(() => {
+  // Pull initial state so the badge is correct on first render. Personal-
+  // edition only — the surrounding template gates this for personal users.
+  if (!authStore.isTeamsEdition) {
+    void onboardingStore.fetchState()
+  }
+})
 
 const collapsed = computed(() => systemStore.sidebarCollapsed)
 
@@ -436,6 +512,10 @@ const IconRepo = makeIcon(
 )
 const IconSettings = makeIcon(
   'M10.3 3.6a1.5 1.5 0 013.4 0l.2 1.1a7 7 0 011.9.8l1-.6a1.5 1.5 0 012.1 2.1l-.6 1a7 7 0 01.8 1.9l1.1.2a1.5 1.5 0 010 3.4l-1.1.2a7 7 0 01-.8 1.9l.6 1a1.5 1.5 0 01-2.1 2.1l-1-.6a7 7 0 01-1.9.8l-.2 1.1a1.5 1.5 0 01-3.4 0l-.2-1.1a7 7 0 01-1.9-.8l-1 .6a1.5 1.5 0 01-2.1-2.1l.6-1a7 7 0 01-.8-1.9l-1.1-.2a1.5 1.5 0 010-3.4l1.1-.2a7 7 0 01.8-1.9l-.6-1a1.5 1.5 0 012.1-2.1l1 .6a7 7 0 011.9-.8l.2-1.1zM12 9a3 3 0 100 6 3 3 0 000-6z'
+)
+// Spec 046 v2: sparkles icon for the top-pinned Setup entry.
+const IconSparkles = makeIcon(
+  'M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4L12 3zm6 11l.8 2.4L21 17l-2.2.6L18 20l-.8-2.4L15 17l2.2-.6L18 14zM6 14l.8 2.4L9 17l-2.2.6L6 20l-.8-2.4L3 17l2.2-.6L6 14z'
 )
 
 // Server edition menus (unchanged behavior)

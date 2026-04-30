@@ -380,6 +380,7 @@
     <!-- Modals -->
     <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
     <AddServerModal :show="showAddServer" @close="showAddServer = false" @added="handleServerAdded" />
+    <OnboardingWizard :show="onboardingStore.wizardOpen" @close="onboardingStore.closeWizard" />
   </div>
 </template>
 
@@ -395,11 +396,14 @@ import TelemetryBanner from '@/components/TelemetryBanner.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
 import ConnectModal from '@/components/ConnectModal.vue'
 import AddServerModal from '@/components/AddServerModal.vue'
+import OnboardingWizard from '@/components/OnboardingWizard.vue'
+import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const onboardingStore = useOnboardingStore()
 
 // Modal state
 const showConnectModal = ref(false)
@@ -797,6 +801,15 @@ onMounted(() => {
 
   systemStore.connectEventSource()
   serversStore.fetchServers()
+
+  // Adaptive onboarding wizard (Spec 046): auto-show on first Web UI load
+  // when the user has not yet engaged with the wizard and at least one
+  // predicate (any client connected? any server configured?) is false.
+  onboardingStore.fetchState().then((state) => {
+    if (state?.should_show_wizard) {
+      onboardingStore.openWizard()
+    }
+  })
 })
 
 onUnmounted(() => {

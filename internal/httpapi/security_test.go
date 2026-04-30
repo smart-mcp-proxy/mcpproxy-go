@@ -338,3 +338,8 @@ func (m *baseController) GetToolApproval(_, _ string) (*storage.ToolApprovalReco
 	return nil, nil
 }
 func (m *baseController) GetToolApprovalStatus(_, _ string) (string, error) { return "", nil }
+func (m *baseController) GetOnboardingState() (*storage.OnboardingState, error) {
+	return &storage.OnboardingState{}, nil
+}
+func (m *baseController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
+func (m *baseController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }

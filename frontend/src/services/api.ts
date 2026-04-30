@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, DiagnosticFixResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -702,20 +702,29 @@ class APIService {
     return this.request<CanonicalConfigPathsResponse>('/api/v1/servers/import/paths')
   }
 
-  // Import servers from a file path on the server's filesystem
+  // Import servers from a file path on the server's filesystem.
+  // Spec 046 v2: skip_quarantine=true imports as already-trusted (skips
+  // the quarantine holding state). Default false preserves the safe-by-
+  // default posture for any caller that doesn't pass the flag.
   async importServersFromPath(params: {
     path: string
     format?: string
     server_names?: string[]
     preview?: boolean
+    skip_quarantine?: boolean
+    rename?: Record<string, string>
   }): Promise<APIResponse<ImportResponse>> {
-    const url = `/api/v1/servers/import/path${params.preview ? '?preview=true' : ''}`
+    const qs: string[] = []
+    if (params.preview) qs.push('preview=true')
+    if (params.skip_quarantine) qs.push('skip_quarantine=true')
+    const url = `/api/v1/servers/import/path${qs.length ? '?' + qs.join('&') : ''}`
     return this.request<ImportResponse>(url, {
       method: 'POST',
       body: JSON.stringify({
         path: params.path,
         format: params.format,
-        server_names: params.server_names
+        server_names: params.server_names,
+        rename: params.rename,
       })
     })
   }
@@ -809,6 +818,18 @@ class APIService {
     return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'DELETE',
       body: JSON.stringify({ server_name: serverName }),
+    })
+  }
+
+  // Onboarding wizard (Spec 046)
+  async getOnboardingState(): Promise<APIResponse<OnboardingStateResponse>> {
+    return this.request<OnboardingStateResponse>('/api/v1/onboarding/state')
+  }
+
+  async markOnboardingState(payload: OnboardingMarkRequest): Promise<APIResponse<OnboardingStateResponse>> {
+    return this.request<OnboardingStateResponse>('/api/v1/onboarding/mark', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     })
   }
 

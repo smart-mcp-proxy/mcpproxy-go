@@ -16,20 +16,20 @@ import (
 
 // ImportRequest represents a request to import servers from JSON/TOML content
 type ImportRequest struct {
-	Content     string   `json:"content"`               // Raw JSON or TOML content
-	Format      string   `json:"format,omitempty"`      // Optional format hint
+	Content     string   `json:"content"`                // Raw JSON or TOML content
+	Format      string   `json:"format,omitempty"`       // Optional format hint
 	ServerNames []string `json:"server_names,omitempty"` // Optional: import only these servers
 }
 
 // ImportResponse represents the response from an import operation
 type ImportResponse struct {
-	Format      string                       `json:"format"`
-	FormatName  string                       `json:"format_name"`
-	Summary     configimport.ImportSummary   `json:"summary"`
-	Imported    []ImportedServerResponse     `json:"imported"`
-	Skipped     []configimport.SkippedServer `json:"skipped"`
-	Failed      []configimport.FailedServer  `json:"failed"`
-	Warnings    []string                     `json:"warnings"`
+	Format     string                       `json:"format"`
+	FormatName string                       `json:"format_name"`
+	Summary    configimport.ImportSummary   `json:"summary"`
+	Imported   []ImportedServerResponse     `json:"imported"`
+	Skipped    []configimport.SkippedServer `json:"skipped"`
+	Failed     []configimport.FailedServer  `json:"failed"`
+	Warnings   []string                     `json:"warnings"`
 }
 
 // ImportedServerResponse represents an imported server in the response
@@ -47,12 +47,12 @@ type ImportedServerResponse struct {
 
 // CanonicalConfigPath represents a well-known config file path
 type CanonicalConfigPath struct {
-	Name        string `json:"name"`         // Display name (e.g., "Claude Desktop")
-	Format      string `json:"format"`       // Format identifier (e.g., "claude_desktop")
-	Path        string `json:"path"`         // Full path to the config file
-	Exists      bool   `json:"exists"`       // Whether the file exists
-	OS          string `json:"os"`           // Operating system (darwin, windows, linux)
-	Description string `json:"description"`  // Brief description
+	Name        string `json:"name"`        // Display name (e.g., "Claude Desktop")
+	Format      string `json:"format"`      // Format identifier (e.g., "claude_desktop")
+	Path        string `json:"path"`        // Full path to the config file
+	Exists      bool   `json:"exists"`      // Whether the file exists
+	OS          string `json:"os"`          // Operating system (darwin, windows, linux)
+	Description string `json:"description"` // Brief description
 }
 
 // CanonicalConfigPathsResponse represents the response for canonical config paths
@@ -164,6 +164,11 @@ type ImportFromPathRequest struct {
 	Path        string   `json:"path"`                   // File path to import from
 	Format      string   `json:"format,omitempty"`       // Optional format hint
 	ServerNames []string `json:"server_names,omitempty"` // Optional: import only these servers
+	// Rename maps OriginalName → new name. Applied after parsing so the
+	// caller can disambiguate cross-source name collisions (Spec 046 v2 —
+	// e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys not present in the
+	// imported set are ignored.
+	Rename map[string]string `json:"rename,omitempty"`
 }
 
 // handleImportFromPath godoc
@@ -220,7 +225,7 @@ func (s *Server) handleImportFromPath(w http.ResponseWriter, r *http.Request) {
 	preview := r.URL.Query().Get("preview") == "true"
 
 	// Use the common runImport function
-	result, err := s.runImport(r, content, req.Format, req.ServerNames, preview)
+	result, err := s.runImport(r, content, req.Format, req.ServerNames, preview, req.Rename)
 	if err != nil {
 		logger.Error("Import from path failed", "path", path, "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
@@ -283,8 +288,8 @@ func (s *Server) handleImportServers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Run import
-	result, err := s.runImport(r, content, formatHint, serverNames, preview)
+	// Run import (rename not supported via multipart upload — leave nil)
+	result, err := s.runImport(r, content, formatHint, serverNames, preview, nil)
 	if err != nil {
 		logger.Error("Import failed", "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
@@ -326,7 +331,7 @@ func (s *Server) handleImportServersJSON(w http.ResponseWriter, r *http.Request)
 	preview := r.URL.Query().Get("preview") == "true"
 
 	// Run import
-	result, err := s.runImport(r, []byte(req.Content), req.Format, req.ServerNames, preview)
+	result, err := s.runImport(r, []byte(req.Content), req.Format, req.ServerNames, preview, nil)
 	if err != nil {
 		logger.Error("Import failed", "error", err)
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
@@ -336,14 +341,23 @@ func (s *Server) handleImportServersJSON(w http.ResponseWriter, r *http.Request)
 	s.writeSuccess(w, result)
 }
 
-// runImport executes the import logic and optionally applies the servers
-func (s *Server) runImport(r *http.Request, content []byte, formatHint string, serverNames []string, preview bool) (*ImportResponse, error) {
+// runImport executes the import logic and optionally applies the servers.
+// rename is an optional map of OriginalName → new name applied after parsing,
+// before adding the servers — used by the wizard to disambiguate cross-source
+// name collisions. May be nil.
+func (s *Server) runImport(r *http.Request, content []byte, formatHint string, serverNames []string, preview bool, rename map[string]string) (*ImportResponse, error) {
 	logger := s.getRequestLogger(r)
+
+	// Spec 046 v2: opt-in trust path. Default behaviour is unchanged
+	// (servers enter quarantine). The wizard's "Import active" path passes
+	// `skip_quarantine=true` to import them as already-trusted.
+	skipQuarantine := r.URL.Query().Get("skip_quarantine") == "true"
 
 	// Build import options
 	opts := &configimport.ImportOptions{
-		Preview: preview,
-		Now:     time.Now(),
+		Preview:        preview,
+		SkipQuarantine: skipQuarantine,
+		Now:            time.Now(),
 	}
 
 	// Parse format hint
@@ -376,6 +390,18 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 	result, err := configimport.Import(content, opts)
 	if err != nil {
 		return nil, err
+	}
+
+	// Spec 046 v2: apply caller-supplied renames before persisting. Keyed
+	// by OriginalName so the caller doesn't need to know the parser's name-
+	// sanitization rules. Server.Name is rewritten in place; OriginalName is
+	// preserved on the response so the caller can reconcile the mapping.
+	if len(rename) > 0 {
+		for i := range result.Imported {
+			if newName, ok := rename[result.Imported[i].OriginalName]; ok && newName != "" {
+				result.Imported[i].Server.Name = newName
+			}
+		}
 	}
 
 	// Build response

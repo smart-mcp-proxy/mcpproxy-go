@@ -2442,3 +2442,41 @@ func (r *Runtime) GetToolApproval(serverName, toolName string) (*storage.ToolApp
 	}
 	return r.storageManager.GetToolApproval(serverName, toolName)
 }
+
+// GetOnboardingState returns the current wizard engagement state (Spec 046).
+func (r *Runtime) GetOnboardingState() (*storage.OnboardingState, error) {
+	if r.storageManager == nil {
+		return &storage.OnboardingState{}, nil
+	}
+	return r.storageManager.GetOnboardingState()
+}
+
+// GetActivationFirstMCPClient returns Spec 044's FirstMCPClientEver flag and
+// the capped list of recognized client names from the activation bucket. Used
+// by the v2 onboarding wizard (Spec 046 v2) Verify tab. Nil-safe: when
+// telemetry/activation isn't wired (CI/test or telemetry disabled) returns
+// (false, nil).
+func (r *Runtime) GetActivationFirstMCPClient() (bool, []string) {
+	if r.telemetryService == nil {
+		return false, nil
+	}
+	store := r.telemetryService.ActivationStore()
+	db := r.telemetryService.ActivationDB()
+	if store == nil || db == nil {
+		return false, nil
+	}
+	st, err := store.Load(db)
+	if err != nil {
+		r.logger.Debug("activation: Load failed for onboarding verify", zap.Error(err))
+		return false, nil
+	}
+	return st.FirstMCPClientEver, st.MCPClientsSeenEver
+}
+
+// SaveOnboardingState persists the wizard engagement state (Spec 046).
+func (r *Runtime) SaveOnboardingState(state *storage.OnboardingState) error {
+	if r.storageManager == nil {
+		return fmt.Errorf("storage not available")
+	}
+	return r.storageManager.SaveOnboardingState(state)
+}

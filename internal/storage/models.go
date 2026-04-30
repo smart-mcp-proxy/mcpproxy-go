@@ -24,7 +24,38 @@ const (
 	ScanJobsBucket           = "security_scan_jobs"
 	ScanReportsBucket        = "security_reports"
 	IntegrityBaselinesBucket = "integrity_baselines"
+
+	// Onboarding wizard bucket (Spec 046)
+	OnboardingBucket = "onboarding"
 )
+
+// Onboarding state keys (Spec 046)
+const (
+	OnboardingStateKey = "wizard_state"
+)
+
+// OnboardingState records whether the user has engaged with the first-run
+// wizard, and which steps they completed or skipped. Persisted under
+// OnboardingBucket / OnboardingStateKey. Absence of the record means
+// "wizard has never been shown to this installation".
+type OnboardingState struct {
+	// Engaged is true once the wizard was shown and the user completed or
+	// skipped it. Once true, the wizard does not auto-show again, even if
+	// state regresses (e.g. user disconnects all clients).
+	Engaged bool `json:"engaged"`
+
+	// FirstShownAt is the timestamp of first wizard render.
+	FirstShownAt *time.Time `json:"first_shown_at,omitempty"`
+
+	// EngagedAt is the timestamp of completion or explicit skip.
+	EngagedAt *time.Time `json:"engaged_at,omitempty"`
+
+	// ConnectStepStatus is one of: "", "completed", "skipped".
+	ConnectStepStatus string `json:"connect_step_status,omitempty"`
+
+	// ServerStepStatus is one of: "", "completed", "skipped".
+	ServerStepStatus string `json:"server_step_status,omitempty"`
+}
 
 // Meta keys
 const (
