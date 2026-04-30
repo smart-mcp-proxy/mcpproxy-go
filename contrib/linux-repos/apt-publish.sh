@@ -52,7 +52,7 @@ echo "[1/5] syncing bucket s3://${APT_BUCKET} -> ${workdir}"
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "  dry-run: skipping sync-down"
 else
-  aws s3 sync "s3://${APT_BUCKET}/" "${workdir}/" --no-progress
+  aws s3 sync "s3://${APT_BUCKET}/" "${workdir}/" --quiet
 fi
 
 # Set up standard directory structure even if empty
@@ -148,15 +148,15 @@ else
   # fetch Release + Packages.gz together, so that a user running `apt update`
   # never sees a Release referencing a stale Packages.gz.
   aws s3 sync "${workdir}/dists/" "s3://${APT_BUCKET}/dists/" \
-    --cache-control "public, max-age=60, must-revalidate" --no-progress --delete
+    --cache-control "public, max-age=60, must-revalidate" --quiet --delete
   # Pool artifacts are immutable
   aws s3 sync "${workdir}/pool/" "s3://${APT_BUCKET}/pool/" \
-    --cache-control "public, max-age=31536000, immutable" --no-progress --delete
+    --cache-control "public, max-age=31536000, immutable" --quiet --delete
   # Public key
   aws s3 cp "${workdir}/mcpproxy.gpg" "s3://${APT_BUCKET}/mcpproxy.gpg" \
-    --cache-control "public, max-age=86400" --no-progress
+    --cache-control "public, max-age=86400" --quiet
   aws s3 cp "${workdir}/mcpproxy.gpg.asc" "s3://${APT_BUCKET}/mcpproxy.gpg.asc" \
-    --cache-control "public, max-age=86400" --no-progress
+    --cache-control "public, max-age=86400" --quiet
 fi
 
 echo "apt-publish: OK"

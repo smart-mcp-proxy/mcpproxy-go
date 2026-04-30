@@ -42,7 +42,7 @@ echo "[1/7] syncing bucket s3://${RPM_BUCKET} -> ${workdir}"
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "  dry-run: skipping sync-down"
 else
-  aws s3 sync "s3://${RPM_BUCKET}/" "${workdir}/" --no-progress
+  aws s3 sync "s3://${RPM_BUCKET}/" "${workdir}/" --quiet
 fi
 mkdir -p "${workdir}/x86_64" "${workdir}/aarch64"
 
@@ -157,12 +157,12 @@ else
   # Per-arch content: metadata short cache, rpms immutable
   for arch in x86_64 aarch64; do
     aws s3 sync "${workdir}/${arch}/repodata/" "s3://${RPM_BUCKET}/${arch}/repodata/" \
-      --cache-control "public, max-age=60, must-revalidate" --no-progress --delete
+      --cache-control "public, max-age=60, must-revalidate" --quiet --delete
     # rpms — upload individually with immutable cache (sync --cache-control is per-run)
     for f in "${workdir}/${arch}/"*.rpm; do
       [[ -e "${f}" ]] || continue
       aws s3 cp "${f}" "s3://${RPM_BUCKET}/${arch}/$(basename "${f}")" \
-        --cache-control "public, max-age=31536000, immutable" --no-progress
+        --cache-control "public, max-age=31536000, immutable" --quiet
     done
     # Delete rpms that no longer exist locally (after pruning)
     aws s3 ls "s3://${RPM_BUCKET}/${arch}/" --no-paginate \
@@ -172,16 +172,16 @@ else
         [[ -z "${remote}" ]] && continue
         if [[ ! -f "${workdir}/${arch}/${remote}" ]]; then
           echo "  deleting stale ${arch}/${remote}"
-          aws s3 rm "s3://${RPM_BUCKET}/${arch}/${remote}" --no-progress
+          aws s3 rm "s3://${RPM_BUCKET}/${arch}/${remote}" --quiet
         fi
       done
   done
   aws s3 cp "${workdir}/mcpproxy.repo" "s3://${RPM_BUCKET}/mcpproxy.repo" \
-    --cache-control "public, max-age=3600" --no-progress
+    --cache-control "public, max-age=3600" --quiet
   aws s3 cp "${workdir}/mcpproxy.gpg" "s3://${RPM_BUCKET}/mcpproxy.gpg" \
-    --cache-control "public, max-age=86400" --no-progress
+    --cache-control "public, max-age=86400" --quiet
   aws s3 cp "${workdir}/mcpproxy.gpg.asc" "s3://${RPM_BUCKET}/mcpproxy.gpg.asc" \
-    --cache-control "public, max-age=86400" --no-progress
+    --cache-control "public, max-age=86400" --quiet
 fi
 
 echo "rpm-publish: OK"
