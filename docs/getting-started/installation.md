@@ -87,7 +87,7 @@ cd mcpproxy-bin
 makepkg -si
 ```
 
-The package installs `mcpproxy` to `/usr/bin` and ships a systemd user unit at `/usr/lib/systemd/user/mcpproxy.service`. 
+The package installs `mcpproxy` to `/usr/bin` and ships a systemd user unit at `/usr/lib/systemd/user/mcpproxy.service`.
 
 Enable it with:
 :::note Update cadence
