@@ -567,6 +567,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		return nil
 	}
 
+	approved := 0
 	for _, toolName := range toolNames {
 		record, err := r.storageManager.GetToolApproval(serverName, toolName)
 		if err != nil {
@@ -591,6 +592,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		if err := r.storageManager.SaveToolApproval(record); err != nil {
 			return err
 		}
+		approved++
 
 		r.logger.Info("Tool approved",
 			zap.String("server", serverName),
@@ -600,6 +602,19 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		// Emit activity event
 		r.emitToolQuarantineEvent(serverName, toolName, "tool_approved",
 			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
+	}
+
+	// Notify SSE subscribers that the server's tool-quarantine counts changed.
+	// Without this, a Servers/overview page open in another tab/window keeps
+	// showing the stale "N pending approval" badge until the user manually
+	// reloads — see issue #438. Emit once per call (not per tool) to keep
+	// the bus quiet on bulk approvals.
+	if approved > 0 {
+		r.emitServersChanged("tools_approved", map[string]any{
+			"server":         serverName,
+			"approved_count": approved,
+			"approved_by":    approvedBy,
+		})
 	}
 
 	return nil
