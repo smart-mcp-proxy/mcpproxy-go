@@ -692,6 +692,10 @@ export interface OnboardingStateResponse {
   configured_server_count: number
   state: OnboardingState
   should_show_wizard: boolean
+  // Spec 046 v2 — passive Verify tab + sidebar badge
+  first_mcp_client_ever: boolean
+  mcp_clients_seen_ever: string[]
+  incomplete_tab_count: number
 }
 
 export interface OnboardingMarkRequest {

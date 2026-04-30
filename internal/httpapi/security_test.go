@@ -342,3 +342,4 @@ func (m *baseController) GetOnboardingState() (*storage.OnboardingState, error) 
 	return &storage.OnboardingState{}, nil
 }
 func (m *baseController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
+func (m *baseController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }

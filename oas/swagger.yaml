@@ -1868,6 +1868,15 @@ components:
         path:
           description: File path to import from
           type: string
+        rename:
+          additionalProperties:
+            type: string
+          description: |-
+            Rename maps OriginalName → new name. Applied after parsing so the
+            caller can disambiguate cross-source name collisions (Spec 046 v2 —
+            e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys not present in the
+            imported set are ignored.
+          type: object
         server_names:
           description: 'Optional: import only these servers'
           items:

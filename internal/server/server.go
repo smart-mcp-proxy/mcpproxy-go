@@ -2438,6 +2438,17 @@ func (s *Server) SaveOnboardingState(state *storage.OnboardingState) error {
 	return s.runtime.SaveOnboardingState(state)
 }
 
+// GetActivationFirstMCPClient returns Spec 044's FirstMCPClientEver flag and
+// the capped list of recognized client names. Used by the v2 onboarding wizard
+// (Spec 046 v2) to drive the Verify tab. Nil-safe: when telemetry isn't wired
+// (e.g. CI/test) returns (false, nil).
+func (s *Server) GetActivationFirstMCPClient() (bool, []string) {
+	if s.runtime == nil {
+		return false, nil
+	}
+	return s.runtime.GetActivationFirstMCPClient()
+}
+
 // serverUnquarantinerAdapter adapts *Server to scanner.ServerUnquarantiner so
 // the security scanner service can unquarantine a server after ApproveServer
 // succeeds. Reuses the existing Server.UnquarantineServer path so the behavior

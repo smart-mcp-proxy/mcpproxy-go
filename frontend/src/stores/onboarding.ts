@@ -35,8 +35,13 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const hasConfiguredServer = computed(() => state.value?.has_configured_server ?? false)
   const isEngaged = computed(() => state.value?.state.engaged ?? false)
 
-  // The list of step IDs the wizard should render, in order. Derived
-  // from the live predicates so the wizard adapts to state on each open.
+  // Spec 046 v2 — passive Verify tab + sidebar badge sources.
+  const firstMCPClientEver = computed(() => state.value?.first_mcp_client_ever ?? false)
+  const mcpClientsSeenEver = computed<string[]>(() => state.value?.mcp_clients_seen_ever ?? [])
+  const incompleteTabCount = computed(() => state.value?.incomplete_tab_count ?? 0)
+
+  // v1 visibleSteps kept for back-compat with any remaining caller. The v2
+  // wizard renders a fixed three-tab surface and ignores this value.
   const visibleSteps = computed<Array<'connect' | 'server'>>(() => {
     const steps: Array<'connect' | 'server'> = []
     if (!hasConnectedClient.value) steps.push('connect')
@@ -153,6 +158,9 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     hasConnectedClient,
     hasConfiguredServer,
     isEngaged,
+    firstMCPClientEver,
+    mcpClientsSeenEver,
+    incompleteTabCount,
     visibleSteps,
     fetchState,
     mark,

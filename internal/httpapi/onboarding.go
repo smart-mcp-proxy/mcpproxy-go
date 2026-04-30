@@ -41,9 +41,30 @@ type OnboardingStateResponse struct {
 	State storage.OnboardingState `json:"state"`
 
 	// ShouldShowWizard is the derived flag the frontend uses to decide
-	// whether to auto-show. True when not engaged and at least one
-	// predicate is false.
+	// whether to auto-show. True when not engaged and IncompleteTabCount > 0
+	// (Spec 046 v2 — semantics widened to also count the Verify tab).
 	ShouldShowWizard bool `json:"should_show_wizard"`
+
+	// --- Spec 046 v2 additions ---
+
+	// FirstMCPClientEver is true once any MCP client has successfully completed
+	// an `initialize` round-trip with this mcpproxy. Sourced from the Spec 044
+	// activation bucket. Drives the Verify tab's "green check" state.
+	FirstMCPClientEver bool `json:"first_mcp_client_ever"`
+
+	// MCPClientsSeenEver is the capped list of recognized client names that
+	// have ever called this mcpproxy. Names come from the MCP `initialize`
+	// payload's `clientInfo.name` field, sanitized. Surfaces on the Verify tab
+	// so the user can see whether their real IDE — not a test client — has
+	// connected.
+	MCPClientsSeenEver []string `json:"mcp_clients_seen_ever"`
+
+	// IncompleteTabCount is the number of wizard tabs whose state is incomplete.
+	// Drives the sidebar Setup entry's badge. Formula:
+	//   +1 if HasConnectedClient == false
+	//   +1 if HasConfiguredServer == false
+	//   +1 if FirstMCPClientEver == false
+	IncompleteTabCount int `json:"incomplete_tab_count"`
 }
 
 // OnboardingMarkRequest is the request body for /api/v1/onboarding/mark
@@ -182,7 +203,24 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 	}
 	resp.State = *state
 
-	resp.ShouldShowWizard = !state.Engaged && (!resp.HasConnectedClient || !resp.HasConfiguredServer)
+	// Spec 046 v2: pull activation state for the Verify tab.
+	resp.FirstMCPClientEver, resp.MCPClientsSeenEver = s.controller.GetActivationFirstMCPClient()
+	if resp.MCPClientsSeenEver == nil {
+		resp.MCPClientsSeenEver = []string{}
+	}
+
+	// Badge formula: +1 per incomplete tab.
+	if !resp.HasConnectedClient {
+		resp.IncompleteTabCount++
+	}
+	if !resp.HasConfiguredServer {
+		resp.IncompleteTabCount++
+	}
+	if !resp.FirstMCPClientEver {
+		resp.IncompleteTabCount++
+	}
+
+	resp.ShouldShowWizard = !state.Engaged && resp.IncompleteTabCount > 0
 
 	return resp, nil
 }

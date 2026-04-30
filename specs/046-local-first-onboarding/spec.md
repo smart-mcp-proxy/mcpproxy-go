@@ -2,7 +2,11 @@
 
 **Feature Branch**: `046-local-first-onboarding`
 **Created**: 2026-04-28
-**Status**: Draft
+**Status**: Draft (v2 amendment 2026-04-30)
+
+> **v2 amendment** (2026-04-30): see "v2 — Wizard Surface Redesign" at the end of this document.
+> The original v1 spec text below describes the shipped first cut (PR #433). Where v2
+> contradicts v1, v2 wins. v1 is preserved verbatim for review traceability.
 **Input**: User description: "Adaptive onboarding wizard that adjusts to the user's state — connect-a-client step shown only if no clients are connected, add-a-server step shown only if no upstream servers are configured (with a quarantine explainer), both shown back-to-back if neither exists. Plus extending the existing /api/v1/connect endpoint (Spec 039) with more clients (mcp-manager-style coverage)."
 
 ## Background
@@ -257,3 +261,109 @@ the existing add-server flow for servers. No new HTTP contract.
 - Skip on any step lands on dashboard with no partial commits
 - Wizard suppressed after first engagement across restart scenarios
 ```
+
+---
+
+# v2 — Wizard Surface Redesign (2026-04-30)
+
+## Why v2
+
+After PR #433 (the v1 wizard) shipped, telemetry from `gemini-home` (SynapBus #27345, 2026-04-30) confirmed that the activation funnel cliff is **Step 3 → Step 4 (78.2% → 11.7%)**: users add upstream servers but fail to wire mcpproxy into their AI IDE. The v1 wizard does help by surfacing the connect step, but it has three weaknesses against this signal:
+
+1. **Linear, one-shot flow.** The user can't easily revisit "did my client actually connect?" without manually digging into Settings.
+2. **No proof of round-trip.** Completing the connect step writes a config file, but the user has no in-product confirmation that their AI agent actually talked to mcpproxy. The 11.7% cliff is the gap between "config written" and "first successful MCP request".
+3. **Hidden re-entry.** The "Run setup wizard" link buried in the Dashboard sidebar is unreachable from other pages, so users who get distracted mid-flow never come back.
+
+v2 reframes the wizard as a **persistent, idempotent setup surface** that lives in the left sidebar and stays visible until the user has clients connected, servers configured, *and* a verified first round-trip from at least one client.
+
+## v2 Goals (in priority order)
+
+1. **Move the cliff signal in-product.** Surface "did your AI agent actually call mcpproxy?" as the third tab, gated by passive detection of the existing Spec 044 `FirstMCPClientEver` flag. No active ping; no fragile prompt injection.
+2. **Always-available re-entry.** Replace the dashboard sidebar link with a top-pinned "Setup" entry that lives above Dashboard in the left nav, with an animated badge counting incomplete tabs. One source of truth: `incomplete_tab_count`.
+3. **Idempotent navigation.** All three tabs are clickable at any time. Each tab is a stateful summary, not a one-shot ritual: revisiting Clients shows currently-connected clients with the option to add more; revisiting Servers shows current servers and the add form. The wizard becomes both first-run flow *and* setup overview.
+4. **Reduce friction at Step 1.** Expose the safe defaults (localhost bind, auto-generated API key) inline as a `Show security settings ▾` expander on the Clients tab — no dedicated config screen ahead of the bottleneck step.
+5. **Keep funnel telemetry honest.** Add the verify-step status to the existing US3 telemetry (PR #434). The five-field schema becomes six.
+
+## v2 Non-Goals
+
+- We do **not** add a configuration screen as a separate step. Bind-LAN and `require_mcp_auth` stay accessible from Settings; the wizard exposes them as an inline expander only.
+- We do **not** ship active connection probing (e.g. spawning an IDE process and injecting a prompt). The Verify tab waits for a real, user-driven round-trip.
+- We do **not** change the `/api/v1/connect` adapter table or the existing add-server flow. v2 is wizard surface only.
+
+## v2 User Story 1 — Three-Tab Wizard with Verify
+
+A first-run user opens mcpproxy. The wizard auto-pops as a 3-tab modal: **Clients | Servers | Verify**. The user can move freely between tabs with no gating: tabs are persistent state views, not steps to march through.
+
+- **Clients tab** lists supported AI clients (detected first, then the always-pinned trio Claude Code / Codex / Gemini CLI, then a `Show N more clients ▾` collapsed list of the rest). Each row has a Connect button. A `Show security settings ▾` expander at the bottom exposes "Bind to LAN" and "Require API key on /mcp" toggles with safe defaults pre-selected.
+- **Servers tab** shows currently configured servers and an "Add a server" button. Two compact toggles above the button: **Docker isolation** (per-server, default on for stdio when Docker is available; gracefully off otherwise) and **Quarantine new tools** (global `quarantine_enabled`, default on). Below the toggles, a one-paragraph quarantine explainer.
+- **Verify tab** shows a passive status: "Open your AI agent and ask it to call `retrieve_tools` — we'll detect it live" until at least one supported client has successfully completed its first MCP `initialize` round-trip. Once detected, the tab flips to a green check with the recognized client name(s) and a "Tools indexed: N" counter sourced from existing index stats.
+
+The wizard's badge in the sidebar is the count of tabs whose state is incomplete:
+- Clients tab is "incomplete" iff `connected_client_count == 0`
+- Servers tab is "incomplete" iff `configured_server_count == 0`
+- Verify tab is "incomplete" iff `FirstMCPClientEver == false`
+
+Auto-popup once on first run when `incomplete_tab_count > 0`. Sidebar badge stays live forever — once the user has engaged at least once, we never auto-popup again, but the badge remains so they know they have unfinished setup.
+
+**Acceptance scenarios:**
+
+1. Fresh install, no clients, no servers, no MCP requests received → wizard auto-pops; badge shows `3`.
+2. User clicks Servers tab while on Clients tab → tab switches, no state change to either side.
+3. User clicks Connect on Claude Code → adapter writes config, badge drops to `2`, Clients tab shows "Connected" badge for that client.
+4. User opens Claude Code and asks it to call `retrieve_tools` (without leaving mcpproxy in another window) → Verify tab flips to green via SSE within 2s of the MCP `initialize` hook firing; badge drops accordingly.
+5. User dismisses the wizard with badge at `1` → wizard closes; sidebar Setup entry shows badge `1`; clicking it re-opens the wizard at the first incomplete tab.
+6. User connects all three (clients, servers, verified) → badge becomes `0`, sidebar entry collapses to a quiet `✓ Setup` styling, wizard does not auto-pop.
+7. User completes everything, then disconnects all clients (regresses to 1 incomplete) → badge re-appears with count `1`. Auto-popup does **not** fire because `Engaged == true`. Sidebar entry pulses subtly to draw attention.
+
+## v2 Functional Requirements (additive — does not remove FR-001..FR-031)
+
+- **FR-V01**: Wizard MUST render exactly three tabs: Clients, Servers, Verify. Tabs are clickable bidirectionally with no gating.
+- **FR-V02**: Wizard MUST auto-popup once on first Web UI load when `Engaged == false` AND `incomplete_tab_count > 0`. After engagement, only the sidebar Setup entry surfaces unfinished state.
+- **FR-V03**: Sidebar MUST contain a top-pinned "Setup" entry above Dashboard, always visible to personal-edition users (Server edition is unaffected — see Out of Scope). Server edition layout (My Workspace / Administration sections) does not include the Setup entry. The entry has two visual states: active (badge with count > 0, pulse animation) and complete (no badge, muted color, optional `✓` glyph).
+- **FR-V04**: Setup entry's badge MUST equal `incomplete_tab_count`, where:
+  - +1 if `connected_client_count == 0`
+  - +1 if `configured_server_count == 0`
+  - +1 if `first_mcp_client_ever == false`
+- **FR-V05**: Clients tab MUST sort the client list as: detected (any order acceptable, but by adapter table order is fine) → always-pinned trio (Claude Code, Codex, Gemini CLI) when not already in the detected list → collapsed `Show N more clients ▾` for the rest. The trio's order is fixed.
+- **FR-V06**: Clients tab MUST include a `Show security settings ▾` expander that exposes:
+  - `Bind interface` (read-only display of `listen` config — the wizard does not write this, only surfaces it; full edit lives in Settings → Configuration)
+  - `Require API key on /mcp` toggle (binds to `require_mcp_auth` in config)
+  - Both default to safe values; the toggle persists via existing `/api/v1/config` endpoints.
+- **FR-V07**: Servers tab MUST surface two toggles above the existing add-server flow: `Docker isolation default` (binds to a config-level default that newly added stdio servers inherit) and `Quarantine new tools` (binds to `quarantine_enabled`).
+- **FR-V08**: Verify tab MUST be passive: it polls the onboarding endpoint (or subscribes via SSE) and flips to "green" iff `first_mcp_client_ever == true`. The tab MUST NOT include any "test connection" button; it shows live recognized client names from `mcp_clients_seen_ever` and a tools-indexed count.
+- **FR-V09**: `/api/v1/onboarding/state` response MUST be extended with three new top-level fields: `first_mcp_client_ever` (bool), `mcp_clients_seen_ever` ([]string, fixed enum from adapter table), and `incomplete_tab_count` (int, derived). The existing `should_show_wizard` flag's semantics change to: `!Engaged && incomplete_tab_count > 0`.
+- **FR-V10**: Wizard modal MUST size to `min(960px, 90vw) × min(640px, 85vh)`, single column, with tabs across the top.
+- **FR-V11**: Dashboard "Run setup wizard" link from v1 MUST be removed; the sidebar Setup entry replaces it. Existing references to that button in tests are updated.
+
+## v2 Telemetry Delta (additive to PR #434)
+
+The five v3 fields shipped in PR #434 stay. v2 adds **one more** to the heartbeat:
+
+- `wizard_verify_step_state` (string, one of `""`, `"pending"`, `"verified"`):
+  - `""` when wizard never shown
+  - `"pending"` when wizard shown but `first_mcp_client_ever == false`
+  - `"verified"` when `first_mcp_client_ever == true` (the cliff has been crossed)
+
+This bumps `schema_version` 4 → 5 in `internal/telemetry/telemetry.go`. v3/v4 consumers ignore the new field. Privacy posture unchanged: tri-state enum, never user-entered.
+
+> v2 telemetry can ship in a separate PR after the wizard surface lands. The wizard surface alone is mergeable independently of the heartbeat field — the field only determines whether we can *measure* the cliff close after release.
+
+## v2 Out of Scope
+
+- **Server edition** (Spec 024 multi-user): the Setup entry is personal-edition only. Server edition's left nav has its own structure (My Workspace / Administration); we do not add Setup there in this scope. Server-edition admins can drive setup via the existing admin tools.
+- **Tier-2 client adapters** (US2 in v1): independently shippable as before. v2 changes nothing here.
+- **CLI surface**: no `mcpproxy wizard` command. The wizard is Web-UI / tray only.
+
+## v2 Implementation Notes
+
+- Backend reuse: `internal/telemetry/activation.go` already exposes `FirstMCPClientEver` and `MCPClientsSeenEver` via the `ActivationStore` interface. The onboarding endpoint just needs to read `ActivationState` (via `runtime.TelemetryService().ActivationStore().Load(db)`) and surface the two fields. No new BBolt bucket, no new hook into MCP — the `AfterInitialize` hook in `internal/server/mcp.go:155` already calls `RecordMCPClientForActivation`.
+- Frontend reuse: `OnboardingWizard.vue` is rewritten in place from a 1-2 step linear flow to a 3-tab idempotent surface. The Pinia store gains `verifiedFirstClient`, `mcpClientsSeenEver`, and `incompleteTabCount` computeds.
+- Sidebar: `SidebarNav.vue` gains a top-pinned `<router-link>` to a synthetic route `/?wizard=open` that opens the wizard via the store. Badge binds to `onboarding.incompleteTabCount`.
+- The existing v1 `should_show_wizard` derivation is replaced (semantically widened) but the field name is preserved so the frontend doesn't break.
+- Live updates on the Verify tab: piggyback on the existing `/events` SSE stream — emit a `runtime.activation_changed` event when `MarkFirstMCPClient` flips. Frontend listens, refetches `/api/v1/onboarding/state`. Falls back to a 5s poll while the wizard is open.
+
+## v2 Risks & Mitigations
+
+- **Risk**: The MCP `initialize` hook fires for *any* MCP client, including curl/test scripts, so a verified state could be a false positive (user ran `mcpinspect` once but never wired up their real IDE). **Mitigation**: `MCPClientsSeenEver` records the client name; the Verify tab shows the recognized names so the user can see whether it's a real IDE or a test client. We don't gate on identity, but we surface it.
+- **Risk**: Sidebar badge churn is annoying if it bounces between values during a quick connect. **Mitigation**: store fetches are debounced 500ms; SSE is the primary update path; the badge only re-renders when the count actually changes.
+- **Risk**: Server-edition users see no Setup entry but expect parity. **Mitigation**: explicit non-goal in v2; we can revisit per multi-user UX in a follow-up.

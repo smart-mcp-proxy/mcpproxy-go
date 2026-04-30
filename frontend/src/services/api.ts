@@ -702,20 +702,29 @@ class APIService {
     return this.request<CanonicalConfigPathsResponse>('/api/v1/servers/import/paths')
   }
 
-  // Import servers from a file path on the server's filesystem
+  // Import servers from a file path on the server's filesystem.
+  // Spec 046 v2: skip_quarantine=true imports as already-trusted (skips
+  // the quarantine holding state). Default false preserves the safe-by-
+  // default posture for any caller that doesn't pass the flag.
   async importServersFromPath(params: {
     path: string
     format?: string
     server_names?: string[]
     preview?: boolean
+    skip_quarantine?: boolean
+    rename?: Record<string, string>
   }): Promise<APIResponse<ImportResponse>> {
-    const url = `/api/v1/servers/import/path${params.preview ? '?preview=true' : ''}`
+    const qs: string[] = []
+    if (params.preview) qs.push('preview=true')
+    if (params.skip_quarantine) qs.push('skip_quarantine=true')
+    const url = `/api/v1/servers/import/path${qs.length ? '?' + qs.join('&') : ''}`
     return this.request<ImportResponse>(url, {
       method: 'POST',
       body: JSON.stringify({
         path: params.path,
         format: params.format,
-        server_names: params.server_names
+        server_names: params.server_names,
+        rename: params.rename,
       })
     })
   }

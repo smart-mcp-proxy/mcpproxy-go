@@ -134,6 +134,12 @@ type ServerController interface {
 	// Onboarding wizard (Spec 046)
 	GetOnboardingState() (*storage.OnboardingState, error)
 	SaveOnboardingState(state *storage.OnboardingState) error
+
+	// Activation state (Spec 044) — read-only access used by the v2
+	// onboarding wizard's Verify tab to detect whether any MCP client has
+	// successfully called this mcpproxy. Returns FirstMCPClientEver and
+	// MCPClientsSeenEver from the activation bucket.
+	GetActivationFirstMCPClient() (firstEver bool, seen []string)
 }
 
 // Server provides HTTP API endpoints with chi router
