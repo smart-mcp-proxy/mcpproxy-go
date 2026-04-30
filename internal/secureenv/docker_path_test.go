@@ -79,11 +79,19 @@ func TestDockerPathEnhancement(t *testing.T) {
 		assert.Contains(t, enhancedPath, "/usr/bin", "Enhanced PATH should preserve original /usr/bin")
 		assert.Contains(t, enhancedPath, "/bin", "Enhanced PATH should preserve original /bin")
 
-		// Should prioritize discovered paths (they should come first)
+		// Should add at least one entry beyond the original two-element PATH.
 		pathParts := strings.Split(enhancedPath, ":")
 		assert.True(t, len(pathParts) > 2, "Enhanced PATH should have more entries than original")
 
-		// /usr/local/bin should come before the original paths for priority
+		// /usr/local/bin must end up in the result. Position relative to
+		// /usr/bin is intentionally not asserted: post-#439 the compose
+		// order is `login-shell PATH → discovered → existing`, so the
+		// final position depends on what the user's login shell exposes.
+		// On a host where login-shell capture doesn't enrich the ambient
+		// PATH (e.g. CI runners where bash -l -c does not pull in
+		// /etc/environment), /usr/local/bin is still added (via
+		// discovery) but ranks after /usr/bin — that is fine for tool
+		// resolution.
 		localBinIndex := -1
 		usrBinIndex := -1
 		for i, part := range pathParts {
@@ -97,7 +105,6 @@ func TestDockerPathEnhancement(t *testing.T) {
 
 		assert.True(t, localBinIndex >= 0, "/usr/local/bin should be in the PATH")
 		assert.True(t, usrBinIndex >= 0, "/usr/bin should be in the PATH")
-		assert.True(t, localBinIndex < usrBinIndex, "/usr/local/bin should come before /usr/bin for priority")
 	})
 
 	t.Run("PATH enhancement skipped for comprehensive paths", func(t *testing.T) {

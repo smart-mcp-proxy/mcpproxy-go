@@ -315,6 +315,57 @@ func writeFakeShell(t *testing.T, dir, wantPath string) string {
 	return p
 }
 
+// writeFakeRealShell writes a POSIX shell script that simulates a real login
+// shell: it prints `bannerOutput` on stdout (mimicking rc-file welcome
+// banners, oh-my-zsh updates, etc.) and then evaluates whatever command
+// follows `-c` so the caller's `printf …` actually runs in a context where
+// PATH is whatever the parent process set.
+func writeFakeRealShell(t *testing.T, dir, bannerOutput string) string {
+	t.Helper()
+	// Use a heredoc-ish embedding so the banner can contain arbitrary text.
+	// The script prints the banner verbatim, then walks its arg list looking
+	// for `-c <cmd>` and evaluates <cmd>.
+	script := `#!/bin/sh
+printf '%s' "$BANNER"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -l|--login) shift ;;
+    -c) shift; eval "$1"; shift ;;
+    *) shift ;;
+  esac
+done
+`
+	p := filepath.Join(dir, "fake-real-shell")
+	require.NoError(t, os.WriteFile(p, []byte(script), 0o755))
+	t.Setenv("BANNER", bannerOutput)
+	return p
+}
+
+func TestLoginShellPATH_StripsBannerContamination(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only")
+	}
+	resetLoginShellPathCacheForTest()
+	t.Cleanup(resetLoginShellPathCacheForTest)
+
+	// Simulate an rc file that prints noisy banner output before our
+	// printf marker — real-world examples: oh-my-zsh "auto-update" line,
+	// motd, fortune, direnv hook, "Loading nvm…" messages.
+	banner := "Last login: Wed Apr 30 12:34 on ttys000\noh-my-zsh: Updating…\n"
+	dir := t.TempDir()
+	fake := writeFakeRealShell(t, dir, banner)
+	t.Setenv("SHELL", fake)
+	// Set the PATH the fake shell will see — this is what our printf must
+	// emit, untouched by the banner.
+	t.Setenv("PATH", "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+
+	got := LoginShellPATH(nil)
+	assert.Equal(t, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin", got,
+		"LoginShellPATH must strip rc-file banner output and return only $PATH")
+	assert.NotContains(t, got, "oh-my-zsh", "banner content must not leak into PATH")
+	assert.NotContains(t, got, "Last login", "banner content must not leak into PATH")
+}
+
 func TestLoginShellPATH_CapturesFromShell(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("login-shell PATH capture is Unix-only")

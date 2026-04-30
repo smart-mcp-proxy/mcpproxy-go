@@ -322,6 +322,31 @@ var (
 //
 // Callers should treat an empty return value as "no override available"
 // and fall back to os.Getenv("PATH").
+// loginShellPATHMarkerBegin / loginShellPATHMarkerEnd bracket the captured
+// PATH inside the shell's stdout. The markers let us pluck the real PATH
+// out of arbitrary banner / motd / oh-my-zsh / direnv output that login-rc
+// files routinely emit on stdout. See issue #439.
+//
+// The strings are deliberately unlikely to appear in any rc-file banner.
+const (
+	loginShellPATHMarkerBegin = "__MCPPROXY_LOGIN_PATH_BEGIN__"
+	loginShellPATHMarkerEnd   = "__MCPPROXY_LOGIN_PATH_END__"
+)
+
+// extractLoginShellPATH parses the stdout of the login-shell capture command
+// and returns the PATH between the begin/end markers. If the markers are
+// absent (e.g. test fakes that ignore `-c`), it falls back to the trimmed
+// stdout for backward compatibility. Returns "" if no usable value is found.
+func extractLoginShellPATH(stdout string) string {
+	if i := strings.Index(stdout, loginShellPATHMarkerBegin); i >= 0 {
+		rest := stdout[i+len(loginShellPATHMarkerBegin):]
+		if j := strings.Index(rest, loginShellPATHMarkerEnd); j >= 0 {
+			return rest[:j]
+		}
+	}
+	return strings.TrimSpace(stdout)
+}
+
 func LoginShellPATH(logger *zap.Logger) string {
 	loginShellPathOnce.Do(func() {
 		if runtime.GOOS == osWindows {
@@ -330,11 +355,18 @@ func LoginShellPATH(logger *zap.Logger) string {
 		shell := resolveLoginShell()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		// `-l -c 'printf %s "$PATH"'` works on bash, zsh, dash, sh.
+		// Bracket the captured PATH with unique markers so banner output
+		// emitted by rc files (welcome messages, oh-my-zsh updates,
+		// direnv hooks, motd, etc.) does NOT leak into the value we
+		// hand back to callers. Without markers the captured stdout
+		// becomes "Welcome banner/usr/local/bin:…" — exec.LookPath then
+		// can't resolve anything.
+		//
 		// We deliberately build the argv ourselves rather than going
 		// through WrapWithUserShell because shellescape would quote
 		// the `$PATH` and suppress expansion.
-		cmd := exec.CommandContext(ctx, shell, "-l", "-c", `printf %s "$PATH"`)
+		script := `printf '` + loginShellPATHMarkerBegin + `%s` + loginShellPATHMarkerEnd + `' "$PATH"`
+		cmd := exec.CommandContext(ctx, shell, "-l", "-c", script)
 		out, err := cmd.Output()
 		if err != nil {
 			if logger != nil {
@@ -344,7 +376,7 @@ func LoginShellPATH(logger *zap.Logger) string {
 			}
 			return
 		}
-		captured := strings.TrimSpace(string(out))
+		captured := extractLoginShellPATH(string(out))
 		if captured == "" {
 			return
 		}
