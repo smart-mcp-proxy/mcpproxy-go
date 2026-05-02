@@ -128,7 +128,7 @@ build_prompt() {
     cat << EOF
 Generate concise release notes for version ${version} of MCPProxy (Smart MCP Proxy).
 
-MCPProxy is a desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP). It provides intelligent tool discovery, token savings, and security quarantine for MCP servers.
+MCPProxy is built in two editions from the same codebase: a default Personal edition (desktop app, distributed as DMG / Windows installer / Linux tar.gz / .deb / .rpm) and a Server edition built with the \`server\` Go build tag (Docker image + multi-user OAuth, code under \`internal/teams/\`). Most changes ship in BOTH editions because shared code (\`internal/runtime/\`, \`internal/server/\`, \`internal/upstream/\`, \`frontend/\`, etc.) is compiled into both binaries.
 
 Commits since last release:
 ${commits}
@@ -146,6 +146,12 @@ Requirements:
 - Use bullet points for each change
 - Be specific but brief - describe the user benefit, not implementation details
 - If there are no meaningful changes, say "Minor internal improvements and maintenance updates."
+
+Edition scoping rules — read carefully:
+- DO NOT add notes like "applies to the Personal edition only" or "applies to the Teams/Server edition only" unless a commit subject EXPLICITLY says so (e.g. contains \`(server)\`, \`(teams)\`, \`server-only\`, or \`personal-only\`).
+- DO NOT speculate about which edition a change targets based on subject keywords (\`ui\`, \`runtime\`, \`oauth\`, \`teams\`, \`dashboard\`, \`KPI\`, etc.). Shared code lands in both editions.
+- DO NOT call this "the Teams edition" — the server edition is named "Server edition" (built with the \`server\` build tag). "Teams" is an internal package name, not a product name.
+- If you are unsure which edition a change applies to, omit edition labels entirely. The default assumption is BOTH editions.
 EOF
 }
 
