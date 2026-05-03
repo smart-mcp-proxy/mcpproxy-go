@@ -302,13 +302,54 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
 
-	// Apply differential update for each server
+	// Persist fresh snapshots for discovered servers
+	r.lastGoodToolsMu.Lock()
 	for serverName, serverTools := range toolsByServer {
+		cp := make([]*config.ToolMetadata, len(serverTools))
+		copy(cp, serverTools)
+		r.lastGoodTools[serverName] = cp
+	}
+	r.lastGoodToolsMu.Unlock()
+
+	// Apply differential update for each server with fallback to last-good snapshots
+	processedServers := make(map[string]struct{}, len(toolsByServer))
+	for serverName, serverTools := range toolsByServer {
+		processedServers[serverName] = struct{}{}
 		if err := r.applyDifferentialToolUpdate(ctx, serverName, serverTools); err != nil {
 			r.logger.Error("Failed to apply differential update for server",
 				zap.String("server", serverName),
 				zap.Error(err))
 			// Continue with other servers instead of failing completely
+		}
+	}
+
+	// For connected servers that were temporarily missing from discovery results,
+	// re-apply last-good snapshot to avoid transient index shrink.
+	for _, serverName := range r.upstreamManager.GetAllServerNames() {
+		if _, ok := processedServers[serverName]; ok {
+			continue
+		}
+
+		client, ok := r.upstreamManager.GetClient(serverName)
+		if !ok || client == nil || !client.IsConnected() {
+			continue
+		}
+
+		r.lastGoodToolsMu.RLock()
+		snapshot, hasSnapshot := r.lastGoodTools[serverName]
+		r.lastGoodToolsMu.RUnlock()
+		if !hasSnapshot || len(snapshot) == 0 {
+			continue
+		}
+
+		r.logger.Warn("Server missing from discovery result; reusing last-good tool snapshot",
+			zap.String("server", serverName),
+			zap.Int("snapshot_tools", len(snapshot)))
+
+		if err := r.applyDifferentialToolUpdate(ctx, serverName, snapshot); err != nil {
+			r.logger.Error("Failed to apply last-good snapshot for server",
+				zap.String("server", serverName),
+				zap.Error(err))
 		}
 	}
 

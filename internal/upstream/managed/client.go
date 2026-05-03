@@ -38,6 +38,9 @@ type Client struct {
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
 	listToolsCancel     context.CancelFunc
+	listToolsWaitCh     chan struct{}
+	listToolsLastResult []*config.ToolMetadata
+	listToolsLastErr    error
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -442,7 +445,7 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	return listCtx, release, true
 }
 
-// ListTools retrieves tools with concurrency control
+// ListTools retrieves tools with concurrency control and coalesces concurrent calls.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.Config.Name),
@@ -456,31 +459,60 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
-	if !ok {
-		mc.logger.Debug("🔍 ListTools already in progress, rejecting",
+	// Coalesce concurrent ListTools calls: one caller fetches, others wait for shared result.
+	mc.listToolsMu.Lock()
+	if mc.listToolsInProgress {
+		waitCh := mc.listToolsWaitCh
+		mc.listToolsMu.Unlock()
+
+		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
 			zap.String("server", mc.Config.Name))
-		return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.Config.Name)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-waitCh:
+			mc.listToolsMu.Lock()
+			res := mc.listToolsLastResult
+			err := mc.listToolsLastErr
+			mc.listToolsMu.Unlock()
+			if err != nil {
+				return nil, fmt.Errorf("ListTools failed: %w", err)
+			}
+			return res, nil
+		}
 	}
 
+	mc.listToolsInProgress = true
+	mc.listToolsWaitCh = make(chan struct{})
+	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	mc.listToolsCancel = cancel
+	mc.listToolsMu.Unlock()
+
 	defer func() {
-		if release() {
-			mc.logger.Debug("🔍 ListTools operation completed, flag reset",
-				zap.String("server", mc.Config.Name))
-		} else {
-			mc.logger.Debug("🔍 ListTools operation completed while disconnected",
-				zap.String("server", mc.Config.Name))
+		cancel()
+		mc.listToolsMu.Lock()
+		mc.listToolsCancel = nil
+		mc.listToolsInProgress = false
+		if mc.listToolsWaitCh != nil {
+			close(mc.listToolsWaitCh)
+			mc.listToolsWaitCh = nil
 		}
+		mc.listToolsMu.Unlock()
 	}()
 
 	tools, err := mc.coreClient.ListTools(listCtx)
+
+	mc.listToolsMu.Lock()
+	mc.listToolsLastResult = tools
+	mc.listToolsLastErr = err
+	mc.listToolsMu.Unlock()
+
 	if err != nil {
-		// Log the error immediately for better debugging
 		mc.logger.Error("ListTools operation failed",
 			zap.String("server", mc.Config.Name),
 			zap.Error(err))
 
-		// Check if it's a connection error and update state
 		if mc.isConnectionError(err) {
 			mc.logger.Warn("Connection error detected during ListTools, updating server state",
 				zap.String("server", mc.Config.Name),
