@@ -302,12 +302,27 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
 
-	// Persist fresh snapshots for discovered servers
+	// Snapshot the set of currently-known servers so we can prune entries for
+	// servers that have been removed from config and avoid an unbounded map.
+	knownServers := r.upstreamManager.GetAllServerNames()
+	knownServerSet := make(map[string]struct{}, len(knownServers))
+	for _, name := range knownServers {
+		knownServerSet[name] = struct{}{}
+	}
+
+	// Persist fresh snapshots for discovered servers and prune stale entries.
+	// ToolMetadata values are treated as immutable post-discovery; if that ever
+	// changes, switch to a deep copy here.
 	r.lastGoodToolsMu.Lock()
 	for serverName, serverTools := range toolsByServer {
 		cp := make([]*config.ToolMetadata, len(serverTools))
 		copy(cp, serverTools)
 		r.lastGoodTools[serverName] = cp
+	}
+	for serverName := range r.lastGoodTools {
+		if _, ok := knownServerSet[serverName]; !ok {
+			delete(r.lastGoodTools, serverName)
+		}
 	}
 	r.lastGoodToolsMu.Unlock()
 
@@ -325,7 +340,7 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 
 	// For connected servers that were temporarily missing from discovery results,
 	// re-apply last-good snapshot to avoid transient index shrink.
-	for _, serverName := range r.upstreamManager.GetAllServerNames() {
+	for _, serverName := range knownServers {
 		if _, ok := processedServers[serverName]; ok {
 			continue
 		}
@@ -342,7 +357,9 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 			continue
 		}
 
-		r.logger.Warn("Server missing from discovery result; reusing last-good tool snapshot",
+		// Logged at Info: this can fire repeatedly during reconnect storms and
+		// is benign self-healing, not a warning condition.
+		r.logger.Info("Server missing from discovery result; reusing last-good tool snapshot",
 			zap.String("server", serverName),
 			zap.Int("snapshot_tools", len(snapshot)))
 
