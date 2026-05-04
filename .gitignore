@@ -138,3 +138,5 @@ native/macos/MCPProxy/.build/
 
 # Wrangler session cache
 .wrangler/
+
+.run
