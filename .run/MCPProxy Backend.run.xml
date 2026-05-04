@@ -1,0 +1,11 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="MCPProxy Backend" type="GoApplicationRunConfiguration" factoryName="Go Application">
+    <module name="mcpproxy-go" />
+    <working_directory value="$PROJECT_DIR$" />
+    <kind value="PACKAGE" />
+    <package value="github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy" />
+    <directory value="$PROJECT_DIR$" />
+    <filePath value="$PROJECT_DIR$" />
+    <method v="2" />
+  </configuration>
+</component>

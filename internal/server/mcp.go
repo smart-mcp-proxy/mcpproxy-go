@@ -1036,23 +1036,34 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
 
-	// Spec 028: Filter results to only include tools from servers the agent can access
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
-		var filtered []*config.SearchResult
-		for _, result := range results {
-			serverName := result.Tool.ServerName
-			if serverName == "" {
-				// Fallback: try to extract from "server:tool" format
-				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
-					serverName = parts[0]
-				}
-			}
-			if authCtx.CanAccessServer(serverName) {
-				filtered = append(filtered, result)
+	// Spec 028 + blocked tool semantics: filter results to only include callable tools
+	// from servers the agent can access. Disabled/blocked tools are treated as non-existent
+	// for runtime discovery.
+	var callableResults []*config.SearchResult
+	for _, result := range results {
+		serverName := result.Tool.ServerName
+		toolName := result.Tool.Name
+		if serverName == "" {
+			// Fallback: try to extract from "server:tool" format
+			if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+				serverName = parts[0]
+				toolName = parts[1]
 			}
 		}
-		results = filtered
+
+		if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
+			if !authCtx.CanAccessServer(serverName) {
+				continue
+			}
+		}
+
+		if !p.isToolCallable(serverName, toolName) {
+			continue
+		}
+
+		callableResults = append(callableResults, result)
 	}
+	results = callableResults
 
 	// Spec 035 F4: Resolve annotations for each result and apply annotation-based filtering
 	// before building the MCP tool response. This allows agents to self-restrict discovery.
@@ -1532,6 +1543,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
+	if !p.isToolCallable(serverName, actualToolName) {
+		errMsg := "TOOL_BLOCKED: Tool is disabled and not callable."
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
 		if !client.IsConnected() {
@@ -1891,6 +1908,12 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	p.logger.Debug("handleCallTool: checking connection status",
 		zap.String("server_name", serverName))
+
+	if !p.isToolCallable(serverName, actualToolName) {
+		errMsg := "TOOL_BLOCKED: Tool is disabled and not callable."
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
+		return mcp.NewToolResultError(errMsg), nil
+	}
 
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
@@ -4488,6 +4511,38 @@ func (p *MCPProxyServer) validateIntentAgainstServer(
 
 // lookupToolAnnotations looks up tool annotations from the StateView cache.
 // Returns nil if annotations are not found.
+func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
+	if strings.Contains(toolName, ":") {
+		parts := strings.SplitN(toolName, ":", 2)
+		if len(parts) == 2 {
+			if serverName == "" {
+				serverName = parts[0]
+			}
+			toolName = parts[1]
+		}
+	}
+
+	if serverName == "" || toolName == "" {
+		return false
+	}
+
+	serverConfig, err := p.storage.GetUpstreamServer(serverName)
+	if err != nil || serverConfig == nil {
+		return false
+	}
+
+	if !serverConfig.Enabled {
+		return false
+	}
+
+	approval, err := p.storage.GetToolApproval(serverName, toolName)
+	if err == nil && approval != nil && approval.Disabled {
+		return false
+	}
+
+	return true
+}
+
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
 	if p.mainServer == nil || p.mainServer.runtime == nil {
 		return nil

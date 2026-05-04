@@ -1,0 +1,7 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Run Frontend + Backend" type="CompoundRunConfigurationType" factoryName="Compound Run Configuration">
+    <toRun name="MCPProxy Backend" type="GoApplicationRunConfiguration" />
+    <toRun name="Frontend Vite" type="js.build_tools.npm" />
+    <method v="2" />
+  </configuration>
+</component>
