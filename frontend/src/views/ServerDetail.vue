@@ -1417,10 +1417,6 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
         title: enabled ? 'Tool Enabled' : 'Tool Disabled',
         message: `${toolName} has been ${enabled ? 'enabled' : 'disabled'}`
       })
-      await loadToolApprovals()
-      await loadTools()
-      await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
     } else {
       if (idx >= 0 && prev) toolApprovals.value[idx] = prev
       systemStore.addToast({
