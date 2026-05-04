@@ -40,29 +40,33 @@ func TestRetrieveTools_ExcludesDisabledToolsPreRanking(t *testing.T) {
 	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "context7", Enabled: true}))
 	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "github", Enabled: true}))
 
+	// Mark the context7 tool as approved-but-disabled. The github tool stays
+	// enabled (no approval row needed - default callable for an enabled server).
 	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: "context7",
-		ToolName:   "resolve-library-id",
+		ToolName:   "library-lookup",
 		Status:     storage.ToolApprovalStatusApproved,
 		Disabled:   true,
 	}))
 
+	// Both tools share keywords from the query so BM25 returns both - that way
+	// we get a real positive control: the github tool MUST survive the filter.
 	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
-		Name:        "context7:resolve-library-id",
+		Name:        "context7:library-lookup",
 		ServerName:  "context7",
-		Description: "Resolve library IDs",
+		Description: "library documentation lookup helper",
 		ParamsJSON:  "{\"type\":\"object\"}",
 	}))
 	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
-		Name:        "github:get_file_contents",
+		Name:        "github:library-lookup",
 		ServerName:  "github",
-		Description: "Get file contents",
+		Description: "library documentation lookup helper",
 		ParamsJSON:  "{\"type\":\"object\"}",
 	}))
 
 	req := mcp.CallToolRequest{}
 	req.Params.Arguments = map[string]interface{}{
-		"query": "context7 resolve library id",
+		"query": "library lookup",
 		"limit": float64(10),
 	}
 
@@ -76,18 +80,25 @@ func TestRetrieveTools_ExcludesDisabledToolsPreRanking(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(text), &payload))
 
 	toolsValue, exists := payload["tools"]
-	if !exists || toolsValue == nil {
-		return
-	}
+	require.True(t, exists, "retrieve_tools response must contain a tools array")
+	require.NotNil(t, toolsValue, "tools array must not be nil")
 
 	toolsRaw, ok := toolsValue.([]interface{})
-	require.True(t, ok)
+	require.True(t, ok, "tools must be a JSON array")
 
+	names := make([]string, 0, len(toolsRaw))
 	for _, item := range toolsRaw {
 		tool := item.(map[string]interface{})
-		name := tool["name"].(string)
-		assert.NotEqual(t, "context7:resolve-library-id", name)
+		names = append(names, tool["name"].(string))
 	}
+
+	// Positive control: the enabled tool must survive ranking + filtering. If the
+	// disabled tool's filtering also clobbered the enabled one (regression), this
+	// catches it. Negative control: the disabled tool must be gone.
+	assert.Contains(t, names, "github:library-lookup",
+		"enabled tool must survive ranking and filtering")
+	assert.NotContains(t, names, "context7:library-lookup",
+		"disabled tool must be filtered out before ranking")
 }
 
 func TestCallBlockedTool_ReturnsToolBlocked(t *testing.T) {

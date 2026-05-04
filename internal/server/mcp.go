@@ -1038,7 +1038,12 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// Spec 028 + blocked tool semantics: filter results to only include callable tools
 	// from servers the agent can access. Disabled/blocked tools are treated as non-existent
-	// for runtime discovery.
+	// for runtime discovery. The auth context is hoisted out of the loop because it's a
+	// per-request value and AuthContextFromContext does a context.Value lookup we don't
+	// want to repeat per result.
+	authCtx := auth.AuthContextFromContext(ctx)
+	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
+
 	var callableResults []*config.SearchResult
 	for _, result := range results {
 		serverName := result.Tool.ServerName
@@ -1051,10 +1056,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 
-		if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
-			if !authCtx.CanAccessServer(serverName) {
-				continue
-			}
+		if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
+			continue
 		}
 
 		if !p.isToolCallable(serverName, toolName) {
@@ -2581,12 +2584,18 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			}
 			isConnected = connInfo.State.String() == "connected"
 			userLoggedOut = client.IsUserLoggedOut()
-			// Get visible/callable tool count (disabled tools are hidden)
+			// Get visible/callable tool count (disabled tools are hidden). The stateview
+			// snapshot may be empty during startup before the supervisor has hydrated it,
+			// so fall back to a live ListTools call (filtered by isToolCallable) so the UI
+			// doesn't show "0 tools" for a connected server with healthy tools.
 			toolCount = p.getVisibleToolCount(server.Name)
-			if toolCount == 0 && p.mainServer == nil {
-				// Test/standalone fallback when runtime/supervisor is unavailable
+			if toolCount == 0 {
 				if tools, err := client.ListTools(context.Background()); err == nil {
-					toolCount = len(tools)
+					for _, tool := range tools {
+						if p.isToolCallable(server.Name, tool.Name) {
+							toolCount++
+						}
+					}
 				}
 			}
 
