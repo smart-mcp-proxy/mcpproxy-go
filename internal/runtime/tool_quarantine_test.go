@@ -595,6 +595,85 @@ func TestCheckToolApprovals_AnnotationChange_Detected(t *testing.T) {
 	assert.False(t, result.BlockedTools["create_issue"], "Tool with only annotation changes should NOT be blocked")
 }
 
+func TestCheckToolApprovals_ApprovedButDisabled_IsBlocked(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	hash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `\"schema\"`, nil)
+	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:         "github",
+		ToolName:           "create_issue",
+		ApprovedHash:       hash,
+		CurrentHash:        hash,
+		Status:             storage.ToolApprovalStatusApproved,
+		CurrentDescription: "Creates a GitHub issue",
+		CurrentSchema:      `\"schema\"`,
+		Disabled:           true,
+	})
+	require.NoError(t, err)
+
+	tools := []*config.ToolMetadata{{
+		ServerName:  "github",
+		Name:        "create_issue",
+		Description: "Creates a GitHub issue",
+		ParamsJSON:  `\"schema\"`,
+	}}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"])
+	assert.Equal(t, 0, result.PendingCount)
+	assert.Equal(t, 0, result.ChangedCount)
+}
+
+func TestSetToolEnabled_TogglesVisibility(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	hash := calculateToolApprovalHash("create_issue", "Creates a GitHub issue", `\"schema\"`, nil)
+	err := rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:         "github",
+		ToolName:           "create_issue",
+		ApprovedHash:       hash,
+		CurrentHash:        hash,
+		Status:             storage.ToolApprovalStatusApproved,
+		CurrentDescription: "Creates a GitHub issue",
+		CurrentSchema:      `\"schema\"`,
+	})
+	require.NoError(t, err)
+
+	err = rt.SetToolEnabled("github", "create_issue", false, "admin")
+	require.NoError(t, err)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.True(t, record.Disabled)
+
+	tools := []*config.ToolMetadata{{
+		ServerName:  "github",
+		Name:        "create_issue",
+		Description: "Creates a GitHub issue",
+		ParamsJSON:  `\"schema\"`,
+	}}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"])
+
+	err = rt.SetToolEnabled("github", "create_issue", true, "admin")
+	require.NoError(t, err)
+
+	record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.False(t, record.Disabled)
+
+	result, err = rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.False(t, result.BlockedTools["create_issue"])
+}
+
 func TestFilterBlockedTools(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{Name: "server:tool_a"},

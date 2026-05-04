@@ -540,6 +540,7 @@ func (s *Server) setupRoutes() {
 
 			// Tool-level quarantine (Spec 032)
 			r.Post("/tools/approve", s.handleApproveTools)
+			r.Post("/tools/{tool}/enabled", s.handleSetToolEnabled)
 			r.Get("/tools/{tool}/diff", s.handleGetToolDiff)
 			r.Get("/tools/export", s.handleExportToolDescriptions)
 
@@ -3776,6 +3777,42 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetToolDiff handles GET /api/v1/servers/{id}/tools/{tool}/diff
+func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	toolName := chi.URLParam(r, "tool")
+	if serverID == "" || toolName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
+		return
+	}
+
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	controller, ok := s.controller.(interface {
+		SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error
+	})
+	if !ok {
+		s.writeError(w, r, http.StatusNotImplemented, "Tool enable toggle not supported by controller")
+		return
+	}
+
+	if err := controller.SetToolEnabled(serverID, toolName, req.Enabled, "api"); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to update tool enabled state: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, map[string]any{
+		"server_name": serverID,
+		"tool_name":   toolName,
+		"enabled":     req.Enabled,
+	})
+}
+
 func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
 	toolName := chi.URLParam(r, "tool")
@@ -3854,6 +3891,8 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 		Hash        string `json:"hash"`
 		Description string `json:"description"`
 		Schema      string `json:"schema,omitempty"`
+		Enabled     bool   `json:"enabled"`
+		Disabled    bool   `json:"disabled"`
 	}
 
 	var exports []toolExport
@@ -3865,6 +3904,8 @@ func (s *Server) handleExportToolDescriptions(w http.ResponseWriter, r *http.Req
 			Hash:        record.CurrentHash,
 			Description: record.CurrentDescription,
 			Schema:      record.CurrentSchema,
+			Enabled:     !record.Disabled,
+			Disabled:    record.Disabled,
 		})
 	}
 

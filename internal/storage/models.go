@@ -122,6 +122,7 @@ type ToolApprovalRecord struct {
 	CurrentDescription  string    `json:"current_description,omitempty"`
 	PreviousSchema      string    `json:"previous_schema,omitempty"`
 	CurrentSchema       string    `json:"current_schema,omitempty"`
+	Disabled            bool      `json:"disabled,omitempty"`
 }
 
 // ToolApprovalKey returns the storage key for a tool approval record.

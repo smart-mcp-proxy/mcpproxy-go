@@ -286,7 +286,20 @@ class APIService {
 
   // Tool-level quarantine (Spec 032)
   async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number }>> {
-    return this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/export`)
+    const response = await this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/export`)
+    if (response.success && response.data?.tools) {
+      response.data.tools = response.data.tools.map((tool) => {
+        const disabled = typeof tool.disabled === 'boolean'
+          ? tool.disabled
+          : (typeof tool.enabled === 'boolean' ? !tool.enabled : false)
+        return {
+          ...tool,
+          disabled,
+          enabled: !disabled,
+        }
+      })
+    }
+    return response
   }
 
   async getToolDiff(serverName: string, toolName: string): Promise<APIResponse<ToolApproval>> {
@@ -300,6 +313,17 @@ class APIService {
     return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/approve`, {
       method: 'POST',
       body: JSON.stringify(body),
+    })
+  }
+
+  async setToolEnabled(serverName: string, toolName: string, enabled: boolean): Promise<APIResponse<{
+    server_name: string
+    tool_name: string
+    enabled: boolean
+  }>> {
+    return this.request<{ server_name: string; tool_name: string; enabled: boolean }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/enabled`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
     })
   }
 

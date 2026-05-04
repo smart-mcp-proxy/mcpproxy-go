@@ -256,6 +256,8 @@ export interface ToolApproval {
   current_description?: string
   previous_schema?: string
   current_schema?: string
+  enabled?: boolean
+  disabled?: boolean
 }
 
 // Search result types

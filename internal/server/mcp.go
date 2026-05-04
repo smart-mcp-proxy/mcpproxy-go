@@ -644,8 +644,8 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools"),
-				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools"),
+				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, enable_tool, disable_tool"),
+				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "enable_tool", "disable_tool"),
 			),
 			mcp.WithString("name",
 				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools)"),
@@ -2335,6 +2335,10 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		result, opErr = p.handleApproveToolByName(request)
 	case "approve_all_tools":
 		result, opErr = p.handleApproveAllToolsByServer(request)
+	case "enable_tool":
+		result, opErr = p.handleSetToolEnabledByName(request, true)
+	case "disable_tool":
+		result, opErr = p.handleSetToolEnabledByName(request, false)
 	default:
 		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown quarantine operation: %s", operation)), nil
@@ -2381,7 +2385,7 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 		return mcp.NewToolResultText(fmt.Sprintf("No tool approval records found for server '%s'", serverName)), nil
 	}
 
-	pendingCount, changedCount, approvedCount := 0, 0, 0
+	pendingCount, changedCount, approvedCount, disabledCount := 0, 0, 0, 0
 	toolList := make([]map[string]interface{}, len(records))
 	for i, r := range records {
 		tool := map[string]interface{}{
@@ -2389,6 +2393,11 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 			"status":      r.Status,
 			"hash":        r.CurrentHash,
 			"description": r.CurrentDescription,
+			"enabled":     !r.Disabled,
+			"disabled":    r.Disabled,
+		}
+		if r.Disabled {
+			disabledCount++
 		}
 		switch r.Status {
 		case "changed":
@@ -2409,6 +2418,7 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 		"approved_count": approvedCount,
 		"pending_count":  pendingCount,
 		"changed_count":  changedCount,
+		"disabled_count": disabledCount,
 	}
 
 	if pendingCount > 0 || changedCount > 0 {
@@ -2455,6 +2465,29 @@ func (p *MCPProxyServer) handleApproveAllToolsByServer(request mcp.CallToolReque
 	}
 
 	return mcp.NewToolResultText(fmt.Sprintf("Approved %d tool(s) on server '%s'.", count, serverName)), nil
+}
+
+func (p *MCPProxyServer) handleSetToolEnabledByName(request mcp.CallToolRequest, enabled bool) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	toolName := request.GetString("tool_name", "")
+	if toolName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'tool_name'"), nil
+	}
+
+	if err := p.mainServer.runtime.SetToolEnabled(serverName, toolName, enabled, "mcp"); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to update tool enabled state for '%s': %v", toolName, err)), nil
+	}
+
+	action := "disabled"
+	if enabled {
+		action = "enabled"
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Tool '%s' on server '%s' has been %s.", toolName, serverName, action)), nil
 }
 
 func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {

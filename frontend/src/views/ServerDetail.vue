@@ -414,7 +414,10 @@
               <div
                 v-for="tool in filteredTools"
                 :key="tool.name"
-                class="card bg-base-100 shadow-md"
+                class="card shadow-md transition-opacity"
+                :class="isToolEnabled(tool.name)
+                  ? 'bg-base-100'
+                  : 'bg-base-200/70 opacity-60 border border-base-300'"
               >
                 <div class="card-body">
                   <div class="flex items-center gap-2">
@@ -427,6 +430,10 @@
                       v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
                       class="badge badge-warning badge-sm"
                     >changed</span>
+                    <span
+                      v-if="!isToolEnabled(tool.name)"
+                      class="badge badge-ghost badge-sm"
+                    >disabled</span>
                   </div>
                   <p class="text-sm text-base-content/70">
                     {{ tool.description || 'No description available' }}
@@ -436,8 +443,19 @@
                     :annotations="tool.annotations"
                     class="mt-2"
                   />
-                  <div v-if="tool.input_schema" class="card-actions justify-end mt-4">
+                  <div class="card-actions justify-end mt-4 gap-2">
                     <button
+                      v-if="getToolApprovalStatus(tool.name) === 'approved'"
+                      class="btn btn-sm"
+                      :class="isToolEnabled(tool.name) ? 'btn-warning' : 'btn-success'"
+                      :disabled="isToolToggleLoading(tool.name)"
+                      @click="toggleToolEnabled(tool.name, !isToolEnabled(tool.name))"
+                    >
+                      <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs"></span>
+                      {{ isToolEnabled(tool.name) ? 'Disable' : 'Enable' }}
+                    </button>
+                    <button
+                      v-if="tool.input_schema"
                       class="btn btn-sm btn-outline"
                       @click="viewToolSchema(tool)"
                     >
@@ -973,6 +991,7 @@ const selectedToolSchema = ref<Tool | null>(null)
 // Tool quarantine (Spec 032)
 const toolApprovals = ref<ToolApproval[]>([])
 const approvalLoading = ref(false)
+const toolToggleLoading = ref<Record<string, boolean>>({})
 
 const quarantinedTools = computed(() => {
   return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
@@ -1107,6 +1126,22 @@ function getToolApprovalStatus(toolName: string): string | null {
   const approval = toolApprovals.value.find(t => t.tool_name === toolName)
   if (!approval) return null
   return approval.status
+}
+
+function getToolApproval(toolName: string): ToolApproval | null {
+  return toolApprovals.value.find(t => t.tool_name === toolName) || null
+}
+
+function isToolEnabled(toolName: string): boolean {
+  const approval = getToolApproval(toolName)
+  if (!approval) return true
+  if (typeof approval.enabled === 'boolean') return approval.enabled
+  if (typeof approval.disabled === 'boolean') return !approval.disabled
+  return true
+}
+
+function isToolToggleLoading(toolName: string): boolean {
+  return !!toolToggleLoading.value[toolName]
 }
 
 // Word-level diff for changed tool descriptions
@@ -1258,7 +1293,16 @@ async function loadToolApprovals() {
   try {
     const response = await api.getToolApprovals(server.value.name)
     if (response.success && response.data) {
-      const approvals = response.data.tools || []
+      const approvals = (response.data.tools || []).map((tool) => {
+        const disabled = typeof tool.disabled === 'boolean'
+          ? tool.disabled
+          : (typeof tool.enabled === 'boolean' ? !tool.enabled : false)
+        return {
+          ...tool,
+          disabled,
+          enabled: !disabled,
+        }
+      })
 
       // Fetch diffs for changed tools to populate previous_description
       const changedTools = approvals.filter(t => t.status === 'changed')
@@ -1347,6 +1391,55 @@ async function approveAllTools() {
     })
   } finally {
     approvalLoading.value = false
+  }
+}
+
+async function toggleToolEnabled(toolName: string, enabled: boolean) {
+  if (!server.value) return
+  toolToggleLoading.value = { ...toolToggleLoading.value, [toolName]: true }
+
+  // optimistic local UI update
+  const idx = toolApprovals.value.findIndex(t => t.tool_name === toolName)
+  const prev = idx >= 0 ? { ...toolApprovals.value[idx] } : null
+  if (idx >= 0) {
+    toolApprovals.value[idx] = {
+      ...toolApprovals.value[idx],
+      enabled,
+      disabled: !enabled,
+    }
+  }
+
+  try {
+    const response = await api.setToolEnabled(server.value.name, toolName, enabled)
+    if (response.success) {
+      systemStore.addToast({
+        type: 'success',
+        title: enabled ? 'Tool Enabled' : 'Tool Disabled',
+        message: `${toolName} has been ${enabled ? 'enabled' : 'disabled'}`
+      })
+      await loadToolApprovals()
+      await loadTools()
+      await serversStore.fetchServers()
+      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    } else {
+      if (idx >= 0 && prev) toolApprovals.value[idx] = prev
+      systemStore.addToast({
+        type: 'error',
+        title: 'Update Failed',
+        message: response.error || 'Failed to update tool state',
+      })
+    }
+  } catch (err) {
+    if (idx >= 0 && prev) toolApprovals.value[idx] = prev
+    systemStore.addToast({
+      type: 'error',
+      title: 'Update Failed',
+      message: err instanceof Error ? err.message : 'Failed to update tool state',
+    })
+  } finally {
+    const next = { ...toolToggleLoading.value }
+    delete next[toolName]
+    toolToggleLoading.value = next
   }
 }
 
