@@ -1131,8 +1131,11 @@ func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
 			continue
 		}
 
-		var pending, changed int
+		var pending, changed, blocked int
 		for _, rec := range records {
+			if rec.Disabled {
+				blocked++
+			}
 			switch rec.Status {
 			case storage.ToolApprovalStatusPending:
 				pending++
@@ -1141,10 +1144,11 @@ func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
 			}
 		}
 
-		if pending > 0 || changed > 0 {
+		if pending > 0 || changed > 0 || blocked > 0 {
 			servers[i].Quarantine = &contracts.QuarantineStats{
 				PendingCount: pending,
 				ChangedCount: changed,
+				BlockedCount: blocked,
 			}
 		}
 	}

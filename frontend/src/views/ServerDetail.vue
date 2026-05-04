@@ -120,7 +120,12 @@
             </div>
             <div class="stat-title">Tools</div>
             <div class="stat-value">{{ serverTools.length }}</div>
-            <div class="stat-desc">available tools</div>
+            <div
+              class="stat-desc"
+              :class="blockedToolCount > 0 ? 'text-error' : ''"
+            >
+              {{ blockedToolCount > 0 ? `${blockedToolCount} blocked` : 'available tools' }}
+            </div>
           </div>
         </div>
 
@@ -995,6 +1000,12 @@ const toolToggleLoading = ref<Record<string, boolean>>({})
 
 const quarantinedTools = computed(() => {
   return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
+})
+
+const blockedToolCount = computed(() => {
+  const q = server.value?.quarantine
+  if (!q) return 0
+  return q.blocked_count ?? 0
 })
 
 // Security scan (Spec 039)

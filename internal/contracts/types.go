@@ -104,6 +104,7 @@ type FindingCounts struct {
 type QuarantineStats struct {
 	PendingCount int `json:"pending_count"` // Number of newly discovered tools awaiting approval
 	ChangedCount int `json:"changed_count"` // Number of tools whose description/schema changed since approval
+	BlockedCount int `json:"blocked_count"` // Number of disabled (blocked) tools
 }
 
 // OAuthConfig represents OAuth configuration for a server
