@@ -2581,9 +2581,13 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			}
 			isConnected = connInfo.State.String() == "connected"
 			userLoggedOut = client.IsUserLoggedOut()
-			// Get tool count from client
-			if tools, err := client.ListTools(context.Background()); err == nil {
-				toolCount = len(tools)
+			// Get visible/callable tool count (disabled tools are hidden)
+			toolCount = p.getVisibleToolCount(server.Name)
+			if toolCount == 0 && p.mainServer == nil {
+				// Test/standalone fallback when runtime/supervisor is unavailable
+				if tools, err := client.ListTools(context.Background()); err == nil {
+					toolCount = len(tools)
+				}
 			}
 
 			serverMap["connection_status"] = map[string]interface{}{
@@ -4511,6 +4515,32 @@ func (p *MCPProxyServer) validateIntentAgainstServer(
 
 // lookupToolAnnotations looks up tool annotations from the StateView cache.
 // Returns nil if annotations are not found.
+func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return 0
+	}
+
+	supervisor := p.mainServer.runtime.Supervisor()
+	if supervisor == nil {
+		return 0
+	}
+
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return 0
+	}
+
+	visible := 0
+	for _, tool := range serverStatus.Tools {
+		if p.isToolCallable(serverName, tool.Name) {
+			visible++
+		}
+	}
+
+	return visible
+}
+
 func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 	if strings.Contains(toolName, ":") {
 		parts := strings.SplitN(toolName, ":", 2)
