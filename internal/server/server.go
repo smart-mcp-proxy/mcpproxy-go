@@ -2433,6 +2433,11 @@ func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, err
 	return s.runtime.ApproveAllTools(serverName, approvedBy)
 }
 
+// SetToolEnabled sets whether a tool is enabled for MCP exposure (Spec 032).
+func (s *Server) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
+	return s.runtime.SetToolEnabled(serverName, toolName, enabled, updatedBy)
+}
+
 // GetToolApproval returns the approval record for a specific tool (Spec 032).
 func (s *Server) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	return s.runtime.GetToolApproval(serverName, toolName)

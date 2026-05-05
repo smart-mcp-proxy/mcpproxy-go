@@ -644,8 +644,8 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools"),
-				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools"),
+				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, enable_tool, disable_tool"),
+				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "enable_tool", "disable_tool"),
 			),
 			mcp.WithString("name",
 				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools)"),
@@ -1036,23 +1036,37 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
 	}
 
-	// Spec 028: Filter results to only include tools from servers the agent can access
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
-		var filtered []*config.SearchResult
-		for _, result := range results {
-			serverName := result.Tool.ServerName
-			if serverName == "" {
-				// Fallback: try to extract from "server:tool" format
-				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
-					serverName = parts[0]
-				}
-			}
-			if authCtx.CanAccessServer(serverName) {
-				filtered = append(filtered, result)
+	// Spec 028 + blocked tool semantics: filter results to only include callable tools
+	// from servers the agent can access. Disabled/blocked tools are treated as non-existent
+	// for runtime discovery. The auth context is hoisted out of the loop because it's a
+	// per-request value and AuthContextFromContext does a context.Value lookup we don't
+	// want to repeat per result.
+	authCtx := auth.AuthContextFromContext(ctx)
+	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
+
+	var callableResults []*config.SearchResult
+	for _, result := range results {
+		serverName := result.Tool.ServerName
+		toolName := result.Tool.Name
+		if serverName == "" {
+			// Fallback: try to extract from "server:tool" format
+			if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+				serverName = parts[0]
+				toolName = parts[1]
 			}
 		}
-		results = filtered
+
+		if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
+			continue
+		}
+
+		if !p.isToolCallable(serverName, toolName) {
+			continue
+		}
+
+		callableResults = append(callableResults, result)
 	}
+	results = callableResults
 
 	// Spec 035 F4: Resolve annotations for each result and apply annotation-based filtering
 	// before building the MCP tool response. This allows agents to self-restrict discovery.
@@ -1532,6 +1546,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		}
 	}
 
+	if !p.isToolCallable(serverName, actualToolName) {
+		errMsg := "TOOL_BLOCKED: Tool is disabled and not callable."
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
 		if !client.IsConnected() {
@@ -1891,6 +1911,12 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	p.logger.Debug("handleCallTool: checking connection status",
 		zap.String("server_name", serverName))
+
+	if !p.isToolCallable(serverName, actualToolName) {
+		errMsg := "TOOL_BLOCKED: Tool is disabled and not callable."
+		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
+		return mcp.NewToolResultError(errMsg), nil
+	}
 
 	// Check connection status before attempting tool call to prevent hanging
 	if client, exists := p.upstreamManager.GetClient(serverName); exists {
@@ -2335,6 +2361,10 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		result, opErr = p.handleApproveToolByName(request)
 	case "approve_all_tools":
 		result, opErr = p.handleApproveAllToolsByServer(request)
+	case "enable_tool":
+		result, opErr = p.handleSetToolEnabledByName(request, true)
+	case "disable_tool":
+		result, opErr = p.handleSetToolEnabledByName(request, false)
 	default:
 		p.emitActivityInternalToolCall("quarantine_security", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown quarantine operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown quarantine operation: %s", operation)), nil
@@ -2381,7 +2411,7 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 		return mcp.NewToolResultText(fmt.Sprintf("No tool approval records found for server '%s'", serverName)), nil
 	}
 
-	pendingCount, changedCount, approvedCount := 0, 0, 0
+	pendingCount, changedCount, approvedCount, disabledCount := 0, 0, 0, 0
 	toolList := make([]map[string]interface{}, len(records))
 	for i, r := range records {
 		tool := map[string]interface{}{
@@ -2389,6 +2419,11 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 			"status":      r.Status,
 			"hash":        r.CurrentHash,
 			"description": r.CurrentDescription,
+			"enabled":     !r.Disabled,
+			"disabled":    r.Disabled,
+		}
+		if r.Disabled {
+			disabledCount++
 		}
 		switch r.Status {
 		case "changed":
@@ -2409,6 +2444,7 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 		"approved_count": approvedCount,
 		"pending_count":  pendingCount,
 		"changed_count":  changedCount,
+		"disabled_count": disabledCount,
 	}
 
 	if pendingCount > 0 || changedCount > 0 {
@@ -2455,6 +2491,29 @@ func (p *MCPProxyServer) handleApproveAllToolsByServer(request mcp.CallToolReque
 	}
 
 	return mcp.NewToolResultText(fmt.Sprintf("Approved %d tool(s) on server '%s'.", count, serverName)), nil
+}
+
+func (p *MCPProxyServer) handleSetToolEnabledByName(request mcp.CallToolRequest, enabled bool) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	toolName := request.GetString("tool_name", "")
+	if toolName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'tool_name'"), nil
+	}
+
+	if err := p.mainServer.runtime.SetToolEnabled(serverName, toolName, enabled, "mcp"); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to update tool enabled state for '%s': %v", toolName, err)), nil
+	}
+
+	action := "disabled"
+	if enabled {
+		action = "enabled"
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Tool '%s' on server '%s' has been %s.", toolName, serverName, action)), nil
 }
 
 func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallToolResult, error) {
@@ -2525,9 +2584,19 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			}
 			isConnected = connInfo.State.String() == "connected"
 			userLoggedOut = client.IsUserLoggedOut()
-			// Get tool count from client
-			if tools, err := client.ListTools(context.Background()); err == nil {
-				toolCount = len(tools)
+			// Get visible/callable tool count (disabled tools are hidden). The stateview
+			// snapshot may be empty during startup before the supervisor has hydrated it,
+			// so fall back to a live ListTools call (filtered by isToolCallable) so the UI
+			// doesn't show "0 tools" for a connected server with healthy tools.
+			toolCount = p.getVisibleToolCount(server.Name)
+			if toolCount == 0 {
+				if tools, err := client.ListTools(context.Background()); err == nil {
+					for _, tool := range tools {
+						if p.isToolCallable(server.Name, tool.Name) {
+							toolCount++
+						}
+					}
+				}
 			}
 
 			serverMap["connection_status"] = map[string]interface{}{
@@ -4455,6 +4524,64 @@ func (p *MCPProxyServer) validateIntentAgainstServer(
 
 // lookupToolAnnotations looks up tool annotations from the StateView cache.
 // Returns nil if annotations are not found.
+func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return 0
+	}
+
+	supervisor := p.mainServer.runtime.Supervisor()
+	if supervisor == nil {
+		return 0
+	}
+
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return 0
+	}
+
+	visible := 0
+	for _, tool := range serverStatus.Tools {
+		if p.isToolCallable(serverName, tool.Name) {
+			visible++
+		}
+	}
+
+	return visible
+}
+
+func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
+	if strings.Contains(toolName, ":") {
+		parts := strings.SplitN(toolName, ":", 2)
+		if len(parts) == 2 {
+			if serverName == "" {
+				serverName = parts[0]
+			}
+			toolName = parts[1]
+		}
+	}
+
+	if serverName == "" || toolName == "" {
+		return false
+	}
+
+	serverConfig, err := p.storage.GetUpstreamServer(serverName)
+	if err != nil || serverConfig == nil {
+		return false
+	}
+
+	if !serverConfig.Enabled {
+		return false
+	}
+
+	approval, err := p.storage.GetToolApproval(serverName, toolName)
+	if err == nil && approval != nil && approval.Disabled {
+		return false
+	}
+
+	return true
+}
+
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
 	if p.mainServer == nil || p.mainServer.runtime == nil {
 		return nil

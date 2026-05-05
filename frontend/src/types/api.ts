@@ -24,6 +24,7 @@ import type { HealthStatus } from './contracts'
 export interface QuarantineStats {
   pending_count: number
   changed_count: number
+  blocked_count: number
 }
 
 // Security scan summary (Spec 039)
@@ -256,6 +257,8 @@ export interface ToolApproval {
   current_description?: string
   previous_schema?: string
   current_schema?: string
+  enabled?: boolean
+  disabled?: boolean
 }
 
 // Search result types

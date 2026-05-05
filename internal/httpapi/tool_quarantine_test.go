@@ -23,13 +23,16 @@ import (
 // mockToolQuarantineController provides controllable tool quarantine behavior
 type mockToolQuarantineController struct {
 	baseController
-	apiKey         string
-	approvals      []*storage.ToolApprovalRecord
-	approveErr     error
-	approveAllErr  error
-	approvedCount  int
-	approvedTools  []string
-	approvedServer string
+	apiKey             string
+	approvals          []*storage.ToolApprovalRecord
+	approveErr         error
+	approveAllErr      error
+	approvedCount      int
+	approvedTools      []string
+	approvedServer     string
+	setToolEnabledErr  error
+	setToolEnabledTool string
+	setToolEnabledTo   *bool
 }
 
 func (m *mockToolQuarantineController) GetCurrentConfig() any {
@@ -66,6 +69,86 @@ func (m *mockToolQuarantineController) GetToolApproval(serverName, toolName stri
 		}
 	}
 	return nil, fmt.Errorf("not found")
+}
+
+func (m *mockToolQuarantineController) SetToolEnabled(serverName, toolName string, enabled bool, _ string) error {
+	m.approvedServer = serverName
+	m.setToolEnabledTool = toolName
+	m.setToolEnabledTo = &enabled
+	if m.setToolEnabledErr != nil {
+		return m.setToolEnabledErr
+	}
+	for _, a := range m.approvals {
+		if a.ServerName == serverName && a.ToolName == toolName {
+			a.Disabled = !enabled
+			return nil
+		}
+	}
+	return fmt.Errorf("not found")
+}
+
+func TestHandleSetToolEnabled_Disable(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey: "test-key",
+		approvals: []*storage.ToolApprovalRecord{{
+			ServerName: "github",
+			ToolName:   "create_issue",
+			Status:     storage.ToolApprovalStatusApproved,
+		}},
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/create_issue/enabled", bytes.NewBufferString("{\"enabled\":false}"))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "github", ctrl.approvedServer)
+	assert.Equal(t, "create_issue", ctrl.setToolEnabledTool)
+	require.NotNil(t, ctrl.setToolEnabledTo)
+	assert.False(t, *ctrl.setToolEnabledTo)
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, "github", data["server_name"])
+	assert.Equal(t, "create_issue", data["tool_name"])
+	assert.Equal(t, false, data["enabled"])
+}
+
+func TestHandleSetToolEnabled_InvalidJSON(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/create_issue/enabled", bytes.NewBufferString("{invalid"))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleSetToolEnabled_ControllerError(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey:            "test-key",
+		setToolEnabledErr: fmt.Errorf("boom"),
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/create_issue/enabled", bytes.NewBufferString("{\"enabled\":true}"))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
 func TestHandleApproveTools_SpecificTools(t *testing.T) {

@@ -161,8 +161,8 @@
       </div>
     </div>
 
-    <!-- Loading -->
-    <div v-if="loading" class="text-center py-12">
+    <!-- Loading (first load only, avoid collapsing page on refresh actions) -->
+    <div v-if="loading && !initialized" class="text-center py-12">
       <span class="loading loading-spinner loading-lg"></span>
       <p class="mt-4">Loading security data...</p>
     </div>
@@ -464,6 +464,7 @@ const DOCKER_ISOLATION_DOCS_URL = 'https://github.com/smart-mcp-proxy/mcpproxy-g
 const NUDGE_DISMISSED_KEY = 'mcpproxy.dockerIsolationNudgeDismissed'
 
 const loading = ref(false)
+const initialized = ref(false)
 const error = ref('')
 const scanners = ref<any[]>([])
 const overview = ref<any>({})
@@ -696,6 +697,7 @@ async function refresh() {
     error.value = e.message
   } finally {
     loading.value = false
+    initialized.value = true
   }
 }
 

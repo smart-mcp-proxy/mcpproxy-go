@@ -1324,6 +1324,9 @@ components:
     contracts.QuarantineStats:
       description: Tool quarantine metrics for this server
       properties:
+        blocked_count:
+          description: Number of disabled (blocked) tools
+          type: integer
         changed_count:
           description: Number of tools whose description/schema changed since approval
           type: integer
