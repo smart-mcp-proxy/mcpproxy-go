@@ -38,6 +38,9 @@ type Client struct {
 	listToolsMu         sync.Mutex
 	listToolsInProgress bool
 	listToolsCancel     context.CancelFunc
+	listToolsWaitCh     chan struct{}
+	listToolsLastResult []*config.ToolMetadata
+	listToolsLastErr    error
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -418,6 +421,13 @@ func (mc *Client) SetToolDiscoveryCallback(callback func(ctx context.Context, se
 	mc.toolDiscoveryCallback = callback
 }
 
+// acquireListToolsContext claims the in-progress flag for an upstream ListTools
+// call. When successful it also allocates listToolsWaitCh and resets the cached
+// last-result, so any concurrent ListTools waiter can safely block on the
+// channel and read the published result regardless of which caller is the
+// leader. release() must be called exactly once; it cancels the timeout,
+// publishes any result via publishListToolsResult (if the caller wrote one),
+// and closes the wait channel so coalesced waiters wake up.
 func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Duration) (context.Context, func() bool, bool) {
 	mc.listToolsMu.Lock()
 	if mc.listToolsInProgress {
@@ -426,6 +436,9 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	}
 
 	mc.listToolsInProgress = true
+	mc.listToolsWaitCh = make(chan struct{})
+	mc.listToolsLastResult = nil
+	mc.listToolsLastErr = nil
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
 	mc.listToolsMu.Unlock()
@@ -435,6 +448,10 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 		mc.listToolsMu.Lock()
 		mc.listToolsCancel = nil
 		mc.listToolsInProgress = false
+		if mc.listToolsWaitCh != nil {
+			close(mc.listToolsWaitCh)
+			mc.listToolsWaitCh = nil
+		}
 		mc.listToolsMu.Unlock()
 		return mc.IsConnected()
 	}
@@ -442,7 +459,20 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 	return listCtx, release, true
 }
 
-// ListTools retrieves tools with concurrency control
+// publishListToolsResult records the outcome of an upstream ListTools call so
+// that coalesced waiters in ListTools() can read it once the wait channel is
+// closed. All call sites that go through acquireListToolsContext (ListTools,
+// the health check, and the tool-count refresh) must publish their result so
+// that an arriving ListTools waiter never reads stale or zero data.
+func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error) {
+	mc.listToolsMu.Lock()
+	mc.listToolsLastResult = tools
+	mc.listToolsLastErr = err
+	mc.listToolsMu.Unlock()
+}
+
+// ListTools retrieves tools with concurrency control and coalesces concurrent
+// callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.Config.Name),
@@ -456,13 +486,52 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
-	listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
-	if !ok {
-		mc.logger.Debug("🔍 ListTools already in progress, rejecting",
-			zap.String("server", mc.Config.Name))
-		return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.Config.Name)
-	}
+	for {
+		listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
+		if ok {
+			return mc.runListToolsAsLeader(listCtx, release)
+		}
 
+		mc.listToolsMu.Lock()
+		waitCh := mc.listToolsWaitCh
+		inProgress := mc.listToolsInProgress
+		mc.listToolsMu.Unlock()
+
+		if !inProgress {
+			// Race: holder released between the failed acquire and our re-check.
+			// Try to become the leader again.
+			continue
+		}
+		if waitCh == nil {
+			// Defensive fallback: every leader path is supposed to allocate a
+			// wait channel via acquireListToolsContext, so this should be
+			// unreachable. Fail fast rather than block forever on a nil channel.
+			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.Config.Name)
+		}
+
+		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
+			zap.String("server", mc.Config.Name))
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-waitCh:
+			mc.listToolsMu.Lock()
+			res := mc.listToolsLastResult
+			err := mc.listToolsLastErr
+			mc.listToolsMu.Unlock()
+			if err != nil {
+				return nil, fmt.Errorf("ListTools failed: %w", err)
+			}
+			return res, nil
+		}
+	}
+}
+
+// runListToolsAsLeader performs the upstream ListTools call as the elected
+// leader and publishes the result before release() closes the wait channel,
+// so coalesced waiters always see a consistent result.
+func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() bool) ([]*config.ToolMetadata, error) {
 	defer func() {
 		if release() {
 			mc.logger.Debug("🔍 ListTools operation completed, flag reset",
@@ -474,13 +543,13 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 	}()
 
 	tools, err := mc.coreClient.ListTools(listCtx)
+	mc.publishListToolsResult(tools, err)
+
 	if err != nil {
-		// Log the error immediately for better debugging
 		mc.logger.Error("ListTools operation failed",
 			zap.String("server", mc.Config.Name),
 			zap.Error(err))
 
-		// Check if it's a connection error and update state
 		if mc.isConnectionError(err) {
 			mc.logger.Warn("Connection error detected during ListTools, updating server state",
 				zap.String("server", mc.Config.Name),
@@ -490,9 +559,7 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 		return nil, fmt.Errorf("ListTools failed: %w", err)
 	}
 
-	// Cache the latest tool count for non-blocking stats consumers
 	mc.setToolCountCache(len(tools))
-
 	return tools, nil
 }
 
@@ -756,7 +823,10 @@ func (mc *Client) performHealthCheck() {
 
 	defer release()
 
-	_, err := mc.coreClient.ListTools(listCtx)
+	// Capture and publish the full result so any concurrent ListTools waiter
+	// (coalesced via the wait channel) receives a real list rather than nil.
+	tools, err := mc.coreClient.ListTools(listCtx)
+	mc.publishListToolsResult(tools, err)
 
 	if err != nil {
 		// Only mark as error if it's a real connection issue, not timeout during high activity
@@ -1235,8 +1305,10 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 		zap.Bool("cache_expired", !cachedTime.IsZero()),
 		zap.Duration("cache_age", time.Since(cachedTime)))
 
-	// Fetch fresh tool count with timeout
+	// Fetch fresh tool count with timeout. Publish the result so any concurrent
+	// ListTools waiter coalesced behind us receives the real tools list.
 	tools, err := mc.coreClient.ListTools(listCtx)
+	mc.publishListToolsResult(tools, err)
 	if err != nil {
 		mc.logger.Debug("Tool count fetch failed, returning cached value",
 			zap.String("server", mc.Config.Name),

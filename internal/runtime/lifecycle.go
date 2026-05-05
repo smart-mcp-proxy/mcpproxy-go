@@ -302,13 +302,71 @@ func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
 		toolsByServer[tool.ServerName] = append(toolsByServer[tool.ServerName], tool)
 	}
 
-	// Apply differential update for each server
+	// Snapshot the set of currently-known servers so we can prune entries for
+	// servers that have been removed from config and avoid an unbounded map.
+	knownServers := r.upstreamManager.GetAllServerNames()
+	knownServerSet := make(map[string]struct{}, len(knownServers))
+	for _, name := range knownServers {
+		knownServerSet[name] = struct{}{}
+	}
+
+	// Persist fresh snapshots for discovered servers and prune stale entries.
+	// ToolMetadata values are treated as immutable post-discovery; if that ever
+	// changes, switch to a deep copy here.
+	r.lastGoodToolsMu.Lock()
 	for serverName, serverTools := range toolsByServer {
+		cp := make([]*config.ToolMetadata, len(serverTools))
+		copy(cp, serverTools)
+		r.lastGoodTools[serverName] = cp
+	}
+	for serverName := range r.lastGoodTools {
+		if _, ok := knownServerSet[serverName]; !ok {
+			delete(r.lastGoodTools, serverName)
+		}
+	}
+	r.lastGoodToolsMu.Unlock()
+
+	// Apply differential update for each server with fallback to last-good snapshots
+	processedServers := make(map[string]struct{}, len(toolsByServer))
+	for serverName, serverTools := range toolsByServer {
+		processedServers[serverName] = struct{}{}
 		if err := r.applyDifferentialToolUpdate(ctx, serverName, serverTools); err != nil {
 			r.logger.Error("Failed to apply differential update for server",
 				zap.String("server", serverName),
 				zap.Error(err))
 			// Continue with other servers instead of failing completely
+		}
+	}
+
+	// For connected servers that were temporarily missing from discovery results,
+	// re-apply last-good snapshot to avoid transient index shrink.
+	for _, serverName := range knownServers {
+		if _, ok := processedServers[serverName]; ok {
+			continue
+		}
+
+		client, ok := r.upstreamManager.GetClient(serverName)
+		if !ok || client == nil || !client.IsConnected() {
+			continue
+		}
+
+		r.lastGoodToolsMu.RLock()
+		snapshot, hasSnapshot := r.lastGoodTools[serverName]
+		r.lastGoodToolsMu.RUnlock()
+		if !hasSnapshot || len(snapshot) == 0 {
+			continue
+		}
+
+		// Logged at Info: this can fire repeatedly during reconnect storms and
+		// is benign self-healing, not a warning condition.
+		r.logger.Info("Server missing from discovery result; reusing last-good tool snapshot",
+			zap.String("server", serverName),
+			zap.Int("snapshot_tools", len(snapshot)))
+
+		if err := r.applyDifferentialToolUpdate(ctx, serverName, snapshot); err != nil {
+			r.logger.Error("Failed to apply last-good snapshot for server",
+				zap.String("server", serverName),
+				zap.Error(err))
 		}
 	}
 
