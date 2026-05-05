@@ -936,6 +936,10 @@ async function onBulkImport(quarantine: boolean) {
       if (quarantine && totalImported > 0) msg += '. Approve from the Servers page.'
       selectionImportMessage.value = msg
       selection.value = new Set()
+      // Spec 046 — bulk-import counts as completing the server step.
+      if (totalImported > 0 && onboarding.state?.state.server_step_status !== 'completed') {
+        await onboarding.markServerCompleted()
+      }
       systemStore.addToast({
         type: 'success',
         title: 'Import complete',
@@ -1013,6 +1017,12 @@ async function connectOne(clientId: string) {
       connectMessageOk.value = true
       connectMessage.value = res.data.message || `Connected ${clientId}`
       await fetchClients()
+      // Spec 046 — record connect-step completion for telemetry funnel.
+      // Only the first successful connect transitions the status; subsequent
+      // calls are no-ops on the backend.
+      if (onboarding.state?.state.connect_step_status !== 'completed') {
+        await onboarding.markConnectCompleted()
+      }
       await onboarding.fetchState()
       systemStore.addToast({
         type: 'success',
@@ -1038,6 +1048,10 @@ function openAddServer() {
 async function onServerAdded() {
   addServerOpen.value = false
   serverAddedJustNow.value = true
+  // Spec 046 — record server-step completion for telemetry funnel.
+  if (onboarding.state?.state.server_step_status !== 'completed') {
+    await onboarding.markServerCompleted()
+  }
   await Promise.all([
     serversStore.fetchServers(),
     onboarding.fetchState(),
@@ -1054,6 +1068,16 @@ async function dismiss() {
   // we don't auto-popup again. The sidebar Setup entry remains visible so
   // the user can return.
   if (!onboarding.isEngaged) {
+    // Spec 046 — any step the user never advanced through counts as "skipped"
+    // so the funnel (engaged - completed - skipped) reconciles to engaged
+    // total. Per-step calls are no-ops if a status is already recorded.
+    const stepState = onboarding.state?.state
+    if (stepState && !stepState.connect_step_status) {
+      await onboarding.markConnectSkipped()
+    }
+    if (stepState && !stepState.server_step_status) {
+      await onboarding.markServerSkipped()
+    }
     await onboarding.markEngaged()
   }
   emit('close')
