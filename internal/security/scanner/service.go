@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,13 @@ import (
 
 	"go.uber.org/zap"
 )
+
+// errNoScans is returned by findLatestPassJobs when the scan-job bucket has no
+// records for the requested server. Callers (notably GetScanSummary) detect
+// this via errors.Is and cache a nil sentinel so subsequent calls for the same
+// server skip BBolt entirely. Other errors (e.g. transient I/O failures) are
+// NOT cached so the next call retries. See spec 047.
+var errNoScans = errors.New("no scan jobs found for server")
 
 // Storage defines the storage interface needed by SecurityService
 type Storage interface {
@@ -1147,8 +1155,13 @@ func deduplicatePass2Findings(reports []*ScanReport) []*ScanReport {
 // Returns (pass1Job, pass2Job, error). At least one must be non-nil on success.
 func (s *Service) findLatestPassJobs(serverName string) (*ScanJob, *ScanJob, error) {
 	jobs, err := s.storage.ListScanJobs(serverName)
-	if err != nil || len(jobs) == 0 {
-		return nil, nil, fmt.Errorf("no scan jobs found for server: %s", serverName)
+	if err != nil {
+		// Surface the underlying I/O error so the caller can distinguish
+		// transient failures from "no records found".
+		return nil, nil, fmt.Errorf("list scan jobs for %s: %w", serverName, err)
+	}
+	if len(jobs) == 0 {
+		return nil, nil, fmt.Errorf("%w: %s", errNoScans, serverName)
 	}
 
 	// Sort by start time descending (newest first)
@@ -1170,7 +1183,7 @@ func (s *Service) findLatestPassJobs(serverName string) (*ScanJob, *ScanJob, err
 	}
 
 	if pass1Job == nil && pass2Job == nil {
-		return nil, nil, fmt.Errorf("no scan jobs found for server: %s", serverName)
+		return nil, nil, fmt.Errorf("%w: %s", errNoScans, serverName)
 	}
 
 	return pass1Job, pass2Job, nil
@@ -1440,7 +1453,14 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// Find latest Pass 1 and Pass 2 jobs
 	pass1Job, pass2Job, err := s.findLatestPassJobs(serverName)
 	if err != nil {
-		return nil // No scans run
+		// Spec 047: cache the negative result so untouched servers don't
+		// re-trigger the full BoltDB.ListScanJobs scan on every poll.
+		// Only cache the explicit "no scans found" sentinel — transient
+		// I/O errors must retry on the next call.
+		if errors.Is(err, errNoScans) {
+			s.cacheScanSummary(serverName, nil)
+		}
+		return nil
 	}
 
 	// Use Pass 1 job as primary for timestamp
@@ -1576,11 +1596,11 @@ func (s *Service) invalidateScanSummaryCache(serverName string) {
 	s.summaryCacheMu.Unlock()
 }
 
-// cacheScanSummary stores a computed scan summary in the cache.
+// cacheScanSummary stores a computed scan summary in the cache. A nil summary
+// is stored as a sentinel meaning "we already checked, this server has no
+// scans" — used by spec 047 to avoid re-scanning the BBolt scan-job bucket on
+// every poll for untouched servers.
 func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary) {
-	if summary == nil {
-		return
-	}
 	s.summaryCacheMu.Lock()
 	s.summaryCache[serverName] = summary
 	s.summaryCacheMu.Unlock()

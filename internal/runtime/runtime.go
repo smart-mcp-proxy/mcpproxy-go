@@ -84,6 +84,11 @@ type Runtime struct {
 	managementService interface{}           // Initialized later to avoid import cycle
 	activityService   *ActivityService      // Activity logging service
 
+	// Spec 047: coalesces servers.changed bursts and embeds the server list +
+	// stats payload so SSE subscribers can update without a follow-up
+	// GET /api/v1/servers.
+	coalescer *serversChangedCoalescer
+
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
@@ -254,6 +259,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		phaseMachine:  newPhaseMachine(PhaseInitializing),
 		lastGoodTools: make(map[string][]*config.ToolMetadata),
 	}
+
+	// Spec 047: drainer goroutine that publishes coalesced servers.changed
+	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
+	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
+	rt.coalescer.start(appCtx)
 
 	return rt, nil
 }

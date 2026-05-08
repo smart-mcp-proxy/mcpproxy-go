@@ -1,0 +1,23 @@
+File: mcpproxy
+Type: cpu
+Time: 2026-05-08 17:20:30 EEST
+Duration: 60.01s, Total samples = 2.27s ( 3.78%)
+Showing nodes accounting for 0, 0% of 2.27s total
+Dropped 114 nodes (cum <= 0.01s)
+Showing top 15 nodes out of 182
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      1.33s 58.59%  github.com/go-chi/chi/v5.(*Mux).Mount.func1
+         0     0%     0%      1.33s 58.59%  github.com/go-chi/chi/v5.(*Mux).ServeHTTP
+         0     0%     0%      1.33s 58.59%  github.com/go-chi/chi/v5.(*Mux).routeHTTP
+         0     0%     0%      1.33s 58.59%  github.com/go-chi/chi/v5/middleware.Recoverer.func1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).ServeHTTP
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.(*Server).correlationIDMiddleware.func7.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.(*Server).httpLoggingMiddleware.func6.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.RequestIDLoggerMiddleware.func5.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.func1.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.func4.(*Server).apiKeyAuthMiddleware.8.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.func4.RESTEndpointHistogramMiddleware.10.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.func4.SurfaceClassifierMiddleware.9.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.(*Server).setupRoutes.func4.Timeout.7.1
+         0     0%     0%      1.33s 58.59%  github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.RequestIDMiddleware.func1
+         0     0%     0%      1.33s 58.59%  net/http.(*ServeMux).ServeHTTP

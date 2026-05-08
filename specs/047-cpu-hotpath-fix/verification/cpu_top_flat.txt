@@ -1,0 +1,23 @@
+File: mcpproxy
+Type: cpu
+Time: 2026-05-08 17:20:30 EEST
+Duration: 60.01s, Total samples = 2270ms ( 3.78%)
+Showing nodes accounting for 1900ms, 83.70% of 2270ms total
+Dropped 114 nodes (cum <= 11.35ms)
+Showing top 15 nodes out of 182
+      flat  flat%   sum%        cum   cum%
+     400ms 17.62% 17.62%      410ms 18.06%  encoding/json.stateInString
+     190ms  8.37% 25.99%      610ms 26.87%  encoding/json.checkValid
+     190ms  8.37% 34.36%      300ms 13.22%  encoding/json.unquoteBytes
+     170ms  7.49% 41.85%      170ms  7.49%  runtime.kevent
+     160ms  7.05% 48.90%      160ms  7.05%  runtime.memclrNoHeapPointers
+     140ms  6.17% 55.07%      140ms  6.17%  encoding/json.(*decodeState).rescanLiteral
+     120ms  5.29% 60.35%      120ms  5.29%  runtime.pthread_kill
+     110ms  4.85% 65.20%      110ms  4.85%  runtime.pthread_cond_wait
+      90ms  3.96% 69.16%       90ms  3.96%  runtime.madvise
+      80ms  3.52% 72.69%       80ms  3.52%  runtime.memmove
+      70ms  3.08% 75.77%      120ms  5.29%  runtime.scanobject
+      60ms  2.64% 78.41%       60ms  2.64%  runtime.pthread_cond_signal
+      50ms  2.20% 80.62%       50ms  2.20%  syscall.syscall6
+      40ms  1.76% 82.38%       40ms  1.76%  runtime.usleep
+      30ms  1.32% 83.70%       30ms  1.32%  runtime.greyobject

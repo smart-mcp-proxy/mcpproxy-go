@@ -522,9 +522,21 @@ actor CoreProcessManager {
             }
 
         case "servers.changed":
-            // Server list actually changed; re-fetch once
+            // Spec 047: prefer the embedded server list in the event payload
+            // and skip the GET /api/v1/servers refetch entirely. Falls back to
+            // refetch when running against an older core that publishes
+            // notify-only events (no `servers` field).
             let oldQuarantined = await MainActor.run { appState.quarantinedToolsCount }
-            await refreshServers()
+            var consumedFromPayload = false
+            if let data = event.data.data(using: .utf8),
+               let envelope = try? JSONDecoder().decode(ServersChangedEnvelope.self, from: data),
+               let servers = envelope.payload.servers {
+                await appState.updateServers(servers)
+                consumedFromPayload = true
+            }
+            if !consumedFromPayload {
+                await refreshServers()
+            }
             await MainActor.run { appState.serversVersion += 1 }
             let newQuarantined = await MainActor.run { appState.quarantinedToolsCount }
             // Notify on new quarantine events

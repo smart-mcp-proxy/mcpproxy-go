@@ -766,6 +766,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - No new persistent storage. Diagnostic state lives on in-memory stateview snapshot. Fix-attempt audit rows reuse existing activity log (`ActivityBucket` in BBolt). Telemetry counters are in-memory only (consistent with spec 042). (044-diagnostics-taxonomy)
 - Markdown (agent instruction files, wiki articles); optionally shell or AppleScript helpers for bootstrap idempotency + Paperclip AI (paperclipai/paperclip, MIT) running locally on loopback :3100; Synapbus on kubic; Anthropic API via Paperclip's Claude Code subprocess adapter (045-paperclip-cockpit)
 - Paperclip's embedded Postgres (existing, port 54329); Synapbus DB (existing); no new storage in mcpproxy-go (045-paperclip-cockpit)
+- Go 1.24 (toolchain go1.24.10); Swift 5.9 (macOS 13+); TypeScript 5.9 / Vue 3.5 (frontend) + `go.etcd.io/bbolt` (existing), `go.uber.org/zap` (existing), `github.com/mark3labs/mcp-go` (existing). No new deps. (047-cpu-hotpath-fix)
+- BBolt (`~/.mcpproxy/config.db`) — read-only on the hot path; no schema change. (047-cpu-hotpath-fix)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
