@@ -364,6 +364,16 @@ export const useServersStore = defineStore('servers', () => {
   function handleServersChanged(event: Event) {
     const customEvent = event as CustomEvent
     console.log('Servers changed event received, updating in background...', customEvent.detail)
+
+    // Spec 047: when the SSE payload includes the full server list, consume it
+    // directly and skip the GET /api/v1/servers refetch. Fall back to refetch
+    // when running against an older core that publishes notify-only events.
+    const payload = customEvent.detail?.payload
+    if (payload && Array.isArray(payload.servers)) {
+      servers.value = mergeServers(servers.value, payload.servers as Server[])
+      return
+    }
+
     // Silent background refresh to avoid scroll jumps and loading states
     fetchServers(true)
   }

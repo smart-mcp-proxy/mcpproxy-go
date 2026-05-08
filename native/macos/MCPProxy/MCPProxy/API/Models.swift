@@ -369,6 +369,25 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     }
 }
 
+// MARK: - SSE Event Envelopes
+
+/// Inner payload of a `servers.changed` SSE event after spec 047. The Go core
+/// embeds the full post-redaction server list and aggregate stats so the tray
+/// can update local state without round-tripping `GET /api/v1/servers`. Older
+/// cores publish only `reason`; both fields are optional for forward-/back-
+/// compat. The outer envelope (`{"payload": {...}, "timestamp": N}`) is
+/// produced by the SSE writer in `internal/httpapi/server.go`.
+struct ServersChangedPayload: Codable {
+    let reason: String?
+    let servers: [ServerStatus]?
+    let stats: UpstreamStats?
+}
+
+struct ServersChangedEnvelope: Codable {
+    let payload: ServersChangedPayload
+    let timestamp: Int64?
+}
+
 // MARK: - Upstream Stats
 
 /// Aggregated statistics about upstream servers, as returned by `GetUpstreamStats()`.

@@ -1,11 +1,112 @@
 package runtime
 
 import (
+	"context"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
+
+// serversChangedCoalescer collapses bursts of servers.changed events into at
+// most one publish per interval window, last-write-wins. See spec 047 §B2.
+//
+// The producer (emitServersChanged) builds a fully-realised Event and stores
+// it in `pending` (atomic.Pointer). Producers signal the drainer via the
+// `wake` channel. The drainer goroutine wakes on either a wake signal or its
+// own timer; on wake it sleeps until the interval has elapsed since the last
+// publish, then atomically swaps `pending` and publishes the swapped event.
+//
+// Tests can drive the coalescer synchronously via flushNow() instead of
+// sleeping for the interval.
+type serversChangedCoalescer struct {
+	rt       *Runtime
+	pending  atomic.Pointer[Event]
+	wake     chan struct{}
+	interval time.Duration
+
+	// flush coordination
+	flushMu   sync.Mutex
+	lastFlush time.Time
+}
+
+func newServersChangedCoalescer(rt *Runtime, interval time.Duration) *serversChangedCoalescer {
+	return &serversChangedCoalescer{
+		rt:       rt,
+		wake:     make(chan struct{}, 1),
+		interval: interval,
+	}
+}
+
+// submit stores `evt` as the latest pending event (overwriting any prior
+// pending event) and signals the drainer.
+func (c *serversChangedCoalescer) submit(evt Event) {
+	c.pending.Store(&evt)
+	select {
+	case c.wake <- struct{}{}:
+	default:
+		// Drainer is already armed.
+	}
+}
+
+// flushNow publishes any pending event immediately. Intended for tests and
+// for shutdown drain.
+func (c *serversChangedCoalescer) flushNow() {
+	evt := c.pending.Swap(nil)
+	if evt == nil {
+		return
+	}
+	c.flushMu.Lock()
+	c.lastFlush = time.Now()
+	c.flushMu.Unlock()
+	c.rt.publishEvent(*evt)
+}
+
+// start launches the drainer goroutine. It exits when ctx is canceled, after
+// a final flush of any residual pending event.
+func (c *serversChangedCoalescer) start(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(c.interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				c.flushNow()
+				return
+			case <-c.wake:
+				// Coalesce: hold for at most one interval before publishing.
+				select {
+				case <-ctx.Done():
+					c.flushNow()
+					return
+				case <-time.After(c.interval):
+					c.flushNow()
+				}
+			case <-ticker.C:
+				// Periodic safety net: if a producer raced past the wake
+				// signal slot (channel was full), this catches it.
+				if c.pending.Load() != nil {
+					c.flushNow()
+				}
+			}
+		}
+	}()
+}
+
+// serversLister is the minimal slice of the management service needed by
+// emitServersChanged to fetch the current server list. The runtime stores the
+// management service as interface{} (avoiding an import cycle), so this local
+// interface is the type assertion target. Implemented by
+// internal/management.(*service).
+type serversLister interface {
+	ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
+}
 
 // containsAny reports whether s contains any of the listed substrings (case-insensitive).
 // Used by Spec 042 telemetry classification on error messages — only the
@@ -54,12 +155,60 @@ func (r *Runtime) publishEvent(evt Event) {
 }
 
 func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
-	payload := make(map[string]any, len(extra)+1)
+	payload := make(map[string]any, len(extra)+3)
 	for k, v := range extra {
 		payload[k] = v
 	}
 	payload["reason"] = reason
-	r.publishEvent(newEvent(EventTypeServersChanged, payload))
+
+	// Spec 047: embed the current server list and stats so SSE subscribers
+	// (Swift tray, Web UI) can update local state without a follow-up
+	// GET /api/v1/servers round trip. On any error, fall back to notify-only —
+	// older clients (and resilient new clients) handle the missing keys.
+	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		servers, stats, err := lister.ListServers(ctx)
+		cancel()
+		if err != nil {
+			r.logger.Warn("emitServersChanged: ListServers failed; emitting notify-only event",
+				zap.String("reason", reason),
+				zap.Error(err))
+		} else {
+			redacted := make([]contracts.Server, 0, len(servers))
+			for _, s := range servers {
+				if s != nil {
+					redacted = append(redacted, *s)
+				}
+			}
+			r.redactServerHeaders(redacted)
+			payload["servers"] = redacted
+			payload["stats"] = stats
+		}
+	}
+
+	evt := newEvent(EventTypeServersChanged, payload)
+	if r.coalescer != nil {
+		r.coalescer.submit(evt)
+		return
+	}
+	r.publishEvent(evt)
+}
+
+// redactServerHeaders mirrors httpapi.(*Server).redactServerHeaders. It strips
+// sensitive header values (Authorization, Cookie, X-API-Key, ...) unless the
+// loaded config opts out via reveal_secret_headers: true. Centralizing this in
+// the runtime keeps SSE subscribers behind the same trust boundary as the
+// HTTP API.
+func (r *Runtime) redactServerHeaders(servers []contracts.Server) {
+	cfg := r.Config()
+	if cfg != nil && cfg.RevealSecretHeaders {
+		return
+	}
+	for i := range servers {
+		if len(servers[i].Headers) > 0 {
+			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
+		}
+	}
 }
 
 func (r *Runtime) emitConfigReloaded(path string) {

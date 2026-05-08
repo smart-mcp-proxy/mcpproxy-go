@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1541,5 +1542,107 @@ func TestScanFindingScanPassTag(t *testing.T) {
 	}
 	if agg.Findings[1].ScanPass != ScanPassSupplyChainAudit {
 		t.Errorf("expected second finding ScanPass=%d, got %d", ScanPassSupplyChainAudit, agg.Findings[1].ScanPass)
+	}
+}
+
+// countingStorage wraps any Storage and counts ListScanJobs invocations.
+// Used for verifying the GetScanSummary negative-cache behavior introduced in
+// spec 047.
+type countingStorage struct {
+	Storage
+	listCalls atomic.Int64
+}
+
+func newCountingStorage(inner Storage) *countingStorage {
+	return &countingStorage{Storage: inner}
+}
+
+func (c *countingStorage) ListScanJobs(serverName string) ([]*ScanJob, error) {
+	c.listCalls.Add(1)
+	return c.Storage.ListScanJobs(serverName)
+}
+
+// erroringStorage returns a transient error from ListScanJobs while delegating
+// other calls to the inner Storage. Used to verify that non-errNoScans errors
+// do NOT populate the negative cache.
+type erroringStorage struct {
+	Storage
+	listCalls atomic.Int64
+	err       error
+}
+
+func (e *erroringStorage) ListScanJobs(string) ([]*ScanJob, error) {
+	e.listCalls.Add(1)
+	return nil, e.err
+}
+
+// Spec 047 — Phase 3 (US1): cache the "no scans found" sentinel.
+
+func TestGetScanSummary_CachesNegativeResult(t *testing.T) {
+	store := newCountingStorage(newMockStorage())
+	svc := NewService(store, NewRegistry("/tmp/scanner-cache-test", zap.NewNop()), nil, "/tmp/scanner-cache-test", zap.NewNop())
+
+	const N = 10
+	for i := 0; i < N; i++ {
+		if got := svc.GetScanSummary(context.Background(), "never-scanned"); got != nil {
+			t.Fatalf("call %d: expected nil summary for never-scanned server, got %+v", i, got)
+		}
+	}
+
+	// Without the negative-cache fix, this would be N storage calls.
+	if got := store.listCalls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 ListScanJobs call after %d GetScanSummary invocations, got %d", N, got)
+	}
+}
+
+func TestGetScanSummary_DoesNotCacheOnTransientError(t *testing.T) {
+	store := &erroringStorage{Storage: newMockStorage(), err: fmt.Errorf("transient bbolt I/O failure")}
+	svc := NewService(store, NewRegistry("/tmp/scanner-cache-test", zap.NewNop()), nil, "/tmp/scanner-cache-test", zap.NewNop())
+
+	const N = 5
+	for i := 0; i < N; i++ {
+		_ = svc.GetScanSummary(context.Background(), "io-failing")
+	}
+
+	// Transient error must NOT populate the negative cache: every call retries.
+	if got := store.listCalls.Load(); got != int64(N) {
+		t.Errorf("expected %d ListScanJobs calls (no caching of transient errors), got %d", N, got)
+	}
+}
+
+func TestGetScanSummary_OverwritesNilSentinelOnRealScan(t *testing.T) {
+	mock := newMockStorage()
+	store := newCountingStorage(mock)
+	svc := NewService(store, NewRegistry("/tmp/scanner-cache-test", zap.NewNop()), nil, "/tmp/scanner-cache-test", zap.NewNop())
+
+	// First call: cache the negative sentinel.
+	if got := svc.GetScanSummary(context.Background(), "later-scanned"); got != nil {
+		t.Fatalf("expected nil summary on first call, got %+v", got)
+	}
+	if got := store.listCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 ListScanJobs call after first GetScanSummary, got %d", got)
+	}
+
+	// Simulate a real scan landing for that server: insert a completed Pass-1 job
+	// then ask the service to refresh its cached summary by calling
+	// cacheScanSummary directly with a real summary (mirrors what the engine
+	// does on scan completion).
+	now := time.Now()
+	job := &ScanJob{
+		ID:         "job-real",
+		ServerName: "later-scanned",
+		ScanPass:   ScanPassSecurityScan,
+		Status:     ScanJobStatusCompleted,
+		StartedAt:  now,
+	}
+	if err := mock.SaveScanJob(job); err != nil {
+		t.Fatalf("SaveScanJob: %v", err)
+	}
+	real := &ScanSummary{Status: "clean", LastScanAt: &now}
+	svc.cacheScanSummary("later-scanned", real)
+
+	// Subsequent GetScanSummary returns the real summary, not the nil sentinel.
+	if got := svc.GetScanSummary(context.Background(), "later-scanned"); got == nil || got.Status != "clean" {
+		t.Errorf("expected real summary {Status: clean}, got %+v", got)
 	}
 }

@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	httppprof "net/http/pprof"
 	"os"
 	"path/filepath"
+	gruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -1769,6 +1771,41 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
 	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+
+	// Debug / profiling endpoints (API-key gated). Block & mutex profiles
+	// default to off; we enable them when the route is hit so the running
+	// daemon stays zero-overhead until someone actively profiles.
+	pprofMux := http.NewServeMux()
+	pprofMux.HandleFunc("/debug/pprof/", httppprof.Index)
+	pprofMux.HandleFunc("/debug/pprof/cmdline", httppprof.Cmdline)
+	pprofMux.HandleFunc("/debug/pprof/profile", httppprof.Profile)
+	pprofMux.HandleFunc("/debug/pprof/symbol", httppprof.Symbol)
+	pprofMux.HandleFunc("/debug/pprof/trace", httppprof.Trace)
+	pprofGated := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.runtime.Config()
+		if cfg == nil || cfg.APIKey == "" {
+			http.Error(w, "api key not configured", http.StatusUnauthorized)
+			return
+		}
+		token := r.Header.Get("X-API-Key")
+		if token == "" {
+			token = r.URL.Query().Get("apikey")
+		}
+		if token == "" {
+			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				token = strings.TrimPrefix(h, "Bearer ")
+			}
+		}
+		if token != cfg.APIKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		gruntime.SetBlockProfileRate(100_000_000) // 1 sample / 100 ms blocked
+		gruntime.SetMutexProfileFraction(100)     // sample 1% of contention
+		pprofMux.ServeHTTP(w, r)
+	})
+	mux.Handle("/debug/pprof/", pprofGated)
+	s.logger.Info("Registered pprof endpoints", zap.String("path", "/debug/pprof/"))
 
 	// Swagger UI (OpenAPI documentation) - mounted directly on main mux for /swagger/* access
 	swaggerHandler := httpapi.SetupSwaggerHandler(s.logger.Sugar())
