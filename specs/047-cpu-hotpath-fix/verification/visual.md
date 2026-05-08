@@ -58,24 +58,19 @@ A core-process inspection at the same time:
 - Every event payload contained `payload.servers` (length 30) and `payload.stats`.
 - The toggled server appeared in the embedded array with `enabled` and `connected` matching the post-toggle state.
 
-## Files in this directory
+## Reproducing the artifacts locally
 
-```
-tray_baseline.png        Top-level tray menu, context7 enabled (1.0 MB)
-tray_after_disable.png   Top-level tray menu, context7 disabled (1.0 MB)
-tray_after_reenable.png  Top-level tray menu, context7 re-enabled (1.0 MB)
-cpu_post.pb.gz           60 s CPU profile after fix (3.78 % total)
-cpu_top_cum.txt          pprof top -cum dump
-cpu_top_flat.txt         pprof top dump
-cputime_delta.txt        ps -o time delta over 60 s wall (2.91 s)
-goroutine_t0.txt         Goroutine snapshot at start of the window
-goroutine_t1.txt         Goroutine snapshot at end of the window
-heap.pb.gz               Heap profile after fix
-allocs.pb.gz             Alloc profile after fix
-mutex.pb.gz              Mutex profile (empty)
-block.pb.gz              Block profile after fix
-report.md                CPU verification report
-visual.md                This file
-```
+Binary profile artifacts (pprof `*.pb.gz`, screenshots, raw `*.txt` dumps) are
+**not committed** — they're build outputs that bloat git history. Reproduce
+them by following [`../quickstart.md`](../quickstart.md). The textual deltas
+above were captured from those artifacts at the time of the verification run
+(2026-05-08); the conclusions stand even though the source files are not in
+the tree.
 
-The top-level tray screenshots don't visually surface `context7` (it's a submenu entry inside `Servers (30)`); the canonical proof is the accessibility-tree dump at lines `Connected (2 tools)` → `Disabled` → `Connected (2 tools)`. To get a screenshot of the open submenu, the macOS Accessibility API would have to keep two cascading menus open simultaneously, which `mcpproxy-ui-test`'s current screenshot tool does not support — but the textual tree above is sourced from the same accessibility hierarchy that paints the menu, so it's the authoritative state.
+Top-level tray screenshots wouldn't visually surface `context7` anyway (it's
+a submenu entry inside `Servers (30)`); the canonical proof is the
+accessibility-tree dump above showing `Connected (2 tools)` → `Disabled` →
+`Connected (2 tools)`. The macOS Accessibility API can't keep two cascading
+menus open simultaneously for a single screenshot, but the textual tree comes
+from the same hierarchy that paints the menu, so it's the authoritative
+state.

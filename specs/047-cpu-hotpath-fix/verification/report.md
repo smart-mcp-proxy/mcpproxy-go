@@ -15,7 +15,7 @@
 | `encoding/json.checkValid` flat CPU | **13.05 %** | **8.37 %** | −36 % |
 | Goroutines (steady) | 80–84 | **71** | −13 |
 
-Files: `cpu_post.pb.gz`, `cpu_top_cum.txt`, `cpu_top_flat.txt`, `cputime_delta.txt`, `goroutine_t0.txt`, `goroutine_t1.txt`, `heap.pb.gz`, `allocs.pb.gz`, `mutex.pb.gz`, `block.pb.gz`.
+Raw pprof artifacts (`cpu_post.pb.gz`, `*.txt`, `heap.pb.gz`, etc.) are not committed; reproduce locally per [`../quickstart.md`](../quickstart.md). The numbers above were captured from those files at the time of the verification run.
 
 ## Acceptance-criteria check
 
