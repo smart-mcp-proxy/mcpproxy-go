@@ -97,16 +97,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
-        // Periodic server refresh every 10s to keep health/action data current
-        Timer.publish(every: 10, on: .main, in: .common)
+        // Spec 048: dropped the 10 s server-refresh timer. The server list is
+        // now SSE-driven via the spec 047 `servers.changed` payload — appState
+        // updates within ~50 ms of any state transition with zero round trip.
+        // The safety-net below covers the rare case where SSE drops events.
+        Timer.publish(every: 300, on: .main, in: .common)   // 5 minutes
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self, let client = self.appState.apiClient else { return }
-                Task {
-                    if let servers = try? await client.servers() {
-                        await self.appState.updateServers(servers)
-                    }
-                }
+                guard let self, let core = self.coreManager else { return }
+                Task { await core.refreshServersForSafetyNet() }
             }
             .store(in: &cancellables)
 
@@ -166,17 +165,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
-        // Fetch fresh server data before building the menu
-        // This ensures health.action (login/restart) is current
-        if let client = appState.apiClient {
-            Task {
-                if let servers = try? await client.servers() {
-                    await appState.updateServers(servers)
-                    await MainActor.run { rebuildMenu() }
-                }
-            }
-        }
-        // Build with current data immediately (async fetch updates it shortly after)
+        // Spec 048: dropped the per-click `client.servers()` fetch. appState
+        // is fed by SSE (spec 047), so it's already current within ~50 ms of
+        // the last upstream state change. Rebuild from in-memory state only.
         rebuildMenu()
     }
 

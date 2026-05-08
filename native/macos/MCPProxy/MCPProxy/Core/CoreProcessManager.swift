@@ -500,24 +500,19 @@ actor CoreProcessManager {
     private func handleSSEEvent(_ event: SSEEvent) async {
         switch event.event {
         case "status":
-            // Status events contain inline stats.
-            // When connected count changes, re-fetch the full server list
-            // to get accurate counts (SSE stats can lag behind actual state).
+            // Status events contain inline stats. Spec 048: any change that
+            // would also flip connected_count emits a `servers.changed`
+            // event (delivered within ~50 ms by spec 047's coalescer) which
+            // already updates the per-server appState. Stat aggregates are
+            // updated unconditionally from the inline payload — no refetch.
             if let data = event.data.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let stats = json["upstream_stats"] as? [String: Any] {
-                let connected = stats["connected_servers"] as? Int ?? 0
                 let total = stats["total_servers"] as? Int ?? 0
                 let tools = stats["total_tools"] as? Int ?? 0
-                let oldConnected = await MainActor.run { appState.connectedCount }
-                // If counts changed, do a full server refresh for accuracy
-                if connected != oldConnected {
-                    await refreshServers()
-                } else {
-                    await MainActor.run {
-                        if appState.totalServers != total { appState.totalServers = total }
-                        if appState.totalTools != tools { appState.totalTools = tools }
-                    }
+                await MainActor.run {
+                    if appState.totalServers != total { appState.totalServers = total }
+                    if appState.totalTools != tools { appState.totalTools = tools }
                 }
             }
 
@@ -613,8 +608,10 @@ actor CoreProcessManager {
     }
 
     /// Fetch full state from the core and update appState.
+    /// Spec 048: dropped the per-tick refreshServers() call. The server list
+    /// is now SSE-driven (spec 047 servers.changed payload). MCPProxyApp
+    /// installs a separate 5-min safety-net timer for missed-event recovery.
     private func refreshState() async {
-        await refreshServers()
         await refreshActivity()
         await refreshSessions()
         await refreshTokenMetrics()
@@ -635,10 +632,12 @@ actor CoreProcessManager {
                 // if docker_isolation.enabled is true in the running config, treat as available.
                 let configEnabled = await MainActor.run { appState.totalServers > 0 }
                 if configEnabled {
-                    // Servers are connected — Docker must be working if isolation is enabled
-                    // Check via the status endpoint which shows connected servers in containers
-                    let servers = try? await apiClient.servers()
-                    let hasStdioServers = servers?.contains(where: { $0.connected && $0.protocol == "stdio" }) ?? false
+                    // Servers are connected — Docker must be working if isolation is enabled.
+                    // Spec 048: appState.servers is SSE-fed, so read it directly instead
+                    // of issuing another GET /api/v1/servers on every periodic refresh.
+                    let hasStdioServers = await MainActor.run {
+                        appState.servers.contains(where: { $0.connected && $0.protocol == "stdio" })
+                    }
                     await MainActor.run {
                         appState.dockerAvailable = hasStdioServers || dockerOK
                     }
@@ -676,6 +675,14 @@ actor CoreProcessManager {
         } catch {
             // Non-fatal; we'll retry on the next refresh
         }
+    }
+
+    /// Spec 048: long-cadence safety-net wrapper around `refreshServers`.
+    /// Called by a 5-minute Combine timer in `MCPProxyApp` to guard against
+    /// missed `servers.changed` SSE events. Separate name documents intent —
+    /// this is *not* the on-demand refresh path (that's been retired).
+    func refreshServersForSafetyNet() async {
+        await refreshServers()
     }
 
     /// Fetch recent activity and update appState.
