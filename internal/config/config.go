@@ -224,6 +224,13 @@ type ServerConfig struct {
 	Updated        time.Time         `json:"updated,omitempty" mapstructure:"updated"`
 	Isolation      *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
 	ReconnectOnUse bool              `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+
+	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
+	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
+	// when the server is configured with both Command and an HTTP/SSE URL — i.e.,
+	// mcpproxy starts the process AND connects via network. Stdio servers ignore
+	// this field. Zero or unset → 30s default.
+	LauncherWaitTimeout Duration `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
 }
 
 // OAuthConfig represents OAuth configuration for a server

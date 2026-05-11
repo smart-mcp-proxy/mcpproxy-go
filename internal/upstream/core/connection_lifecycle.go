@@ -242,13 +242,22 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 		}
 	}
 
-	// Step 6: Update state under lock
+	// Step 6: Stop any locally-launched HTTP/SSE upstream. We do this
+	// AFTER closing the MCP client — the child should see the network
+	// transport go away first, giving it a clean shutdown signal before
+	// we send SIGTERM.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	c.stopLauncher(stopCtx)
+	stopCancel()
+
+	// Step 7: Update state under lock
 	c.mu.Lock()
 	c.client = nil
 	c.serverInfo = nil
 	c.connected = false
 	c.cachedTools = nil
 	c.processGroupID = 0
+	c.processCmd = nil
 	c.mu.Unlock()
 
 	c.logger.Debug("Disconnect completed successfully",

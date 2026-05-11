@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -97,6 +98,14 @@ type Client struct {
 	containerID     string
 	containerName   string // Store container name for cleanup via docker container commands
 	isDockerCommand bool
+
+	// Local launcher tracking — only populated when this Client is using
+	// HTTP/SSE/streamable-HTTP transport AND ServerConfig.Command is set.
+	// In that mode mcpproxy spawns the upstream process before connecting,
+	// and owns its lifecycle via the handle below. Stdio servers leave
+	// these fields nil — they spawn through mcp-go's stdio transport.
+	launcherHandle  launcher.Handle
+	launcherCIDFile string
 
 	// Notification callback for tools/list_changed
 	onToolsChanged func(serverName string)
