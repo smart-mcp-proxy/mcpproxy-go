@@ -5,6 +5,7 @@
 *.so
 *.dylib
 /mcpproxy
+/test/launcher-server/launcher-server
 __debug_bin*
 
 # Playwright MCP artifacts

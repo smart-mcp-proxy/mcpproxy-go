@@ -77,6 +77,9 @@ cleanup() {
 
     # Additional cleanup - find any remaining mcpproxy processes
     pkill -f "mcpproxy.*serve" 2>/dev/null || true
+    # Reap the launcher-test fixture if our launcher-lifecycle test
+    # failed before the shutdown reap path could run.
+    pkill -f "launcher-server.*--port 39933" 2>/dev/null || true
     sleep 1
 
     # Clean up test data
@@ -167,6 +170,41 @@ wait_for_server() {
     done
 
     echo "Server failed to start within $max_attempts seconds"
+    return 1
+}
+
+# Wait for the launcher-test server (spec 046) to reach healthy.
+# Distinct from wait_for_everything_server because it specifically
+# verifies the new "mcpproxy spawned and connected to an HTTP MCP
+# server it owns" path rather than a stdio upstream.
+wait_for_launcher_test_server() {
+    local max_attempts=30
+    local attempt=1
+
+    echo "Waiting for launcher-test server to be connected..."
+
+    while [ $attempt -le $max_attempts ]; do
+        local curl_cmd="curl -s --max-time 5 $CURL_CA_OPTS"
+        if [ ! -z "$API_KEY" ]; then
+            curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
+        fi
+        curl_cmd="$curl_cmd \"${API_BASE}/servers\""
+
+        local response=$(eval $curl_cmd 2>/dev/null)
+        local connected=$(echo "$response" | jq -r '.data.servers[] | select(.name=="launcher-test") | .connected // false' 2>/dev/null)
+
+        if [ "$connected" = "true" ]; then
+            echo "launcher-test server is connected"
+            sleep 1
+            return 0
+        fi
+
+        echo "Attempt $attempt/$max_attempts - launcher-test connected: $connected"
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo "launcher-test server failed to connect within $max_attempts attempts"
     return 1
 }
 
@@ -366,6 +404,97 @@ test_sse_auth_failure() {
     fi
 }
 
+# Spec-046 lifecycle test: verifies that mcpproxy spawned the launcher
+# fixture, drove its lifecycle via the REST API, and reaped it cleanly.
+#
+# Each assertion is a separate test row so a partial failure shows up as
+# one failed sub-step rather than a single opaque test fail.
+test_launcher_lifecycle() {
+    log_test "Launcher lifecycle: tools/list call reaches launched HTTP MCP server"
+    local curl_cmd="curl -s --max-time 10 $CURL_CA_OPTS"
+    if [ ! -z "$API_KEY" ]; then
+        curl_cmd="$curl_cmd -H \"X-API-Key: $API_KEY\""
+    fi
+    local tools_response
+    tools_response=$(eval "$curl_cmd \"${API_BASE}/servers/launcher-test/tools\"")
+    if echo "$tools_response" | jq -e '.success == true and any(.data.tools[]; .name == "ping")' >/dev/null 2>&1; then
+        log_pass "tools/list returned the fixture's ping tool"
+    else
+        log_fail "tools/list missing ping tool. Response: $tools_response"
+    fi
+
+    # Step 2: the child should be a real OS process. pgrep over the
+    # fixture argv signature lets us detect it without knowing the PID
+    # mcpproxy assigned. Use `pgrep -f` for arg-line matching.
+    log_test "Launcher lifecycle: child process is running (pgrep)"
+    local before_pid
+    before_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
+    if [ -n "$before_pid" ]; then
+        log_pass "child running (pid=$before_pid)"
+    else
+        log_fail "no launcher-server process found via pgrep"
+    fi
+
+    # Step 3: restart -> child must be a NEW pid afterwards.
+    log_test "Launcher lifecycle: POST /restart reaps + respawns child with new PID"
+    eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/restart\"" >/dev/null
+    sleep 4
+    local after_pid
+    after_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
+    if [ -z "$after_pid" ]; then
+        log_fail "child gone after restart — should have respawned"
+    elif [ "$after_pid" = "$before_pid" ]; then
+        log_fail "child PID unchanged after restart (was $before_pid, still $after_pid)"
+    else
+        log_pass "child respawned (was=$before_pid, now=$after_pid)"
+    fi
+
+    # Step 4: disable -> child must be gone.
+    log_test "Launcher lifecycle: POST /disable reaps the child"
+    eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/disable\"" >/dev/null
+    # Give the launcher up to 8s to deliver SIGTERM + wait for exit.
+    local waited=0
+    while [ $waited -lt 8 ]; do
+        if ! pgrep -f 'launcher-server.*--port 39933' >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if pgrep -f 'launcher-server.*--port 39933' >/dev/null 2>&1; then
+        local stragglers
+        stragglers=$(pgrep -f 'launcher-server.*--port 39933' | tr '\n' ' ')
+        log_fail "child still alive ${waited}s after disable (pids: $stragglers)"
+    else
+        log_pass "child reaped within ${waited}s of disable"
+    fi
+
+    # Step 5: re-enable + reconnect, then verify a fresh PID appears.
+    log_test "Launcher lifecycle: POST /enable respawns child"
+    eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/enable\"" >/dev/null
+    if wait_for_launcher_test_server; then
+        local reenabled_pid
+        reenabled_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
+        if [ -n "$reenabled_pid" ] && [ "$reenabled_pid" != "$after_pid" ]; then
+            log_pass "child respawned after enable (pid=$reenabled_pid, different from $after_pid)"
+        else
+            log_fail "expected a new PID after enable; got '$reenabled_pid' (previous '$after_pid')"
+        fi
+    else
+        log_fail "launcher-test never reconnected after enable"
+    fi
+
+    # Step 6: per-server log should contain the launcher banner.
+    log_test "Launcher lifecycle: per-server log captures child output"
+    local logs_response
+    logs_response=$(eval "$curl_cmd \"${API_BASE}/servers/launcher-test/logs?tail=200\"")
+    if echo "$logs_response" | jq -r '.data.logs[]?' 2>/dev/null | grep -qE '\[launcher\] starting|\[launcher-server\] listening'; then
+        log_pass "per-server log contains launcher banner / child stdout"
+    else
+        log_fail "per-server log missing launcher banner or child stdout"
+    fi
+}
+
 # Prerequisites check
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
@@ -393,6 +522,21 @@ fi
 if ! command -v npx &> /dev/null; then
     echo -e "${RED}Error: npx is required for @modelcontextprotocol/server-everything${NC}"
     echo "Please install Node.js and npm"
+    exit 1
+fi
+
+# Build the launcher-test fixture. This is a tiny HTTP MCP server used
+# by the spec-046 launcher-lifecycle test below. We rebuild every run
+# so the fixture stays in lockstep with the e2e harness.
+LAUNCHER_FIXTURE="./test/launcher-server/launcher-server"
+echo -e "${YELLOW}Building launcher-test fixture (./test/launcher-server)...${NC}"
+if ! go build -o "$LAUNCHER_FIXTURE" ./test/launcher-server >/tmp/launcher-fixture-build.log 2>&1; then
+    echo -e "${RED}Error: failed to build launcher-test fixture${NC}"
+    cat /tmp/launcher-fixture-build.log
+    exit 1
+fi
+if [ ! -x "$LAUNCHER_FIXTURE" ]; then
+    echo -e "${RED}Error: launcher-test fixture not executable at $LAUNCHER_FIXTURE${NC}"
     exit 1
 fi
 
@@ -436,6 +580,13 @@ if ! wait_for_everything_server; then
     echo "Server logs:"
     tail -50 "/tmp/mcpproxy_e2e.log"
     exit 1
+fi
+
+# Wait for the launcher-test server (spec 046). Failing this hard would
+# mask other regressions in the suite, so we just warn and let the
+# launcher tests below decide whether to fail.
+if ! wait_for_launcher_test_server; then
+    echo -e "${YELLOW}Warning: launcher-test server never connected — launcher lifecycle test will fail loudly below.${NC}"
 fi
 
 echo ""
@@ -515,6 +666,13 @@ fi
 # Test 16: Verify server is working after restart
 test_api "GET /api/v1/servers (after restart)" "GET" "${API_BASE}/servers" "200" "" \
     "jq -e '.success == true and (.data.servers | length) > 0' < '$TEST_RESULTS_FILE' >/dev/null"
+
+# Spec-046 launcher lifecycle (six sub-assertions). Runs late in the
+# suite so an earlier failure that takes down mcpproxy short-circuits
+# here too rather than producing confusing isolated failures.
+echo ""
+echo -e "${YELLOW}Running launcher lifecycle test (spec 046)...${NC}"
+test_launcher_lifecycle
 
 # Test 17: Test concurrent requests
 echo ""
