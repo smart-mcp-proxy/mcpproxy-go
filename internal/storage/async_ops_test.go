@@ -228,23 +228,24 @@ func TestSaveServerSyncPreservesNilFields(t *testing.T) {
 func TestSaveServerSyncFieldCoverage(t *testing.T) {
 	// List of ServerConfig fields that ARE expected to be copied
 	expectedFields := map[string]bool{
-		"Name":           true,
-		"URL":            true,
-		"Protocol":       true,
-		"Command":        true,
-		"Args":           true,
-		"WorkingDir":     true,
-		"Env":            true,
-		"Headers":        true,
-		"OAuth":          true,
-		"Enabled":        true,
-		"Quarantined":    true,
-		"Created":        true,
-		"Updated":        true, // Updated is set by saveServerSync, not copied
-		"Isolation":      true,
-		"Shared":         true, // Teams-only: persisted in JSON config, not in BBolt
-		"SkipQuarantine": true, // Spec 032: runtime-only field, not persisted to BBolt
-		"ReconnectOnUse": true, // Spec 354: persisted to BBolt for on-demand reconnection
+		"Name":                true,
+		"URL":                 true,
+		"Protocol":            true,
+		"Command":             true,
+		"Args":                true,
+		"WorkingDir":          true,
+		"Env":                 true,
+		"Headers":             true,
+		"OAuth":               true,
+		"Enabled":             true,
+		"Quarantined":         true,
+		"Created":             true,
+		"Updated":             true, // Updated is set by saveServerSync, not copied
+		"Isolation":           true,
+		"Shared":              true, // Teams-only: persisted in JSON config, not in BBolt
+		"SkipQuarantine":      true, // Spec 032: runtime-only field, not persisted to BBolt
+		"ReconnectOnUse":      true, // Spec 354: persisted to BBolt for on-demand reconnection
+		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
 	}
 
 	// Get all fields from ServerConfig
