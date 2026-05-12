@@ -100,6 +100,13 @@ func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
 
 // HasPersistedToken checks if a token exists in persistent storage (BBolt) for the server.
 // This is the preferred method to check for existing tokens as it reflects actual token availability.
+//
+// A zero ExpiresAt (time.Time{}) is treated as "no expiration" — some authorization servers
+// (e.g. Atlassian's MCP endpoint) issue access tokens without an `expires_in` field, which
+// the oauth2 library deserializes as the Go zero time. Returning isExpired=true for those
+// records would make the upstream connection loop forever asking for re-auth even though a
+// valid token is on disk. This mirrors HasValidToken (see below), which already treats
+// IsZero() as "never expires".
 func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool) {
 	if boltStorage == nil {
 		return false, false, false
@@ -113,7 +120,11 @@ func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB
 
 	hasToken = record.AccessToken != ""
 	hasRefreshToken = record.RefreshToken != ""
-	isExpired = time.Now().After(record.ExpiresAt)
+	if record.ExpiresAt.IsZero() {
+		isExpired = false
+	} else {
+		isExpired = time.Now().After(record.ExpiresAt)
+	}
 	return
 }
 

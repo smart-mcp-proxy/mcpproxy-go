@@ -99,25 +99,39 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	}
 
 	now := time.Now()
-	timeUntilExpiry := record.ExpiresAt.Sub(now)
-	isExpired := now.After(record.ExpiresAt)
-	needsRefresh := timeUntilExpiry < TokenRefreshGracePeriod
+	// A zero ExpiresAt means the authorization server did not return an `expires_in`
+	// claim. Treat such tokens as never-expiring (matches Go's oauth2 convention and
+	// HasValidToken/HasPersistedToken) instead of perpetually-expired.
+	hasExpiry := !record.ExpiresAt.IsZero()
+	timeUntilExpiry := time.Duration(0)
+	isExpired := false
+	needsRefresh := false
+	if hasExpiry {
+		timeUntilExpiry = record.ExpiresAt.Sub(now)
+		isExpired = now.After(record.ExpiresAt)
+		needsRefresh = timeUntilExpiry < TokenRefreshGracePeriod
+	}
 
 	// Log token status for debugging
-	if isExpired {
+	switch {
+	case !hasExpiry:
+		p.logger.Debug("✅ OAuth token has no expiration, treating as long-lived",
+			zap.String("server_key", p.serverKey),
+			zap.Bool("has_refresh_token", record.RefreshToken != ""))
+	case isExpired:
 		p.logger.Warn("⚠️ OAuth token has expired and needs refresh",
 			zap.String("server_key", p.serverKey),
 			zap.Time("expires_at", record.ExpiresAt),
 			zap.Duration("expired_since", -timeUntilExpiry),
 			zap.Bool("has_refresh_token", record.RefreshToken != ""))
-	} else if needsRefresh {
+	case needsRefresh:
 		p.logger.Info("⏰ OAuth token will expire soon, proactive refresh recommended",
 			zap.String("server_key", p.serverKey),
 			zap.Time("expires_at", record.ExpiresAt),
 			zap.Duration("time_until_expiry", timeUntilExpiry),
 			zap.Duration("grace_period", TokenRefreshGracePeriod),
 			zap.Bool("has_refresh_token", record.RefreshToken != ""))
-	} else {
+	default:
 		p.logger.Debug("✅ OAuth token is valid and not expiring soon",
 			zap.String("server_key", p.serverKey),
 			zap.Time("expires_at", record.ExpiresAt),

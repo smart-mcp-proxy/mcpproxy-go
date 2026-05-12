@@ -271,6 +271,78 @@ func TestTokenStoreManager_HasValidToken_PersistentStore_NoExpiration(t *testing
 	assert.True(t, result, "Expected true for token with no expiration (zero time)")
 }
 
+// TestHasPersistedToken_ZeroExpiresAt validates that a persisted token with no expiration
+// (time.Time zero value) is reported as NOT expired. Some authorization servers (e.g. the
+// Atlassian MCP endpoint) omit `expires_in` from /token responses, which the oauth2
+// library deserializes as ExpiresAt = time.Time{}. Treating that as "expired" would loop
+// the upstream connection forever asking for re-auth even though a valid access token is
+// on disk. This must match HasValidToken's IsZero() == valid semantics.
+func TestHasPersistedToken_ZeroExpiresAt(t *testing.T) {
+	db := setupTestStorage(t)
+
+	serverName := "Atlassian"
+	serverURL := "https://mcp.atlassian.com/v1/mcp"
+	serverKey := GenerateServerKey(serverName, serverURL)
+
+	record := &storage.OAuthTokenRecord{
+		ServerName:  serverKey,
+		AccessToken: "opaque-access-token-without-expiry",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Time{}, // No expires_in returned by the auth server
+	}
+	require.NoError(t, db.SaveOAuthToken(record))
+
+	hasToken, hasRefresh, isExpired := HasPersistedToken(serverName, serverURL, db)
+
+	assert.True(t, hasToken, "Expected hasToken=true for a record with a non-empty access token")
+	assert.False(t, hasRefresh, "Expected hasRefresh=false for a record without a refresh token")
+	assert.False(t, isExpired, "Expected isExpired=false for a record with zero ExpiresAt (no expiration)")
+}
+
+// TestHasPersistedToken_FutureExpiresAt sanity-checks that a normal future expiry is
+// reported as not expired (regression guard alongside the zero-expiry test above).
+func TestHasPersistedToken_FutureExpiresAt(t *testing.T) {
+	db := setupTestStorage(t)
+
+	serverName := "future-server"
+	serverURL := "https://example.com/mcp"
+	serverKey := GenerateServerKey(serverName, serverURL)
+
+	require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:   serverKey,
+		AccessToken:  "valid-token",
+		RefreshToken: "valid-refresh",
+		TokenType:    "Bearer",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	}))
+
+	hasToken, hasRefresh, isExpired := HasPersistedToken(serverName, serverURL, db)
+	assert.True(t, hasToken)
+	assert.True(t, hasRefresh)
+	assert.False(t, isExpired)
+}
+
+// TestHasPersistedToken_PastExpiresAt sanity-checks that an actually-expired token is
+// still reported as expired (we only want IsZero() to be the special case).
+func TestHasPersistedToken_PastExpiresAt(t *testing.T) {
+	db := setupTestStorage(t)
+
+	serverName := "past-server"
+	serverURL := "https://example.com/mcp"
+	serverKey := GenerateServerKey(serverName, serverURL)
+
+	require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName:  serverKey,
+		AccessToken: "expired-token",
+		TokenType:   "Bearer",
+		ExpiresAt:   time.Now().Add(-1 * time.Hour),
+	}))
+
+	hasToken, _, isExpired := HasPersistedToken(serverName, serverURL, db)
+	assert.True(t, hasToken)
+	assert.True(t, isExpired, "Expected isExpired=true for a record with a past ExpiresAt")
+}
+
 // TestTokenStoreManager_HasValidToken_NilStorage validates graceful handling of nil storage
 func TestTokenStoreManager_HasValidToken_NilStorage(t *testing.T) {
 	manager := &TokenStoreManager{
