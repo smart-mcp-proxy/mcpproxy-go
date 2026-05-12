@@ -127,8 +127,13 @@ func TestWaitForURL_InfersDefaultPort(t *testing.T) {
 	// that an http:// URL without a port is parsed (rather than rejected)
 	// by checking it produces a "not reachable" error rather than a
 	// parse error within the short timeout window.
+	//
+	// Use TEST-NET-1 (RFC 5737, 192.0.2.0/24) as the host — it's reserved
+	// for documentation and guaranteed non-routable, so the dial fails
+	// consistently across OSes. 127.0.0.1:80 is bound on Windows GitHub
+	// runners (IIS/WinNAT), which would make this test pass spuriously.
 	ctx := context.Background()
-	err := WaitForURL(ctx, "http://127.0.0.1/", 100*time.Millisecond)
+	err := WaitForURL(ctx, "http://192.0.2.1/", 100*time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not reachable", "default-port inference should reach the polling loop, not fail at parse")
 }
