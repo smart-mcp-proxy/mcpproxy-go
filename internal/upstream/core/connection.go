@@ -40,13 +40,9 @@ const (
 	manualOAuthKey contextKey = "manual_oauth"
 )
 
-
-
-
 // ErrOAuthPending represents a deferred OAuth authentication requirement.
 // This error indicates that OAuth is required but has been intentionally deferred
 // (e.g., for user action via tray UI or CLI) rather than being a connection failure.
-
 
 // IsOAuthPending checks if an error is an ErrOAuthPending
 

@@ -79,6 +79,12 @@ type Supervisor struct {
 	onServerConnectedCallback func(serverName string)
 	callbackMu                sync.RWMutex
 
+	// errorCodeNotifier is an optional hook called whenever a DiagnosticError
+	// is classified and attached to a server status. Used by the telemetry
+	// layer to increment diagnostics counters (Spec 044 Phase H). The argument
+	// is a stable MCPX_* code string. Safe to leave nil; calls are no-ops.
+	errorCodeNotifier func(code string)
+
 	// Inspection exemptions for temporary connections to quarantined servers
 	inspectionExemptions   map[string]time.Time
 	inspectionExemptionsMu sync.RWMutex
@@ -671,6 +677,16 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 					transport = string(state.Config.Protocol)
 				}
 				classifyAndAttach(status, state.ConnectionInfo.LastError, transport)
+				// Spec 044 Phase H: notify telemetry counter store.
+				if status.Diagnostic != nil {
+					s.callbackMu.RLock()
+					notifier := s.errorCodeNotifier
+					s.callbackMu.RUnlock()
+					if notifier != nil {
+						code := string(status.Diagnostic.Code)
+						go notifier(code)
+					}
+				}
 
 				// Set last error time if available
 				if !state.ConnectionInfo.LastRetryTime.IsZero() {
@@ -709,6 +725,16 @@ func (s *Supervisor) SetOnServerConnectedCallback(callback func(serverName strin
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
 	s.onServerConnectedCallback = callback
+}
+
+// SetErrorCodeNotifier registers a callback that fires whenever a diagnostic
+// error code is classified and attached to a server (Spec 044 Phase H). The
+// callback receives the stable MCPX_* code string and runs synchronously in
+// a goroutine to avoid blocking the supervisor's hot path.
+func (s *Supervisor) SetErrorCodeNotifier(fn func(code string)) {
+	s.callbackMu.Lock()
+	defer s.callbackMu.Unlock()
+	s.errorCodeNotifier = fn
 }
 
 // RefreshToolsFromDiscovery updates both the Supervisor snapshot and StateView with tools from background discovery.
@@ -923,6 +949,16 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 							transport = string(status.Config.Protocol)
 						}
 						classifyAndAttach(status, connInfo.LastError, transport)
+						// Spec 044 Phase H: notify telemetry counter store.
+						if status.Diagnostic != nil {
+							s.callbackMu.RLock()
+							notifier := s.errorCodeNotifier
+							s.callbackMu.RUnlock()
+							if notifier != nil {
+								code := string(status.Diagnostic.Code)
+								go notifier(code)
+							}
+						}
 
 						if !connInfo.LastRetryTime.IsZero() {
 							t := connInfo.LastRetryTime

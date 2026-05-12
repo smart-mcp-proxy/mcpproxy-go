@@ -130,6 +130,19 @@ func (s *Server) handleInvokeFix(w http.ResponseWriter, r *http.Request) {
 	})
 	duration := time.Since(started)
 
+	// Spec 044 Phase H: record fix attempt in telemetry counter store.
+	// Runs only for mode=execute (dry_run is not a real attempt). Fire-and-forget.
+	if mode == diagnostics.ModeExecute && s.telemetryPayloadProvider != nil {
+		if svc := s.telemetryPayloadProvider(); svc != nil {
+			if store := svc.DiagnosticsCounterStore(); store != nil {
+				if db := svc.DiagnosticsCounterDB(); db != nil {
+					outcome := result.Outcome
+					go func() { _ = store.RecordFixAttempt(db, outcome) }()
+				}
+			}
+		}
+	}
+
 	if errors.Is(invokeErr, diagnostics.ErrUnknownFixer) {
 		s.writeError(w, r, http.StatusBadRequest, "Unknown fixer_key: "+body.FixerKey)
 		return

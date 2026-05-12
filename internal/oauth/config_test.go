@@ -501,7 +501,7 @@ func TestCreateOAuthConfig_MergesExtraParams(t *testing.T) {
 		URL:  mockMetadataServer.URL + "/mcp",
 		OAuth: &config.OAuthConfig{
 			ExtraParams: map[string]string{
-				"tenant_id": "12345",          // Additional param (should be preserved)
+				"tenant_id": "12345",           // Additional param (should be preserved)
 				"audience":  "custom-audience", // Additional param (should be preserved)
 				// Note: no "resource" - should be auto-detected
 			},

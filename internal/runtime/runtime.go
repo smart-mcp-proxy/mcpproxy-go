@@ -2168,6 +2168,22 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 					r.logger.Info("Installer-launched process: installer_heartbeat_pending=true")
 				}
 			}
+
+			// Spec 044 Phase H: wire diagnostics counter store. Pre-create the
+			// bucket to avoid write-race on first DiagnosticError classification.
+			if err := telemetry.EnsureDiagnosticsCountersBucket(db); err != nil {
+				r.logger.Warn("Failed to ensure diagnostics_counters bucket", zap.Error(err))
+			}
+			diagStore := telemetry.NewDiagnosticsCounterStore()
+			r.telemetryService.SetDiagnosticsCounterStore(diagStore, db)
+
+			// Wire error-code notifier into supervisor so every classified
+			// DiagnosticError increments the 24h per-code counter.
+			if r.supervisor != nil {
+				r.supervisor.SetErrorCodeNotifier(func(code string) {
+					_ = diagStore.RecordErrorCode(db, code)
+				})
+			}
 		}
 	}
 

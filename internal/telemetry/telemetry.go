@@ -132,6 +132,11 @@ type HeartbeatPayload struct {
 	// WizardServerStep is the per-step status for "Add an MCP server":
 	// one of "" (not shown to this install), "completed", or "skipped".
 	WizardServerStep string `json:"wizard_server_step,omitempty"`
+
+	// Spec 044 Phase H: diagnostics counter snapshot. Omitted entirely when
+	// all counters are zero (omitempty on the pointer). No PII: only stable
+	// MCPX_* enum strings, non-negative int counts.
+	Diagnostics *DiagnosticsCounters `json:"diagnostics,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -189,6 +194,11 @@ type Service struct {
 	// Activation is simply omitted from the heartbeat.
 	activationStore ActivationStore
 	activationDB    *bbolt.DB
+
+	// Spec 044 Phase H: diagnostics counter store + DB handle. Optional — same
+	// nil-safety guarantee as activationStore. When nil, Diagnostics is omitted.
+	diagCounterStore DiagnosticsCounterStore
+	diagCounterDB    *bbolt.DB
 
 	// Spec 044: optional provider for configured IDE count. Populated by the
 	// runtime from internal/connect at wire-up time. nil-safe.
@@ -265,6 +275,25 @@ func (s *Service) ActivationStore() ActivationStore {
 // store (or nil). Callers pair this with ActivationStore() to perform writes.
 func (s *Service) ActivationDB() *bbolt.DB {
 	return s.activationDB
+}
+
+// SetDiagnosticsCounterStore wires the BBolt-backed diagnostics counter store
+// (Spec 044 Phase H). Optional; when unset, heartbeat payloads omit the
+// diagnostics object. Safe to call once during startup.
+func (s *Service) SetDiagnosticsCounterStore(store DiagnosticsCounterStore, db *bbolt.DB) {
+	s.diagCounterStore = store
+	s.diagCounterDB = db
+}
+
+// DiagnosticsCounterStore returns the wired counter store (or nil).
+func (s *Service) DiagnosticsCounterStore() DiagnosticsCounterStore {
+	return s.diagCounterStore
+}
+
+// DiagnosticsCounterDB returns the BBolt DB handle associated with the
+// diagnostics counter store (or nil).
+func (s *Service) DiagnosticsCounterDB() *bbolt.DB {
+	return s.diagCounterDB
 }
 
 // SetConfiguredIDECountProvider wires a function that returns the number of
@@ -573,6 +602,19 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 			payload.WizardEngaged = snap.WizardEngaged
 			payload.WizardConnectStep = snap.WizardConnectStep
 			payload.WizardServerStep = snap.WizardServerStep
+		}
+	}
+
+	// Spec 044 Phase H: diagnostics counter snapshot. Load from BBolt (decay
+	// applied at read time); omit entirely when counters are all zero or the
+	// store is not wired (short-lived CLI commands).
+	if s.diagCounterStore != nil && s.diagCounterDB != nil {
+		if snap, err := s.diagCounterStore.Snapshot(s.diagCounterDB); err == nil {
+			if !snap.isZero() {
+				payload.Diagnostics = &snap
+			}
+		} else {
+			s.logger.Debug("Failed to load diagnostics counters for heartbeat", zap.Error(err))
 		}
 	}
 
