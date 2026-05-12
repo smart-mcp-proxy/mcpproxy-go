@@ -85,22 +85,23 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 	defer m.mu.Unlock()
 
 	record := &UpstreamRecord{
-		ID:             serverConfig.Name, // Use name as ID for simplicity
-		Name:           serverConfig.Name,
-		URL:            serverConfig.URL,
-		Protocol:       serverConfig.Protocol,
-		Command:        serverConfig.Command,
-		Args:           serverConfig.Args,
-		WorkingDir:     serverConfig.WorkingDir,
-		Env:            serverConfig.Env,
-		Headers:        serverConfig.Headers,
-		OAuth:          serverConfig.OAuth,
-		Enabled:        serverConfig.Enabled,
-		Quarantined:    serverConfig.Quarantined,
-		Created:        serverConfig.Created,
-		Updated:        time.Now(),
-		Isolation:      serverConfig.Isolation,
-		ReconnectOnUse: serverConfig.ReconnectOnUse,
+		ID:                  serverConfig.Name, // Use name as ID for simplicity
+		Name:                serverConfig.Name,
+		URL:                 serverConfig.URL,
+		Protocol:            serverConfig.Protocol,
+		Command:             serverConfig.Command,
+		Args:                serverConfig.Args,
+		WorkingDir:          serverConfig.WorkingDir,
+		Env:                 serverConfig.Env,
+		Headers:             serverConfig.Headers,
+		OAuth:               serverConfig.OAuth,
+		Enabled:             serverConfig.Enabled,
+		Quarantined:         serverConfig.Quarantined,
+		Created:             serverConfig.Created,
+		Updated:             time.Now(),
+		Isolation:           serverConfig.Isolation,
+		ReconnectOnUse:      serverConfig.ReconnectOnUse,
+		LauncherWaitTimeout: serverConfig.LauncherWaitTimeout,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -117,21 +118,22 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 	}
 
 	return &config.ServerConfig{
-		Name:           record.Name,
-		URL:            record.URL,
-		Protocol:       record.Protocol,
-		Command:        record.Command,
-		Args:           record.Args,
-		WorkingDir:     record.WorkingDir,
-		Env:            record.Env,
-		Headers:        record.Headers,
-		OAuth:          record.OAuth,
-		Enabled:        record.Enabled,
-		Quarantined:    record.Quarantined,
-		Created:        record.Created,
-		Updated:        record.Updated,
-		Isolation:      record.Isolation,
-		ReconnectOnUse: record.ReconnectOnUse,
+		Name:                record.Name,
+		URL:                 record.URL,
+		Protocol:            record.Protocol,
+		Command:             record.Command,
+		Args:                record.Args,
+		WorkingDir:          record.WorkingDir,
+		Env:                 record.Env,
+		Headers:             record.Headers,
+		OAuth:               record.OAuth,
+		Enabled:             record.Enabled,
+		Quarantined:         record.Quarantined,
+		Created:             record.Created,
+		Updated:             record.Updated,
+		Isolation:           record.Isolation,
+		ReconnectOnUse:      record.ReconnectOnUse,
+		LauncherWaitTimeout: record.LauncherWaitTimeout,
 	}, nil
 }
 
@@ -148,21 +150,22 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 	var servers []*config.ServerConfig
 	for _, record := range records {
 		servers = append(servers, &config.ServerConfig{
-			Name:           record.Name,
-			URL:            record.URL,
-			Protocol:       record.Protocol,
-			Command:        record.Command,
-			Args:           record.Args,
-			WorkingDir:     record.WorkingDir,
-			Env:            record.Env,
-			Headers:        record.Headers,
-			OAuth:          record.OAuth,
-			Enabled:        record.Enabled,
-			Quarantined:    record.Quarantined,
-			Created:        record.Created,
-			Updated:        record.Updated,
-			Isolation:      record.Isolation,
-			ReconnectOnUse: record.ReconnectOnUse,
+			Name:                record.Name,
+			URL:                 record.URL,
+			Protocol:            record.Protocol,
+			Command:             record.Command,
+			Args:                record.Args,
+			WorkingDir:          record.WorkingDir,
+			Env:                 record.Env,
+			Headers:             record.Headers,
+			OAuth:               record.OAuth,
+			Enabled:             record.Enabled,
+			Quarantined:         record.Quarantined,
+			Created:             record.Created,
+			Updated:             record.Updated,
+			Isolation:           record.Isolation,
+			ReconnectOnUse:      record.ReconnectOnUse,
+			LauncherWaitTimeout: record.LauncherWaitTimeout,
 		})
 	}
 
