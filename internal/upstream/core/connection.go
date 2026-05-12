@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -118,6 +119,21 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	// Create and connect client based on transport type
 	var err error
+	// Locally-launched HTTP/SSE upstreams: spawn the child process before
+	// the transport-level connect, then wait for its URL to become
+	// reachable. Stdio is excluded because the stdio transport spawns
+	// through mcp-go itself; running the launcher here would double-spawn.
+	switch c.transportType {
+	case transportHTTP, transportHTTPStreamable, transportSSE:
+		if c.config.Command != "" {
+			c.logger.Debug("🚀 Launching local upstream before HTTP/SSE connect",
+				zap.String("server", c.config.Name),
+				zap.String("transport", c.transportType))
+			if launchErr := c.connectWithLauncher(ctx); launchErr != nil {
+				return fmt.Errorf("failed to launch local upstream: %w", launchErr)
+			}
+		}
+	}
 	switch c.transportType {
 	case transportStdio:
 		c.logger.Debug("📡 Using STDIO transport")
@@ -181,6 +197,36 @@ func (c *Client) Connect(ctx context.Context) error {
 					zap.Error(err))
 			}
 			c.processGroupID = 0
+		}
+
+		// Stop any locally-launched upstream child the HTTP/SSE path
+		// started — connectWithLauncher itself only stops it on
+		// wait-for-url failure, not on subsequent transport-level
+		// connect failure.
+		//
+		// IMPORTANT: c.mu is held for the duration of Connect (see
+		// the c.mu.Lock at the top of this function), so we can read
+		// the launcher fields directly. We release the lock briefly
+		// around handle.Stop because Stop blocks until the child is
+		// reaped and we don't want to hold c.mu that long; the
+		// `connecting` flag already prevents a concurrent Connect.
+		if c.launcherHandle != nil {
+			handle := c.launcherHandle
+			cidFile := c.launcherCIDFile
+			c.launcherHandle = nil
+			c.launcherCIDFile = ""
+			c.mu.Unlock()
+			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if stopErr := handle.Stop(stopCtx); stopErr != nil {
+				c.logger.Warn("error stopping launcher during connect-failure cleanup",
+					zap.String("server", c.config.Name),
+					zap.Error(stopErr))
+			}
+			stopCancel()
+			if cidFile != "" {
+				_ = os.Remove(cidFile)
+			}
+			c.mu.Lock()
 		}
 
 		return fmt.Errorf("failed to connect: %w", err)

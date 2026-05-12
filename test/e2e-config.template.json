@@ -20,6 +20,18 @@
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
       "updated": "2025-09-23T10:13:46.357736+03:00"
+    },
+    {
+      "name": "launcher-test",
+      "protocol": "http",
+      "url": "http://127.0.0.1:39933/mcp",
+      "command": "./test/launcher-server/launcher-server",
+      "args": ["--port", "39933", "--quiet"],
+      "launcher_wait_timeout": "10s",
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-11T00:00:00Z",
+      "updated": "2026-05-11T00:00:00Z"
     }
   ],
   "top_k": 10,

@@ -147,8 +147,9 @@ MCPProxy looks for configuration in these locations (in order):
 | `args` | array | No | Command arguments |
 | `url` | string | Yes* | Server URL (required for `http`/`sse`/`streamable-http` protocols) |
 | `headers` | object | No | HTTP headers for HTTP-based protocols |
-| `working_dir` | string | No | Working directory for stdio servers (default: current directory) |
-| `env` | object | No | Environment variables for stdio servers |
+| `working_dir` | string | No | Working directory for stdio servers, or for the locally-launched child of an HTTP/SSE server (default: current directory) |
+| `env` | object | No | Environment variables for stdio servers, or for the locally-launched child of an HTTP/SSE server |
+| `launcher_wait_timeout` | duration | No | When `command` is set together with an HTTP/SSE `url`, how long mcpproxy waits for that URL to become reachable after spawning the child (e.g. `"15s"`, default `"30s"`) |
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
@@ -209,6 +210,54 @@ MCPProxy looks for configuration in these locations (in order):
   "args": ["-y", "my-server"]
 }
 ```
+
+### Locally-launched HTTP / SSE servers
+
+By default `command` is only used for `stdio` servers. When you set `command`
+together with an HTTP/SSE `url` and an explicit `protocol` of `http`, `sse`,
+or `streamable-http`, mcpproxy will:
+
+1. Spawn the command (with `args`, `env`, `working_dir`, and Docker isolation
+   exactly like a stdio server).
+2. Wait up to `launcher_wait_timeout` (default 30s) for `url` to accept a TCP
+   connection.
+3. Connect via the configured HTTP/SSE transport.
+4. Own the child's lifecycle — the process is stopped (`SIGTERM`, then
+   `SIGKILL` after a grace period) on disconnect, restart, server-disable, or
+   mcpproxy shutdown. Unexpected exits trigger an automatic disconnect, which
+   the existing reconnect path picks up.
+
+```json
+{
+  "name": "local-http-mcp",
+  "protocol": "http",
+  "url": "http://127.0.0.1:9999/mcp",
+  "command": "node",
+  "args": ["./examples/echo-http-server.js", "--port", "9999"],
+  "working_dir": "/path/to/repo",
+  "launcher_wait_timeout": "15s",
+  "enabled": true
+}
+```
+
+`stdout` and `stderr` of the child are routed to the per-server log, so
+`mcpproxy upstream logs <name>` continues to work the same way it does for
+stdio servers.
+
+#### Behaviour matrix when both `command` and `url` are set
+
+| `protocol` | `command` | `url` | Behaviour |
+|---|---|---|---|
+| `stdio` (explicit) | set | any | Stdio transport, child via stdin/stdout — `url` ignored. |
+| `http` / `sse` / `streamable-http` (explicit) | set | set | **Locally-launched HTTP/SSE** — spawn child, wait for URL, connect via network. |
+| `http` / `sse` / `streamable-http` (explicit) | unset | set | Connect to remote URL — no spawn. |
+| `auto` or unset | set | any | Stdio (`command` wins over `url` for back-compat — set `protocol` explicitly to opt into the launcher). |
+| `auto` or unset | unset | set | HTTP/SSE remote — no spawn. |
+
+The "command wins" rule under `auto` is intentional: it preserves backwards
+compatibility with configurations written before the launcher feature
+existed. To launch a local HTTP/SSE server you **must** set `protocol`
+explicitly to one of `http`, `sse`, or `streamable-http`.
 
 ### OAuth Configuration
 

@@ -352,6 +352,14 @@ mcpproxy upstream restart --all
 
 **Note:** Restart does not require confirmation as it's non-destructive.
 
+**Locally-launched HTTP/SSE upstreams:** when a server is configured with both
+`command` and an HTTP/SSE `url` (see [docs/configuration.md](configuration.md#locally-launched-http--sse-servers)),
+`restart` stops the spawned child (`SIGTERM` → grace → `SIGKILL`) before
+re-running Connect. The grace timeout is fixed at 5s today; the next start
+won't begin until the previous child is fully reaped, so you can rely on the
+port being free after the command returns. Stop ordering is: close MCP client
+→ stop launched child → release per-server state.
+
 ---
 
 ### `mcpproxy doctor`
