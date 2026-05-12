@@ -266,9 +266,15 @@ func (h *handle) stopLocked(ctx context.Context) error {
 }
 
 func (h *handle) reap() {
-	err := h.cmd.Wait()
-	// Drain log pumps so any final output lands in the sink.
+	// Drain log pumps FIRST. exec.Cmd.Wait() closes the parent-side stdout/stderr
+	// pipes as part of its cleanup; if we call Wait() before the pumps have read
+	// to EOF, the pump scanners can race against that close and observe EOF with
+	// buffered child output still in flight, dropping it on the floor. Per the
+	// exec.Cmd doc: "it is thus incorrect to call Wait before all reads from the
+	// pipe have completed." Pumps naturally finish when the child exits and the
+	// kernel propagates EOF — we don't need Wait() to reach that state.
 	h.pumpWG.Wait()
+	err := h.cmd.Wait()
 
 	h.waitErrMu.Lock()
 	h.waitErr = err
