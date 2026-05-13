@@ -118,6 +118,26 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 	// Collect quarantine stats from servers
 	quarantineStats := collectQuarantineStats(ctx, client, logger)
 
+	// Host-environment hint (issue #457). Cheap probe — runs locally because
+	// doctor is socket-bound, i.e. same host as the daemon. Skip on a single-
+	// server filter since the hint is host-global, not server-scoped.
+	var envHint string
+	if doctorServerFilter == "" {
+		servers, err := client.GetServers(ctx)
+		if err != nil {
+			logger.Debug("Failed to get servers for env hint", zap.Error(err))
+		} else {
+			inputs := snapDockerEnvInputs{
+				SnapDockerPresent:      detectSnapDockerPresent(ctx),
+				ServiceHomeOutsideHome: homeOutsideHome(detectServiceHome(ctx)),
+				HasDockerUpstream:      hasDockerUpstream(servers),
+			}
+			if inputs.ShouldWarn() {
+				envHint = snapDockerHint()
+			}
+		}
+	}
+
 	// Spec 044 — optionally narrow to a single server. Applied after
 	// collection so the backend diagnostic shape is unchanged.
 	if doctorServerFilter != "" {
@@ -125,7 +145,7 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 		quarantineStats = filterQuarantineStatsByServer(quarantineStats, doctorServerFilter)
 	}
 
-	return outputDiagnostics(diag, info, quarantineStats)
+	return outputDiagnostics(diag, info, quarantineStats, envHint)
 }
 
 // filterDiagnosticsByServer returns a shallow copy of the diagnostics
@@ -238,7 +258,7 @@ func collectQuarantineStats(ctx context.Context, client *cliclient.Client, logge
 	return stats
 }
 
-func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats) error {
+func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string) error {
 	switch doctorOutput {
 	case "json":
 		// Combine diagnostics with info for JSON output
@@ -250,6 +270,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		if len(quarantineStats) > 0 {
 			combined["quarantine"] = quarantineStats
+		}
+		if envHint != "" {
+			combined["environment_warnings"] = []string{envHint}
 		}
 		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
@@ -298,6 +321,11 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 
 			// Show deprecated config warnings even when no issues
 			displayDeprecatedConfigs(diag)
+
+			// Host-environment hint (snap-docker, issue #457). Surfaced even
+			// when no per-server diagnostics fired because the upstreams may
+			// still be in retry — the hint preempts the next failure.
+			displayEnvironmentHint(envHint)
 
 			// Display security features status even when no issues
 			fmt.Println("🔒 Security Features")
@@ -461,6 +489,9 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 
 		// Deprecated Configuration warnings
 		displayDeprecatedConfigs(diag)
+
+		// Host-environment hint (snap-docker, issue #457).
+		displayEnvironmentHint(envHint)
 
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		fmt.Println()
