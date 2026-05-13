@@ -328,7 +328,10 @@ func (b *BoltDB) SaveToolApproval(record *ToolApprovalRecord) error {
 	})
 }
 
-// GetToolApproval retrieves a tool approval record by server and tool name
+// GetToolApproval retrieves a tool approval record by server and tool name.
+// Returns ErrToolApprovalNotFound (wrapped so callers can use errors.Is) when
+// no record exists. Any other error indicates a real read failure (decode
+// error, closed DB, etc.) and MUST NOT be treated as "missing" by callers.
 func (b *BoltDB) GetToolApproval(serverName, toolName string) (*ToolApprovalRecord, error) {
 	var record *ToolApprovalRecord
 
@@ -337,7 +340,7 @@ func (b *BoltDB) GetToolApproval(serverName, toolName string) (*ToolApprovalReco
 		key := ToolApprovalKey(serverName, toolName)
 		data := bucket.Get([]byte(key))
 		if data == nil {
-			return fmt.Errorf("tool approval not found: %s", key)
+			return fmt.Errorf("%w: %s", ErrToolApprovalNotFound, key)
 		}
 
 		record = &ToolApprovalRecord{}
