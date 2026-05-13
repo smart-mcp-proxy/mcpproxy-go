@@ -52,6 +52,24 @@ contents:
       owner: root
       group: mcpproxy
 
+  # Auto-update opt-in for unattended-upgrades hosts. Whitelists the MCPProxy
+  # apt origin so new releases are pulled automatically on systems that have
+  # unattended-upgrades configured (default on Ubuntu Server). Conffile so
+  # user edits survive upgrades; no-op on hosts that don't run unattended-upgrades
+  # or that installed mcpproxy from a downloaded .deb rather than the apt repo
+  # (apt simply has no source matching origin=MCPProxy).
+  #
+  # The .rpm variant intentionally omits this file: dnf-automatic uses a
+  # different config schema (/etc/dnf/automatic.conf) and would require either
+  # editing-in-place or shipping a full automatic.conf, neither of which is
+  # safe across distros. Track that in a follow-up.
+  - src: ./packaging/linux/apt-unattended-upgrades.conf
+    dst: /etc/apt/apt.conf.d/52unattended-upgrades-mcpproxy
+    type: "config|noreplace"
+    packager: deb
+    file_info:
+      mode: 0644
+
   - src: ./LICENSE
     dst: /usr/share/doc/mcpproxy/LICENSE
     file_info:
