@@ -402,8 +402,17 @@ const onboardingStore = useOnboardingStore()
 
 // Spec 046 v2: badge count drives the sidebar Setup entry's pulse + count.
 // Refetched on mount; the wizard itself drives subsequent updates while open.
+//
+// Pulse is also gated on `!isEngaged` so that headless / LAN-server installs
+// (where HasConnectedClient and FirstMCPClientEver are structurally false —
+// there's no local AI client and no GUI to install one) can quiet the badge
+// by clicking "Close for now". The Setup entry itself remains in the sidebar
+// so the user can re-open the wizard, but it no longer pulses or shows a
+// count after engagement.
 const setupCount = computed(() => onboardingStore.incompleteTabCount)
-const setupIncomplete = computed(() => setupCount.value > 0)
+const setupIncomplete = computed(
+  () => setupCount.value > 0 && !onboardingStore.isEngaged
+)
 const setupTitleAttr = computed(() =>
   setupIncomplete.value
     ? `Setup (${setupCount.value} step${setupCount.value === 1 ? '' : 's'} remaining)`
