@@ -1279,6 +1279,41 @@ const hasDisabledTool = computed(() =>
   serverTools.value.some(t => isToolToggleAvailable(t.name) && !isToolEnabled(t.name))
 )
 
+// Vue Router 4 reuses the ServerDetail.vue component instance across
+// /servers/foo → /servers/bar (same route, just a different param). The
+// `server` computed correctly retargets via the store, but the local
+// data refs (serverTools, toolApprovals, serverLogs, scan*) stay populated
+// with the previous server's data until something refetches them. Without
+// this watch, navigating between server detail pages briefly shows server
+// B's name + stats with server A's tool list — looks like a data-corruption
+// bug. Reset eagerly, then kick off a fresh load.
+//
+// Race protection: loadGeneration is bumped by loadServerDetails so an
+// in-flight load for the previous server can't overwrite the new server's
+// refs when its fetch finally resolves. See loadTools / loadToolApprovals
+// / loadLogs for the gen-check pattern.
+watch(
+  () => props.serverName,
+  (next, prev) => {
+    if (next === prev) return
+    serverTools.value = []
+    toolsError.value = null
+    selectedToolSchema.value = null
+    toolApprovals.value = []
+    toolToggleLoading.value = {}
+    serverLogs.value = []
+    logsError.value = null
+    scanReport.value = null
+    scanStatus.value = null
+    scanError.value = null
+    scanReportLoading.value = false
+    activeScanJobId.value = null
+    scanFiles.value = []
+    scanFilesLoaded.value = false
+    void loadServerDetails()
+  }
+)
+
 // Reload tools (and approvals) whenever the server's runtime state
 // changes between enabled/disconnected/connected. Without this, toggling
 // a server enabled/disabled would leave the local serverTools list
@@ -1406,12 +1441,23 @@ function computeWordDiff(oldText: string, newText: string): DiffPart[] {
 }
 
 // Methods
+// loadGeneration is bumped by every loadServerDetails entry. The three
+// per-server fetches (loadTools / loadToolApprovals / loadLogs) capture
+// the generation at the start of their call and only commit their result
+// if the generation hasn't advanced — which protects against the foo→bar
+// navigation race where foo's response arrives AFTER bar's load already
+// started. The counter is intentionally not a Vue ref: it's purely
+// internal flow control, no UI reactivity needed.
+let loadGeneration = 0
+
 async function loadServerDetails() {
+  const myGen = ++loadGeneration
   loading.value = true
   error.value = null
 
   try {
     await serversStore.fetchServers()
+    if (myGen !== loadGeneration) return
     // server is a computed from the store — no manual reassignment needed.
 
     if (!server.value) {
@@ -1421,18 +1467,28 @@ async function loadServerDetails() {
 
     // Load tools, approvals, and logs in parallel
     await Promise.all([
-      loadTools(),
-      loadToolApprovals(),
-      loadLogs()
+      _loadToolsWithGen(myGen),
+      _loadToolApprovalsWithGen(myGen),
+      _loadLogsWithGen(myGen)
     ])
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load server details'
+    if (myGen === loadGeneration) {
+      error.value = err instanceof Error ? err.message : 'Failed to load server details'
+    }
   } finally {
-    loading.value = false
+    if (myGen === loadGeneration) loading.value = false
   }
 }
 
-async function loadTools() {
+// loadTools is the public no-arg wrapper used by template @click handlers
+// and ad-hoc reloads (e.g. the connected/enabled watch). Internal gen-gated
+// impl lives in _loadToolsWithGen so loadServerDetails can pass an explicit
+// generation token for navigation-race protection.
+function loadTools() {
+  return _loadToolsWithGen(loadGeneration)
+}
+
+async function _loadToolsWithGen(gen: number) {
   if (!server.value) return
 
   toolsLoading.value = true
@@ -1440,23 +1496,30 @@ async function loadTools() {
 
   try {
     const response = await api.getServerTools(server.value.name)
+    if (gen !== loadGeneration) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
     } else {
       toolsError.value = response.error || 'Failed to load tools'
     }
   } catch (err) {
+    if (gen !== loadGeneration) return
     toolsError.value = err instanceof Error ? err.message : 'Failed to load tools'
   } finally {
-    toolsLoading.value = false
+    if (gen === loadGeneration) toolsLoading.value = false
   }
 }
 
 // Tool quarantine functions (Spec 032)
-async function loadToolApprovals() {
+function loadToolApprovals() {
+  return _loadToolApprovalsWithGen(loadGeneration)
+}
+
+async function _loadToolApprovalsWithGen(gen: number) {
   if (!server.value) return
   try {
     const response = await api.getToolApprovals(server.value.name)
+    if (gen !== loadGeneration) return
     if (response.success && response.data) {
       const approvals = (response.data.tools || []).map((tool) => {
         const disabled = typeof tool.disabled === 'boolean'
@@ -1484,6 +1547,7 @@ async function loadToolApprovals() {
           }
         })
         await Promise.all(diffPromises)
+        if (gen !== loadGeneration) return
       }
 
       toolApprovals.value = approvals
@@ -1736,7 +1800,11 @@ async function bulkToggleAllTools(enabled: boolean) {
   }
 }
 
-async function loadLogs() {
+function loadLogs() {
+  return _loadLogsWithGen(loadGeneration)
+}
+
+async function _loadLogsWithGen(gen: number) {
   if (!server.value) return
 
   logsLoading.value = true
@@ -1744,15 +1812,17 @@ async function loadLogs() {
 
   try {
     const response = await api.getServerLogs(server.value.name, logTail.value)
+    if (gen !== loadGeneration) return
     if (response.success && response.data) {
       serverLogs.value = response.data.logs || []
     } else {
       logsError.value = response.error || 'Failed to load logs'
     }
   } catch (err) {
+    if (gen !== loadGeneration) return
     logsError.value = err instanceof Error ? err.message : 'Failed to load logs'
   } finally {
-    logsLoading.value = false
+    if (gen === loadGeneration) logsLoading.value = false
   }
 }
 
