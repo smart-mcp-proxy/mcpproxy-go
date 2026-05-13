@@ -448,75 +448,83 @@
               <div
                 v-for="tool in filteredTools"
                 :key="tool.name"
-                class="card shadow-md transition-opacity"
+                class="card shadow-md transition-colors"
                 :class="isToolEnabled(tool.name)
                   ? 'bg-base-100'
-                  : 'bg-base-200/70 opacity-60 border border-base-300'"
+                  : 'bg-base-200/70 border border-base-300'"
               >
                 <div class="card-body">
-                  <div class="flex items-center gap-2">
-                    <h4 class="card-title text-lg">{{ tool.name }}</h4>
-                    <span
-                      v-if="getToolApprovalStatus(tool.name) === 'pending'"
-                      class="badge badge-info badge-sm"
-                    >new</span>
-                    <span
-                      v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
-                      class="badge badge-warning badge-sm"
-                    >changed</span>
-                    <span
-                      v-if="!isToolEnabled(tool.name)"
-                      class="badge badge-ghost badge-sm"
-                    >disabled</span>
-                  </div>
-                  <p class="text-sm text-base-content/70">
-                    {{ tool.description || 'No description available' }}
-                  </p>
-                  <AnnotationBadges
-                    v-if="tool.annotations"
-                    :annotations="tool.annotations"
-                    class="mt-2"
-                  />
-                  <div class="card-actions justify-between items-center mt-4 gap-2">
-                    <!--
-                      Per-tool enable toggle. Uses the same daisyUI
-                      `toggle toggle-sm` widget as the server-level Enabled
-                      switch (see Config tab) so the two controls feel like
-                      the same affordance applied at different scopes. The
-                      adjacent "Enabled"/"Disabled" label mirrors the
-                      server-card admin-state badge, so "disabled" reads
-                      consistently across server-level and tool-level UI.
+                  <!--
+                    Header row: title + status badges on the left, the
+                    per-tool toggle pinned to the top-right corner so it's
+                    the first thing the eye lands on. The toggle itself
+                    stays in the bright base-content layer (no opacity)
+                    even when the tool is disabled — only the description /
+                    annotations / View Schema button below dim so the user
+                    can tell at a glance the tool is off but the control to
+                    bring it back is still a "live affordance".
+                    Using `toggle-primary` gives the on-state a saturated
+                    color so the off-state can't be confused with a
+                    visually-disabled widget.
 
-                      Hidden for pending/changed tools because the right
-                      next action there is Approve, not Disable. For
-                      approved or never-quarantined tools the daemon
-                      synthesizes the approval record on demand, so the
-                      toggle works regardless of quarantine state.
-                    -->
+                    Hidden for pending/changed tools because the right
+                    next action there is Approve, not Disable. For
+                    approved or never-quarantined tools the daemon
+                    synthesizes the approval record on demand, so the
+                    toggle works regardless of quarantine state.
+                  -->
+                  <div class="flex justify-between items-start gap-3">
+                    <div
+                      class="flex items-center gap-2 flex-wrap min-w-0 transition-opacity"
+                      :class="isToolEnabled(tool.name) ? '' : 'opacity-60'"
+                    >
+                      <h4 class="card-title text-lg break-all">{{ tool.name }}</h4>
+                      <span
+                        v-if="getToolApprovalStatus(tool.name) === 'pending'"
+                        class="badge badge-info badge-sm"
+                      >new</span>
+                      <span
+                        v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
+                        class="badge badge-warning badge-sm"
+                      >changed</span>
+                    </div>
                     <label
                       v-if="isToolToggleAvailable(tool.name)"
-                      class="flex items-center gap-2 cursor-pointer"
+                      class="flex items-center gap-2 cursor-pointer shrink-0"
                     >
-                      <input
-                        type="checkbox"
-                        class="toggle toggle-sm"
-                        :checked="isToolEnabled(tool.name)"
-                        :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
-                        @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
-                      />
                       <span class="text-xs text-base-content/70">
                         <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs mr-1"></span>
                         {{ isToolEnabled(tool.name) ? 'Enabled' : 'Disabled' }}
                       </span>
+                      <input
+                        type="checkbox"
+                        class="toggle toggle-sm toggle-primary"
+                        :checked="isToolEnabled(tool.name)"
+                        :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
+                        @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
+                      />
                     </label>
-                    <span v-else></span>
-                    <button
-                      v-if="tool.input_schema"
-                      class="btn btn-sm btn-outline"
-                      @click="viewToolSchema(tool)"
-                    >
-                      View Schema
-                    </button>
+                  </div>
+                  <div
+                    class="transition-opacity"
+                    :class="isToolEnabled(tool.name) ? '' : 'opacity-60'"
+                  >
+                    <p class="text-sm text-base-content/70 mt-2">
+                      {{ tool.description || 'No description available' }}
+                    </p>
+                    <AnnotationBadges
+                      v-if="tool.annotations"
+                      :annotations="tool.annotations"
+                      class="mt-2"
+                    />
+                    <div v-if="tool.input_schema" class="card-actions justify-end mt-4">
+                      <button
+                        class="btn btn-sm btn-outline"
+                        @click="viewToolSchema(tool)"
+                      >
+                        View Schema
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1238,6 +1246,36 @@ const hasDisabledTool = computed(() =>
   serverTools.value.some(t => isToolToggleAvailable(t.name) && !isToolEnabled(t.name))
 )
 
+// Reload tools (and approvals) whenever the server's runtime state
+// changes between enabled/disconnected/connected. Without this, toggling
+// a server enabled/disabled would leave the local serverTools list
+// stuck at its previous value: enabling shows "Connected" but tool
+// count stays 0 until manual refresh; disabling shows "Disconnected"
+// but the prior count lingers. Both directions snap to the right state
+// here by re-fetching once the store-backed server status flips. The
+// store itself receives status updates via the SSE handler in
+// frontend/src/stores/servers.ts, so this watch piggybacks on that
+// path instead of polling.
+watch(
+  () => [server.value?.connected, server.value?.enabled] as const,
+  ([connected, enabled], prev) => {
+    if (!server.value) return
+    const [prevConnected, prevEnabled] = prev ?? [undefined, undefined]
+    if (connected === prevConnected && enabled === prevEnabled) return
+    if (!enabled) {
+      // A disabled server reports tool_count=0 immediately; reflect
+      // that locally so the big "Tools" counter doesn't lag.
+      serverTools.value = []
+      toolApprovals.value = []
+      return
+    }
+    if (connected) {
+      void loadTools()
+      void loadToolApprovals()
+    }
+  }
+)
+
 // Word-level diff for changed tool descriptions
 interface DiffPart {
   type: 'same' | 'added' | 'removed'
@@ -1502,6 +1540,14 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       disabled: !enabled,
     }
   }
+  // Optimistically bump the local quarantine.blocked_count so the
+  // "N disabled" stat-desc pill responds the instant the user flips the
+  // toggle, even before the round-trip + SSE + merge sequence completes.
+  // The subsequent syncAfterToolToggle() snaps it to server truth.
+  const prevQuarantine: Server['quarantine'] | undefined = server.value.quarantine
+    ? { ...server.value.quarantine }
+    : undefined
+  bumpLocalBlockedCount(enabled ? -1 : 1)
 
   try {
     const response = await api.setToolEnabled(server.value.name, toolName, enabled)
@@ -1518,6 +1564,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       await syncAfterToolToggle()
     } else {
       if (idx >= 0 && prev) toolApprovals.value[idx] = prev
+      restoreLocalQuarantine(prevQuarantine)
       systemStore.addToast({
         type: 'error',
         title: 'Update Failed',
@@ -1526,6 +1573,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     }
   } catch (err) {
     if (idx >= 0 && prev) toolApprovals.value[idx] = prev
+    restoreLocalQuarantine(prevQuarantine)
     systemStore.addToast({
       type: 'error',
       title: 'Update Failed',
@@ -1535,6 +1583,39 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     const next = { ...toolToggleLoading.value }
     delete next[toolName]
     toolToggleLoading.value = next
+  }
+}
+
+// bumpLocalBlockedCount adjusts the local server's quarantine.blocked_count
+// so the "N disabled" stat-desc pill reflects the user's toggle action
+// immediately. Without this, the pill waits on the GET /api/v1/servers
+// round-trip + store merge before updating — long enough for users to
+// notice and report as a "stuck counter" bug.
+function bumpLocalBlockedCount(delta: number) {
+  if (!server.value) return
+  const current = server.value.quarantine
+  const nextBlocked = Math.max(0, (current?.blocked_count ?? 0) + delta)
+  const pending = current?.pending_count ?? 0
+  const changed = current?.changed_count ?? 0
+  if (nextBlocked === 0 && pending === 0 && changed === 0) {
+    // Match the backend's "omit when all-zero" rule so mergeServers
+    // doesn't leave a stale empty Quarantine block around.
+    delete (server.value as Server & { quarantine?: unknown }).quarantine
+  } else {
+    server.value.quarantine = {
+      pending_count: pending,
+      changed_count: changed,
+      blocked_count: nextBlocked,
+    }
+  }
+}
+
+function restoreLocalQuarantine(prev: Server['quarantine']) {
+  if (!server.value) return
+  if (prev) {
+    server.value.quarantine = prev
+  } else {
+    delete (server.value as Server & { quarantine?: unknown }).quarantine
   }
 }
 
