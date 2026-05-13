@@ -674,6 +674,80 @@ func TestSetToolEnabled_TogglesVisibility(t *testing.T) {
 	assert.False(t, result.BlockedTools["create_issue"])
 }
 
+// SetToolEnabled must work even when no approval record exists yet — that's
+// the common case when QuarantineEnabled is false globally or SkipQuarantine
+// is on for the server. Without on-demand record creation, the per-tool
+// enable/disable UI is dead for any non-quarantined deployment.
+func TestSetToolEnabled_CreatesRecordWhenMissing(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// No SaveToolApproval before this — the tool has never been seen by the
+	// approval bucket. SetToolEnabled must synthesize a record.
+	err := rt.SetToolEnabled("github", "create_issue", false, "admin")
+	require.NoError(t, err)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.True(t, record.Disabled, "synthesized record must reflect the disable intent")
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status,
+		"synthesized record must be approved — the toggle is a visibility decision, not a quarantine one")
+
+	// Re-enabling should clear the flag without re-resetting status.
+	err = rt.SetToolEnabled("github", "create_issue", true, "admin")
+	require.NoError(t, err)
+
+	record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.False(t, record.Disabled)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+}
+
+func TestSetAllToolsEnabled_DisablesAllKnownTools(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Seed two approved tools (mix: one with full record, one minimal). The
+	// bulk operation must flip both.
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "list_repos",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "create_issue",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
+
+	changed, err := rt.SetAllToolsEnabled("github", false, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 2, changed)
+
+	for _, tool := range []string{"list_repos", "create_issue"} {
+		record, err := rt.storageManager.GetToolApproval("github", tool)
+		require.NoError(t, err)
+		assert.True(t, record.Disabled, "tool %s must be disabled after disable-all", tool)
+	}
+
+	// Idempotent: calling again should report 0 changes.
+	changed, err = rt.SetAllToolsEnabled("github", false, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 0, changed, "second disable-all is a no-op")
+
+	// Re-enable everything; both records must be cleared.
+	changed, err = rt.SetAllToolsEnabled("github", true, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 2, changed)
+	for _, tool := range []string{"list_repos", "create_issue"} {
+		record, err := rt.storageManager.GetToolApproval("github", tool)
+		require.NoError(t, err)
+		assert.False(t, record.Disabled, "tool %s must be enabled after enable-all", tool)
+	}
+}
+
 func TestFilterBlockedTools(t *testing.T) {
 	tools := []*config.ToolMetadata{
 		{Name: "server:tool_a"},

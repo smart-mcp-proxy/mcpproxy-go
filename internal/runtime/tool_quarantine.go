@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -625,6 +626,11 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 }
 
 // SetToolEnabled sets whether a tool is enabled for exposure to MCP clients.
+// A tool approval record is created on demand when one does not yet exist —
+// without this, callers would only be able to toggle tools that had already
+// transited the quarantine flow (i.e. only when QuarantineEnabled is on and
+// SkipQuarantine is off on the server). The synthesized record's Status is
+// "approved" so the new entry never reintroduces a tool into quarantine.
 func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
 	if r.storageManager == nil {
 		return nil
@@ -632,7 +638,17 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 
 	record, err := r.storageManager.GetToolApproval(serverName, toolName)
 	if err != nil {
-		return err
+		// Synthesize a baseline record on first toggle. The tool has been seen by
+		// MCP (we wouldn't be toggling it otherwise), so "approved" is the
+		// correct admin state — the toggle expresses user visibility intent,
+		// not a quarantine decision.
+		record = &storage.ToolApprovalRecord{
+			ServerName: serverName,
+			ToolName:   toolName,
+			Status:     storage.ToolApprovalStatusApproved,
+			ApprovedAt: time.Now().UTC(),
+			ApprovedBy: updatedBy,
+		}
 	}
 
 	record.Disabled = !enabled
@@ -659,6 +675,104 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 	})
 
 	return nil
+}
+
+// SetAllToolsEnabled bulk-toggles every tool currently known for a server to
+// the given enabled state. Returns the count of tools whose state was changed
+// (i.e. excluding tools already in the desired state).
+//
+// Tool inventory comes from the StateView when available (so it covers tools
+// the user has seen even if not yet indexed) and falls back to the search
+// index. Tools without an approval record get one synthesized via
+// SetToolEnabled — see that method for the rationale.
+func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error) {
+	if r.storageManager == nil {
+		return 0, nil
+	}
+	if serverName == "" {
+		return 0, fmt.Errorf("server name required")
+	}
+
+	toolNames, err := r.collectKnownToolNames(serverName)
+	if err != nil {
+		return 0, err
+	}
+	if len(toolNames) == 0 {
+		return 0, nil
+	}
+
+	changed := 0
+	for _, toolName := range toolNames {
+		// Skip when already in the desired state to keep the audit trail clean
+		// and avoid no-op SSE traffic.
+		if record, getErr := r.storageManager.GetToolApproval(serverName, toolName); getErr == nil {
+			if record.Disabled == !enabled {
+				continue
+			}
+		} else if enabled {
+			// No record + target enabled is already the implicit default.
+			continue
+		}
+
+		if setErr := r.SetToolEnabled(serverName, toolName, enabled, updatedBy); setErr != nil {
+			r.logger.Warn("Failed to toggle tool in bulk operation",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.Bool("enabled", enabled),
+				zap.Error(setErr))
+			continue
+		}
+		changed++
+	}
+
+	return changed, nil
+}
+
+// collectKnownToolNames returns the set of tool short-names (no "server:"
+// prefix) currently known for a server. Prefers the StateView snapshot
+// (covers in-memory tools), falling back to the search index, and finally
+// to whatever approval records already exist for the server.
+func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
+	seen := make(map[string]struct{})
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		// Strip "server:" prefix if present.
+		if idx := strings.Index(name, ":"); idx != -1 {
+			name = name[idx+1:]
+		}
+		seen[name] = struct{}{}
+	}
+
+	if r.supervisor != nil {
+		snapshot := r.supervisor.StateView().Snapshot()
+		if status, ok := snapshot.Servers[serverName]; ok {
+			for _, tool := range status.Tools {
+				add(tool.Name)
+			}
+		}
+	}
+
+	if r.indexManager != nil {
+		if tools, err := r.indexManager.GetToolsByServer(serverName); err == nil {
+			for _, tool := range tools {
+				add(tool.Name)
+			}
+		}
+	}
+
+	if records, err := r.storageManager.ListToolApprovals(serverName); err == nil {
+		for _, record := range records {
+			add(record.ToolName)
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	return out, nil
 }
 
 // ApproveAllTools approves all pending/changed tools for a server.

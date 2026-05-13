@@ -2475,6 +2475,12 @@ func (s *Server) SetToolEnabled(serverName, toolName string, enabled bool, updat
 	return s.runtime.SetToolEnabled(serverName, toolName, enabled, updatedBy)
 }
 
+// SetAllToolsEnabled bulk-toggles every known tool for a server to the given
+// state. Returns the count of tools whose state actually changed.
+func (s *Server) SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error) {
+	return s.runtime.SetAllToolsEnabled(serverName, enabled, updatedBy)
+}
+
 // GetToolApproval returns the approval record for a specific tool (Spec 032).
 func (s *Server) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	return s.runtime.GetToolApproval(serverName, toolName)

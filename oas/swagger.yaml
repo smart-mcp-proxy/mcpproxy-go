@@ -1661,6 +1661,12 @@ components:
           type: string
         description:
           type: string
+        disabled:
+          description: |-
+            Disabled mirrors ToolApprovalRecord.Disabled so per-tool enable state is
+            available without a second round-trip to the approvals endpoint. Absent
+            in the JSON when false (default) to keep responses compact.
+          type: boolean
         last_used:
           type: string
         name:
@@ -3881,6 +3887,86 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Get tools for a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/tools/disable_all:
+    post:
+      description: Bulk-toggles every known tool of a server. The "changed" field
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Operation result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Enable or disable all tools for a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/tools/enable_all:
+    post:
+      description: Bulk-toggles every known tool of a server. The "changed" field
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Operation result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Enable or disable all tools for a server
       tags:
       - servers
   /api/v1/servers/{id}/unquarantine:

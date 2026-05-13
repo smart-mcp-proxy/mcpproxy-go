@@ -943,6 +943,97 @@ func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[s
 	return apiResp.Data.Tools, nil
 }
 
+// SetToolEnabled flips an individual tool's enabled state for a server. The
+// daemon synthesizes an approval record on demand if the tool has never been
+// quarantined or toggled before — see Runtime.SetToolEnabled.
+func (c *Client) SetToolEnabled(ctx context.Context, serverName, toolName string, enabled bool) error {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s/enabled",
+		c.baseURL, serverName, toolName)
+	body, err := json.Marshal(map[string]bool{"enabled": enabled})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call set-tool-enabled API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success   bool   `json:"success"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return nil
+}
+
+// SetAllToolsEnabled bulk-toggles every known tool for a server. Returns the
+// number of tools whose state actually changed (already-correct tools are
+// skipped on the server side).
+func (c *Client) SetAllToolsEnabled(ctx context.Context, serverName string, enabled bool) (int, error) {
+	path := "disable_all"
+	if enabled {
+		path = "enable_all"
+	}
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s", c.baseURL, serverName, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to call bulk-tool-enable API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Changed int `json:"changed"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return 0, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return apiResp.Data.Changed, nil
+}
+
 // TriggerOAuthLogin initiates OAuth authentication flow for a server.
 // Returns *contracts.OAuthFlowError for structured OAuth errors (Spec 020).
 func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error {

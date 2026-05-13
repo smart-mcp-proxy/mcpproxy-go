@@ -327,6 +327,20 @@ class APIService {
     })
   }
 
+  // Bulk-toggle every known tool of a server. The response's `changed`
+  // field reflects only tools whose state actually changed — already-correct
+  // tools are skipped on the server side.
+  async setAllToolsEnabled(serverName: string, enabled: boolean): Promise<APIResponse<{
+    server_name: string
+    enabled: boolean
+    changed: number
+  }>> {
+    const action = enabled ? 'enable_all' : 'disable_all'
+    return this.request<{ server_name: string; enabled: boolean; changed: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${action}`, {
+      method: 'POST',
+    })
+  }
+
   async getServerLogs(serverName: string, tail?: number): Promise<APIResponse<{ logs: string[] }>> {
     const params = tail ? `?tail=${tail}` : ''
     return this.request<{ logs: string[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/logs${params}`)

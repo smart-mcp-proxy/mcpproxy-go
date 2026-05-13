@@ -148,6 +148,48 @@ Examples:
 		RunE: runUpstreamApprove,
 	}
 
+	// Per-tool enable/disable. The "tools" subcommand groups the four
+	// operations so the surface mirrors the server-level
+	// "upstream enable/disable" + "upstream enable --all/--all" without
+	// shadowing those flags.
+	upstreamToolsCmd = &cobra.Command{
+		Use:   "tools",
+		Short: "Manage per-tool enable/disable state for a server",
+		Long: `Enable or disable individual tools (or all tools) of an upstream server.
+
+Disabled tools are filtered out of retrieve_tools results and rejected on
+direct call_tool_* invocations. Use this to suppress noisy or unused tools
+without removing the whole server.`,
+	}
+
+	upstreamToolsEnableCmd = &cobra.Command{
+		Use:   "enable <server-name> <tool-name>",
+		Short: "Enable a tool for a server",
+		Args:  cobra.ExactArgs(2),
+		RunE:  func(_ *cobra.Command, args []string) error { return runUpstreamToolAction(args[0], args[1], true) },
+	}
+
+	upstreamToolsDisableCmd = &cobra.Command{
+		Use:   "disable <server-name> <tool-name>",
+		Short: "Disable a tool for a server",
+		Args:  cobra.ExactArgs(2),
+		RunE:  func(_ *cobra.Command, args []string) error { return runUpstreamToolAction(args[0], args[1], false) },
+	}
+
+	upstreamToolsEnableAllCmd = &cobra.Command{
+		Use:   "enable-all <server-name>",
+		Short: "Enable every tool for a server",
+		Args:  cobra.ExactArgs(1),
+		RunE:  func(_ *cobra.Command, args []string) error { return runUpstreamToolBulkAction(args[0], true) },
+	}
+
+	upstreamToolsDisableAllCmd = &cobra.Command{
+		Use:   "disable-all <server-name>",
+		Short: "Disable every tool for a server",
+		Args:  cobra.ExactArgs(1),
+		RunE:  func(_ *cobra.Command, args []string) error { return runUpstreamToolBulkAction(args[0], false) },
+	}
+
 	upstreamImportCmd = &cobra.Command{
 		Use:   "import <path>",
 		Short: "Import servers from external configuration file",
@@ -233,6 +275,11 @@ func init() {
 	upstreamCmd.AddCommand(upstreamInspectCmd)
 	upstreamCmd.AddCommand(upstreamApproveCmd)
 	upstreamCmd.AddCommand(upstreamImportCmd)
+	upstreamCmd.AddCommand(upstreamToolsCmd)
+	upstreamToolsCmd.AddCommand(upstreamToolsEnableCmd)
+	upstreamToolsCmd.AddCommand(upstreamToolsDisableCmd)
+	upstreamToolsCmd.AddCommand(upstreamToolsEnableAllCmd)
+	upstreamToolsCmd.AddCommand(upstreamToolsDisableAllCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
@@ -860,6 +907,99 @@ func runUpstreamAction(serverName, action string) error {
 	}
 
 	fmt.Printf("✅ Successfully %sed server '%s'\n", action, serverName)
+	return nil
+}
+
+// runUpstreamToolAction toggles a single tool for a server via the daemon.
+// The action verb ("enable"/"disable") is derived from `enabled` so the
+// surface stays narrow.
+func runUpstreamToolAction(serverName, toolName string, enabled bool) error {
+	verb := "enable"
+	if !enabled {
+		verb = "disable"
+	}
+
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return err
+	}
+	if err := validateServerExists(globalConfig, serverName); err != nil {
+		return err
+	}
+
+	logger, err := createUpstreamLogger(upstreamLogLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
+		return err
+	}
+
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("tool actions require running daemon. Start with: mcpproxy serve")
+	}
+
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	fmt.Printf("%sing tool '%s' on server '%s'...\n", strings.Title(verb), toolName, serverName)
+	if err := client.SetToolEnabled(ctx, serverName, toolName, enabled); err != nil {
+		return fmt.Errorf("failed to %s tool: %w", verb, err)
+	}
+	fmt.Printf("✅ Tool '%s' %sd on server '%s'\n", toolName, verb, serverName)
+	return nil
+}
+
+// runUpstreamToolBulkAction enables or disables every known tool for a server.
+func runUpstreamToolBulkAction(serverName string, enabled bool) error {
+	verb := "enable-all"
+	if !enabled {
+		verb = "disable-all"
+	}
+
+	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		return err
+	}
+	if err := validateServerExists(globalConfig, serverName); err != nil {
+		return err
+	}
+
+	logger, err := createUpstreamLogger(upstreamLogLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating logger: %v\n", err)
+		return err
+	}
+
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("tool actions require running daemon. Start with: mcpproxy serve")
+	}
+
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	fmt.Printf("Running tools %s on server '%s'...\n", verb, serverName)
+	changed, err := client.SetAllToolsEnabled(ctx, serverName, enabled)
+	if err != nil {
+		return fmt.Errorf("failed to %s tools: %w", verb, err)
+	}
+	if changed == 0 {
+		fmt.Printf("ℹ️  No tools changed (already in target state) on server '%s'\n", serverName)
+		return nil
+	}
+	state := "enabled"
+	if !enabled {
+		state = "disabled"
+	}
+	fmt.Printf("✅ %d tool(s) %s on server '%s'\n", changed, state, serverName)
 	return nil
 }
 

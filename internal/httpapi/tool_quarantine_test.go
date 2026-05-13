@@ -23,16 +23,20 @@ import (
 // mockToolQuarantineController provides controllable tool quarantine behavior
 type mockToolQuarantineController struct {
 	baseController
-	apiKey             string
-	approvals          []*storage.ToolApprovalRecord
-	approveErr         error
-	approveAllErr      error
-	approvedCount      int
-	approvedTools      []string
-	approvedServer     string
-	setToolEnabledErr  error
-	setToolEnabledTool string
-	setToolEnabledTo   *bool
+	apiKey                 string
+	approvals              []*storage.ToolApprovalRecord
+	approveErr             error
+	approveAllErr          error
+	approvedCount          int
+	approvedTools          []string
+	approvedServer         string
+	setToolEnabledErr      error
+	setToolEnabledTool     string
+	setToolEnabledTo       *bool
+	setAllToolsEnabledErr  error
+	setAllToolsEnabledTo   *bool
+	setAllToolsEnabledFor  string
+	setAllToolsChangedFake int
 }
 
 func (m *mockToolQuarantineController) GetCurrentConfig() any {
@@ -85,6 +89,92 @@ func (m *mockToolQuarantineController) SetToolEnabled(serverName, toolName strin
 		}
 	}
 	return fmt.Errorf("not found")
+}
+
+func (m *mockToolQuarantineController) SetAllToolsEnabled(serverName string, enabled bool, _ string) (int, error) {
+	m.setAllToolsEnabledFor = serverName
+	m.setAllToolsEnabledTo = &enabled
+	if m.setAllToolsEnabledErr != nil {
+		return 0, m.setAllToolsEnabledErr
+	}
+	// Default to the count of approvals that change; allows the test to
+	// override with a fake count when needed.
+	if m.setAllToolsChangedFake != 0 {
+		return m.setAllToolsChangedFake, nil
+	}
+	changed := 0
+	for _, a := range m.approvals {
+		if a.ServerName == serverName && a.Disabled == enabled {
+			a.Disabled = !enabled
+			changed++
+		}
+	}
+	return changed, nil
+}
+
+func TestHandleSetAllToolsEnabled_DisableAll(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey: "test-key",
+		approvals: []*storage.ToolApprovalRecord{
+			{ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusApproved},
+			{ServerName: "github", ToolName: "list_repos", Status: storage.ToolApprovalStatusApproved},
+		},
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/disable_all", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "github", ctrl.setAllToolsEnabledFor)
+	require.NotNil(t, ctrl.setAllToolsEnabledTo)
+	assert.False(t, *ctrl.setAllToolsEnabledTo)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, "github", data["server_name"])
+	assert.Equal(t, false, data["enabled"])
+	assert.Equal(t, float64(2), data["changed"])
+}
+
+func TestHandleSetAllToolsEnabled_EnableAll(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey: "test-key",
+		approvals: []*storage.ToolApprovalRecord{
+			{ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+		},
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/enable_all", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	require.NotNil(t, ctrl.setAllToolsEnabledTo)
+	assert.True(t, *ctrl.setAllToolsEnabledTo)
+}
+
+func TestHandleSetAllToolsEnabled_ControllerError(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey:                "test-key",
+		setAllToolsEnabledErr: fmt.Errorf("boom"),
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/disable_all", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
 }
 
 func TestHandleSetToolEnabled_Disable(t *testing.T) {

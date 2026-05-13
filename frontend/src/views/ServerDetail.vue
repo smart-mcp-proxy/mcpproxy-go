@@ -400,18 +400,47 @@
               </div>
             </div>
 
-            <div class="flex justify-between items-center">
+            <div class="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3">
               <div>
                 <h3 class="text-lg font-semibold">Available Tools</h3>
                 <p class="text-base-content/70">Tools provided by {{ server.name }}</p>
               </div>
-              <div class="form-control">
-                <input
-                  v-model="toolSearch"
-                  type="text"
-                  placeholder="Search tools..."
-                  class="input input-bordered input-sm w-64"
-                />
+              <div class="flex items-center gap-2 flex-wrap">
+                <!--
+                  Bulk Enable/Disable. Both buttons surface only when there's
+                  something for them to do — "Enable All" appears when at
+                  least one tool is currently disabled, "Disable All" when at
+                  least one is currently enabled. That way the action label
+                  always matches a real, observable outcome.
+                -->
+                <button
+                  v-if="hasDisabledTool"
+                  class="btn btn-sm btn-success"
+                  :disabled="bulkToolToggleLoading"
+                  @click="bulkToggleAllTools(true)"
+                  data-test="tools-enable-all"
+                >
+                  <span v-if="bulkToolToggleLoading" class="loading loading-spinner loading-xs"></span>
+                  Enable All
+                </button>
+                <button
+                  v-if="hasEnabledTool"
+                  class="btn btn-sm btn-warning"
+                  :disabled="bulkToolToggleLoading"
+                  @click="bulkToggleAllTools(false)"
+                  data-test="tools-disable-all"
+                >
+                  <span v-if="bulkToolToggleLoading" class="loading loading-spinner loading-xs"></span>
+                  Disable All
+                </button>
+                <div class="form-control">
+                  <input
+                    v-model="toolSearch"
+                    type="text"
+                    placeholder="Search tools..."
+                    class="input input-bordered input-sm w-64"
+                  />
+                </div>
               </div>
             </div>
 
@@ -449,11 +478,21 @@
                     class="mt-2"
                   />
                   <div class="card-actions justify-end mt-4 gap-2">
+                    <!--
+                      The toggle previously only appeared for tools with an
+                      "approved" approval record, which silently hid it for
+                      every tool when QuarantineEnabled was false or the
+                      server had SkipQuarantine. Show it for any non-pending
+                      tool — the daemon now synthesizes the approval record
+                      on demand, so the toggle works regardless of quarantine
+                      state. Hidden for pending/changed tools because the
+                      approve flow is the right next action for those.
+                    -->
                     <button
-                      v-if="getToolApprovalStatus(tool.name) === 'approved'"
+                      v-if="isToolToggleAvailable(tool.name)"
                       class="btn btn-sm"
                       :class="isToolEnabled(tool.name) ? 'btn-warning' : 'btn-success'"
-                      :disabled="isToolToggleLoading(tool.name)"
+                      :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
                       @click="toggleToolEnabled(tool.name, !isToolEnabled(tool.name))"
                     >
                       <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs"></span>
@@ -997,6 +1036,9 @@ const selectedToolSchema = ref<Tool | null>(null)
 const toolApprovals = ref<ToolApproval[]>([])
 const approvalLoading = ref(false)
 const toolToggleLoading = ref<Record<string, boolean>>({})
+// Single in-flight flag for the bulk Enable All / Disable All buttons so
+// they're mutually exclusive with each other and with any per-tool toggle.
+const bulkToolToggleLoading = ref(false)
 
 const quarantinedTools = computed(() => {
   return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
@@ -1144,6 +1186,16 @@ function getToolApproval(toolName: string): ToolApproval | null {
 }
 
 function isToolEnabled(toolName: string): boolean {
+  // GET /api/v1/servers/{id}/tools returns each tool with a top-level
+  // `disabled` boolean (see contracts.Tool.Disabled in Go) when an approval
+  // record exists. The approvals endpoint also exposes `enabled`/`disabled`.
+  // Cross-check both so the toggle reflects reality regardless of which
+  // payload the frontend already loaded.
+  const tool = serverTools.value.find(t => t.name === toolName) as Tool & { disabled?: boolean; enabled?: boolean } | undefined
+  if (tool) {
+    if (typeof tool.disabled === 'boolean') return !tool.disabled
+    if (typeof tool.enabled === 'boolean') return tool.enabled
+  }
   const approval = getToolApproval(toolName)
   if (!approval) return true
   if (typeof approval.enabled === 'boolean') return approval.enabled
@@ -1154,6 +1206,25 @@ function isToolEnabled(toolName: string): boolean {
 function isToolToggleLoading(toolName: string): boolean {
   return !!toolToggleLoading.value[toolName]
 }
+
+// The toggle is hidden for pending/changed tools because the right next
+// action there is "Approve", not "Disable". For approved or never-quarantined
+// tools the daemon synthesizes an approval record on demand, so the toggle
+// works in every other case.
+function isToolToggleAvailable(toolName: string): boolean {
+  const status = getToolApprovalStatus(toolName)
+  return status === null || status === 'approved'
+}
+
+// Whether the bulk buttons should appear. We only render "Enable All" when
+// at least one tool can actually be enabled, and "Disable All" only when at
+// least one tool can be disabled — otherwise the label promises a no-op.
+const hasEnabledTool = computed(() =>
+  serverTools.value.some(t => isToolToggleAvailable(t.name) && isToolEnabled(t.name))
+)
+const hasDisabledTool = computed(() =>
+  serverTools.value.some(t => isToolToggleAvailable(t.name) && !isToolEnabled(t.name))
+)
 
 // Word-level diff for changed tool descriptions
 interface DiffPart {
@@ -1447,6 +1518,43 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     const next = { ...toolToggleLoading.value }
     delete next[toolName]
     toolToggleLoading.value = next
+  }
+}
+
+// bulkToggleAllTools dispatches one Enable-all / Disable-all request and
+// refreshes the local tool/approval state so the UI reflects the new
+// disabled-flags immediately (instead of waiting for the SSE event).
+async function bulkToggleAllTools(enabled: boolean) {
+  if (!server.value || bulkToolToggleLoading.value) return
+  bulkToolToggleLoading.value = true
+  try {
+    const response = await api.setAllToolsEnabled(server.value.name, enabled)
+    if (response.success && response.data) {
+      const changed = response.data.changed ?? 0
+      systemStore.addToast({
+        type: 'success',
+        title: enabled ? 'Tools Enabled' : 'Tools Disabled',
+        message: changed === 0
+          ? 'No tools needed changes.'
+          : `${changed} tool${changed === 1 ? '' : 's'} ${enabled ? 'enabled' : 'disabled'}.`,
+      })
+      // Refresh both so the per-tool toggle + Tool list reflect new state.
+      await Promise.all([loadTools(), loadToolApprovals()])
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Bulk Update Failed',
+        message: response.error || 'Failed to update tools',
+      })
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Bulk Update Failed',
+      message: err instanceof Error ? err.message : 'Failed to update tools',
+    })
+  } finally {
+    bulkToolToggleLoading.value = false
   }
 }
 
