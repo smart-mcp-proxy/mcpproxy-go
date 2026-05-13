@@ -71,4 +71,4 @@
 3) Add Go integration tests for detection, resource, DCR, device, and failure cases.
 4) Wire e2e script + Playwright/API assertions using the harness.
 5) Add/verify observability outputs; backfill tests for logs/CLI surfaces.
-6) CI job + docs: add run instructions to MANUAL_TESTING.md and scripts README.
+6) CI job + docs: add run instructions to the scripts README.

@@ -155,5 +155,4 @@ When the DMG is mounted the user only needs to drag the app bundle to `/Applicat
 ## Further Reading
 
 - [docs/setup.md](./setup.md) – full installation and configuration walkthrough.
-- [MANUAL_TESTING.md](../MANUAL_TESTING.md) – manual smoke scenarios that benefit from the environment flags above.
 - [Playwright MCP server README](../.playwright-mcp/README.md) – pattern for automating UI flows; the tray inspector mirrors that approach.
