@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -181,6 +182,14 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 				}
 			}
 			r.redactServerHeaders(redacted)
+			// Mirror httpapi.enrichServersWithQuarantineStats so SSE
+			// subscribers see the same Quarantine.{Pending,Changed,Blocked}
+			// counts the REST list returns. Without this, the Web UI's
+			// store-merge strips the previously-set Quarantine field
+			// (mergeServers treats incoming as authoritative — absent
+			// fields are deleted) and the "N disabled" pill goes stale
+			// after a per-tool toggle.
+			r.enrichServersWithQuarantineStats(redacted)
 			payload["servers"] = redacted
 			payload["stats"] = stats
 		}
@@ -192,6 +201,55 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 		return
 	}
 	r.publishEvent(evt)
+}
+
+// enrichServersWithQuarantineStats mirrors
+// httpapi.(*Server).enrichServersWithQuarantineStats so SSE subscribers receive
+// the same pending/changed/blocked counts the REST /api/v1/servers list does.
+// Without parity, the frontend's mergeServers (which deletes absent fields)
+// would wipe the Quarantine struct on every SSE delivery — the original symptom
+// users hit as "quarantine badges go stale after toggling tools, need page
+// refresh" and the corresponding "N disabled pill stays after re-enabling".
+func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
+	if r.storageManager == nil {
+		return
+	}
+	for i := range servers {
+		records, err := r.storageManager.ListToolApprovals(servers[i].Name)
+		if err != nil {
+			r.logger.Debug("Failed to load tool approvals for SSE enrichment",
+				zap.String("server", servers[i].Name),
+				zap.Error(err))
+			continue
+		}
+
+		var pending, changed, blocked int
+		for _, rec := range records {
+			if rec.Disabled {
+				blocked++
+			}
+			switch rec.Status {
+			case storage.ToolApprovalStatusPending:
+				pending++
+			case storage.ToolApprovalStatusChanged:
+				changed++
+			}
+		}
+
+		// Emit the Quarantine block whenever any of the counts is non-zero
+		// (matches the REST handler) AND also explicitly when the previous
+		// emission set non-zero counts — but here we can't see the prior
+		// state, so we follow the same "omit when all-zero" rule as the
+		// REST path. The Web UI's mergeServers correctly handles the
+		// transition to all-zero by dropping the field.
+		if pending > 0 || changed > 0 || blocked > 0 {
+			servers[i].Quarantine = &contracts.QuarantineStats{
+				PendingCount: pending,
+				ChangedCount: changed,
+				BlockedCount: blocked,
+			}
+		}
+	}
 }
 
 // redactServerHeaders mirrors httpapi.(*Server).redactServerHeaders. It strips

@@ -124,7 +124,7 @@
               class="stat-desc"
               :class="blockedToolCount > 0 ? 'text-error' : ''"
             >
-              {{ blockedToolCount > 0 ? `${blockedToolCount} blocked` : 'available tools' }}
+              {{ blockedToolCount > 0 ? `${blockedToolCount} disabled` : 'available tools' }}
             </div>
           </div>
         </div>
@@ -477,27 +477,39 @@
                     :annotations="tool.annotations"
                     class="mt-2"
                   />
-                  <div class="card-actions justify-end mt-4 gap-2">
+                  <div class="card-actions justify-between items-center mt-4 gap-2">
                     <!--
-                      The toggle previously only appeared for tools with an
-                      "approved" approval record, which silently hid it for
-                      every tool when QuarantineEnabled was false or the
-                      server had SkipQuarantine. Show it for any non-pending
-                      tool — the daemon now synthesizes the approval record
-                      on demand, so the toggle works regardless of quarantine
-                      state. Hidden for pending/changed tools because the
-                      approve flow is the right next action for those.
+                      Per-tool enable toggle. Uses the same daisyUI
+                      `toggle toggle-sm` widget as the server-level Enabled
+                      switch (see Config tab) so the two controls feel like
+                      the same affordance applied at different scopes. The
+                      adjacent "Enabled"/"Disabled" label mirrors the
+                      server-card admin-state badge, so "disabled" reads
+                      consistently across server-level and tool-level UI.
+
+                      Hidden for pending/changed tools because the right
+                      next action there is Approve, not Disable. For
+                      approved or never-quarantined tools the daemon
+                      synthesizes the approval record on demand, so the
+                      toggle works regardless of quarantine state.
                     -->
-                    <button
+                    <label
                       v-if="isToolToggleAvailable(tool.name)"
-                      class="btn btn-sm"
-                      :class="isToolEnabled(tool.name) ? 'btn-warning' : 'btn-success'"
-                      :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
-                      @click="toggleToolEnabled(tool.name, !isToolEnabled(tool.name))"
+                      class="flex items-center gap-2 cursor-pointer"
                     >
-                      <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs"></span>
-                      {{ isToolEnabled(tool.name) ? 'Disable' : 'Enable' }}
-                    </button>
+                      <input
+                        type="checkbox"
+                        class="toggle toggle-sm"
+                        :checked="isToolEnabled(tool.name)"
+                        :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
+                        @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span class="text-xs text-base-content/70">
+                        <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs mr-1"></span>
+                        {{ isToolEnabled(tool.name) ? 'Enabled' : 'Disabled' }}
+                      </span>
+                    </label>
+                    <span v-else></span>
                     <button
                       v-if="tool.input_schema"
                       class="btn btn-sm btn-outline"
@@ -1499,6 +1511,11 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
         title: enabled ? 'Tool Enabled' : 'Tool Disabled',
         message: `${toolName} has been ${enabled ? 'enabled' : 'disabled'}`
       })
+      // Re-fetch so blockedToolCount + serverTools.disabled reflect the new
+      // state. The runtime emits servers.changed via SSE, but local server.value
+      // is a snapshot of the store and doesn't auto-update — without this an
+      // Enable toggle leaves the stat-desc pill stuck on "N disabled".
+      await syncAfterToolToggle()
     } else {
       if (idx >= 0 && prev) toolApprovals.value[idx] = prev
       systemStore.addToast({
@@ -1521,6 +1538,18 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   }
 }
 
+// syncAfterToolToggle keeps the page state consistent after any tool enable/
+// disable: it refreshes the store-backed servers list (so blockedToolCount on
+// the Server List view loses staleness on navigation), the local server ref
+// (so the in-page "N disabled" pill responds), and the per-tool / approval
+// caches (so toggle widgets pick up server-truth instead of optimistic state).
+async function syncAfterToolToggle() {
+  if (!server.value) return
+  await serversStore.fetchServers(true)
+  server.value = serversStore.servers.find(s => s.name === server.value!.name) || server.value
+  await Promise.all([loadTools(), loadToolApprovals()])
+}
+
 // bulkToggleAllTools dispatches one Enable-all / Disable-all request and
 // refreshes the local tool/approval state so the UI reflects the new
 // disabled-flags immediately (instead of waiting for the SSE event).
@@ -1538,8 +1567,9 @@ async function bulkToggleAllTools(enabled: boolean) {
           ? 'No tools needed changes.'
           : `${changed} tool${changed === 1 ? '' : 's'} ${enabled ? 'enabled' : 'disabled'}.`,
       })
-      // Refresh both so the per-tool toggle + Tool list reflect new state.
-      await Promise.all([loadTools(), loadToolApprovals()])
+      // Refresh server data + tool caches so the per-tool toggle, the
+      // "N disabled" pill, and the Server List both lose any staleness.
+      await syncAfterToolToggle()
     } else {
       systemStore.addToast({
         type: 'error',
