@@ -152,3 +152,52 @@ func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
 	assert.Contains(t, authVal, "REDACTED")
 	assert.Equal(t, "application/json", contentVal, "Content-Type is not sensitive; must not be redacted")
 }
+
+// ctxAwareLister is a serversLister that blocks ListServers until the
+// caller-supplied ctx fires Done. Used to verify the parent ctx is threaded
+// through buildServersChangedPayload — without that threading the call sits
+// on a detached 2-second timer regardless of app-shutdown cancellation.
+type ctxAwareLister struct {
+	servers []*contracts.Server
+	stats   *contracts.ServerStats
+}
+
+func (l *ctxAwareLister) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		// Safety net: tests should never reach this.
+		return l.servers, l.stats, nil
+	}
+}
+
+// TestBuildServersChangedPayload_HonoursCancelledParentCtx is the regression
+// test for the shutdown-drain path: if the parent ctx is already cancelled
+// (because Runtime.Close() fired appCancel) the ListServers call must abort
+// promptly rather than wait up to 2 seconds on the (otherwise detached)
+// WithTimeout.
+func TestBuildServersChangedPayload_HonoursCancelledParentCtx(t *testing.T) {
+	rt := newPayloadTestRuntime(t, nil)
+	rt.managementService = &ctxAwareLister{
+		servers: []*contracts.Server{{Name: "s1"}},
+		stats:   &contracts.ServerStats{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	evt := rt.buildServersChangedPayload(ctx, "shutdown", nil)
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"buildServersChangedPayload must abort immediately when parent ctx is already cancelled (took %s — Background-rooted timeout would have been ~2s)",
+		elapsed)
+
+	// On ctx.Err() the build still publishes a notify-only event — neither
+	// `servers` nor `stats` is set.
+	assert.Equal(t, "shutdown", evt.Payload["reason"])
+	_, hasServers := evt.Payload["servers"]
+	assert.False(t, hasServers, "no servers key when ListServers errors")
+}

@@ -41,6 +41,14 @@ type serversChangedCoalescer struct {
 	wake     chan struct{}
 	interval time.Duration
 
+	// parentCtx is set by start() and is the appCtx the drainer was launched
+	// with. flushNow uses it as the parent for buildServersChangedPayload's
+	// ListServers timeout so app-shutdown cancellation aborts the build
+	// instead of waiting up to 2s on a Background()-rooted timeout. nil
+	// before start() is called (tests that exercise flushNow directly fall
+	// back to context.Background()).
+	parentCtx context.Context
+
 	// flush coordination
 	flushMu   sync.Mutex
 	lastFlush time.Time
@@ -76,7 +84,9 @@ func (c *serversChangedCoalescer) submit(reason string, extra map[string]any) {
 
 // flushNow materialises and publishes any pending marker immediately.
 // Intended for tests and for shutdown drain. The build (ListServers + N×
-// ListToolApprovals) runs synchronously on the caller's goroutine.
+// ListToolApprovals) runs synchronously on the caller's goroutine, parented
+// to c.parentCtx so app-shutdown cancellation aborts ListServers instead of
+// waiting up to 2s on a detached Background()-rooted timeout.
 func (c *serversChangedCoalescer) flushNow() {
 	marker := c.pending.Swap(nil)
 	if marker == nil {
@@ -85,13 +95,18 @@ func (c *serversChangedCoalescer) flushNow() {
 	c.flushMu.Lock()
 	c.lastFlush = time.Now()
 	c.flushMu.Unlock()
-	evt := c.rt.buildServersChangedPayload(marker.reason, marker.extra)
+	ctx := c.parentCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	evt := c.rt.buildServersChangedPayload(ctx, marker.reason, marker.extra)
 	c.rt.publishEvent(evt)
 }
 
 // start launches the drainer goroutine. It exits when ctx is canceled, after
 // a final flush of any residual pending event.
 func (c *serversChangedCoalescer) start(ctx context.Context) {
+	c.parentCtx = ctx
 	go func() {
 		ticker := time.NewTicker(c.interval)
 		defer ticker.Stop()
@@ -187,7 +202,15 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 		r.coalescer.submit(reason, extra)
 		return
 	}
-	evt := r.buildServersChangedPayload(reason, extra)
+	// No coalescer (some tests, code paths that haven't wired one yet) — fall
+	// back to inline build + publish. Parented to appCtx so shutdown cancels
+	// the build; context.Background() if even the runtime context isn't set
+	// yet (very early in test bootstrap).
+	ctx := r.appCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	evt := r.buildServersChangedPayload(ctx, reason, extra)
 	r.publishEvent(evt)
 }
 
@@ -201,8 +224,11 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 // Cost: 1 ListServers call + N enrichServersWithQuarantineStats reads
 // (one BBolt View per server). Lives here so the coalescer drainer can
 // invoke it at flush time, amortising the build to one per publish window
-// regardless of how many submits land.
-func (r *Runtime) buildServersChangedPayload(reason string, extra map[string]any) Event {
+// regardless of how many submits land. The caller-supplied parent ctx is
+// used as the root of the 2-second ListServers timeout so app-shutdown
+// cancellation propagates instead of leaving the drainer goroutine
+// blocked on a detached Background-rooted timer.
+func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason string, extra map[string]any) Event {
 	payload := make(map[string]any, len(extra)+3)
 	for k, v := range extra {
 		payload[k] = v
@@ -210,7 +236,7 @@ func (r *Runtime) buildServersChangedPayload(reason string, extra map[string]any
 	payload["reason"] = reason
 
 	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
 		servers, stats, err := lister.ListServers(ctx)
 		cancel()
 		if err != nil {
