@@ -26,6 +26,11 @@ docker run --rm debian:stable-slim bash -c '
   apt-get -qq update
   apt-get -qq install -y mcpproxy
   mcpproxy --version
+  # Conffile that whitelists the MCPProxy apt origin for unattended-upgrades
+  # must be shipped — otherwise auto-updates silently never run on hosts with
+  # unattended-upgrades configured. See packaging/linux/nfpm.yaml.
+  test -f /etc/apt/apt.conf.d/52unattended-upgrades-mcpproxy
+  grep -q "MCPProxy:stable" /etc/apt/apt.conf.d/52unattended-upgrades-mcpproxy
 ' | tee /tmp/smoke-debian.out
 
 actual=$(grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' /tmp/smoke-debian.out | head -1 | sed 's/^v//')
