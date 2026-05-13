@@ -133,6 +133,58 @@ sudo nano /etc/mcpproxy/mcp_config.json   # edit config (then restart)
 sudo systemctl restart mcpproxy
 ```
 
+### Migrating from a manually-installed mcpproxy
+
+If you've been running an older mcpproxy from a binary you dropped into `/usr/local/bin/` with a hand-rolled systemd unit (typically running as your own user, with config under `~/.mcpproxy/`), the apt/dnf install is a different layout. The deb/rpm runs as a dedicated `mcpproxy` system user with config in `/etc/mcpproxy/` and state in `/var/lib/mcpproxy/`. Migration takes a couple of minutes; the only tricky bit is preserving paths your existing config references.
+
+```bash
+# 0. Stop and back up everything
+sudo systemctl stop mcpproxy
+sudo cp -a ~/.mcpproxy ~/mcpproxy-backup-$(date +%Y%m%d)
+sudo cp ~/.mcpproxy/mcp_config.json ~/mcpproxy-config-backup-$(date +%Y%m%d).json
+
+# 1. Remove the old service + binaries
+sudo systemctl disable mcpproxy
+sudo rm /etc/systemd/system/mcpproxy.service \
+        /etc/systemd/system/multi-user.target.wants/mcpproxy.service
+sudo systemctl daemon-reload
+sudo mv /usr/local/bin/mcpproxy /usr/local/bin/mcpproxy.pre-deb.bak  # keep one rollback
+
+# 2. Install the deb (follow the "apt repository (recommended)" section above)
+#    The service starts immediately on a fresh config — stop it before migrating state.
+sudo systemctl stop mcpproxy
+
+# 3. Carry state across. config.db preserves quarantine + tool-approval state;
+#    skip this copy if you'd rather start clean and re-approve every tool.
+sudo cp ~/.mcpproxy/config.db          /var/lib/mcpproxy/config.db
+sudo cp ~/.mcpproxy/mcp_config.json    /etc/mcpproxy/mcp_config.json
+sudo chown -R mcpproxy:mcpproxy /var/lib/mcpproxy
+sudo chown root:mcpproxy /etc/mcpproxy/mcp_config.json
+sudo chmod 0640 /etc/mcpproxy/mcp_config.json
+
+# 4. Rewrite any home-relative paths inside the migrated config.
+#    The new service can't read /home/<you>/ because the unit sets ProtectHome=true.
+sudo sed -i.bak \
+    -e "s|\"data_dir\": \"$HOME/.mcpproxy\"|\"data_dir\": \"/var/lib/mcpproxy\"|g" \
+    /etc/mcpproxy/mcp_config.json
+sudo grep -nE "$HOME" /etc/mcpproxy/mcp_config.json   # should print nothing
+
+# 5. If any stdio server uses `docker run`, give the mcpproxy user docker access:
+sudo usermod -aG docker mcpproxy
+
+# 6. Start it
+sudo systemctl start mcpproxy
+sudo systemctl status mcpproxy --no-pager
+```
+
+Things to watch for after step 6:
+
+- **Secrets files referenced from the config**: if any of your stdio servers `source` an env file from your home directory (e.g. `set -a; source ~/.mcpproxy/foo.env; ...`), copy that file to `/etc/mcpproxy/` with `root:mcpproxy 0640` ownership and update the path inside `mcp_config.json`. `ProtectHome=true` will otherwise make the file invisible to the service.
+- **Custom data_dir or cache paths**: the same `sed` pattern as step 4 — anything under `$HOME` becomes invisible.
+- **Snap-installed Docker**: on Ubuntu hosts where Docker came from snap (the default on 24.04), `mcpproxy doctor` will warn about additional one-time host setup (`loginctl enable-linger mcpproxy`, `snap set system homedirs=/var/lib`, and a systemd drop-in). Follow the snippet `doctor` prints, then `sudo systemctl restart mcpproxy`. The error you'd see otherwise is `cannot create XDG_RUNTIME_DIR folder "/run/user/<uid>/snap.docker"`.
+
+Once you've confirmed the new service is healthy (`mcpproxy doctor` reports no issues), you can delete the backups under `~/mcpproxy-backup-*` — but the deb keeps your config intact across future upgrades regardless.
+
 ### Network exposure: localhost by default
 
 Both `.deb` and `.rpm` packages ship a default config that binds **only to `127.0.0.1:8080`** — meaning the service is reachable only from the same machine. This is intentional: MCPProxy proxies tools that can read your filesystem, call paid APIs, and execute code, so a wide-open default would be unsafe.
