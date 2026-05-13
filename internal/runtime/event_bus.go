@@ -18,23 +18,40 @@ import (
 // serversChangedCoalescer collapses bursts of servers.changed events into at
 // most one publish per interval window, last-write-wins. See spec 047 §B2.
 //
-// The producer (emitServersChanged) builds a fully-realised Event and stores
-// it in `pending` (atomic.Pointer). Producers signal the drainer via the
-// `wake` channel. The drainer goroutine wakes on either a wake signal or its
-// own timer; on wake it sleeps until the interval has elapsed since the last
-// publish, then atomically swaps `pending` and publishes the swapped event.
+// Producers (emitServersChanged) submit a lightweight marker (reason + extra
+// fields) via submit(); the marker is stored in `pending` (atomic.Pointer,
+// last-write-wins) and the drainer is signalled via the `wake` channel. The
+// drainer wakes on either a wake signal or its own timer; on wake it sleeps
+// for one interval, then atomically swaps `pending`, materialises the full
+// SSE payload via rt.buildServersChangedPayload, and publishes once.
+//
+// Why build in the drainer, not the producer: the payload requires a
+// ListServers call and an N-row BBolt scan per server. Building eagerly in
+// the producer means a bulk caller that fires K rapid emits pays K×(1+N)
+// BBolt ops, of which K-1 are wasted (the coalescer drops them at publish
+// time). Building lazily in the drainer means exactly one build per publish
+// window, regardless of how many submits land — Spec 047's amortisation
+// promise extended from publish to build.
 //
 // Tests can drive the coalescer synchronously via flushNow() instead of
 // sleeping for the interval.
 type serversChangedCoalescer struct {
 	rt       *Runtime
-	pending  atomic.Pointer[Event]
+	pending  atomic.Pointer[serversChangedMarker]
 	wake     chan struct{}
 	interval time.Duration
 
 	// flush coordination
 	flushMu   sync.Mutex
 	lastFlush time.Time
+}
+
+// serversChangedMarker is the lightweight "something happened" record the
+// coalescer stores between submit and flush. The drainer materialises the
+// full server-list payload at flush time using the marker's reason + extra.
+type serversChangedMarker struct {
+	reason string
+	extra  map[string]any
 }
 
 func newServersChangedCoalescer(rt *Runtime, interval time.Duration) *serversChangedCoalescer {
@@ -45,10 +62,11 @@ func newServersChangedCoalescer(rt *Runtime, interval time.Duration) *serversCha
 	}
 }
 
-// submit stores `evt` as the latest pending event (overwriting any prior
-// pending event) and signals the drainer.
-func (c *serversChangedCoalescer) submit(evt Event) {
-	c.pending.Store(&evt)
+// submit stores a marker as the latest pending change (overwriting any prior
+// pending marker) and signals the drainer. Cheap by design: no BBolt or
+// ListServers call here — the build happens in flushNow.
+func (c *serversChangedCoalescer) submit(reason string, extra map[string]any) {
+	c.pending.Store(&serversChangedMarker{reason: reason, extra: extra})
 	select {
 	case c.wake <- struct{}{}:
 	default:
@@ -56,17 +74,19 @@ func (c *serversChangedCoalescer) submit(evt Event) {
 	}
 }
 
-// flushNow publishes any pending event immediately. Intended for tests and
-// for shutdown drain.
+// flushNow materialises and publishes any pending marker immediately.
+// Intended for tests and for shutdown drain. The build (ListServers + N×
+// ListToolApprovals) runs synchronously on the caller's goroutine.
 func (c *serversChangedCoalescer) flushNow() {
-	evt := c.pending.Swap(nil)
-	if evt == nil {
+	marker := c.pending.Swap(nil)
+	if marker == nil {
 		return
 	}
 	c.flushMu.Lock()
 	c.lastFlush = time.Now()
 	c.flushMu.Unlock()
-	c.rt.publishEvent(*evt)
+	evt := c.rt.buildServersChangedPayload(marker.reason, marker.extra)
+	c.rt.publishEvent(evt)
 }
 
 // start launches the drainer goroutine. It exits when ctx is canceled, after
@@ -155,23 +175,46 @@ func (r *Runtime) publishEvent(evt Event) {
 	r.eventMu.RUnlock()
 }
 
+// emitServersChanged signals that the server list (or any per-server stat)
+// may have changed. When the coalescer is wired up (production path) this
+// is essentially free: it just stores a marker and signals the drainer.
+// The expensive build runs once per coalescing window in the drainer.
+//
+// The no-coalescer branch (some tests, shutdown paths) builds and publishes
+// synchronously to preserve the prior semantics.
 func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
+	if r.coalescer != nil {
+		r.coalescer.submit(reason, extra)
+		return
+	}
+	evt := r.buildServersChangedPayload(reason, extra)
+	r.publishEvent(evt)
+}
+
+// buildServersChangedPayload materialises the full servers.changed event
+// from a (reason, extra) marker. Spec 047 embeds the current server list +
+// stats so SSE subscribers (Swift tray, Web UI) can update local state
+// without a follow-up GET /api/v1/servers round trip; on any error we fall
+// back to notify-only — older clients (and resilient new clients) handle
+// the missing keys.
+//
+// Cost: 1 ListServers call + N enrichServersWithQuarantineStats reads
+// (one BBolt View per server). Lives here so the coalescer drainer can
+// invoke it at flush time, amortising the build to one per publish window
+// regardless of how many submits land.
+func (r *Runtime) buildServersChangedPayload(reason string, extra map[string]any) Event {
 	payload := make(map[string]any, len(extra)+3)
 	for k, v := range extra {
 		payload[k] = v
 	}
 	payload["reason"] = reason
 
-	// Spec 047: embed the current server list and stats so SSE subscribers
-	// (Swift tray, Web UI) can update local state without a follow-up
-	// GET /api/v1/servers round trip. On any error, fall back to notify-only —
-	// older clients (and resilient new clients) handle the missing keys.
 	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		servers, stats, err := lister.ListServers(ctx)
 		cancel()
 		if err != nil {
-			r.logger.Warn("emitServersChanged: ListServers failed; emitting notify-only event",
+			r.logger.Warn("buildServersChangedPayload: ListServers failed; emitting notify-only event",
 				zap.String("reason", reason),
 				zap.Error(err))
 		} else {
@@ -195,12 +238,7 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 		}
 	}
 
-	evt := newEvent(EventTypeServersChanged, payload)
-	if r.coalescer != nil {
-		r.coalescer.submit(evt)
-		return
-	}
-	r.publishEvent(evt)
+	return newEvent(EventTypeServersChanged, payload)
 }
 
 // enrichServersWithQuarantineStats mirrors

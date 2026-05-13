@@ -140,6 +140,44 @@ func TestCoalescer_FlushNowSynchronousHook(t *testing.T) {
 	}
 }
 
+// TestCoalescer_AmortisesBuildAcrossBurst is the regression test for the
+// lazy-build refactor: K rapid emitServersChanged calls must result in
+// exactly one ListServers call (and therefore at most one Quarantine-stats
+// BBolt scan per server), not K. Before the refactor, the build ran eagerly
+// inside emitServersChanged so a 100-emit burst paid 100×(1+N) BBolt ops
+// even though the coalescer dropped 99 publishes.
+func TestCoalescer_AmortisesBuildAcrossBurst(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	lister := &fakeServersLister{
+		servers: []*contracts.Server{{Name: "s1"}, {Name: "s2"}},
+		stats:   &contracts.ServerStats{},
+	}
+	rt := &Runtime{
+		logger:            logger,
+		eventSubs:         make(map[chan Event]struct{}),
+		managementService: lister,
+	}
+	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt.coalescer.start(ctx)
+
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	for i := 0; i < 100; i++ {
+		rt.emitServersChanged("burst", map[string]any{"i": i})
+	}
+
+	events := collectEvents(ch, 200*time.Millisecond)
+	assert.LessOrEqual(t, len(events), 1, "coalescer must collapse the burst to ≤ 1 publish")
+	assert.EqualValues(t, 1, lister.calls.Load(),
+		"lazy build: 100 rapid emits must result in exactly 1 ListServers call (got %d)",
+		lister.calls.Load())
+}
+
 func TestCoalescer_ConcurrentSubmittersAreSafe(t *testing.T) {
 	rt := newCoalescerTestRuntime(t)
 	ctx, cancel := context.WithCancel(context.Background())
