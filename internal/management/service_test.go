@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
@@ -230,6 +231,61 @@ func TestListServers(t *testing.T) {
 		assert.Equal(t, "https://oauth.example.com/authorize", server.OAuth.AuthURL)
 		assert.Equal(t, "https://oauth.example.com/token", server.OAuth.TokenURL)
 	})
+
+	// ListServers must populate SecurityScan via the wired enricher so that
+	// REST and the SSE servers.changed embed (which both call ListServers)
+	// share one enrichment site. Without parity, mergeServers on the Web UI
+	// strips security_scan from each store-side server on every SSE delivery.
+	t.Run("populates SecurityScan via enricher", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "alpha", "name": "alpha", "enabled": true, "connected": true},
+			{"id": "beta", "name": "beta", "enabled": true, "connected": true},
+		}
+
+		enricher := &fakeScanEnricher{
+			byServer: map[string]*contracts.SecurityScanSummary{
+				"alpha": {RiskScore: 42, Status: "warnings"},
+				// beta intentionally missing — must stay nil.
+			},
+		}
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		svc.SetScanSummaryEnricher(enricher)
+
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 2)
+		require.NotNil(t, servers[0].SecurityScan, "alpha must carry its scan summary")
+		assert.Equal(t, "warnings", servers[0].SecurityScan.Status)
+		assert.Equal(t, 42, servers[0].SecurityScan.RiskScore)
+		assert.Nil(t, servers[1].SecurityScan, "beta must stay nil — enricher returned nil")
+		assert.Equal(t, []string{"alpha", "beta"}, enricher.calls, "enricher called once per server")
+	})
+
+	t.Run("nil enricher is a no-op", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "alpha", "name": "alpha", "enabled": true},
+		}
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		// SetScanSummaryEnricher not called — must still succeed.
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		assert.Nil(t, servers[0].SecurityScan)
+	})
+}
+
+// fakeScanEnricher records which servers were asked about and returns a
+// canned summary per server (nil when the server isn't in byServer).
+type fakeScanEnricher struct {
+	byServer map[string]*contracts.SecurityScanSummary
+	calls    []string
+}
+
+func (f *fakeScanEnricher) GetSecurityScanSummary(_ context.Context, serverName string) *contracts.SecurityScanSummary {
+	f.calls = append(f.calls, serverName)
+	return f.byServer[serverName]
 }
 
 // T019: Unit test for EnableServer

@@ -172,6 +172,57 @@ func (l *ctxAwareLister) ListServers(ctx context.Context) ([]*contracts.Server, 
 	}
 }
 
+// TestEmitServersChanged_PayloadPreservesSecurityScan is the SSE-parity
+// regression test for PR #463: the servers.changed embed must carry every
+// field the REST /api/v1/servers response carries. The Web UI's mergeServers
+// treats incoming server data as authoritative and deletes absent keys
+// (it's how a count dropping to zero clears its badge), so any field that
+// only one path populates is silently wiped from the store on every SSE
+// delivery. SecurityScan is plumbed through management.ListServers so REST
+// and SSE share one enrichment site — this asserts the SSE path carries it
+// through to subscribers unchanged.
+func TestEmitServersChanged_PayloadPreservesSecurityScan(t *testing.T) {
+	lastScan := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	servers := []*contracts.Server{
+		{
+			Name: "alpha",
+			SecurityScan: &contracts.SecurityScanSummary{
+				LastScanAt: &lastScan,
+				RiskScore:  42,
+				Status:     "warnings",
+				FindingCounts: &contracts.FindingCounts{
+					Dangerous: 1,
+					Warning:   3,
+					Info:      7,
+					Total:     11,
+				},
+			},
+		},
+		{Name: "beta"}, // No scan summary — must not gain a stray one.
+	}
+	stats := &contracts.ServerStats{TotalServers: 2}
+
+	rt := newPayloadTestRuntime(t, &fakeServersLister{servers: servers, stats: stats})
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	rt.emitServersChanged("scan-parity", nil)
+
+	evt := receiveServersChanged(t, ch)
+	gotServers, ok := evt.Payload["servers"].([]contracts.Server)
+	require.True(t, ok)
+	require.Len(t, gotServers, 2)
+
+	require.NotNil(t, gotServers[0].SecurityScan, "alpha must keep its SecurityScan on the SSE path")
+	assert.Equal(t, "warnings", gotServers[0].SecurityScan.Status)
+	assert.Equal(t, 42, gotServers[0].SecurityScan.RiskScore)
+	require.NotNil(t, gotServers[0].SecurityScan.FindingCounts)
+	assert.Equal(t, 1, gotServers[0].SecurityScan.FindingCounts.Dangerous)
+	assert.Equal(t, 11, gotServers[0].SecurityScan.FindingCounts.Total)
+
+	assert.Nil(t, gotServers[1].SecurityScan, "beta must not gain a stray scan summary")
+}
+
 // TestBuildServersChangedPayload_HonoursCancelledParentCtx is the regression
 // test for the shutdown-drain path: if the parent ctx is already cancelled
 // (because Runtime.Close() fired appCancel) the ListServers call must abort
