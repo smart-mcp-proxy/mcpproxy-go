@@ -1041,7 +1041,40 @@ const systemStore = useSystemStore()
 // State
 const loading = ref(true)
 const error = ref<string | null>(null)
-const server = ref<Server | null>(null)
+// SYSTEMATIC FIX for the "stale local snapshot" class of bugs:
+//
+// `server` is a *computed* derived from the Pinia store, not a manually
+// reassigned ref. That means every property access (`server.value.enabled`,
+// `server.value.quarantine.blocked_count`, …) reads through the store's
+// reactive proxy, and every SSE-driven store mutation — whether it lands
+// via the spec-047 embedded payload, the spec-048 server-merge, or the
+// notify-only fallback that re-fetches /api/v1/servers — automatically
+// propagates to every template binding and computed in this view.
+//
+// The previous shape was a snapshot ref reassigned at ~10 action-handler
+// sites. Any new handler that forgot the reassignment introduced a fresh
+// staleness bug (latest examples: the "N disabled" pill not clearing on
+// re-enable, and the big Tools counter freezing across a server-level
+// Disable/Enable cycle). The computed makes the whole class structurally
+// impossible.
+//
+// Mutations: anywhere we previously did `server.value.X = Y` to nudge the
+// UI ahead of a network round-trip (the optimistic blocked_count bump),
+// we now mutate the store's server object directly via `mutateStoreServer`.
+// Pinia is reactive to direct mutation, so the computed observers see
+// the change immediately and the subsequent `fetchServers` reconciles
+// to authoritative state.
+const server = computed<Server | null>(() => {
+  return serversStore.servers.find(s => s.name === props.serverName) || null
+})
+
+// mutateStoreServer applies fn to the live store object for this view's
+// server. Lets optimistic updates land where the rest of the app will
+// see them, without forking a parallel local copy.
+function mutateStoreServer(fn: (s: Server) => void) {
+  const s = serversStore.servers.find(srv => srv.name === props.serverName)
+  if (s) fn(s)
+}
 const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
 const actionLoading = ref(false)
 
@@ -1379,7 +1412,7 @@ async function loadServerDetails() {
 
   try {
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
 
     if (!server.value) {
       error.value = `Server "${props.serverName}" not found`
@@ -1474,7 +1507,7 @@ async function approveTool(toolName: string) {
       await loadToolApprovals()
       // Refresh server data to update quarantine counts
       await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+      // server is a computed from the store — no manual reassignment needed.
     } else {
       systemStore.addToast({
         type: 'error',
@@ -1507,7 +1540,7 @@ async function approveAllTools() {
       await loadToolApprovals()
       // Refresh server data to update quarantine counts
       await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+      // server is a computed from the store — no manual reassignment needed.
     } else {
       systemStore.addToast({
         type: 'error',
@@ -1547,7 +1580,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   const prevQuarantine: Server['quarantine'] | undefined = server.value.quarantine
     ? { ...server.value.quarantine }
     : undefined
-  bumpLocalBlockedCount(enabled ? -1 : 1)
+  bumpStoreBlockedCount(enabled ? -1 : 1)
 
   try {
     const response = await api.setToolEnabled(server.value.name, toolName, enabled)
@@ -1564,7 +1597,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       await syncAfterToolToggle()
     } else {
       if (idx >= 0 && prev) toolApprovals.value[idx] = prev
-      restoreLocalQuarantine(prevQuarantine)
+      restoreStoreQuarantine(prevQuarantine)
       systemStore.addToast({
         type: 'error',
         title: 'Update Failed',
@@ -1573,7 +1606,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     }
   } catch (err) {
     if (idx >= 0 && prev) toolApprovals.value[idx] = prev
-    restoreLocalQuarantine(prevQuarantine)
+    restoreStoreQuarantine(prevQuarantine)
     systemStore.addToast({
       type: 'error',
       title: 'Update Failed',
@@ -1586,49 +1619,55 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   }
 }
 
-// bumpLocalBlockedCount adjusts the local server's quarantine.blocked_count
+// bumpStoreBlockedCount adjusts the store server's quarantine.blocked_count
 // so the "N disabled" stat-desc pill reflects the user's toggle action
-// immediately. Without this, the pill waits on the GET /api/v1/servers
-// round-trip + store merge before updating — long enough for users to
-// notice and report as a "stuck counter" bug.
-function bumpLocalBlockedCount(delta: number) {
-  if (!server.value) return
-  const current = server.value.quarantine
-  const nextBlocked = Math.max(0, (current?.blocked_count ?? 0) + delta)
-  const pending = current?.pending_count ?? 0
-  const changed = current?.changed_count ?? 0
-  if (nextBlocked === 0 && pending === 0 && changed === 0) {
-    // Match the backend's "omit when all-zero" rule so mergeServers
-    // doesn't leave a stale empty Quarantine block around.
-    delete (server.value as Server & { quarantine?: unknown }).quarantine
-  } else {
-    server.value.quarantine = {
-      pending_count: pending,
-      changed_count: changed,
-      blocked_count: nextBlocked,
+// immediately. Mutates the store directly (Pinia is reactive to direct
+// mutation) so every consumer — Server Detail, Server List, tray — sees
+// the update without a round-trip. The subsequent syncAfterToolToggle()
+// snaps everything back to authoritative server state.
+function bumpStoreBlockedCount(delta: number) {
+  mutateStoreServer(s => {
+    const current = s.quarantine
+    const nextBlocked = Math.max(0, (current?.blocked_count ?? 0) + delta)
+    const pending = current?.pending_count ?? 0
+    const changed = current?.changed_count ?? 0
+    if (nextBlocked === 0 && pending === 0 && changed === 0) {
+      // Match the backend's "omit when all-zero" rule so mergeServers
+      // doesn't leave a stale empty Quarantine block around.
+      delete (s as Server & { quarantine?: unknown }).quarantine
+    } else {
+      s.quarantine = {
+        pending_count: pending,
+        changed_count: changed,
+        blocked_count: nextBlocked,
+      }
     }
-  }
+  })
 }
 
-function restoreLocalQuarantine(prev: Server['quarantine']) {
-  if (!server.value) return
-  if (prev) {
-    server.value.quarantine = prev
-  } else {
-    delete (server.value as Server & { quarantine?: unknown }).quarantine
-  }
+function restoreStoreQuarantine(prev: Server['quarantine']) {
+  mutateStoreServer(s => {
+    if (prev) {
+      s.quarantine = prev
+    } else {
+      delete (s as Server & { quarantine?: unknown }).quarantine
+    }
+  })
 }
 
 // syncAfterToolToggle keeps the page state consistent after any tool enable/
 // disable: it refreshes the store-backed servers list (so blockedToolCount on
-// the Server List view loses staleness on navigation), the local server ref
-// (so the in-page "N disabled" pill responds), and the per-tool / approval
-// caches (so toggle widgets pick up server-truth instead of optimistic state).
+// the Server List view loses staleness on navigation) and the per-tool /
+// approval caches (so toggle widgets pick up server-truth instead of
+// optimistic state). The `server` computed automatically reflects the store
+// update — no manual ref reassignment.
 async function syncAfterToolToggle() {
   if (!server.value) return
-  await serversStore.fetchServers(true)
-  server.value = serversStore.servers.find(s => s.name === server.value!.name) || server.value
-  await Promise.all([loadTools(), loadToolApprovals()])
+  await Promise.all([
+    serversStore.fetchServers(true),
+    loadTools(),
+    loadToolApprovals(),
+  ])
 }
 
 // bulkToggleAllTools dispatches one Enable-all / Disable-all request and
@@ -1637,6 +1676,32 @@ async function syncAfterToolToggle() {
 async function bulkToggleAllTools(enabled: boolean) {
   if (!server.value || bulkToolToggleLoading.value) return
   bulkToolToggleLoading.value = true
+
+  // Optimistic store mutation — same idea as the single-tool path, but
+  // we drive blocked_count straight to 0 (Enable All) or the count of
+  // togglable tools (Disable All) so the "N disabled" pill snaps to the
+  // expected value instantly. The subsequent syncAfterToolToggle()
+  // reconciles to whatever the backend actually changed.
+  const prevQuarantine: Server['quarantine'] | undefined = server.value.quarantine
+    ? { ...server.value.quarantine }
+    : undefined
+  const togglable = serverTools.value.filter(t => isToolToggleAvailable(t.name)).length
+  mutateStoreServer(s => {
+    const current = s.quarantine
+    const pending = current?.pending_count ?? 0
+    const changed = current?.changed_count ?? 0
+    const nextBlocked = enabled ? 0 : togglable
+    if (nextBlocked === 0 && pending === 0 && changed === 0) {
+      delete (s as Server & { quarantine?: unknown }).quarantine
+    } else {
+      s.quarantine = {
+        pending_count: pending,
+        changed_count: changed,
+        blocked_count: nextBlocked,
+      }
+    }
+  })
+
   try {
     const response = await api.setAllToolsEnabled(server.value.name, enabled)
     if (response.success && response.data) {
@@ -1652,6 +1717,7 @@ async function bulkToggleAllTools(enabled: boolean) {
       // "N disabled" pill, and the Server List both lose any staleness.
       await syncAfterToolToggle()
     } else {
+      restoreStoreQuarantine(prevQuarantine)
       systemStore.addToast({
         type: 'error',
         title: 'Bulk Update Failed',
@@ -1659,6 +1725,7 @@ async function bulkToggleAllTools(enabled: boolean) {
       })
     }
   } catch (err) {
+    restoreStoreQuarantine(prevQuarantine)
     systemStore.addToast({
       type: 'error',
       title: 'Bulk Update Failed',
@@ -1711,7 +1778,7 @@ async function toggleEnabled() {
     }
     // Update local server reference
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1737,7 +1804,7 @@ async function restartServer() {
     // Refresh server data after restart
     setTimeout(async () => {
       await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+      // server is a computed from the store — no manual reassignment needed.
     }, 2000)
   } catch (error) {
     systemStore.addToast({
@@ -1785,7 +1852,7 @@ async function quarantineServer() {
     })
     // Update local server reference
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1810,7 +1877,7 @@ async function unquarantineServer() {
     })
     // Update local server reference
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1871,7 +1938,7 @@ async function doSecurityApprove(force: boolean) {
     })
     showApproveConfirmation.value = false
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -2143,7 +2210,7 @@ function startScanPolling() {
             activeScanJobId.value = null
             await loadScanReport(true)
             await serversStore.fetchServers()
-            server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+            // server is a computed from the store — no manual reassignment needed.
             systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
           }
           return
@@ -2155,7 +2222,7 @@ function startScanPolling() {
           activeScanJobId.value = null
           await loadScanReport(true)
           await serversStore.fetchServers()
-          server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+          // server is a computed from the store — no manual reassignment needed.
           systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
         } else if (status === 'failed' || status === 'error') {
           stopScanPolling()
