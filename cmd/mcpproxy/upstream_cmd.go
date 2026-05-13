@@ -945,7 +945,10 @@ func runUpstreamToolAction(serverName, toolName string, enabled bool) error {
 	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
 	client := cliclient.NewClient(socketPath, logger.Sugar())
 
-	fmt.Printf("%sing tool '%s' on server '%s'...\n", strings.Title(verb), toolName, serverName)
+	// "enable" / "disable" are ASCII verbs, so an inline ASCII-only
+	// title-case is fine here and avoids the deprecated strings.Title.
+	titleVerb := strings.ToUpper(verb[:1]) + verb[1:]
+	fmt.Printf("%sing tool '%s' on server '%s'...\n", titleVerb, toolName, serverName)
 	if err := client.SetToolEnabled(ctx, serverName, toolName, enabled); err != nil {
 		return fmt.Errorf("failed to %s tool: %w", verb, err)
 	}
