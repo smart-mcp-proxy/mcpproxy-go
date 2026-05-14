@@ -294,13 +294,35 @@ class APIService {
 
   // storeSecret stashes a value in the OS keyring under the given name and
   // returns the ${keyring:<name>} reference string callers can substitute
-  // back into the server config. Used by the "Convert to secret" affordance
-  // on the Headers and Environment Variables cards.
+  // back into the server config. Kept for legacy callers; the
+  // Headers/Environment Variables "Convert to secret" flow now uses the
+  // atomic convertConfigToSecret() instead.
   async storeSecret(name: string, value: string): Promise<APIResponse<{ reference?: string }>> {
     return this.request<{ reference?: string }>('/api/v1/secrets', {
       method: 'POST',
       body: JSON.stringify({ name, value, type: 'keyring' }),
     })
+  }
+
+  // convertConfigToSecret asks the backend to atomically (a) read the real
+  // value of a header / env key from the server config, (b) store it in
+  // the OS keyring under `secretName`, and (c) rewrite the config field
+  // with the `${keyring:<name>}` reference. The client never has to
+  // possess the real value — which matters when the API redacts
+  // sensitive header values on the read path.
+  async convertConfigToSecret(
+    serverName: string,
+    scope: 'header' | 'env',
+    key: string,
+    secretName: string
+  ): Promise<APIResponse<{ reference?: string }>> {
+    return this.request<{ reference?: string }>(
+      `/api/v1/servers/${encodeURIComponent(serverName)}/config-to-secret`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ scope, key, secret_name: secretName }),
+      }
+    )
   }
 
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {

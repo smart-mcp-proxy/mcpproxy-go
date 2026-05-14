@@ -676,10 +676,7 @@
                           :k="k"
                           :raw-value="serverHeaders[k]"
                           :is-editing="editingKey === `hdr::${k}`"
-                          :revealed="revealedKeys.has(`hdr::${k}`)"
                           :busy="kvPatchInFlight"
-                          @reveal="revealedKeys.add(`hdr::${k}`)"
-                          @hide="revealedKeys.delete(`hdr::${k}`)"
                           @start-edit="startEdit('hdr', k)"
                           @cancel-edit="cancelEdit"
                           @save="(val) => saveEdit('header', k, val)"
@@ -743,10 +740,7 @@
                           :k="k"
                           :raw-value="serverEnv[k]"
                           :is-editing="editingKey === `env::${k}`"
-                          :revealed="revealedKeys.has(`env::${k}`)"
                           :busy="kvPatchInFlight"
-                          @reveal="revealedKeys.add(`env::${k}`)"
-                          @hide="revealedKeys.delete(`env::${k}`)"
                           @start-edit="startEdit('env', k)"
                           @cancel-edit="cancelEdit"
                           @save="(val) => saveEdit('env', k, val)"
@@ -2321,7 +2315,6 @@ const envKeys = computed(() => Object.keys(serverEnv.value).sort())
 const hasHeaders = computed(() => headerKeys.value.length > 0)
 const hasEnv = computed(() => envKeys.value.length > 0)
 
-const revealedKeys = ref<Set<string>>(new Set())
 const editingKey = ref<string | null>(null)
 const kvPatchInFlight = ref(false)
 
@@ -2461,19 +2454,22 @@ function closeConvertModal() {
 
 async function commitConvert() {
   const m = convertModal.value
-  if (!m.secretName || !m.rawValue) return
+  if (!m.secretName || !server.value) return
   m.busy = true
   try {
-    const storeResp = await api.storeSecret(m.secretName, m.rawValue)
-    if (!storeResp.success) {
-      systemStore.addToast({ type: 'error', title: 'Failed to store secret', message: storeResp.error || 'Unknown error' })
+    // Atomic server-side conversion: the backend reads the real value
+    // from the loaded config (so we don't need the plaintext on the
+    // client — important when the API redacts sensitive headers on the
+    // read path), stores it in keyring, and rewrites the config field
+    // with the ${keyring:NAME} reference. Single round-trip, single
+    // failure surface.
+    const resp = await api.convertConfigToSecret(server.value.name, m.scope, m.key, m.secretName)
+    if (!resp.success) {
+      systemStore.addToast({ type: 'error', title: 'Convert failed', message: resp.error || 'Unknown error' })
       return
     }
-    const ref = `\${keyring:${m.secretName}}`
-    await patchServerDiff(
-      { [scopeKey(m.scope)]: { [m.key]: ref } },
-      `Converted ${m.key} to secret`
-    )
+    await serversStore.fetchServers(true)
+    systemStore.addToast({ type: 'success', title: `Converted ${m.key} to secret`, message: '' })
     closeConvertModal()
   } catch (e: any) {
     systemStore.addToast({ type: 'error', title: 'Convert failed', message: e?.message || String(e) })

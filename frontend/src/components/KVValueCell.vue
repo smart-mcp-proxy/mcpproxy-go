@@ -13,53 +13,43 @@
     <button class="btn btn-xs btn-ghost" :disabled="busy" @click="$emit('cancel-edit')">Cancel</button>
   </div>
   <div v-else class="flex gap-2 items-center flex-wrap">
-    <!-- Keyring reference: rendered as a chip; no reveal toggle. -->
+    <!-- Keyring reference: rendered as a chip; no convert affordance. -->
     <template v-if="isKeyringRef">
       <span class="badge badge-info badge-sm gap-1" :title="rawValue">
         <span aria-hidden="true">🔑</span>
         <span class="font-mono text-xs">stored in keyring: {{ keyringName }}</span>
       </span>
     </template>
-    <!-- Env reference (${env:VAR}): also a chip with no reveal toggle. -->
+    <!-- Env reference (${env:VAR}): also a chip. -->
     <template v-else-if="isEnvRef">
       <span class="badge badge-ghost badge-sm gap-1" :title="rawValue">
         <span aria-hidden="true">$</span>
         <span class="font-mono text-xs">env var: {{ envRefName }}</span>
       </span>
     </template>
-    <!-- Literal value path. Two sub-cases:
-         1. Backend redacted the value (`***REDACTED***` sentinel). The
-            real string isn't on the client; reveal would just expose
-            the sentinel and Convert-to-secret has nothing to upload to
-            the keyring. We surface a small "backend-redacted" hint
-            instead so the user understands why those actions are
-            disabled. Editing the value still works through the inline
-            edit button — the PATCH endpoint deep-merges, so typing a
-            new value replaces just that one header server-side.
-         2. Plaintext literal: mask by default, eye to reveal, lock to
-            convert. -->
+    <!-- Literal value path. Two cases produce identical visuals:
+         1. Header value the backend already masked (`••••<last2> (<N> chars)`
+            format from oauth.RedactStringHeaders) — we render the masked
+            string verbatim. Convert-to-secret on these rows hits the
+            server-side `/config-to-secret` endpoint, which has the real
+            value on disk.
+         2. Plaintext literal (env vars, or headers when
+            `reveal_secret_headers: true`) — we mask client-side using
+            the same format so it looks the same to the user.
+         The UI no longer has a reveal button; the two routes to peek
+         at the value (edit + cancel, or open the config file) are
+         documented in CLAUDE.md. -->
     <template v-else>
-      <code v-if="isBackendRedacted" class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/50" title="Backend redacted this value. Edit to overwrite — the PATCH endpoint deep-merges, so the unchanged real value is preserved.">{{ rawValue }}</code>
-      <template v-else>
-        <code v-if="revealed" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ rawValue }}</code>
-        <code v-else class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/50">{{ redactedPreview }}</code>
-        <button
-          class="btn btn-ghost btn-xs"
-          :title="revealed ? 'Hide value' : 'Reveal value'"
-          @click="revealed ? $emit('hide') : $emit('reveal')"
-        >
-          <span aria-hidden="true">{{ revealed ? '🙈' : '👁' }}</span>
-        </button>
-        <button
-          class="btn btn-ghost btn-xs"
-          title="Move value into the OS keyring and reference it as ${keyring:name}"
-          @click="$emit('convert')"
-          :disabled="busy"
-        >
-          <span aria-hidden="true">🔒</span>
-          <span class="hidden md:inline ml-1">Convert to secret</span>
-        </button>
-      </template>
+      <code class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/70 font-mono break-all">{{ displayValue }}</code>
+      <button
+        class="btn btn-ghost btn-xs"
+        title="Move value into the OS keyring and reference it as ${keyring:name}"
+        @click="$emit('convert')"
+        :disabled="busy"
+      >
+        <span aria-hidden="true">🔒</span>
+        <span class="hidden md:inline ml-1">Convert to secret</span>
+      </button>
     </template>
     <button class="btn btn-ghost btn-xs" title="Edit" @click="$emit('start-edit')" :disabled="busy">✎</button>
     <button class="btn btn-ghost btn-xs text-error" title="Delete" @click="$emit('delete')" :disabled="busy">✕</button>
@@ -70,22 +60,19 @@
 import { computed, nextTick, ref, watch } from 'vue'
 
 // KVValueCell encapsulates the per-row UI for the Headers and Environment
-// Variables cards on ServerDetail. It owns the visual state (revealed vs
-// hidden, edit-in-progress draft) and emits intent events; the parent owns
-// the persistence (PATCH the server, refresh the store).
+// Variables cards on ServerDetail. It owns the visual state (edit-in-
+// progress draft) and emits intent events; the parent owns the
+// persistence (PATCH the server, call config-to-secret, refresh).
 
 const props = defineProps<{
   scope: 'header' | 'env'
   k: string
   rawValue: string
   isEditing: boolean
-  revealed: boolean
   busy?: boolean
 }>()
 
 const emit = defineEmits<{
-  (e: 'reveal'): void
-  (e: 'hide'): void
   (e: 'start-edit'): void
   (e: 'cancel-edit'): void
   (e: 'save', value: string): void
@@ -123,20 +110,21 @@ const envRefName = computed(() => {
   const m = (props.rawValue ?? '').match(/^\$\{env:([^}]+)\}$/)
   return m ? m[1] : ''
 })
-// The Go backend redacts secret header values via
-// `redactServerHeaders` so an MCP agent calling `upstream_servers list`
-// cannot exfiltrate Bearer tokens (PR #425). The REST API and SSE
-// channel inherit the same redaction. When that sentinel surfaces, the
-// real string is not in our hands — reveal/convert are disabled, but
-// editing still works because the PATCH endpoint deep-merges (the
-// untouched redacted key simply stays out of the patch body).
-const isBackendRedacted = computed(() => props.rawValue === '***REDACTED***')
 
-const redactedPreview = computed(() => {
+// Render the literal value with the masked-display format. If the
+// backend already masked the value (sensitive header, default redaction
+// policy), it arrives already in this exact format — we pass it
+// through unchanged. If the backend sent plaintext (env var, or headers
+// when `reveal_secret_headers: true`), we mask client-side here for
+// consistency. The detection is "starts with a mask bullet", which is
+// idempotent: re-masking a masked string is a no-op.
+const MASK_PREFIX = '••••'
+const displayValue = computed(() => {
   const v = props.rawValue ?? ''
   if (!v) return '(empty)'
-  if (v.length <= 4) return '••••'
-  return '••••' + v.slice(-2) + ` (${v.length} chars)`
+  if (v.startsWith(MASK_PREFIX) || v === '(empty)') return v
+  if (v.length <= 4) return MASK_PREFIX
+  return MASK_PREFIX + v.slice(-2) + ` (${v.length} chars)`
 })
 
 const placeholder = computed(() =>

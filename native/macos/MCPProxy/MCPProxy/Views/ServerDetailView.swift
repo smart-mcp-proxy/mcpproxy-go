@@ -54,12 +54,14 @@ struct ServerDetailView: View {
     @State private var editWorkingDir = ""
     @State private var editEnvVars = ""
     /// HTTP servers only — KEY=VALUE per line. Pre-populated from
-    /// `server.headers` on enter-edit. Backend may return `***REDACTED***`
-    /// for sensitive header values (PR #425); the textarea shows that
-    /// verbatim. saveEdits() diffs the parsed map against `server.headers`
-    /// and only sends changed/added/removed keys to the deep-merge PATCH
-    /// endpoint — so leaving a redacted line untouched preserves the real
-    /// stored value, and editing/deleting/adding behaves intuitively.
+    /// `server.headers` on enter-edit. The backend masks sensitive
+    /// header values on the read path (see oauth.MaskValue) so the
+    /// textarea may show e.g. `Authorization=••••59 (71 chars)`.
+    /// saveEdits() diffs the parsed map against `server.headers` and
+    /// only sends changed/added/removed keys to the deep-merge PATCH
+    /// endpoint — so leaving the masked line untouched preserves the
+    /// real stored value, and editing/deleting/adding behaves
+    /// intuitively.
     @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
@@ -1234,13 +1236,18 @@ struct ServerDetailView: View {
         convertSheetBusy = true
         defer { convertSheetBusy = false }
         do {
-            let ref = try await client.storeSecret(name: name, value: ctx.value)
-            // Send the minimal JSON Merge Patch: just the one key that
-            // changed. The deep-merge backend preserves every other key,
-            // so we don't risk round-tripping a redacted Authorization
-            // back as the literal `***REDACTED***` string.
-            let field = ctx.scope == .header ? "headers" : "env"
-            try await client.updateServer(server.name, updates: [field: [ctx.key: ref]])
+            // Atomic server-side conversion: the backend reads the real
+            // value from the loaded config (so this works even when the
+            // value the user sees is a redacted mask string), stores it
+            // in the OS keyring, and rewrites the config field with the
+            // `${keyring:<name>}` reference. One round trip, one
+            // failure surface.
+            try await client.convertConfigToSecret(
+                serverName: server.name,
+                scope: ctx.scope == .header ? "header" : "env",
+                key: ctx.key,
+                secretName: name
+            )
             await refreshServer()
             await MainActor.run { convertSheet = nil }
         } catch {
@@ -1279,13 +1286,13 @@ struct ServerDetailView: View {
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
                     .textSelection(.enabled)
 
-                // Convert-to-secret is only meaningful when we hold the
-                // real value. When the backend redacted it (PR #425), the
-                // sentinel string isn't useful as a keyring payload.
-                // Editing still works through the textarea — the PATCH
-                // endpoint deep-merges so the untouched redacted key
-                // stays out of the patch and its real value is preserved.
-                if !value.isEmpty && value != "***REDACTED***" {
+                // Convert-to-secret is always available on non-empty
+                // values. The flow hits the backend's
+                // /api/v1/servers/{name}/config-to-secret endpoint,
+                // which atomically reads the real value from the loaded
+                // config (so it works even when the API redacts what we
+                // see), stores it in keyring, and rewrites the field.
+                if !value.isEmpty {
                     Button {
                         openConvertSheet(scope: scope, key: key, value: value)
                     } label: {
@@ -1303,23 +1310,25 @@ struct ServerDetailView: View {
     // MARK: - Headers + Env helpers
 
     /// Diff a new key/value map against the original (e.g. `server.headers`
-    /// as returned by the API, which may contain `***REDACTED***` sentinels
-    /// for sensitive keys). Returns a single JSON Merge Patch dict (RFC
-    /// 7396): upserts map to their new string value, deletes map to
-    /// `NSNull()`, unchanged keys are omitted entirely. Returns `nil`
-    /// when the maps are identical and no patch is needed.
+    /// as returned by the API, which may contain backend-masked values
+    /// like `••••59 (71 chars)` for sensitive keys). Returns a single
+    /// JSON Merge Patch dict (RFC 7396): upserts map to their new string
+    /// value, deletes map to `NSNull()`, unchanged keys are omitted
+    /// entirely. Returns `nil` when the maps are identical and no patch
+    /// is needed.
     ///
     /// `[String: Any]` rather than `[String: Any?]` is intentional —
     /// JSONSerialization treats absent keys as omitted, NSNull entries as
     /// literal JSON `null`. If we used `[String: String?]` and the default
     /// `JSONEncoder`, nil values would be silently dropped from the wire
-    /// payload and deletes would never reach the backend. The SwiftEncoder
-    /// unit test pins this contract.
+    /// payload and deletes would never reach the backend. The
+    /// MergePatchEncodingTests unit tests pin this contract.
     ///
     /// Subtle invariant: when the user leaves the textarea line for a
-    /// redacted key untouched, `next[k] == "***REDACTED***" == original[k]`
-    /// — the key stays out of the diff, the backend preserves the real
-    /// stored value, and the redaction sentinel never round-trips.
+    /// backend-masked key untouched, `next[k] == "••••59 (71 chars)" ==
+    /// original[k]` — the key stays out of the diff, the backend
+    /// preserves the real stored value, and the mask string never
+    /// round-trips as a "new value" to be persisted.
     private func diffKVMap(original: [String: String], next: [String: String]) -> [String: Any]? {
         var patch: [String: Any] = [:]
         for (k, v) in next {
@@ -1354,17 +1363,18 @@ struct ServerDetailView: View {
         return out
     }
 
-    /// Render a header value safely in view mode. Keyring/env references
-    /// pass through as-is (they're already labels, not secrets). Literal
-    /// values are masked to "•••• (NN chars)" so a casual onlooker can
-    /// see the header IS set without exposing the secret. The backend
-    /// may have already redacted the value to `***REDACTED***`; in that
-    /// case we surface that string verbatim so users know to flip
-    /// `reveal_secret_headers` in config to inspect / edit it.
+    /// Render a header / env value safely in view mode. Keyring / env
+    /// references pass through as-is (they're already labels, not
+    /// secrets). Literal values are masked to `••••<last2> (<N> chars)`
+    /// so a casual onlooker can see the field IS set without exposing
+    /// the secret. The backend now emits this exact format for sensitive
+    /// headers it redacts on the read path (see oauth.MaskValue), so
+    /// the mask is idempotent: re-masking an already-masked string
+    /// returns it unchanged.
     private func maskedHeaderValue(_ value: String) -> String {
-        if value == "***REDACTED***" { return value }
         if value.hasPrefix("${keyring:") || value.hasPrefix("${env:") { return value }
         if value.isEmpty { return "(empty)" }
+        if value.hasPrefix("••••") { return value }
         if value.count <= 4 { return "••••" }
         let tail = value.suffix(2)
         return "••••\(tail) (\(value.count) chars)"

@@ -105,19 +105,27 @@ func TestRedactHeaders(t *testing.T) {
 }
 
 func TestRedactStringHeaders(t *testing.T) {
-	t.Run("redacts a bearer authorization", func(t *testing.T) {
+	// The mask format mirrors the Web UI / macOS tray client-side
+	// display: `••••<last2> (<N> chars)`. Keeping length + the last
+	// two characters helps operators identify which token is in use
+	// without revealing the secret, and gives all callers a single
+	// uniform representation — no `***REDACTED***` sentinel branching.
+	t.Run("redacts a bearer authorization to the masked-display format", func(t *testing.T) {
 		headers := map[string]string{
 			"Authorization":  "Bearer fake-test-token-not-a-real-secret",
 			"X-MCP-Toolsets": "pull_requests",
 		}
 		got := RedactStringHeaders(headers)
-		assert.Equal(t, "***REDACTED***", got["Authorization"])
+		assert.Equal(t, "••••et (40 chars)", got["Authorization"],
+			"sensitive value should be masked with length + last-2-char suffix")
+		assert.NotContains(t, got["Authorization"], "fake-test-token",
+			"plaintext must not survive the mask")
 		assert.Equal(t, "pull_requests", got["X-MCP-Toolsets"])
 	})
 
 	t.Run("redacts x-api-key", func(t *testing.T) {
-		got := RedactStringHeaders(map[string]string{"X-Api-Key": "secret"})
-		assert.Equal(t, "***REDACTED***", got["X-Api-Key"])
+		got := RedactStringHeaders(map[string]string{"X-Api-Key": "supersecretkey"})
+		assert.Equal(t, "••••ey (14 chars)", got["X-Api-Key"])
 	})
 
 	t.Run("redacts cookie and set-cookie", func(t *testing.T) {
@@ -125,8 +133,33 @@ func TestRedactStringHeaders(t *testing.T) {
 			"Cookie":     "session=abc",
 			"Set-Cookie": "session=abc; Path=/",
 		})
-		assert.Equal(t, "***REDACTED***", got["Cookie"])
-		assert.Equal(t, "***REDACTED***", got["Set-Cookie"])
+		assert.Equal(t, "••••bc (11 chars)", got["Cookie"])
+		assert.Equal(t, "••••=/ (19 chars)", got["Set-Cookie"])
+	})
+
+	t.Run("short values (<=4 chars) emit 4 bullets with no suffix", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{"Authorization": "ab"})
+		assert.Equal(t, "••••", got["Authorization"],
+			"don't leak the whole secret as the suffix for very short values")
+	})
+
+	t.Run("empty value renders as (empty)", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{"Authorization": ""})
+		assert.Equal(t, "(empty)", got["Authorization"])
+	})
+
+	t.Run("keyring reference passes through unchanged", func(t *testing.T) {
+		// References aren't secrets — they're labels pointing at the
+		// OS keyring entry. Masking them would defeat the UI's
+		// "stored in keyring" chip rendering, which depends on
+		// detecting the literal `${keyring:NAME}` form.
+		got := RedactStringHeaders(map[string]string{"Authorization": "${keyring:synapbus-auth}"})
+		assert.Equal(t, "${keyring:synapbus-auth}", got["Authorization"])
+	})
+
+	t.Run("env reference passes through unchanged", func(t *testing.T) {
+		got := RedactStringHeaders(map[string]string{"Authorization": "${env:GITHUB_TOKEN}"})
+		assert.Equal(t, "${env:GITHUB_TOKEN}", got["Authorization"])
 	})
 
 	t.Run("preserves non-sensitive headers", func(t *testing.T) {
@@ -135,8 +168,8 @@ func TestRedactStringHeaders(t *testing.T) {
 	})
 
 	t.Run("case insensitive header matching", func(t *testing.T) {
-		got := RedactStringHeaders(map[string]string{"AUTHORIZATION": "Bearer x"})
-		assert.Equal(t, "***REDACTED***", got["AUTHORIZATION"])
+		got := RedactStringHeaders(map[string]string{"AUTHORIZATION": "Bearer xyz"})
+		assert.Equal(t, "••••yz (10 chars)", got["AUTHORIZATION"])
 	})
 
 	t.Run("nil input returns nil", func(t *testing.T) {

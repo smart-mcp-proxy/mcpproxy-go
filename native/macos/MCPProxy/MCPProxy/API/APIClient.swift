@@ -184,14 +184,29 @@ actor APIClient {
     }
 
     /// Store a value in the OS keyring under `name` and return the
-    /// `${keyring:name}` reference string. Used by the "Convert to secret"
-    /// affordance on the Headers / Environment Variables sections.
+    /// `${keyring:name}` reference string. Kept for callers that have
+    /// the plaintext on the client side; the Headers / Environment
+    /// Variables "Convert to secret" flow uses the atomic
+    /// `convertConfigToSecret` below instead.
     func storeSecret(name: String, value: String) async throws -> String {
         _ = try await postAction(
             path: "/api/v1/secrets",
             body: ["name": name, "value": value, "type": "keyring"]
         )
         return "${keyring:\(name)}"
+    }
+
+    /// Atomically move a header / env value out of `mcp_config.json` and
+    /// into the OS keyring. The backend reads the real value from the
+    /// loaded config (so the client never has to possess it — useful
+    /// when the API redacts what we see), stores it in keyring under
+    /// `secretName`, and rewrites the config field with the
+    /// `${keyring:<name>}` reference.
+    func convertConfigToSecret(serverName: String, scope: String, key: String, secretName: String) async throws {
+        _ = try await postAction(
+            path: "/api/v1/servers/\(serverName)/config-to-secret",
+            body: ["scope": scope, "key": key, "secret_name": secretName]
+        )
     }
 
     // MARK: - Connect (Client Registration)

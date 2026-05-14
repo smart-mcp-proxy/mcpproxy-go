@@ -133,9 +133,9 @@ func TestHandlePatchServer_ExplicitBoolsTakePrecedence(t *testing.T) {
 // TestHandlePatchServer_HeadersDeepMerge verifies that PATCH /api/v1/servers
 // preserves existing header keys not mentioned in the request body. This is
 // the foundation of the Web UI / macOS tray edit flow: clients send a diff
-// against the redacted view of headers, so any key whose value is
-// `***REDACTED***` and unchanged stays out of the patch — and the backend
-// must NOT wipe it.
+// against the redacted view of headers, so any key whose masked-display
+// value (`••••<last2> (<N> chars)`) is unchanged stays out of the patch —
+// and the backend must NOT wipe it.
 func TestHandlePatchServer_HeadersDeepMerge(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mockCtrl := &mockPatchServerController{
@@ -154,8 +154,8 @@ func TestHandlePatchServer_HeadersDeepMerge(t *testing.T) {
 	srv := NewServer(mockCtrl, logger, nil)
 
 	// Client sends just X-New-Header. Authorization is omitted because
-	// its redacted view (`***REDACTED***`) matched the original, and
-	// X-Trace is omitted because the user didn't touch it.
+	// its masked view (`••••<last2> (<N> chars)`) matched the original
+	// in the diff, and X-Trace is omitted because the user didn't touch it.
 	body, _ := json.Marshal(map[string]any{
 		"headers": map[string]string{"X-New-Header": "new-value"},
 	})
@@ -334,4 +334,132 @@ func TestHandlePatchServer_HeadersEmptyStringSetsNotDeletes(t *testing.T) {
 	assert.Equal(t, "", v, "X-Empty must be the empty string, not deleted")
 	assert.Equal(t, "value", got["X-Original"], "X-Original must be preserved")
 	assert.Len(t, got, 2)
+}
+
+// TestHandleConvertConfigToSecret_ValidationErrors covers the input
+// validation paths on POST /api/v1/servers/{id}/config-to-secret that
+// happen BEFORE we touch the secret resolver — so they're testable with
+// a nil resolver via the existing mock. Happy-path lives in the live
+// verification scripts because secret.Resolver is a concrete struct and
+// faking it would mean stubbing the whole keyring provider chain.
+func TestHandleConvertConfigToSecret_ValidationErrors(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	cases := []struct {
+		name       string
+		existing   *config.ServerConfig
+		body       string
+		wantStatus int
+		wantInBody string
+	}{
+		{
+			name:       "missing scope",
+			existing:   &config.ServerConfig{Name: "synapbus", Protocol: "http", Enabled: true},
+			body:       `{"key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: `scope`,
+		},
+		{
+			name:       "invalid scope",
+			existing:   &config.ServerConfig{Name: "synapbus", Protocol: "http", Enabled: true},
+			body:       `{"scope": "isolation", "key": "image", "secret_name": "foo"}`,
+			wantStatus: 400,
+			wantInBody: `scope`,
+		},
+		{
+			name:       "missing key",
+			existing:   &config.ServerConfig{Name: "synapbus", Protocol: "http", Enabled: true},
+			body:       `{"scope": "header", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: `key`,
+		},
+		{
+			name:       "missing secret name",
+			existing:   &config.ServerConfig{Name: "synapbus", Protocol: "http", Enabled: true},
+			body:       `{"scope": "header", "key": "Authorization"}`,
+			wantStatus: 400,
+			wantInBody: `secret_name`,
+		},
+		{
+			name: "key not present on server",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "http", Enabled: true,
+				Headers: map[string]string{"X-Trace": "on"},
+			},
+			body:       `{"scope": "header", "key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 404,
+			wantInBody: "Authorization",
+		},
+		{
+			name: "value is already a keyring reference",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "http", Enabled: true,
+				Headers: map[string]string{"Authorization": "${keyring:already-stored}"},
+			},
+			body:       `{"scope": "header", "key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "already a reference",
+		},
+		{
+			name: "value is already an env reference",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "http", Enabled: true,
+				Headers: map[string]string{"Authorization": "${env:FOO}"},
+			},
+			body:       `{"scope": "header", "key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "already a reference",
+		},
+		{
+			name: "empty value",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "http", Enabled: true,
+				Headers: map[string]string{"Authorization": ""},
+			},
+			body:       `{"scope": "header", "key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "no value to store",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockCtrl := &mockPatchServerController{
+				apiKey:         "test-key",
+				existingServer: tc.existing,
+			}
+			srv := NewServer(mockCtrl, logger, nil)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/synapbus/config-to-secret", bytes.NewReader([]byte(tc.body)))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-API-Key", "test-key")
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			require.Equal(t, tc.wantStatus, w.Code, "body=%s", w.Body.String())
+			require.Contains(t, w.Body.String(), tc.wantInBody)
+			// The update path must not have been invoked when validation
+			// rejects the request.
+			assert.Nil(t, mockCtrl.capturedUpdates, "validation errors must not call UpdateServer")
+		})
+	}
+}
+
+// TestHandleConvertConfigToSecret_ServerNotFound verifies the 404 path
+// for an unknown server name. Separate from the validation-errors table
+// because it needs an empty server list, not a single populated entry.
+func TestHandleConvertConfigToSecret_ServerNotFound(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{apiKey: "test-key", existingServer: nil}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	body := []byte(`{"scope": "header", "key": "Authorization", "secret_name": "x"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/missing/config-to-secret", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNotFound, w.Code, "body=%s", w.Body.String())
+	require.Contains(t, w.Body.String(), `missing`)
 }

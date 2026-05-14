@@ -3458,6 +3458,57 @@ paths:
       summary: Partially update an upstream server
       tags:
       - servers
+  /api/v1/servers/{id}/config-to-secret:
+    post:
+      description: Atomically reads the real value from the server config, stores
+        it in the OS keyring, and rewrites the config field to `${keyring:<name>}`.
+        Unblocks the UI's Convert-to-secret affordance for values the API redacts
+        on the read path.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
+          description: Secret stored, config updated with reference
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad scope/key/secret_name, or value is already a reference
+            / empty
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server or key not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Secret resolver or config update failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Convert a header / env value to a keyring secret
+      tags:
+      - servers
   /api/v1/servers/{id}/disable:
     post:
       description: Disable a specific upstream MCP server
