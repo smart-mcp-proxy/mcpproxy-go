@@ -236,6 +236,64 @@ func TestValidateDetailed(t *testing.T) {
 			expectedErrors: 0,
 			errorFields:    []string{},
 		},
+		{
+			name: "enabled_tools and disabled_tools are mutually exclusive",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				Servers: []*ServerConfig{
+					{
+						Name:         "test",
+						Protocol:     "http",
+						URL:          "https://api.example.com/mcp",
+						EnabledTools: []string{"read_file"},
+						DisabledTools: []string{"write_file"},
+					},
+				},
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"mcpServers[0].enabled_tools"},
+		},
+		{
+			name: "enabled_tools alone is valid",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				Servers: []*ServerConfig{
+					{
+						Name:         "test",
+						Protocol:     "http",
+						URL:          "https://api.example.com/mcp",
+						EnabledTools: []string{"read_file", "list_dir"},
+					},
+				},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
+		{
+			name: "disabled_tools alone is valid",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				Servers: []*ServerConfig{
+					{
+						Name:          "test",
+						Protocol:      "http",
+						URL:           "https://api.example.com/mcp",
+						DisabledTools: []string{"delete_file", "execute_code"},
+					},
+				},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
 	}
 
 	for _, tt := range tests {

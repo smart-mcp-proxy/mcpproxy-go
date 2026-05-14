@@ -497,6 +497,13 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
 	}
 
+	// Sync enabled_tools / disabled_tools from server config into BBolt
+	if err := r.applyConfigToolFilter(serverName, newTools); err != nil {
+		r.logger.Warn("Failed to apply config tool filter",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+
 	// Query existing tools from the index
 	existingTools, err := r.indexManager.GetToolsByServer(serverName)
 	if err != nil {

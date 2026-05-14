@@ -239,7 +239,9 @@ type ServerConfig struct {
 	// when the server is configured with both Command and an HTTP/SSE URL — i.e.,
 	// mcpproxy starts the process AND connects via network. Stdio servers ignore
 	// this field. Zero or unset → 30s default.
-	LauncherWaitTimeout Duration `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
+	LauncherWaitTimeout Duration  `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
+	EnabledTools        []string  `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
+	DisabledTools       []string  `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -1009,6 +1011,14 @@ func (c *Config) ValidateDetailed() []ValidationError {
 
 		// Note: OAuth configuration is optional. client_id is optional (uses Dynamic Client Registration RFC 7591 if empty).
 		// ClientSecret can be a secret reference, so we don't validate it as empty.
+
+		// enabled_tools and disabled_tools are mutually exclusive
+		if len(server.EnabledTools) > 0 && len(server.DisabledTools) > 0 {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".enabled_tools",
+				Message: "enabled_tools and disabled_tools are mutually exclusive; use one or the other",
+			})
+		}
 	}
 
 	// Validate DataDir exists (if specified and not empty).

@@ -921,3 +921,72 @@ func (r *Runtime) emitToolQuarantineEvent(serverName, toolName, action, oldHash,
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolQuarantineChange, payload))
 }
+
+// applyConfigToolFilter syncs the enabled_tools / disabled_tools lists from
+// the server's static config into BBolt ToolApprovalRecord.Disabled flags.
+// It is called from applyDifferentialToolUpdate so the config-declared filter
+// is enforced on every connect / tool-refresh cycle.
+//
+//   - enabled_tools (allowlist): every tool NOT in the list is disabled.
+//   - disabled_tools (denylist): every tool IN the list is disabled; others
+//     are (re-)enabled so a tool removed from the denylist becomes visible.
+//
+// When neither field is set the function is a no-op — no records are written.
+func (r *Runtime) applyConfigToolFilter(serverName string, tools []*config.ToolMetadata) error {
+	if r.storageManager == nil {
+		return nil
+	}
+
+	// Read from the in-memory config snapshot (EnabledTools/DisabledTools are
+	// static declarations, not runtime state — no BBolt read needed).
+	var serverCfg *config.ServerConfig
+	for _, sc := range r.Config().Servers {
+		if sc.Name == serverName {
+			serverCfg = sc
+			break
+		}
+	}
+	if serverCfg == nil {
+		return nil
+	}
+
+	hasAllowList := len(serverCfg.EnabledTools) > 0
+	hasDenyList := len(serverCfg.DisabledTools) > 0
+
+	if !hasAllowList && !hasDenyList {
+		return nil
+	}
+
+	allowSet := make(map[string]bool, len(serverCfg.EnabledTools))
+	for _, t := range serverCfg.EnabledTools {
+		allowSet[t] = true
+	}
+	denySet := make(map[string]bool, len(serverCfg.DisabledTools))
+	for _, t := range serverCfg.DisabledTools {
+		denySet[t] = true
+	}
+
+	for _, tool := range tools {
+		toolName := tool.Name
+		if idx := strings.Index(toolName, ":"); idx != -1 {
+			toolName = toolName[idx+1:]
+		}
+
+		var shouldEnable bool
+		if hasAllowList {
+			shouldEnable = allowSet[toolName]
+		} else {
+			shouldEnable = !denySet[toolName]
+		}
+
+		if _, err := r.setToolEnabledNoEmit(serverName, toolName, shouldEnable, "config"); err != nil {
+			r.logger.Warn("applyConfigToolFilter: failed to set tool enabled state",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.Bool("enabled", shouldEnable),
+				zap.Error(err))
+		}
+	}
+
+	return nil
+}
