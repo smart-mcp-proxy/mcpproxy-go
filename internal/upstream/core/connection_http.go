@@ -251,7 +251,16 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	return nil
 }
 
-// isAuthError checks if error indicates authentication failure (non-OAuth)
+// isAuthError checks if error indicates authentication failure (non-OAuth).
+//
+// The substring list is intentionally narrow: the strategy wrappers
+// ("MCP initialize failed during headers-auth strategy", "no-auth strategy",
+// "SSE headers-auth strategy") contain the literal token "auth", so any
+// substring as permissive as "auth" or "authentication" would misclassify a
+// wrapped transport/parse error (e.g. upstream HTTP 502 → JSON parse failure)
+// as an auth failure and trigger an unwanted OAuth fallback. The patterns
+// below match only genuine HTTP 403 responses and explicit "*failed"/"*failure"
+// phrasings that upstreams emit, never the wrapper text.
 func (c *Client) isAuthError(err error) bool {
 	if err == nil {
 		return false
@@ -264,8 +273,9 @@ func (c *Client) isAuthError(err error) bool {
 
 	errStr := err.Error()
 	return containsAny(errStr, []string{
-		"403", "Forbidden",
-		"authentication", "auth",
+		"403", "Forbidden", "forbidden",
+		"authentication failed", "authentication failure",
+		"authorization failed", "authorization failure",
 	})
 }
 
