@@ -345,7 +345,7 @@ func seedUNKNOWN() {
 		Severity:    SeverityError,
 		UserMessage: "mcpproxy could not classify this failure. Please file a bug report so we can add a specific code.",
 		FixSteps: []FixStep{
-			{Type: FixStepLink, Label: "Report a bug", URL: "https://github.com/smartmcpproxy/mcpproxy-go/issues/new?template=bug_report.md"},
+			{Type: FixStepLink, Label: "Report a bug", URL: "https://github.com/smart-mcp-proxy/mcpproxy-go/issues/new"},
 		},
 		DocsURL: docsURL(UnknownUnclassified),
 	})
