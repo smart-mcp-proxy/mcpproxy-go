@@ -1224,6 +1224,62 @@ func (c *Client) AddServer(ctx context.Context, req *AddServerRequest) (*AddServ
 	return apiResp.Data, nil
 }
 
+// PatchServer issues a partial update against PATCH /api/v1/servers/{name}.
+//
+// The body is sent as raw JSON so callers can include JSON null values
+// for header / env deletion under JSON Merge Patch semantics (RFC 7396).
+// Building the body as `map[string]any{"X": nil}` would round-trip through
+// encoding/json fine, but `map[string]*string` is cleaner for fixed-shape
+// callers that want type safety — both forms are supported because
+// callers pass already-marshaled bytes.
+//
+// Example body shapes:
+//
+//	{"headers": {"X-New": "value"}}                  -- upsert
+//	{"headers": {"X-Stale": null}}                   -- delete
+//	{"headers": {"X-Set": "v", "X-Old": null}}       -- combined
+//	{"env": {"API_KEY": null}, "enabled": true}      -- env delete + enable
+func (c *Client) PatchServer(ctx context.Context, serverName string, body []byte) error {
+	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, serverName)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call patch API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("server '%s' not found", serverName)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var apiResp struct {
+		Success   bool   `json:"success"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return nil
+}
+
 // RemoveServer removes an upstream server via the daemon API.
 func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
 	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, serverName)

@@ -5,6 +5,7 @@ package oauth
 import (
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,19 @@ func RedactHeaders(headers http.Header) map[string]string {
 // tool and the /api/v1/servers REST response. Returns a new map; the input
 // is not mutated. Returns nil for nil input so JSON callers can keep emitting
 // `null` rather than `{}` if they were doing so before.
+//
+// Sensitive header values are replaced with a length-preserving mask of
+// the form `••••<last2> (<N> chars)` — the same format the Web UI and
+// macOS tray apply to display literals. This gives all callers a single
+// uniform representation: clients render whatever string the API hands
+// back, no `***REDACTED***`-vs-`••••XX`-vs-plaintext branching.
+//
+// Carrying the length and last two characters is intentional. They are
+// already exposed indirectly (length via response size analysis, tail
+// via prior history, etc.), they materially help operators identify
+// which token is in use without revealing the secret, and they make the
+// "Convert to secret" affordance work on the UI side because the user
+// can confirm a recognisable suffix before approving.
 func RedactStringHeaders(headers map[string]string) map[string]string {
 	if headers == nil {
 		return nil
@@ -103,12 +117,42 @@ func RedactStringHeaders(headers map[string]string) map[string]string {
 	for key, value := range headers {
 		lowerKey := strings.ToLower(key)
 		if sensitiveHeaders[lowerKey] {
-			redacted[key] = "***REDACTED***"
+			redacted[key] = MaskValue(value)
 		} else {
 			redacted[key] = RedactSensitiveData(value)
 		}
 	}
 	return redacted
+}
+
+// isConfigReference reports whether the given value is already a
+// ${keyring:NAME} or ${env:VAR} reference. These aren't secrets — they
+// are public labels pointing at the actual secret store — so the
+// backend masker passes them through unchanged.
+func isConfigReference(v string) bool {
+	return strings.HasPrefix(v, "${keyring:") || strings.HasPrefix(v, "${env:")
+}
+
+// MaskValue renders a string secret as `••••<last2> (<N> chars)` for
+// human display. Returns "(empty)" for empty input, a 4-bullet preview
+// for values up to 4 characters (where revealing the last two would
+// leak too much), and `${keyring:NAME}` / `${env:VAR}` reference strings
+// pass through unchanged because they are labels, not secrets — the UI
+// renders them as keyring chips and a masked reference would defeat
+// that detection. The format mirrors what the Web UI / macOS tray apply
+// client-side for env vars and other non-redacted-by-backend literals,
+// so a single rendering path produces a uniform look.
+func MaskValue(v string) string {
+	if v == "" {
+		return "(empty)"
+	}
+	if isConfigReference(v) {
+		return v
+	}
+	if len(v) <= 4 {
+		return "••••"
+	}
+	return "••••" + v[len(v)-2:] + " (" + strconv.Itoa(len(v)) + " chars)"
 }
 
 // RedactURL redacts sensitive query parameters from a URL string.

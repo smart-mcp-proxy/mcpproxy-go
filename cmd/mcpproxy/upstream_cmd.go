@@ -121,6 +121,39 @@ Examples:
 		RunE: runUpstreamAddJSON,
 	}
 
+	upstreamPatchCmd = &cobra.Command{
+		Use:   "patch <name>",
+		Short: "Update headers / env on an existing upstream server",
+		Long: `Update HTTP headers and stdio environment variables on an existing upstream server.
+
+The PATCH endpoint uses JSON Merge Patch semantics: keys you specify are
+upserted, keys you delete with -remove flags are explicitly removed, and
+every other key on the stored config is preserved. So you can safely
+rotate a single header without seeing or touching the rest — including
+sensitive values the backend redacts from list / inspect responses.
+
+Examples:
+  # rotate the Authorization header on the synapbus server
+  mcpproxy upstream patch synapbus --header "Authorization: Bearer new-token"
+
+  # add a custom header without disturbing existing ones
+  mcpproxy upstream patch synapbus --header "X-Trace: on"
+
+  # remove a header
+  mcpproxy upstream patch synapbus --header-remove "X-Stale"
+
+  # set + remove in a single round-trip
+  mcpproxy upstream patch synapbus --header "X-New: v" --header-remove "X-Old"
+
+  # update env vars on a stdio server
+  mcpproxy upstream patch obsidian-pilot --env "LOG_LEVEL=debug" --env-remove "OLD_VAR"
+
+Flags are repeatable. The corresponding null in the JSON Merge Patch body
+is constructed automatically — you never have to think about wire format.`,
+		Args: cobra.ExactArgs(1),
+		RunE: runUpstreamPatch,
+	}
+
 	upstreamInspectCmd = &cobra.Command{
 		Use:   "inspect <server-name>",
 		Short: "Inspect tool approval status for a server",
@@ -248,6 +281,12 @@ Examples:
 	// Inspect command flags
 	upstreamInspectTool string
 
+	// Patch command flags
+	upstreamPatchHeaders      []string
+	upstreamPatchHeaderRemove []string
+	upstreamPatchEnvs         []string
+	upstreamPatchEnvRemove    []string
+
 	// Import command flags
 	upstreamImportServer       string
 	upstreamImportFormat       string
@@ -272,6 +311,7 @@ func init() {
 	upstreamCmd.AddCommand(upstreamAddCmd)
 	upstreamCmd.AddCommand(upstreamRemoveCmd)
 	upstreamCmd.AddCommand(upstreamAddJSONCmd)
+	upstreamCmd.AddCommand(upstreamPatchCmd)
 	upstreamCmd.AddCommand(upstreamInspectCmd)
 	upstreamCmd.AddCommand(upstreamApproveCmd)
 	upstreamCmd.AddCommand(upstreamImportCmd)
@@ -315,6 +355,12 @@ func init() {
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
 	upstreamRemoveCmd.Flags().BoolVarP(&upstreamRemoveYes, "y", "y", false, "Skip confirmation prompt (short form)")
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveIfExists, "if-exists", false, "Don't error if server doesn't exist")
+
+	// Patch command flags
+	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchHeaders, "header", nil, "HTTP header to upsert in 'Name: value' format (repeatable)")
+	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchHeaderRemove, "header-remove", nil, "HTTP header name to delete (repeatable)")
+	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvs, "env", nil, "Environment variable to upsert in KEY=value format (repeatable)")
+	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvRemove, "env-remove", nil, "Environment variable name to delete (repeatable)")
 
 	// Inspect command flags
 	upstreamInspectCmd.Flags().StringVar(&upstreamInspectTool, "tool", "", "Show details for a specific tool")
@@ -2004,5 +2050,127 @@ func applyImportedServersConfigMode(imported []*configimport.ImportedServer, glo
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
+	return nil
+}
+
+// runUpstreamPatch handles the 'upstream patch' command. Translates the
+// repeatable --header / --env / --header-remove / --env-remove flags into
+// a JSON Merge Patch (RFC 7396) body and POSTs it to PATCH /api/v1/servers/{name}.
+//
+// Upserts encode as {"headers": {"X-Foo": "bar"}}; deletes encode as
+// {"headers": {"X-Stale": null}}. Both shapes go through encoding/json
+// (`map[string]*string`) where a nil pointer renders as the literal
+// `null` token — verified by the backend's PATCH tests.
+func runUpstreamPatch(_ *cobra.Command, args []string) error {
+	serverName := strings.TrimSpace(args[0])
+	if serverName == "" {
+		return fmt.Errorf("server name is required")
+	}
+
+	if len(upstreamPatchHeaders) == 0 && len(upstreamPatchHeaderRemove) == 0 &&
+		len(upstreamPatchEnvs) == 0 && len(upstreamPatchEnvRemove) == 0 {
+		return fmt.Errorf("at least one of --header / --header-remove / --env / --env-remove must be specified")
+	}
+
+	headers := map[string]*string{}
+	for _, h := range upstreamPatchHeaders {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid --header format: %q (expected 'Name: value')", h)
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if key == "" {
+			return fmt.Errorf("invalid --header: empty header name in %q", h)
+		}
+		headers[key] = &val
+	}
+	for _, k := range upstreamPatchHeaderRemove {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			return fmt.Errorf("invalid --header-remove: empty name")
+		}
+		if _, dupe := headers[key]; dupe {
+			return fmt.Errorf("--header and --header-remove for %q conflict; pick one", key)
+		}
+		headers[key] = nil // JSON Merge Patch: null = delete
+	}
+
+	envs := map[string]*string{}
+	for _, e := range upstreamPatchEnvs {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid --env format: %q (expected 'KEY=value')", e)
+		}
+		key := strings.TrimSpace(parts[0])
+		val := parts[1]
+		if key == "" {
+			return fmt.Errorf("invalid --env: empty key in %q", e)
+		}
+		envs[key] = &val
+	}
+	for _, k := range upstreamPatchEnvRemove {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			return fmt.Errorf("invalid --env-remove: empty name")
+		}
+		if _, dupe := envs[key]; dupe {
+			return fmt.Errorf("--env and --env-remove for %q conflict; pick one", key)
+		}
+		envs[key] = nil
+	}
+
+	body := map[string]interface{}{}
+	if len(headers) > 0 {
+		body["headers"] = headers
+	}
+	if len(envs) > 0 {
+		body["env"] = envs
+	}
+
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal patch body: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI), 15*time.Second)
+	defer cancel()
+
+	globalConfig, err := loadUpstreamConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first; the `patch` subcommand requires a live backend so configuration changes are applied with full deep-merge semantics and propagated to running upstream connections immediately. Editing the config file by hand only works while the daemon is offline")
+	}
+	logger, err := createUpstreamLogger("warn")
+	if err != nil {
+		return fmt.Errorf("failed to create logger: %w", err)
+	}
+	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
+	client := cliclient.NewClient(socketPath, logger.Sugar())
+
+	if err := client.PatchServer(ctx, serverName, bodyBytes); err != nil {
+		return err
+	}
+
+	fmt.Printf("✅ Patched %s", serverName)
+	parts := []string{}
+	if n := len(upstreamPatchHeaders); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d header(s) set", n))
+	}
+	if n := len(upstreamPatchHeaderRemove); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d header(s) removed", n))
+	}
+	if n := len(upstreamPatchEnvs); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d env var(s) set", n))
+	}
+	if n := len(upstreamPatchEnvRemove); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d env var(s) removed", n))
+	}
+	if len(parts) > 0 {
+		fmt.Printf(": %s", strings.Join(parts, ", "))
+	}
+	fmt.Println()
 	return nil
 }

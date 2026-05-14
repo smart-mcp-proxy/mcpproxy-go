@@ -274,6 +274,87 @@ func TestListServers(t *testing.T) {
 		require.Len(t, servers, 1)
 		assert.Nil(t, servers[0].SecurityScan)
 	})
+
+	// Verifies that headers and env extracted from the runtime map make it
+	// onto contracts.Server in both the typed (map[string]string, in-process
+	// StateView path) and generic (map[string]interface{}, JSON-round-trip
+	// path) shapes. Without this, the Web UI / macOS Edit Config screens see
+	// no headers and cannot round-trip configuration.
+	t.Run("headers and env (typed shape)", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":       "synapbus",
+				"name":     "synapbus",
+				"protocol": "streamable-http",
+				"enabled":  true,
+				"headers": map[string]string{
+					"Authorization": "Bearer abc123",
+					"X-Trace":       "on",
+				},
+				"env": map[string]string{
+					"LOG_LEVEL": "debug",
+				},
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		s := servers[0]
+		assert.Equal(t, "Bearer abc123", s.Headers["Authorization"])
+		assert.Equal(t, "on", s.Headers["X-Trace"])
+		assert.Equal(t, "debug", s.Env["LOG_LEVEL"])
+	})
+
+	t.Run("headers and env (generic shape from JSON round-trip)", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":       "synapbus",
+				"name":     "synapbus",
+				"protocol": "streamable-http",
+				"enabled":  true,
+				"headers": map[string]interface{}{
+					"Authorization": "Bearer abc123",
+				},
+				"env": map[string]interface{}{
+					"LOG_LEVEL": "debug",
+				},
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		s := servers[0]
+		assert.Equal(t, "Bearer abc123", s.Headers["Authorization"])
+		assert.Equal(t, "debug", s.Env["LOG_LEVEL"])
+	})
+
+	t.Run("missing headers and env stay nil", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":       "plain",
+				"name":     "plain",
+				"protocol": "stdio",
+				"enabled":  true,
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		require.Len(t, servers, 1)
+		assert.Nil(t, servers[0].Headers)
+		assert.Nil(t, servers[0].Env)
+	})
 }
 
 // fakeScanEnricher records which servers were asked about and returns a

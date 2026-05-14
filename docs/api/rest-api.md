@@ -117,6 +117,36 @@ Get server status and statistics.
 
 List all upstream servers with unified health status.
 
+##### Header redaction and the mask format
+
+By default, sensitive header values (`Authorization`, `X-API-Key`, `Cookie`,
+`Set-Cookie`, etc.) are replaced with a length-preserving mask of the form
+`••••<last2> (<N> chars)` before serialization. This applies to:
+
+- `GET /api/v1/servers` and its single-server children
+- The `/events` SSE `servers.changed` payloads
+- The `upstream_servers list` MCP tool
+
+The mask preserves enough information to identify which token is in use
+(the last two characters + total length) while keeping the secret out of
+the response. Values that are already secret references — `${keyring:NAME}`
+or `${env:VAR}` — pass through unchanged because they're labels, not
+secrets.
+
+Setting `reveal_secret_headers: true` in
+[`mcp_config.json`](../configuration/config-file.md) disables redaction on
+all three channels. This is **not normally needed**: the Web UI / macOS
+tray / CLI can edit, delete, and convert-to-secret without ever seeing
+the plaintext, because the PATCH endpoint deep-merges (omitted keys are
+preserved) and the [`config-to-secret`](#post-apiv1serversnameconfig-to-secret)
+endpoint reads the real value server-side. Flip the flag only if you
+need to inspect a raw value through the API for debugging.
+
+The MCP `upstream_servers` tool was the original motivator for redaction
+(see [PR #425](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/425)) —
+a prompt-injected agent could otherwise read another upstream's PAT via
+`upstream_servers list`.
+
 **Response:**
 ```json
 {
@@ -166,6 +196,118 @@ List all upstream servers with unified health status.
 | `summary` | string | Human-readable status message |
 | `detail` | string | Optional additional context about the status |
 | `action` | string | Suggested remediation: `login`, `restart`, `enable`, `approve`, `view_logs`, or empty |
+
+#### PATCH /api/v1/servers/{name}
+
+Partial update of an existing upstream server. All request fields are optional;
+omitted fields are preserved as-is.
+
+The map-typed fields `headers` and `env` follow **JSON Merge Patch
+([RFC 7396](https://www.rfc-editor.org/rfc/rfc7396))** semantics:
+
+| Value in patch body | Effect on stored map |
+|---|---|
+| key present with a non-null string value | upsert (add or replace that key) |
+| key present with JSON `null` | delete that key |
+| key absent from the patch body | preserve as-is |
+
+This is the same convention the MCP `upstream_servers patch` tool uses. It
+lets the Web UI / macOS tray / CLI send a minimal diff — keys that match
+the server's current masked view (`••••<last2> (<N> chars)` — see
+[Header redaction](#header-redaction-and-the-mask-format) below) simply stay
+out of the patch body, so the real stored value is never overwritten by the
+mask string.
+
+**Request body** ([`AddServerRequest`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/internal/httpapi/server.go) — all fields optional):
+
+```json
+{
+  "url": "https://api.example.com/mcp",
+  "command": "uvx",
+  "args": ["mcp-server-foo"],
+  "env": {"API_KEY": "new-value", "OLD_VAR": null},
+  "headers": {"X-Trace": "on", "X-Stale": null},
+  "working_dir": "/path/to/dir",
+  "protocol": "http",
+  "enabled": true,
+  "quarantined": false,
+  "isolation": {"enabled": true, "image": "node:20"}
+}
+```
+
+**Examples:**
+
+```bash
+# Rotate a Bearer token without touching anything else on the server
+curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"headers":{"Authorization":"Bearer new-token"}}' \
+  http://127.0.0.1:8080/api/v1/servers/synapbus
+
+# Remove a stale header (the JSON null is the delete signal)
+curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"headers":{"X-Stale":null}}' \
+  http://127.0.0.1:8080/api/v1/servers/synapbus
+
+# Upsert one env var and delete another in a single round-trip
+curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"env":{"LOG_LEVEL":"debug","OBSOLETE":null}}' \
+  http://127.0.0.1:8080/api/v1/servers/obsidian-pilot
+```
+
+**Notes:**
+
+- Empty string `""` is **set-to-empty**, NOT delete. JSON Merge Patch is
+  explicit about this — only the JSON `null` token deletes.
+- Boolean fields (`enabled`, `quarantined`, `reconnect_on_use`) use
+  pointer-style semantics: absent = preserve, present = explicit value.
+
+#### POST /api/v1/servers/{name}/config-to-secret
+
+Atomically move a header or env value out of `mcp_config.json` and into the
+OS keyring. The backend reads the real value from the loaded config, stores
+it in the keyring under `secret_name`, and rewrites the config field with
+`${keyring:<secret_name>}`. The client never needs to possess the plaintext
+— useful when the API redacts sensitive header values on the read path.
+
+**Request body:**
+
+```json
+{
+  "scope": "header",
+  "key": "Authorization",
+  "secret_name": "synapbus-auth"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `scope` | string | `header` or `env` |
+| `key` | string | The key on the server's headers / env map |
+| `secret_name` | string | Name to store the value under in the OS keyring |
+
+**Response (200 OK):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "message": "header \"Authorization\" on \"synapbus\" now references keyring secret \"synapbus-auth\"",
+    "reference": "${keyring:synapbus-auth}"
+  }
+}
+```
+
+**Failure cases:**
+
+| Status | Cause |
+|---|---|
+| 400 | Missing `scope` / `key` / `secret_name`, invalid scope, value is already a `${keyring:…}` or `${env:…}` reference, or value is empty |
+| 404 | Server or key not found |
+| 500 | Secret resolver unavailable, keyring store failed, or config update failed |
+
+This endpoint is what the Web UI and macOS tray "Convert to secret" button
+calls. It works even for headers the API redacts (the backend has the real
+value on disk).
 
 #### POST /api/v1/servers/{name}/enable
 

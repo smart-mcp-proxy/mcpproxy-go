@@ -53,6 +53,16 @@ struct ServerDetailView: View {
     @State private var editArgs = ""
     @State private var editWorkingDir = ""
     @State private var editEnvVars = ""
+    /// HTTP servers only — KEY=VALUE per line. Pre-populated from
+    /// `server.headers` on enter-edit. The backend masks sensitive
+    /// header values on the read path (see oauth.MaskValue) so the
+    /// textarea may show e.g. `Authorization=••••59 (71 chars)`.
+    /// saveEdits() diffs the parsed map against `server.headers` and
+    /// only sends changed/added/removed keys to the deep-merge PATCH
+    /// endpoint — so leaving the masked line untouched preserves the
+    /// real stored value, and editing/deleting/adding behaves
+    /// intuitively.
+    @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
     @State private var editDockerIsolation = false
@@ -64,6 +74,15 @@ struct ServerDetailView: View {
     @State private var editIsolationWorkingDir = ""
     @State private var isSavingEdit = false
     @State private var editError: String?
+
+    /// State for the "Convert to secret" sheet shown when the user picks
+    /// the lock icon next to a literal header / env value. Mirrors the
+    /// Web UI flow: prompt for a secret name, POST to /api/v1/secrets,
+    /// then PATCH the server replacing the value with `${keyring:NAME}`.
+    @State private var convertSheet: ConvertToSecretContext?
+    @State private var convertSheetSecretName: String = ""
+    @State private var convertSheetBusy: Bool = false
+    @State private var convertSheetError: String?
 
     // Logs auto-refresh timer
     @State private var logRefreshTimer: Timer?
@@ -86,6 +105,9 @@ struct ServerDetailView: View {
             case .logs: logsTab
             case .config: configTab
             }
+        }
+        .sheet(item: $convertSheet) { ctx in
+            convertToSecretSheet(ctx)
         }
     }
 
@@ -547,6 +569,25 @@ struct ServerDetailView: View {
                                 configRow(label: "URL", value: server.url ?? "N/A")
                             }
                         }
+                        // Headers section: visible whenever we have any headers
+                        // to show OR we're in edit mode (so users can add new
+                        // headers on a server that started without any).
+                        if isEditing || (server.headers?.isEmpty == false) {
+                            configSection(title: "Headers") {
+                                if isEditing {
+                                    configEditRow(
+                                        label: "KEY=VALUE per line",
+                                        text: $editHeaders,
+                                        placeholder: "Authorization=Bearer abc123\nX-API-Key=${keyring:my-key}",
+                                        multiline: true
+                                    )
+                                } else if let headers = server.headers {
+                                    ForEach(headers.keys.sorted(), id: \.self) { key in
+                                        kvRow(scope: .header, key: key, value: headers[key] ?? "")
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if server.protocol == "stdio" {
@@ -567,9 +608,15 @@ struct ServerDetailView: View {
                         }
                     }
 
-                    if isEditing {
+                    if isEditing || (server.env?.isEmpty == false) {
                         configSection(title: "Environment Variables") {
-                            configEditRow(label: "KEY=VALUE per line", text: $editEnvVars, placeholder: "API_KEY=abc123\nDEBUG=true", multiline: true)
+                            if isEditing {
+                                configEditRow(label: "KEY=VALUE per line", text: $editEnvVars, placeholder: "API_KEY=abc123\nDEBUG=true", multiline: true)
+                            } else if let env = server.env {
+                                ForEach(env.keys.sorted(), id: \.self) { key in
+                                    kvRow(scope: .env, key: key, value: env[key] ?? "")
+                                }
+                            }
                         }
                     }
 
@@ -936,7 +983,18 @@ struct ServerDetailView: View {
         editCommand = server.command ?? ""
         editArgs = (server.args ?? []).joined(separator: "\n")
         editWorkingDir = server.workingDir ?? ""
-        editEnvVars = "" // env vars not in ServerStatus model, would need config API
+        // Pre-populate env and headers textareas from the server payload
+        // so users entering edit mode start from the existing config
+        // rather than from blank. Both maps emit one KEY=VALUE per line,
+        // sorted by key for stable rendering.
+        editEnvVars = (server.env ?? [:])
+            .sorted(by: { $0.key < $1.key })
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "\n")
+        editHeaders = (server.headers ?? [:])
+            .sorted(by: { $0.key < $1.key })
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "\n")
         editEnabled = server.enabled
         editQuarantined = server.quarantined
         editDockerIsolation = server.isolation?.enabled ?? false
@@ -981,18 +1039,26 @@ struct ServerDetailView: View {
         let wd = editWorkingDir.trimmingCharacters(in: .whitespaces)
         if !wd.isEmpty { updates["working_dir"] = wd }
 
-        // Parse env vars
-        if !editEnvVars.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var env: [String: String] = [:]
-            for line in editEnvVars.components(separatedBy: "\n") {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.isEmpty { continue }
-                let parts = trimmed.components(separatedBy: "=")
-                if parts.count >= 2 {
-                    env[parts[0].trimmingCharacters(in: .whitespaces)] = parts.dropFirst().joined(separator: "=")
-                }
+        // Parse env vars. The textarea is the user's authoritative copy on
+        // save — sending an empty map clears all env vars on the backend
+        // (matches the existing add-server flow). We pass it through
+        // unconditionally so deletes round-trip.
+        updates["env"] = parseKVTextarea(editEnvVars)
+
+        // Compute JSON Merge Patch (RFC 7396) diffs for env and headers.
+        // The backend treats each value in the map as: non-null → upsert,
+        // `null` → delete, omitted key → preserve. So we emit a single
+        // dict whose entries are either real strings or `NSNull()`
+        // sentinels. JSONSerialization renders NSNull as the literal
+        // `null` token — see the SwiftEncoder unit test that pins this
+        // invariant in case a future refactor swaps the encoder.
+        if let envPatch = diffKVMap(original: server.env ?? [:], next: parseKVTextarea(editEnvVars)) {
+            updates["env"] = envPatch
+        }
+        if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
+            if let hdrPatch = diffKVMap(original: server.headers ?? [:], next: parseKVTextarea(editHeaders)) {
+                updates["headers"] = hdrPatch
             }
-            if !env.isEmpty { updates["env"] = env }
         }
 
         // Boolean toggles
@@ -1080,6 +1146,238 @@ struct ServerDetailView: View {
     private func stopLogRefresh() {
         logRefreshTimer?.invalidate()
         logRefreshTimer = nil
+    }
+
+    // MARK: - Convert-to-secret sheet
+
+    /// Identifiable context for the SwiftUI .sheet(item:) modifier — keeps
+    /// the current convert-target alongside the sheet state. `scope` picks
+    /// between the Headers and Environment Variables maps; `key` is the
+    /// map key whose literal value we're about to move into the keyring.
+    struct ConvertToSecretContext: Identifiable {
+        let id = UUID()
+        let scope: Scope
+        let key: String
+        let value: String
+        enum Scope: String { case header, env }
+    }
+
+    /// Suggest a keyring secret name derived from server.name + key.
+    /// Lowercased, alphanumeric + hyphens, capped at 64 chars — same
+    /// convention as the Web UI / Secrets view.
+    private func suggestedSecretName(for key: String) -> String {
+        let base = "\(server.name)-\(key)"
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+        let scrubbed = base.lowercased().unicodeScalars
+            .map { allowed.contains($0) ? Character($0) : "-" }
+        var out = String(scrubbed)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        if out.count > 64 { out = String(out.prefix(64)) }
+        return out
+    }
+
+    private func openConvertSheet(scope: ConvertToSecretContext.Scope, key: String, value: String) {
+        convertSheetSecretName = suggestedSecretName(for: key)
+        convertSheetBusy = false
+        convertSheetError = nil
+        convertSheet = ConvertToSecretContext(scope: scope, key: key, value: value)
+    }
+
+    @ViewBuilder
+    private func convertToSecretSheet(_ ctx: ConvertToSecretContext) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Convert to secret")
+                .font(.scaled(.title3, scale: fontScale).bold())
+            Text("Store the value of \(Text(ctx.key).font(.scaledMonospaced(.body, scale: fontScale))) in the OS keyring and replace it with a `${keyring:NAME}` reference. The server config will then no longer contain the literal value.")
+                .font(.scaled(.subheadline, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Secret name").font(.scaled(.subheadline, scale: fontScale)).foregroundStyle(.secondary)
+                TextField("e.g. \(server.name)-token", text: $convertSheetSecretName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .disabled(convertSheetBusy)
+                Text("Will be referenced as ${keyring:\(convertSheetSecretName.isEmpty ? "NAME" : convertSheetSecretName)}")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let err = convertSheetError {
+                Text(err)
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { convertSheet = nil }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(convertSheetBusy)
+                Button(convertSheetBusy ? "Converting…" : "Convert") {
+                    Task { await performConvertToSecret(ctx) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(convertSheetBusy || convertSheetSecretName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private func performConvertToSecret(_ ctx: ConvertToSecretContext) async {
+        guard let client = apiClient else { return }
+        let name = convertSheetSecretName.trimmingCharacters(in: .whitespaces)
+        if name.isEmpty { return }
+        convertSheetBusy = true
+        defer { convertSheetBusy = false }
+        do {
+            // Atomic server-side conversion: the backend reads the real
+            // value from the loaded config (so this works even when the
+            // value the user sees is a redacted mask string), stores it
+            // in the OS keyring, and rewrites the config field with the
+            // `${keyring:<name>}` reference. One round trip, one
+            // failure surface.
+            try await client.convertConfigToSecret(
+                serverName: server.name,
+                scope: ctx.scope == .header ? "header" : "env",
+                key: ctx.key,
+                secretName: name
+            )
+            await refreshServer()
+            await MainActor.run { convertSheet = nil }
+        } catch {
+            await MainActor.run {
+                convertSheetError = "Convert failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Headers + Env per-row view (read-only mode)
+
+    /// Render a single key/value entry with the appropriate affordances:
+    ///  - keyring/env references render as a chip with no actions.
+    ///  - literal values render masked, with a 🔒 "Convert to secret"
+    ///    button next to them.
+    ///  - the backend redaction sentinel renders verbatim so the user
+    ///    knows to flip `reveal_secret_headers` in their config.
+    @ViewBuilder
+    private func kvRow(scope: ConvertToSecretContext.Scope, key: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(key)
+                .font(.scaled(.subheadline, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .frame(width: 140, alignment: .trailing)
+
+            if value.hasPrefix("${keyring:") || value.hasPrefix("${env:") {
+                Label(value, systemImage: "key.fill")
+                    .font(.scaledMonospaced(.caption, scale: fontScale))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.15))
+                    .clipShape(Capsule())
+                Spacer()
+            } else {
+                Text(maskedHeaderValue(value))
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .textSelection(.enabled)
+
+                // Convert-to-secret is always available on non-empty
+                // values. The flow hits the backend's
+                // /api/v1/servers/{name}/config-to-secret endpoint,
+                // which atomically reads the real value from the loaded
+                // config (so it works even when the API redacts what we
+                // see), stores it in keyring, and rewrites the field.
+                if !value.isEmpty {
+                    Button {
+                        openConvertSheet(scope: scope, key: key, value: value)
+                    } label: {
+                        Label("Convert to secret", systemImage: "lock.fill")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Store this value in the OS keyring and replace it with a ${keyring:…} reference")
+                }
+                Spacer()
+            }
+        }
+    }
+
+    // MARK: - Headers + Env helpers
+
+    /// Diff a new key/value map against the original (e.g. `server.headers`
+    /// as returned by the API, which may contain backend-masked values
+    /// like `••••59 (71 chars)` for sensitive keys). Returns a single
+    /// JSON Merge Patch dict (RFC 7396): upserts map to their new string
+    /// value, deletes map to `NSNull()`, unchanged keys are omitted
+    /// entirely. Returns `nil` when the maps are identical and no patch
+    /// is needed.
+    ///
+    /// `[String: Any]` rather than `[String: Any?]` is intentional —
+    /// JSONSerialization treats absent keys as omitted, NSNull entries as
+    /// literal JSON `null`. If we used `[String: String?]` and the default
+    /// `JSONEncoder`, nil values would be silently dropped from the wire
+    /// payload and deletes would never reach the backend. The
+    /// MergePatchEncodingTests unit tests pin this contract.
+    ///
+    /// Subtle invariant: when the user leaves the textarea line for a
+    /// backend-masked key untouched, `next[k] == "••••59 (71 chars)" ==
+    /// original[k]` — the key stays out of the diff, the backend
+    /// preserves the real stored value, and the mask string never
+    /// round-trips as a "new value" to be persisted.
+    private func diffKVMap(original: [String: String], next: [String: String]) -> [String: Any]? {
+        var patch: [String: Any] = [:]
+        for (k, v) in next {
+            if original[k] != v {
+                patch[k] = v
+            }
+        }
+        for k in original.keys {
+            if next[k] == nil {
+                patch[k] = NSNull()
+            }
+        }
+        return patch.isEmpty ? nil : patch
+    }
+
+    /// Parse a "KEY=VALUE per line" textarea (used for both env and
+    /// headers) into a map. Empty lines are dropped; lines without `=`
+    /// are dropped silently — matching the existing env-parsing behaviour
+    /// on this view. Returns an empty map when the textarea is empty so
+    /// callers can treat the result as the authoritative new state.
+    private func parseKVTextarea(_ text: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            let parts = trimmed.components(separatedBy: "=")
+            guard parts.count >= 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            if key.isEmpty { continue }
+            out[key] = parts.dropFirst().joined(separator: "=")
+        }
+        return out
+    }
+
+    /// Render a header / env value safely in view mode. Keyring / env
+    /// references pass through as-is (they're already labels, not
+    /// secrets). Literal values are masked to `••••<last2> (<N> chars)`
+    /// so a casual onlooker can see the field IS set without exposing
+    /// the secret. The backend now emits this exact format for sensitive
+    /// headers it redacts on the read path (see oauth.MaskValue), so
+    /// the mask is idempotent: re-masking an already-masked string
+    /// returns it unchanged.
+    private func maskedHeaderValue(_ value: String) -> String {
+        if value.hasPrefix("${keyring:") || value.hasPrefix("${env:") { return value }
+        if value.isEmpty { return "(empty)" }
+        if value.hasPrefix("••••") { return value }
+        if value.count <= 4 { return "••••" }
+        let tail = value.suffix(2)
+        return "••••\(tail) (\(value.count) chars)"
     }
 }
 

@@ -109,12 +109,21 @@ components:
         reveal_secret_headers:
           description: |-
             RevealSecretHeaders, when true, disables the redaction of sensitive
-            header values (Authorization, X-API-Key, Cookie, …) in responses from
-            the `upstream_servers` MCP tool and the `/api/v1/servers` REST API.
+            header values (Authorization, X-API-Key, Cookie, …) in responses
+            from the `upstream_servers` MCP tool, the `/api/v1/servers` REST
+            API, and the SSE event stream.
+
             Default false — sensitive header values are surfaced as
-            `***REDACTED***` so an MCP agent cannot read Bearer tokens / API keys
-            out of another upstream's config. Set to true if a downstream tool
-            needs the raw values (e.g. a UI that round-trips PUT replaces).
+            `***REDACTED***` so an MCP agent cannot read Bearer tokens / API
+            keys out of another upstream's config (PR #425).
+
+            The Web UI / macOS tray edit forms work without seeing the real
+            values: PATCH /api/v1/servers/{id} deep-merges (omitted keys are
+            preserved, see `headers_remove` / `env_remove` for explicit
+            deletes), so clients compute a diff and only send the keys that
+            actually changed. Redacted-but-unchanged values never round-trip
+            — the backend keeps the real string. Set this to true if a
+            downstream tool genuinely needs raw values in the response.
           type: boolean
         routing_mode:
           description: |-
@@ -3447,6 +3456,57 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Partially update an upstream server
+      tags:
+      - servers
+  /api/v1/servers/{id}/config-to-secret:
+    post:
+      description: Atomically reads the real value from the server config, stores
+        it in the OS keyring, and rewrites the config field to `${keyring:<name>}`.
+        Unblocks the UI's Convert-to-secret affordance for values the API redacts
+        on the read path.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
+          description: Secret stored, config updated with reference
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad scope/key/secret_name, or value is already a reference
+            / empty
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server or key not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Secret resolver or config update failed
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Convert a header / env value to a keyring secret
       tags:
       - servers
   /api/v1/servers/{id}/disable:

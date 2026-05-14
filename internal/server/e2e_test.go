@@ -2382,13 +2382,18 @@ func TestE2E_PatchDeepMergesEnvAndHeaders(t *testing.T) {
 
 	// CRITICAL: Verify existing headers are preserved (deep merge).
 	// The Authorization value is redacted in the API response by default
-	// (see config.RevealSecretHeaders) — we assert the key is still present
-	// to confirm the merge kept it; non-sensitive headers retain their
-	// actual values, which confirms both that merge worked AND that
-	// redaction is scoped to sensitive header names only.
+	// (see config.RevealSecretHeaders) — we assert the key is still
+	// present (confirming the merge kept it) and that the value is the
+	// masked-display format `••••<last2> (<N> chars)` rather than the
+	// plaintext. Non-sensitive headers retain their actual values,
+	// confirming both that merge worked AND that redaction is scoped to
+	// sensitive header names only.
 	headersMap, ok := foundServer["headers"].(map[string]interface{})
 	require.True(t, ok, "Headers should be a map")
-	assert.Equal(t, "***REDACTED***", headersMap["Authorization"], "Authorization should be present (key preserved by merge) but redacted in API output")
+	authVal, _ := headersMap["Authorization"].(string)
+	assert.Contains(t, authVal, "••••", "Authorization should be present and masked")
+	assert.Contains(t, authVal, "chars)", "Authorization mask should include the length suffix")
+	assert.NotContains(t, authVal, "Bearer", "Bearer plaintext must not survive the mask")
 	assert.Equal(t, "custom-value", headersMap["X-Custom"], "X-Custom must be preserved")
 	assert.Equal(t, "new-header-value", headersMap["X-New-Header"], "X-New-Header must be added")
 
@@ -2496,13 +2501,16 @@ func TestE2E_MultipleEnableDisablePreservesConfig(t *testing.T) {
 	assert.Equal(t, "secret", envMap["API_KEY"], "API_KEY must be preserved")
 	assert.Equal(t, "true", envMap["DEBUG"], "DEBUG must be preserved")
 
-	// Verify headers — Authorization is redacted in API output by default
+	// Verify headers — Authorization is masked in API output by default
 	// (config.RevealSecretHeaders defaults to false). The key is still
-	// present, which confirms the underlying merge preserved the value
-	// across the 5 toggles.
+	// present and the value is the masked-display format
+	// `••••<last2> (<N> chars)`, which confirms the underlying merge
+	// preserved the real secret across the 5 toggles.
 	headersMap, ok := foundServer["headers"].(map[string]interface{})
 	require.True(t, ok, "headers should be a map")
-	assert.Equal(t, "***REDACTED***", headersMap["Authorization"], "Authorization key must be preserved across toggles (value redacted in API output)")
+	authVal, _ := headersMap["Authorization"].(string)
+	assert.Contains(t, authVal, "••••", "Authorization key must be preserved across toggles (value masked in API output)")
+	assert.Contains(t, authVal, "chars)", "mask must include length suffix")
 
 	// Verify isolation - in list response, isolation is under docker_isolation.server_isolation
 	dockerIsolation, ok := foundServer["docker_isolation"].(map[string]interface{})

@@ -148,8 +148,11 @@ func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
 
 	authVal := gotServers[0].Headers["Authorization"]
 	contentVal := gotServers[0].Headers["Content-Type"]
-	assert.NotEqual(t, "Bearer secret-token-value", authVal, "Authorization header must be redacted")
-	assert.Contains(t, authVal, "REDACTED")
+	assert.NotEqual(t, "Bearer secret-token-value", authVal, "Authorization header plaintext must not survive")
+	assert.NotContains(t, authVal, "Bearer", "Bearer keyword leaks the secret prefix")
+	assert.NotContains(t, authVal, "secret-token-value", "the secret token must not appear")
+	assert.Contains(t, authVal, "••••", "value should use the masked-display format on the wire")
+	assert.Contains(t, authVal, "chars)", "the masked-display format includes the length suffix")
 	assert.Equal(t, "application/json", contentVal, "Content-Type is not sensitive; must not be redacted")
 }
 

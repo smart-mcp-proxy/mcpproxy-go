@@ -280,6 +280,51 @@ class APIService {
     })
   }
 
+  // patchServer issues a partial update to an existing upstream server. The
+  // backend (handlePatchServer in internal/httpapi/server.go) treats every
+  // request field as optional and preserves anything not supplied, so callers
+  // can send only what they want to change. Passing `headers: {}` clears
+  // headers; omitting the field keeps the existing value.
+  async patchServer(serverName: string, patch: Record<string, unknown>): Promise<APIResponse> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    })
+  }
+
+  // storeSecret stashes a value in the OS keyring under the given name and
+  // returns the ${keyring:<name>} reference string callers can substitute
+  // back into the server config. Kept for legacy callers; the
+  // Headers/Environment Variables "Convert to secret" flow now uses the
+  // atomic convertConfigToSecret() instead.
+  async storeSecret(name: string, value: string): Promise<APIResponse<{ reference?: string }>> {
+    return this.request<{ reference?: string }>('/api/v1/secrets', {
+      method: 'POST',
+      body: JSON.stringify({ name, value, type: 'keyring' }),
+    })
+  }
+
+  // convertConfigToSecret asks the backend to atomically (a) read the real
+  // value of a header / env key from the server config, (b) store it in
+  // the OS keyring under `secretName`, and (c) rewrite the config field
+  // with the `${keyring:<name>}` reference. The client never has to
+  // possess the real value — which matters when the API redacts
+  // sensitive header values on the read path.
+  async convertConfigToSecret(
+    serverName: string,
+    scope: 'header' | 'env',
+    key: string,
+    secretName: string
+  ): Promise<APIResponse<{ reference?: string }>> {
+    return this.request<{ reference?: string }>(
+      `/api/v1/servers/${encodeURIComponent(serverName)}/config-to-secret`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ scope, key, secret_name: secretName }),
+      }
+    )
+  }
+
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
     return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }

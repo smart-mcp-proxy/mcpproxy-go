@@ -164,12 +164,21 @@ type Config struct {
 	Security *SecurityConfig `json:"security,omitempty" mapstructure:"security"`
 
 	// RevealSecretHeaders, when true, disables the redaction of sensitive
-	// header values (Authorization, X-API-Key, Cookie, …) in responses from
-	// the `upstream_servers` MCP tool and the `/api/v1/servers` REST API.
+	// header values (Authorization, X-API-Key, Cookie, …) in responses
+	// from the `upstream_servers` MCP tool, the `/api/v1/servers` REST
+	// API, and the SSE event stream.
+	//
 	// Default false — sensitive header values are surfaced as
-	// `***REDACTED***` so an MCP agent cannot read Bearer tokens / API keys
-	// out of another upstream's config. Set to true if a downstream tool
-	// needs the raw values (e.g. a UI that round-trips PUT replaces).
+	// `***REDACTED***` so an MCP agent cannot read Bearer tokens / API
+	// keys out of another upstream's config (PR #425).
+	//
+	// The Web UI / macOS tray edit forms work without seeing the real
+	// values: PATCH /api/v1/servers/{id} deep-merges (omitted keys are
+	// preserved, see `headers_remove` / `env_remove` for explicit
+	// deletes), so clients compute a diff and only send the keys that
+	// actually changed. Redacted-but-unchanged values never round-trip
+	// — the backend keeps the real string. Set this to true if a
+	// downstream tool genuinely needs raw values in the response.
 	RevealSecretHeaders bool `json:"reveal_secret_headers,omitempty" mapstructure:"reveal-secret-headers"`
 
 	// Server edition multi-user configuration (only meaningful with -tags server)

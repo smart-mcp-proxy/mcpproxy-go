@@ -522,8 +522,9 @@ func (s *Server) setupRoutes() {
 		r.Post("/servers/enable_all", s.handleEnableAll)
 		r.Post("/servers/disable_all", s.handleDisableAll)
 		r.Route("/servers/{id}", func(r chi.Router) {
-			r.Patch("/", s.handlePatchServer)   // Partial update server config
-			r.Delete("/", s.handleRemoveServer) // T002: Remove server
+			r.Patch("/", s.handlePatchServer)                          // Partial update server config
+			r.Delete("/", s.handleRemoveServer)                        // T002: Remove server
+			r.Post("/config-to-secret", s.handleConvertConfigToSecret) // Move a header / env value into OS keyring
 			r.Post("/enable", s.handleEnableServer)
 			r.Post("/disable", s.handleDisableServer)
 			r.Post("/restart", s.handleRestartServer)
@@ -1047,9 +1048,12 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// ListServers) share one site and can't drift out of parity.
 
 		// Redact sensitive header values unless explicitly opted out via
-		// `reveal_secret_headers: true` in config. See config.Config field
-		// for rationale — the same redaction is applied to the
-		// `upstream_servers` MCP tool's list output.
+		// `reveal_secret_headers: true` in config. The Web UI and macOS
+		// tray edit forms work without seeing the real values because
+		// PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved),
+		// so they send only the diff — redacted-but-unchanged values
+		// stay out of the patch and the backend keeps the real string.
+		// See PR #425 for the original threat model.
 		s.redactServerHeaders(serverValues)
 
 		// Dereference stats pointer
@@ -1080,7 +1084,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Enrich with quarantine stats
 	s.enrichServersWithQuarantineStats(servers)
 
-	// See note above the management-service path for rationale.
+	// See note above the management-service path for redaction rationale.
 	s.redactServerHeaders(servers)
 
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
@@ -1093,10 +1097,34 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// flattenNullableMap turns a request-side `map[string]*string` (which uses
+// nil values to signal "delete" under JSON Merge Patch semantics) into the
+// `map[string]string` shape config.ServerConfig stores. Nil entries are
+// dropped — they have no meaning on POST (add) and are handled separately
+// by the deep-merge loop on PATCH.
+func flattenNullableMap(m map[string]*string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, vp := range m {
+		if vp != nil {
+			out[k] = *vp
+		}
+	}
+	return out
+}
+
 // redactServerHeaders walks each server in the slice and replaces sensitive
 // header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
 // Skips redaction entirely when `reveal_secret_headers: true` is set in the
 // loaded config, matching the behaviour of the `upstream_servers` MCP tool.
+//
+// The UI edit-and-save flow works without seeing the real values because
+// PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved), so the
+// client computes a diff and only sends the keys that actually changed.
+// Redacted-but-unchanged values never round-trip — the backend keeps the
+// real string on disk.
 func (s *Server) redactServerHeaders(servers []contracts.Server) {
 	cfg, err := s.controller.GetConfig()
 	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
@@ -1143,19 +1171,42 @@ func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
 	}
 }
 
-// AddServerRequest represents a request to add a new server
+// AddServerRequest represents a request to add a new server.
+//
+// PATCH semantics for the map-typed fields (`headers`, `env`) follow
+// JSON Merge Patch (RFC 7396):
+//   - A key present with a non-null value upserts that key on the
+//     stored map.
+//   - A key present with a JSON null value deletes that key.
+//   - A key absent from the request is preserved as-is.
+//
+// This lets the Web UI / macOS tray edit forms work without seeing
+// the real values of sensitive headers — the backend redacts them on
+// read, the client computes a diff against the redacted state, and
+// only keys that genuinely changed round-trip. Redacted-but-untouched
+// values stay out of the patch entirely, so the backend keeps the
+// real string on disk.
+//
+// The MCP `upstream_servers patch` tool uses the same `null = delete`
+// convention; the two interfaces are now in sync.
+//
+// `map[string]*string` is the canonical Go shape for this: encoding/json
+// decodes a missing key into no map entry, a present non-null value
+// into a non-nil `*string`, and a present `null` into a nil `*string`.
+//
+// POST (add) ignores nil entries — they have no meaning at create time.
 type AddServerRequest struct {
-	Name           string            `json:"name"`
-	URL            string            `json:"url,omitempty"`
-	Command        string            `json:"command,omitempty"`
-	Args           []string          `json:"args,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	Headers        map[string]string `json:"headers,omitempty"`
-	WorkingDir     string            `json:"working_dir,omitempty"`
-	Protocol       string            `json:"protocol,omitempty"`
-	Enabled        *bool             `json:"enabled,omitempty"`
-	Quarantined    *bool             `json:"quarantined,omitempty"`
-	ReconnectOnUse *bool             `json:"reconnect_on_use,omitempty"`
+	Name           string             `json:"name"`
+	URL            string             `json:"url,omitempty"`
+	Command        string             `json:"command,omitempty"`
+	Args           []string           `json:"args,omitempty"`
+	Env            map[string]*string `json:"env,omitempty"`
+	Headers        map[string]*string `json:"headers,omitempty"`
+	WorkingDir     string             `json:"working_dir,omitempty"`
+	Protocol       string             `json:"protocol,omitempty"`
+	Enabled        *bool              `json:"enabled,omitempty"`
+	Quarantined    *bool              `json:"quarantined,omitempty"`
+	ReconnectOnUse *bool              `json:"reconnect_on_use,omitempty"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1263,13 +1314,15 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		quarantined = *req.Quarantined
 	}
 
+	// ADD ignores null entries — `null` is JSON Merge Patch's "delete"
+	// signal which has no meaning on create. Drop nils when flattening.
 	serverConfig := &config.ServerConfig{
 		Name:        req.Name,
 		URL:         req.URL,
 		Command:     req.Command,
 		Args:        req.Args,
-		Env:         req.Env,
-		Headers:     req.Headers,
+		Env:         flattenNullableMap(req.Env),
+		Headers:     flattenNullableMap(req.Headers),
 		WorkingDir:  req.WorkingDir,
 		Protocol:    protocol,
 		Enabled:     enabled,
@@ -1401,12 +1454,44 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		updates.Args = req.Args
 		hasUpdates = true
 	}
+	// PATCH semantics for headers and env follow JSON Merge Patch
+	// (RFC 7396): keys with a non-null value upsert, keys with a null
+	// value delete, omitted keys are preserved. This lets the Web UI /
+	// macOS tray / CLI send a minimal diff so redacted-but-unchanged
+	// values (returned by the GET path via `redactServerHeaders`)
+	// never round-trip through the client.
 	if req.Env != nil {
-		updates.Env = req.Env
+		merged := map[string]string{}
+		if existingSrv != nil {
+			for k, v := range existingSrv.Env {
+				merged[k] = v
+			}
+		}
+		for k, vp := range req.Env {
+			if vp == nil {
+				delete(merged, k)
+			} else {
+				merged[k] = *vp
+			}
+		}
+		updates.Env = merged
 		hasUpdates = true
 	}
 	if req.Headers != nil {
-		updates.Headers = req.Headers
+		merged := map[string]string{}
+		if existingSrv != nil {
+			for k, v := range existingSrv.Headers {
+				merged[k] = v
+			}
+		}
+		for k, vp := range req.Headers {
+			if vp == nil {
+				delete(merged, k)
+			} else {
+				merged[k] = *vp
+			}
+		}
+		updates.Headers = merged
 		hasUpdates = true
 	}
 	if req.WorkingDir != "" {
@@ -1461,6 +1546,165 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, map[string]interface{}{
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
 		"restart_required": true,
+	})
+}
+
+// handleConvertConfigToSecret moves a literal header / env value out of
+// `mcp_config.json` and into the OS keyring, atomically. The client never
+// needs to see the real value — useful when the API redacts sensitive
+// header values on the GET path. The body is:
+//
+//	{"scope": "header" | "env", "key": "Authorization", "secret_name": "synapbus-auth"}
+//
+// On success the server config is updated with the reference string
+// `${keyring:<secret_name>}` and the response carries the same reference
+// so the UI can render the keyring chip immediately without a refetch.
+//
+// @Summary Convert a header / env value to a keyring secret
+// @Description Atomically reads the real value from the server config, stores it in the OS keyring, and rewrites the config field to `${keyring:<name>}`. Unblocks the UI's Convert-to-secret affordance for values the API redacts on the read path.
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} map[string]interface{} "Secret stored, config updated with reference"
+// @Failure 400 {object} contracts.ErrorResponse "Bad scope/key/secret_name, or value is already a reference / empty"
+// @Failure 404 {object} contracts.ErrorResponse "Server or key not found"
+// @Failure 500 {object} contracts.ErrorResponse "Secret resolver or config update failed"
+// @Router /api/v1/servers/{id}/config-to-secret [post]
+func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Request) {
+	serverName := chi.URLParam(r, "id")
+	if serverName == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	var req struct {
+		Scope      string `json:"scope"`
+		Key        string `json:"key"`
+		SecretName string `json:"secret_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Scope != "header" && req.Scope != "env" {
+		s.writeError(w, r, http.StatusBadRequest, `"scope" must be "header" or "env"`)
+		return
+	}
+	if req.Key == "" {
+		s.writeError(w, r, http.StatusBadRequest, `"key" is required`)
+		return
+	}
+	if req.SecretName == "" {
+		s.writeError(w, r, http.StatusBadRequest, `"secret_name" is required`)
+		return
+	}
+
+	// Look up the real value from the current loaded config — the
+	// API-redacted view that the client just saw is not the source of
+	// truth.
+	cfg, err := s.controller.GetConfig()
+	if err != nil || cfg == nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
+		return
+	}
+	var sc *config.ServerConfig
+	for _, c := range cfg.Servers {
+		if c != nil && c.Name == serverName {
+			sc = c
+			break
+		}
+	}
+	if sc == nil {
+		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("server %q not found", serverName))
+		return
+	}
+
+	var value string
+	var present bool
+	if req.Scope == "header" {
+		value, present = sc.Headers[req.Key]
+	} else {
+		value, present = sc.Env[req.Key]
+	}
+	if !present {
+		s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("%s %q not found on server %q", req.Scope, req.Key, serverName))
+		return
+	}
+	if value == "" {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q has no value to store", req.Scope, req.Key))
+		return
+	}
+	if strings.HasPrefix(value, "${keyring:") || strings.HasPrefix(value, "${env:") {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
+		return
+	}
+
+	resolver := s.controller.GetSecretResolver()
+	if resolver == nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Secret resolver not available")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Store first, then patch. If the keyring write fails, the config is
+	// unchanged. If the keyring write succeeds and the patch fails, the
+	// secret is in the keyring under a name that's not yet referenced —
+	// the operator can either delete it or retry. We log the partial
+	// state so it's traceable.
+	ref := secret.Ref{Type: secretTypeKeyring, Name: req.SecretName}
+	if err := resolver.Store(ctx, ref, value); err != nil {
+		s.logger.Error("config-to-secret: keyring store failed",
+			"server", serverName, "scope", req.Scope, "key", req.Key, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("failed to store secret: %v", err))
+		return
+	}
+	referenceStr := fmt.Sprintf("${%s:%s}", secretTypeKeyring, req.SecretName)
+
+	// Apply the swap as a deep-merge PATCH so we don't touch any other
+	// keys on the server. Build the updates map with just the one field
+	// we care about.
+	updates := &config.ServerConfig{Name: serverName}
+	if req.Scope == "header" {
+		merged := map[string]string{}
+		for k, v := range sc.Headers {
+			merged[k] = v
+		}
+		merged[req.Key] = referenceStr
+		updates.Headers = merged
+	} else {
+		merged := map[string]string{}
+		for k, v := range sc.Env {
+			merged[k] = v
+		}
+		merged[req.Key] = referenceStr
+		updates.Env = merged
+	}
+	// Preserve existing bool fields so the partial config doesn't reset them.
+	updates.Enabled = sc.Enabled
+	updates.Quarantined = sc.Quarantined
+	updates.ReconnectOnUse = sc.ReconnectOnUse
+
+	if err := s.controller.UpdateServer(ctx, serverName, updates); err != nil {
+		s.logger.Error("config-to-secret: keyring write succeeded but config update failed; secret is stored but not referenced",
+			"server", serverName, "scope", req.Scope, "key", req.Key, "secret_name", req.SecretName, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("secret stored as %q but config update failed: %v", req.SecretName, err))
+		return
+	}
+
+	// Wake any servers that depend on the new secret. Best-effort.
+	if err := s.controller.NotifySecretsChanged(ctx, "store", req.SecretName); err != nil {
+		s.logger.Warn("config-to-secret: failed to notify runtime of secret change",
+			"name", req.SecretName, "error", err)
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"message":   fmt.Sprintf("%s %q on %q now references keyring secret %q", req.Scope, req.Key, serverName, req.SecretName),
+		"reference": referenceStr,
 	})
 }
 

@@ -321,6 +321,33 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.WorkingDir = workingDir
 		}
 
+		// Extract headers and env. Accept both typed (map[string]string,
+		// the shape used by the in-process StateView path) and generic
+		// (map[string]interface{}, the shape after a JSON round-trip)
+		// so this works regardless of how the runtime layer delivered
+		// the server map. Header redaction is applied later in the HTTP
+		// layer (see httpapi/server.go:redactServerHeaders).
+		if headersTyped, ok := srvRaw["headers"].(map[string]string); ok && len(headersTyped) > 0 {
+			srv.Headers = headersTyped
+		} else if headersGeneric, ok := srvRaw["headers"].(map[string]interface{}); ok && len(headersGeneric) > 0 {
+			srv.Headers = make(map[string]string, len(headersGeneric))
+			for k, v := range headersGeneric {
+				if vStr, ok := v.(string); ok {
+					srv.Headers[k] = vStr
+				}
+			}
+		}
+		if envTyped, ok := srvRaw["env"].(map[string]string); ok && len(envTyped) > 0 {
+			srv.Env = envTyped
+		} else if envGeneric, ok := srvRaw["env"].(map[string]interface{}); ok && len(envGeneric) > 0 {
+			srv.Env = make(map[string]string, len(envGeneric))
+			for k, v := range envGeneric {
+				if vStr, ok := v.(string); ok {
+					srv.Env[k] = vStr
+				}
+			}
+		}
+
 		// Extract isolation overrides if present. Like OAuth above, both
 		// typed and generic map shapes are accepted so this path works
 		// whether the runtime provides a map[string]interface{} directly

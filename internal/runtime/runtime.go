@@ -1760,15 +1760,26 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		// Expose config fields the UI needs for edit mode (args, working
-		// dir, isolation overrides). These used to be dropped on the
-		// floor here, so the tray/webui could not round-trip stdio
-		// server configuration.
+		// dir, isolation overrides, headers, env). These used to be
+		// dropped on the floor here, so the tray/webui could not
+		// round-trip stdio server configuration or display the auth
+		// headers attached to HTTP servers.
 		if serverStatus.Config != nil {
 			if len(serverStatus.Config.Args) > 0 {
 				serverMap["args"] = serverStatus.Config.Args
 			}
 			if serverStatus.Config.WorkingDir != "" {
 				serverMap["working_dir"] = serverStatus.Config.WorkingDir
+			}
+			if len(serverStatus.Config.Headers) > 0 {
+				// Headers are redacted at the httpapi/MCP serialization
+				// boundary (see Server.redactServerHeaders) — emit the
+				// raw values here so reveal-secret-headers users still
+				// see plaintext.
+				serverMap["headers"] = serverStatus.Config.Headers
+			}
+			if len(serverStatus.Config.Env) > 0 {
+				serverMap["env"] = serverStatus.Config.Env
 			}
 			if iso := serverStatus.Config.Isolation; iso != nil {
 				isoMap := map[string]interface{}{

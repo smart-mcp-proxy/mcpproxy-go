@@ -647,18 +647,135 @@
               </div>
             </div>
 
-            <!-- Environment Variables: keys are listed; values masked to avoid
-                 shoulder-surfing leaks. Users can edit values via the dedicated
-                 Edit page if they need to inspect them. -->
-            <div v-if="server.env && Object.keys(server.env).length" class="card bg-base-100 shadow-sm">
+            <!-- Headers (HTTP servers): redacted by default per backend
+                 redaction policy. Click the eye icon on a row to reveal the
+                 raw value, which only works if the loaded config has
+                 `reveal_secret_headers: true` — otherwise the API returns
+                 `***REDACTED***` and there is nothing to reveal. -->
+            <div v-if="(server.url || hasHeaders) && server.protocol !== 'stdio'" class="card bg-base-100 shadow-sm">
               <div class="card-body py-4">
-                <h3 class="card-title text-base">Environment Variables</h3>
-                <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 mt-2 text-sm">
-                  <template v-for="(v, k) in server.env" :key="k">
-                    <dt><code class="font-mono text-xs">{{ k }}</code></dt>
-                    <dd class="text-base-content/60">{{ maskEnvValue(v) }}</dd>
-                  </template>
-                </dl>
+                <div class="flex items-center justify-between">
+                  <h3 class="card-title text-base">Headers</h3>
+                  <button
+                    v-if="!addingHeader"
+                    class="btn btn-xs btn-ghost"
+                    @click="startAddingHeader"
+                    :disabled="kvPatchInFlight"
+                  >+ Add header</button>
+                </div>
+                <p class="text-xs text-base-content/50 mt-1">
+                  Sent with every request to this server. Storing the value as a secret keeps the literal token out of the config file.
+                </p>
+                <table v-if="hasHeaders || addingHeader" class="table table-sm mt-2">
+                  <tbody>
+                    <tr v-for="k in headerKeys" :key="`hdr-${k}`">
+                      <td class="font-mono text-xs w-1/3 align-top">{{ k }}</td>
+                      <td>
+                        <KVValueCell
+                          scope="header"
+                          :k="k"
+                          :raw-value="serverHeaders[k]"
+                          :is-editing="editingKey === `hdr::${k}`"
+                          :busy="kvPatchInFlight"
+                          @start-edit="startEdit('hdr', k)"
+                          @cancel-edit="cancelEdit"
+                          @save="(val) => saveEdit('header', k, val)"
+                          @delete="deleteKv('header', k)"
+                          @convert="openConvertModal('header', k, serverHeaders[k])"
+                        />
+                      </td>
+                    </tr>
+                    <tr v-if="addingHeader">
+                      <td>
+                        <input
+                          v-model="newHeaderKey"
+                          class="input input-bordered input-xs w-full font-mono"
+                          placeholder="Header-Name"
+                          @keyup.enter="commitNewHeader"
+                          ref="newHeaderKeyInput"
+                        />
+                      </td>
+                      <td>
+                        <div class="flex gap-2 items-center">
+                          <input
+                            v-model="newHeaderValue"
+                            type="text"
+                            class="input input-bordered input-xs flex-1 font-mono"
+                            placeholder="value (literal or ${keyring:name})"
+                            @keyup.enter="commitNewHeader"
+                          />
+                          <button class="btn btn-xs btn-primary" @click="commitNewHeader" :disabled="!newHeaderKey || !newHeaderValue || kvPatchInFlight">Add</button>
+                          <button class="btn btn-xs btn-ghost" @click="addingHeader = false" :disabled="kvPatchInFlight">Cancel</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="text-xs text-base-content/50 mt-2">No headers configured.</div>
+              </div>
+            </div>
+
+            <!-- Environment Variables: same affordances as Headers — redact /
+                 reveal / inline edit / delete / convert literal values into
+                 ${keyring:name} references. Visible for any server that has
+                 env vars or for stdio servers (which is where most env lives). -->
+            <div v-if="hasEnv || server.protocol === 'stdio'" class="card bg-base-100 shadow-sm">
+              <div class="card-body py-4">
+                <div class="flex items-center justify-between">
+                  <h3 class="card-title text-base">Environment Variables</h3>
+                  <button
+                    v-if="!addingEnv"
+                    class="btn btn-xs btn-ghost"
+                    @click="startAddingEnv"
+                    :disabled="kvPatchInFlight"
+                  >+ Add variable</button>
+                </div>
+                <table v-if="hasEnv || addingEnv" class="table table-sm mt-2">
+                  <tbody>
+                    <tr v-for="k in envKeys" :key="`env-${k}`">
+                      <td class="font-mono text-xs w-1/3 align-top">{{ k }}</td>
+                      <td>
+                        <KVValueCell
+                          scope="env"
+                          :k="k"
+                          :raw-value="serverEnv[k]"
+                          :is-editing="editingKey === `env::${k}`"
+                          :busy="kvPatchInFlight"
+                          @start-edit="startEdit('env', k)"
+                          @cancel-edit="cancelEdit"
+                          @save="(val) => saveEdit('env', k, val)"
+                          @delete="deleteKv('env', k)"
+                          @convert="openConvertModal('env', k, serverEnv[k])"
+                        />
+                      </td>
+                    </tr>
+                    <tr v-if="addingEnv">
+                      <td>
+                        <input
+                          v-model="newEnvKey"
+                          class="input input-bordered input-xs w-full font-mono"
+                          placeholder="VAR_NAME"
+                          @keyup.enter="commitNewEnv"
+                          ref="newEnvKeyInput"
+                        />
+                      </td>
+                      <td>
+                        <div class="flex gap-2 items-center">
+                          <input
+                            v-model="newEnvValue"
+                            type="text"
+                            class="input input-bordered input-xs flex-1 font-mono"
+                            placeholder="value (literal or ${keyring:name})"
+                            @keyup.enter="commitNewEnv"
+                          />
+                          <button class="btn btn-xs btn-primary" @click="commitNewEnv" :disabled="!newEnvKey || !newEnvValue || kvPatchInFlight">Add</button>
+                          <button class="btn btn-xs btn-ghost" @click="addingEnv = false" :disabled="kvPatchInFlight">Cancel</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="text-xs text-base-content/50 mt-2">No environment variables configured.</div>
               </div>
             </div>
 
@@ -1010,6 +1127,39 @@
       </div>
     </div>
 
+    <!-- Convert-to-secret modal: prompts for a keyring secret name, then
+         calls POST /api/v1/secrets followed by a PATCH replacing the
+         literal value with `${keyring:NAME}`. -->
+    <div v-if="convertModal.open" class="modal modal-open">
+      <div class="modal-box max-w-md">
+        <h3 class="font-bold text-lg">Convert to secret</h3>
+        <p class="text-sm text-base-content/70 mt-2">
+          Store the value of <code class="font-mono">{{ convertModal.key }}</code> in the OS keyring and
+          replace it with a <code class="font-mono">{{ '${keyring:NAME}' }}</code> reference. The
+          server config will then no longer contain the literal value.
+        </p>
+        <div class="form-control mt-4">
+          <label class="label py-1"><span class="label-text">Secret name</span></label>
+          <input
+            v-model="convertModal.secretName"
+            class="input input-bordered input-sm font-mono"
+            placeholder="my-server-token"
+            @keyup.enter="commitConvert"
+          />
+          <label class="label py-1">
+            <span class="label-text-alt text-base-content/50">Will be referenced as <code>{{ '${keyring:' + (convertModal.secretName || 'NAME') + '}' }}</code></span>
+          </label>
+        </div>
+        <div class="modal-action">
+          <button class="btn btn-ghost btn-sm" @click="closeConvertModal" :disabled="convertModal.busy">Cancel</button>
+          <button class="btn btn-primary btn-sm" @click="commitConvert" :disabled="!convertModal.secretName || convertModal.busy">
+            <span v-if="convertModal.busy" class="loading loading-spinner loading-xs"></span>
+            Convert
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="serverDetailHints" />
   </div>
@@ -1023,6 +1173,7 @@ import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
+import KVValueCell from '@/components/KVValueCell.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
@@ -2150,6 +2301,181 @@ function maskEnvValue(value: string): string {
   if (!value) return '(empty)'
   if (value.length <= 4) return '••••'
   return '••••' + value.slice(-2) + ` (${value.length} chars)`
+}
+
+// --- Headers / Env display + edit state ---
+// Convention: composite key strings prefixed with the scope ("hdr::Name" or
+// "env::Name") so a single Set can drive reveal/edit state across both
+// cards without collision.
+
+const serverHeaders = computed<Record<string, string>>(() => (server.value?.headers ?? {}) as Record<string, string>)
+const serverEnv = computed<Record<string, string>>(() => (server.value?.env ?? {}) as Record<string, string>)
+const headerKeys = computed(() => Object.keys(serverHeaders.value).sort())
+const envKeys = computed(() => Object.keys(serverEnv.value).sort())
+const hasHeaders = computed(() => headerKeys.value.length > 0)
+const hasEnv = computed(() => envKeys.value.length > 0)
+
+const editingKey = ref<string | null>(null)
+const kvPatchInFlight = ref(false)
+
+const addingHeader = ref(false)
+const newHeaderKey = ref('')
+const newHeaderValue = ref('')
+const newHeaderKeyInput = ref<HTMLInputElement | null>(null)
+
+const addingEnv = ref(false)
+const newEnvKey = ref('')
+const newEnvValue = ref('')
+const newEnvKeyInput = ref<HTMLInputElement | null>(null)
+
+const convertModal = ref<{ open: boolean; scope: 'header' | 'env'; key: string; rawValue: string; secretName: string; busy: boolean }>({
+  open: false,
+  scope: 'header',
+  key: '',
+  rawValue: '',
+  secretName: '',
+  busy: false,
+})
+
+function startEdit(scope: 'hdr' | 'env', k: string) {
+  editingKey.value = `${scope}::${k}`
+}
+function cancelEdit() {
+  editingKey.value = null
+}
+
+async function startAddingHeader() {
+  addingHeader.value = true
+  newHeaderKey.value = ''
+  newHeaderValue.value = ''
+  await new Promise((r) => setTimeout(r, 0))
+  newHeaderKeyInput.value?.focus()
+}
+async function startAddingEnv() {
+  addingEnv.value = true
+  newEnvKey.value = ''
+  newEnvValue.value = ''
+  await new Promise((r) => setTimeout(r, 0))
+  newEnvKeyInput.value?.focus()
+}
+
+// patchServer with deep-merge semantics: the backend treats keys present
+// in `headers` / `env` as upserts, keys absent as preserved, and keys
+// listed in `headers_remove` / `env_remove` as deletes. This lets us send
+// the minimal diff for each user action — and crucially never round-trips
+// `***REDACTED***` values: any header whose redacted form was unchanged
+// simply stays out of the patch, so the backend keeps the real string.
+async function patchServerDiff(patch: Record<string, unknown>, action: string): Promise<boolean> {
+  if (!server.value) return false
+  kvPatchInFlight.value = true
+  try {
+    const resp = await api.patchServer(server.value.name, patch)
+    if (!resp.success) {
+      systemStore.addToast({ type: 'error', title: `${action} failed`, message: resp.error || 'Unknown error' })
+      return false
+    }
+    await serversStore.fetchServers(true)
+    systemStore.addToast({ type: 'success', title: action, message: '' })
+    return true
+  } catch (e: any) {
+    systemStore.addToast({ type: 'error', title: `${action} failed`, message: e?.message || String(e) })
+    return false
+  } finally {
+    kvPatchInFlight.value = false
+  }
+}
+
+function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
+  return scope === 'header' ? 'headers' : 'env'
+}
+
+async function saveEdit(scope: 'header' | 'env', k: string, val: string) {
+  const ok = await patchServerDiff({ [scopeKey(scope)]: { [k]: val } }, `Updated ${k}`)
+  if (ok) editingKey.value = null
+}
+
+// Deletion uses JSON Merge Patch (RFC 7396): a null value on the key
+// signals "delete this key" to the backend. JSON.stringify emits `null`
+// as the literal token, so the patch body becomes `{"headers": {"X-Old":
+// null}}` on the wire — symmetric with the MCP `upstream_servers patch`
+// tool's `{"X-Old": null}` convention. Note the explicit `null` literal:
+// passing `undefined` would be stripped by JSON.stringify (no key in the
+// output) and the backend would interpret that as "preserve".
+async function deleteKv(scope: 'header' | 'env', k: string) {
+  if (!confirm(`Delete ${scope === 'header' ? 'header' : 'env variable'} "${k}"?`)) return
+  await patchServerDiff({ [scopeKey(scope)]: { [k]: null } }, `Deleted ${k}`)
+}
+
+async function commitNewHeader() {
+  if (!newHeaderKey.value || !newHeaderValue.value) return
+  const ok = await patchServerDiff(
+    { headers: { [newHeaderKey.value]: newHeaderValue.value } },
+    `Added ${newHeaderKey.value}`
+  )
+  if (ok) addingHeader.value = false
+}
+
+async function commitNewEnv() {
+  if (!newEnvKey.value || !newEnvValue.value) return
+  const ok = await patchServerDiff(
+    { env: { [newEnvKey.value]: newEnvValue.value } },
+    `Added ${newEnvKey.value}`
+  )
+  if (ok) addingEnv.value = false
+}
+
+// Suggest a keyring secret name derived from the kv key. Keep it short,
+// lowercase, alphanumeric + hyphens — the same convention as the existing
+// Secrets view.
+function suggestSecretName(scope: 'header' | 'env', k: string): string {
+  const base = `${server.value?.name || 'server'}-${k}`
+  return base
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 64)
+}
+
+function openConvertModal(scope: 'header' | 'env', k: string, rawValue: string) {
+  convertModal.value = {
+    open: true,
+    scope,
+    key: k,
+    rawValue,
+    secretName: suggestSecretName(scope, k),
+    busy: false,
+  }
+}
+function closeConvertModal() {
+  convertModal.value.open = false
+  convertModal.value.busy = false
+}
+
+async function commitConvert() {
+  const m = convertModal.value
+  if (!m.secretName || !server.value) return
+  m.busy = true
+  try {
+    // Atomic server-side conversion: the backend reads the real value
+    // from the loaded config (so we don't need the plaintext on the
+    // client — important when the API redacts sensitive headers on the
+    // read path), stores it in keyring, and rewrites the config field
+    // with the ${keyring:NAME} reference. Single round-trip, single
+    // failure surface.
+    const resp = await api.convertConfigToSecret(server.value.name, m.scope, m.key, m.secretName)
+    if (!resp.success) {
+      systemStore.addToast({ type: 'error', title: 'Convert failed', message: resp.error || 'Unknown error' })
+      return
+    }
+    await serversStore.fetchServers(true)
+    systemStore.addToast({ type: 'success', title: `Converted ${m.key} to secret`, message: '' })
+    closeConvertModal()
+  } catch (e: any) {
+    systemStore.addToast({ type: 'error', title: 'Convert failed', message: e?.message || String(e) })
+  } finally {
+    convertModal.value.busy = false
+  }
 }
 
 // hasIsolationData is true when there's anything to show in the Docker

@@ -281,6 +281,18 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let command: String?
     let args: [String]?
     let workingDir: String?
+    /// HTTP headers attached to every request to this server (HTTP /
+    /// streamable-http only). Sensitive values are redacted to
+    /// `***REDACTED***` by the backend unless `reveal_secret_headers:
+    /// true` is set in the loaded config (see
+    /// internal/httpapi/server.go:redactServerHeaders). Edit-mode preserves
+    /// the user-supplied values via the PATCH endpoint regardless.
+    let headers: [String: String]?
+    /// Environment variables attached to stdio servers. The Web UI's
+    /// Edit Config screen has full round-trip support; this field lets
+    /// the Swift tray display and pre-populate them on its own edit form
+    /// rather than starting from an empty textarea.
+    let env: [String: String]?
     let `protocol`: String
     let enabled: Bool
     let connected: Bool
@@ -311,6 +323,8 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, name, url, command, args
         case workingDir = "working_dir"
+        case headers
+        case env
         case `protocol` = "protocol"
         case enabled, connected, connecting, quarantined
         case status

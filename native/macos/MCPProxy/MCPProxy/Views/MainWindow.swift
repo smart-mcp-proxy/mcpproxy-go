@@ -37,7 +37,14 @@ struct MainWindow: View {
                         .accessibilityIdentifier("sidebar-\(item.rawValue)")
                 }
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 220)
+            // Cap the sidebar width so SwiftUI cannot expand it past a
+            // sensible upper bound. Without `max:`, the sidebar can grow
+            // unbounded after certain layout transitions (e.g. exiting a
+            // detail view back to the list), leaving the detail pane
+            // squeezed into a sliver on the right. 280pt keeps long
+            // labels like "Activity Log" fully readable while leaving
+            // the main content area generous space.
+            .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
             .listStyle(.sidebar)
             .accessibilityIdentifier("sidebar-list")
         } detail: {

@@ -318,9 +318,9 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 
 // redactServerHeaders mirrors httpapi.(*Server).redactServerHeaders. It strips
 // sensitive header values (Authorization, Cookie, X-API-Key, ...) unless the
-// loaded config opts out via reveal_secret_headers: true. Centralizing this in
+// loaded config opts out via reveal_secret_headers: true. Centralising this in
 // the runtime keeps SSE subscribers behind the same trust boundary as the
-// HTTP API.
+// REST API.
 func (r *Runtime) redactServerHeaders(servers []contracts.Server) {
 	cfg := r.Config()
 	if cfg != nil && cfg.RevealSecretHeaders {

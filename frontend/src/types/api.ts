@@ -147,6 +147,11 @@ export interface Server {
   args?: string[]
   working_dir?: string
   env?: Record<string, string>
+  // Static headers sent with every request to HTTP / streamable-http
+  // servers. Server-side redaction replaces sensitive values with
+  // `***REDACTED***` unless `reveal_secret_headers: true` is set on the
+  // loaded config (see internal/httpapi/server.go:redactServerHeaders).
+  headers?: Record<string, string>
   protocol: 'http' | 'stdio' | 'streamable-http'
   enabled: boolean
   quarantined: boolean
