@@ -2395,18 +2395,22 @@ async function patchServerDiff(patch: Record<string, unknown>, action: string): 
 function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
   return scope === 'header' ? 'headers' : 'env'
 }
-function scopeRemoveKey(scope: 'header' | 'env'): 'headers_remove' | 'env_remove' {
-  return scope === 'header' ? 'headers_remove' : 'env_remove'
-}
 
 async function saveEdit(scope: 'header' | 'env', k: string, val: string) {
   const ok = await patchServerDiff({ [scopeKey(scope)]: { [k]: val } }, `Updated ${k}`)
   if (ok) editingKey.value = null
 }
 
+// Deletion uses JSON Merge Patch (RFC 7396): a null value on the key
+// signals "delete this key" to the backend. JSON.stringify emits `null`
+// as the literal token, so the patch body becomes `{"headers": {"X-Old":
+// null}}` on the wire — symmetric with the MCP `upstream_servers patch`
+// tool's `{"X-Old": null}` convention. Note the explicit `null` literal:
+// passing `undefined` would be stripped by JSON.stringify (no key in the
+// output) and the backend would interpret that as "preserve".
 async function deleteKv(scope: 'header' | 'env', k: string) {
   if (!confirm(`Delete ${scope === 'header' ? 'header' : 'env variable'} "${k}"?`)) return
-  await patchServerDiff({ [scopeRemoveKey(scope)]: [k] }, `Deleted ${k}`)
+  await patchServerDiff({ [scopeKey(scope)]: { [k]: null } }, `Deleted ${k}`)
 }
 
 async function commitNewHeader() {

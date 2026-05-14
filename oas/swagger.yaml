@@ -1825,20 +1825,10 @@ components:
           additionalProperties:
             type: string
           type: object
-        env_remove:
-          items:
-            type: string
-          type: array
-          uniqueItems: false
         headers:
           additionalProperties:
             type: string
           type: object
-        headers_remove:
-          items:
-            type: string
-          type: array
-          uniqueItems: false
         isolation:
           $ref: '#/components/schemas/httpapi.IsolationRequest'
         name:

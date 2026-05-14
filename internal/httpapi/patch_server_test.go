@@ -176,10 +176,15 @@ func TestHandlePatchServer_HeadersDeepMerge(t *testing.T) {
 	assert.Len(t, got, 3, "exactly 3 headers expected (Authorization, X-Trace, X-New-Header)")
 }
 
-// TestHandlePatchServer_HeadersRemove verifies that the `headers_remove`
-// field deletes the listed keys from the stored map. Combined with the
-// merge behaviour above, this is how clients delete a header through PATCH.
-func TestHandlePatchServer_HeadersRemove(t *testing.T) {
+// TestHandlePatchServer_HeadersNullDelete verifies that a JSON null value
+// in the `headers` map deletes the key under JSON Merge Patch semantics.
+// This is the unified delete syntax aligned with the MCP `upstream_servers
+// patch` tool — no separate `headers_remove` array is needed.
+//
+// We use json.RawMessage to inject literal nulls because Go's reflect-based
+// marshaling can collapse map[string]any{"k": nil} into omitted entries
+// depending on the path; raw bytes make the test independent of that.
+func TestHandlePatchServer_HeadersNullDelete(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mockCtrl := &mockPatchServerController{
 		apiKey: "test-key",
@@ -197,10 +202,8 @@ func TestHandlePatchServer_HeadersRemove(t *testing.T) {
 	}
 	srv := NewServer(mockCtrl, logger, nil)
 
-	body, _ := json.Marshal(map[string]any{
-		"headers_remove": []string{"X-Old", "X-Trace"},
-	})
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/synapbus", bytes.NewReader(body))
+	rawBody := []byte(`{"headers":{"X-Old":null,"X-Trace":null}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/synapbus", bytes.NewReader(rawBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
 	w := httptest.NewRecorder()
@@ -211,18 +214,17 @@ func TestHandlePatchServer_HeadersRemove(t *testing.T) {
 
 	got := mockCtrl.capturedUpdates.Headers
 	assert.Equal(t, "Bearer token", got["Authorization"], "Authorization untouched")
-	assert.Len(t, got, 1, "only Authorization should remain (X-Old and X-Trace removed)")
+	assert.Len(t, got, 1, "only Authorization should remain (X-Old and X-Trace deleted via null)")
 	_, hasOld := got["X-Old"]
 	_, hasTrace := got["X-Trace"]
 	assert.False(t, hasOld, "X-Old must be removed")
 	assert.False(t, hasTrace, "X-Trace must be removed")
 }
 
-// TestHandlePatchServer_HeadersSetAndRemove combines the merge + remove
-// operations in a single PATCH. The same body shape the Web UI and macOS
-// tray send when the user simultaneously edits one header and deletes
-// another.
-func TestHandlePatchServer_HeadersSetAndRemove(t *testing.T) {
+// TestHandlePatchServer_HeadersSetAndDelete combines upsert + null-delete
+// in a single PATCH. Same body shape the Web UI / macOS tray / CLI emit
+// when the user simultaneously edits one header and deletes another.
+func TestHandlePatchServer_HeadersSetAndDelete(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mockCtrl := &mockPatchServerController{
 		apiKey: "test-key",
@@ -239,14 +241,8 @@ func TestHandlePatchServer_HeadersSetAndRemove(t *testing.T) {
 	}
 	srv := NewServer(mockCtrl, logger, nil)
 
-	body, _ := json.Marshal(map[string]any{
-		"headers": map[string]string{
-			"Authorization": "Bearer new-token",
-			"X-New":         "new-value",
-		},
-		"headers_remove": []string{"X-Trace"},
-	})
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/synapbus", bytes.NewReader(body))
+	rawBody := []byte(`{"headers":{"Authorization":"Bearer new-token","X-New":"new-value","X-Trace":null}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/synapbus", bytes.NewReader(rawBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
 	w := httptest.NewRecorder()
@@ -256,16 +252,15 @@ func TestHandlePatchServer_HeadersSetAndRemove(t *testing.T) {
 	require.NotNil(t, mockCtrl.capturedUpdates)
 
 	got := mockCtrl.capturedUpdates.Headers
-	assert.Equal(t, "Bearer new-token", got["Authorization"], "Authorization updated to new value")
+	assert.Equal(t, "Bearer new-token", got["Authorization"], "Authorization updated")
 	assert.Equal(t, "new-value", got["X-New"], "X-New added")
 	_, hasTrace := got["X-Trace"]
-	assert.False(t, hasTrace, "X-Trace deleted")
+	assert.False(t, hasTrace, "X-Trace deleted via null")
 	assert.Len(t, got, 2)
 }
 
-// TestHandlePatchServer_EnvDeepMerge mirrors HeadersDeepMerge for env vars.
-// The redaction risk is the same — backend doesn't redact env values today,
-// but the merge semantics are needed for symmetric UI editing.
+// TestHandlePatchServer_EnvDeepMerge mirrors HeadersDeepMerge for env vars,
+// using the unified null-delete syntax.
 func TestHandlePatchServer_EnvDeepMerge(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mockCtrl := &mockPatchServerController{
@@ -283,11 +278,8 @@ func TestHandlePatchServer_EnvDeepMerge(t *testing.T) {
 	}
 	srv := NewServer(mockCtrl, logger, nil)
 
-	body, _ := json.Marshal(map[string]any{
-		"env":        map[string]string{"NEW_VAR": "value"},
-		"env_remove": []string{"LOG_LEVEL"},
-	})
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/demo", bytes.NewReader(body))
+	rawBody := []byte(`{"env":{"NEW_VAR":"value","LOG_LEVEL":null}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/demo", bytes.NewReader(rawBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
 	w := httptest.NewRecorder()
@@ -297,9 +289,49 @@ func TestHandlePatchServer_EnvDeepMerge(t *testing.T) {
 	require.NotNil(t, mockCtrl.capturedUpdates)
 
 	got := mockCtrl.capturedUpdates.Env
-	assert.Equal(t, "live-secret", got["API_KEY"], "API_KEY preserved (not in patch body)")
+	assert.Equal(t, "live-secret", got["API_KEY"], "API_KEY preserved")
 	assert.Equal(t, "value", got["NEW_VAR"], "NEW_VAR added")
 	_, hasLog := got["LOG_LEVEL"]
-	assert.False(t, hasLog, "LOG_LEVEL deleted via env_remove")
+	assert.False(t, hasLog, "LOG_LEVEL deleted via null")
+	assert.Len(t, got, 2)
+}
+
+// TestHandlePatchServer_HeadersEmptyStringSetsNotDeletes pins the
+// distinction between `""` (set to empty) and `null` (delete). Empty
+// string is a legitimate header / env value — many consumers treat it
+// differently from "unset". A client that wants to clear a header to
+// empty string must send `""`; a client that wants to remove the key
+// entirely must send `null`. Without this test, a future refactor that
+// "helpfully" collapses empty string to delete (or vice versa) would go
+// unnoticed.
+func TestHandlePatchServer_HeadersEmptyStringSetsNotDeletes(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name:     "demo",
+			Protocol: "http",
+			URL:      "https://example.com/mcp",
+			Enabled:  true,
+			Headers: map[string]string{
+				"X-Original": "value",
+			},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	rawBody := []byte(`{"headers":{"X-Empty":""}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/demo", bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	got := mockCtrl.capturedUpdates.Headers
+	v, hasEmpty := got["X-Empty"]
+	assert.True(t, hasEmpty, "X-Empty must be present (empty string is not delete)")
+	assert.Equal(t, "", v, "X-Empty must be the empty string, not deleted")
+	assert.Equal(t, "value", got["X-Original"], "X-Original must be preserved")
 	assert.Len(t, got, 2)
 }

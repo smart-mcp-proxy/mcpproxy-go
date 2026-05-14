@@ -1096,6 +1096,24 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
+// flattenNullableMap turns a request-side `map[string]*string` (which uses
+// nil values to signal "delete" under JSON Merge Patch semantics) into the
+// `map[string]string` shape config.ServerConfig stores. Nil entries are
+// dropped — they have no meaning on POST (add) and are handled separately
+// by the deep-merge loop on PATCH.
+func flattenNullableMap(m map[string]*string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, vp := range m {
+		if vp != nil {
+			out[k] = *vp
+		}
+	}
+	return out
+}
+
 // redactServerHeaders walks each server in the slice and replaces sensitive
 // header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
 // Skips redaction entirely when `reveal_secret_headers: true` is set in the
@@ -1154,31 +1172,40 @@ func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
 
 // AddServerRequest represents a request to add a new server.
 //
-// PATCH semantics for the map-typed fields (`headers`, `env`) are
-// deep-merge: keys provided in the request are added or updated on the
-// stored map; keys absent from the request are preserved. To delete a
-// key, list it in `headers_remove` / `env_remove`. This shape lets the
-// Web UI / macOS tray edit forms work without seeing the real values
-// of sensitive headers — the backend redacts them on read, the client
-// computes a diff against the redacted state and only sends keys that
-// changed, so redacted-but-unchanged values never round-trip.
+// PATCH semantics for the map-typed fields (`headers`, `env`) follow
+// JSON Merge Patch (RFC 7396):
+//   - A key present with a non-null value upserts that key on the
+//     stored map.
+//   - A key present with a JSON null value deletes that key.
+//   - A key absent from the request is preserved as-is.
 //
-// `headers_remove` / `env_remove` are ignored on POST (add) — they
-// only matter for PATCH.
+// This lets the Web UI / macOS tray edit forms work without seeing
+// the real values of sensitive headers — the backend redacts them on
+// read, the client computes a diff against the redacted state, and
+// only keys that genuinely changed round-trip. Redacted-but-untouched
+// values stay out of the patch entirely, so the backend keeps the
+// real string on disk.
+//
+// The MCP `upstream_servers patch` tool uses the same `null = delete`
+// convention; the two interfaces are now in sync.
+//
+// `map[string]*string` is the canonical Go shape for this: encoding/json
+// decodes a missing key into no map entry, a present non-null value
+// into a non-nil `*string`, and a present `null` into a nil `*string`.
+//
+// POST (add) ignores nil entries — they have no meaning at create time.
 type AddServerRequest struct {
-	Name           string            `json:"name"`
-	URL            string            `json:"url,omitempty"`
-	Command        string            `json:"command,omitempty"`
-	Args           []string          `json:"args,omitempty"`
-	Env            map[string]string `json:"env,omitempty"`
-	EnvRemove      []string          `json:"env_remove,omitempty"`
-	Headers        map[string]string `json:"headers,omitempty"`
-	HeadersRemove  []string          `json:"headers_remove,omitempty"`
-	WorkingDir     string            `json:"working_dir,omitempty"`
-	Protocol       string            `json:"protocol,omitempty"`
-	Enabled        *bool             `json:"enabled,omitempty"`
-	Quarantined    *bool             `json:"quarantined,omitempty"`
-	ReconnectOnUse *bool             `json:"reconnect_on_use,omitempty"`
+	Name           string             `json:"name"`
+	URL            string             `json:"url,omitempty"`
+	Command        string             `json:"command,omitempty"`
+	Args           []string           `json:"args,omitempty"`
+	Env            map[string]*string `json:"env,omitempty"`
+	Headers        map[string]*string `json:"headers,omitempty"`
+	WorkingDir     string             `json:"working_dir,omitempty"`
+	Protocol       string             `json:"protocol,omitempty"`
+	Enabled        *bool              `json:"enabled,omitempty"`
+	Quarantined    *bool              `json:"quarantined,omitempty"`
+	ReconnectOnUse *bool              `json:"reconnect_on_use,omitempty"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1286,13 +1313,15 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		quarantined = *req.Quarantined
 	}
 
+	// ADD ignores null entries — `null` is JSON Merge Patch's "delete"
+	// signal which has no meaning on create. Drop nils when flattening.
 	serverConfig := &config.ServerConfig{
 		Name:        req.Name,
 		URL:         req.URL,
 		Command:     req.Command,
 		Args:        req.Args,
-		Env:         req.Env,
-		Headers:     req.Headers,
+		Env:         flattenNullableMap(req.Env),
+		Headers:     flattenNullableMap(req.Headers),
 		WorkingDir:  req.WorkingDir,
 		Protocol:    protocol,
 		Enabled:     enabled,
@@ -1424,40 +1453,42 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		updates.Args = req.Args
 		hasUpdates = true
 	}
-	// PATCH semantics for headers and env are DEEP MERGE — keys provided
-	// by the request are upserted, keys absent from the request are
-	// preserved, and keys listed in `*_remove` are explicitly deleted.
-	// This lets the Web UI / macOS tray send a diff instead of the full
-	// map, so redacted-but-unchanged values (returned by the GET path
-	// via `redactServerHeaders`) never round-trip through the client.
-	if req.Env != nil || len(req.EnvRemove) > 0 {
+	// PATCH semantics for headers and env follow JSON Merge Patch
+	// (RFC 7396): keys with a non-null value upsert, keys with a null
+	// value delete, omitted keys are preserved. This lets the Web UI /
+	// macOS tray / CLI send a minimal diff so redacted-but-unchanged
+	// values (returned by the GET path via `redactServerHeaders`)
+	// never round-trip through the client.
+	if req.Env != nil {
 		merged := map[string]string{}
 		if existingSrv != nil {
 			for k, v := range existingSrv.Env {
 				merged[k] = v
 			}
 		}
-		for k, v := range req.Env {
-			merged[k] = v
-		}
-		for _, k := range req.EnvRemove {
-			delete(merged, k)
+		for k, vp := range req.Env {
+			if vp == nil {
+				delete(merged, k)
+			} else {
+				merged[k] = *vp
+			}
 		}
 		updates.Env = merged
 		hasUpdates = true
 	}
-	if req.Headers != nil || len(req.HeadersRemove) > 0 {
+	if req.Headers != nil {
 		merged := map[string]string{}
 		if existingSrv != nil {
 			for k, v := range existingSrv.Headers {
 				merged[k] = v
 			}
 		}
-		for k, v := range req.Headers {
-			merged[k] = v
-		}
-		for _, k := range req.HeadersRemove {
-			delete(merged, k)
+		for k, vp := range req.Headers {
+			if vp == nil {
+				delete(merged, k)
+			} else {
+				merged[k] = *vp
+			}
 		}
 		updates.Headers = merged
 		hasUpdates = true

@@ -1043,29 +1043,19 @@ struct ServerDetailView: View {
         // unconditionally so deletes round-trip.
         updates["env"] = parseKVTextarea(editEnvVars)
 
-        // Compute deep-merge diffs for env and headers. The PATCH endpoint
-        // treats `headers` / `env` as upserts (keys present in the body
-        // are added or replaced), and `headers_remove` / `env_remove` as
-        // explicit deletes. Keys absent from both are preserved on the
-        // server — which is exactly what we want for redacted Bearer
-        // tokens that the user did not edit: we leave them out of the
-        // patch and the backend keeps the real string.
-        if let (envSet, envRemove) = diffKVMap(original: server.env ?? [:], next: parseKVTextarea(editEnvVars)) {
-            if !envSet.isEmpty {
-                updates["env"] = envSet
-            }
-            if !envRemove.isEmpty {
-                updates["env_remove"] = envRemove
-            }
+        // Compute JSON Merge Patch (RFC 7396) diffs for env and headers.
+        // The backend treats each value in the map as: non-null → upsert,
+        // `null` → delete, omitted key → preserve. So we emit a single
+        // dict whose entries are either real strings or `NSNull()`
+        // sentinels. JSONSerialization renders NSNull as the literal
+        // `null` token — see the SwiftEncoder unit test that pins this
+        // invariant in case a future refactor swaps the encoder.
+        if let envPatch = diffKVMap(original: server.env ?? [:], next: parseKVTextarea(editEnvVars)) {
+            updates["env"] = envPatch
         }
         if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
-            if let (hdrSet, hdrRemove) = diffKVMap(original: server.headers ?? [:], next: parseKVTextarea(editHeaders)) {
-                if !hdrSet.isEmpty {
-                    updates["headers"] = hdrSet
-                }
-                if !hdrRemove.isEmpty {
-                    updates["headers_remove"] = hdrRemove
-                }
+            if let hdrPatch = diffKVMap(original: server.headers ?? [:], next: parseKVTextarea(editHeaders)) {
+                updates["headers"] = hdrPatch
             }
         }
 
@@ -1245,18 +1235,12 @@ struct ServerDetailView: View {
         defer { convertSheetBusy = false }
         do {
             let ref = try await client.storeSecret(name: name, value: ctx.value)
-            // Patch the server with the new map value. Build the full
-            // map so deletes round-trip, matching saveEdits()'s policy.
-            switch ctx.scope {
-            case .header:
-                var headers = server.headers ?? [:]
-                headers[ctx.key] = ref
-                try await client.updateServer(server.name, updates: ["headers": headers])
-            case .env:
-                var env = server.env ?? [:]
-                env[ctx.key] = ref
-                try await client.updateServer(server.name, updates: ["env": env])
-            }
+            // Send the minimal JSON Merge Patch: just the one key that
+            // changed. The deep-merge backend preserves every other key,
+            // so we don't risk round-tripping a redacted Authorization
+            // back as the literal `***REDACTED***` string.
+            let field = ctx.scope == .header ? "headers" : "env"
+            try await client.updateServer(server.name, updates: [field: [ctx.key: ref]])
             await refreshServer()
             await MainActor.run { convertSheet = nil }
         } catch {
@@ -1320,35 +1304,35 @@ struct ServerDetailView: View {
 
     /// Diff a new key/value map against the original (e.g. `server.headers`
     /// as returned by the API, which may contain `***REDACTED***` sentinels
-    /// for sensitive keys). Returns a `set` map of upserts and a `remove`
-    /// list of deletes that, sent as a deep-merge PATCH body, produces the
-    /// desired final state without round-tripping redacted values.
+    /// for sensitive keys). Returns a single JSON Merge Patch dict (RFC
+    /// 7396): upserts map to their new string value, deletes map to
+    /// `NSNull()`, unchanged keys are omitted entirely. Returns `nil`
+    /// when the maps are identical and no patch is needed.
     ///
-    /// Returns `nil` when the original and next maps are identical (no
-    /// patch needed). Otherwise returns a tuple suitable for the
-    /// `headers` / `headers_remove` (or env equivalents) JSON fields.
+    /// `[String: Any]` rather than `[String: Any?]` is intentional —
+    /// JSONSerialization treats absent keys as omitted, NSNull entries as
+    /// literal JSON `null`. If we used `[String: String?]` and the default
+    /// `JSONEncoder`, nil values would be silently dropped from the wire
+    /// payload and deletes would never reach the backend. The SwiftEncoder
+    /// unit test pins this contract.
     ///
     /// Subtle invariant: when the user leaves the textarea line for a
     /// redacted key untouched, `next[k] == "***REDACTED***" == original[k]`
-    /// — equality check is "values match", so the key stays out of both
-    /// sides of the diff and the backend preserves the real value.
-    private func diffKVMap(original: [String: String], next: [String: String]) -> (set: [String: String], remove: [String])? {
-        var set: [String: String] = [:]
-        var remove: [String] = []
+    /// — the key stays out of the diff, the backend preserves the real
+    /// stored value, and the redaction sentinel never round-trips.
+    private func diffKVMap(original: [String: String], next: [String: String]) -> [String: Any]? {
+        var patch: [String: Any] = [:]
         for (k, v) in next {
             if original[k] != v {
-                set[k] = v
+                patch[k] = v
             }
         }
         for k in original.keys {
             if next[k] == nil {
-                remove.append(k)
+                patch[k] = NSNull()
             }
         }
-        if set.isEmpty && remove.isEmpty {
-            return nil
-        }
-        return (set, remove.sorted())
+        return patch.isEmpty ? nil : patch
     }
 
     /// Parse a "KEY=VALUE per line" textarea (used for both env and
