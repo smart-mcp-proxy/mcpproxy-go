@@ -3776,6 +3776,12 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 
 // handleGetToolDiff handles GET /api/v1/servers/{id}/tools/{tool}/diff
 func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
+	authCtx := auth.AuthContextFromContext(r.Context())
+	if authCtx == nil || !authCtx.IsAdmin() {
+		s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+		return
+	}
+
 	serverID := chi.URLParam(r, "id")
 	toolName := chi.URLParam(r, "tool")
 	if serverID == "" || toolName == "" {
@@ -3836,6 +3842,12 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 // @Router /api/v1/servers/{id}/tools/disable_all [post]
 func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		authCtx := auth.AuthContextFromContext(r.Context())
+		if authCtx == nil || !authCtx.IsAdmin() {
+			s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+			return
+		}
+
 		serverID := chi.URLParam(r, "id")
 		if serverID == "" {
 			s.writeError(w, r, http.StatusBadRequest, "Server ID required")

@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -591,4 +593,143 @@ func TestHandleUnquarantineServer_Error(t *testing.T) {
 	server.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// =============================================================================
+// Security: Admin gate on tool-toggle REST endpoints (fix: agent bypass)
+// =============================================================================
+
+// agentTokenServer returns a Server wired with a fake agent token so that
+// requests carrying that raw token go through the middleware as AuthTypeAgent
+// (non-admin). The returned rawToken must be placed in X-API-Key.
+func agentTokenServer(t *testing.T, ctrl ServerController) (*Server, string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	_, err := auth.GetOrCreateHMACKey(tmpDir)
+	require.NoError(t, err)
+
+	rawToken, err := auth.GenerateToken()
+	require.NoError(t, err)
+
+	agentToken := &auth.AgentToken{
+		Name:           "test-agent",
+		TokenPrefix:    auth.TokenPrefix(rawToken),
+		AllowedServers: []string{"*"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite},
+		ExpiresAt:      time.Now().Add(24 * time.Hour),
+		CreatedAt:      time.Now(),
+	}
+
+	store := &testTokenStore{
+		validateFunc: func(token string, _ []byte) (*auth.AgentToken, error) {
+			if token == rawToken {
+				return agentToken, nil
+			}
+			return nil, fmt.Errorf("token not found")
+		},
+	}
+
+	logger := zap.NewNop().Sugar()
+	srv := NewServer(ctrl, logger, nil)
+	srv.SetTokenStore(store, tmpDir)
+	return srv, rawToken
+}
+
+// mockToolToggleController embeds mockToolQuarantineController and overrides
+// GetCurrentConfig to return a real *config.Config so the auth middleware
+// enforces authentication (required to distinguish admin vs agent).
+type mockToolToggleController struct {
+	mockToolQuarantineController
+}
+
+func (m *mockToolToggleController) GetCurrentConfig() any {
+	return &config.Config{APIKey: m.apiKey}
+}
+
+func TestHandleSetToolEnabled_AgentTokenForbidden(t *testing.T) {
+	ctrl := &mockToolToggleController{
+		mockToolQuarantineController: mockToolQuarantineController{
+			apiKey: "admin-secret",
+			approvals: []*storage.ToolApprovalRecord{{
+				ServerName: "github",
+				ToolName:   "create_issue",
+				Status:     storage.ToolApprovalStatusApproved,
+			}},
+		},
+	}
+
+	srv, agentToken := agentTokenServer(t, ctrl)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/create_issue/enabled",
+		bytes.NewBufferString(`{"enabled":false}`))
+	req.Header.Set("X-API-Key", agentToken)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "admin access")
+}
+
+func TestHandleSetAllToolsEnabled_EnableAll_AgentTokenForbidden(t *testing.T) {
+	ctrl := &mockToolToggleController{
+		mockToolQuarantineController: mockToolQuarantineController{
+			apiKey: "admin-secret",
+		},
+	}
+
+	srv, agentToken := agentTokenServer(t, ctrl)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/enable_all", nil)
+	req.Header.Set("X-API-Key", agentToken)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "admin access")
+}
+
+func TestHandleSetAllToolsEnabled_DisableAll_AgentTokenForbidden(t *testing.T) {
+	ctrl := &mockToolToggleController{
+		mockToolQuarantineController: mockToolQuarantineController{
+			apiKey: "admin-secret",
+		},
+	}
+
+	srv, agentToken := agentTokenServer(t, ctrl)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/disable_all", nil)
+	req.Header.Set("X-API-Key", agentToken)
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "admin access")
+}
+
+func TestHandleSetToolEnabled_AdminKeyAllowed(t *testing.T) {
+	ctrl := &mockToolToggleController{
+		mockToolQuarantineController: mockToolQuarantineController{
+			apiKey: "admin-secret",
+			approvals: []*storage.ToolApprovalRecord{{
+				ServerName: "github",
+				ToolName:   "create_issue",
+				Status:     storage.ToolApprovalStatusApproved,
+			}},
+		},
+	}
+
+	logger := zap.NewNop().Sugar()
+	srv := NewServer(ctrl, logger, nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/create_issue/enabled",
+		bytes.NewBufferString(`{"enabled":false}`))
+	req.Header.Set("X-API-Key", "admin-secret")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
 }
