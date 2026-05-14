@@ -183,6 +183,17 @@ actor APIClient {
         }
     }
 
+    /// Store a value in the OS keyring under `name` and return the
+    /// `${keyring:name}` reference string. Used by the "Convert to secret"
+    /// affordance on the Headers / Environment Variables sections.
+    func storeSecret(name: String, value: String) async throws -> String {
+        _ = try await postAction(
+            path: "/api/v1/secrets",
+            body: ["name": name, "value": value, "type": "keyring"]
+        )
+        return "${keyring:\(name)}"
+    }
+
     // MARK: - Connect (Client Registration)
 
     /// Client status model returned by `GET /api/v1/connect`.

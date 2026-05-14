@@ -73,6 +73,15 @@ struct ServerDetailView: View {
     @State private var isSavingEdit = false
     @State private var editError: String?
 
+    /// State for the "Convert to secret" sheet shown when the user picks
+    /// the lock icon next to a literal header / env value. Mirrors the
+    /// Web UI flow: prompt for a secret name, POST to /api/v1/secrets,
+    /// then PATCH the server replacing the value with `${keyring:NAME}`.
+    @State private var convertSheet: ConvertToSecretContext?
+    @State private var convertSheetSecretName: String = ""
+    @State private var convertSheetBusy: Bool = false
+    @State private var convertSheetError: String?
+
     // Logs auto-refresh timer
     @State private var logRefreshTimer: Timer?
 
@@ -94,6 +103,9 @@ struct ServerDetailView: View {
             case .logs: logsTab
             case .config: configTab
             }
+        }
+        .sheet(item: $convertSheet) { ctx in
+            convertToSecretSheet(ctx)
         }
     }
 
@@ -569,7 +581,7 @@ struct ServerDetailView: View {
                                     )
                                 } else if let headers = server.headers {
                                     ForEach(headers.keys.sorted(), id: \.self) { key in
-                                        configRow(label: key, value: maskedHeaderValue(headers[key] ?? ""))
+                                        kvRow(scope: .header, key: key, value: headers[key] ?? "")
                                     }
                                 }
                             }
@@ -594,9 +606,15 @@ struct ServerDetailView: View {
                         }
                     }
 
-                    if isEditing {
+                    if isEditing || (server.env?.isEmpty == false) {
                         configSection(title: "Environment Variables") {
-                            configEditRow(label: "KEY=VALUE per line", text: $editEnvVars, placeholder: "API_KEY=abc123\nDEBUG=true", multiline: true)
+                            if isEditing {
+                                configEditRow(label: "KEY=VALUE per line", text: $editEnvVars, placeholder: "API_KEY=abc123\nDEBUG=true", multiline: true)
+                            } else if let env = server.env {
+                                ForEach(env.keys.sorted(), id: \.self) { key in
+                                    kvRow(scope: .env, key: key, value: env[key] ?? "")
+                                }
+                            }
                         }
                     }
 
@@ -1031,14 +1049,40 @@ struct ServerDetailView: View {
         // not "ignore".
         if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
             let headers = parseKVTextarea(editHeaders)
-            // Refuse to save a literal `***REDACTED***` value — that
-            // sentinel means the backend never sent us the real value
-            // (reveal_secret_headers is off), so persisting it would
-            // silently overwrite a real header with the redaction string.
-            // Users editing redacted headers must either change the value
-            // or enable reveal_secret_headers in their config first.
-            if headers.values.contains("***REDACTED***") {
-                editError = "Some header values are redacted (`***REDACTED***`). Set `reveal_secret_headers: true` in your config to view + edit them, or replace those values with new ones before saving."
+
+            // Defense against two distinct destructive edits when the
+            // backend has redacted secret values (reveal_secret_headers
+            // is off):
+            //
+            // 1. The user leaves a `***REDACTED***` literal in the
+            //    textarea and clicks Save — we'd persist the literal
+            //    sentinel as the new value, breaking the upstream.
+            //
+            // 2. The user *removes* a redacted line (perhaps to add a
+            //    new header alongside it) without realising they're
+            //    also wiping out the real secret behind the redaction.
+            //    The new map has no `***REDACTED***` so guard #1 misses
+            //    it, but the original key has silently vanished and the
+            //    real Authorization header is gone from the saved config.
+            //
+            // Compare against the original `server.headers` keys whose
+            // value is the redaction sentinel and refuse the save if any
+            // of them are still ***REDACTED*** OR have been dropped
+            // entirely. Either way the user needs to enable
+            // reveal_secret_headers in their config first so they can
+            // see and explicitly carry the value forward (or use the
+            // Web UI's per-row affordances).
+            let redactedKeysInOriginal: Set<String> = Set(
+                (server.headers ?? [:])
+                    .filter { $0.value == "***REDACTED***" }
+                    .map { $0.key }
+            )
+            let stillRedacted = headers.filter { $0.value == "***REDACTED***" }.map { $0.key }
+            let droppedFromOriginal = redactedKeysInOriginal.subtracting(headers.keys)
+
+            if !stillRedacted.isEmpty || !droppedFromOriginal.isEmpty {
+                let offenders = (stillRedacted + Array(droppedFromOriginal)).sorted().joined(separator: ", ")
+                editError = "Cannot save: the backend redacted these headers and the real values are not visible here: \(offenders). Set `reveal_secret_headers: true` in your config to view + edit them, then try again."
                 isSavingEdit = false
                 return
             }
@@ -1130,6 +1174,167 @@ struct ServerDetailView: View {
     private func stopLogRefresh() {
         logRefreshTimer?.invalidate()
         logRefreshTimer = nil
+    }
+
+    // MARK: - Convert-to-secret sheet
+
+    /// Identifiable context for the SwiftUI .sheet(item:) modifier — keeps
+    /// the current convert-target alongside the sheet state. `scope` picks
+    /// between the Headers and Environment Variables maps; `key` is the
+    /// map key whose literal value we're about to move into the keyring.
+    struct ConvertToSecretContext: Identifiable {
+        let id = UUID()
+        let scope: Scope
+        let key: String
+        let value: String
+        enum Scope: String { case header, env }
+    }
+
+    /// Suggest a keyring secret name derived from server.name + key.
+    /// Lowercased, alphanumeric + hyphens, capped at 64 chars — same
+    /// convention as the Web UI / Secrets view.
+    private func suggestedSecretName(for key: String) -> String {
+        let base = "\(server.name)-\(key)"
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
+        let scrubbed = base.lowercased().unicodeScalars
+            .map { allowed.contains($0) ? Character($0) : "-" }
+        var out = String(scrubbed)
+            .split(separator: "-", omittingEmptySubsequences: true)
+            .joined(separator: "-")
+        if out.count > 64 { out = String(out.prefix(64)) }
+        return out
+    }
+
+    private func openConvertSheet(scope: ConvertToSecretContext.Scope, key: String, value: String) {
+        convertSheetSecretName = suggestedSecretName(for: key)
+        convertSheetBusy = false
+        convertSheetError = nil
+        convertSheet = ConvertToSecretContext(scope: scope, key: key, value: value)
+    }
+
+    @ViewBuilder
+    private func convertToSecretSheet(_ ctx: ConvertToSecretContext) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Convert to secret")
+                .font(.scaled(.title3, scale: fontScale).bold())
+            Text("Store the value of \(Text(ctx.key).font(.scaledMonospaced(.body, scale: fontScale))) in the OS keyring and replace it with a `${keyring:NAME}` reference. The server config will then no longer contain the literal value.")
+                .font(.scaled(.subheadline, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Secret name").font(.scaled(.subheadline, scale: fontScale)).foregroundStyle(.secondary)
+                TextField("e.g. \(server.name)-token", text: $convertSheetSecretName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .disabled(convertSheetBusy)
+                Text("Will be referenced as ${keyring:\(convertSheetSecretName.isEmpty ? "NAME" : convertSheetSecretName)}")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let err = convertSheetError {
+                Text(err)
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") { convertSheet = nil }
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(convertSheetBusy)
+                Button(convertSheetBusy ? "Converting…" : "Convert") {
+                    Task { await performConvertToSecret(ctx) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(convertSheetBusy || convertSheetSecretName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private func performConvertToSecret(_ ctx: ConvertToSecretContext) async {
+        guard let client = apiClient else { return }
+        // Refuse to convert if the value is the backend redaction
+        // sentinel — that means the real value is not in our hands and
+        // would be uploaded literally to the keyring.
+        if ctx.value == "***REDACTED***" {
+            convertSheetError = "Cannot convert a redacted value. Set `reveal_secret_headers: true` in your config to view + convert."
+            return
+        }
+        let name = convertSheetSecretName.trimmingCharacters(in: .whitespaces)
+        if name.isEmpty { return }
+        convertSheetBusy = true
+        defer { convertSheetBusy = false }
+        do {
+            let ref = try await client.storeSecret(name: name, value: ctx.value)
+            // Patch the server with the new map value. Build the full
+            // map so deletes round-trip, matching saveEdits()'s policy.
+            switch ctx.scope {
+            case .header:
+                var headers = server.headers ?? [:]
+                headers[ctx.key] = ref
+                try await client.updateServer(server.name, updates: ["headers": headers])
+            case .env:
+                var env = server.env ?? [:]
+                env[ctx.key] = ref
+                try await client.updateServer(server.name, updates: ["env": env])
+            }
+            await refreshServer()
+            await MainActor.run { convertSheet = nil }
+        } catch {
+            await MainActor.run {
+                convertSheetError = "Convert failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Headers + Env per-row view (read-only mode)
+
+    /// Render a single key/value entry with the appropriate affordances:
+    ///  - keyring/env references render as a chip with no actions.
+    ///  - literal values render masked, with a 🔒 "Convert to secret"
+    ///    button next to them.
+    ///  - the backend redaction sentinel renders verbatim so the user
+    ///    knows to flip `reveal_secret_headers` in their config.
+    @ViewBuilder
+    private func kvRow(scope: ConvertToSecretContext.Scope, key: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(key)
+                .font(.scaled(.subheadline, scale: fontScale))
+                .foregroundStyle(.secondary)
+                .frame(width: 140, alignment: .trailing)
+
+            if value.hasPrefix("${keyring:") || value.hasPrefix("${env:") {
+                Label(value, systemImage: "key.fill")
+                    .font(.scaledMonospaced(.caption, scale: fontScale))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.15))
+                    .clipShape(Capsule())
+                Spacer()
+            } else {
+                Text(maskedHeaderValue(value))
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .textSelection(.enabled)
+
+                if value != "***REDACTED***" && !value.isEmpty {
+                    Button {
+                        openConvertSheet(scope: scope, key: key, value: value)
+                    } label: {
+                        Label("Convert to secret", systemImage: "lock.fill")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Store this value in the OS keyring and replace it with a ${keyring:…} reference")
+                }
+                Spacer()
+            }
+        }
     }
 
     // MARK: - Headers + Env helpers
