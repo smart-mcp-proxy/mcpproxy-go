@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -1045,15 +1046,14 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// embed (which goes through runtime.buildServersChangedPayload →
 		// ListServers) share one site and can't drift out of parity.
 
-		// NOTE: header values flow through the REST API in plaintext.
-		// The REST API is gated by the local API key — the same trust
-		// boundary as access to `~/.mcpproxy/mcp_config.json` on disk
-		// where these values are persisted. Redacting in the response
-		// bought no real security, only broke edit-and-save round-trips
-		// for the Web UI and macOS tray. Redaction is still applied at
-		// the `upstream_servers` MCP tool layer (mcp.go:~2545), which
-		// IS the agent-context exposure that motivated
-		// `reveal_secret_headers`.
+		// Redact sensitive header values unless explicitly opted out via
+		// `reveal_secret_headers: true` in config. The Web UI and macOS
+		// tray edit forms work without seeing the real values because
+		// PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved),
+		// so they send only the diff — redacted-but-unchanged values
+		// stay out of the patch and the backend keeps the real string.
+		// See PR #425 for the original threat model.
+		s.redactServerHeaders(serverValues)
 
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
@@ -1083,8 +1083,8 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Enrich with quarantine stats
 	s.enrichServersWithQuarantineStats(servers)
 
-	// See note above the management-service path: REST responses now
-	// send plaintext; the MCP `upstream_servers` tool still redacts.
+	// See note above the management-service path for redaction rationale.
+	s.redactServerHeaders(servers)
 
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
 
@@ -1094,6 +1094,28 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// redactServerHeaders walks each server in the slice and replaces sensitive
+// header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
+// Skips redaction entirely when `reveal_secret_headers: true` is set in the
+// loaded config, matching the behaviour of the `upstream_servers` MCP tool.
+//
+// The UI edit-and-save flow works without seeing the real values because
+// PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved), so the
+// client computes a diff and only sends the keys that actually changed.
+// Redacted-but-unchanged values never round-trip — the backend keeps the
+// real string on disk.
+func (s *Server) redactServerHeaders(servers []contracts.Server) {
+	cfg, err := s.controller.GetConfig()
+	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
+		return
+	}
+	for i := range servers {
+		if len(servers[i].Headers) > 0 {
+			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
+		}
+	}
 }
 
 // enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)
@@ -1130,14 +1152,28 @@ func (s *Server) enrichServersWithQuarantineStats(servers []contracts.Server) {
 	}
 }
 
-// AddServerRequest represents a request to add a new server
+// AddServerRequest represents a request to add a new server.
+//
+// PATCH semantics for the map-typed fields (`headers`, `env`) are
+// deep-merge: keys provided in the request are added or updated on the
+// stored map; keys absent from the request are preserved. To delete a
+// key, list it in `headers_remove` / `env_remove`. This shape lets the
+// Web UI / macOS tray edit forms work without seeing the real values
+// of sensitive headers — the backend redacts them on read, the client
+// computes a diff against the redacted state and only sends keys that
+// changed, so redacted-but-unchanged values never round-trip.
+//
+// `headers_remove` / `env_remove` are ignored on POST (add) — they
+// only matter for PATCH.
 type AddServerRequest struct {
 	Name           string            `json:"name"`
 	URL            string            `json:"url,omitempty"`
 	Command        string            `json:"command,omitempty"`
 	Args           []string          `json:"args,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
+	EnvRemove      []string          `json:"env_remove,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
+	HeadersRemove  []string          `json:"headers_remove,omitempty"`
 	WorkingDir     string            `json:"working_dir,omitempty"`
 	Protocol       string            `json:"protocol,omitempty"`
 	Enabled        *bool             `json:"enabled,omitempty"`
@@ -1388,12 +1424,42 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		updates.Args = req.Args
 		hasUpdates = true
 	}
-	if req.Env != nil {
-		updates.Env = req.Env
+	// PATCH semantics for headers and env are DEEP MERGE — keys provided
+	// by the request are upserted, keys absent from the request are
+	// preserved, and keys listed in `*_remove` are explicitly deleted.
+	// This lets the Web UI / macOS tray send a diff instead of the full
+	// map, so redacted-but-unchanged values (returned by the GET path
+	// via `redactServerHeaders`) never round-trip through the client.
+	if req.Env != nil || len(req.EnvRemove) > 0 {
+		merged := map[string]string{}
+		if existingSrv != nil {
+			for k, v := range existingSrv.Env {
+				merged[k] = v
+			}
+		}
+		for k, v := range req.Env {
+			merged[k] = v
+		}
+		for _, k := range req.EnvRemove {
+			delete(merged, k)
+		}
+		updates.Env = merged
 		hasUpdates = true
 	}
-	if req.Headers != nil {
-		updates.Headers = req.Headers
+	if req.Headers != nil || len(req.HeadersRemove) > 0 {
+		merged := map[string]string{}
+		if existingSrv != nil {
+			for k, v := range existingSrv.Headers {
+				merged[k] = v
+			}
+		}
+		for k, v := range req.Headers {
+			merged[k] = v
+		}
+		for _, k := range req.HeadersRemove {
+			delete(merged, k)
+		}
+		updates.Headers = merged
 		hasUpdates = true
 	}
 	if req.WorkingDir != "" {

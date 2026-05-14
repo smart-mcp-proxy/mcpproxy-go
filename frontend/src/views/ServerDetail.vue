@@ -2366,21 +2366,16 @@ async function startAddingEnv() {
   newEnvKeyInput.value?.focus()
 }
 
-// Build the next headers/env map for a PATCH. We send the full map (not a
-// diff) so the backend stores exactly what's on the client — there is no
-// "merge" semantics on the server side, the partial-update is at the
-// field level (headers / env / args / ...), not at the per-key level.
-function buildNextMap(scope: 'header' | 'env', mutate: (next: Record<string, string>) => void): Record<string, string> {
-  const next = { ...(scope === 'header' ? serverHeaders.value : serverEnv.value) }
-  mutate(next)
-  return next
-}
-
-async function patchKVMap(scope: 'header' | 'env', nextMap: Record<string, string>, action: string): Promise<boolean> {
+// patchServer with deep-merge semantics: the backend treats keys present
+// in `headers` / `env` as upserts, keys absent as preserved, and keys
+// listed in `headers_remove` / `env_remove` as deletes. This lets us send
+// the minimal diff for each user action — and crucially never round-trips
+// `***REDACTED***` values: any header whose redacted form was unchanged
+// simply stays out of the patch, so the backend keeps the real string.
+async function patchServerDiff(patch: Record<string, unknown>, action: string): Promise<boolean> {
   if (!server.value) return false
   kvPatchInFlight.value = true
   try {
-    const patch = scope === 'header' ? { headers: nextMap } : { env: nextMap }
     const resp = await api.patchServer(server.value.name, patch)
     if (!resp.success) {
       systemStore.addToast({ type: 'error', title: `${action} failed`, message: resp.error || 'Unknown error' })
@@ -2397,37 +2392,38 @@ async function patchKVMap(scope: 'header' | 'env', nextMap: Record<string, strin
   }
 }
 
+function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
+  return scope === 'header' ? 'headers' : 'env'
+}
+function scopeRemoveKey(scope: 'header' | 'env'): 'headers_remove' | 'env_remove' {
+  return scope === 'header' ? 'headers_remove' : 'env_remove'
+}
+
 async function saveEdit(scope: 'header' | 'env', k: string, val: string) {
-  const next = buildNextMap(scope, (m) => {
-    m[k] = val
-  })
-  const ok = await patchKVMap(scope, next, `Updated ${k}`)
+  const ok = await patchServerDiff({ [scopeKey(scope)]: { [k]: val } }, `Updated ${k}`)
   if (ok) editingKey.value = null
 }
 
 async function deleteKv(scope: 'header' | 'env', k: string) {
   if (!confirm(`Delete ${scope === 'header' ? 'header' : 'env variable'} "${k}"?`)) return
-  const next = buildNextMap(scope, (m) => {
-    delete m[k]
-  })
-  await patchKVMap(scope, next, `Deleted ${k}`)
+  await patchServerDiff({ [scopeRemoveKey(scope)]: [k] }, `Deleted ${k}`)
 }
 
 async function commitNewHeader() {
   if (!newHeaderKey.value || !newHeaderValue.value) return
-  const next = buildNextMap('header', (m) => {
-    m[newHeaderKey.value] = newHeaderValue.value
-  })
-  const ok = await patchKVMap('header', next, `Added ${newHeaderKey.value}`)
+  const ok = await patchServerDiff(
+    { headers: { [newHeaderKey.value]: newHeaderValue.value } },
+    `Added ${newHeaderKey.value}`
+  )
   if (ok) addingHeader.value = false
 }
 
 async function commitNewEnv() {
   if (!newEnvKey.value || !newEnvValue.value) return
-  const next = buildNextMap('env', (m) => {
-    m[newEnvKey.value] = newEnvValue.value
-  })
-  const ok = await patchKVMap('env', next, `Added ${newEnvKey.value}`)
+  const ok = await patchServerDiff(
+    { env: { [newEnvKey.value]: newEnvValue.value } },
+    `Added ${newEnvKey.value}`
+  )
   if (ok) addingEnv.value = false
 }
 
@@ -2470,10 +2466,10 @@ async function commitConvert() {
       return
     }
     const ref = `\${keyring:${m.secretName}}`
-    const next = buildNextMap(m.scope, (map) => {
-      map[m.key] = ref
-    })
-    await patchKVMap(m.scope, next, `Converted ${m.key} to secret`)
+    await patchServerDiff(
+      { [scopeKey(m.scope)]: { [m.key]: ref } },
+      `Converted ${m.key} to secret`
+    )
     closeConvertModal()
   } catch (e: any) {
     systemStore.addToast({ type: 'error', title: 'Convert failed', message: e?.message || String(e) })

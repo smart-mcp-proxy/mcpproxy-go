@@ -244,12 +244,6 @@ func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason s
 				zap.String("reason", reason),
 				zap.Error(err))
 		} else {
-			// SSE subscribers ride the same trust boundary as the REST
-			// API (API-key gated, local-host only). Send plaintext
-			// header values so the Web UI / macOS tray can round-trip
-			// edits. The MCP `upstream_servers` tool applies its own
-			// redaction for the agent-context exposure that motivated
-			// reveal_secret_headers.
 			redacted := make([]contracts.Server, 0, len(servers))
 			for _, s := range servers {
 				if s != nil {
@@ -318,6 +312,23 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 				ChangedCount: changed,
 				BlockedCount: blocked,
 			}
+		}
+	}
+}
+
+// redactServerHeaders mirrors httpapi.(*Server).redactServerHeaders. It strips
+// sensitive header values (Authorization, Cookie, X-API-Key, ...) unless the
+// loaded config opts out via reveal_secret_headers: true. Centralising this in
+// the runtime keeps SSE subscribers behind the same trust boundary as the
+// REST API.
+func (r *Runtime) redactServerHeaders(servers []contracts.Server) {
+	cfg := r.Config()
+	if cfg != nil && cfg.RevealSecretHeaders {
+		return
+	}
+	for i := range servers {
+		if len(servers[i].Headers) > 0 {
+			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
 		}
 	}
 }

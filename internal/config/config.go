@@ -163,20 +163,22 @@ type Config struct {
 	// Security scanner settings (Spec 039)
 	Security *SecurityConfig `json:"security,omitempty" mapstructure:"security"`
 
-	// RevealSecretHeaders controls whether the `upstream_servers` MCP
-	// tool returns sensitive header values (Authorization, X-API-Key,
-	// Cookie, …) in plaintext or redacted to `***REDACTED***`.
+	// RevealSecretHeaders, when true, disables the redaction of sensitive
+	// header values (Authorization, X-API-Key, Cookie, …) in responses
+	// from the `upstream_servers` MCP tool, the `/api/v1/servers` REST
+	// API, and the SSE event stream.
 	//
-	// Default false — an MCP agent calling `upstream_servers list` sees
-	// `***REDACTED***` so it cannot read another upstream's Bearer token
-	// out of the config and exfiltrate it back to the LLM context.
+	// Default false — sensitive header values are surfaced as
+	// `***REDACTED***` so an MCP agent cannot read Bearer tokens / API
+	// keys out of another upstream's config (PR #425).
 	//
-	// This flag DOES NOT affect the REST API (`/api/v1/servers`) or the
-	// SSE event stream. Those paths are gated by the local API key —
-	// the same trust boundary as access to `~/.mcpproxy/mcp_config.json`
-	// on disk — so redacting there bought no real security while
-	// breaking the Web UI / macOS tray edit-and-save round-trip. They
-	// always send plaintext.
+	// The Web UI / macOS tray edit forms work without seeing the real
+	// values: PATCH /api/v1/servers/{id} deep-merges (omitted keys are
+	// preserved, see `headers_remove` / `env_remove` for explicit
+	// deletes), so clients compute a diff and only send the keys that
+	// actually changed. Redacted-but-unchanged values never round-trip
+	// — the backend keeps the real string. Set this to true if a
+	// downstream tool genuinely needs raw values in the response.
 	RevealSecretHeaders bool `json:"reveal_secret_headers,omitempty" mapstructure:"reveal-secret-headers"`
 
 	// Server edition multi-user configuration (only meaningful with -tags server)

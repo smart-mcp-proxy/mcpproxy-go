@@ -27,30 +27,39 @@
         <span class="font-mono text-xs">env var: {{ envRefName }}</span>
       </span>
     </template>
-    <!-- Literal value: masked by default to avoid shoulder-surfing
-         leaks; click the eye to reveal the actual string returned by
-         the REST API. The REST API serves plaintext header / env
-         values (the API key is the gate at this trust boundary), so
-         reveal always shows the real thing. -->
+    <!-- Literal value path. Two sub-cases:
+         1. Backend redacted the value (`***REDACTED***` sentinel). The
+            real string isn't on the client; reveal would just expose
+            the sentinel and Convert-to-secret has nothing to upload to
+            the keyring. We surface a small "backend-redacted" hint
+            instead so the user understands why those actions are
+            disabled. Editing the value still works through the inline
+            edit button — the PATCH endpoint deep-merges, so typing a
+            new value replaces just that one header server-side.
+         2. Plaintext literal: mask by default, eye to reveal, lock to
+            convert. -->
     <template v-else>
-      <code v-if="revealed" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ rawValue }}</code>
-      <code v-else class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/50">{{ redactedPreview }}</code>
-      <button
-        class="btn btn-ghost btn-xs"
-        :title="revealed ? 'Hide value' : 'Reveal value'"
-        @click="revealed ? $emit('hide') : $emit('reveal')"
-      >
-        <span aria-hidden="true">{{ revealed ? '🙈' : '👁' }}</span>
-      </button>
-      <button
-        class="btn btn-ghost btn-xs"
-        title="Move value into the OS keyring and reference it as ${keyring:name}"
-        @click="$emit('convert')"
-        :disabled="busy"
-      >
-        <span aria-hidden="true">🔒</span>
-        <span class="hidden md:inline ml-1">Convert to secret</span>
-      </button>
+      <code v-if="isBackendRedacted" class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/50" title="Backend redacted this value. Edit to overwrite — the PATCH endpoint deep-merges, so the unchanged real value is preserved.">{{ rawValue }}</code>
+      <template v-else>
+        <code v-if="revealed" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ rawValue }}</code>
+        <code v-else class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/50">{{ redactedPreview }}</code>
+        <button
+          class="btn btn-ghost btn-xs"
+          :title="revealed ? 'Hide value' : 'Reveal value'"
+          @click="revealed ? $emit('hide') : $emit('reveal')"
+        >
+          <span aria-hidden="true">{{ revealed ? '🙈' : '👁' }}</span>
+        </button>
+        <button
+          class="btn btn-ghost btn-xs"
+          title="Move value into the OS keyring and reference it as ${keyring:name}"
+          @click="$emit('convert')"
+          :disabled="busy"
+        >
+          <span aria-hidden="true">🔒</span>
+          <span class="hidden md:inline ml-1">Convert to secret</span>
+        </button>
+      </template>
     </template>
     <button class="btn btn-ghost btn-xs" title="Edit" @click="$emit('start-edit')" :disabled="busy">✎</button>
     <button class="btn btn-ghost btn-xs text-error" title="Delete" @click="$emit('delete')" :disabled="busy">✕</button>
@@ -114,6 +123,15 @@ const envRefName = computed(() => {
   const m = (props.rawValue ?? '').match(/^\$\{env:([^}]+)\}$/)
   return m ? m[1] : ''
 })
+// The Go backend redacts secret header values via
+// `redactServerHeaders` so an MCP agent calling `upstream_servers list`
+// cannot exfiltrate Bearer tokens (PR #425). The REST API and SSE
+// channel inherit the same redaction. When that sentinel surfaces, the
+// real string is not in our hands — reveal/convert are disabled, but
+// editing still works because the PATCH endpoint deep-merges (the
+// untouched redacted key simply stays out of the patch body).
+const isBackendRedacted = computed(() => props.rawValue === '***REDACTED***')
+
 const redactedPreview = computed(() => {
   const v = props.rawValue ?? ''
   if (!v) return '(empty)'

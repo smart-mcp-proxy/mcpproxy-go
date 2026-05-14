@@ -54,9 +54,12 @@ struct ServerDetailView: View {
     @State private var editWorkingDir = ""
     @State private var editEnvVars = ""
     /// HTTP servers only — KEY=VALUE per line. Pre-populated from
-    /// `server.headers` on enter-edit. The REST API now serves plaintext
-    /// header values (the API key gates that endpoint), so the textarea
-    /// always contains the real strings the user can edit and save back.
+    /// `server.headers` on enter-edit. Backend may return `***REDACTED***`
+    /// for sensitive header values (PR #425); the textarea shows that
+    /// verbatim. saveEdits() diffs the parsed map against `server.headers`
+    /// and only sends changed/added/removed keys to the deep-merge PATCH
+    /// endpoint — so leaving a redacted line untouched preserves the real
+    /// stored value, and editing/deleting/adding behaves intuitively.
     @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
@@ -1040,14 +1043,30 @@ struct ServerDetailView: View {
         // unconditionally so deletes round-trip.
         updates["env"] = parseKVTextarea(editEnvVars)
 
-        // Parse headers (HTTP / streamable-http only). Same all-or-nothing
-        // semantics as env: we always send the parsed map so deletes
-        // propagate. The backend handler treats `headers: {}` as "clear",
-        // not "ignore". The REST API now serves plaintext header values
-        // (the API key gates this endpoint), so the textarea is always
-        // pre-populated with the real values and a straight save is safe.
+        // Compute deep-merge diffs for env and headers. The PATCH endpoint
+        // treats `headers` / `env` as upserts (keys present in the body
+        // are added or replaced), and `headers_remove` / `env_remove` as
+        // explicit deletes. Keys absent from both are preserved on the
+        // server — which is exactly what we want for redacted Bearer
+        // tokens that the user did not edit: we leave them out of the
+        // patch and the backend keeps the real string.
+        if let (envSet, envRemove) = diffKVMap(original: server.env ?? [:], next: parseKVTextarea(editEnvVars)) {
+            if !envSet.isEmpty {
+                updates["env"] = envSet
+            }
+            if !envRemove.isEmpty {
+                updates["env_remove"] = envRemove
+            }
+        }
         if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
-            updates["headers"] = parseKVTextarea(editHeaders)
+            if let (hdrSet, hdrRemove) = diffKVMap(original: server.headers ?? [:], next: parseKVTextarea(editHeaders)) {
+                if !hdrSet.isEmpty {
+                    updates["headers"] = hdrSet
+                }
+                if !hdrRemove.isEmpty {
+                    updates["headers_remove"] = hdrRemove
+                }
+            }
         }
 
         // Boolean toggles
@@ -1276,7 +1295,13 @@ struct ServerDetailView: View {
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
                     .textSelection(.enabled)
 
-                if !value.isEmpty {
+                // Convert-to-secret is only meaningful when we hold the
+                // real value. When the backend redacted it (PR #425), the
+                // sentinel string isn't useful as a keyring payload.
+                // Editing still works through the textarea — the PATCH
+                // endpoint deep-merges so the untouched redacted key
+                // stays out of the patch and its real value is preserved.
+                if !value.isEmpty && value != "***REDACTED***" {
                     Button {
                         openConvertSheet(scope: scope, key: key, value: value)
                     } label: {
@@ -1292,6 +1317,39 @@ struct ServerDetailView: View {
     }
 
     // MARK: - Headers + Env helpers
+
+    /// Diff a new key/value map against the original (e.g. `server.headers`
+    /// as returned by the API, which may contain `***REDACTED***` sentinels
+    /// for sensitive keys). Returns a `set` map of upserts and a `remove`
+    /// list of deletes that, sent as a deep-merge PATCH body, produces the
+    /// desired final state without round-tripping redacted values.
+    ///
+    /// Returns `nil` when the original and next maps are identical (no
+    /// patch needed). Otherwise returns a tuple suitable for the
+    /// `headers` / `headers_remove` (or env equivalents) JSON fields.
+    ///
+    /// Subtle invariant: when the user leaves the textarea line for a
+    /// redacted key untouched, `next[k] == "***REDACTED***" == original[k]`
+    /// — equality check is "values match", so the key stays out of both
+    /// sides of the diff and the backend preserves the real value.
+    private func diffKVMap(original: [String: String], next: [String: String]) -> (set: [String: String], remove: [String])? {
+        var set: [String: String] = [:]
+        var remove: [String] = []
+        for (k, v) in next {
+            if original[k] != v {
+                set[k] = v
+            }
+        }
+        for k in original.keys {
+            if next[k] == nil {
+                remove.append(k)
+            }
+        }
+        if set.isEmpty && remove.isEmpty {
+            return nil
+        }
+        return (set, remove.sorted())
+    }
 
     /// Parse a "KEY=VALUE per line" textarea (used for both env and
     /// headers) into a map. Empty lines are dropped; lines without `=`
