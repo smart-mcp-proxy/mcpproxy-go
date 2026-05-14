@@ -53,6 +53,14 @@ struct ServerDetailView: View {
     @State private var editArgs = ""
     @State private var editWorkingDir = ""
     @State private var editEnvVars = ""
+    /// HTTP servers only — KEY=VALUE per line. Pre-populated from
+    /// `server.headers` on enter-edit. Sensitive values may show as
+    /// `***REDACTED***` if the backend redacted them; saving redacted
+    /// content unchanged is a no-op (the PATCH endpoint preserves whatever
+    /// arrives but a `***REDACTED***` literal is meaningless to upstream),
+    /// so users editing redacted headers should either edit the value or
+    /// enable `reveal_secret_headers: true` in their config first.
+    @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
     @State private var editDockerIsolation = false
@@ -547,6 +555,25 @@ struct ServerDetailView: View {
                                 configRow(label: "URL", value: server.url ?? "N/A")
                             }
                         }
+                        // Headers section: visible whenever we have any headers
+                        // to show OR we're in edit mode (so users can add new
+                        // headers on a server that started without any).
+                        if isEditing || (server.headers?.isEmpty == false) {
+                            configSection(title: "Headers") {
+                                if isEditing {
+                                    configEditRow(
+                                        label: "KEY=VALUE per line",
+                                        text: $editHeaders,
+                                        placeholder: "Authorization=Bearer abc123\nX-API-Key=${keyring:my-key}",
+                                        multiline: true
+                                    )
+                                } else if let headers = server.headers {
+                                    ForEach(headers.keys.sorted(), id: \.self) { key in
+                                        configRow(label: key, value: maskedHeaderValue(headers[key] ?? ""))
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     if server.protocol == "stdio" {
@@ -936,7 +963,18 @@ struct ServerDetailView: View {
         editCommand = server.command ?? ""
         editArgs = (server.args ?? []).joined(separator: "\n")
         editWorkingDir = server.workingDir ?? ""
-        editEnvVars = "" // env vars not in ServerStatus model, would need config API
+        // Pre-populate env and headers textareas from the server payload
+        // so users entering edit mode start from the existing config
+        // rather than from blank. Both maps emit one KEY=VALUE per line,
+        // sorted by key for stable rendering.
+        editEnvVars = (server.env ?? [:])
+            .sorted(by: { $0.key < $1.key })
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "\n")
+        editHeaders = (server.headers ?? [:])
+            .sorted(by: { $0.key < $1.key })
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: "\n")
         editEnabled = server.enabled
         editQuarantined = server.quarantined
         editDockerIsolation = server.isolation?.enabled ?? false
@@ -981,18 +1019,30 @@ struct ServerDetailView: View {
         let wd = editWorkingDir.trimmingCharacters(in: .whitespaces)
         if !wd.isEmpty { updates["working_dir"] = wd }
 
-        // Parse env vars
-        if !editEnvVars.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var env: [String: String] = [:]
-            for line in editEnvVars.components(separatedBy: "\n") {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if trimmed.isEmpty { continue }
-                let parts = trimmed.components(separatedBy: "=")
-                if parts.count >= 2 {
-                    env[parts[0].trimmingCharacters(in: .whitespaces)] = parts.dropFirst().joined(separator: "=")
-                }
+        // Parse env vars. The textarea is the user's authoritative copy on
+        // save — sending an empty map clears all env vars on the backend
+        // (matches the existing add-server flow). We pass it through
+        // unconditionally so deletes round-trip.
+        updates["env"] = parseKVTextarea(editEnvVars)
+
+        // Parse headers (HTTP / streamable-http only). Same all-or-nothing
+        // semantics as env: we always send the parsed map so deletes
+        // propagate. The backend handler treats `headers: {}` as "clear",
+        // not "ignore".
+        if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
+            let headers = parseKVTextarea(editHeaders)
+            // Refuse to save a literal `***REDACTED***` value — that
+            // sentinel means the backend never sent us the real value
+            // (reveal_secret_headers is off), so persisting it would
+            // silently overwrite a real header with the redaction string.
+            // Users editing redacted headers must either change the value
+            // or enable reveal_secret_headers in their config first.
+            if headers.values.contains("***REDACTED***") {
+                editError = "Some header values are redacted (`***REDACTED***`). Set `reveal_secret_headers: true` in your config to view + edit them, or replace those values with new ones before saving."
+                isSavingEdit = false
+                return
             }
-            if !env.isEmpty { updates["env"] = env }
+            updates["headers"] = headers
         }
 
         // Boolean toggles
@@ -1080,6 +1130,43 @@ struct ServerDetailView: View {
     private func stopLogRefresh() {
         logRefreshTimer?.invalidate()
         logRefreshTimer = nil
+    }
+
+    // MARK: - Headers + Env helpers
+
+    /// Parse a "KEY=VALUE per line" textarea (used for both env and
+    /// headers) into a map. Empty lines are dropped; lines without `=`
+    /// are dropped silently — matching the existing env-parsing behaviour
+    /// on this view. Returns an empty map when the textarea is empty so
+    /// callers can treat the result as the authoritative new state.
+    private func parseKVTextarea(_ text: String) -> [String: String] {
+        var out: [String: String] = [:]
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            let parts = trimmed.components(separatedBy: "=")
+            guard parts.count >= 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            if key.isEmpty { continue }
+            out[key] = parts.dropFirst().joined(separator: "=")
+        }
+        return out
+    }
+
+    /// Render a header value safely in view mode. Keyring/env references
+    /// pass through as-is (they're already labels, not secrets). Literal
+    /// values are masked to "•••• (NN chars)" so a casual onlooker can
+    /// see the header IS set without exposing the secret. The backend
+    /// may have already redacted the value to `***REDACTED***`; in that
+    /// case we surface that string verbatim so users know to flip
+    /// `reveal_secret_headers` in config to inspect / edit it.
+    private func maskedHeaderValue(_ value: String) -> String {
+        if value == "***REDACTED***" { return value }
+        if value.hasPrefix("${keyring:") || value.hasPrefix("${env:") { return value }
+        if value.isEmpty { return "(empty)" }
+        if value.count <= 4 { return "••••" }
+        let tail = value.suffix(2)
+        return "••••\(tail) (\(value.count) chars)"
     }
 }
 
