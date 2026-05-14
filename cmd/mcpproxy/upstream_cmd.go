@@ -2141,7 +2141,7 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first.\n\nThe `patch` subcommand requires a live backend so configuration changes are\napplied with full deep-merge semantics and propagated to running upstream\nconnections immediately. Editing the config file by hand only works while\nthe daemon is offline.")
+		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first; the `patch` subcommand requires a live backend so configuration changes are applied with full deep-merge semantics and propagated to running upstream connections immediately. Editing the config file by hand only works while the daemon is offline")
 	}
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
