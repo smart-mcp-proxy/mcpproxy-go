@@ -22,7 +22,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
@@ -1046,11 +1045,15 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// embed (which goes through runtime.buildServersChangedPayload →
 		// ListServers) share one site and can't drift out of parity.
 
-		// Redact sensitive header values unless explicitly opted out via
-		// `reveal_secret_headers: true` in config. See config.Config field
-		// for rationale — the same redaction is applied to the
-		// `upstream_servers` MCP tool's list output.
-		s.redactServerHeaders(serverValues)
+		// NOTE: header values flow through the REST API in plaintext.
+		// The REST API is gated by the local API key — the same trust
+		// boundary as access to `~/.mcpproxy/mcp_config.json` on disk
+		// where these values are persisted. Redacting in the response
+		// bought no real security, only broke edit-and-save round-trips
+		// for the Web UI and macOS tray. Redaction is still applied at
+		// the `upstream_servers` MCP tool layer (mcp.go:~2545), which
+		// IS the agent-context exposure that motivated
+		// `reveal_secret_headers`.
 
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
@@ -1080,8 +1083,8 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	// Enrich with quarantine stats
 	s.enrichServersWithQuarantineStats(servers)
 
-	// See note above the management-service path for rationale.
-	s.redactServerHeaders(servers)
+	// See note above the management-service path: REST responses now
+	// send plaintext; the MCP `upstream_servers` tool still redacts.
 
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
 
@@ -1091,22 +1094,6 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
-}
-
-// redactServerHeaders walks each server in the slice and replaces sensitive
-// header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
-// Skips redaction entirely when `reveal_secret_headers: true` is set in the
-// loaded config, matching the behaviour of the `upstream_servers` MCP tool.
-func (s *Server) redactServerHeaders(servers []contracts.Server) {
-	cfg, err := s.controller.GetConfig()
-	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
-		return
-	}
-	for i := range servers {
-		if len(servers[i].Headers) > 0 {
-			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
-		}
-	}
 }
 
 // enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)

@@ -120,7 +120,12 @@ func TestEmitServersChanged_NoListerStillPublishesNotifyOnly(t *testing.T) {
 	assert.False(t, hasServers, "servers key should be absent without a configured lister")
 }
 
-func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
+// SSE rides the same trust boundary as the REST API (API-key gated, local
+// only). Header values must come through in plaintext so Web UI / macOS
+// tray clients can round-trip edits. The `upstream_servers` MCP tool keeps
+// its own redaction for the agent-context path — that exposure is the
+// one `reveal_secret_headers` was created to protect.
+func TestEmitServersChanged_SendsPlaintextHeaders(t *testing.T) {
 	servers := []*contracts.Server{
 		{
 			Name: "alpha",
@@ -133,24 +138,25 @@ func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
 	stats := &contracts.ServerStats{TotalServers: 1}
 
 	rt := newPayloadTestRuntime(t, &fakeServersLister{servers: servers, stats: stats})
-	// Default config (RevealSecretHeaders=false). Wire a minimal config service
-	// snapshot so r.Config() returns non-nil.
+	// Default config (RevealSecretHeaders=false). The new policy is that
+	// REST + SSE responses do NOT redact, only the MCP tool does, so the
+	// SSE payload should carry plaintext regardless of the flag.
 	rt.cfg = &config.Config{}
 	ch := rt.SubscribeEvents()
 	defer rt.UnsubscribeEvents(ch)
 
-	rt.emitServersChanged("redact-check", nil)
+	rt.emitServersChanged("plaintext-check", nil)
 
 	evt := receiveServersChanged(t, ch)
 	gotServers, ok := evt.Payload["servers"].([]contracts.Server)
 	require.True(t, ok)
 	require.Len(t, gotServers, 1)
 
-	authVal := gotServers[0].Headers["Authorization"]
-	contentVal := gotServers[0].Headers["Content-Type"]
-	assert.NotEqual(t, "Bearer secret-token-value", authVal, "Authorization header must be redacted")
-	assert.Contains(t, authVal, "REDACTED")
-	assert.Equal(t, "application/json", contentVal, "Content-Type is not sensitive; must not be redacted")
+	assert.Equal(t, "Bearer secret-token-value", gotServers[0].Headers["Authorization"],
+		"Authorization must be plaintext over SSE — the API key already gates this endpoint")
+	assert.NotContains(t, gotServers[0].Headers["Authorization"], "REDACTED",
+		"the redaction sentinel must not appear in SSE payloads")
+	assert.Equal(t, "application/json", gotServers[0].Headers["Content-Type"])
 }
 
 // ctxAwareLister is a serversLister that blocks ListServers until the

@@ -27,23 +27,22 @@
         <span class="font-mono text-xs">env var: {{ envRefName }}</span>
       </span>
     </template>
-    <!-- Literal value: redacted by default, reveal button shows the raw
-         string as returned by the API. If the backend redacted the value
-         (i.e. `reveal_secret_headers: false`), the "raw" string will be
-         `***REDACTED***` and revealing it is a no-op — we surface that
-         explicitly so the user understands why nothing changes. -->
+    <!-- Literal value: masked by default to avoid shoulder-surfing
+         leaks; click the eye to reveal the actual string returned by
+         the REST API. The REST API serves plaintext header / env
+         values (the API key is the gate at this trust boundary), so
+         reveal always shows the real thing. -->
     <template v-else>
       <code v-if="revealed" class="bg-base-200 px-1.5 py-0.5 rounded text-xs break-all">{{ rawValue }}</code>
       <code v-else class="bg-base-200 px-1.5 py-0.5 rounded text-xs text-base-content/50">{{ redactedPreview }}</code>
       <button
         class="btn btn-ghost btn-xs"
-        :title="revealed ? 'Hide value' : (isBackendRedacted ? 'Backend redacted this value. Set reveal_secret_headers: true to view.' : 'Reveal value')"
+        :title="revealed ? 'Hide value' : 'Reveal value'"
         @click="revealed ? $emit('hide') : $emit('reveal')"
       >
         <span aria-hidden="true">{{ revealed ? '🙈' : '👁' }}</span>
       </button>
       <button
-        v-if="!isBackendRedacted"
         class="btn btn-ghost btn-xs"
         title="Move value into the OS keyring and reference it as ${keyring:name}"
         @click="$emit('convert')"
@@ -115,12 +114,6 @@ const envRefName = computed(() => {
   const m = (props.rawValue ?? '').match(/^\$\{env:([^}]+)\}$/)
   return m ? m[1] : ''
 })
-// The Go backend redacts secret header values via
-// internal/httpapi/server.go:redactServerHeaders. Detect that sentinel so
-// we can disable affordances (reveal, convert) that depend on having the
-// real value in hand.
-const isBackendRedacted = computed(() => props.rawValue === '***REDACTED***')
-
 const redactedPreview = computed(() => {
   const v = props.rawValue ?? ''
   if (!v) return '(empty)'

@@ -54,12 +54,9 @@ struct ServerDetailView: View {
     @State private var editWorkingDir = ""
     @State private var editEnvVars = ""
     /// HTTP servers only — KEY=VALUE per line. Pre-populated from
-    /// `server.headers` on enter-edit. Sensitive values may show as
-    /// `***REDACTED***` if the backend redacted them; saving redacted
-    /// content unchanged is a no-op (the PATCH endpoint preserves whatever
-    /// arrives but a `***REDACTED***` literal is meaningless to upstream),
-    /// so users editing redacted headers should either edit the value or
-    /// enable `reveal_secret_headers: true` in their config first.
+    /// `server.headers` on enter-edit. The REST API now serves plaintext
+    /// header values (the API key gates that endpoint), so the textarea
+    /// always contains the real strings the user can edit and save back.
     @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
@@ -1046,47 +1043,11 @@ struct ServerDetailView: View {
         // Parse headers (HTTP / streamable-http only). Same all-or-nothing
         // semantics as env: we always send the parsed map so deletes
         // propagate. The backend handler treats `headers: {}` as "clear",
-        // not "ignore".
+        // not "ignore". The REST API now serves plaintext header values
+        // (the API key gates this endpoint), so the textarea is always
+        // pre-populated with the real values and a straight save is safe.
         if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
-            let headers = parseKVTextarea(editHeaders)
-
-            // Defense against two distinct destructive edits when the
-            // backend has redacted secret values (reveal_secret_headers
-            // is off):
-            //
-            // 1. The user leaves a `***REDACTED***` literal in the
-            //    textarea and clicks Save — we'd persist the literal
-            //    sentinel as the new value, breaking the upstream.
-            //
-            // 2. The user *removes* a redacted line (perhaps to add a
-            //    new header alongside it) without realising they're
-            //    also wiping out the real secret behind the redaction.
-            //    The new map has no `***REDACTED***` so guard #1 misses
-            //    it, but the original key has silently vanished and the
-            //    real Authorization header is gone from the saved config.
-            //
-            // Compare against the original `server.headers` keys whose
-            // value is the redaction sentinel and refuse the save if any
-            // of them are still ***REDACTED*** OR have been dropped
-            // entirely. Either way the user needs to enable
-            // reveal_secret_headers in their config first so they can
-            // see and explicitly carry the value forward (or use the
-            // Web UI's per-row affordances).
-            let redactedKeysInOriginal: Set<String> = Set(
-                (server.headers ?? [:])
-                    .filter { $0.value == "***REDACTED***" }
-                    .map { $0.key }
-            )
-            let stillRedacted = headers.filter { $0.value == "***REDACTED***" }.map { $0.key }
-            let droppedFromOriginal = redactedKeysInOriginal.subtracting(headers.keys)
-
-            if !stillRedacted.isEmpty || !droppedFromOriginal.isEmpty {
-                let offenders = (stillRedacted + Array(droppedFromOriginal)).sorted().joined(separator: ", ")
-                editError = "Cannot save: the backend redacted these headers and the real values are not visible here: \(offenders). Set `reveal_secret_headers: true` in your config to view + edit them, then try again."
-                isSavingEdit = false
-                return
-            }
-            updates["headers"] = headers
+            updates["headers"] = parseKVTextarea(editHeaders)
         }
 
         // Boolean toggles
@@ -1259,13 +1220,6 @@ struct ServerDetailView: View {
 
     private func performConvertToSecret(_ ctx: ConvertToSecretContext) async {
         guard let client = apiClient else { return }
-        // Refuse to convert if the value is the backend redaction
-        // sentinel — that means the real value is not in our hands and
-        // would be uploaded literally to the keyring.
-        if ctx.value == "***REDACTED***" {
-            convertSheetError = "Cannot convert a redacted value. Set `reveal_secret_headers: true` in your config to view + convert."
-            return
-        }
         let name = convertSheetSecretName.trimmingCharacters(in: .whitespaces)
         if name.isEmpty { return }
         convertSheetBusy = true
@@ -1322,7 +1276,7 @@ struct ServerDetailView: View {
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
                     .textSelection(.enabled)
 
-                if value != "***REDACTED***" && !value.isEmpty {
+                if !value.isEmpty {
                     Button {
                         openConvertSheet(scope: scope, key: key, value: value)
                     } label: {

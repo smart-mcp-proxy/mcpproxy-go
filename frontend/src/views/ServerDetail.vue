@@ -2462,14 +2462,6 @@ function closeConvertModal() {
 async function commitConvert() {
   const m = convertModal.value
   if (!m.secretName || !m.rawValue) return
-  if (m.rawValue === '***REDACTED***') {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Cannot convert',
-      message: 'Backend is redacting this value (reveal_secret_headers: false). The literal cannot be read from this side; edit the value first or enable reveal_secret_headers in your config.',
-    })
-    return
-  }
   m.busy = true
   try {
     const storeResp = await api.storeSecret(m.secretName, m.rawValue)
