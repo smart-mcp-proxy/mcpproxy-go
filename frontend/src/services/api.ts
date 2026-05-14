@@ -280,6 +280,29 @@ class APIService {
     })
   }
 
+  // patchServer issues a partial update to an existing upstream server. The
+  // backend (handlePatchServer in internal/httpapi/server.go) treats every
+  // request field as optional and preserves anything not supplied, so callers
+  // can send only what they want to change. Passing `headers: {}` clears
+  // headers; omitting the field keeps the existing value.
+  async patchServer(serverName: string, patch: Record<string, unknown>): Promise<APIResponse> {
+    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    })
+  }
+
+  // storeSecret stashes a value in the OS keyring under the given name and
+  // returns the ${keyring:<name>} reference string callers can substitute
+  // back into the server config. Used by the "Convert to secret" affordance
+  // on the Headers and Environment Variables cards.
+  async storeSecret(name: string, value: string): Promise<APIResponse<{ reference?: string }>> {
+    return this.request<{ reference?: string }>('/api/v1/secrets', {
+      method: 'POST',
+      body: JSON.stringify({ name, value, type: 'keyring' }),
+    })
+  }
+
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
     return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }
