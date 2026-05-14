@@ -8,6 +8,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -147,4 +148,43 @@ func TestReenableTool_VisibleAndCallable(t *testing.T) {
 	}))
 
 	assert.True(t, proxy.isToolCallable("context7", "resolve-library-id"))
+}
+
+// TestIsToolCallable_FailsClosedOnStorageError verifies that isToolCallable is
+// fail-closed: when GetToolApproval returns a real storage error (not
+// ErrToolApprovalNotFound), the function must return false (not callable) so
+// that a transient I/O error cannot silently re-enable a tool the user disabled.
+//
+// We trigger a real storage error by writing corrupt (non-JSON) bytes directly
+// into the tool_approvals BBolt bucket for the target key. When GetToolApproval
+// reads those bytes and json.Unmarshal fails, it returns a decode error that is
+// NOT wrapped in ErrToolApprovalNotFound — exactly the "real error" case the
+// fix must handle.
+func TestIsToolCallable_FailsClosedOnStorageError(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	// Register an enabled server so the early-exit check passes.
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name:    "badstore",
+		Enabled: true,
+	}))
+
+	// Write corrupt (non-JSON) bytes directly into the tool_approvals bucket for
+	// the target key. This bypasses the normal SaveToolApproval path and causes
+	// GetToolApproval to return a json.UnmarshalError — a real error that is NOT
+	// ErrToolApprovalNotFound.
+	corruptKey := storage.ToolApprovalKey("badstore", "fragile-tool")
+	err := proxy.storage.GetDB().Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(storage.ToolApprovalBucket))
+		if b == nil {
+			t.Fatal("tool_approvals bucket not found")
+		}
+		return b.Put([]byte(corruptKey), []byte("NOT VALID JSON {{{"))
+	})
+	require.NoError(t, err, "writing corrupt bytes into BBolt must succeed")
+
+	// isToolCallable must return false (fail-closed) rather than true (fail-open)
+	// when it encounters a real storage error reading the approval record.
+	assert.False(t, proxy.isToolCallable("badstore", "fragile-tool"),
+		"isToolCallable must be fail-closed on storage decode errors")
 }
