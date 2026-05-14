@@ -1141,7 +1141,7 @@
         <h3 class="font-bold text-lg">Convert to secret</h3>
         <p class="text-sm text-base-content/70 mt-2">
           Store the value of <code class="font-mono">{{ convertModal.key }}</code> in the OS keyring and
-          replace it with a <code class="font-mono">${'{'}keyring:NAME{'}'}</code> reference. The
+          replace it with a <code class="font-mono">{{ '${keyring:NAME}' }}</code> reference. The
           server config will then no longer contain the literal value.
         </p>
         <div class="form-control mt-4">
@@ -1153,7 +1153,7 @@
             @keyup.enter="commitConvert"
           />
           <label class="label py-1">
-            <span class="label-text-alt text-base-content/50">Will be referenced as <code>${'{'}keyring:{{ convertModal.secretName || 'NAME' }}{'}'}</code></span>
+            <span class="label-text-alt text-base-content/50">Will be referenced as <code>{{ '${keyring:' + (convertModal.secretName || 'NAME') + '}' }}</code></span>
           </label>
         </div>
         <div class="modal-action">
