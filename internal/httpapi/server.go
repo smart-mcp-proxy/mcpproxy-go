@@ -541,6 +541,10 @@ func (s *Server) setupRoutes() {
 			// Tool-level quarantine (Spec 032)
 			r.Post("/tools/approve", s.handleApproveTools)
 			r.Post("/tools/{tool}/enabled", s.handleSetToolEnabled)
+			// Bulk per-tool enable/disable. Mirrors /servers/enable_all
+			// + /servers/disable_all but scoped to a single server's tools.
+			r.Post("/tools/enable_all", s.handleSetAllToolsEnabled(true))
+			r.Post("/tools/disable_all", s.handleSetAllToolsEnabled(false))
 			r.Get("/tools/{tool}/diff", s.handleGetToolDiff)
 			r.Get("/tools/export", s.handleExportToolDescriptions)
 
@@ -1036,26 +1040,11 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// Enrich with quarantine stats
 		s.enrichServersWithQuarantineStats(serverValues)
 
-		// Enrich with security scan summary (Spec 039)
-		if s.securityController != nil {
-			for i := range serverValues {
-				if summary := s.securityController.GetScanSummary(r.Context(), serverValues[i].Name); summary != nil {
-					serverValues[i].SecurityScan = &contracts.SecurityScanSummary{
-						LastScanAt: summary.LastScanAt,
-						RiskScore:  summary.RiskScore,
-						Status:     summary.Status,
-					}
-					if summary.FindingCounts != nil {
-						serverValues[i].SecurityScan.FindingCounts = &contracts.FindingCounts{
-							Dangerous: summary.FindingCounts.Dangerous,
-							Warning:   summary.FindingCounts.Warning,
-							Info:      summary.FindingCounts.Info,
-							Total:     summary.FindingCounts.Total,
-						}
-					}
-				}
-			}
-		}
+		// SecurityScan is now populated by management.ListServers via the
+		// SecurityScanEnricher wired in internal/server.NewServerWithConfigPath.
+		// Keeping the enrichment there means REST and the SSE servers.changed
+		// embed (which goes through runtime.buildServersChangedPayload →
+		// ListServers) share one site and can't drift out of parity.
 
 		// Redact sensitive header values unless explicitly opted out via
 		// `reveal_secret_headers: true` in config. See config.Config field
@@ -2197,13 +2186,18 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed tools
 	typedTools := contracts.ConvertGenericToolsToTyped(tools)
 
-	// Enrich with approval status from storage
+	// Enrich with approval status + per-tool disabled state from storage.
+	// Using GetToolApproval (instead of GetToolApprovalStatus) lets us
+	// surface the disabled flag without a second lookup. Missing records
+	// are normal — they just mean the tool has never been quarantined or
+	// explicitly toggled.
 	enrichedCount := 0
 	var firstErr error
 	for i := range typedTools {
-		status, err := s.controller.GetToolApprovalStatus(serverID, typedTools[i].Name)
-		if err == nil && status != "" {
-			typedTools[i].ApprovalStatus = status
+		record, err := s.controller.GetToolApproval(serverID, typedTools[i].Name)
+		if err == nil && record != nil {
+			typedTools[i].ApprovalStatus = record.Status
+			typedTools[i].Disabled = record.Disabled
 			enrichedCount++
 		} else if i == 0 {
 			firstErr = err
@@ -3782,6 +3776,12 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 
 // handleGetToolDiff handles GET /api/v1/servers/{id}/tools/{tool}/diff
 func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
+	authCtx := auth.AuthContextFromContext(r.Context())
+	if authCtx == nil || !authCtx.IsAdmin() {
+		s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+		return
+	}
+
 	serverID := chi.URLParam(r, "id")
 	toolName := chi.URLParam(r, "tool")
 	if serverID == "" || toolName == "" {
@@ -3815,6 +3815,65 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 		"tool_name":   toolName,
 		"enabled":     req.Enabled,
 	})
+}
+
+// handleSetAllToolsEnabled returns an HTTP handler that bulk-toggles every
+// tool of a server to `enabled`. The two route registrations (enable_all,
+// disable_all) share this body to keep semantics identical and so the OpenAPI
+// docs stay aligned. Response shape mirrors handleSetToolEnabled, plus a
+// "changed" count for the bulk variant.
+//
+// @Summary Enable or disable all tools for a server
+// @Description Bulk-toggles every known tool of a server. The "changed" field
+//
+//	in the response counts tools whose state actually changed (tools already
+//	in the desired state are skipped to avoid no-op SSE traffic).
+//
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.SuccessResponse "Operation result"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /api/v1/servers/{id}/tools/enable_all [post]
+// @Router /api/v1/servers/{id}/tools/disable_all [post]
+func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authCtx := auth.AuthContextFromContext(r.Context())
+		if authCtx == nil || !authCtx.IsAdmin() {
+			s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+			return
+		}
+
+		serverID := chi.URLParam(r, "id")
+		if serverID == "" {
+			s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+			return
+		}
+
+		controller, ok := s.controller.(interface {
+			SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error)
+		})
+		if !ok {
+			s.writeError(w, r, http.StatusNotImplemented, "Bulk tool enable toggle not supported by controller")
+			return
+		}
+
+		changed, err := controller.SetAllToolsEnabled(serverID, enabled, "api")
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to update tool states: %v", err))
+			return
+		}
+
+		s.writeSuccess(w, map[string]any{
+			"server_name": serverID,
+			"enabled":     enabled,
+			"changed":     changed,
+		})
+	}
 }
 
 func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {

@@ -11,29 +11,55 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 // serversChangedCoalescer collapses bursts of servers.changed events into at
 // most one publish per interval window, last-write-wins. See spec 047 §B2.
 //
-// The producer (emitServersChanged) builds a fully-realised Event and stores
-// it in `pending` (atomic.Pointer). Producers signal the drainer via the
-// `wake` channel. The drainer goroutine wakes on either a wake signal or its
-// own timer; on wake it sleeps until the interval has elapsed since the last
-// publish, then atomically swaps `pending` and publishes the swapped event.
+// Producers (emitServersChanged) submit a lightweight marker (reason + extra
+// fields) via submit(); the marker is stored in `pending` (atomic.Pointer,
+// last-write-wins) and the drainer is signalled via the `wake` channel. The
+// drainer wakes on either a wake signal or its own timer; on wake it sleeps
+// for one interval, then atomically swaps `pending`, materialises the full
+// SSE payload via rt.buildServersChangedPayload, and publishes once.
+//
+// Why build in the drainer, not the producer: the payload requires a
+// ListServers call and an N-row BBolt scan per server. Building eagerly in
+// the producer means a bulk caller that fires K rapid emits pays K×(1+N)
+// BBolt ops, of which K-1 are wasted (the coalescer drops them at publish
+// time). Building lazily in the drainer means exactly one build per publish
+// window, regardless of how many submits land — Spec 047's amortisation
+// promise extended from publish to build.
 //
 // Tests can drive the coalescer synchronously via flushNow() instead of
 // sleeping for the interval.
 type serversChangedCoalescer struct {
 	rt       *Runtime
-	pending  atomic.Pointer[Event]
+	pending  atomic.Pointer[serversChangedMarker]
 	wake     chan struct{}
 	interval time.Duration
+
+	// parentCtx is set by start() and is the appCtx the drainer was launched
+	// with. flushNow uses it as the parent for buildServersChangedPayload's
+	// ListServers timeout so app-shutdown cancellation aborts the build
+	// instead of waiting up to 2s on a Background()-rooted timeout. nil
+	// before start() is called (tests that exercise flushNow directly fall
+	// back to context.Background()).
+	parentCtx context.Context
 
 	// flush coordination
 	flushMu   sync.Mutex
 	lastFlush time.Time
+}
+
+// serversChangedMarker is the lightweight "something happened" record the
+// coalescer stores between submit and flush. The drainer materialises the
+// full server-list payload at flush time using the marker's reason + extra.
+type serversChangedMarker struct {
+	reason string
+	extra  map[string]any
 }
 
 func newServersChangedCoalescer(rt *Runtime, interval time.Duration) *serversChangedCoalescer {
@@ -44,10 +70,11 @@ func newServersChangedCoalescer(rt *Runtime, interval time.Duration) *serversCha
 	}
 }
 
-// submit stores `evt` as the latest pending event (overwriting any prior
-// pending event) and signals the drainer.
-func (c *serversChangedCoalescer) submit(evt Event) {
-	c.pending.Store(&evt)
+// submit stores a marker as the latest pending change (overwriting any prior
+// pending marker) and signals the drainer. Cheap by design: no BBolt or
+// ListServers call here — the build happens in flushNow.
+func (c *serversChangedCoalescer) submit(reason string, extra map[string]any) {
+	c.pending.Store(&serversChangedMarker{reason: reason, extra: extra})
 	select {
 	case c.wake <- struct{}{}:
 	default:
@@ -55,22 +82,31 @@ func (c *serversChangedCoalescer) submit(evt Event) {
 	}
 }
 
-// flushNow publishes any pending event immediately. Intended for tests and
-// for shutdown drain.
+// flushNow materialises and publishes any pending marker immediately.
+// Intended for tests and for shutdown drain. The build (ListServers + N×
+// ListToolApprovals) runs synchronously on the caller's goroutine, parented
+// to c.parentCtx so app-shutdown cancellation aborts ListServers instead of
+// waiting up to 2s on a detached Background()-rooted timeout.
 func (c *serversChangedCoalescer) flushNow() {
-	evt := c.pending.Swap(nil)
-	if evt == nil {
+	marker := c.pending.Swap(nil)
+	if marker == nil {
 		return
 	}
 	c.flushMu.Lock()
 	c.lastFlush = time.Now()
 	c.flushMu.Unlock()
-	c.rt.publishEvent(*evt)
+	ctx := c.parentCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	evt := c.rt.buildServersChangedPayload(ctx, marker.reason, marker.extra)
+	c.rt.publishEvent(evt)
 }
 
 // start launches the drainer goroutine. It exits when ctx is canceled, after
 // a final flush of any residual pending event.
 func (c *serversChangedCoalescer) start(ctx context.Context) {
+	c.parentCtx = ctx
 	go func() {
 		ticker := time.NewTicker(c.interval)
 		defer ticker.Stop()
@@ -154,23 +190,57 @@ func (r *Runtime) publishEvent(evt Event) {
 	r.eventMu.RUnlock()
 }
 
+// emitServersChanged signals that the server list (or any per-server stat)
+// may have changed. When the coalescer is wired up (production path) this
+// is essentially free: it just stores a marker and signals the drainer.
+// The expensive build runs once per coalescing window in the drainer.
+//
+// The no-coalescer branch (some tests, shutdown paths) builds and publishes
+// synchronously to preserve the prior semantics.
 func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
+	if r.coalescer != nil {
+		r.coalescer.submit(reason, extra)
+		return
+	}
+	// No coalescer (some tests, code paths that haven't wired one yet) — fall
+	// back to inline build + publish. Parented to appCtx so shutdown cancels
+	// the build; context.Background() if even the runtime context isn't set
+	// yet (very early in test bootstrap).
+	ctx := r.appCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	evt := r.buildServersChangedPayload(ctx, reason, extra)
+	r.publishEvent(evt)
+}
+
+// buildServersChangedPayload materialises the full servers.changed event
+// from a (reason, extra) marker. Spec 047 embeds the current server list +
+// stats so SSE subscribers (Swift tray, Web UI) can update local state
+// without a follow-up GET /api/v1/servers round trip; on any error we fall
+// back to notify-only — older clients (and resilient new clients) handle
+// the missing keys.
+//
+// Cost: 1 ListServers call + N enrichServersWithQuarantineStats reads
+// (one BBolt View per server). Lives here so the coalescer drainer can
+// invoke it at flush time, amortising the build to one per publish window
+// regardless of how many submits land. The caller-supplied parent ctx is
+// used as the root of the 2-second ListServers timeout so app-shutdown
+// cancellation propagates instead of leaving the drainer goroutine
+// blocked on a detached Background-rooted timer.
+func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason string, extra map[string]any) Event {
 	payload := make(map[string]any, len(extra)+3)
 	for k, v := range extra {
 		payload[k] = v
 	}
 	payload["reason"] = reason
 
-	// Spec 047: embed the current server list and stats so SSE subscribers
-	// (Swift tray, Web UI) can update local state without a follow-up
-	// GET /api/v1/servers round trip. On any error, fall back to notify-only —
-	// older clients (and resilient new clients) handle the missing keys.
 	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
 		servers, stats, err := lister.ListServers(ctx)
 		cancel()
 		if err != nil {
-			r.logger.Warn("emitServersChanged: ListServers failed; emitting notify-only event",
+			r.logger.Warn("buildServersChangedPayload: ListServers failed; emitting notify-only event",
 				zap.String("reason", reason),
 				zap.Error(err))
 		} else {
@@ -181,17 +251,69 @@ func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
 				}
 			}
 			r.redactServerHeaders(redacted)
+			// Mirror httpapi.enrichServersWithQuarantineStats so SSE
+			// subscribers see the same Quarantine.{Pending,Changed,Blocked}
+			// counts the REST list returns. Without this, the Web UI's
+			// store-merge strips the previously-set Quarantine field
+			// (mergeServers treats incoming as authoritative — absent
+			// fields are deleted) and the "N disabled" pill goes stale
+			// after a per-tool toggle.
+			r.enrichServersWithQuarantineStats(redacted)
 			payload["servers"] = redacted
 			payload["stats"] = stats
 		}
 	}
 
-	evt := newEvent(EventTypeServersChanged, payload)
-	if r.coalescer != nil {
-		r.coalescer.submit(evt)
+	return newEvent(EventTypeServersChanged, payload)
+}
+
+// enrichServersWithQuarantineStats mirrors
+// httpapi.(*Server).enrichServersWithQuarantineStats so SSE subscribers receive
+// the same pending/changed/blocked counts the REST /api/v1/servers list does.
+// Without parity, the frontend's mergeServers (which deletes absent fields)
+// would wipe the Quarantine struct on every SSE delivery — the original symptom
+// users hit as "quarantine badges go stale after toggling tools, need page
+// refresh" and the corresponding "N disabled pill stays after re-enabling".
+func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
+	if r.storageManager == nil {
 		return
 	}
-	r.publishEvent(evt)
+	for i := range servers {
+		records, err := r.storageManager.ListToolApprovals(servers[i].Name)
+		if err != nil {
+			r.logger.Debug("Failed to load tool approvals for SSE enrichment",
+				zap.String("server", servers[i].Name),
+				zap.Error(err))
+			continue
+		}
+
+		var pending, changed, blocked int
+		for _, rec := range records {
+			if rec.Disabled {
+				blocked++
+			}
+			switch rec.Status {
+			case storage.ToolApprovalStatusPending:
+				pending++
+			case storage.ToolApprovalStatusChanged:
+				changed++
+			}
+		}
+
+		// Emit the Quarantine block whenever any of the counts is non-zero
+		// (matches the REST handler) AND also explicitly when the previous
+		// emission set non-zero counts — but here we can't see the prior
+		// state, so we follow the same "omit when all-zero" rule as the
+		// REST path. The Web UI's mergeServers correctly handles the
+		// transition to all-zero by dropping the field.
+		if pending > 0 || changed > 0 || blocked > 0 {
+			servers[i].Quarantine = &contracts.QuarantineStats{
+				PendingCount: pending,
+				ChangedCount: changed,
+				BlockedCount: blocked,
+			}
+		}
+	}
 }
 
 // redactServerHeaders mirrors httpapi.(*Server).redactServerHeaders. It strips

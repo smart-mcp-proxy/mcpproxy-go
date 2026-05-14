@@ -191,6 +191,10 @@ type Tool struct {
 	LastUsed       *time.Time             `json:"last_used,omitempty"`
 	Annotations    *ToolAnnotation        `json:"annotations,omitempty"`
 	ApprovalStatus string                 `json:"approval_status,omitempty"`
+	// Disabled mirrors ToolApprovalRecord.Disabled so per-tool enable state is
+	// available without a second round-trip to the approvals endpoint. Absent
+	// in the JSON when false (default) to keep responses compact.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // SearchResult represents a search result for tools

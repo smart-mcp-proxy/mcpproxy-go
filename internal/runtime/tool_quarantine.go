@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -624,21 +626,68 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 	return nil
 }
 
-// SetToolEnabled sets whether a tool is enabled for exposure to MCP clients.
-func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
+// setToolEnabledNoEmit applies the visibility toggle without firing the
+// servers.changed SSE event. Returns (changed, err) where `changed` reports
+// whether record.Disabled actually flipped. The per-tool activity event
+// (emitToolQuarantineEvent) still fires on a real flip — that's the audit
+// trail consumers expect per-tool. SSE-level emission is the caller's job:
+//   - SetToolEnabled (single-toggle wrapper) emits per call.
+//   - SetAllToolsEnabled (bulk) emits exactly once after the loop.
+//
+// Why split this out: emitServersChanged ultimately materialises an SSE
+// payload that requires a ListServers call plus an N-row BBolt scan per
+// server. Calling it inside a bulk loop is K×(1+N) BBolt ops where K-1 of
+// those builds get coalesced away. Mirrors ApproveAllTools, which already
+// emits once after its loop instead of per item.
+//
+// A tool approval record is created on demand when one does not yet exist —
+// without this, callers would only be able to toggle tools that had already
+// transited the quarantine flow (i.e. only when QuarantineEnabled is on and
+// SkipQuarantine is off on the server). The synthesized record's Status is
+// "approved" so the new entry never reintroduces a tool into quarantine.
+//
+// Critical: we ONLY synthesize on storage.ErrToolApprovalNotFound. Any other
+// GetToolApproval error (decode failure, closed DB, mmap remap during
+// compaction, …) is propagated to the caller. Without this check, a transient
+// I/O / unmarshal error could silently demote a `pending`/`changed` record to
+// `approved` — exactly the rug-pull bypass Spec 032 was designed to prevent.
+func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool, updatedBy string) (bool, error) {
 	if r.storageManager == nil {
-		return nil
+		return false, nil
 	}
 
 	record, err := r.storageManager.GetToolApproval(serverName, toolName)
-	if err != nil {
-		return err
+	switch {
+	case err == nil:
+		// existing record — keep its Status, just flip Disabled below.
+	case errors.Is(err, storage.ErrToolApprovalNotFound):
+		// First time we've seen this tool. The tool has been seen by MCP
+		// (we wouldn't be toggling it otherwise), so "approved" is the
+		// correct admin state — the toggle expresses user visibility
+		// intent, not a quarantine decision.
+		record = &storage.ToolApprovalRecord{
+			ServerName: serverName,
+			ToolName:   toolName,
+			Status:     storage.ToolApprovalStatusApproved,
+			ApprovedAt: time.Now().UTC(),
+			ApprovedBy: updatedBy,
+		}
+	default:
+		// Real read error — refuse to write. See comment above for rationale.
+		return false, fmt.Errorf("read tool approval %s:%s: %w", serverName, toolName, err)
+	}
+
+	if record.Disabled == !enabled {
+		// Already in the desired state — no write, no audit event, no SSE.
+		// Matches the prior bulk-path pre-check; lifted here so single-toggle
+		// also avoids no-op BBolt writes.
+		return false, nil
 	}
 
 	record.Disabled = !enabled
 
 	if err := r.storageManager.SaveToolApproval(record); err != nil {
-		return err
+		return false, err
 	}
 
 	action := "tool_enabled"
@@ -651,6 +700,28 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 		"", record.CurrentDescription,
 		"", record.CurrentSchema)
 
+	return true, nil
+}
+
+// SetToolEnabled sets whether a tool is enabled for exposure to MCP clients.
+// Thin wrapper over setToolEnabledNoEmit that adds the per-toggle SSE
+// servers.changed emit so single-tool consumers (CLI, REST) see the state
+// transition without polling. The emit is skipped when the call was a
+// no-op (already in the desired state) to avoid wasted SSE traffic.
+func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
+	changed, err := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+
+	action := "tool_enabled"
+	if !enabled {
+		action = "tool_disabled"
+	}
+
 	r.emitServersChanged(action, map[string]any{
 		"server":     serverName,
 		"tool":       toolName,
@@ -659,6 +730,116 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 	})
 
 	return nil
+}
+
+// SetAllToolsEnabled bulk-toggles every tool currently known for a server to
+// the given enabled state. Returns the count of tools whose state was changed
+// (i.e. excluding tools already in the desired state).
+//
+// Tool inventory comes from the StateView when available (so it covers tools
+// the user has seen even if not yet indexed) and falls back to the search
+// index. Tools without an approval record get one synthesized — see
+// setToolEnabledNoEmit for the rationale.
+//
+// SSE emission: the loop calls setToolEnabledNoEmit (no per-tool
+// servers.changed). A single trailing emitServersChanged fires after the
+// loop when at least one tool actually flipped, mirroring the
+// ApproveAllTools pattern. With the lazy-build coalescer (Spec 047 §B2 +
+// PR #463) the bulk operation pays exactly one payload build no matter how
+// many tools changed.
+func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error) {
+	if r.storageManager == nil {
+		return 0, nil
+	}
+	if serverName == "" {
+		return 0, fmt.Errorf("server name required")
+	}
+
+	toolNames, err := r.collectKnownToolNames(serverName)
+	if err != nil {
+		return 0, err
+	}
+	if len(toolNames) == 0 {
+		return 0, nil
+	}
+
+	changed := 0
+	for _, toolName := range toolNames {
+		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
+		if setErr != nil {
+			r.logger.Warn("Failed to toggle tool in bulk operation",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.Bool("enabled", enabled),
+				zap.Error(setErr))
+			continue
+		}
+		if flipped {
+			changed++
+		}
+	}
+
+	if changed > 0 {
+		action := "tools_enabled"
+		if !enabled {
+			action = "tools_disabled"
+		}
+		r.emitServersChanged(action, map[string]any{
+			"server":     serverName,
+			"enabled":    enabled,
+			"changed":    changed,
+			"updated_by": updatedBy,
+		})
+	}
+
+	return changed, nil
+}
+
+// collectKnownToolNames returns the set of tool short-names (no "server:"
+// prefix) currently known for a server. Prefers the StateView snapshot
+// (covers in-memory tools), falling back to the search index, and finally
+// to whatever approval records already exist for the server.
+func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
+	seen := make(map[string]struct{})
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		// Strip "server:" prefix if present.
+		if idx := strings.Index(name, ":"); idx != -1 {
+			name = name[idx+1:]
+		}
+		seen[name] = struct{}{}
+	}
+
+	if r.supervisor != nil {
+		snapshot := r.supervisor.StateView().Snapshot()
+		if status, ok := snapshot.Servers[serverName]; ok {
+			for _, tool := range status.Tools {
+				add(tool.Name)
+			}
+		}
+	}
+
+	if r.indexManager != nil {
+		if tools, err := r.indexManager.GetToolsByServer(serverName); err == nil {
+			for _, tool := range tools {
+				add(tool.Name)
+			}
+		}
+	}
+
+	if records, err := r.storageManager.ListToolApprovals(serverName); err == nil {
+		for _, record := range records {
+			add(record.ToolName)
+		}
+	}
+
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	return out, nil
 }
 
 // ApproveAllTools approves all pending/changed tools for a server.

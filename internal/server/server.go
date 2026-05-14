@@ -1756,6 +1756,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
+		// Plumb scan summaries through management.ListServers so the SSE
+		// servers.changed embed and REST GET /api/v1/servers share a single
+		// enrichment site. Without this, mergeServers on the Web UI strips
+		// security_scan from every server on every SSE delivery — same bug
+		// class as the pre-existing quarantine-stats staleness PR #463
+		// already fixes for Quarantine.
+		if mgmtSvc, ok := s.runtime.GetManagementService().(management.Service); ok && mgmtSvc != nil {
+			mgmtSvc.SetScanSummaryEnricher(&scanSummaryEnricherAdapter{scanner: secService})
+		}
 		s.securityScanner = secService
 	}
 	// Wire teams multi-user OAuth (no-op in personal edition)
@@ -2475,6 +2484,12 @@ func (s *Server) SetToolEnabled(serverName, toolName string, enabled bool, updat
 	return s.runtime.SetToolEnabled(serverName, toolName, enabled, updatedBy)
 }
 
+// SetAllToolsEnabled bulk-toggles every known tool for a server to the given
+// state. Returns the count of tools whose state actually changed.
+func (s *Server) SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error) {
+	return s.runtime.SetAllToolsEnabled(serverName, enabled, updatedBy)
+}
+
 // GetToolApproval returns the approval record for a specific tool (Spec 032).
 func (s *Server) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	return s.runtime.GetToolApproval(serverName, toolName)
@@ -2523,6 +2538,39 @@ func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error
 		return fmt.Errorf("server unavailable")
 	}
 	return a.server.UnquarantineServer(serverName)
+}
+
+// scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
+// returns the scanner-internal *scanner.ScanSummary type) to
+// management.SecurityScanEnricher (which returns the wire-shape
+// *contracts.SecurityScanSummary used by REST and SSE consumers). Plain
+// field copy — the two structs are isomorphic by design.
+type scanSummaryEnricherAdapter struct {
+	scanner *scanner.Service
+}
+
+func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context, serverName string) *contracts.SecurityScanSummary {
+	if a == nil || a.scanner == nil {
+		return nil
+	}
+	summary := a.scanner.GetScanSummary(ctx, serverName)
+	if summary == nil {
+		return nil
+	}
+	out := &contracts.SecurityScanSummary{
+		LastScanAt: summary.LastScanAt,
+		RiskScore:  summary.RiskScore,
+		Status:     summary.Status,
+	}
+	if summary.FindingCounts != nil {
+		out.FindingCounts = &contracts.FindingCounts{
+			Dangerous: summary.FindingCounts.Dangerous,
+			Warning:   summary.FindingCounts.Warning,
+			Info:      summary.FindingCounts.Info,
+			Total:     summary.FindingCounts.Total,
+		}
+	}
+	return out
 }
 
 // keyringSecretStore adapts secret.Resolver to scanner.SecretStore for API key management.

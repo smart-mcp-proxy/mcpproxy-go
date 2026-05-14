@@ -2,9 +2,19 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"time"
 )
+
+// ErrToolApprovalNotFound is returned by GetToolApproval when no record
+// exists for the requested server+tool key. Callers that want to distinguish
+// "first time we've seen this tool" from a real read error (corrupt JSON,
+// closed DB, mmap remap during compaction) MUST use errors.Is, not a generic
+// `err != nil` check — a transient decode error must not be misread as
+// "missing", which would otherwise silently overwrite a pending/changed
+// record with a synthesized approved one.
+var ErrToolApprovalNotFound = errors.New("tool approval not found")
 
 // Bucket names for bbolt database
 const (

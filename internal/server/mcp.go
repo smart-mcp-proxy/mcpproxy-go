@@ -4575,7 +4575,21 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 	}
 
 	approval, err := p.storage.GetToolApproval(serverName, toolName)
-	if err == nil && approval != nil && approval.Disabled {
+	switch {
+	case err == nil:
+		if approval != nil && approval.Disabled {
+			return false
+		}
+	case errors.Is(err, storage.ErrToolApprovalNotFound):
+		// no record → use the implicit default (enabled / callable)
+	default:
+		// real storage error — fail closed to avoid silently re-enabling a
+		// tool the user disabled. A transient BBolt mmap-remap during compaction
+		// should not cause a Disabled=true record to be ignored.
+		p.logger.Warn("isToolCallable: storage error treated as not-callable",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.Error(err))
 		return false
 	}
 

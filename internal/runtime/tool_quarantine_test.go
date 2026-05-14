@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -672,6 +673,198 @@ func TestSetToolEnabled_TogglesVisibility(t *testing.T) {
 	result, err = rt.checkToolApprovals("github", tools)
 	require.NoError(t, err)
 	assert.False(t, result.BlockedTools["create_issue"])
+}
+
+// SetToolEnabled must work even when no approval record exists yet — that's
+// the common case when QuarantineEnabled is false globally or SkipQuarantine
+// is on for the server. Without on-demand record creation, the per-tool
+// enable/disable UI is dead for any non-quarantined deployment.
+func TestSetToolEnabled_CreatesRecordWhenMissing(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// No SaveToolApproval before this — the tool has never been seen by the
+	// approval bucket. SetToolEnabled must synthesize a record.
+	err := rt.SetToolEnabled("github", "create_issue", false, "admin")
+	require.NoError(t, err)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.True(t, record.Disabled, "synthesized record must reflect the disable intent")
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status,
+		"synthesized record must be approved — the toggle is a visibility decision, not a quarantine one")
+
+	// Re-enabling should clear the flag without re-resetting status.
+	err = rt.SetToolEnabled("github", "create_issue", true, "admin")
+	require.NoError(t, err)
+
+	record, err = rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.False(t, record.Disabled)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+}
+
+// SetToolEnabled is a visibility toggle, not an approval decision. The
+// existing-record branch must preserve Status verbatim — a pending or
+// changed record must not be silently promoted to approved by a Disable
+// click. Without the sentinel-error check this regressed: any non-nil
+// GetToolApproval error (incl. transient unmarshal or IO failures) was
+// treated as "not found" and synthesized a fresh approved record over
+// whatever was already on disk.
+func TestSetToolEnabled_PreservesExistingPendingStatus(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "create_issue",
+		Status:     storage.ToolApprovalStatusPending,
+	}))
+
+	err := rt.SetToolEnabled("github", "create_issue", false, "admin")
+	require.NoError(t, err)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.True(t, record.Disabled, "Disabled must flip")
+	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status,
+		"Status must be preserved — SetToolEnabled is a visibility toggle, not an approval decision")
+}
+
+func TestSetAllToolsEnabled_DisablesAllKnownTools(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Seed two approved tools (mix: one with full record, one minimal). The
+	// bulk operation must flip both.
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "list_repos",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "create_issue",
+		Status:     storage.ToolApprovalStatusApproved,
+	}))
+
+	changed, err := rt.SetAllToolsEnabled("github", false, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 2, changed)
+
+	for _, tool := range []string{"list_repos", "create_issue"} {
+		record, err := rt.storageManager.GetToolApproval("github", tool)
+		require.NoError(t, err)
+		assert.True(t, record.Disabled, "tool %s must be disabled after disable-all", tool)
+	}
+
+	// Idempotent: calling again should report 0 changes.
+	changed, err = rt.SetAllToolsEnabled("github", false, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 0, changed, "second disable-all is a no-op")
+
+	// Re-enable everything; both records must be cleared.
+	changed, err = rt.SetAllToolsEnabled("github", true, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 2, changed)
+	for _, tool := range []string{"list_repos", "create_issue"} {
+		record, err := rt.storageManager.GetToolApproval("github", tool)
+		require.NoError(t, err)
+		assert.False(t, record.Disabled, "tool %s must be enabled after enable-all", tool)
+	}
+}
+
+// TestSetAllToolsEnabled_EmitsOncePerBulk is the regression test for A.2:
+// the bulk path must NOT fire a servers.changed event per tool. Before the
+// split, SetAllToolsEnabled delegated to SetToolEnabled per item, which
+// emitted servers.changed each time. With ApproveAllTools-style splitting,
+// the loop body calls setToolEnabledNoEmit and a single trailing
+// emitServersChanged fires after the loop.
+//
+// Asserts both: only one EventTypeServersChanged arrives, and its reason
+// is the bulk variant ("tools_disabled"), not the per-tool variant.
+func TestSetAllToolsEnabled_EmitsOncePerBulk(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	// Seed five approved tools so the bulk has real work to do (count chosen
+	// to exercise the per-tool emit storm the refactor eliminates).
+	tools := []string{"list_repos", "create_issue", "get_user", "list_prs", "merge_pr"}
+	for _, name := range tools {
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "github",
+			ToolName:   name,
+			Status:     storage.ToolApprovalStatusApproved,
+		}))
+	}
+
+	events := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(events)
+
+	changed, err := rt.SetAllToolsEnabled("github", false, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, len(tools), changed)
+
+	// Coalescer interval is 50ms; collect for well past that window.
+	deadline := time.After(500 * time.Millisecond)
+	var serversChangedEvents []Event
+	for {
+		done := false
+		select {
+		case evt := <-events:
+			if evt.Type == EventTypeServersChanged {
+				serversChangedEvents = append(serversChangedEvents, evt)
+			}
+		case <-deadline:
+			done = true
+		}
+		if done {
+			break
+		}
+	}
+
+	require.Len(t, serversChangedEvents, 1,
+		"bulk must produce exactly one servers.changed event, not one per tool")
+	assert.Equal(t, "tools_disabled", serversChangedEvents[0].Payload["reason"],
+		"trailing emit should use the bulk reason label")
+	assert.Equal(t, "github", serversChangedEvents[0].Payload["server"])
+	assert.Equal(t, len(tools), serversChangedEvents[0].Payload["changed"])
+}
+
+// TestSetAllToolsEnabled_NoEventOnNoOp verifies the bulk path stays quiet
+// when every tool is already in the desired state — mirrors the analogous
+// guarantee for ApproveTools (see TestApproveTools_NoEventOnNoOp).
+func TestSetAllToolsEnabled_NoEventOnNoOp(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true},
+	})
+
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github",
+		ToolName:   "list_repos",
+		Status:     storage.ToolApprovalStatusApproved,
+		Disabled:   true,
+	}))
+
+	events := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(events)
+
+	changed, err := rt.SetAllToolsEnabled("github", false, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 0, changed)
+
+	select {
+	case evt := <-events:
+		if evt.Type == EventTypeServersChanged {
+			t.Fatalf("did not expect servers.changed when bulk made no changes; got %+v", evt)
+		}
+	case <-time.After(200 * time.Millisecond):
+		// expected: no servers.changed event
+	}
 }
 
 func TestFilterBlockedTools(t *testing.T) {

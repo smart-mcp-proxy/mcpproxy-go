@@ -152,3 +152,103 @@ func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
 	assert.Contains(t, authVal, "REDACTED")
 	assert.Equal(t, "application/json", contentVal, "Content-Type is not sensitive; must not be redacted")
 }
+
+// ctxAwareLister is a serversLister that blocks ListServers until the
+// caller-supplied ctx fires Done. Used to verify the parent ctx is threaded
+// through buildServersChangedPayload — without that threading the call sits
+// on a detached 2-second timer regardless of app-shutdown cancellation.
+type ctxAwareLister struct {
+	servers []*contracts.Server
+	stats   *contracts.ServerStats
+}
+
+func (l *ctxAwareLister) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-time.After(5 * time.Second):
+		// Safety net: tests should never reach this.
+		return l.servers, l.stats, nil
+	}
+}
+
+// TestEmitServersChanged_PayloadPreservesSecurityScan is the SSE-parity
+// regression test for PR #463: the servers.changed embed must carry every
+// field the REST /api/v1/servers response carries. The Web UI's mergeServers
+// treats incoming server data as authoritative and deletes absent keys
+// (it's how a count dropping to zero clears its badge), so any field that
+// only one path populates is silently wiped from the store on every SSE
+// delivery. SecurityScan is plumbed through management.ListServers so REST
+// and SSE share one enrichment site — this asserts the SSE path carries it
+// through to subscribers unchanged.
+func TestEmitServersChanged_PayloadPreservesSecurityScan(t *testing.T) {
+	lastScan := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	servers := []*contracts.Server{
+		{
+			Name: "alpha",
+			SecurityScan: &contracts.SecurityScanSummary{
+				LastScanAt: &lastScan,
+				RiskScore:  42,
+				Status:     "warnings",
+				FindingCounts: &contracts.FindingCounts{
+					Dangerous: 1,
+					Warning:   3,
+					Info:      7,
+					Total:     11,
+				},
+			},
+		},
+		{Name: "beta"}, // No scan summary — must not gain a stray one.
+	}
+	stats := &contracts.ServerStats{TotalServers: 2}
+
+	rt := newPayloadTestRuntime(t, &fakeServersLister{servers: servers, stats: stats})
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	rt.emitServersChanged("scan-parity", nil)
+
+	evt := receiveServersChanged(t, ch)
+	gotServers, ok := evt.Payload["servers"].([]contracts.Server)
+	require.True(t, ok)
+	require.Len(t, gotServers, 2)
+
+	require.NotNil(t, gotServers[0].SecurityScan, "alpha must keep its SecurityScan on the SSE path")
+	assert.Equal(t, "warnings", gotServers[0].SecurityScan.Status)
+	assert.Equal(t, 42, gotServers[0].SecurityScan.RiskScore)
+	require.NotNil(t, gotServers[0].SecurityScan.FindingCounts)
+	assert.Equal(t, 1, gotServers[0].SecurityScan.FindingCounts.Dangerous)
+	assert.Equal(t, 11, gotServers[0].SecurityScan.FindingCounts.Total)
+
+	assert.Nil(t, gotServers[1].SecurityScan, "beta must not gain a stray scan summary")
+}
+
+// TestBuildServersChangedPayload_HonoursCancelledParentCtx is the regression
+// test for the shutdown-drain path: if the parent ctx is already cancelled
+// (because Runtime.Close() fired appCancel) the ListServers call must abort
+// promptly rather than wait up to 2 seconds on the (otherwise detached)
+// WithTimeout.
+func TestBuildServersChangedPayload_HonoursCancelledParentCtx(t *testing.T) {
+	rt := newPayloadTestRuntime(t, nil)
+	rt.managementService = &ctxAwareLister{
+		servers: []*contracts.Server{{Name: "s1"}},
+		stats:   &contracts.ServerStats{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	evt := rt.buildServersChangedPayload(ctx, "shutdown", nil)
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"buildServersChangedPayload must abort immediately when parent ctx is already cancelled (took %s — Background-rooted timeout would have been ~2s)",
+		elapsed)
+
+	// On ctx.Err() the build still publishes a notify-only event — neither
+	// `servers` nor `stats` is set.
+	assert.Equal(t, "shutdown", evt.Payload["reason"])
+	_, hasServers := evt.Payload["servers"]
+	assert.False(t, hasServers, "no servers key when ListServers errors")
+}

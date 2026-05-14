@@ -124,7 +124,7 @@
               class="stat-desc"
               :class="blockedToolCount > 0 ? 'text-error' : ''"
             >
-              {{ blockedToolCount > 0 ? `${blockedToolCount} blocked` : 'available tools' }}
+              {{ blockedToolCount > 0 ? `${blockedToolCount} disabled` : 'available tools' }}
             </div>
           </div>
         </div>
@@ -400,18 +400,47 @@
               </div>
             </div>
 
-            <div class="flex justify-between items-center">
+            <div class="flex flex-col lg:flex-row lg:justify-between lg:items-center gap-3">
               <div>
                 <h3 class="text-lg font-semibold">Available Tools</h3>
                 <p class="text-base-content/70">Tools provided by {{ server.name }}</p>
               </div>
-              <div class="form-control">
-                <input
-                  v-model="toolSearch"
-                  type="text"
-                  placeholder="Search tools..."
-                  class="input input-bordered input-sm w-64"
-                />
+              <div class="flex items-center gap-2 flex-wrap">
+                <!--
+                  Bulk Enable/Disable. Both buttons surface only when there's
+                  something for them to do — "Enable All" appears when at
+                  least one tool is currently disabled, "Disable All" when at
+                  least one is currently enabled. That way the action label
+                  always matches a real, observable outcome.
+                -->
+                <button
+                  v-if="hasDisabledTool"
+                  class="btn btn-sm btn-success"
+                  :disabled="bulkToolToggleLoading"
+                  @click="bulkToggleAllTools(true)"
+                  data-test="tools-enable-all"
+                >
+                  <span v-if="bulkToolToggleLoading" class="loading loading-spinner loading-xs"></span>
+                  Enable All
+                </button>
+                <button
+                  v-if="hasEnabledTool"
+                  class="btn btn-sm btn-warning"
+                  :disabled="bulkToolToggleLoading"
+                  @click="bulkToggleAllTools(false)"
+                  data-test="tools-disable-all"
+                >
+                  <span v-if="bulkToolToggleLoading" class="loading loading-spinner loading-xs"></span>
+                  Disable All
+                </button>
+                <div class="form-control">
+                  <input
+                    v-model="toolSearch"
+                    type="text"
+                    placeholder="Search tools..."
+                    class="input input-bordered input-sm w-64"
+                  />
+                </div>
               </div>
             </div>
 
@@ -419,53 +448,83 @@
               <div
                 v-for="tool in filteredTools"
                 :key="tool.name"
-                class="card shadow-md transition-opacity"
+                class="card shadow-md transition-colors"
                 :class="isToolEnabled(tool.name)
                   ? 'bg-base-100'
-                  : 'bg-base-200/70 opacity-60 border border-base-300'"
+                  : 'bg-base-200/70 border border-base-300'"
               >
                 <div class="card-body">
-                  <div class="flex items-center gap-2">
-                    <h4 class="card-title text-lg">{{ tool.name }}</h4>
-                    <span
-                      v-if="getToolApprovalStatus(tool.name) === 'pending'"
-                      class="badge badge-info badge-sm"
-                    >new</span>
-                    <span
-                      v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
-                      class="badge badge-warning badge-sm"
-                    >changed</span>
-                    <span
-                      v-if="!isToolEnabled(tool.name)"
-                      class="badge badge-ghost badge-sm"
-                    >disabled</span>
+                  <!--
+                    Header row: title + status badges on the left, the
+                    per-tool toggle pinned to the top-right corner so it's
+                    the first thing the eye lands on. The toggle itself
+                    stays in the bright base-content layer (no opacity)
+                    even when the tool is disabled — only the description /
+                    annotations / View Schema button below dim so the user
+                    can tell at a glance the tool is off but the control to
+                    bring it back is still a "live affordance".
+                    Using `toggle-primary` gives the on-state a saturated
+                    color so the off-state can't be confused with a
+                    visually-disabled widget.
+
+                    Hidden for pending/changed tools because the right
+                    next action there is Approve, not Disable. For
+                    approved or never-quarantined tools the daemon
+                    synthesizes the approval record on demand, so the
+                    toggle works regardless of quarantine state.
+                  -->
+                  <div class="flex justify-between items-start gap-3">
+                    <div
+                      class="flex items-center gap-2 flex-wrap min-w-0 transition-opacity"
+                      :class="isToolEnabled(tool.name) ? '' : 'opacity-60'"
+                    >
+                      <h4 class="card-title text-lg break-all">{{ tool.name }}</h4>
+                      <span
+                        v-if="getToolApprovalStatus(tool.name) === 'pending'"
+                        class="badge badge-info badge-sm"
+                      >new</span>
+                      <span
+                        v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
+                        class="badge badge-warning badge-sm"
+                      >changed</span>
+                    </div>
+                    <label
+                      v-if="isToolToggleAvailable(tool.name)"
+                      class="flex items-center gap-2 cursor-pointer shrink-0"
+                    >
+                      <span class="text-xs text-base-content/70">
+                        <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs mr-1"></span>
+                        {{ isToolEnabled(tool.name) ? 'Enabled' : 'Disabled' }}
+                      </span>
+                      <input
+                        type="checkbox"
+                        class="toggle toggle-sm toggle-primary"
+                        :checked="isToolEnabled(tool.name)"
+                        :disabled="isToolToggleLoading(tool.name) || bulkToolToggleLoading"
+                        @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
+                      />
+                    </label>
                   </div>
-                  <p class="text-sm text-base-content/70">
-                    {{ tool.description || 'No description available' }}
-                  </p>
-                  <AnnotationBadges
-                    v-if="tool.annotations"
-                    :annotations="tool.annotations"
-                    class="mt-2"
-                  />
-                  <div class="card-actions justify-end mt-4 gap-2">
-                    <button
-                      v-if="getToolApprovalStatus(tool.name) === 'approved'"
-                      class="btn btn-sm"
-                      :class="isToolEnabled(tool.name) ? 'btn-warning' : 'btn-success'"
-                      :disabled="isToolToggleLoading(tool.name)"
-                      @click="toggleToolEnabled(tool.name, !isToolEnabled(tool.name))"
-                    >
-                      <span v-if="isToolToggleLoading(tool.name)" class="loading loading-spinner loading-xs"></span>
-                      {{ isToolEnabled(tool.name) ? 'Disable' : 'Enable' }}
-                    </button>
-                    <button
-                      v-if="tool.input_schema"
-                      class="btn btn-sm btn-outline"
-                      @click="viewToolSchema(tool)"
-                    >
-                      View Schema
-                    </button>
+                  <div
+                    class="transition-opacity"
+                    :class="isToolEnabled(tool.name) ? '' : 'opacity-60'"
+                  >
+                    <p class="text-sm text-base-content/70 mt-2">
+                      {{ tool.description || 'No description available' }}
+                    </p>
+                    <AnnotationBadges
+                      v-if="tool.annotations"
+                      :annotations="tool.annotations"
+                      class="mt-2"
+                    />
+                    <div v-if="tool.input_schema" class="card-actions justify-end mt-4">
+                      <button
+                        class="btn btn-sm btn-outline"
+                        @click="viewToolSchema(tool)"
+                      >
+                        View Schema
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -982,7 +1041,40 @@ const systemStore = useSystemStore()
 // State
 const loading = ref(true)
 const error = ref<string | null>(null)
-const server = ref<Server | null>(null)
+// SYSTEMATIC FIX for the "stale local snapshot" class of bugs:
+//
+// `server` is a *computed* derived from the Pinia store, not a manually
+// reassigned ref. That means every property access (`server.value.enabled`,
+// `server.value.quarantine.blocked_count`, …) reads through the store's
+// reactive proxy, and every SSE-driven store mutation — whether it lands
+// via the spec-047 embedded payload, the spec-048 server-merge, or the
+// notify-only fallback that re-fetches /api/v1/servers — automatically
+// propagates to every template binding and computed in this view.
+//
+// The previous shape was a snapshot ref reassigned at ~10 action-handler
+// sites. Any new handler that forgot the reassignment introduced a fresh
+// staleness bug (latest examples: the "N disabled" pill not clearing on
+// re-enable, and the big Tools counter freezing across a server-level
+// Disable/Enable cycle). The computed makes the whole class structurally
+// impossible.
+//
+// Mutations: anywhere we previously did `server.value.X = Y` to nudge the
+// UI ahead of a network round-trip (the optimistic blocked_count bump),
+// we now mutate the store's server object directly via `mutateStoreServer`.
+// Pinia is reactive to direct mutation, so the computed observers see
+// the change immediately and the subsequent `fetchServers` reconciles
+// to authoritative state.
+const server = computed<Server | null>(() => {
+  return serversStore.servers.find(s => s.name === props.serverName) || null
+})
+
+// mutateStoreServer applies fn to the live store object for this view's
+// server. Lets optimistic updates land where the rest of the app will
+// see them, without forking a parallel local copy.
+function mutateStoreServer(fn: (s: Server) => void) {
+  const s = serversStore.servers.find(srv => srv.name === props.serverName)
+  if (s) fn(s)
+}
 const activeTab = ref<'tools' | 'logs' | 'config' | 'security'>('tools')
 const actionLoading = ref(false)
 
@@ -997,6 +1089,9 @@ const selectedToolSchema = ref<Tool | null>(null)
 const toolApprovals = ref<ToolApproval[]>([])
 const approvalLoading = ref(false)
 const toolToggleLoading = ref<Record<string, boolean>>({})
+// Single in-flight flag for the bulk Enable All / Disable All buttons so
+// they're mutually exclusive with each other and with any per-tool toggle.
+const bulkToolToggleLoading = ref(false)
 
 const quarantinedTools = computed(() => {
   return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
@@ -1144,6 +1239,16 @@ function getToolApproval(toolName: string): ToolApproval | null {
 }
 
 function isToolEnabled(toolName: string): boolean {
+  // GET /api/v1/servers/{id}/tools returns each tool with a top-level
+  // `disabled` boolean (see contracts.Tool.Disabled in Go) when an approval
+  // record exists. The approvals endpoint also exposes `enabled`/`disabled`.
+  // Cross-check both so the toggle reflects reality regardless of which
+  // payload the frontend already loaded.
+  const tool = serverTools.value.find(t => t.name === toolName) as Tool & { disabled?: boolean; enabled?: boolean } | undefined
+  if (tool) {
+    if (typeof tool.disabled === 'boolean') return !tool.disabled
+    if (typeof tool.enabled === 'boolean') return tool.enabled
+  }
   const approval = getToolApproval(toolName)
   if (!approval) return true
   if (typeof approval.enabled === 'boolean') return approval.enabled
@@ -1154,6 +1259,90 @@ function isToolEnabled(toolName: string): boolean {
 function isToolToggleLoading(toolName: string): boolean {
   return !!toolToggleLoading.value[toolName]
 }
+
+// The toggle is hidden for pending/changed tools because the right next
+// action there is "Approve", not "Disable". For approved or never-quarantined
+// tools the daemon synthesizes an approval record on demand, so the toggle
+// works in every other case.
+function isToolToggleAvailable(toolName: string): boolean {
+  const status = getToolApprovalStatus(toolName)
+  return status === null || status === 'approved'
+}
+
+// Whether the bulk buttons should appear. We only render "Enable All" when
+// at least one tool can actually be enabled, and "Disable All" only when at
+// least one tool can be disabled — otherwise the label promises a no-op.
+const hasEnabledTool = computed(() =>
+  serverTools.value.some(t => isToolToggleAvailable(t.name) && isToolEnabled(t.name))
+)
+const hasDisabledTool = computed(() =>
+  serverTools.value.some(t => isToolToggleAvailable(t.name) && !isToolEnabled(t.name))
+)
+
+// Vue Router 4 reuses the ServerDetail.vue component instance across
+// /servers/foo → /servers/bar (same route, just a different param). The
+// `server` computed correctly retargets via the store, but the local
+// data refs (serverTools, toolApprovals, serverLogs, scan*) stay populated
+// with the previous server's data until something refetches them. Without
+// this watch, navigating between server detail pages briefly shows server
+// B's name + stats with server A's tool list — looks like a data-corruption
+// bug. Reset eagerly, then kick off a fresh load.
+//
+// Race protection: loadGeneration is bumped by loadServerDetails so an
+// in-flight load for the previous server can't overwrite the new server's
+// refs when its fetch finally resolves. See loadTools / loadToolApprovals
+// / loadLogs for the gen-check pattern.
+watch(
+  () => props.serverName,
+  (next, prev) => {
+    if (next === prev) return
+    serverTools.value = []
+    toolsError.value = null
+    selectedToolSchema.value = null
+    toolApprovals.value = []
+    toolToggleLoading.value = {}
+    serverLogs.value = []
+    logsError.value = null
+    scanReport.value = null
+    scanStatus.value = null
+    scanError.value = null
+    scanReportLoading.value = false
+    activeScanJobId.value = null
+    scanFiles.value = []
+    scanFilesLoaded.value = false
+    void loadServerDetails()
+  }
+)
+
+// Reload tools (and approvals) whenever the server's runtime state
+// changes between enabled/disconnected/connected. Without this, toggling
+// a server enabled/disabled would leave the local serverTools list
+// stuck at its previous value: enabling shows "Connected" but tool
+// count stays 0 until manual refresh; disabling shows "Disconnected"
+// but the prior count lingers. Both directions snap to the right state
+// here by re-fetching once the store-backed server status flips. The
+// store itself receives status updates via the SSE handler in
+// frontend/src/stores/servers.ts, so this watch piggybacks on that
+// path instead of polling.
+watch(
+  () => [server.value?.connected, server.value?.enabled] as const,
+  ([connected, enabled], prev) => {
+    if (!server.value) return
+    const [prevConnected, prevEnabled] = prev ?? [undefined, undefined]
+    if (connected === prevConnected && enabled === prevEnabled) return
+    if (!enabled) {
+      // A disabled server reports tool_count=0 immediately; reflect
+      // that locally so the big "Tools" counter doesn't lag.
+      serverTools.value = []
+      toolApprovals.value = []
+      return
+    }
+    if (connected) {
+      void loadTools()
+      void loadToolApprovals()
+    }
+  }
+)
 
 // Word-level diff for changed tool descriptions
 interface DiffPart {
@@ -1252,13 +1441,24 @@ function computeWordDiff(oldText: string, newText: string): DiffPart[] {
 }
 
 // Methods
+// loadGeneration is bumped by every loadServerDetails entry. The three
+// per-server fetches (loadTools / loadToolApprovals / loadLogs) capture
+// the generation at the start of their call and only commit their result
+// if the generation hasn't advanced — which protects against the foo→bar
+// navigation race where foo's response arrives AFTER bar's load already
+// started. The counter is intentionally not a Vue ref: it's purely
+// internal flow control, no UI reactivity needed.
+let loadGeneration = 0
+
 async function loadServerDetails() {
+  const myGen = ++loadGeneration
   loading.value = true
   error.value = null
 
   try {
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    if (myGen !== loadGeneration) return
+    // server is a computed from the store — no manual reassignment needed.
 
     if (!server.value) {
       error.value = `Server "${props.serverName}" not found`
@@ -1267,18 +1467,28 @@ async function loadServerDetails() {
 
     // Load tools, approvals, and logs in parallel
     await Promise.all([
-      loadTools(),
-      loadToolApprovals(),
-      loadLogs()
+      _loadToolsWithGen(myGen),
+      _loadToolApprovalsWithGen(myGen),
+      _loadLogsWithGen(myGen)
     ])
   } catch (err) {
-    error.value = err instanceof Error ? err.message : 'Failed to load server details'
+    if (myGen === loadGeneration) {
+      error.value = err instanceof Error ? err.message : 'Failed to load server details'
+    }
   } finally {
-    loading.value = false
+    if (myGen === loadGeneration) loading.value = false
   }
 }
 
-async function loadTools() {
+// loadTools is the public no-arg wrapper used by template @click handlers
+// and ad-hoc reloads (e.g. the connected/enabled watch). Internal gen-gated
+// impl lives in _loadToolsWithGen so loadServerDetails can pass an explicit
+// generation token for navigation-race protection.
+function loadTools() {
+  return _loadToolsWithGen(loadGeneration)
+}
+
+async function _loadToolsWithGen(gen: number) {
   if (!server.value) return
 
   toolsLoading.value = true
@@ -1286,23 +1496,30 @@ async function loadTools() {
 
   try {
     const response = await api.getServerTools(server.value.name)
+    if (gen !== loadGeneration) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
     } else {
       toolsError.value = response.error || 'Failed to load tools'
     }
   } catch (err) {
+    if (gen !== loadGeneration) return
     toolsError.value = err instanceof Error ? err.message : 'Failed to load tools'
   } finally {
-    toolsLoading.value = false
+    if (gen === loadGeneration) toolsLoading.value = false
   }
 }
 
 // Tool quarantine functions (Spec 032)
-async function loadToolApprovals() {
+function loadToolApprovals() {
+  return _loadToolApprovalsWithGen(loadGeneration)
+}
+
+async function _loadToolApprovalsWithGen(gen: number) {
   if (!server.value) return
   try {
     const response = await api.getToolApprovals(server.value.name)
+    if (gen !== loadGeneration) return
     if (response.success && response.data) {
       const approvals = (response.data.tools || []).map((tool) => {
         const disabled = typeof tool.disabled === 'boolean'
@@ -1330,6 +1547,7 @@ async function loadToolApprovals() {
           }
         })
         await Promise.all(diffPromises)
+        if (gen !== loadGeneration) return
       }
 
       toolApprovals.value = approvals
@@ -1353,7 +1571,7 @@ async function approveTool(toolName: string) {
       await loadToolApprovals()
       // Refresh server data to update quarantine counts
       await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+      // server is a computed from the store — no manual reassignment needed.
     } else {
       systemStore.addToast({
         type: 'error',
@@ -1386,7 +1604,7 @@ async function approveAllTools() {
       await loadToolApprovals()
       // Refresh server data to update quarantine counts
       await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+      // server is a computed from the store — no manual reassignment needed.
     } else {
       systemStore.addToast({
         type: 'error',
@@ -1419,6 +1637,14 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       disabled: !enabled,
     }
   }
+  // Optimistically bump the local quarantine.blocked_count so the
+  // "N disabled" stat-desc pill responds the instant the user flips the
+  // toggle, even before the round-trip + SSE + merge sequence completes.
+  // The subsequent syncAfterToolToggle() snaps it to server truth.
+  const prevQuarantine: Server['quarantine'] | undefined = server.value.quarantine
+    ? { ...server.value.quarantine }
+    : undefined
+  bumpStoreBlockedCount(enabled ? -1 : 1)
 
   try {
     const response = await api.setToolEnabled(server.value.name, toolName, enabled)
@@ -1428,8 +1654,14 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
         title: enabled ? 'Tool Enabled' : 'Tool Disabled',
         message: `${toolName} has been ${enabled ? 'enabled' : 'disabled'}`
       })
+      // Re-fetch so blockedToolCount + serverTools.disabled reflect the new
+      // state. The runtime emits servers.changed via SSE, but local server.value
+      // is a snapshot of the store and doesn't auto-update — without this an
+      // Enable toggle leaves the stat-desc pill stuck on "N disabled".
+      await syncAfterToolToggle()
     } else {
       if (idx >= 0 && prev) toolApprovals.value[idx] = prev
+      restoreStoreQuarantine(prevQuarantine)
       systemStore.addToast({
         type: 'error',
         title: 'Update Failed',
@@ -1438,6 +1670,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     }
   } catch (err) {
     if (idx >= 0 && prev) toolApprovals.value[idx] = prev
+    restoreStoreQuarantine(prevQuarantine)
     systemStore.addToast({
       type: 'error',
       title: 'Update Failed',
@@ -1450,7 +1683,128 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   }
 }
 
-async function loadLogs() {
+// bumpStoreBlockedCount adjusts the store server's quarantine.blocked_count
+// so the "N disabled" stat-desc pill reflects the user's toggle action
+// immediately. Mutates the store directly (Pinia is reactive to direct
+// mutation) so every consumer — Server Detail, Server List, tray — sees
+// the update without a round-trip. The subsequent syncAfterToolToggle()
+// snaps everything back to authoritative server state.
+function bumpStoreBlockedCount(delta: number) {
+  mutateStoreServer(s => {
+    const current = s.quarantine
+    const nextBlocked = Math.max(0, (current?.blocked_count ?? 0) + delta)
+    const pending = current?.pending_count ?? 0
+    const changed = current?.changed_count ?? 0
+    if (nextBlocked === 0 && pending === 0 && changed === 0) {
+      // Match the backend's "omit when all-zero" rule so mergeServers
+      // doesn't leave a stale empty Quarantine block around.
+      delete (s as Server & { quarantine?: unknown }).quarantine
+    } else {
+      s.quarantine = {
+        pending_count: pending,
+        changed_count: changed,
+        blocked_count: nextBlocked,
+      }
+    }
+  })
+}
+
+function restoreStoreQuarantine(prev: Server['quarantine']) {
+  mutateStoreServer(s => {
+    if (prev) {
+      s.quarantine = prev
+    } else {
+      delete (s as Server & { quarantine?: unknown }).quarantine
+    }
+  })
+}
+
+// syncAfterToolToggle keeps the page state consistent after any tool enable/
+// disable: it refreshes the store-backed servers list (so blockedToolCount on
+// the Server List view loses staleness on navigation) and the per-tool /
+// approval caches (so toggle widgets pick up server-truth instead of
+// optimistic state). The `server` computed automatically reflects the store
+// update — no manual ref reassignment.
+async function syncAfterToolToggle() {
+  if (!server.value) return
+  await Promise.all([
+    serversStore.fetchServers(true),
+    loadTools(),
+    loadToolApprovals(),
+  ])
+}
+
+// bulkToggleAllTools dispatches one Enable-all / Disable-all request and
+// refreshes the local tool/approval state so the UI reflects the new
+// disabled-flags immediately (instead of waiting for the SSE event).
+async function bulkToggleAllTools(enabled: boolean) {
+  if (!server.value || bulkToolToggleLoading.value) return
+  bulkToolToggleLoading.value = true
+
+  // Optimistic store mutation — same idea as the single-tool path, but
+  // we drive blocked_count straight to 0 (Enable All) or the count of
+  // togglable tools (Disable All) so the "N disabled" pill snaps to the
+  // expected value instantly. The subsequent syncAfterToolToggle()
+  // reconciles to whatever the backend actually changed.
+  const prevQuarantine: Server['quarantine'] | undefined = server.value.quarantine
+    ? { ...server.value.quarantine }
+    : undefined
+  const togglable = serverTools.value.filter(t => isToolToggleAvailable(t.name)).length
+  mutateStoreServer(s => {
+    const current = s.quarantine
+    const pending = current?.pending_count ?? 0
+    const changed = current?.changed_count ?? 0
+    const nextBlocked = enabled ? 0 : togglable
+    if (nextBlocked === 0 && pending === 0 && changed === 0) {
+      delete (s as Server & { quarantine?: unknown }).quarantine
+    } else {
+      s.quarantine = {
+        pending_count: pending,
+        changed_count: changed,
+        blocked_count: nextBlocked,
+      }
+    }
+  })
+
+  try {
+    const response = await api.setAllToolsEnabled(server.value.name, enabled)
+    if (response.success && response.data) {
+      const changed = response.data.changed ?? 0
+      systemStore.addToast({
+        type: 'success',
+        title: enabled ? 'Tools Enabled' : 'Tools Disabled',
+        message: changed === 0
+          ? 'No tools needed changes.'
+          : `${changed} tool${changed === 1 ? '' : 's'} ${enabled ? 'enabled' : 'disabled'}.`,
+      })
+      // Refresh server data + tool caches so the per-tool toggle, the
+      // "N disabled" pill, and the Server List both lose any staleness.
+      await syncAfterToolToggle()
+    } else {
+      restoreStoreQuarantine(prevQuarantine)
+      systemStore.addToast({
+        type: 'error',
+        title: 'Bulk Update Failed',
+        message: response.error || 'Failed to update tools',
+      })
+    }
+  } catch (err) {
+    restoreStoreQuarantine(prevQuarantine)
+    systemStore.addToast({
+      type: 'error',
+      title: 'Bulk Update Failed',
+      message: err instanceof Error ? err.message : 'Failed to update tools',
+    })
+  } finally {
+    bulkToolToggleLoading.value = false
+  }
+}
+
+function loadLogs() {
+  return _loadLogsWithGen(loadGeneration)
+}
+
+async function _loadLogsWithGen(gen: number) {
   if (!server.value) return
 
   logsLoading.value = true
@@ -1458,15 +1812,17 @@ async function loadLogs() {
 
   try {
     const response = await api.getServerLogs(server.value.name, logTail.value)
+    if (gen !== loadGeneration) return
     if (response.success && response.data) {
       serverLogs.value = response.data.logs || []
     } else {
       logsError.value = response.error || 'Failed to load logs'
     }
   } catch (err) {
+    if (gen !== loadGeneration) return
     logsError.value = err instanceof Error ? err.message : 'Failed to load logs'
   } finally {
-    logsLoading.value = false
+    if (gen === loadGeneration) logsLoading.value = false
   }
 }
 
@@ -1492,7 +1848,7 @@ async function toggleEnabled() {
     }
     // Update local server reference
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1518,7 +1874,7 @@ async function restartServer() {
     // Refresh server data after restart
     setTimeout(async () => {
       await serversStore.fetchServers()
-      server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+      // server is a computed from the store — no manual reassignment needed.
     }, 2000)
   } catch (error) {
     systemStore.addToast({
@@ -1566,7 +1922,7 @@ async function quarantineServer() {
     })
     // Update local server reference
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1591,7 +1947,7 @@ async function unquarantineServer() {
     })
     // Update local server reference
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1652,7 +2008,7 @@ async function doSecurityApprove(force: boolean) {
     })
     showApproveConfirmation.value = false
     await serversStore.fetchServers()
-    server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+    // server is a computed from the store — no manual reassignment needed.
   } catch (error) {
     systemStore.addToast({
       type: 'error',
@@ -1924,7 +2280,7 @@ function startScanPolling() {
             activeScanJobId.value = null
             await loadScanReport(true)
             await serversStore.fetchServers()
-            server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+            // server is a computed from the store — no manual reassignment needed.
             systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
           }
           return
@@ -1936,7 +2292,7 @@ function startScanPolling() {
           activeScanJobId.value = null
           await loadScanReport(true)
           await serversStore.fetchServers()
-          server.value = serversStore.servers.find(s => s.name === props.serverName) || null
+          // server is a computed from the store — no manual reassignment needed.
           systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
         } else if (status === 'failed' || status === 'error') {
           stopScanPolling()

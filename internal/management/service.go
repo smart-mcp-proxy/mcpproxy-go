@@ -119,12 +119,34 @@ type Service interface {
 	// Returns BulkOperationResult with success/failure counts.
 	// This operation respects disable_management and read_only configuration gates.
 	LogoutAllOAuth(ctx context.Context) (*BulkOperationResult, error)
+
+	// SetScanSummaryEnricher wires the SecurityScanEnricher used by
+	// ListServers to populate Server.SecurityScan. The scanner is constructed
+	// later in the boot sequence than the management service, so this is a
+	// setter rather than a constructor parameter. Optional — callers without
+	// a scanner can skip the call and ListServers will return SecurityScan=nil.
+	SetScanSummaryEnricher(e SecurityScanEnricher)
 }
 
 // EventEmitter defines the interface for emitting runtime events.
 // This is used by the service to notify subscribers of state changes.
 type EventEmitter interface {
 	EmitServersChanged(reason string, extra map[string]any)
+}
+
+// SecurityScanEnricher provides the current security scan summary for a
+// server, shaped for inclusion in contracts.Server.SecurityScan. nil means
+// "no summary yet for this server" (never scanned, no cached result).
+//
+// ListServers calls this once per server when wired so REST and the SSE
+// servers.changed embed (which goes through runtime.buildServersChangedPayload
+// → lister.ListServers) share one enrichment site. Without that parity, the
+// Web UI's mergeServers (which treats incoming server data as authoritative
+// and deletes absent keys) silently strips security_scan from the store on
+// every SSE delivery — same bug class as the pre-existing quarantine-stats
+// staleness fixed by PR #463.
+type SecurityScanEnricher interface {
+	GetSecurityScanSummary(ctx context.Context, serverName string) *contracts.SecurityScanSummary
 }
 
 // RuntimeOperations defines the interface for runtime operations needed by the service.
@@ -151,6 +173,30 @@ type service struct {
 	eventEmitter   EventEmitter
 	secretResolver *secret.Resolver
 	logger         *zap.SugaredLogger
+
+	// scanEnricher is the optional adapter that populates each server's
+	// SecurityScan field on ListServers. Wired by internal/server after
+	// the scanner.Service is constructed (the scanner is created later
+	// in the boot sequence than the management service). Read-mostly,
+	// guarded by scanEnricherMu so wiring is concurrency-safe.
+	scanEnricher   SecurityScanEnricher
+	scanEnricherMu sync.RWMutex
+}
+
+// SetScanSummaryEnricher installs the SecurityScanEnricher used by
+// ListServers to populate Server.SecurityScan. Called once during wire-up
+// in internal/server.NewServerWithConfigPath right after the scanner is
+// constructed. nil disables enrichment.
+func (s *service) SetScanSummaryEnricher(e SecurityScanEnricher) {
+	s.scanEnricherMu.Lock()
+	s.scanEnricher = e
+	s.scanEnricherMu.Unlock()
+}
+
+func (s *service) getScanEnricher() SecurityScanEnricher {
+	s.scanEnricherMu.RLock()
+	defer s.scanEnricherMu.RUnlock()
+	return s.scanEnricher
 }
 
 // NewService creates a new management service with the given dependencies.
@@ -457,6 +503,23 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		}
 		if srv.Quarantined {
 			stats.QuarantinedServers++
+		}
+	}
+
+	// Enrich with security scan summary so REST and the SSE servers.changed
+	// embed share a single enrichment site. mergeServers on the Web UI
+	// deletes absent fields from incoming payloads, so any field added later
+	// on only one path silently goes stale on the other. Lives here so the
+	// runtime's emitServersChanged → buildServersChangedPayload chain (which
+	// calls ListServers) carries SecurityScan automatically.
+	if enricher := s.getScanEnricher(); enricher != nil {
+		for _, srv := range servers {
+			if srv == nil {
+				continue
+			}
+			if summary := enricher.GetSecurityScanSummary(ctx, srv.Name); summary != nil {
+				srv.SecurityScan = summary
+			}
 		}
 	}
 

@@ -120,6 +120,12 @@ export interface Tool {
   schema?: Record<string, any>;
   usage: number;
   last_used?: string; // ISO date string
+  // Mirrors contracts.Tool.Disabled on the Go side — present when an
+  // approval record exists for this tool. Absent means "enabled" (default).
+  disabled?: boolean;
+  // Tool-level quarantine status surfaced by the same approval record.
+  // Optional because non-quarantined tools simply omit the field.
+  approval_status?: string;
 }
 
 export interface SearchResult {
