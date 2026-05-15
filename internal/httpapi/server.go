@@ -2437,6 +2437,12 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	// explicitly toggled.
 	enrichedCount := 0
 	var firstErr error
+
+	type configDeniedChecker interface {
+		IsToolConfigDenied(serverName, toolName string) bool
+	}
+	configChecker, hasConfigChecker := s.controller.(configDeniedChecker)
+
 	for i := range typedTools {
 		record, err := s.controller.GetToolApproval(serverID, typedTools[i].Name)
 		if err == nil && record != nil {
@@ -2446,11 +2452,12 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		} else if i == 0 {
 			firstErr = err
 		}
+		if hasConfigChecker {
+			typedTools[i].ConfigDenied = configChecker.IsToolConfigDenied(serverID, typedTools[i].Name)
+		}
 	}
 	if firstErr != nil {
-		fmt.Printf("[DEBUG] Tool approval enrichment: server=%s enriched=%d/%d first_error=%v\n", serverID, enrichedCount, len(typedTools), firstErr)
-	} else {
-		fmt.Printf("[DEBUG] Tool approval enrichment: server=%s enriched=%d/%d\n", serverID, enrichedCount, len(typedTools))
+		s.logger.Debug("Tool approval enrichment partial", "server", serverID, "enriched", enrichedCount, "total", len(typedTools), "error", firstErr)
 	}
 
 	// Sort: pending/changed tools first, then approved
@@ -4039,6 +4046,17 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
+	}
+
+	// Reject attempts to enable a tool the server config forbids.
+	if req.Enabled {
+		if configChecker, ok := s.controller.(interface {
+			IsToolConfigDenied(serverName, toolName string) bool
+		}); ok && configChecker.IsToolConfigDenied(serverID, toolName) {
+			s.writeError(w, r, http.StatusConflict,
+				"tool is denied by server config (enabled_tools / disabled_tools); remove the config restriction to enable this tool")
+			return
+		}
 	}
 
 	controller, ok := s.controller.(interface {
