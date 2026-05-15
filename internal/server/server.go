@@ -2490,6 +2490,12 @@ func (s *Server) SetAllToolsEnabled(serverName string, enabled bool, updatedBy s
 	return s.runtime.SetAllToolsEnabled(serverName, enabled, updatedBy)
 }
 
+// IsToolConfigDenied reports whether toolName is denied by the server's static
+// enabled_tools / disabled_tools config.
+func (s *Server) IsToolConfigDenied(serverName, toolName string) bool {
+	return s.runtime.IsToolConfigDenied(serverName, toolName)
+}
+
 // GetToolApproval returns the approval record for a specific tool (Spec 032).
 func (s *Server) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
 	return s.runtime.GetToolApproval(serverName, toolName)

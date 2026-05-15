@@ -4574,6 +4574,14 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 		return false
 	}
 
+	// Config-layer filter — evaluated at call time, never written to BBolt.
+	// A tool absent from enabled_tools or present in disabled_tools is hard off.
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if p.mainServer.runtime.IsToolConfigDenied(serverName, toolName) {
+			return false
+		}
+	}
+
 	approval, err := p.storage.GetToolApproval(serverName, toolName)
 	switch {
 	case err == nil:
