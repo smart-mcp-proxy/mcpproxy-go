@@ -842,6 +842,25 @@ func (sc *ServerConfig) IsQuarantineSkipped() bool {
 	return sc.SkipQuarantine
 }
 
+// IsToolAllowedByConfig reports whether toolName passes the server's static
+// enabled_tools / disabled_tools filter. Returns true when neither list is set.
+func (sc *ServerConfig) IsToolAllowedByConfig(toolName string) bool {
+	if len(sc.EnabledTools) > 0 {
+		for _, t := range sc.EnabledTools {
+			if t == toolName {
+				return true
+			}
+		}
+		return false
+	}
+	for _, t := range sc.DisabledTools {
+		if t == toolName {
+			return false
+		}
+	}
+	return true
+}
+
 // EnsureAPIKey ensures the API key is set, generating one if needed
 // Returns the API key, whether it was auto-generated, and the source
 // SECURITY: Empty API keys are never allowed - always auto-generates if empty or missing
