@@ -1407,7 +1407,7 @@ function getToolApproval(toolName: string): ToolApproval | null {
 }
 
 function isToolConfigDenied(toolName: string): boolean {
-  const tool = serverTools.value.find(t => t.name === toolName) as Tool & { config_denied?: boolean } | undefined
+  const tool = serverTools.value.find(t => t.name === toolName)
   return tool?.config_denied === true
 }
 
@@ -1417,10 +1417,9 @@ function isToolEnabled(toolName: string): boolean {
   // record exists. The approvals endpoint also exposes `enabled`/`disabled`.
   // Cross-check both so the toggle reflects reality regardless of which
   // payload the frontend already loaded.
-  const tool = serverTools.value.find(t => t.name === toolName) as Tool & { disabled?: boolean; enabled?: boolean } | undefined
+  const tool = serverTools.value.find(t => t.name === toolName)
   if (tool) {
     if (typeof tool.disabled === 'boolean') return !tool.disabled
-    if (typeof tool.enabled === 'boolean') return tool.enabled
   }
   const approval = getToolApproval(toolName)
   if (!approval) return true

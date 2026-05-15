@@ -244,8 +244,15 @@ export interface Tool {
   name: string
   description: string
   server: string
+  server_name?: string
   input_schema?: Record<string, any>
+  schema?: Record<string, any>
   annotations?: ToolAnnotation
+  usage?: number
+  last_used?: string
+  approval_status?: string
+  disabled?: boolean
+  config_denied?: boolean
 }
 
 // Tool approval types (Spec 032)
