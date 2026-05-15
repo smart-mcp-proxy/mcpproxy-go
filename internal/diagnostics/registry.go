@@ -207,6 +207,16 @@ func seedHTTP() {
 		},
 		DocsURL: docsURL(HTTPConnRefuse),
 	})
+	register(CatalogEntry{
+		Code:        HTTPTimeout,
+		Severity:    SeverityWarn,
+		UserMessage: "The upstream server did not respond in time. This is usually transient.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Test reachability", Command: "curl -v <server-url>"},
+			{Type: FixStepLink, Label: "Upstream status page", URL: docsURL(HTTPTimeout)},
+		},
+		DocsURL: docsURL(HTTPTimeout),
+	})
 }
 
 // --- DOCKER --------------------------------------------------------------

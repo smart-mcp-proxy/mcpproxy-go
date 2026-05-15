@@ -71,6 +71,51 @@ func TestClassify_HTTP_ConnRefused(t *testing.T) {
 	}
 }
 
+func TestClassify_HTTP_Timeout(t *testing.T) {
+	// Real upstream timeout — the http transport wraps context.DeadlineExceeded
+	// with the operation name. Must classify as MCPX_HTTP_TIMEOUT, not
+	// MCPX_UNKNOWN_UNCLASSIFIED.
+	err := fmt.Errorf("post %q: %w", "https://hf.co/mcp", context.DeadlineExceeded)
+	got := Classify(err, ClassifierHints{Transport: "http"})
+	if got != HTTPTimeout {
+		t.Errorf("Classify(timeout) = %q, want %q", got, HTTPTimeout)
+	}
+}
+
+func TestClassify_HTTP_TimeoutStringWrapped(t *testing.T) {
+	// The upstream manager often re-wraps as a plain string ("transport error: ...
+	// context deadline exceeded"). The typed errors.Is path can't see through that,
+	// so the classifier must also catch the substring on the http transport hint.
+	err := errors.New(`failed to list tools: transport error: failed to send request: failed to send request: Post "https://hf.co/mcp": context deadline exceeded`)
+	got := Classify(err, ClassifierHints{Transport: "http"})
+	if got != HTTPTimeout {
+		t.Errorf("Classify(string-wrapped timeout) = %q, want %q", got, HTTPTimeout)
+	}
+}
+
+func TestClassify_HTTP_StatusFromText(t *testing.T) {
+	// 5xx responses arrive at the classifier as a plain string from the
+	// upstream layer (the typed statusError path is bypassed by the wrapping).
+	// Must map to HTTPServerErr / HTTPUnauth / etc. instead of UNCLASSIFIED.
+	cases := []struct {
+		err  string
+		want Code
+	}{
+		{`transport error: request failed with status 504: <html><body>504</body></html>`, HTTPServerErr},
+		{`transport error: request failed with status 502 Bad Gateway`, HTTPServerErr},
+		{`failed to send initialized notification: notification failed with status 504: <html>...`, HTTPServerErr},
+		{`transport error: request failed with status 401`, HTTPUnauth},
+		{`transport error: request failed with status 403 Forbidden`, HTTPForbidden},
+		{`request failed with status 404`, HTTPNotFound},
+	}
+	for _, tc := range cases {
+		got := Classify(errors.New(tc.err), ClassifierHints{Transport: "http"})
+		if got != tc.want {
+			t.Errorf("Classify(%q) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
+
 func TestClassify_NetworkOffline(t *testing.T) {
 	err := &net.OpError{Op: "dial", Err: syscall.ENETUNREACH}
 	got := Classify(err, ClassifierHints{})
