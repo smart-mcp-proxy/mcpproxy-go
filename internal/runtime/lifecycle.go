@@ -1183,26 +1183,74 @@ func (r *Runtime) BulkEnableServers(serverNames []string, enabled bool) (map[str
 	return resultErrs, nil
 }
 
+// lookupServerConfigForRestart returns the named server's config, preferring
+// the on-disk mcp_config.json over the BoltDB cache. Falls back to BoltDB
+// when the disk file is unreadable, malformed, or missing the named server.
+//
+// On a successful disk read, the resolved config is also written back to
+// BoltDB so subsequent restarts (and any other read-from-storage code path)
+// see the same value. Without this, only the synchronous restart that did
+// the disk read would see the edit; the next one would replay storage and
+// regress. See issue #467 for context.
+func (r *Runtime) lookupServerConfigForRestart(serverName string) *config.ServerConfig {
+	r.mu.RLock()
+	cfgPath := r.cfgPath
+	r.mu.RUnlock()
+
+	if cfgPath != "" {
+		diskCfg, err := config.LoadFromFile(cfgPath)
+		if err != nil {
+			r.logger.Warn("Failed to re-read config from disk during restart, falling back to storage",
+				zap.String("path", cfgPath),
+				zap.String("server", serverName),
+				zap.Error(err))
+		} else {
+			for _, srv := range diskCfg.Servers {
+				if srv != nil && srv.Name == serverName {
+					if r.storageManager != nil {
+						if saveErr := r.storageManager.SaveUpstreamServer(srv); saveErr != nil {
+							r.logger.Warn("Failed to persist disk-loaded config to storage during restart",
+								zap.String("server", serverName),
+								zap.Error(saveErr))
+						}
+					}
+					return srv
+				}
+			}
+		}
+	}
+
+	if r.storageManager == nil {
+		return nil
+	}
+	servers, err := r.storageManager.ListUpstreamServers()
+	if err != nil {
+		r.logger.Error("Failed to list servers during restart fallback",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return nil
+	}
+	for _, srv := range servers {
+		if srv.Name == serverName {
+			return srv
+		}
+	}
+	return nil
+}
+
 // RestartServer restarts an upstream server by disconnecting and reconnecting it.
 // Validation and disconnect are synchronous; reconnection and reindexing happen
 // asynchronously so the caller (HTTP handler) returns immediately.
 func (r *Runtime) RestartServer(serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
-	// Check if server exists in storage (config)
-	servers, err := r.storageManager.ListUpstreamServers()
-	if err != nil {
-		return fmt.Errorf("failed to list servers: %w", err)
-	}
-
-	var serverConfig *config.ServerConfig
-	for _, srv := range servers {
-		if srv.Name == serverName {
-			serverConfig = srv
-			break
-		}
-	}
-
+	// Issue #467: pull the latest server config from disk before falling
+	// back to BoltDB. There is no fsnotify-style auto file-watcher, so a
+	// user who edits mcp_config.json and then triggers a restart would
+	// otherwise replay stale env / headers / args / isolation data — only
+	// the live REST PATCH path used to update them. Disk-first here closes
+	// that gap for the (much more common) edit-then-restart UX.
+	serverConfig := r.lookupServerConfigForRestart(serverName)
 	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration", serverName)
 	}
