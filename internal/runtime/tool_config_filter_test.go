@@ -74,3 +74,24 @@ func TestIsToolConfigDenied_UserDisabledPreserved(t *testing.T) {
 	assert.False(t, rt.IsToolConfigDenied("github", "list_issues"),
 		"config allows list_issues; user-disabled state must not affect IsToolConfigDenied")
 }
+
+func TestSetAllToolsEnabled_SkipsConfigDenied(t *testing.T) {
+	rt := setupConfigFilterRuntime(t, []*config.ServerConfig{
+		{Name: "github", Enabled: true, EnabledTools: []string{"list_issues"}},
+	})
+
+	// Seed approval records so SetAllToolsEnabled has tools to iterate over.
+	require.NoError(t, rt.SetToolEnabled("github", "list_issues", false, "user"))
+	require.NoError(t, rt.SetToolEnabled("github", "create_issue", false, "user"))
+
+	changed, err := rt.SetAllToolsEnabled("github", true, "user")
+	require.NoError(t, err)
+
+	// Only list_issues should flip — create_issue is config-denied.
+	assert.Equal(t, 1, changed)
+
+	// create_issue must remain disabled in BBolt
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.True(t, record.Disabled, "create_issue must remain disabled; config denies it")
+}

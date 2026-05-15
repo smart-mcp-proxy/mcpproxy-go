@@ -765,6 +765,12 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 
 	changed := 0
 	for _, toolName := range toolNames {
+		// Never enable a tool the config denies — user-owned Disabled flag is
+		// irrelevant here; enforcement is in isToolCallable, but we avoid a
+		// misleading record.Disabled=false for a hard-off tool.
+		if enabled && r.IsToolConfigDenied(serverName, toolName) {
+			continue
+		}
 		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
 		if setErr != nil {
 			r.logger.Warn("Failed to toggle tool in bulk operation",
