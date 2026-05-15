@@ -388,7 +388,14 @@
                         </div>
                       </div>
                     </div>
+                    <template v-if="isToolConfigDenied(tool.tool_name)">
+                      <span
+                        class="badge badge-error badge-sm ml-4 self-center"
+                        title="Tool is denied by mcp_config.json; approval has no effect while the config lock is active"
+                      >locked by config</span>
+                    </template>
                     <button
+                      v-else
                       @click="approveTool(tool.tool_name)"
                       :disabled="approvalLoading"
                       class="btn btn-sm btn-outline ml-4"
@@ -487,6 +494,11 @@
                         v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
                         class="badge badge-warning badge-sm"
                       >changed</span>
+                      <span
+                        v-if="isToolConfigDenied(tool.name)"
+                        class="badge badge-error badge-sm"
+                        title="Disabled by mcp_config.json (enabled_tools / disabled_tools)"
+                      >locked by config</span>
                     </div>
                     <label
                       v-if="isToolToggleAvailable(tool.name)"
@@ -504,6 +516,11 @@
                         @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
                       />
                     </label>
+                    <span
+                      v-else-if="isToolConfigDenied(tool.name)"
+                      class="text-xs text-base-content/40 shrink-0 italic"
+                      title="Remove from disabled_tools or add to enabled_tools in mcp_config.json to unlock"
+                    >config locked</span>
                   </div>
                   <div
                     class="transition-opacity"
@@ -1389,6 +1406,11 @@ function getToolApproval(toolName: string): ToolApproval | null {
   return toolApprovals.value.find(t => t.tool_name === toolName) || null
 }
 
+function isToolConfigDenied(toolName: string): boolean {
+  const tool = serverTools.value.find(t => t.name === toolName) as Tool & { config_denied?: boolean } | undefined
+  return tool?.config_denied === true
+}
+
 function isToolEnabled(toolName: string): boolean {
   // GET /api/v1/servers/{id}/tools returns each tool with a top-level
   // `disabled` boolean (see contracts.Tool.Disabled in Go) when an approval
@@ -1416,6 +1438,7 @@ function isToolToggleLoading(toolName: string): boolean {
 // tools the daemon synthesizes an approval record on demand, so the toggle
 // works in every other case.
 function isToolToggleAvailable(toolName: string): boolean {
+  if (isToolConfigDenied(toolName)) return false
   const status = getToolApprovalStatus(toolName)
   return status === null || status === 'approved'
 }
