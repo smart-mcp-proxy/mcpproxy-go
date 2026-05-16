@@ -95,6 +95,8 @@ type UpstreamRecord struct {
 	Isolation           *config.IsolationConfig `json:"isolation,omitempty"`             // Per-server isolation settings
 	ReconnectOnUse      bool                    `json:"reconnect_on_use,omitempty"`      // Attempt reconnection on tool call
 	LauncherWaitTimeout config.Duration         `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
+	EnabledTools        []string                `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
+	DisabledTools       []string                `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
 }
 
 // ToolStatRecord represents tool usage statistics

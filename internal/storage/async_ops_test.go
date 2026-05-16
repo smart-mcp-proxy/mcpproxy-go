@@ -246,6 +246,8 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		"SkipQuarantine":      true, // Spec 032: runtime-only field, not persisted to BBolt
 		"ReconnectOnUse":      true, // Spec 354: persisted to BBolt for on-demand reconnection
 		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
+		"EnabledTools":        true, // feat/config-tool-allowlist: persisted to BBolt
+		"DisabledTools":       true, // feat/config-tool-allowlist: persisted to BBolt
 	}
 
 	// Get all fields from ServerConfig
