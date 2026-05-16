@@ -117,6 +117,7 @@ export interface HealthStatus {
   created: string; // ISO date string
   updated: string; // ISO date string
   isolation?: IsolationConfig;
+  isolation_defaults?: IsolationDefaults; // Resolved baseline values (read-only, used as placeholders)
   oauth_status?: 'authenticated' | 'expired' | 'error' | 'none'; // OAuth authentication status
   token_expires_at?: string; // ISO date string when OAuth token expires
   user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
@@ -135,10 +136,25 @@ export interface OAuthConfig {
 export interface IsolationConfig {
   enabled: boolean;
   image?: string;
+  network_mode?: string;
+  extra_args?: string[];
   memory_limit?: string;
   cpu_limit?: string;
   working_dir?: string;
   timeout?: string;
+}
+
+// IsolationDefaults reports the resolved baseline Docker isolation
+// values the backend will apply when no per-server override is set.
+// Populated on server-list / server-get responses; the Web UI uses these
+// as placeholders so "empty = inherit" is discoverable instead of
+// mysterious. Never sent back on PATCH requests.
+export interface IsolationDefaults {
+  runtime_type?: string;
+  image?: string;
+  network_mode?: string;
+  extra_args?: string[];
+  working_dir?: string;
 }
 
 `)
@@ -151,6 +167,12 @@ export interface IsolationConfig {
   schema?: Record<string, any>;
   usage: number;
   last_used?: string; // ISO date string
+  // Mirrors contracts.Tool.Disabled on the Go side — present when an
+  // approval record exists for this tool. Absent means "enabled" (default).
+  disabled?: boolean;
+  // Tool-level quarantine status surfaced by the same approval record.
+  // Optional because non-quarantined tools simply omit the field.
+  approval_status?: string;
 }
 
 export interface SearchResult {
