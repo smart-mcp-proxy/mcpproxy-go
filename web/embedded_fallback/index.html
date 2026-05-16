@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MCPProxy — Web UI not built</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 42rem; margin: 4rem auto; padding: 0 1rem; line-height: 1.55; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    p { margin: 0.75rem 0; }
+    code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.95em; }
+    pre { background: rgba(127,127,127,0.12); padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <h1>MCPProxy Web UI is not embedded in this build</h1>
+  <p>
+    This binary was built without running the frontend build step, so the
+    React/Vue UI assets are not embedded. The REST API and MCP endpoints
+    still work normally — this fallback page only replaces the
+    <code>/ui/</code> route.
+  </p>
+  <p>
+    If you installed mcpproxy with <code>go install …@latest</code> or
+    bare <code>go build ./cmd/mcpproxy</code>, this is expected: the Go
+    toolchain doesn't run <code>npm</code>. To get the real UI, either
+    install a release artifact (DMG, Homebrew, .deb, .rpm, AUR, Docker)
+    or build from source with:
+  </p>
+  <pre>make build       # full build (swagger + frontend + backend)
+make build-server  # server edition</pre>
+  <p>
+    See <a href="https://github.com/smart-mcp-proxy/mcpproxy-go#installation">the project README</a> for details.
+  </p>
+</body>
+</html>

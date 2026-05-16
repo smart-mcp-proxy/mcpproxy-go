@@ -10,8 +10,24 @@ import (
 	"go.uber.org/zap"
 )
 
-//go:embed frontend/dist
+// frontendFS embeds the Vite-built web UI from web/frontend/dist/. The
+// `all:` prefix is required because a fresh module fetch (e.g.
+// `go install …@latest`) contains only the tracked .gitkeep placeholder
+// under that directory, and the default //go:embed pattern excludes
+// dotfiles. With `all:`, the directive compiles even when no real UI
+// has been produced yet; the handler below detects that case and falls
+// back to fallbackFS.
+//
+//go:embed all:frontend/dist
 var frontendFS embed.FS
+
+// fallbackFS embeds a small stub UI shown when frontendFS contains only
+// the .gitkeep placeholder (no real index.html). This is what bare
+// `go build ./cmd/mcpproxy` and `go install …@latest` users see — it
+// points them at the documented `make build` flow or release artifacts.
+//
+//go:embed embedded_fallback
+var fallbackFS embed.FS
 
 // NewHandler creates a new HTTP handler for serving the embedded web UI
 func NewHandler(logger *zap.SugaredLogger) http.Handler {
@@ -29,14 +45,21 @@ func NewHandler(logger *zap.SugaredLogger) http.Handler {
 		// Try to read the file
 		content, err := fs.ReadFile(frontendFS, fullPath)
 		if err != nil {
-			// If file not found, serve index.html (for SPA routing)
+			// File not found in the real UI bundle. Fall back to the
+			// real index.html (for SPA client-side routing), and if
+			// that's missing too, serve the embedded fallback stub.
 			content, err = fs.ReadFile(frontendFS, "frontend/dist/index.html")
 			if err != nil {
-				logger.Errorw("Failed to read index.html", "error", err)
-				http.Error(w, "Not found", http.StatusNotFound)
-				return
+				content, err = fs.ReadFile(fallbackFS, "embedded_fallback/index.html")
+				if err != nil {
+					logger.Errorw("Failed to read fallback index.html", "error", err)
+					http.Error(w, "Not found", http.StatusNotFound)
+					return
+				}
+				fullPath = "embedded_fallback/index.html"
+			} else {
+				fullPath = "frontend/dist/index.html"
 			}
-			fullPath = "frontend/dist/index.html"
 		}
 
 		// Set content type based on file extension
