@@ -294,8 +294,11 @@ jobs:
         shell: bash
         run: |
           rm -rf web/frontend
-          mkdir -p web/frontend
-          cp -r frontend/dist web/frontend/
+          mkdir -p web/frontend/dist
+          cp -r frontend/dist/. web/frontend/dist/
+          # Recreate the tracked .gitkeep so //go:embed all:frontend/dist
+          # always has something to embed (matches the Makefile frontend-build target).
+          touch web/frontend/dist/.gitkeep
 
       - name: Import Code-Signing Certificates (macOS)
         if: matrix.goos == 'darwin'
