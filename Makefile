@@ -74,8 +74,13 @@ frontend-build:
 	cd frontend && npm install && npm run build
 	@echo "📁 Copying dist files for embedding..."
 	rm -rf web/frontend
-	mkdir -p web/frontend
-	cp -r frontend/dist web/frontend/
+	mkdir -p web/frontend/dist
+	cp -r frontend/dist/. web/frontend/dist/
+	# Recreate the tracked .gitkeep so //go:embed all:frontend/dist still has
+	# something to embed even before the real UI is built (e.g. on a fresh
+	# `go install …@latest`), and so subsequent rebuilds don't show a phantom
+	# "deleted .gitkeep" in `git status`.
+	touch web/frontend/dist/.gitkeep
 	@echo "✅ Frontend build completed"
 
 # Start frontend development server
