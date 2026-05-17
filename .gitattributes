@@ -1,0 +1,4 @@
+# Pin generated/source files that are byte-compared in tests to LF so they are
+# checked out identically on Windows (core.autocrlf=true would otherwise yield
+# CRLF and break cmd/generate-types TestContractsInSync).
+frontend/src/types/contracts.ts text eol=lf

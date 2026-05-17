@@ -1,10 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+// normalizeEOL strips carriage returns so the comparison is robust on Windows,
+// where git may check out contracts.ts with CRLF endings (core.autocrlf=true)
+// even though the generator always emits LF. .gitattributes pins this file to
+// LF, but normalizing here keeps the test green regardless of git config.
+func normalizeEOL(b []byte) []byte {
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+}
 
 // TestContractsInSync fails when frontend/src/types/contracts.ts has drifted
 // from what cmd/generate-types would produce today. Catches the failure mode
@@ -14,10 +23,10 @@ import (
 // and leaves a dirty working tree.
 //
 // To fix a failure of this test:
-//   1. Decide which side is correct (usually: the generator).
-//   2. Run `go run ./cmd/generate-types` from the module root, OR update the
-//      string literals in main.go to match contracts.ts.
-//   3. Commit both files in the same change.
+//  1. Decide which side is correct (usually: the generator).
+//  2. Run `go run ./cmd/generate-types` from the module root, OR update the
+//     string literals in main.go to match contracts.ts.
+//  3. Commit both files in the same change.
 func TestContractsInSync(t *testing.T) {
 	// cmd/generate-types tests run with cwd = the package directory.
 	// Walk up two levels to reach the module root.
@@ -30,7 +39,7 @@ func TestContractsInSync(t *testing.T) {
 
 	generated := []byte(generateFileContent())
 
-	if string(committed) == string(generated) {
+	if bytes.Equal(normalizeEOL(committed), normalizeEOL(generated)) {
 		return
 	}
 
