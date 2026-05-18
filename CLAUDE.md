@@ -229,20 +229,7 @@ mcpproxy doctor                     # Run health checks
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
-### Global Tools CLI (Spec 050)
-```bash
-mcpproxy tools list                              # Global list — all tools across all servers (requires daemon)
-mcpproxy tools list -o json                      # JSON output for scripting
-mcpproxy tools list --status disabled            # Only disabled/config-denied tools
-mcpproxy tools list --risk read                  # Only read-only tools
-mcpproxy tools list --approval pending           # Only tools pending approval
-mcpproxy tools list --server=github-server       # Server-scoped debug listing
-mcpproxy tools enable github:create_issue        # Enable a specific tool
-mcpproxy tools disable github:create_issue       # Disable a specific tool
-mcpproxy tools disable everything:echo memory:foo  # Batch disable; per-target summary; non-zero exit on any failure
-```
-
-See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
+Global tools (Spec 050): `mcpproxy tools list` is global when `--server` is omitted; `tools enable|disable <server:tool ...>` for batch curation.
 
 ### Activity Log CLI
 ```bash
@@ -408,7 +395,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `POST /api/v1/servers/{name}/disable` | Disable server |
 | `POST /api/v1/servers/{name}/quarantine` | Quarantine a server |
 | `POST /api/v1/servers/{name}/unquarantine` | Unquarantine a server |
-| `GET /api/v1/tools` | Global tools overview: every tool across all servers + stats (spec 050, issue #437) |
+| `GET /api/v1/tools` | Global tools overview: all tools + stats (spec 050) |
 | `GET /api/v1/index/search` | Search tools across servers (`?q=query&limit=N`) |
 | `GET /api/v1/activity` | List activity records with filtering |
 | `GET /api/v1/activity/{id}` | Get activity record details |
@@ -786,8 +773,7 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt (`~/.mcpproxy/config.db`) — read-only on the hot path; no schema change. (047-cpu-hotpath-fix)
 - Swift 5.9 (macOS 13+); Go 1.24 only for the verification harness, no Go changes in scope. + SwiftUI/AppKit (existing), Combine (existing for the periodic timer pattern). No new deps. (048-tray-refetch-elimination)
 - None. Pure in-memory state. (048-tray-refetch-elimination)
-- Go 1.24 (toolchain go1.24.10); TypeScript 5.9 / Vue 3.5 (frontend) + Chi router, BBolt (`go.etcd.io/bbolt`), Zap, Cobra (CLI), `mark3labs/mcp-go`; Vue 3, Pinia, Vue Router, Tailwind/DaisyUI, Vite — all existing, no new deps (050-global-tools-page)
-- BBolt `~/.mcpproxy/config.db` — read-only on the hot path. Reuses existing `ActivityRecordsBucket` (aggregation pass) and `ToolApprovalBucket` (enrichment). No schema change, no migration. (050-global-tools-page)
+- Go 1.24 / Vue 3.5; no new deps; read-only BBolt reuse, no schema change (050-global-tools-page)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
