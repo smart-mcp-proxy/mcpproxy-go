@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,10 +25,20 @@ import (
 func TestConfigFileToolFilter_ReachesRuntime(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "mcp_config.json")
-	require.NoError(t, os.WriteFile(p, []byte(`{
-	  "listen":"127.0.0.1:0","data_dir":"`+dir+`","api_key":"k",
-	  "mcpServers":[{"name":"everything","command":"npx","args":["-y","x"],"protocol":"stdio","enabled":true,"disabled_tools":["echo"]}]
-	}`), 0600))
+	// json.Marshal so the data_dir path is correctly escaped on every OS
+	// (Windows temp paths contain backslashes — raw string interpolation into
+	// a JSON literal produces invalid JSON).
+	cfgJSON, err := json.Marshal(map[string]any{
+		"listen":   "127.0.0.1:0",
+		"data_dir": dir,
+		"api_key":  "k",
+		"mcpServers": []map[string]any{{
+			"name": "everything", "command": "npx", "args": []string{"-y", "x"},
+			"protocol": "stdio", "enabled": true, "disabled_tools": []string{"echo"},
+		}},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(p, cfgJSON, 0600))
 
 	cfg, err := config.LoadFromFile(p)
 	require.NoError(t, err)
