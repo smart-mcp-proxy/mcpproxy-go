@@ -76,8 +76,8 @@ Single Go project. Backend only under `internal/`. No frontend (UI lock badges s
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T015 [P] Regenerate OpenAPI: run the generator, then `./scripts/verify-oas-coverage.sh`; commit `oas/swagger.yaml` + `oas/docs.go` for the new `include_disabled` param and `disabled`/`remediation`/`tools` shapes.
-- [ ] T016 [P] Docs: add a one-line note to the CLAUDE.md built-in-tools section and `docs/` (code_execution / MCP reference) describing `include_disabled` and the 5 statuses (Constitution VI).
+- [X] T015 [P] Regenerate OpenAPI: run the generator, then `./scripts/verify-oas-coverage.sh`; commit `oas/swagger.yaml` + `oas/docs.go` for the new `include_disabled` param and `disabled`/`remediation`/`tools` shapes.
+- [X] T016 [P] Docs: add a one-line note to the CLAUDE.md built-in-tools section and `docs/` (code_execution / MCP reference) describing `include_disabled` and the 5 statuses (Constitution VI).
 - [ ] T017 Run full local verification per `quickstart.md` §0–§6 (build, curl, live MCP) and record pass/fail inline in quickstart.md; then `go test ./internal/runtime/ ./internal/server/ -run 'ClassifyDisabledTool|DisabledDiscovery|BlockedToolMessage' -count=1`, `./scripts/test-api-e2e.sh`, `golangci-lint` clean.
 - [ ] T018 Open PR from `049-agent-discoverable-disabled-tools` → `main` (squash; commit policy: no Co-Authored-By, author = human; `Related #468`); ensure CI green before requesting merge.
 

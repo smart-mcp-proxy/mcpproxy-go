@@ -361,12 +361,12 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 ## MCP Protocol
 
 ### Built-in Tools
-- **`retrieve_tools`** - BM25 keyword search across all upstream tools, returns annotations and recommended tool variant
+- **`retrieve_tools`** - BM25 keyword search across all upstream tools, returns annotations and recommended tool variant. Spec 049: optional `include_disabled:true` also returns a `disabled[]` list (name/server/description/`status`) + once-per-response `remediation` map for tools that exist but are locked; `status` ∈ `disabled_by_config|disabled_by_user|pending_approval|server_disabled|disabled_unknown`. Default output unchanged.
 - **`call_tool_read`** - Proxy read-only tool calls to upstream servers (Spec 018)
 - **`call_tool_write`** - Proxy write tool calls to upstream servers (Spec 018)
 - **`call_tool_destructive`** - Proxy destructive tool calls to upstream servers (Spec 018)
 - **`code_execution`** - Execute JavaScript to orchestrate multiple tools (disabled by default)
-- **`upstream_servers`** - CRUD operations for server management
+- **`upstream_servers`** - CRUD operations for server management. Spec 049: list/get entries carry a conditional `tools` count block (callable + per-disable-reason) only when a server has ≥1 non-callable tool.
 - **`quarantine_security`** - Security quarantine management: list/inspect quarantined servers, inspect/approve/approve-all tools (Spec 032)
 
 **Tool Format**: `<serverName>:<toolName>` (e.g., `github:create_issue`)
