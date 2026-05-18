@@ -39,6 +39,9 @@ func TestIsDockerAvailable_CachesResult(t *testing.T) {
 // result expires after 5m (negative TTL) — so users who launch Docker
 // after mcpproxy starts see the flip within minutes, not only after restart.
 func TestIsDockerAvailable_NegativeTTLShorter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-time TTL test (~18s under -race); runs in the stress-tests CI job")
+	}
 	rt := newTestRuntime(t)
 
 	// Prime with a negative result 6 minutes old — past negative TTL (5m)
@@ -65,6 +68,9 @@ func TestIsDockerAvailable_NegativeTTLShorter(t *testing.T) {
 // result within 15m is reused (no re-probe) to avoid spending 2s on
 // `docker info` on every telemetry heartbeat.
 func TestIsDockerAvailable_PositiveTTLHonored(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real-time TTL test (~18s under -race); runs in the stress-tests CI job")
+	}
 	rt := newTestRuntime(t)
 
 	// 10 minutes old — well within positive TTL (15m).

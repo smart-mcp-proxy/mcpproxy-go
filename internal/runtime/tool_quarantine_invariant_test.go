@@ -353,6 +353,9 @@ func (m *quarantineModel) checkInvariant(t *rapid.T) {
 // TestRapidQuarantineStateMachine runs a property-based state machine test
 // using rapid to verify quarantine invariants hold across random action sequences.
 func TestRapidQuarantineStateMachine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("heavy property test (~270s under -race); runs in the stress-tests CI job")
+	}
 	rapid.Check(t, func(t *rapid.T) {
 		// Set up runtime with quarantine enabled
 		tempDir, err := os.MkdirTemp("", "quarantine-rapid-*")
@@ -498,6 +501,9 @@ func TestRapidQuarantineStateMachine(t *testing.T) {
 // TestRapidInvariant_ChangedNeverAutoApproved is a focused property test that
 // specifically targets the "changed→approved without user action" invariant.
 func TestRapidInvariant_ChangedNeverAutoApproved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("heavy property test (~70s under -race); runs in the stress-tests CI job")
+	}
 	rapid.Check(t, func(t *rapid.T) {
 		tempDir, err := os.MkdirTemp("", "quarantine-changed-*")
 		if err != nil {

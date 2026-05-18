@@ -398,6 +398,9 @@ func TestToolCacheInvalidation_MultipleServers(t *testing.T) {
 // removes its tools from the search index (Issue #285 fix).
 // This ensures disabled servers' tools don't appear in search results.
 func TestToolCacheInvalidation_DisableServerRemovesTools(t *testing.T) {
+	if testing.Short() {
+		t.Skip("heavy server-lifecycle test (~18s under -race); runs in the stress-tests CI job")
+	}
 	tempDir := t.TempDir()
 	cfg := &config.Config{
 		DataDir:           tempDir,

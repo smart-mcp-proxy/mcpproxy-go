@@ -580,8 +580,12 @@ func (r *Runtime) Close() error {
 			}
 		}
 
-		// Verify all containers stopped with retry loop (15 attempts = 15 seconds)
-		if r.upstreamManager.HasDockerContainers() {
+		// Verify all containers stopped with retry loop (15 attempts = 15 seconds).
+		// Only when Docker isolation could have launched containers — otherwise
+		// the `docker ps` probe + this loop are pure waste (and add ~17s per
+		// Close in test processes, which made internal/runtime exceed CI's
+		// -race timeout). No isolation ⇒ no managed containers ⇒ nothing to verify.
+		if r.upstreamManager.UsesDockerIsolation() && r.upstreamManager.HasDockerContainers() {
 			if r.logger != nil {
 				r.logger.Warn("Docker containers still running after shutdown, verifying cleanup...")
 			}

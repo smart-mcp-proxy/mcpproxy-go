@@ -1447,8 +1447,11 @@ func (s *Server) StopServer() error {
 		_ = s.logger.Sync()
 	}
 
-	// NEW: Verify all containers stopped with retry loop (instead of arbitrary 3s sleep)
-	if s.runtime.UpstreamManager().HasDockerContainers() {
+	// NEW: Verify all containers stopped with retry loop (instead of arbitrary 3s sleep).
+	// Gated on Docker isolation actually being in use — otherwise the `docker ps`
+	// probe + verifyContainersCleanedUp loop are pure waste (and add ~17s per
+	// Stop in test processes). No isolation ⇒ no managed containers ⇒ nothing to verify.
+	if s.runtime.UpstreamManager().UsesDockerIsolation() && s.runtime.UpstreamManager().HasDockerContainers() {
 		s.logger.Warn("STOPSERVER - Docker containers still running, verifying cleanup...")
 		_ = s.logger.Sync()
 		s.verifyContainersCleanedUp(cleanupCtx)

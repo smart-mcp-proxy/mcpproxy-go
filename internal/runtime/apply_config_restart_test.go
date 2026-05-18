@@ -17,6 +17,9 @@ import (
 // TestApplyConfig_ListenAddressChange tests that listen address changes are saved to disk
 // even though they require a restart
 func TestApplyConfig_ListenAddressChange(t *testing.T) {
+	if testing.Short() {
+		t.Skip("server restart timing test (~18s under -race); runs in the stress-tests CI job")
+	}
 	// Create temp directory and config file
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "config.json")
