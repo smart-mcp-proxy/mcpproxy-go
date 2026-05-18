@@ -13,3 +13,5 @@ State file per CLAUDE.md autonomous-operation constraint. One line per completed
 - 2026-05-18 Playwright sweep 5/5 GREEN (loaded table, search, sort, batch-bar+disable, empty state); self-contained report.html + screenshots committed under verification/.
 - 2026-05-18 chrome-ext live check: page matches issue #437 mockup (sidebar Tools badge=13, 4 stat cards, filter bar, dense table). Verified batch-disable works end-to-end (Playwright run disabled all 13; curl confirms disabled:13, frontend cards reflect backend stats — consistent, no bug).
 - 2026-05-18 final: golangci-lint 0 issues, frontend build clean, go tests GREEN. Ready for PR.
+- 2026-05-18 PR #481 opened. First run: check-size red (CLAUDE.md >40k, pre-existing-adjacent — main was 39605, my additions pushed over). Trimmed my own footprint (condensed CLI note + auto agent-context lines) → 39928/40000.
+- 2026-05-18 CI FULLY GREEN: all builds (6 platforms), Unit Tests 9 OS/Go combos, Integration, E2E, OAuth E2E, Cross-Platform Logging, Lint, Verify OpenAPI, Build Frontend, check-size — NO failures (Stress Tests skipped, normal). PR #481 awaiting human review.
