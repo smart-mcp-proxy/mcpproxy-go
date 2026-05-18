@@ -164,3 +164,42 @@ func TestDisabledDiscovery_UsageCounter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), proxy.IncludeDisabledCalls(), "flag set → +1")
 }
+
+// T010a: blocked-tool message carries the discovery pointer in both branches,
+// and the config branch stays distinct (operator policy, not a UI toggle).
+func TestBlockedToolMessage_DiscoveryPointer(t *testing.T) {
+	cfg := blockedToolMessageFor(true)
+	usr := blockedToolMessageFor(false)
+	assert.Contains(t, cfg, "include_disabled:true")
+	assert.Contains(t, usr, "include_disabled:true")
+	assert.Contains(t, cfg, "NOT user-overridable")
+	assert.NotContains(t, cfg, "enable it in the mcpproxy UI")
+	assert.Contains(t, usr, "Tool is disabled and not callable.")
+}
+
+// T010b: 0 callable results + locked matches + flag OFF → one-line count
+// nudge in the result text, and NO inline locked entries.
+func TestDisabledDiscovery_ZeroResultNudge(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "s", Enabled: true}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "s", ToolName: "only_tool",
+		Status: storage.ToolApprovalStatusApproved, Disabled: true,
+	}))
+	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+		Name: "s:only_tool", ServerName: "s", Description: "uniqueglyph capability",
+		ParamsJSON: `{"type":"object"}`,
+	}))
+
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]interface{}{"query": "uniqueglyph capability"}
+	result, err := proxy.handleRetrieveTools(context.Background(), req)
+	require.NoError(t, err)
+	resp := decodeRetrieve(t, result)
+
+	text := result.Content[0].(mcp.TextContent).Text
+	assert.Contains(t, text, "include_disabled:true")
+	assert.Contains(t, text, "locked")
+	assert.Nil(t, resp.Disabled, "nudge must not inline locked entries")
+	assert.Empty(t, resp.Tools)
+}

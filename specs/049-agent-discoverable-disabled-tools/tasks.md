@@ -53,9 +53,9 @@ Single Go project. Backend only under `internal/`. No frontend (UI lock badges s
 
 **Independent test**: quickstart.md §4 (config-denied call rejection distinct + pointer) and §5 (0-callable query returns one-line count nudge, no inline entries).
 
-- [ ] T010 [US2] Write failing test in `internal/server/mcp_disabled_discovery_test.go`: (a) calling a config-denied tool returns the operator-policy message AND the `include_disabled:true` pointer, distinct from the user-disabled message (extends existing `TestBlockedToolMessageFor`); (b) a query with 0 callable matches but ≥1 locked match yields a one-line "N … retry with include_disabled:true" note in the result text and NO inline locked entries (FR-009).
-- [ ] T011 [US2] Extend `blockedToolMessageFor` in `internal/server/mcp.go` to append the `retrieve_tools include_disabled:true` pointer for the config/user/pending branches (the status-aware split itself shipped in #468). Keep the legacy substring "Tool is disabled and not callable." in the non-config branch for back-compat.
-- [ ] T012 [US2] In `handleRetrieveToolsWithMode`: when callable results == 0 and the always-on dropped-counter > 0 and `include_disabled` is false, append the one-line count nudge to the result text (count only). Make T010 green.
+- [X] T010 [US2] Write failing test in `internal/server/mcp_disabled_discovery_test.go`: (a) calling a config-denied tool returns the operator-policy message AND the `include_disabled:true` pointer, distinct from the user-disabled message (extends existing `TestBlockedToolMessageFor`); (b) a query with 0 callable matches but ≥1 locked match yields a one-line "N … retry with include_disabled:true" note in the result text and NO inline locked entries (FR-009).
+- [X] T011 [US2] Extend `blockedToolMessageFor` in `internal/server/mcp.go` to append the `retrieve_tools include_disabled:true` pointer for the config/user/pending branches (the status-aware split itself shipped in #468). Keep the legacy substring "Tool is disabled and not callable." in the non-config branch for back-compat.
+- [X] T012 [US2] In `handleRetrieveToolsWithMode`: when callable results == 0 and the always-on dropped-counter > 0 and `include_disabled` is false, append the one-line count nudge to the result text (count only). Make T010 green.
 
 **Checkpoint**: an agent ignorant of the flag still reliably finds it.
 

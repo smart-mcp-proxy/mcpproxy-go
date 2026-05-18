@@ -1263,6 +1263,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		response["remediation"] = remediation
 	}
 
+	// Spec 049 FR-009: an agent that didn't set the flag still gets nudged when
+	// every match was locked. Count only — never the entries — so this stays a
+	// few tokens regardless of how many tools are locked.
+	if !includeDisabled && len(results) == 0 && droppedCount > 0 {
+		response["notice"] = fmt.Sprintf(
+			"%d relevant tool(s) exist but are locked; retry with include_disabled:true for details and remediation.",
+			droppedCount)
+	}
+
 	// Spec 035 F2: Session risk analysis — analyze all connected servers' tool annotations
 	// to detect the "lethal trifecta" risk combination.
 	//
@@ -4673,14 +4682,17 @@ func (p *MCPProxyServer) blockedToolMessage(serverName, toolName string) string 
 // blockedToolMessage, split out so the operator-policy vs user-disable wording
 // is unit-testable without standing up a runtime.
 func blockedToolMessageFor(configDenied bool) string {
+	// Spec 049: every branch points the agent at the opt-in discovery path so
+	// it can see locked capabilities and their remediation in one follow-up.
+	const discoveryHint = " Run retrieve_tools with include_disabled:true to see locked capabilities and remediation."
 	if configDenied {
 		return "TOOL_BLOCKED: Tool is denied by server config (enabled_tools/disabled_tools). " +
 			"This is operator policy and is NOT user-overridable from the UI; " +
-			"ask the operator to edit mcp_config.json to enable it."
+			"ask the operator to edit mcp_config.json to enable it." + discoveryHint
 	}
 	return "TOOL_BLOCKED: Tool is disabled and not callable. " +
 		"It may be disabled by the user or pending security approval; " +
-		"ask the user to enable it in the mcpproxy UI (Server detail → Tools)."
+		"ask the user to enable it in the mcpproxy UI (Server detail → Tools)." + discoveryHint
 }
 
 // recordIncludeDisabled bumps the in-memory include_disabled usage counter
