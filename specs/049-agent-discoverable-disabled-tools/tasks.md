@@ -15,7 +15,7 @@ Single Go project. Backend only under `internal/`. No frontend (UI lock badges s
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Verify branch `049-agent-discoverable-disabled-tools` is rebased on `main` containing #468 (`git merge-base --is-ancestor 3ffa41e9 HEAD`); `go build ./cmd/mcpproxy` succeeds.
+- [X] T001 Verify branch `049-agent-discoverable-disabled-tools` is rebased on `main` containing #468 (`git merge-base --is-ancestor 3ffa41e9 HEAD`); `go build ./cmd/mcpproxy` succeeds.
 
 ---
 
@@ -23,10 +23,10 @@ Single Go project. Backend only under `internal/`. No frontend (UI lock badges s
 
 **Purpose**: The shared classifier + additive response types every story depends on. MUST complete before US1/US2/US3.
 
-- [ ] T002 [P] Add additive types to `internal/contracts/types.go`: `DisabledToolStatus` string consts (`server_disabled`,`disabled_by_config`,`disabled_by_user`,`pending_approval`,`disabled_unknown`); `LockedToolEntry{Name,Server,Description,Status}`; extend the retrieve_tools response wrapper with `Disabled []LockedToolEntry \`json:"disabled,omitempty"\`` and `Remediation map[string]string \`json:"remediation,omitempty"\``; extend the upstream_servers server entry with `Tools *ServerToolCounts \`json:"tools,omitempty"\``; define `ServerToolCounts` with all six int fields `omitempty`.
-- [ ] T003 Write failing table test `internal/runtime/tool_disabled_classify_test.go` for `ClassifyDisabledTool(serverName, toolName) DisabledToolStatus`: cases for each of the 5 states, first-match precedence (config-denied + user-disabled → `disabled_by_config`), and storage-error → `disabled_unknown`.
-- [ ] T004 Implement `ClassifyDisabledTool` in `internal/runtime/tool_quarantine.go` (pure, request-time, read-only): precedence server-off → `IsToolConfigDenied` → approval.Disabled → approval pending/changed → unknown. No BBolt writes. Make T003 green.
-- [ ] T005 Add `internal/runtime` micro-benchmark `BenchmarkClassifyDisabledTool` over 1k tools; assert classify loop stays well under the 100ms discovery budget (Constitution I).
+- [X] T002 [P] Add additive types to `internal/contracts/types.go`: `DisabledToolStatus` string consts (`server_disabled`,`disabled_by_config`,`disabled_by_user`,`pending_approval`,`disabled_unknown`); `LockedToolEntry{Name,Server,Description,Status}`; extend the retrieve_tools response wrapper with `Disabled []LockedToolEntry \`json:"disabled,omitempty"\`` and `Remediation map[string]string \`json:"remediation,omitempty"\``; extend the upstream_servers server entry with `Tools *ServerToolCounts \`json:"tools,omitempty"\``; define `ServerToolCounts` with all six int fields `omitempty`.
+- [X] T003 Write failing table test `internal/runtime/tool_disabled_classify_test.go` for `ClassifyDisabledTool(serverName, toolName) DisabledToolStatus`: cases for each of the 5 states, first-match precedence (config-denied + user-disabled → `disabled_by_config`), and storage-error → `disabled_unknown`.
+- [X] T004 Implement `ClassifyDisabledTool` in `internal/runtime/tool_quarantine.go` (pure, request-time, read-only): precedence server-off → `IsToolConfigDenied` → approval.Disabled → approval pending/changed → unknown. No BBolt writes. Make T003 green.
+- [X] T005 Add `internal/runtime` micro-benchmark `BenchmarkClassifyDisabledTool` over 1k tools; assert classify loop stays well under the 100ms discovery budget (Constitution I).
 
 **Checkpoint**: classifier + types exist and are unit-green; no handler wired yet.
 

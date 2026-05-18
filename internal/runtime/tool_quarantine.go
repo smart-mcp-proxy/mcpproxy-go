@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -939,4 +940,53 @@ func (r *Runtime) IsToolConfigDenied(serverName, toolName string) bool {
 		}
 	}
 	return false
+}
+
+// ClassifyDisabledTool returns the single machine-branchable reason a tool is
+// not callable, by fixed first-match precedence (Spec 049). Pure, request-time,
+// read-only — nothing is written to BBolt. Only meaningful for tools that are
+// already known non-callable; it never lies (indeterminate → unknown).
+func (r *Runtime) ClassifyDisabledTool(serverName, toolName string) contracts.DisabledToolStatus {
+	// Resolve the server config. Unknown server → unknown (never a misleading
+	// remediation for a server we cannot reason about).
+	var sc *config.ServerConfig
+	for _, candidate := range r.Config().Servers {
+		if candidate.Name == serverName {
+			sc = candidate
+			break
+		}
+	}
+	if sc == nil {
+		return contracts.DisabledStatusUnknown
+	}
+
+	// 1. Whole server off.
+	if !sc.Enabled {
+		return contracts.DisabledStatusServerDisabled
+	}
+
+	// 2. Operator config policy — outranks user/pending; the user cannot lift
+	//    this from the UI.
+	if !sc.IsToolAllowedByConfig(toolName) {
+		return contracts.DisabledStatusByConfig
+	}
+
+	// 3/4. User-disabled vs pending security approval, from the approval record.
+	record, err := r.GetToolApproval(serverName, toolName)
+	switch {
+	case err == nil && record != nil:
+		if record.Disabled {
+			return contracts.DisabledStatusByUser
+		}
+		if record.Status == storage.ToolApprovalStatusPending ||
+			record.Status == storage.ToolApprovalStatusChanged {
+			return contracts.DisabledStatusPendingApproval
+		}
+	case errors.Is(err, storage.ErrToolApprovalNotFound):
+		// No record — fall through to unknown below.
+	}
+
+	// 5. Indeterminate (storage error, or no concrete reason found) — never
+	//    emit a wrong remediation.
+	return contracts.DisabledStatusUnknown
 }

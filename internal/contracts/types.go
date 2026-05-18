@@ -200,6 +200,41 @@ type Tool struct {
 	ConfigDenied bool `json:"config_denied,omitempty"`
 }
 
+// DisabledToolStatus is the single machine-branchable reason a tool exists but
+// is not callable (Spec 049). Exactly one value per locked tool, assigned by
+// fixed first-match precedence (server-off → config → user → pending → unknown).
+type DisabledToolStatus = string
+
+const (
+	DisabledStatusServerDisabled  DisabledToolStatus = "server_disabled"
+	DisabledStatusByConfig        DisabledToolStatus = "disabled_by_config"
+	DisabledStatusByUser          DisabledToolStatus = "disabled_by_user"
+	DisabledStatusPendingApproval DisabledToolStatus = "pending_approval"
+	DisabledStatusUnknown         DisabledToolStatus = "disabled_unknown"
+)
+
+// LockedToolEntry is the lean discovery shape for a non-callable tool returned
+// by retrieve_tools when include_disabled=true (Spec 049). No input schema —
+// the agent only needs enough to tell the user the capability exists and why.
+type LockedToolEntry struct {
+	Name        string             `json:"name"`
+	Server      string             `json:"server"`
+	Description string             `json:"description"`
+	Status      DisabledToolStatus `json:"status"`
+}
+
+// ServerToolCounts is a compact per-server rollup of tool callability,
+// attached to an upstream_servers entry only when a non-callable count > 0
+// (Spec 049). Zero-valued reasons are omitted to keep the payload minimal.
+type ServerToolCounts struct {
+	Callable         int `json:"callable"`
+	DisabledByConfig int `json:"disabled_by_config,omitempty"`
+	DisabledByUser   int `json:"disabled_by_user,omitempty"`
+	PendingApproval  int `json:"pending_approval,omitempty"`
+	ServerDisabled   int `json:"server_disabled,omitempty"`
+	DisabledUnknown  int `json:"disabled_unknown,omitempty"`
+}
+
 // SearchResult represents a search result for tools
 type SearchResult struct {
 	Tool    Tool    `json:"tool"`
