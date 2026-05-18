@@ -234,6 +234,16 @@ func (m *Manager) shouldEnableDockerRecovery() bool {
 	return false
 }
 
+// UsesDockerIsolation reports whether this manager could have launched
+// Docker-isolated containers (global isolation on, a per-server isolation, or
+// a docker command). When false, no container cleanup verification is needed
+// on shutdown — shelling out to `docker ps` would be pure waste (and, in test
+// processes, adds ~17s/Close via the verification loop). Same predicate the
+// Docker recovery monitor uses, so behavior stays consistent.
+func (m *Manager) UsesDockerIsolation() bool {
+	return m.shouldEnableDockerRecovery()
+}
+
 // SetLogConfig sets the logging configuration for upstream server loggers
 func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 	m.mu.Lock()

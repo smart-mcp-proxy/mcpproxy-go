@@ -79,6 +79,9 @@ func TestRuntimeUpdateStatusBroadcasts(t *testing.T) {
 }
 
 func TestRuntimeStatusSnapshotReflectsRunningAndListen(t *testing.T) {
+	if testing.Short() {
+		t.Skip("server startup/listen timing test (~18s under -race); runs in the stress-tests CI job")
+	}
 	rt := newTestRuntime(t)
 
 	rt.SetRunning(true)

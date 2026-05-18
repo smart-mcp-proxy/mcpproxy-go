@@ -91,7 +91,10 @@ jobs:
         run: go build -tags nogui -o mcpproxy ./cmd/mcpproxy
 
       - name: Run unit tests
-        run: go test -v -race -timeout 2m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
+        # -short skips the heavy property/timing tests (TestRapidQuarantine* etc.);
+        # they run unguarded in the main-only stress-tests job below so coverage
+        # is preserved. Bumped to 4m for headroom under -race on slow runners.
+        run: go test -v -short -race -timeout 4m -skip "Binary|MCP|E2E|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/...
 
       # Binary tests are too flaky in CI due to server startup timing issues
       # All Binary tests consistently timeout waiting for server to be ready
@@ -325,21 +328,21 @@ jobs:
           if [ -d "${{ matrix.log_path_check }}" ]; then
             echo "✓ Log directory created successfully"
             ls -la "${{ matrix.log_path_check }}"
-            
+
             # Check if log file exists and has content
             if [ -f "${{ matrix.log_path_check }}/main.log" ]; then
               echo "✓ Log file created successfully"
               echo "Log file size: $(wc -c < "${{ matrix.log_path_check }}/main.log") bytes"
               echo "First few lines:"
               head -3 "${{ matrix.log_path_check }}/main.log"
-              
+
               # Verify log contains expected content
               if grep -q "Log directory configured" "${{ matrix.log_path_check }}/main.log"; then
                 echo "✓ Log contains expected startup messages"
               else
                 echo "⚠ Log missing expected startup messages"
               fi
-              
+
               if grep -q "${{ matrix.log_standard }}" "${{ matrix.log_path_check }}/main.log"; then
                 echo "✓ Log contains OS standard compliance information"
               else
@@ -475,6 +478,13 @@ jobs:
         run: |
           mkdir -p web/frontend
           cp -r frontend/dist web/frontend/
+
+      - name: Run heavy runtime property/timing tests
+        run: |
+          # These are -short-skipped in the fast unit step; run them here
+          # (unguarded, generous timeout) so invariant coverage is preserved.
+          go test -v -race -timeout 20m ./internal/runtime \
+            -run 'TestRapidQuarantineStateMachine|TestRapidInvariant_ChangedNeverAutoApproved|TestApplyConfig_ListenAddressChange|TestIsDockerAvailable_NegativeTTLShorter|TestIsDockerAvailable_PositiveTTLHonored|TestToolCacheInvalidation_DisableServerRemovesTools|TestRuntimeStatusSnapshotReflectsRunningAndListen'
 
       - name: Run concurrent stress tests
         run: |
