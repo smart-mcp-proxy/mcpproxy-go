@@ -578,6 +578,98 @@ Shows what will be affected before proceeding.
 
 ---
 
+## Tool Management (`mcpproxy tools`)
+
+Global view and per-tool enable/disable across all configured servers.
+
+### `mcpproxy tools list`
+
+List tools from upstream servers. Without `--server`, lists every tool across
+all servers from the consolidated endpoint (requires daemon). With `--server`,
+lists tools from that specific server only (daemon or standalone).
+
+**Usage:**
+```bash
+mcpproxy tools list [flags]
+```
+
+**Flags:**
+- `--server, -s` - Server name (optional; omit for global list)
+- `--status` - Filter by state: `enabled`, `disabled`, `config-denied`
+- `--risk` - Filter by risk level: `read`, `write`, `destructive`
+- `--approval` - Filter by approval: `approved`, `pending`, `changed`
+- `--output, -o` - Output format: `table`, `json`, `yaml`
+- `--log-level, -l` - Log level [default: info]
+- `--config, -c` - Path to config file
+- `--timeout, -t` - Connection timeout [default: 30s]
+- `--trace-transport` - Enable HTTP/SSE frame-by-frame tracing
+
+**Examples:**
+```bash
+# Global list (all servers) — requires daemon
+mcpproxy tools list
+mcpproxy tools list -o json | jq '.[0]'
+
+# Filtered list
+mcpproxy tools list --status disabled
+mcpproxy tools list --risk read
+mcpproxy tools list --approval pending
+
+# Server-scoped debug listing (daemon or standalone)
+mcpproxy tools list --server=github-server
+mcpproxy tools list --server=github-server --log-level=trace
+```
+
+**Output Columns (global view):**
+- NAME, SERVER, STATE (enabled/disabled/config-denied), APPROVAL, USAGE, LAST USED, DESCRIPTION
+
+---
+
+### `mcpproxy tools enable <server:tool> [...]`
+
+Enable one or more tools. Requires daemon.
+
+**Usage:**
+```bash
+mcpproxy tools enable <server:tool> [<server:tool>...]
+```
+
+**Examples:**
+```bash
+mcpproxy tools enable github:create_issue
+mcpproxy tools enable github:create_issue github:list_repos memory:create_entities
+```
+
+**Behavior:**
+- Each `server:tool` is parsed by splitting on the first `:` (tool names may contain `:`)
+- All targets are attempted independently; invalid targets are reported without aborting others
+- Prints `OK <server:tool>: enabled` or `FAILED <server:tool>: <reason>` per target
+- Exits non-zero if any target failed (enabling partial failure detection in scripts)
+
+---
+
+### `mcpproxy tools disable <server:tool> [...]`
+
+Disable one or more tools. Requires daemon.
+
+**Usage:**
+```bash
+mcpproxy tools disable <server:tool> [<server:tool>...]
+```
+
+**Examples:**
+```bash
+mcpproxy tools disable github:create_issue
+mcpproxy tools disable everything:echo memory:foo
+echo "exit: $?"   # non-zero if any failed
+```
+
+**Behavior:**
+- Same per-target processing and exit-code semantics as `tools enable`
+- Config-denied tools fail individually (server rejects) without aborting other targets
+
+---
+
 ## Exit Codes
 
 - `0` - Success

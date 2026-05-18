@@ -86,6 +86,14 @@ const router = createRouter({
       },
     },
     {
+      path: '/tools',
+      name: 'tools',
+      component: () => import('@/views/Tools.vue'),
+      meta: {
+        title: 'Tools',
+      },
+    },
+    {
       path: '/activity',
       name: 'activity',
       component: () => import('@/views/Activity.vue'),

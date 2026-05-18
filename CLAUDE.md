@@ -229,6 +229,21 @@ mcpproxy doctor                     # Run health checks
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
+### Global Tools CLI (Spec 050)
+```bash
+mcpproxy tools list                              # Global list — all tools across all servers (requires daemon)
+mcpproxy tools list -o json                      # JSON output for scripting
+mcpproxy tools list --status disabled            # Only disabled/config-denied tools
+mcpproxy tools list --risk read                  # Only read-only tools
+mcpproxy tools list --approval pending           # Only tools pending approval
+mcpproxy tools list --server=github-server       # Server-scoped debug listing
+mcpproxy tools enable github:create_issue        # Enable a specific tool
+mcpproxy tools disable github:create_issue       # Disable a specific tool
+mcpproxy tools disable everything:echo memory:foo  # Batch disable; per-target summary; non-zero exit on any failure
+```
+
+See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
+
 ### Activity Log CLI
 ```bash
 mcpproxy activity list              # List recent activity
@@ -393,6 +408,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `POST /api/v1/servers/{name}/disable` | Disable server |
 | `POST /api/v1/servers/{name}/quarantine` | Quarantine a server |
 | `POST /api/v1/servers/{name}/unquarantine` | Unquarantine a server |
+| `GET /api/v1/tools` | Global tools overview: every tool across all servers + stats (spec 050, issue #437) |
 | `GET /api/v1/index/search` | Search tools across servers (`?q=query&limit=N`) |
 | `GET /api/v1/activity` | List activity records with filtering |
 | `GET /api/v1/activity/{id}` | Get activity record details |

@@ -258,6 +258,9 @@ func (m *MockServerController) ListActivities(_ storage.ActivityFilter) ([]*stor
 func (m *MockServerController) GetActivity(_ string) (*storage.ActivityRecord, error) {
 	return nil, nil
 }
+func (m *MockServerController) AggregateToolUsage(_ time.Time) (map[string]storage.ToolUsageStat, error) {
+	return map[string]storage.ToolUsageStat{}, nil
+}
 func (m *MockServerController) StreamActivities(_ storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord)
 	close(ch)

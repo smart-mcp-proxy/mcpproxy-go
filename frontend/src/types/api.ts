@@ -213,6 +213,34 @@ export interface DiagnosticFixResponse {
   failure_msg?: string
 }
 
+// Global Tools response types (Spec 050)
+export interface GlobalTool {
+  name: string
+  server_name: string
+  description: string
+  approval_status: string  // "pending" | "changed" | "approved" | ""
+  disabled: boolean        // per-tool user toggle
+  config_denied: boolean   // layered config (read-only)
+  usage: number
+  last_used?: string       // ISO 8601; omitted if never used in window
+  annotations?: ToolAnnotation
+  // derived locally: enabled = !disabled && !config_denied
+}
+
+export interface GlobalToolsStats {
+  total: number
+  enabled: number
+  disabled: number
+  pending_approval: number
+}
+
+export interface GlobalToolsResponse {
+  tools: GlobalTool[]
+  stats: GlobalToolsStats
+  partial: boolean
+  failed_servers: string[]
+}
+
 // Tool Annotation types
 export interface ToolAnnotation {
   title?: string

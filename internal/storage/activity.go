@@ -227,6 +227,70 @@ func (m *Manager) CountActivities() (int, error) {
 	return count, err
 }
 
+// ToolUsageStat is a per-tool rollup of activity over a bounded window.
+// Used by the global tools view (spec 050). A zero LastUsed means the tool
+// was never used within the window.
+type ToolUsageStat struct {
+	Count    int
+	LastUsed time.Time
+}
+
+// toolUsageKey builds the map key for AggregateToolUsage. A NUL separator is
+// used so it cannot collide with ':' or other characters valid in server/tool
+// names.
+func toolUsageKey(serverName, toolName string) string {
+	return serverName + "\x00" + toolName
+}
+
+// AggregateToolUsage performs a single pass over the activity bucket and
+// returns per-(server,tool) call counts and last-used time for tool_call
+// records with Timestamp >= since. Records outside the window and non
+// tool_call records are skipped. An empty/absent bucket yields an empty map
+// (not an error). This is the consolidated usage source for GET /api/v1/tools
+// (spec 050) — read-only, no schema change.
+func (m *Manager) AggregateToolUsage(since time.Time) (map[string]ToolUsageStat, error) {
+	stats := make(map[string]ToolUsageStat)
+
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ActivityRecordsBucket))
+		if bucket == nil {
+			return nil // no activity yet
+		}
+
+		cursor := bucket.Cursor()
+		for k, v := cursor.Last(); k != nil; k, v = cursor.Prev() {
+			var record ActivityRecord
+			if err := record.UnmarshalBinary(v); err != nil {
+				m.logger.Warnw("Failed to unmarshal activity record during usage aggregation",
+					"key", string(k), "error", err)
+				continue
+			}
+
+			if record.Type != ActivityTypeToolCall {
+				continue
+			}
+			if record.ToolName == "" {
+				continue
+			}
+			if record.Timestamp.Before(since) {
+				continue
+			}
+
+			key := toolUsageKey(record.ServerName, record.ToolName)
+			st := stats[key]
+			st.Count++
+			if record.Timestamp.After(st.LastUsed) {
+				st.LastUsed = record.Timestamp
+			}
+			stats[key] = st
+		}
+
+		return nil
+	})
+
+	return stats, err
+}
+
 // StreamActivities returns a channel that yields activity records matching the filter.
 // The channel is closed when all matching records have been sent.
 // This is useful for streaming large exports without loading all records into memory.

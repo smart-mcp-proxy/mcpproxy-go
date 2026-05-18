@@ -496,24 +496,39 @@ See [Routing Modes](../features/routing-modes.md) for details on each mode.
 
 #### GET /api/v1/tools
 
-Search tools across all servers.
-
-**Query Parameters:**
-- `q` - Search query (optional)
-- `limit` - Maximum results (default: 15)
+Global tools overview (spec 050, issue #437): every tool from **every** configured
+server — including disabled servers and individually disabled / config-denied tools —
+enriched with approval state and 30-day usage. Read-only; consumers apply their own
+search/filter/sort over the full set. For relevance-ranked discovery use
+`GET /api/v1/index/search` instead.
 
 **Response:**
 ```json
 {
-  "tools": [
-    {
-      "name": "github:create_issue",
-      "server": "github-server",
-      "description": "Create a new GitHub issue"
-    }
-  ]
+  "success": true,
+  "data": {
+    "tools": [
+      {
+        "name": "create_issue",
+        "server_name": "github",
+        "description": "Create a new GitHub issue",
+        "approval_status": "approved",
+        "disabled": false,
+        "config_denied": false,
+        "usage": 42,
+        "last_used": "2026-05-18T09:30:51Z"
+      }
+    ],
+    "stats": { "total": 478, "enabled": 450, "disabled": 28, "pending_approval": 0 },
+    "partial": false,
+    "failed_servers": []
+  }
 }
 ```
+
+`enabled` is derived by the consumer as `!disabled && !config_denied`. When a
+server cannot be read the endpoint still returns every tool it could gather and
+sets `partial: true` with `failed_servers` (it does not fail the whole request).
 
 #### GET /api/v1/servers/{name}/tools
 

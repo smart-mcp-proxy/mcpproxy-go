@@ -1061,6 +1061,34 @@ components:
         total:
           type: integer
       type: object
+    contracts.GlobalToolsResponse:
+      properties:
+        failed_servers:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        partial:
+          type: boolean
+        stats:
+          $ref: '#/components/schemas/contracts.GlobalToolsStats'
+        tools:
+          items:
+            $ref: '#/components/schemas/contracts.Tool'
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.GlobalToolsStats:
+      properties:
+        disabled:
+          type: integer
+        enabled:
+          type: integer
+        pending_approval:
+          type: integer
+        total:
+          type: integer
+      type: object
     contracts.HealthStatus:
       description: Unified health status calculated by the backend
       properties:
@@ -4685,6 +4713,31 @@ paths:
       summary: Replay a tool call
       tags:
       - tool-calls
+  /api/v1/tools:
+    get:
+      description: 'Consolidated, read-only listing of all tools from every configured
+        server (including disabled servers and disabled/config-denied tools), enriched
+        with approval state and 30-day usage. Backs the global Tools page and the
+        CLI global `tools list` (spec 050, issue #437).'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.GlobalToolsResponse'
+          description: All tools across all servers
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Could not enumerate servers
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List every tool across all servers
+      tags:
+      - tools
   /api/v1/tools/call:
     post:
       description: Execute a tool on an upstream MCP server (wrapper around MCP tool

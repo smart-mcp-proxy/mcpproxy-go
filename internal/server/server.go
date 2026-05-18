@@ -2467,6 +2467,12 @@ func (s *Server) StreamActivities(filter storage.ActivityFilter) <-chan *storage
 	return s.runtime.StreamActivities(filter)
 }
 
+// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
+// given time (spec 050).
+func (s *Server) AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error) {
+	return s.runtime.AggregateToolUsage(since)
+}
+
 // ListToolApprovals returns tool approval records for a server (Spec 032).
 func (s *Server) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
 	return s.runtime.ListToolApprovals(serverName)

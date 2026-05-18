@@ -333,6 +333,28 @@ type GetServerToolsResponse struct {
 	Count      int    `json:"count"`
 }
 
+// GlobalToolsStats is the aggregate rollup shown on the global tools page
+// (spec 050). Disabled counts a tool that is user-disabled OR config-denied;
+// Enabled = Total - Disabled; PendingApproval counts pending/changed approval.
+type GlobalToolsStats struct {
+	Total           int `json:"total"`
+	Enabled         int `json:"enabled"`
+	Disabled        int `json:"disabled"`
+	PendingApproval int `json:"pending_approval"`
+}
+
+// GlobalToolsResponse is the response for GET /api/v1/tools — every tool from
+// every configured server (including disabled servers and disabled/
+// config-denied tools), enriched with approval state and usage. Partial is set
+// when one or more servers could not be read; the list still contains every
+// tool that could be gathered.
+type GlobalToolsResponse struct {
+	Tools         []Tool           `json:"tools"`
+	Stats         GlobalToolsStats `json:"stats"`
+	Partial       bool             `json:"partial,omitempty"`
+	FailedServers []string         `json:"failed_servers,omitempty"`
+}
+
 // SearchToolsResponse is the response for GET /api/v1/index/search
 type SearchToolsResponse struct {
 	Query   string         `json:"query"`
