@@ -79,3 +79,20 @@ func BenchmarkClassifyDisabledTool(b *testing.B) {
 		_ = rt.ClassifyDisabledTool("github", "delete_repo")
 	}
 }
+
+// Regression for the #476 follow-up: config-file disabled_tools live ONLY in
+// the runtime config, not always in the storage copy. ClassifyDisabledTool
+// must read the live config (r.Config()) so disabled_by_config is correct for
+// config-file stdio servers — the server-layer classifier delegates its
+// config-denied leg to this authority.
+func TestClassifyDisabledTool_ConfigFromLiveConfig(t *testing.T) {
+	rt := setupConfigFilterRuntime(t, []*config.ServerConfig{
+		{Name: "cfgsrv", Enabled: true, DisabledTools: []string{"locked"}},
+	})
+	// No storage approval record and no storage.SaveUpstreamServer call:
+	// disabled_tools exists only in the live config here.
+	assert.Equal(t, contracts.DisabledStatusByConfig,
+		rt.ClassifyDisabledTool("cfgsrv", "locked"))
+	assert.Equal(t, contracts.DisabledStatusUnknown,
+		rt.ClassifyDisabledTool("cfgsrv", "allowed")) // callable → not a disable reason
+}
