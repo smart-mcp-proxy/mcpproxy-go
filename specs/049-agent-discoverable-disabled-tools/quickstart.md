@@ -115,3 +115,23 @@ go test ./internal/server/ -run 'DisabledDiscovery|BlockedToolMessage' -count=1
 ```bash
 pkill -f 'mcpproxy serve.*18049' 2>/dev/null
 ```
+
+---
+
+## Verification Results (2026-05-18, live MCP + curl)
+
+| Check | Result |
+|-------|--------|
+| §2 default path byte-for-byte unchanged (`has disabled/remediation`=false; user-disabled tool excluded as before) | ✅ PASS |
+| §3 `include_disabled` → `disabled:[{echo,disabled_by_user}]`, `remediation` keyed only by present status, callables still listed first | ✅ PASS |
+| §4 config-denied call → operator-policy message + `include_disabled:true` pointer, distinct from user-disable | ✅ PASS |
+| §1 `upstream_servers` → `{callable:12,disabled_by_user:1}`, zero reasons omitted; all-callable server emits no block | ✅ PASS |
+| §5 zero-result nudge | ✅ PASS (unit: `TestDisabledDiscovery_ZeroResultNudge`) |
+
+**Known limitation (pre-existing, NOT spec 049):** config-file `disabled_tools`
+on a stdio server did not reach `IsToolConfigDenied` at runtime in this manual
+run (`disabled_tools` showed null in the live server view; an `echo` call
+succeeded). The 049 classifier maps `disabled_by_config` correctly whenever
+`IsToolConfigDenied` fires (proven by `TestClassifyDisabledTool_Precedence` and
+the §4 call-path message). This config→runtime load gap belongs to #468 and is
+filed separately; it does not affect 049 correctness.
