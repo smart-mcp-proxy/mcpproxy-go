@@ -4665,8 +4665,11 @@ func (p *MCPProxyServer) serverToolCounts(serverName string, toolNames []string)
 }
 
 // classifyServerToolStatus returns "" when the tool is callable, otherwise the
-// disable reason. Storage-sourced, runtime-independent, mirrors
-// classifyDisabledTool's precedence so the two never drift.
+// disable reason. Mirrors classifyDisabledTool's precedence so the two never
+// drift. The config-denied leg prefers the live runtime signal (the same
+// authority isToolCallable/blockedToolMessage use — config-file disabled_tools
+// only lives in the live config, not always in the storage copy); it falls
+// back to the storage ServerConfig when no runtime is wired (unit tests).
 func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) contracts.DisabledToolStatus {
 	if strings.Contains(toolName, ":") {
 		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
@@ -4683,7 +4686,13 @@ func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) c
 	if !sc.Enabled {
 		return contracts.DisabledStatusServerDisabled
 	}
-	if !sc.IsToolAllowedByConfig(toolName) {
+	configDenied := false
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		configDenied = p.mainServer.runtime.IsToolConfigDenied(serverName, toolName)
+	} else {
+		configDenied = !sc.IsToolAllowedByConfig(toolName)
+	}
+	if configDenied {
 		return contracts.DisabledStatusByConfig
 	}
 	if approval, aerr := p.storage.GetToolApproval(serverName, toolName); aerr == nil && approval != nil {
