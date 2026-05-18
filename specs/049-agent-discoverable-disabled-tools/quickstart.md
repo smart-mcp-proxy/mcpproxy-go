@@ -128,10 +128,16 @@ pkill -f 'mcpproxy serve.*18049' 2>/dev/null
 | §1 `upstream_servers` → `{callable:12,disabled_by_user:1}`, zero reasons omitted; all-callable server emits no block | ✅ PASS |
 | §5 zero-result nudge | ✅ PASS (unit: `TestDisabledDiscovery_ZeroResultNudge`) |
 
-**Known limitation (pre-existing, NOT spec 049):** config-file `disabled_tools`
-on a stdio server did not reach `IsToolConfigDenied` at runtime in this manual
-run (`disabled_tools` showed null in the live server view; an `echo` call
-succeeded). The 049 classifier maps `disabled_by_config` correctly whenever
-`IsToolConfigDenied` fires (proven by `TestClassifyDisabledTool_Precedence` and
-the §4 call-path message). This config→runtime load gap belongs to #468 and is
-filed separately; it does not affect 049 correctness.
+**Investigated and resolved — there is no config→runtime gap.** The manual
+run that appeared to show config-file `disabled_tools` not reaching
+`IsToolConfigDenied` was a test-environment artifact (a `/tmp` data-dir reused
+across runs while mcpproxy's own `SaveConfiguration()` rewrites the config
+file, plus the hot-reload watcher — the effective config at the `echo` call
+was indeterminate). Systematic debugging proved every boundary preserves the
+filter: file parse, storage `Save→Get/List`, and the full path
+parse→`New`→`LoadConfiguredServers`→`SaveConfiguration`→`IsToolConfigDenied`.
+This is now permanently guarded by
+`TestConfigFileToolFilter_ReachesRuntime` (internal/runtime). The investigation
+did surface and fix one real latent defect — `configsvc.Snapshot.Clone()`
+shallow-aliased the `EnabledTools`/`DisabledTools` slices (immutability
+violation, not data loss) — fixed with `TestSnapshotClone_DeepCopiesToolFilters`.
