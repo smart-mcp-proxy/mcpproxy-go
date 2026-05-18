@@ -27,6 +27,11 @@ type globalToolsController struct {
 	usageErr     error
 }
 
+// GetManagementService returns nil so handleGetGlobalTools exercises the
+// controller GetServerTools path this mock controls. The management-service
+// path is verified end-to-end via the API E2E + curl verification.
+func (m *globalToolsController) GetManagementService() interface{} { return nil }
+
 func (m *globalToolsController) GetAllServers() ([]map[string]interface{}, error) {
 	return m.allServers, nil
 }

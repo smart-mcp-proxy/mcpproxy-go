@@ -2514,6 +2514,22 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 		usage = map[string]storage.ToolUsageStat{}
 	}
 
+	// Use the same management-service path as the per-server tools endpoint so
+	// behaviour is consistent: a disabled / not-connected server returns an
+	// empty tool set (NOT an error), so it contributes zero tools without
+	// being mislabelled as a failed server. Fall back to the controller path
+	// when the management service is unavailable (keeps unit tests + minimal
+	// deployments working).
+	mgmtSvc, hasMgmt := s.controller.GetManagementService().(interface {
+		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
+	})
+	getTools := func(name string) ([]map[string]interface{}, error) {
+		if hasMgmt {
+			return mgmtSvc.GetServerTools(r.Context(), name)
+		}
+		return s.controller.GetServerTools(name)
+	}
+
 	resp := contracts.GlobalToolsResponse{
 		Tools: make([]contracts.Tool, 0, 256),
 	}
@@ -2524,9 +2540,10 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		generic, terr := s.controller.GetServerTools(name)
+		generic, terr := getTools(name)
 		if terr != nil {
-			// Spec edge case: still return every tool we could gather.
+			// Spec edge case: a genuine fetch error — still return every tool
+			// we could gather, flag the rest as partial.
 			resp.Partial = true
 			resp.FailedServers = append(resp.FailedServers, name)
 			s.logger.Debug("Global tools: server tools fetch failed", "server", name, "error", terr)
