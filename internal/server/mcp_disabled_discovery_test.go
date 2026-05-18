@@ -203,3 +203,38 @@ func TestDisabledDiscovery_ZeroResultNudge(t *testing.T) {
 	assert.Nil(t, resp.Disabled, "nudge must not inline locked entries")
 	assert.Empty(t, resp.Tools)
 }
+
+// T013: per-server counts present (zero reasons omitted) when there is a
+// non-callable tool; nil (→ no `tools` block) when all callable.
+func TestServerToolCounts_Conditional(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "mix", Enabled: true, DisabledTools: []string{"locked_cfg"},
+	}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "mix", ToolName: "locked_usr",
+		Status: storage.ToolApprovalStatusApproved, Disabled: true,
+	}))
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "clean", Enabled: true,
+	}))
+
+	mix := proxy.serverToolCounts("mix", []string{"ok1", "ok2", "locked_cfg", "locked_usr"})
+	require.NotNil(t, mix, "server with non-callable tools must emit counts")
+	assert.Equal(t, 2, mix.Callable)
+	assert.Equal(t, 1, mix.DisabledByConfig)
+	assert.Equal(t, 1, mix.DisabledByUser)
+	assert.Equal(t, 0, mix.PendingApproval) // omitted via omitempty in JSON
+
+	clean := proxy.serverToolCounts("clean", []string{"a", "b", "c"})
+	assert.Nil(t, clean, "all-callable server must NOT emit a tools block")
+
+	// JSON: zero reasons omitted, callable always present.
+	b, err := json.Marshal(mix)
+	require.NoError(t, err)
+	js := string(b)
+	assert.Contains(t, js, `"callable":2`)
+	assert.Contains(t, js, `"disabled_by_config":1`)
+	assert.NotContains(t, js, "pending_approval")
+	assert.NotContains(t, js, "server_disabled")
+}

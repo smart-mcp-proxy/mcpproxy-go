@@ -2679,6 +2679,13 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			}
 		}
 
+		// Spec 049 US3: conditional per-server tool counts — emitted only when
+		// the server has at least one non-callable tool, so an agent learns
+		// where hidden capability lives without per-tool spam.
+		if tc := p.serverToolCounts(server.Name, p.serverToolNames(server.Name)); tc != nil {
+			serverMap["tools"] = tc
+		}
+
 		// Calculate unified health status
 		healthInput := health.HealthCalculatorInput{
 			Name:           server.Name,
@@ -4613,6 +4620,110 @@ func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
 	return visible
 }
 
+// serverToolCounts tallies a server's tools by callability for the
+// upstream_servers response (Spec 049 US3). Returns nil when the server has no
+// known tools or every tool is callable, so the caller emits the `tools` block
+// ONLY when there is hidden capability worth a targeted retrieve_tools
+// (SC-005: fully-callable servers gain zero bytes).
+func (p *MCPProxyServer) serverToolCounts(serverName string, toolNames []string) *contracts.ServerToolCounts {
+	if len(toolNames) == 0 {
+		return nil
+	}
+	c := &contracts.ServerToolCounts{}
+	nonCallable := 0
+	for _, name := range toolNames {
+		// Use the storage-sourced classifier as the single truth so counts are
+		// correct with OR without a wired runtime and never disagree with the
+		// retrieve_tools status. A tool is "callable" iff it has no disable
+		// reason (enabled server, config-allowed, not user-disabled, not
+		// pending). isToolCallable is intentionally NOT used here because its
+		// config-denial leg depends on runtime.
+		switch p.classifyServerToolStatus(serverName, name) {
+		case "":
+			c.Callable++
+		case contracts.DisabledStatusServerDisabled:
+			c.ServerDisabled++
+			nonCallable++
+		case contracts.DisabledStatusByConfig:
+			c.DisabledByConfig++
+			nonCallable++
+		case contracts.DisabledStatusByUser:
+			c.DisabledByUser++
+			nonCallable++
+		case contracts.DisabledStatusPendingApproval:
+			c.PendingApproval++
+			nonCallable++
+		default:
+			c.DisabledUnknown++
+			nonCallable++
+		}
+	}
+	if nonCallable == 0 {
+		return nil
+	}
+	return c
+}
+
+// classifyServerToolStatus returns "" when the tool is callable, otherwise the
+// disable reason. Storage-sourced, runtime-independent, mirrors
+// classifyDisabledTool's precedence so the two never drift.
+func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) contracts.DisabledToolStatus {
+	if strings.Contains(toolName, ":") {
+		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
+			if serverName == "" {
+				serverName = parts[0]
+			}
+			toolName = parts[1]
+		}
+	}
+	sc, err := p.storage.GetUpstreamServer(serverName)
+	if err != nil || sc == nil {
+		return contracts.DisabledStatusUnknown
+	}
+	if !sc.Enabled {
+		return contracts.DisabledStatusServerDisabled
+	}
+	if !sc.IsToolAllowedByConfig(toolName) {
+		return contracts.DisabledStatusByConfig
+	}
+	if approval, aerr := p.storage.GetToolApproval(serverName, toolName); aerr == nil && approval != nil {
+		if approval.Disabled {
+			return contracts.DisabledStatusByUser
+		}
+		if approval.Status == storage.ToolApprovalStatusPending ||
+			approval.Status == storage.ToolApprovalStatusChanged {
+			return contracts.DisabledStatusPendingApproval
+		}
+	}
+	return "" // callable
+}
+
+// serverToolNames returns the best-available list of a server's tool names:
+// the StateView snapshot when hydrated, otherwise a live ListTools.
+func (p *MCPProxyServer) serverToolNames(serverName string) []string {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if sup := p.mainServer.runtime.Supervisor(); sup != nil {
+			if ss, ok := sup.StateView().Snapshot().Servers[serverName]; ok && len(ss.Tools) > 0 {
+				names := make([]string, 0, len(ss.Tools))
+				for _, tl := range ss.Tools {
+					names = append(names, tl.Name)
+				}
+				return names
+			}
+		}
+	}
+	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		if tools, err := client.ListTools(context.Background()); err == nil {
+			names := make([]string, 0, len(tools))
+			for _, tl := range tools {
+				names = append(names, tl.Name)
+			}
+			return names
+		}
+	}
+	return nil
+}
+
 func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 	if strings.Contains(toolName, ":") {
 		parts := strings.SplitN(toolName, ":", 2)
@@ -4713,36 +4824,11 @@ func (p *MCPProxyServer) IncludeDisabledCalls() int64 {
 // runtime). Mirrors runtime.ClassifyDisabledTool's precedence exactly; both are
 // covered by tests asserting the same precedence so they cannot silently drift.
 func (p *MCPProxyServer) classifyDisabledTool(serverName, toolName string) contracts.DisabledToolStatus {
-	// Normalize "server:tool" exactly like isToolCallable does: the discovery
-	// loop leaves toolName prefixed when ServerName is set.
-	if strings.Contains(toolName, ":") {
-		parts := strings.SplitN(toolName, ":", 2)
-		if len(parts) == 2 {
-			if serverName == "" {
-				serverName = parts[0]
-			}
-			toolName = parts[1]
-		}
-	}
-	sc, err := p.storage.GetUpstreamServer(serverName)
-	if err != nil || sc == nil {
-		return contracts.DisabledStatusUnknown
-	}
-	if !sc.Enabled {
-		return contracts.DisabledStatusServerDisabled
-	}
-	if !sc.IsToolAllowedByConfig(toolName) {
-		return contracts.DisabledStatusByConfig
-	}
-	approval, err := p.storage.GetToolApproval(serverName, toolName)
-	if err == nil && approval != nil {
-		if approval.Disabled {
-			return contracts.DisabledStatusByUser
-		}
-		if approval.Status == storage.ToolApprovalStatusPending ||
-			approval.Status == storage.ToolApprovalStatusChanged {
-			return contracts.DisabledStatusPendingApproval
-		}
+	// Single source of truth: classifyServerToolStatus. It returns "" only for
+	// callable tools; classifyDisabledTool is only ever called for tools
+	// already known non-callable, so "" → Unknown (never lie about a reason).
+	if status := p.classifyServerToolStatus(serverName, toolName); status != "" {
+		return status
 	}
 	return contracts.DisabledStatusUnknown
 }

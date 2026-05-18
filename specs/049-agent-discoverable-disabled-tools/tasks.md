@@ -67,8 +67,8 @@ Single Go project. Backend only under `internal/`. No frontend (UI lock badges s
 
 **Independent test**: quickstart.md §1 — `everything` has a `tools` block with `disabled_by_config>=1` and `disabled_by_user>=1`; a fully-callable server has no `tools` block.
 
-- [ ] T013 [US3] Write failing test in `internal/server/mcp_disabled_discovery_test.go`: server with ≥1 non-callable tool → entry has `ServerToolCounts` with zero reasons omitted; fully-callable server → no `tools` field at all (FR-010/SC-005).
-- [ ] T014 [US3] In the `upstream_servers` list/get handler (`internal/server/mcp.go`): walk the StateView snapshot tools per server (reuse the `getVisibleToolCount` traversal), tally callable + per-status via `ClassifyDisabledTool`, attach `*ServerToolCounts` only when a non-callable count > 0, omit zero sub-keys. Make T013 green.
+- [X] T013 [US3] Write failing test in `internal/server/mcp_disabled_discovery_test.go`: server with ≥1 non-callable tool → entry has `ServerToolCounts` with zero reasons omitted; fully-callable server → no `tools` field at all (FR-010/SC-005).
+- [X] T014 [US3] In the `upstream_servers` list/get handler (`internal/server/mcp.go`): walk the StateView snapshot tools per server (reuse the `getVisibleToolCount` traversal), tally callable + per-status via `ClassifyDisabledTool`, attach `*ServerToolCounts` only when a non-callable count > 0, omit zero sub-keys. Make T013 green.
 
 **Checkpoint**: all three stories complete and independently verifiable.
 
