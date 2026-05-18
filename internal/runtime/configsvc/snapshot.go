@@ -50,6 +50,19 @@ func (s *Snapshot) Clone() *config.Config {
 					copy(clonedSrv.Args, srv.Args)
 				}
 
+				// Spec 049: deep-copy the config tool-filter slices. Without
+				// this, `clonedSrv := *srv` aliases the original backing array,
+				// so a mutation of a cloned snapshot's filter would corrupt the
+				// shared config (immutability violation).
+				if srv.EnabledTools != nil {
+					clonedSrv.EnabledTools = make([]string, len(srv.EnabledTools))
+					copy(clonedSrv.EnabledTools, srv.EnabledTools)
+				}
+				if srv.DisabledTools != nil {
+					clonedSrv.DisabledTools = make([]string, len(srv.DisabledTools))
+					copy(clonedSrv.DisabledTools, srv.DisabledTools)
+				}
+
 				// Clone OAuth config if present
 				if srv.OAuth != nil {
 					oauthClone := *srv.OAuth
