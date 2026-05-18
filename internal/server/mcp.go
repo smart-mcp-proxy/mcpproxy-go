@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
@@ -107,6 +108,10 @@ type MCPProxyServer struct {
 
 	// Hooks shared across all routing mode servers
 	hooks *mcpserver.Hooks
+
+	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
+	// include_disabled. Never persisted (privacy, consistent with Spec 042).
+	includeDisabledCalls atomic.Int64
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -508,6 +513,9 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
+		),
+		mcp.WithBoolean("include_disabled",
+			mcp.Description("Set true to also surface tools that exist but are currently locked by config, user, or quarantine (default: false). Returns a 'disabled' list (name/server/description/status) plus a 'remediation' map; callable results are unaffected and listed first."),
 		),
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
@@ -1044,7 +1052,19 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	authCtx := auth.AuthContextFromContext(ctx)
 	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
 
+	// Spec 049: opt-in discovery of locked tools. When false (default) the
+	// behavior below is byte-for-byte identical to before — disabled tools are
+	// still dropped. droppedCount is tallied unconditionally so the zero-result
+	// nudge (Spec 049 US2) is free on the default path.
+	includeDisabled := request.GetBool("include_disabled", false)
+	if includeDisabled {
+		p.recordIncludeDisabled()
+		args["include_disabled"] = true
+	}
+
 	var callableResults []*config.SearchResult
+	var disabledEntries []contracts.LockedToolEntry
+	droppedCount := 0
 	for _, result := range results {
 		serverName := result.Tool.ServerName
 		toolName := result.Tool.Name
@@ -1056,11 +1076,23 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 
+		// Agent-scope filtering happens BEFORE classification (Spec 049 FR-007)
+		// so an agent never learns a locked tool exists on a server it cannot
+		// access.
 		if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
 			continue
 		}
 
 		if !p.isToolCallable(serverName, toolName) {
+			droppedCount++
+			if includeDisabled {
+				disabledEntries = append(disabledEntries, contracts.LockedToolEntry{
+					Name:        result.Tool.Name,
+					Server:      serverName,
+					Description: result.Tool.Description,
+					Status:      p.classifyDisabledTool(serverName, toolName),
+				})
+			}
 			continue
 		}
 
@@ -1207,6 +1239,37 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		"query":              query,
 		"total":              len(results),
 		"usage_instructions": usageInstructions,
+	}
+
+	// Spec 049: opt-in locked-tool discovery. Callable results above are
+	// untouched and listed first; locked entries follow, capped at
+	// min(limit,10) so a restrictive config can't blow the token budget. The
+	// remediation map is emitted once, keyed ONLY by statuses actually present.
+	if includeDisabled && len(disabledEntries) > 0 {
+		cap := limit
+		if cap > 10 {
+			cap = 10
+		}
+		if len(disabledEntries) > cap {
+			disabledEntries = disabledEntries[:cap]
+		}
+		remediation := map[string]string{}
+		for _, e := range disabledEntries {
+			if _, ok := remediation[e.Status]; !ok {
+				remediation[e.Status] = disabledToolRemediation(e.Status)
+			}
+		}
+		response["disabled"] = disabledEntries
+		response["remediation"] = remediation
+	}
+
+	// Spec 049 FR-009: an agent that didn't set the flag still gets nudged when
+	// every match was locked. Count only — never the entries — so this stays a
+	// few tokens regardless of how many tools are locked.
+	if !includeDisabled && len(results) == 0 && droppedCount > 0 {
+		response["notice"] = fmt.Sprintf(
+			"%d relevant tool(s) exist but are locked; retry with include_disabled:true for details and remediation.",
+			droppedCount)
 	}
 
 	// Spec 035 F2: Session risk analysis — analyze all connected servers' tool annotations
@@ -2614,6 +2677,13 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 				"last_error":  nil,
 				"retry_count": 0,
 			}
+		}
+
+		// Spec 049 US3: conditional per-server tool counts — emitted only when
+		// the server has at least one non-callable tool, so an agent learns
+		// where hidden capability lives without per-tool spam.
+		if tc := p.serverToolCounts(server.Name, p.serverToolNames(server.Name)); tc != nil {
+			serverMap["tools"] = tc
 		}
 
 		// Calculate unified health status
@@ -4550,6 +4620,110 @@ func (p *MCPProxyServer) getVisibleToolCount(serverName string) int {
 	return visible
 }
 
+// serverToolCounts tallies a server's tools by callability for the
+// upstream_servers response (Spec 049 US3). Returns nil when the server has no
+// known tools or every tool is callable, so the caller emits the `tools` block
+// ONLY when there is hidden capability worth a targeted retrieve_tools
+// (SC-005: fully-callable servers gain zero bytes).
+func (p *MCPProxyServer) serverToolCounts(serverName string, toolNames []string) *contracts.ServerToolCounts {
+	if len(toolNames) == 0 {
+		return nil
+	}
+	c := &contracts.ServerToolCounts{}
+	nonCallable := 0
+	for _, name := range toolNames {
+		// Use the storage-sourced classifier as the single truth so counts are
+		// correct with OR without a wired runtime and never disagree with the
+		// retrieve_tools status. A tool is "callable" iff it has no disable
+		// reason (enabled server, config-allowed, not user-disabled, not
+		// pending). isToolCallable is intentionally NOT used here because its
+		// config-denial leg depends on runtime.
+		switch p.classifyServerToolStatus(serverName, name) {
+		case "":
+			c.Callable++
+		case contracts.DisabledStatusServerDisabled:
+			c.ServerDisabled++
+			nonCallable++
+		case contracts.DisabledStatusByConfig:
+			c.DisabledByConfig++
+			nonCallable++
+		case contracts.DisabledStatusByUser:
+			c.DisabledByUser++
+			nonCallable++
+		case contracts.DisabledStatusPendingApproval:
+			c.PendingApproval++
+			nonCallable++
+		default:
+			c.DisabledUnknown++
+			nonCallable++
+		}
+	}
+	if nonCallable == 0 {
+		return nil
+	}
+	return c
+}
+
+// classifyServerToolStatus returns "" when the tool is callable, otherwise the
+// disable reason. Storage-sourced, runtime-independent, mirrors
+// classifyDisabledTool's precedence so the two never drift.
+func (p *MCPProxyServer) classifyServerToolStatus(serverName, toolName string) contracts.DisabledToolStatus {
+	if strings.Contains(toolName, ":") {
+		if parts := strings.SplitN(toolName, ":", 2); len(parts) == 2 {
+			if serverName == "" {
+				serverName = parts[0]
+			}
+			toolName = parts[1]
+		}
+	}
+	sc, err := p.storage.GetUpstreamServer(serverName)
+	if err != nil || sc == nil {
+		return contracts.DisabledStatusUnknown
+	}
+	if !sc.Enabled {
+		return contracts.DisabledStatusServerDisabled
+	}
+	if !sc.IsToolAllowedByConfig(toolName) {
+		return contracts.DisabledStatusByConfig
+	}
+	if approval, aerr := p.storage.GetToolApproval(serverName, toolName); aerr == nil && approval != nil {
+		if approval.Disabled {
+			return contracts.DisabledStatusByUser
+		}
+		if approval.Status == storage.ToolApprovalStatusPending ||
+			approval.Status == storage.ToolApprovalStatusChanged {
+			return contracts.DisabledStatusPendingApproval
+		}
+	}
+	return "" // callable
+}
+
+// serverToolNames returns the best-available list of a server's tool names:
+// the StateView snapshot when hydrated, otherwise a live ListTools.
+func (p *MCPProxyServer) serverToolNames(serverName string) []string {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if sup := p.mainServer.runtime.Supervisor(); sup != nil {
+			if ss, ok := sup.StateView().Snapshot().Servers[serverName]; ok && len(ss.Tools) > 0 {
+				names := make([]string, 0, len(ss.Tools))
+				for _, tl := range ss.Tools {
+					names = append(names, tl.Name)
+				}
+				return names
+			}
+		}
+	}
+	if client, exists := p.upstreamManager.GetClient(serverName); exists {
+		if tools, err := client.ListTools(context.Background()); err == nil {
+			names := make([]string, 0, len(tools))
+			for _, tl := range tools {
+				names = append(names, tl.Name)
+			}
+			return names
+		}
+	}
+	return nil
+}
+
 func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 	if strings.Contains(toolName, ":") {
 		parts := strings.SplitN(toolName, ":", 2)
@@ -4619,14 +4793,63 @@ func (p *MCPProxyServer) blockedToolMessage(serverName, toolName string) string 
 // blockedToolMessage, split out so the operator-policy vs user-disable wording
 // is unit-testable without standing up a runtime.
 func blockedToolMessageFor(configDenied bool) string {
+	// Spec 049: every branch points the agent at the opt-in discovery path so
+	// it can see locked capabilities and their remediation in one follow-up.
+	const discoveryHint = " Run retrieve_tools with include_disabled:true to see locked capabilities and remediation."
 	if configDenied {
 		return "TOOL_BLOCKED: Tool is denied by server config (enabled_tools/disabled_tools). " +
 			"This is operator policy and is NOT user-overridable from the UI; " +
-			"ask the operator to edit mcp_config.json to enable it."
+			"ask the operator to edit mcp_config.json to enable it." + discoveryHint
 	}
 	return "TOOL_BLOCKED: Tool is disabled and not callable. " +
 		"It may be disabled by the user or pending security approval; " +
-		"ask the user to enable it in the mcpproxy UI (Server detail → Tools)."
+		"ask the user to enable it in the mcpproxy UI (Server detail → Tools)." + discoveryHint
+}
+
+// recordIncludeDisabled bumps the in-memory include_disabled usage counter
+// (Spec 049 FR-013). Never persisted.
+func (p *MCPProxyServer) recordIncludeDisabled() {
+	p.includeDisabledCalls.Add(1)
+}
+
+// IncludeDisabledCalls reports how many retrieve_tools calls opted into
+// include_disabled this process lifetime. Test/observability only.
+func (p *MCPProxyServer) IncludeDisabledCalls() int64 {
+	return p.includeDisabledCalls.Load()
+}
+
+// classifyDisabledTool returns the single reason a non-callable tool is locked
+// (Spec 049). It sources state from p.storage — the same data isToolCallable
+// uses — so it works on every code path (including those without a wired
+// runtime). Mirrors runtime.ClassifyDisabledTool's precedence exactly; both are
+// covered by tests asserting the same precedence so they cannot silently drift.
+func (p *MCPProxyServer) classifyDisabledTool(serverName, toolName string) contracts.DisabledToolStatus {
+	// Single source of truth: classifyServerToolStatus. It returns "" only for
+	// callable tools; classifyDisabledTool is only ever called for tools
+	// already known non-callable, so "" → Unknown (never lie about a reason).
+	if status := p.classifyServerToolStatus(serverName, toolName); status != "" {
+		return status
+	}
+	return contracts.DisabledStatusUnknown
+}
+
+// disabledToolRemediation maps a status to one agent-actionable instruction
+// (Spec 049 FR-005). Emitted once per response, never per tool.
+func disabledToolRemediation(status contracts.DisabledToolStatus) string {
+	switch status {
+	case contracts.DisabledStatusServerDisabled:
+		return "Its server is disabled. Ask the user to enable the server first."
+	case contracts.DisabledStatusByConfig:
+		return "Locked by operator policy in mcp_config.json (enabled_tools/disabled_tools). " +
+			"The user cannot enable this from the UI; ask the operator to change the server config."
+	case contracts.DisabledStatusByUser:
+		return "Disabled by the user. Ask the user to re-enable it in the mcpproxy UI " +
+			"(Server detail → Tools) or via the API."
+	case contracts.DisabledStatusPendingApproval:
+		return "Awaiting security approval. Ask the user to review and approve it in the mcpproxy UI."
+	default:
+		return "Reason undetermined; check server logs."
+	}
 }
 
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
