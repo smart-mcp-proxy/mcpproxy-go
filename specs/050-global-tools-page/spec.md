@@ -59,6 +59,23 @@ The user selects multiple tools (individually, or all tools currently shown on t
 
 ---
 
+### User Story 4 - CLI parity for global tool curation (Priority: P2)
+
+A user driving mcpproxy from the terminal or scripts needs the same global view and curation actions the web page offers, without a browser. They run a single command to list every tool across all servers (with the same server/state/risk/approval filters and machine-readable JSON/YAML output), and run enable/disable commands that accept one or more `server:tool` targets to curate in bulk from a script.
+
+**Why this priority**: mcpproxy's product principle is CLI/UI parity for every management surface (the project ships activity, tokens, upstream, quarantine, etc. as CLI commands mirroring the UI). A global tools page with no CLI equivalent breaks that contract and blocks automation/scripted cleanup. It depends on the same consolidated data source as the web page, so it is P2.
+
+**Independent Test**: With multiple servers configured, run the global list command with no server argument and confirm all tools across all servers are listed with state/approval/usage columns and that `-o json` emits the same consolidated data; run the disable command with several `server:tool` arguments and confirm each becomes disabled (verifiable via the list command and the web page).
+
+**Acceptance Scenarios**:
+
+1. **Given** multiple configured servers, **When** the user runs the tools list command without specifying a server, **Then** tools from all servers are listed in one output, including disabled-server and individually-disabled tools.
+2. **Given** the global list command, **When** the user applies server/state/risk/approval filters or requests JSON/YAML output, **Then** the output reflects exactly the same filtering semantics and data as the web page's consolidated source.
+3. **Given** one or more `server:tool` targets, **When** the user runs the enable (or disable) command, **Then** every targeted tool's state changes accordingly and a per-target success/failure summary is printed; partial failures leave succeeded targets changed and exit with a non-zero status.
+4. **Given** an invalid or unknown `server:tool` target, **When** the user runs an enable/disable command, **Then** a clear error identifies the bad target without aborting valid targets in the same invocation.
+
+---
+
 ### Edge Cases
 
 - **No servers / no tools**: The page shows an empty state explaining that connecting MCP servers will populate it, with a link to server management.
@@ -89,6 +106,10 @@ The user selects multiple tools (individually, or all tools currently shown on t
 - **FR-014**: The page MUST be reachable from the primary navigation and MUST display a live count of total tools in the navigation entry.
 - **FR-015**: The page MUST show clear empty, loading, and partial-error states.
 - **FR-016**: The existing tool-discovery mechanism used by AI agents MUST remain unchanged and unaffected by this feature (this page is a separate audit surface, not a change to agent discovery).
+- **FR-017**: The CLI MUST provide a command that lists every tool across all configured servers when no specific server is given, drawing from the same consolidated data source as the web page (no per-server invocation required by the user).
+- **FR-018**: The CLI global list command MUST support the same filtering dimensions as the web page (server, enabled/disabled/config-denied state, risk level, approval status) and MUST support machine-readable output (JSON/YAML) consistent with the rest of the CLI.
+- **FR-019**: The CLI MUST provide commands to enable and to disable tools that accept one or more `server:tool` targets in a single invocation, applying the same per-tool state change as the web page's batch action.
+- **FR-020**: When a CLI enable/disable invocation contains multiple targets, the command MUST process each independently, print a per-target success/failure summary, leave successfully changed targets changed, and exit non-zero if any target failed; an invalid target MUST NOT abort the remaining valid targets.
 
 ### Out of Scope (v1)
 
@@ -117,6 +138,7 @@ The following appear in the originating issue as desirable but are explicitly de
 - **SC-004**: Disabled and config-denied tools remain discoverable on the page (including via search), so 100% of cleanup-candidate tools can be located from this single surface.
 - **SC-005**: After a batch enable/disable, the page's displayed states and summary counts match the system's authoritative state on the next load, with any partial failures explicitly surfaced to the user.
 - **SC-006**: Opening or using the page does not slow down or alter AI-agent tool discovery; agent discovery behavior is unchanged.
+- **SC-007**: A user with no browser can list all tools across all servers and disable a set of unwanted tools entirely from the command line, with the same filtering and data as the web page, and a script can detect partial failures via exit status.
 
 ## Assumptions
 
@@ -127,6 +149,7 @@ The following appear in the originating issue as desirable but are explicitly de
 - The page replaces the existing unused/orphaned tools view rather than adding a parallel one, to avoid two competing "tools" surfaces.
 - Search is a deterministic substring filter over the already-loaded set, deliberately not relevance-ranked discovery, because the audit use case requires seeing every matching tool (including disabled ones) in a stable, user-sortable order.
 - Reasonable web-app defaults apply for pagination size, debounce on search input, and user-friendly error messaging.
+- CLI parity is delivered within this feature (not a separate spec) because it consumes the same consolidated data source and per-tool state-change capability as the web page; it extends the existing `mcpproxy tools` command group (today `tools list --server` is debug-only and server-scoped) with a global default and curation subcommands, following the project's established CLI/UI parity pattern (activity, tokens, upstream, quarantine).
 
 ## Commit Message Conventions *(mandatory)*
 
