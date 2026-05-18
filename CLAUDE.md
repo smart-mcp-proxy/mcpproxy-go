@@ -770,6 +770,8 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt (`~/.mcpproxy/config.db`) — read-only on the hot path; no schema change. (047-cpu-hotpath-fix)
 - Swift 5.9 (macOS 13+); Go 1.24 only for the verification harness, no Go changes in scope. + SwiftUI/AppKit (existing), Combine (existing for the periodic timer pattern). No new deps. (048-tray-refetch-elimination)
 - None. Pure in-memory state. (048-tray-refetch-elimination)
+- Go 1.24 (toolchain go1.24.10); TypeScript 5.9 / Vue 3.5 (frontend) + Chi router, BBolt (`go.etcd.io/bbolt`), Zap, Cobra (CLI), `mark3labs/mcp-go`; Vue 3, Pinia, Vue Router, Tailwind/DaisyUI, Vite — all existing, no new deps (050-global-tools-page)
+- BBolt `~/.mcpproxy/config.db` — read-only on the hot path. Reuses existing `ActivityRecordsBucket` (aggregation pass) and `ToolApprovalBucket` (enrichment). No schema change, no migration. (050-global-tools-page)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
