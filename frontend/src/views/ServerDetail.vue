@@ -388,7 +388,14 @@
                         </div>
                       </div>
                     </div>
+                    <template v-if="isToolConfigDenied(tool.tool_name)">
+                      <span
+                        class="badge badge-neutral badge-sm ml-4 self-center"
+                        title="Tool is denied by mcp_config.json; approval has no effect while the config lock is active"
+                      >🔒 locked by config</span>
+                    </template>
                     <button
+                      v-else
                       @click="approveTool(tool.tool_name)"
                       :disabled="approvalLoading"
                       class="btn btn-sm btn-outline ml-4"
@@ -487,6 +494,11 @@
                         v-else-if="getToolApprovalStatus(tool.name) === 'changed'"
                         class="badge badge-warning badge-sm"
                       >changed</span>
+                      <span
+                        v-if="isToolConfigDenied(tool.name)"
+                        class="badge badge-neutral badge-sm"
+                        title="Disabled by mcp_config.json (enabled_tools / disabled_tools)"
+                      >🔒 locked by config</span>
                     </div>
                     <label
                       v-if="isToolToggleAvailable(tool.name)"
@@ -504,6 +516,11 @@
                         @change="toggleToolEnabled(tool.name, ($event.target as HTMLInputElement).checked)"
                       />
                     </label>
+                    <span
+                      v-else-if="isToolConfigDenied(tool.name)"
+                      class="text-xs text-base-content/40 shrink-0 italic"
+                      title="Remove from disabled_tools or add to enabled_tools in mcp_config.json to unlock"
+                    >🔒 locked by config</span>
                   </div>
                   <div
                     class="transition-opacity"
@@ -1389,16 +1406,20 @@ function getToolApproval(toolName: string): ToolApproval | null {
   return toolApprovals.value.find(t => t.tool_name === toolName) || null
 }
 
+function isToolConfigDenied(toolName: string): boolean {
+  const tool = serverTools.value.find(t => t.name === toolName)
+  return tool?.config_denied === true
+}
+
 function isToolEnabled(toolName: string): boolean {
   // GET /api/v1/servers/{id}/tools returns each tool with a top-level
   // `disabled` boolean (see contracts.Tool.Disabled in Go) when an approval
   // record exists. The approvals endpoint also exposes `enabled`/`disabled`.
   // Cross-check both so the toggle reflects reality regardless of which
   // payload the frontend already loaded.
-  const tool = serverTools.value.find(t => t.name === toolName) as Tool & { disabled?: boolean; enabled?: boolean } | undefined
+  const tool = serverTools.value.find(t => t.name === toolName)
   if (tool) {
     if (typeof tool.disabled === 'boolean') return !tool.disabled
-    if (typeof tool.enabled === 'boolean') return tool.enabled
   }
   const approval = getToolApproval(toolName)
   if (!approval) return true
@@ -1416,6 +1437,7 @@ function isToolToggleLoading(toolName: string): boolean {
 // tools the daemon synthesizes an approval record on demand, so the toggle
 // works in every other case.
 function isToolToggleAvailable(toolName: string): boolean {
+  if (isToolConfigDenied(toolName)) return false
   const status = getToolApprovalStatus(toolName)
   return status === null || status === 'approved'
 }
@@ -1921,12 +1943,22 @@ async function bulkToggleAllTools(enabled: boolean) {
     const response = await api.setAllToolsEnabled(server.value.name, enabled)
     if (response.success && response.data) {
       const changed = response.data.changed ?? 0
+      // "Enable All" intentionally skips tools the server config denies
+      // (enabled_tools/disabled_tools) — surface that so the user isn't
+      // left wondering why some toggles stayed locked.
+      const lockedByConfig = enabled
+        ? serverTools.value.filter(t => t.config_denied === true).length
+        : 0
+      const baseMsg = changed === 0
+        ? 'No tools needed changes.'
+        : `${changed} tool${changed === 1 ? '' : 's'} ${enabled ? 'enabled' : 'disabled'}.`
+      const lockedMsg = lockedByConfig > 0
+        ? ` ${lockedByConfig} tool${lockedByConfig === 1 ? '' : 's'} remain locked by config.`
+        : ''
       systemStore.addToast({
         type: 'success',
         title: enabled ? 'Tools Enabled' : 'Tools Disabled',
-        message: changed === 0
-          ? 'No tools needed changes.'
-          : `${changed} tool${changed === 1 ? '' : 's'} ${enabled ? 'enabled' : 'disabled'}.`,
+        message: baseMsg + lockedMsg,
       })
       // Refresh server data + tool caches so the per-tool toggle, the
       // "N disabled" pill, and the Server List both lose any staleness.

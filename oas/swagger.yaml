@@ -496,8 +496,22 @@ components:
           type: string
         created:
           type: string
+        disabled_tools:
+          description: 'Denylist: these tools are hidden; mutually exclusive with
+            enabled_tools'
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         enabled:
           type: boolean
+        enabled_tools:
+          description: 'Allowlist: only these tools are exposed; mutually exclusive
+            with disabled_tools'
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         env:
           additionalProperties:
             type: string
@@ -1668,6 +1682,11 @@ components:
           $ref: '#/components/schemas/contracts.ToolAnnotation'
         approval_status:
           type: string
+        config_denied:
+          description: |-
+            ConfigDenied is true when the tool is denied by the server's static
+            enabled_tools / disabled_tools config. The user cannot override this toggle.
+          type: boolean
         description:
           type: string
         disabled:

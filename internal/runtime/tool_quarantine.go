@@ -765,6 +765,12 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 
 	changed := 0
 	for _, toolName := range toolNames {
+		// Never enable a tool the config denies — user-owned Disabled flag is
+		// irrelevant here; enforcement is in isToolCallable, but we avoid a
+		// misleading record.Disabled=false for a hard-off tool.
+		if enabled && r.IsToolConfigDenied(serverName, toolName) {
+			continue
+		}
 		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
 		if setErr != nil {
 			r.logger.Warn("Failed to toggle tool in bulk operation",
@@ -920,4 +926,17 @@ func (r *Runtime) emitToolQuarantineEvent(serverName, toolName, action, oldHash,
 		"metadata":    string(metadataJSON),
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolQuarantineChange, payload))
+}
+
+// IsToolConfigDenied reports whether toolName is denied by the server's static
+// enabled_tools / disabled_tools config. Evaluated at call time — nothing is
+// written to BBolt. Returns false (allow) when the server is unknown or has no
+// filter configured.
+func (r *Runtime) IsToolConfigDenied(serverName, toolName string) bool {
+	for _, sc := range r.Config().Servers {
+		if sc.Name == serverName {
+			return !sc.IsToolAllowedByConfig(toolName)
+		}
+	}
+	return false
 }

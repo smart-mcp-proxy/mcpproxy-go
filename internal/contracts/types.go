@@ -195,6 +195,9 @@ type Tool struct {
 	// available without a second round-trip to the approvals endpoint. Absent
 	// in the JSON when false (default) to keep responses compact.
 	Disabled bool `json:"disabled,omitempty"`
+	// ConfigDenied is true when the tool is denied by the server's static
+	// enabled_tools / disabled_tools config. The user cannot override this toggle.
+	ConfigDenied bool `json:"config_denied,omitempty"`
 }
 
 // SearchResult represents a search result for tools

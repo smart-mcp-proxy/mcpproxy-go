@@ -177,14 +177,18 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		Args:        serverConfig.Args,
 		Env:         serverConfig.Env,
 		WorkingDir:  serverConfig.WorkingDir,
-		Enabled:     serverConfig.Enabled,
-		Quarantined: serverConfig.Quarantined,
-		Headers:     serverConfig.Headers,
-		Created:     serverConfig.Created,
-		Updated:     time.Now(),
+		Enabled:             serverConfig.Enabled,
+		Quarantined:         serverConfig.Quarantined,
+		Headers:             serverConfig.Headers,
+		Created:             serverConfig.Created,
+		Updated:             time.Now(),
+		ReconnectOnUse:      serverConfig.ReconnectOnUse,
+		LauncherWaitTimeout: serverConfig.LauncherWaitTimeout,
 		// Fix: Include all nested config fields to prevent data loss (Issue #239, #240)
-		Isolation: serverConfig.Isolation,
-		OAuth:     serverConfig.OAuth,
+		Isolation:     serverConfig.Isolation,
+		OAuth:         serverConfig.OAuth,
+		EnabledTools:  serverConfig.EnabledTools,
+		DisabledTools: serverConfig.DisabledTools,
 	}
 	return am.db.SaveUpstream(record)
 }

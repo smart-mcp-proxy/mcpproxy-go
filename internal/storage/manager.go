@@ -102,6 +102,8 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 		Isolation:           serverConfig.Isolation,
 		ReconnectOnUse:      serverConfig.ReconnectOnUse,
 		LauncherWaitTimeout: serverConfig.LauncherWaitTimeout,
+		EnabledTools:        serverConfig.EnabledTools,
+		DisabledTools:       serverConfig.DisabledTools,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -134,6 +136,8 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 		Isolation:           record.Isolation,
 		ReconnectOnUse:      record.ReconnectOnUse,
 		LauncherWaitTimeout: record.LauncherWaitTimeout,
+		EnabledTools:        record.EnabledTools,
+		DisabledTools:       record.DisabledTools,
 	}, nil
 }
 
@@ -166,6 +170,8 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 			Isolation:           record.Isolation,
 			ReconnectOnUse:      record.ReconnectOnUse,
 			LauncherWaitTimeout: record.LauncherWaitTimeout,
+			EnabledTools:        record.EnabledTools,
+			DisabledTools:       record.DisabledTools,
 		})
 	}
 
@@ -208,10 +214,12 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 				Headers:     record.Headers,
 				OAuth:       record.OAuth,
 				Enabled:     record.Enabled,
-				Quarantined: record.Quarantined,
-				Created:     record.Created,
-				Updated:     record.Updated,
-				Isolation:   record.Isolation,
+				Quarantined:   record.Quarantined,
+				Created:       record.Created,
+				Updated:       record.Updated,
+				Isolation:     record.Isolation,
+				EnabledTools:  record.EnabledTools,
+				DisabledTools: record.DisabledTools,
 			})
 
 			m.logger.Debugw("Added server to quarantined list",

@@ -188,3 +188,19 @@ func TestIsToolCallable_FailsClosedOnStorageError(t *testing.T) {
 	assert.False(t, proxy.isToolCallable("badstore", "fragile-tool"),
 		"isToolCallable must be fail-closed on storage decode errors")
 }
+
+func TestBlockedToolMessageFor(t *testing.T) {
+	cfgDenied := blockedToolMessageFor(true)
+	assert.Contains(t, cfgDenied, "TOOL_BLOCKED")
+	assert.Contains(t, cfgDenied, "enabled_tools/disabled_tools")
+	assert.Contains(t, cfgDenied, "NOT user-overridable")
+	assert.Contains(t, cfgDenied, "mcp_config.json")
+	// Must NOT tell the user to flip a UI toggle — that 409s for config-denied.
+	assert.NotContains(t, cfgDenied, "enable it in the mcpproxy UI")
+
+	userDisabled := blockedToolMessageFor(false)
+	assert.Contains(t, userDisabled, "TOOL_BLOCKED")
+	// Preserves the legacy substring existing tests/agents key off of.
+	assert.Contains(t, userDisabled, "Tool is disabled and not callable.")
+	assert.Contains(t, userDisabled, "enable it in the mcpproxy UI")
+}

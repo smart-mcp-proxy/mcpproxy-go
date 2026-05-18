@@ -1356,3 +1356,26 @@ func TestServerConfig_ReconnectOnUse(t *testing.T) {
 		assert.Equal(t, server.ReconnectOnUse, restored.ReconnectOnUse)
 	})
 }
+
+func TestServerConfig_IsToolAllowedByConfig(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      *ServerConfig
+		toolName string
+		want     bool
+	}{
+		{"no filter allows everything", &ServerConfig{}, "anything", true},
+		{"allowlist: listed tool allowed", &ServerConfig{EnabledTools: []string{"read_file", "list_dir"}}, "read_file", true},
+		{"allowlist: unlisted tool denied", &ServerConfig{EnabledTools: []string{"read_file"}}, "delete_file", false},
+		{"denylist: listed tool denied", &ServerConfig{DisabledTools: []string{"delete_repo"}}, "delete_repo", false},
+		{"denylist: unlisted tool allowed", &ServerConfig{DisabledTools: []string{"delete_repo"}}, "list_repos", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.IsToolAllowedByConfig(tt.toolName)
+			if got != tt.want {
+				t.Errorf("IsToolAllowedByConfig(%q) = %v, want %v", tt.toolName, got, tt.want)
+			}
+		})
+	}
+}
