@@ -1547,7 +1547,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	if !p.isToolCallable(serverName, actualToolName) {
-		errMsg := "TOOL_BLOCKED: Tool is disabled and not callable."
+		errMsg := p.blockedToolMessage(serverName, actualToolName)
 		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
@@ -1913,7 +1913,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		zap.String("server_name", serverName))
 
 	if !p.isToolCallable(serverName, actualToolName) {
-		errMsg := "TOOL_BLOCKED: Tool is disabled and not callable."
+		errMsg := p.blockedToolMessage(serverName, actualToolName)
 		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
 	}
@@ -4602,6 +4602,31 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 	}
 
 	return true
+}
+
+// blockedToolMessage returns an agent-actionable reason a tool is not callable.
+// It distinguishes operator config policy (enabled_tools/disabled_tools — NOT
+// user-overridable from the UI; a UI/API enable attempt 409s) from a user or
+// runtime disable, so an agent relays the correct remediation instead of
+// telling the user to toggle a switch that cannot lift the lock.
+func (p *MCPProxyServer) blockedToolMessage(serverName, toolName string) string {
+	configDenied := p.mainServer != nil && p.mainServer.runtime != nil &&
+		p.mainServer.runtime.IsToolConfigDenied(serverName, toolName)
+	return blockedToolMessageFor(configDenied)
+}
+
+// blockedToolMessageFor is the pure message-selection half of
+// blockedToolMessage, split out so the operator-policy vs user-disable wording
+// is unit-testable without standing up a runtime.
+func blockedToolMessageFor(configDenied bool) string {
+	if configDenied {
+		return "TOOL_BLOCKED: Tool is denied by server config (enabled_tools/disabled_tools). " +
+			"This is operator policy and is NOT user-overridable from the UI; " +
+			"ask the operator to edit mcp_config.json to enable it."
+	}
+	return "TOOL_BLOCKED: Tool is disabled and not callable. " +
+		"It may be disabled by the user or pending security approval; " +
+		"ask the user to enable it in the mcpproxy UI (Server detail → Tools)."
 }
 
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
