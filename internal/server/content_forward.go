@@ -110,6 +110,40 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 	return forwarded, textRepresentation, wasTruncated
 }
 
+// maybeTruncateAndCacheText is a small helper for built-in MCP tools whose
+// output bypasses forwardContentResult (e.g. handleReadCache). It applies the
+// same truncate-and-cache contract: if the text exceeds the truncator's limit,
+// the full text is stored in cacheStore under the truncator-generated key and
+// the returned snippet carries the standard "use read_cache" banner that
+// points at it.
+//
+// The paginableUnits parameter is a guard against infinite recursion for
+// built-in tools that may themselves be paginating (notably read_cache). If
+// paginableUnits <= 1 the caller has nothing further to subdivide — caching
+// a fresh key under those circumstances just produces an identical record
+// the agent can never escape from. In that case the text is returned as-is
+// (uncaught, exceeding the limit) and the caller decides what to do.
+//
+// Returns:
+//   - the text to actually emit (possibly truncated)
+//   - wasTruncated: true if the truncator's recorded-pagination path ran
+func maybeTruncateAndCacheText(text, toolName string, args map[string]interface{}, paginableUnits int, truncator *truncate.Truncator, cacheStore CacheStore) (out string, wasTruncated bool) {
+	if truncator == nil || !truncator.ShouldTruncate(text) {
+		return text, false
+	}
+	if paginableUnits <= 1 {
+		// Cannot subdivide further; recursive caching here would just hand the
+		// agent a new key that resolves to the exact same payload. Return the
+		// oversize text intact and let the caller (and the agent) handle it.
+		return text, false
+	}
+	tr := truncator.Truncate(text, toolName, args)
+	if tr.CacheAvailable && cacheStore != nil {
+		_ = cacheStore.Store(tr.CacheKey, toolName, args, text, tr.RecordPath, tr.TotalRecords)
+	}
+	return tr.TruncatedContent, true
+}
+
 // joinTextParts concatenates text parts with a newline separator.
 // Equivalent to strings.Join but avoids importing strings just for this.
 func joinTextParts(parts []string) string {

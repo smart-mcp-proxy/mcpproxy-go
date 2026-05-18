@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -280,6 +281,153 @@ func TestForwardContentResult_RoundTripViaRealCacheManager(t *testing.T) {
 	assert.Equal(t, float64(0), idOf(page1.Records[0]), "page 1 should start at id 0")
 	assert.Equal(t, float64(10), idOf(page2.Records[0]), "page 2 should start at id 10")
 	assert.Equal(t, float64(19), idOf(page2.Records[9]), "page 2 should end at id 19")
+}
+
+// TestMaybeTruncateAndCacheText_HappyPathStores asserts that an oversized text
+// with more than one paginable unit gets truncated AND stored under the
+// embedded cache key — the contract required for read_cache pagination to keep
+// working as the recursion depth grows.
+func TestMaybeTruncateAndCacheText_HappyPathStores(t *testing.T) {
+	records := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		records = append(records, fmt.Sprintf(`{"i":%d,"v":"%s"}`, i, strings.Repeat("p", 30)))
+	}
+	body := `{"records":[` + strings.Join(records, ",") + `],"meta":{"total":30}}`
+
+	store := &captureStore{}
+	out, wasTruncated := maybeTruncateAndCacheText(
+		body,
+		"read_cache",
+		map[string]interface{}{"key": "AAA", "offset": 0, "limit": 30},
+		30, // paginableUnits > 1 → recursion allowed
+		truncate.NewTruncator(500),
+		store,
+	)
+	require.True(t, wasTruncated)
+	assert.Contains(t, out, `key="`, "truncated output must carry a usable cache key")
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	require.Len(t, store.calls, 1)
+	assert.Equal(t, "read_cache", store.calls[0].toolName)
+	assert.Equal(t, body, store.calls[0].content, "full pre-truncation body must be persisted")
+}
+
+// TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord covers the
+// single-huge-record edge case. When read_cache returns one record bigger than
+// the truncator limit, recursively caching it would produce a new key that
+// resolves to the exact same oversized payload — an infinite loop the agent
+// can never escape. paginableUnits=1 must short-circuit that.
+func TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord(t *testing.T) {
+	// A response shaped like a single huge record (e.g. one CodeRabbit review
+	// body of ~70 KB) wrapped in a 1-element records array.
+	body := `{"records":[{"body":"` + strings.Repeat("z", 5000) + `"}],"meta":{"total":1}}`
+	store := &captureStore{}
+
+	out, wasTruncated := maybeTruncateAndCacheText(
+		body,
+		"read_cache",
+		map[string]interface{}{"key": "AAA", "offset": 0, "limit": 1},
+		1, // single record — no further pagination axis available
+		truncate.NewTruncator(500),
+		store,
+	)
+	assert.False(t, wasTruncated, "single-record path must NOT recurse")
+	assert.Equal(t, body, out, "single-record body must pass through unchanged")
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	assert.Empty(t, store.calls, "no Store call should happen for the single-record short-circuit")
+}
+
+// TestMaybeTruncateAndCacheText_NoOpUnderLimit asserts the helper is a no-op
+// when the input is already within the limit — no cache churn, no banner
+// pollution, no wrapper allocation.
+func TestMaybeTruncateAndCacheText_NoOpUnderLimit(t *testing.T) {
+	body := `{"records":[{"id":1}],"meta":{"total":1}}`
+	store := &captureStore{}
+
+	out, wasTruncated := maybeTruncateAndCacheText(
+		body,
+		"read_cache",
+		nil,
+		1,
+		truncate.NewTruncator(10_000),
+		store,
+	)
+	assert.False(t, wasTruncated)
+	assert.Equal(t, body, out)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	assert.Empty(t, store.calls)
+}
+
+// TestMaybeTruncateAndCacheText_RecursiveRoundTripViaRealCacheManager is the
+// hardening contract spelled out: a giant read_cache response gets truncated,
+// the full body is stored under a fresh key K2, and a follow-up call against
+// K2 returns the same records sliced at the requested offset/limit. The
+// recursion is bounded (each level uses a new key) and idempotent.
+func TestMaybeTruncateAndCacheText_RecursiveRoundTripViaRealCacheManager(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	db, err := bbolt.Open(dbPath, 0o600, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	mgr, err := cache.NewManager(db, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(mgr.Close)
+
+	// Build a read-cache-shaped response with 40 records.
+	type rec struct {
+		ID   int    `json:"id"`
+		Body string `json:"body"`
+	}
+	recs := make([]rec, 40)
+	for i := range recs {
+		recs[i] = rec{ID: i, Body: strings.Repeat("x", 60)}
+	}
+	wrapper := map[string]interface{}{
+		"records": recs,
+		"meta":    map[string]interface{}{"total": len(recs)},
+	}
+	jsonBytes, err := json.Marshal(wrapper)
+	require.NoError(t, err)
+
+	out, wasTruncated := maybeTruncateAndCacheText(
+		string(jsonBytes),
+		"read_cache",
+		map[string]interface{}{"key": "ORIG", "offset": 0, "limit": 40},
+		len(recs),
+		truncate.NewTruncator(800),
+		mgr,
+	)
+	require.True(t, wasTruncated)
+
+	// Pull the new cache key out of the truncation banner.
+	idx := strings.Index(out, `key="`)
+	require.NotEqual(t, -1, idx)
+	keyStart := idx + len(`key="`)
+	keyEnd := strings.Index(out[keyStart:], `"`)
+	require.NotEqual(t, -1, keyEnd)
+	newKey := out[keyStart : keyStart+keyEnd]
+	require.NotEmpty(t, newKey)
+
+	// Walk the new key page by page and verify each requested slice resolves
+	// to the same records the truncated response was hiding.
+	page, err := mgr.GetRecords(newKey, 0, 5)
+	require.NoError(t, err, "follow-up read_cache against the recursively-cached key must succeed")
+	require.Equal(t, 40, page.Meta.TotalRecords)
+	require.Len(t, page.Records, 5)
+
+	idOf := func(r interface{}) float64 {
+		m, _ := r.(map[string]interface{})
+		v, _ := m["id"].(float64)
+		return v
+	}
+	for i, r := range page.Records {
+		assert.Equal(t, float64(i), idOf(r), "page 1 must hand back ids 0..4 in order")
+	}
 }
 
 // TestForwardContentResult_FallbackPathStoresCache covers the legacy fallback

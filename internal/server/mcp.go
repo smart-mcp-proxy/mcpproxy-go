@@ -4118,10 +4118,25 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
 	}
 
+	// Apply the same truncate-and-cache contract to read_cache output itself so
+	// oversized pagination responses don't quietly blow past the tool-response
+	// limit. The paginableUnits guard (len(response.Records)) prevents an
+	// infinite-recursion loop when a single record is bigger than the limit —
+	// in that case there's nothing this layer can subdivide, so the oversize
+	// text flows through unchanged.
+	text, _ := maybeTruncateAndCacheText(
+		string(jsonResult),
+		"read_cache",
+		args,
+		len(response.Records),
+		p.truncator,
+		p.cacheManager,
+	)
+
 	// Spec 024: Emit success event with args and response
 	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(text), nil
 }
 
 // handleTailLog implements the tail_log functionality
