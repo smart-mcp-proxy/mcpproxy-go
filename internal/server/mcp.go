@@ -1787,7 +1787,9 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 	// while applying truncation only to TextContent. See issue #368.
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, toolName, args)
+	// p.cacheManager is passed so truncated payloads land in the read_cache
+	// store under the key embedded in the truncation banner.
+	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, toolName, args)
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -2155,7 +2157,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 	// while applying truncation only to TextContent. See issue #368.
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, toolName, args)
+	// p.cacheManager is passed so truncated payloads land in the read_cache
+	// store under the key embedded in the truncation banner.
+	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, toolName, args)
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
