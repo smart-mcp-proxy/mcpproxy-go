@@ -287,6 +287,55 @@ func TestForwardContentResult_RoundTripViaRealCacheManager(t *testing.T) {
 	assert.Equal(t, float64(19), idOf(page2.Records[9]), "page 2 should end at id 19")
 }
 
+// TestForwardContentResult_MultipleTextBlocksDistinctKeys is a regression test
+// for the multi-block cache-key collision. When an upstream result carries
+// more than one oversized TextContent block, each block is truncated
+// independently and gets its own banner + cache key. The truncator derives the
+// key from toolName+args+timestamp; at the previous second-granularity, two
+// blocks truncated within the same wall-clock second produced the SAME key, so
+// the second Store overwrote the first and the first banner resolved to the
+// wrong block's payload. Each block must persist under a distinct key and that
+// key must resolve to that block's own content.
+func TestForwardContentResult_MultipleTextBlocksDistinctKeys(t *testing.T) {
+	mkBig := func(tag string) string {
+		recs := make([]string, 0, 40)
+		for i := 0; i < 40; i++ {
+			recs = append(recs, fmt.Sprintf(`{"id":%d,"tag":"%s","pad":"%s"}`, i, tag, strings.Repeat(tag, 20)))
+		}
+		return `[` + strings.Join(recs, ",") + `]`
+	}
+	blockA := mkBig("A")
+	blockB := mkBig("B")
+
+	upstream := &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.NewTextContent(blockA),
+			mcp.NewTextContent(blockB),
+		},
+	}
+	store := &captureStore{}
+	_, _, wasTruncated := forwardContentResult(
+		upstream,
+		truncate.NewTruncator(500),
+		store,
+		nil,
+		"github:pull_request_read",
+		map[string]interface{}{"perPage": 100},
+	)
+	require.True(t, wasTruncated)
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	require.Len(t, store.calls, 2, "each oversized text block must produce its own Store call")
+
+	k0, k1 := store.calls[0].key, store.calls[1].key
+	assert.NotEmpty(t, k0)
+	assert.NotEmpty(t, k1)
+	assert.NotEqual(t, k0, k1, "distinct text blocks must persist under distinct cache keys")
+	assert.Equal(t, blockA, store.calls[0].content, "block A's key must resolve to block A's content")
+	assert.Equal(t, blockB, store.calls[1].content, "block B's key must resolve to block B's content")
+}
+
 // TestMaybeTruncateAndCacheText_HappyPathStores asserts that an oversized text
 // with more than one paginable unit gets truncated AND stored under the
 // embedded cache key — the contract required for read_cache pagination to keep

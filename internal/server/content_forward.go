@@ -144,12 +144,21 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 // the returned snippet carries the standard "use read_cache" banner that
 // points at it.
 //
-// The paginableUnits parameter is a guard against infinite recursion for
-// built-in tools that may themselves be paginating (notably read_cache). If
-// paginableUnits <= 1 the caller has nothing further to subdivide — caching
-// a fresh key under those circumstances just produces an identical record
-// the agent can never escape from. In that case the text is returned as-is
-// (uncaught, exceeding the limit) and the caller decides what to do.
+// The paginableUnits parameter is the recursion guard for built-in tools that
+// may themselves be paginating (notably read_cache). If paginableUnits <= 1
+// the caller has nothing further to subdivide — caching a fresh key here would
+// just hand the agent a new key resolving to the same oversize payload, an
+// inescapable loop. In that case the text is returned as-is (still over the
+// limit) and the caller decides what to do.
+//
+// Termination is therefore agent-driven, not strictly algorithmic: a level
+// whose records all fit individually but overflow collectively keeps minting
+// a fresh key per call until the agent pages down to the single-record
+// short-circuit. Each call's key is unique (timestamped at nanosecond
+// granularity), so successive identical calls are NOT idempotent — they
+// produce distinct cache entries. Unbounded growth is bounded only by the
+// cache's TTL + background cleanup (see cache.DefaultTTL), which is acceptable
+// because truncation is the exceptional path.
 //
 // Returns:
 //   - the text to actually emit (possibly truncated)

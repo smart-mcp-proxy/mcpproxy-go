@@ -80,6 +80,17 @@ func TestGenerateKey(t *testing.T) {
 	if len(key1) != 64 { // SHA256 hex = 64 chars
 		t.Errorf("Expected key length 64, got %d", len(key1))
 	}
+
+	// Sub-second-distinct timestamps must produce different keys. The
+	// truncator calls GenerateKey with time.Now() for every truncated block;
+	// at second granularity two blocks truncated in the same wall-clock
+	// second collided on one key, so the second Store overwrote the first and
+	// read_cache for the first banner resolved to the wrong payload.
+	tsA := time.Unix(1700000000, 0)
+	tsB := tsA.Add(time.Nanosecond)
+	if GenerateKey("test_tool", args1, tsA) == GenerateKey("test_tool", args1, tsB) {
+		t.Error("Timestamps 1ns apart must produce different keys (multi-block collision regression)")
+	}
 }
 
 func TestStoreAndGet(t *testing.T) {
