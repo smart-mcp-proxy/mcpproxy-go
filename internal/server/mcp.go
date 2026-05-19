@@ -4129,7 +4129,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 	// in that case there's nothing this layer can subdivide, so the oversize
 	// text flows through unchanged. p.logger receives a zap.Warn if the cache
 	// write fails so the resulting "cache key not found" is diagnosable.
-	text, _ := maybeTruncateAndCacheText(
+	text, reTruncated := maybeTruncateAndCacheText(
 		string(jsonResult),
 		"read_cache",
 		args,
@@ -4138,6 +4138,21 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		p.cacheManager,
 		p.logger,
 	)
+
+	// read_cache has no token-metrics plumbing (it reports via the activity
+	// log, not the tokenMetrics/toolCallRecord path used by upstream tool
+	// calls). A recursively re-truncated page is otherwise invisible to
+	// operators, so surface it as a structured log: it signals the agent is
+	// walking a payload deep enough that even one cache page overflows.
+	if reTruncated {
+		p.logger.Info("read_cache output exceeded the response limit and was recursively truncated-and-cached",
+			zap.String("requested_key", key),
+			zap.Int("offset", offset),
+			zap.Int("limit", limit),
+			zap.Int("page_records", len(response.Records)),
+			zap.Int("full_bytes", len(jsonResult)),
+		)
+	}
 
 	// Spec 024: Emit success event with args and response
 	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")

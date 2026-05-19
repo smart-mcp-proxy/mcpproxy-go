@@ -62,11 +62,20 @@ func NewManager(db *bbolt.DB, logger *zap.Logger) (*Manager, error) {
 	return manager, nil
 }
 
-// GenerateKey generates a cache key from tool name, arguments, and timestamp
+// GenerateKey generates a cache key from tool name, arguments, and timestamp.
+//
+// The timestamp is mixed in at nanosecond granularity. The truncator calls
+// this with time.Now() once per truncated payload; a single upstream result
+// can carry multiple oversized TextContent blocks, and recursive read_cache
+// truncation can mint several keys in quick succession. At second granularity
+// any of those that landed in the same wall-clock second collided on one key,
+// so a later Store silently overwrote an earlier payload and the earlier
+// banner resolved to the wrong data. Nanosecond granularity makes each call's
+// key unique in practice.
 func GenerateKey(toolName string, args map[string]interface{}, timestamp time.Time) string {
 	// Create a consistent string representation
 	argsJSON, _ := json.Marshal(args)
-	input := fmt.Sprintf("%s:%s:%d", toolName, string(argsJSON), timestamp.Unix())
+	input := fmt.Sprintf("%s:%s:%d", toolName, string(argsJSON), timestamp.UnixNano())
 
 	hash := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(hash[:])
