@@ -20,24 +20,44 @@
 
     <!-- Summary Stat Cards -->
     <div v-if="stats" class="stats shadow bg-base-100 w-full">
-      <div class="stat" data-test="stat-total">
+      <button
+        type="button"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'total' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        data-test="stat-total"
+        @click="selectStatCard('total')"
+      >
         <div class="stat-title">Total</div>
         <div class="stat-value text-2xl">{{ stats.total }}</div>
-      </div>
-      <div class="stat" data-test="stat-enabled">
+      </button>
+      <button
+        type="button"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'enabled' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        data-test="stat-enabled"
+        @click="selectStatCard('enabled')"
+      >
         <div class="stat-title">Enabled</div>
         <div class="stat-value text-2xl text-success">{{ stats.enabled }}</div>
-      </div>
-      <div class="stat" data-test="stat-disabled">
+      </button>
+      <button
+        type="button"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'disabled' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        data-test="stat-disabled"
+        @click="selectStatCard('disabled')"
+      >
         <div class="stat-title">Disabled</div>
         <div class="stat-value text-2xl text-warning">{{ stats.disabled }}</div>
-      </div>
-      <div class="stat" data-test="stat-pending">
+      </button>
+      <button
+        type="button"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', activeStatCard === 'pending' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        data-test="stat-pending"
+        @click="selectStatCard('pending')"
+      >
         <div class="stat-title">Pending Approval</div>
         <div class="stat-value text-2xl" :class="stats.pending_approval > 0 ? 'text-error' : ''">
           {{ stats.pending_approval }}
         </div>
-      </div>
+      </button>
     </div>
 
     <!-- Partial-error banner -->
@@ -280,7 +300,7 @@
                 <td>
                   <router-link
                     :to="`/servers/${tool.server_name}`"
-                    class="link link-hover text-sm font-medium"
+                    class="link link-primary text-sm font-medium"
                     @click.stop
                   >
                     {{ tool.server_name }}
@@ -556,6 +576,34 @@ const availableServers = computed(() => {
 const hasActiveFilters = computed(() =>
   !!searchQuery.value || !!filterServer.value || !!filterStatus.value || !!filterRisk.value || !!filterApproval.value
 )
+
+// Clickable stat cards (parity with Servers page): each card drives the
+// status/approval filter and toggles off when its active card is clicked again.
+type StatCard = 'total' | 'enabled' | 'disabled' | 'pending'
+
+const activeStatCard = computed<StatCard>(() => {
+  if (filterApproval.value === 'pending') return 'pending'
+  if (filterStatus.value === 'enabled') return 'enabled'
+  if (filterStatus.value === 'disabled') return 'disabled'
+  if (!filterStatus.value && !filterApproval.value) return 'total'
+  return 'total'
+})
+
+function selectStatCard(card: StatCard) {
+  // Toggle: re-clicking the active card resets to the unfiltered "total" view.
+  if (card === 'total' || activeStatCard.value === card) {
+    filterStatus.value = ''
+    filterApproval.value = ''
+    return
+  }
+  if (card === 'pending') {
+    filterStatus.value = ''
+    filterApproval.value = 'pending'
+  } else {
+    filterApproval.value = ''
+    filterStatus.value = card // 'enabled' | 'disabled'
+  }
+}
 
 // ---- Computed: risk derivation ----
 function getRisk(tool: GlobalTool): 'read' | 'write' | 'destructive' {

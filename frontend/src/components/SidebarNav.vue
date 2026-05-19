@@ -211,6 +211,10 @@
               >
                 <IconServers class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Servers</span>
+                <span
+                  v-if="!collapsed && serverCount > 0"
+                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
+                >{{ serverCount }}</span>
               </router-link>
             </li>
             <li>
@@ -237,6 +241,10 @@
               >
                 <IconSecrets class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Secrets</span>
+                <span
+                  v-if="!collapsed && secretCount > 0"
+                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
+                >{{ secretCount }}</span>
               </router-link>
             </li>
             <!-- Sub-item: Agent Tokens nested under Secrets.
@@ -451,6 +459,7 @@ onMounted(() => {
   if (!authStore.isTeamsEdition) {
     void onboardingStore.fetchState()
     void fetchToolCount()
+    void fetchSecretCount()
   }
 })
 
@@ -556,6 +565,28 @@ async function fetchToolCount() {
     const resp = await api.getGlobalTools()
     if (resp.success && resp.data) {
       toolCount.value = resp.data.stats.total
+    }
+  } catch {
+    // Silently ignore — badge is non-critical
+  }
+}
+
+// Sidebar badge parity with Tools: show total server + secret counts so the
+// WORKSPACE section reads consistently. Server count is already reactive via
+// the status SSE; secrets need a one-shot fetch on mount.
+const serverCount = computed(() => systemStore.upstreamStats.total_servers ?? 0)
+const secretCount = ref(0)
+
+async function fetchSecretCount() {
+  try {
+    // Use the same source as the Secrets page (total_secrets from
+    // /secrets/config) so the badge matches what the user sees there.
+    // /secrets/refs is NOT equivalent — it counts every config reference
+    // including ${env:...} placeholders (TERM_SESSION_ID etc.), not stored
+    // keyring secrets.
+    const resp = await api.getConfigSecrets()
+    if (resp.success && resp.data) {
+      secretCount.value = resp.data.total_secrets ?? 0
     }
   } catch {
     // Silently ignore — badge is non-critical
