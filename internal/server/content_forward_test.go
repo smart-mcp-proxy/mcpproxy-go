@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -60,7 +63,7 @@ func TestForwardContentResult_PreservesImageContent(t *testing.T) {
 	}
 	truncator := truncate.NewTruncator(0) // disabled
 
-	forwarded, text, truncated := forwardContentResult(upstream, truncator, nil, "test:tool", nil)
+	forwarded, text, truncated := forwardContentResult(upstream, truncator, nil, nil, "test:tool", nil)
 
 	require.NotNil(t, forwarded)
 	require.Equal(t, 2, len(forwarded.Content), "both content blocks must be forwarded")
@@ -100,7 +103,7 @@ func TestForwardContentResult_TruncatesOnlyText(t *testing.T) {
 	// Truncator with a 500-char limit
 	truncator := truncate.NewTruncator(500)
 
-	forwarded, _, truncated := forwardContentResult(upstream, truncator, nil, "test:tool", nil)
+	forwarded, _, truncated := forwardContentResult(upstream, truncator, nil, nil, "test:tool", nil)
 	require.NotNil(t, forwarded)
 	require.Equal(t, 3, len(forwarded.Content))
 	assert.True(t, truncated, "text block should be marked as truncated")
@@ -131,7 +134,7 @@ func TestForwardContentResult_TextOnlyNoTruncation(t *testing.T) {
 	}
 	truncator := truncate.NewTruncator(0)
 
-	forwarded, text, truncated := forwardContentResult(upstream, truncator, nil, "test:tool", nil)
+	forwarded, text, truncated := forwardContentResult(upstream, truncator, nil, nil, "test:tool", nil)
 	require.NotNil(t, forwarded)
 	require.Equal(t, 1, len(forwarded.Content))
 	assert.False(t, truncated)
@@ -147,12 +150,12 @@ func TestForwardContentResult_TextOnlyNoTruncation(t *testing.T) {
 // falls back to legacy JSON-wrapping behavior without panicking.
 func TestForwardContentResult_Fallback(t *testing.T) {
 	// Case 1: nil — should not panic, returns a JSON "null" text wrapper
-	forwarded, _, _ := forwardContentResult(nil, truncate.NewTruncator(0), nil, "t", nil)
+	forwarded, _, _ := forwardContentResult(nil, truncate.NewTruncator(0), nil, nil, "t", nil)
 	require.NotNil(t, forwarded)
 	require.Equal(t, 1, len(forwarded.Content))
 
 	// Case 2: a plain map — legacy JSON marshal path
-	forwarded, text, _ := forwardContentResult(map[string]string{"key": "value"}, truncate.NewTruncator(0), nil, "t", nil)
+	forwarded, text, _ := forwardContentResult(map[string]string{"key": "value"}, truncate.NewTruncator(0), nil, nil, "t", nil)
 	require.NotNil(t, forwarded)
 	require.Equal(t, 1, len(forwarded.Content))
 	assert.Contains(t, text, "key")
@@ -181,7 +184,7 @@ func TestForwardContentResult_StoresFullContentInCache(t *testing.T) {
 	tr := truncate.NewTruncator(500)
 
 	args := map[string]interface{}{"q": "demo"}
-	_, _, wasTruncated := forwardContentResult(upstream, tr, store, "github:pull_request_read", args)
+	_, _, wasTruncated := forwardContentResult(upstream, tr, store, nil, "github:pull_request_read", args)
 	require.True(t, wasTruncated)
 
 	store.mu.Lock()
@@ -205,7 +208,7 @@ func TestForwardContentResult_NoCacheStoreNoPanic(t *testing.T) {
 	}
 	tr := truncate.NewTruncator(500)
 
-	forwarded, _, wasTruncated := forwardContentResult(upstream, tr, nil, "t", nil)
+	forwarded, _, wasTruncated := forwardContentResult(upstream, tr, nil, nil, "t", nil)
 	require.NotNil(t, forwarded)
 	require.True(t, wasTruncated)
 }
@@ -247,6 +250,7 @@ func TestForwardContentResult_RoundTripViaRealCacheManager(t *testing.T) {
 		upstream,
 		truncate.NewTruncator(600),
 		mgr,
+		nil,
 		"github:pull_request_read",
 		args,
 	)
@@ -302,6 +306,7 @@ func TestMaybeTruncateAndCacheText_HappyPathStores(t *testing.T) {
 		30, // paginableUnits > 1 → recursion allowed
 		truncate.NewTruncator(500),
 		store,
+		nil,
 	)
 	require.True(t, wasTruncated)
 	assert.Contains(t, out, `key="`, "truncated output must carry a usable cache key")
@@ -331,6 +336,7 @@ func TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord(t *testing.T) {
 		1, // single record — no further pagination axis available
 		truncate.NewTruncator(500),
 		store,
+		nil,
 	)
 	assert.False(t, wasTruncated, "single-record path must NOT recurse")
 	assert.Equal(t, body, out, "single-record body must pass through unchanged")
@@ -354,6 +360,7 @@ func TestMaybeTruncateAndCacheText_NoOpUnderLimit(t *testing.T) {
 		1,
 		truncate.NewTruncator(10_000),
 		store,
+		nil,
 	)
 	assert.False(t, wasTruncated)
 	assert.Equal(t, body, out)
@@ -401,6 +408,7 @@ func TestMaybeTruncateAndCacheText_RecursiveRoundTripViaRealCacheManager(t *test
 		len(recs),
 		truncate.NewTruncator(800),
 		mgr,
+		nil,
 	)
 	require.True(t, wasTruncated)
 
@@ -430,6 +438,213 @@ func TestMaybeTruncateAndCacheText_RecursiveRoundTripViaRealCacheManager(t *test
 	}
 }
 
+// TestForwardContentResult_LogsAndForwardsOnStoreFailure exercises the new
+// failure-logging contract: when cacheStore.Store returns an error, the
+// truncated content still flows through unchanged (graceful degradation) AND
+// a zap.Warn entry is emitted carrying the failed key + tool name so the
+// resulting "cache key not found" symptom is operator-debuggable. Without the
+// log, an operator faced with a misbehaving read_cache call has no diagnostic
+// signal that the upstream BBolt write was the root cause.
+func TestForwardContentResult_LogsAndForwardsOnStoreFailure(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	store := &captureStore{failErr: errors.New("simulated bbolt write failure")}
+	// Truncator only emits a cache key when it can find a JSON record array
+	// to split on; a flat string falls into the simpleTruncate path where
+	// caching is disabled and there's nothing for our log to fire from. Build
+	// a real JSON payload so the cache path is exercised.
+	records := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		records = append(records, fmt.Sprintf(`{"id":%d,"x":"%s"}`, i, strings.Repeat("z", 20)))
+	}
+	bigText := `[` + strings.Join(records, ",") + `]`
+	upstream := &mcp.CallToolResult{Content: []mcp.Content{mcp.NewTextContent(bigText)}}
+
+	forwarded, response, wasTruncated := forwardContentResult(
+		upstream,
+		truncate.NewTruncator(500),
+		store,
+		logger,
+		"github:pull_request_read",
+		map[string]interface{}{"perPage": 100},
+	)
+
+	require.True(t, wasTruncated, "truncation must still happen even when Store fails")
+	require.NotNil(t, forwarded)
+	assert.Contains(t, response, `key="`, "truncated content keeps its banner; downstream agent sees the cache key it asked to use")
+
+	store.mu.Lock()
+	require.Len(t, store.calls, 1, "Store was attempted exactly once")
+	failedKey := store.calls[0].key
+	store.mu.Unlock()
+
+	entries := logs.FilterMessageSnippet("Failed to persist truncated payload").All()
+	require.Len(t, entries, 1, "exactly one Warn log expected for the failed Store")
+	e := entries[0]
+	assert.Equal(t, zapcore.WarnLevel, e.Level)
+	assert.Equal(t, "github:pull_request_read", e.ContextMap()["tool"])
+	assert.Equal(t, failedKey, e.ContextMap()["cache_key"], "log must carry the same key the agent will fail to resolve")
+	// Error chain preserved via zap.Error
+	errVal, ok := e.ContextMap()["error"].(string)
+	require.True(t, ok)
+	assert.Contains(t, errVal, "simulated bbolt write failure")
+}
+
+// TestMaybeTruncateAndCacheText_LogsAndForwardsOnStoreFailure mirrors the
+// above for the read_cache recursion path: a failed BBolt write while
+// recursively caching an oversized read_cache page must still emit the banner
+// (the agent's response is unchanged) AND log a Warn so the next-level
+// "cache key not found" is debuggable.
+func TestMaybeTruncateAndCacheText_LogsAndForwardsOnStoreFailure(t *testing.T) {
+	core, logs := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+
+	store := &captureStore{failErr: errors.New("simulated bbolt write failure")}
+
+	records := make([]string, 0, 30)
+	for i := 0; i < 30; i++ {
+		records = append(records, fmt.Sprintf(`{"i":%d,"v":"%s"}`, i, strings.Repeat("p", 30)))
+	}
+	body := `{"records":[` + strings.Join(records, ",") + `],"meta":{"total":30}}`
+
+	out, wasTruncated := maybeTruncateAndCacheText(
+		body,
+		"read_cache",
+		map[string]interface{}{"key": "FAIL", "offset": 0, "limit": 30},
+		30, // paginableUnits > 1 → would normally recurse-and-cache
+		truncate.NewTruncator(500),
+		store,
+		logger,
+	)
+
+	require.True(t, wasTruncated)
+	assert.Contains(t, out, `key="`, "truncation banner still emitted even when Store fails")
+
+	entries := logs.FilterMessageSnippet("Failed to persist truncated payload").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "read_cache", entries[0].ContextMap()["tool"])
+}
+
+// TestMaybeTruncateAndCacheText_TwoLevelRecursionStablePagination is a true
+// multi-level pagination test for the recursive truncate-and-cache contract.
+// It simulates the chain an agent walks when a tool response is so large that
+// even one page of read_cache exceeds the limit:
+//
+//	upstream tool → truncated → cache key K1
+//	  agent: read_cache(K1, limit=N)
+//	    → response still over limit → recursively truncated → cache key K2
+//	      agent: read_cache(K2, offset=M, limit=P)
+//	        → returns the actual records, paginated
+//
+// This proves recursion is stable: each level emits a distinct key, every key
+// resolves via cache.Manager.GetRecords, and offset/limit are honored at every
+// depth. Without this test the multi-level chain (which is what makes the
+// "recursive caching" half of this PR meaningful) is unverified end-to-end.
+func TestMaybeTruncateAndCacheText_TwoLevelRecursionStablePagination(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+	db, err := bbolt.Open(dbPath, 0o600, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	mgr, err := cache.NewManager(db, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(mgr.Close)
+
+	// --- Level 0: simulate the upstream tool's full payload getting cached
+	// under K1 (the work normally done by forwardContentResult on a truncated
+	// upstream call). The payload is a 60-record JSON array.
+	type rec struct {
+		ID   int    `json:"id"`
+		Body string `json:"body"`
+	}
+	level0Recs := make([]rec, 60)
+	for i := range level0Recs {
+		level0Recs[i] = rec{ID: i, Body: strings.Repeat("a", 50)}
+	}
+	level0JSON, err := json.Marshal(map[string]interface{}{
+		"records": level0Recs,
+		"meta":    map[string]interface{}{"total": len(level0Recs)},
+	})
+	require.NoError(t, err)
+
+	tr := truncate.NewTruncator(700)
+
+	// First-level cache (this is what forwardContentResult would do for a
+	// truncated upstream call):
+	level0Out, was0 := maybeTruncateAndCacheText(
+		string(level0JSON),
+		"upstream:tool",
+		map[string]interface{}{"perPage": 60},
+		len(level0Recs),
+		tr,
+		mgr,
+		nil,
+	)
+	require.True(t, was0)
+	K1 := extractCacheKey(t, level0Out)
+	require.NotEmpty(t, K1)
+
+	// --- Level 1: agent issues read_cache(K1, offset=0, limit=20). Simulate
+	// the resulting ReadCacheResponse shape and feed it back through the
+	// helper; it should re-truncate AND cache under a fresh key K2.
+	level1Page, err := mgr.GetRecords(K1, 0, 20)
+	require.NoError(t, err)
+	require.Len(t, level1Page.Records, 20)
+	require.Equal(t, 60, level1Page.Meta.TotalRecords)
+
+	level1JSON, err := json.Marshal(level1Page)
+	require.NoError(t, err)
+	require.Greater(t, len(level1JSON), 700, "level-1 read_cache response should still exceed the limit, otherwise the test isn't exercising recursion")
+
+	level1Out, was1 := maybeTruncateAndCacheText(
+		string(level1JSON),
+		"read_cache",
+		map[string]interface{}{"key": K1, "offset": 0, "limit": 20},
+		len(level1Page.Records),
+		tr,
+		mgr,
+		nil,
+	)
+	require.True(t, was1, "level-1 must still trigger truncation")
+	K2 := extractCacheKey(t, level1Out)
+	require.NotEmpty(t, K2)
+	require.NotEqual(t, K1, K2, "every recursion level must emit a distinct cache key")
+
+	// --- Level 2: agent issues read_cache(K2, offset=5, limit=5). Verify the
+	// slice is correct and well-ordered (ids 5..9 from the level-1 page,
+	// which itself is ids 0..19 of level-0).
+	level2Page, err := mgr.GetRecords(K2, 5, 5)
+	require.NoError(t, err, "second-level cache key must resolve — this is the contract the previous bug broke")
+	require.Len(t, level2Page.Records, 5)
+	require.Equal(t, 20, level2Page.Meta.TotalRecords, "level-2 totalRecords is the level-1 page size")
+
+	idOf := func(r interface{}) float64 {
+		m, _ := r.(map[string]interface{})
+		v, _ := m["id"].(float64)
+		return v
+	}
+	for i, r := range level2Page.Records {
+		assert.Equal(t, float64(5+i), idOf(r), "level-2 offset must be honored: records 5..9 expected, got id %v at slot %d", idOf(r), i)
+	}
+}
+
+// extractCacheKey pulls the cache key out of a truncation banner emitted by
+// the truncator. Returns "" if not found.
+func extractCacheKey(t *testing.T, banner string) string {
+	t.Helper()
+	idx := strings.Index(banner, `key="`)
+	if idx == -1 {
+		return ""
+	}
+	keyStart := idx + len(`key="`)
+	keyEnd := strings.Index(banner[keyStart:], `"`)
+	if keyEnd == -1 {
+		return ""
+	}
+	return banner[keyStart : keyStart+keyEnd]
+}
+
 // TestForwardContentResult_FallbackPathStoresCache covers the legacy fallback
 // where `result` is not a *mcp.CallToolResult — the JSON-wrapped fallback path
 // must also persist its truncated payload so read_cache works there too.
@@ -443,7 +658,7 @@ func TestForwardContentResult_FallbackPathStoresCache(t *testing.T) {
 	store := &captureStore{}
 	tr := truncate.NewTruncator(400)
 
-	_, _, wasTruncated := forwardContentResult(payload, tr, store, "fallback:tool", nil)
+	_, _, wasTruncated := forwardContentResult(payload, tr, store, nil, "fallback:tool", nil)
 	require.True(t, wasTruncated)
 
 	store.mu.Lock()
