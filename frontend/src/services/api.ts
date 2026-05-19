@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -327,6 +327,11 @@ class APIService {
 
   async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
     return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
+  }
+
+  // Global tools listing (Spec 050) — all tools across all servers from a single consolidated endpoint.
+  async getGlobalTools(): Promise<APIResponse<GlobalToolsResponse>> {
+    return this.request<GlobalToolsResponse>('/api/v1/tools')
   }
 
   // Tool-level quarantine (Spec 032)

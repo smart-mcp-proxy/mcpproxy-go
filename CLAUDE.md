@@ -229,6 +229,8 @@ mcpproxy doctor                     # Run health checks
 
 See [docs/cli-management-commands.md](docs/cli-management-commands.md) for complete reference.
 
+Global tools (Spec 050): `mcpproxy tools list` is global when `--server` is omitted; `tools enable|disable <server:tool ...>` for batch curation.
+
 ### Activity Log CLI
 ```bash
 mcpproxy activity list              # List recent activity
@@ -393,6 +395,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `POST /api/v1/servers/{name}/disable` | Disable server |
 | `POST /api/v1/servers/{name}/quarantine` | Quarantine a server |
 | `POST /api/v1/servers/{name}/unquarantine` | Unquarantine a server |
+| `GET /api/v1/tools` | Global tools overview: all tools + stats (spec 050) |
 | `GET /api/v1/index/search` | Search tools across servers (`?q=query&limit=N`) |
 | `GET /api/v1/activity` | List activity records with filtering |
 | `GET /api/v1/activity/{id}` | Get activity record details |
@@ -770,6 +773,7 @@ See `docs/prerelease-builds.md` for download instructions.
 - BBolt (`~/.mcpproxy/config.db`) — read-only on the hot path; no schema change. (047-cpu-hotpath-fix)
 - Swift 5.9 (macOS 13+); Go 1.24 only for the verification harness, no Go changes in scope. + SwiftUI/AppKit (existing), Combine (existing for the periodic timer pattern). No new deps. (048-tray-refetch-elimination)
 - None. Pure in-memory state. (048-tray-refetch-elimination)
+- Go 1.24 / Vue 3.5; no new deps; read-only BBolt reuse, no schema change (050-global-tools-page)
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)

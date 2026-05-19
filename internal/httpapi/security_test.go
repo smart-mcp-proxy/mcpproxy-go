@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -323,6 +324,9 @@ func (m *baseController) ListActivities(_ storage.ActivityFilter) ([]*storage.Ac
 }
 func (m *baseController) GetActivity(_ string) (*storage.ActivityRecord, error) {
 	return nil, nil
+}
+func (m *baseController) AggregateToolUsage(_ time.Time) (map[string]storage.ToolUsageStat, error) {
+	return map[string]storage.ToolUsageStat{}, nil
 }
 func (m *baseController) StreamActivities(_ storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord)

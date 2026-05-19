@@ -2464,6 +2464,15 @@ func (r *Runtime) GetActivity(id string) (*storage.ActivityRecord, error) {
 	return r.storageManager.GetActivity(id)
 }
 
+// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
+// given time (spec 050). Returns an empty map when storage is unavailable.
+func (r *Runtime) AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error) {
+	if r.storageManager == nil {
+		return map[string]storage.ToolUsageStat{}, nil
+	}
+	return r.storageManager.AggregateToolUsage(since)
+}
+
 // StreamActivities returns a channel that yields activity records matching the filter.
 func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	if r.storageManager == nil {

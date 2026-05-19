@@ -899,6 +899,52 @@ func (c *Client) DisableAll(ctx context.Context) (*BulkOperationResult, error) {
 	return apiResp.Data, nil
 }
 
+// GetGlobalTools retrieves all tools across every configured server from the
+// consolidated GET /api/v1/tools endpoint (Spec 050). The returned slice
+// contains one map per tool with the same fields as the web page's data source.
+func (c *Client) GetGlobalTools(ctx context.Context) ([]map[string]interface{}, error) {
+	url := c.baseURL + "/api/v1/tools"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call global tools API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Tools []map[string]interface{} `json:"tools"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data.Tools, nil
+}
+
 // GetServerTools retrieves tools for a specific server from daemon.
 func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[string]interface{}, error) {
 	url := fmt.Sprintf("%s/api/v1/servers/%s/tools", c.baseURL, serverName)

@@ -124,6 +124,9 @@ type ServerController interface {
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
 	GetActivity(id string) (*storage.ActivityRecord, error)
 	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
+	// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
+	// given time. Backs the global tools page usage columns (spec 050).
+	AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error)
 
 	// Tool-level quarantine (Spec 032)
 	ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error)
@@ -562,6 +565,9 @@ func (s *Server) setupRoutes() {
 
 		// Search
 		r.Get("/index/search", s.handleSearchTools)
+
+		// Global tools overview — every tool across all servers (spec 050, issue #437)
+		r.Get("/tools", s.handleGetGlobalTools)
 
 		// Docker recovery status
 		r.Get("/docker/status", s.handleGetDockerStatus)
@@ -2427,23 +2433,40 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert to typed tools
-	typedTools := contracts.ConvertGenericToolsToTyped(tools)
+	// Convert + enrich (shared with the global tools endpoint, spec 050).
+	typedTools := s.enrichServerTools(serverID, tools)
 
-	// Enrich with approval status + per-tool disabled state from storage.
-	// Using GetToolApproval (instead of GetToolApprovalStatus) lets us
-	// surface the disabled flag without a second lookup. Missing records
-	// are normal — they just mean the tool has never been quarantined or
-	// explicitly toggled.
-	enrichedCount := 0
-	var firstErr error
+	// Sort: pending/changed tools first, then approved
+	sort.SliceStable(typedTools, func(i, j int) bool {
+		return toolApprovalPriority(typedTools[i].ApprovalStatus) < toolApprovalPriority(typedTools[j].ApprovalStatus)
+	})
+
+	response := contracts.GetServerToolsResponse{
+		ServerName: serverID,
+		Tools:      typedTools,
+		Count:      len(typedTools),
+	}
+
+	s.writeSuccess(w, response)
+}
+
+// enrichServerTools converts generic upstream tools to typed tools and enriches
+// each with approval status, per-tool disabled state, and config-denied state.
+// Shared by the per-server tools endpoint and the global tools endpoint
+// (spec 050). ServerName is forced to serverID so the global merge can attribute
+// every tool to its server even if the upstream payload omits server_name.
+func (s *Server) enrichServerTools(serverID string, tools []map[string]interface{}) []contracts.Tool {
+	typedTools := contracts.ConvertGenericToolsToTyped(tools)
 
 	type configDeniedChecker interface {
 		IsToolConfigDenied(serverName, toolName string) bool
 	}
 	configChecker, hasConfigChecker := s.controller.(configDeniedChecker)
 
+	enrichedCount := 0
+	var firstErr error
 	for i := range typedTools {
+		typedTools[i].ServerName = serverID
 		record, err := s.controller.GetToolApproval(serverID, typedTools[i].Name)
 		if err == nil && record != nil {
 			typedTools[i].ApprovalStatus = record.Status
@@ -2459,19 +2482,101 @@ func (s *Server) handleGetServerTools(w http.ResponseWriter, r *http.Request) {
 	if firstErr != nil {
 		s.logger.Debug("Tool approval enrichment partial", "server", serverID, "enriched", enrichedCount, "total", len(typedTools), "error", firstErr)
 	}
+	return typedTools
+}
 
-	// Sort: pending/changed tools first, then approved
-	sort.SliceStable(typedTools, func(i, j int) bool {
-		return toolApprovalPriority(typedTools[i].ApprovalStatus) < toolApprovalPriority(typedTools[j].ApprovalStatus)
-	})
+// globalToolsUsageWindow is the fixed look-back window for the usage columns on
+// the global tools page (spec 050). Not user-configurable in v1.
+const globalToolsUsageWindow = 30 * 24 * time.Hour
 
-	response := contracts.GetServerToolsResponse{
-		ServerName: serverID,
-		Tools:      typedTools,
-		Count:      len(typedTools),
+// handleGetGlobalTools godoc
+// @Summary List every tool across all servers
+// @Description Consolidated, read-only listing of all tools from every configured server (including disabled servers and disabled/config-denied tools), enriched with approval state and 30-day usage. Backs the global Tools page and the CLI global `tools list` (spec 050, issue #437).
+// @Tags tools
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.GlobalToolsResponse "All tools across all servers"
+// @Failure 500 {object} contracts.ErrorResponse "Could not enumerate servers"
+// @Router /api/v1/tools [get]
+func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
+	allServers, err := s.controller.GetAllServers()
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to enumerate servers")
+		return
 	}
 
-	s.writeSuccess(w, response)
+	// Usage rollup is a single bounded pass over the activity log; a failure
+	// here must not fail the whole page — usage columns just stay zero.
+	usage, usageErr := s.controller.AggregateToolUsage(time.Now().Add(-globalToolsUsageWindow))
+	if usageErr != nil {
+		s.logger.Warn("Global tools: usage aggregation failed, continuing without usage", "error", usageErr)
+		usage = map[string]storage.ToolUsageStat{}
+	}
+
+	// Use the same management-service path as the per-server tools endpoint so
+	// behaviour is consistent: a disabled / not-connected server returns an
+	// empty tool set (NOT an error), so it contributes zero tools without
+	// being mislabelled as a failed server. Fall back to the controller path
+	// when the management service is unavailable (keeps unit tests + minimal
+	// deployments working).
+	mgmtSvc, hasMgmt := s.controller.GetManagementService().(interface {
+		GetServerTools(ctx context.Context, name string) ([]map[string]interface{}, error)
+	})
+	getTools := func(name string) ([]map[string]interface{}, error) {
+		if hasMgmt {
+			return mgmtSvc.GetServerTools(r.Context(), name)
+		}
+		return s.controller.GetServerTools(name)
+	}
+
+	resp := contracts.GlobalToolsResponse{
+		Tools: make([]contracts.Tool, 0, 256),
+	}
+
+	for _, srv := range allServers {
+		name, _ := srv["name"].(string)
+		if name == "" {
+			continue
+		}
+
+		generic, terr := getTools(name)
+		if terr != nil {
+			// Spec edge case: a genuine fetch error — still return every tool
+			// we could gather, flag the rest as partial.
+			resp.Partial = true
+			resp.FailedServers = append(resp.FailedServers, name)
+			s.logger.Debug("Global tools: server tools fetch failed", "server", name, "error", terr)
+			continue
+		}
+
+		typed := s.enrichServerTools(name, generic)
+		for i := range typed {
+			if st, ok := usage[name+"\x00"+typed[i].Name]; ok {
+				typed[i].Usage = st.Count
+				if !st.LastUsed.IsZero() {
+					lu := st.LastUsed
+					typed[i].LastUsed = &lu
+				}
+			}
+		}
+		resp.Tools = append(resp.Tools, typed...)
+	}
+
+	for i := range resp.Tools {
+		t := &resp.Tools[i]
+		resp.Stats.Total++
+		if t.Disabled || t.ConfigDenied {
+			resp.Stats.Disabled++
+		} else {
+			resp.Stats.Enabled++
+		}
+		if t.ApprovalStatus == storage.ToolApprovalStatusPending || t.ApprovalStatus == storage.ToolApprovalStatusChanged {
+			resp.Stats.PendingApproval++
+		}
+	}
+
+	s.writeSuccess(w, resp)
 }
 
 // handleGetServerLogs godoc

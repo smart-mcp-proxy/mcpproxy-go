@@ -605,6 +605,10 @@ test_api "GET /api/v1/servers" "GET" "${API_BASE}/servers" "200" "" \
 test_api "GET /api/v1/servers/everything/tools" "GET" "${API_BASE}/servers/everything/tools" "200" "" \
     "jq -e '.success == true and (.data.tools | length) > 0' < '$TEST_RESULTS_FILE' >/dev/null"
 
+# Test 2b: Global tools overview (spec 050, issue #437) — consolidated listing + stats
+test_api "GET /api/v1/tools" "GET" "${API_BASE}/tools" "200" "" \
+    "jq -e '.success == true and (.data.tools | type == \"array\") and (.data.tools | length) > 0 and (.data.stats | has(\"total\") and has(\"enabled\") and has(\"disabled\") and has(\"pending_approval\")) and (.data.stats.total == (.data.tools | length))' < '$TEST_RESULTS_FILE' >/dev/null"
+
 # Test 3: Search tools
 test_api "GET /api/v1/index/search?q=echo" "GET" "${API_BASE}/index/search?q=echo" "200" "" \
     "jq -e '.success == true and (.data.results | length) > 0' < '$TEST_RESULTS_FILE' >/dev/null"

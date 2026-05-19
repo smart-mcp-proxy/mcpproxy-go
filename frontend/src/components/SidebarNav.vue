@@ -211,6 +211,25 @@
               >
                 <IconServers class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Servers</span>
+                <span
+                  v-if="!collapsed && serverCount > 0"
+                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
+                >{{ serverCount }}</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
+                to="/tools"
+                :class="{ 'active': isActiveRoute('/tools') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Tools' : ''"
+              >
+                <IconTools class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Tools</span>
+                <span
+                  v-if="!collapsed && toolCount > 0"
+                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
+                >{{ toolCount }}</span>
               </router-link>
             </li>
             <li>
@@ -222,6 +241,10 @@
               >
                 <IconSecrets class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Secrets</span>
+                <span
+                  v-if="!collapsed && secretCount > 0"
+                  class="badge badge-sm badge-ghost ml-auto tabular-nums"
+                >{{ secretCount }}</span>
               </router-link>
             </li>
             <!-- Sub-item: Agent Tokens nested under Secrets.
@@ -388,11 +411,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, h, onMounted, type FunctionalComponent } from 'vue'
+import { computed, h, onMounted, ref, type FunctionalComponent } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import { useAuthStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
+import api from '@/services/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -434,6 +458,8 @@ onMounted(() => {
   // edition only — the surrounding template gates this for personal users.
   if (!authStore.isTeamsEdition) {
     void onboardingStore.fetchState()
+    void fetchToolCount()
+    void fetchSecretCount()
   }
 })
 
@@ -526,6 +552,46 @@ const IconSettings = makeIcon(
 const IconSparkles = makeIcon(
   'M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4L12 3zm6 11l.8 2.4L21 17l-2.2.6L18 20l-.8-2.4L15 17l2.2-.6L18 14zM6 14l.8 2.4L9 17l-2.2.6L6 20l-.8-2.4L3 17l2.2-.6L6 14z'
 )
+// Spec 050: wrench/tool icon for the global Tools nav entry.
+const IconTools = makeIcon(
+  'M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4l-1.6-1.6a1 1 0 00-1.4 0l-1 1L15 3l-5 5-1.3-1.3a1 1 0 00-1.4 0l-3 3a1 1 0 000 1.4L6 13l-3 3a1 1 0 000 1.4l2.6 2.6a1 1 0 001.4 0l3-3a1 1 0 000-1.4L8.7 14l5-5 1.6 1.6z'
+)
+
+// Spec 050: live tool count for the sidebar badge.
+const toolCount = ref(0)
+
+async function fetchToolCount() {
+  try {
+    const resp = await api.getGlobalTools()
+    if (resp.success && resp.data) {
+      toolCount.value = resp.data.stats.total
+    }
+  } catch {
+    // Silently ignore — badge is non-critical
+  }
+}
+
+// Sidebar badge parity with Tools: show total server + secret counts so the
+// WORKSPACE section reads consistently. Server count is already reactive via
+// the status SSE; secrets need a one-shot fetch on mount.
+const serverCount = computed(() => systemStore.upstreamStats.total_servers ?? 0)
+const secretCount = ref(0)
+
+async function fetchSecretCount() {
+  try {
+    // Use the same source as the Secrets page (total_secrets from
+    // /secrets/config) so the badge matches what the user sees there.
+    // /secrets/refs is NOT equivalent — it counts every config reference
+    // including ${env:...} placeholders (TERM_SESSION_ID etc.), not stored
+    // keyring secrets.
+    const resp = await api.getConfigSecrets()
+    if (resp.success && resp.data) {
+      secretCount.value = resp.data.total_secrets ?? 0
+    }
+  } catch {
+    // Silently ignore — badge is non-critical
+  }
+}
 
 // Server edition menus (unchanged behavior)
 const teamsUserMenu = [
