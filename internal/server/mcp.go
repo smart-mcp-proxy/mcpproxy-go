@@ -1787,7 +1787,11 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 	// while applying truncation only to TextContent. See issue #368.
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, toolName, args)
+	// p.cacheManager is passed so truncated payloads land in the read_cache
+	// store under the key embedded in the truncation banner. p.logger receives
+	// a zap.Warn if the cache write fails — the resulting "cache key not
+	// found" symptom needs to be debuggable from the server logs.
+	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -2155,7 +2159,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 	// while applying truncation only to TextContent. See issue #368.
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, toolName, args)
+	// p.cacheManager is passed so truncated payloads land in the read_cache
+	// store under the key embedded in the truncation banner. p.logger receives
+	// a zap.Warn if the cache write fails — the resulting "cache key not
+	// found" symptom needs to be debuggable from the server logs.
+	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -4114,10 +4122,27 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize response: %v", err)), nil
 	}
 
+	// Apply the same truncate-and-cache contract to read_cache output itself so
+	// oversized pagination responses don't quietly blow past the tool-response
+	// limit. The paginableUnits guard (len(response.Records)) prevents an
+	// infinite-recursion loop when a single record is bigger than the limit —
+	// in that case there's nothing this layer can subdivide, so the oversize
+	// text flows through unchanged. p.logger receives a zap.Warn if the cache
+	// write fails so the resulting "cache key not found" is diagnosable.
+	text, _ := maybeTruncateAndCacheText(
+		string(jsonResult),
+		"read_cache",
+		args,
+		len(response.Records),
+		p.truncator,
+		p.cacheManager,
+		p.logger,
+	)
+
 	// Spec 024: Emit success event with args and response
 	p.emitActivityInternalToolCall("read_cache", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
 
-	return mcp.NewToolResultText(string(jsonResult)), nil
+	return mcp.NewToolResultText(text), nil
 }
 
 // handleTailLog implements the tail_log functionality
