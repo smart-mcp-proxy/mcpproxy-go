@@ -131,11 +131,11 @@
             </div>
 
             <!-- Install Command -->
-            <div v-if="server.installCmd" class="mt-3">
+            <div v-if="server.install_cmd" class="mt-3">
               <div class="flex items-center justify-between bg-base-200 rounded px-2 py-1">
-                <code class="text-xs flex-1 overflow-x-auto">{{ server.installCmd }}</code>
+                <code class="text-xs flex-1 overflow-x-auto">{{ server.install_cmd }}</code>
                 <button
-                  @click="copyToClipboard(server.installCmd)"
+                  @click="copyToClipboard(server.install_cmd)"
                   class="btn btn-ghost btn-xs ml-2"
                   title="Copy install command"
                 >

@@ -296,6 +296,16 @@ func TestParseDocker(t *testing.T) {
 	if servers[0].Description != "Weather MCP server" {
 		t.Errorf("expected description 'Weather MCP server', got '%s'", servers[0].Description)
 	}
+	// Regression for issue #483: Docker catalog entries must surface as a docker
+	// run install command, NOT a synthetic "docker://" URL (which the frontend
+	// would mis-classify as an http transport).
+	if servers[0].URL != "" {
+		t.Errorf("expected empty URL for Docker catalog entry, got '%s'", servers[0].URL)
+	}
+	wantCmd := "docker run -i --rm mcp/mcp-weather"
+	if servers[0].InstallCmd != wantCmd {
+		t.Errorf("expected InstallCmd %q, got %q", wantCmd, servers[0].InstallCmd)
+	}
 }
 
 func TestParseFleur(t *testing.T) {
@@ -769,10 +779,13 @@ func TestConstructServerURL(t *testing.T) {
 			"https://api.mcpstore.co/servers/news/mcp",
 		},
 		{
-			"docker protocol",
+			// Issue #483: Docker catalog must NOT synthesise a docker:// URL —
+			// the URL field is reserved for HTTP/SSE remote endpoints. The launch
+			// info travels via InstallCmd populated by parseDocker.
+			"docker protocol returns empty (install via docker run)",
 			ServerEntry{ID: "scraper", URL: ""},
 			RegistryEntry{Protocol: "custom/docker"},
-			"docker://mcp/scraper",
+			"",
 		},
 		{
 			"fleur protocol",
