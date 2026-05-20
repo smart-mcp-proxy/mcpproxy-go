@@ -199,11 +199,11 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 }
 
 // classifyHTTP handles HTTP/SSE transport errors including TLS, DNS, and
-// structured HTTP status errors. HTTP status classification requires the
-// caller to wrap a statusError — see DiagnoseHTTPStatus below.
+// structured HTTP status errors. HTTP status classification prefers a typed
+// statusError (DiagnoseHTTPStatus below) but also falls back to a string match
+// because the upstream layer commonly stringifies the error before bubbling it
+// up.
 func classifyHTTP(err error, hints ClassifierHints) Code {
-	_ = hints
-
 	// DNS lookup errors are reported as *net.DNSError.
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
@@ -213,6 +213,7 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 	// TLS verification: mcp-go surfaces these as *tls.CertificateVerificationError
 	// in recent releases; we avoid a direct import dependency by string match.
 	msg := err.Error()
+	lmsg := strings.ToLower(msg)
 	if strings.Contains(msg, "x509:") || strings.Contains(msg, "tls: ") || strings.Contains(msg, "certificate") {
 		return HTTPTLSFailed
 	}
@@ -222,8 +223,58 @@ func classifyHTTP(err error, hints ClassifierHints) Code {
 		return HTTPConnRefuse
 	}
 
+	// HTTP request timeouts. The upstream HTTP transport bubbles
+	// context.DeadlineExceeded up wrapped in a free-text "transport error: ...
+	// context deadline exceeded" string. Try the typed errors.Is path first
+	// (cheap, exact); fall back to substring on the http transport hint to
+	// catch the stringified form. Without this, hf.co/mcp slowdowns surface
+	// to the UI as MCPX_UNKNOWN_UNCLASSIFIED.
+	if errors.Is(err, context.DeadlineExceeded) && hints.Transport == "http" {
+		return HTTPTimeout
+	}
+	if hints.Transport == "http" && strings.Contains(lmsg, "context deadline exceeded") {
+		return HTTPTimeout
+	}
+
+	// HTTP status text fallback. The upstream layer wraps non-2xx responses
+	// as a plain string ("transport error: request failed with status 504: ...").
+	// The typed statusError path used by DiagnoseHTTPStatus() never fires for
+	// those, so we substring-match the canonical phrasing here.
+	if hints.Transport == "http" {
+		if code := matchHTTPStatusText(lmsg); code != "" {
+			return code
+		}
+	}
+
 	return ""
 }
+
+// matchHTTPStatusText extracts a status code from the canonical
+// "request failed with status NNN" / "notification failed with status NNN"
+// phrasing emitted by the HTTP transport adapter. Returns empty when no
+// recognised status appears.
+func matchHTTPStatusText(lmsg string) Code {
+	const marker = "status "
+	idx := strings.Index(lmsg, marker)
+	for idx != -1 {
+		rest := lmsg[idx+len(marker):]
+		// Need at least three digits.
+		if len(rest) >= 3 && isDigit(rest[0]) && isDigit(rest[1]) && isDigit(rest[2]) {
+			status := int(rest[0]-'0')*100 + int(rest[1]-'0')*10 + int(rest[2]-'0')
+			if c := DiagnoseHTTPStatus(status); c != "" {
+				return c
+			}
+		}
+		next := strings.Index(lmsg[idx+1:], marker)
+		if next == -1 {
+			break
+		}
+		idx += 1 + next
+	}
+	return ""
+}
+
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // classifyNetwork handles host-environment network issues.
 func classifyNetwork(err error, hints ClassifierHints) Code {

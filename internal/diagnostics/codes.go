@@ -33,6 +33,7 @@ const (
 	HTTPNotFound   Code = "MCPX_HTTP_404"
 	HTTPServerErr  Code = "MCPX_HTTP_5XX"
 	HTTPConnRefuse Code = "MCPX_HTTP_CONN_REFUSED"
+	HTTPTimeout    Code = "MCPX_HTTP_TIMEOUT"
 )
 
 // DOCKER domain — Docker isolation subsystem failures.
