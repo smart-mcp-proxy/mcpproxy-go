@@ -642,9 +642,15 @@ class APIService {
       protocol: 'stdio'
     }
 
-    // Determine command and args from installCmd or connectUrl
-    if (server.installCmd) {
-      const parts = server.installCmd.split(' ')
+    // Determine command and args from install_cmd or connect_url.
+    // NB: backend contracts.RepositoryServer serialises these as snake_case
+    // (install_cmd, connect_url). Reading the wrong casing here is the
+    // second half of issue #483 — for a stdio entry the install command
+    // was silently undefined and the call fell through to "neither url nor
+    // command supplied", surfaced as "Either 'url' or 'command' parameter
+    // is required".
+    if (server.install_cmd) {
+      const parts = server.install_cmd.split(' ').filter(Boolean)
       args.command = parts[0]
       if (parts.length > 1) {
         args.args_json = JSON.stringify(parts.slice(1))
@@ -653,9 +659,9 @@ class APIService {
       // Remote server with HTTP protocol
       args.protocol = 'http'
       args.url = server.url
-    } else if (server.connectUrl) {
+    } else if (server.connect_url) {
       args.protocol = 'http'
-      args.url = server.connectUrl
+      args.url = server.connect_url
     }
 
     return this.callTool('upstream_servers', args)

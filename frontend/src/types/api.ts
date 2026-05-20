@@ -531,8 +531,8 @@ export interface RepositoryServer {
   description: string
   url?: string  // MCP endpoint for remote servers only
   source_code_url?: string  // Source repository URL
-  installCmd?: string  // Installation command
-  connectUrl?: string  // Alternative connection URL
+  install_cmd?: string  // Installation command (matches backend contracts.RepositoryServer)
+  connect_url?: string  // Alternative connection URL (matches backend contracts.RepositoryServer)
   updatedAt?: string
   createdAt?: string
   registry?: string  // Which registry this came from

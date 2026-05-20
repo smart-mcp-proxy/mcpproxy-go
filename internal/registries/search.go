@@ -326,9 +326,17 @@ func parseDocker(rawData interface{}) []ServerEntry {
 			continue
 		}
 		if name, ok := itemMap["name"].(string); ok && name != "" {
+			// Docker Hub's mcp/ namespace returns image repo names (e.g. "sqlite",
+			// "git", "fetch"). The full reference is mcp/<name>. These images are
+			// stdio MCP servers, so the canonical launch is `docker run -i --rm`.
+			// We MUST set InstallCmd (not URL) — the URL field is reserved for HTTP/SSE
+			// remote endpoints. See issue #483: synthesising "docker://mcp/<name>" as a
+			// URL caused the frontend to register it as an http transport, leading to
+			// `Post "docker://mcp/sqlite": unsupported protocol scheme "docker"`.
 			server := ServerEntry{
-				ID:   name,
-				Name: name,
+				ID:         name,
+				Name:       name,
+				InstallCmd: fmt.Sprintf("docker run -i --rm mcp/%s", name),
 			}
 
 			// Try to get description from images array
@@ -563,9 +571,12 @@ func constructServerURL(server *ServerEntry, reg *RegistryEntry) string {
 			return fmt.Sprintf("https://api.mcpstore.co/servers/%s/mcp", server.ID)
 		}
 	case protocolDocker:
-		if server.ID != "" {
-			return fmt.Sprintf("docker://mcp/%s", server.ID)
-		}
+		// Docker MCP catalog entries are stdio servers launched via `docker run`
+		// (see parseDocker — InstallCmd is populated). Do NOT synthesise a URL:
+		// the URL field is for HTTP/SSE remote endpoints only, and any non-empty
+		// value here causes the frontend to register the server as an http
+		// transport (issue #483).
+		return ""
 	case protocolFleur:
 		if server.ID != "" {
 			return fmt.Sprintf("https://api.fleurmcp.com/apps/%s/mcp", server.ID)
