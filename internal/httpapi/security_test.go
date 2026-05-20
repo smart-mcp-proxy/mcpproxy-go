@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/flow"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -347,3 +348,7 @@ func (m *baseController) GetOnboardingState() (*storage.OnboardingState, error) 
 }
 func (m *baseController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
 func (m *baseController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
+func (m *baseController) IsHooksActive() bool                                  { return false }
+func (m *baseController) EvaluateHook(_ context.Context, _ *flow.HookEvaluateRequest) (*flow.HookEvaluateResponse, error) {
+	return &flow.HookEvaluateResponse{Decision: flow.PolicyAllow}, nil
+}

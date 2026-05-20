@@ -1,0 +1,144 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Data Flow Security Configuration",
+  "description": "Configuration schema for the security.flow_tracking, security.classification, security.flow_policy, and security.hooks sections of mcp_config.json",
+  "type": "object",
+  "properties": {
+    "security": {
+      "type": "object",
+      "properties": {
+        "flow_tracking": {
+          "type": "object",
+          "description": "Controls data flow tracking behavior",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether flow tracking is enabled"
+            },
+            "session_timeout_minutes": {
+              "type": "integer",
+              "default": 30,
+              "minimum": 1,
+              "maximum": 1440,
+              "description": "Minutes of inactivity before a flow session expires"
+            },
+            "max_origins_per_session": {
+              "type": "integer",
+              "default": 10000,
+              "minimum": 100,
+              "maximum": 100000,
+              "description": "Maximum data origins tracked per session (oldest evicted at limit)"
+            },
+            "hash_min_length": {
+              "type": "integer",
+              "default": 20,
+              "minimum": 10,
+              "maximum": 100,
+              "description": "Minimum string length for per-field hashing (shorter strings skipped)"
+            },
+            "max_response_hash_bytes": {
+              "type": "integer",
+              "default": 65536,
+              "minimum": 1024,
+              "maximum": 1048576,
+              "description": "Maximum response size in bytes to hash (truncated beyond this)"
+            }
+          },
+          "additionalProperties": false
+        },
+        "classification": {
+          "type": "object",
+          "description": "Controls server/tool classification behavior",
+          "properties": {
+            "default_unknown": {
+              "type": "string",
+              "enum": ["internal", "external"],
+              "default": "internal",
+              "description": "How to treat unclassified servers (conservative default: internal)"
+            },
+            "server_overrides": {
+              "type": "object",
+              "description": "Manual classification overrides for specific servers",
+              "additionalProperties": {
+                "type": "string",
+                "enum": ["internal", "external", "hybrid"]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "flow_policy": {
+          "type": "object",
+          "description": "Policy rules for responding to detected data flows",
+          "properties": {
+            "internal_to_external": {
+              "type": "string",
+              "enum": ["allow", "warn", "ask", "deny"],
+              "default": "ask",
+              "description": "Action when internal data flows to external destination (without sensitive data)"
+            },
+            "sensitive_data_external": {
+              "type": "string",
+              "enum": ["allow", "warn", "ask", "deny"],
+              "default": "deny",
+              "description": "Action when sensitive data flows to external destination"
+            },
+            "require_justification": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether flow justification is required for internal→external flows"
+            },
+            "suspicious_endpoints": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "webhook.site",
+                "requestbin.com",
+                "pipedream.net",
+                "hookbin.com",
+                "beeceptor.com"
+              ],
+              "description": "Known testing/exfiltration endpoints that are always denied"
+            },
+            "tool_overrides": {
+              "type": "object",
+              "description": "Per-tool policy action overrides",
+              "additionalProperties": {
+                "type": "string",
+                "enum": ["allow", "warn", "ask", "deny"]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "hooks": {
+          "type": "object",
+          "description": "Controls agent hook integration behavior",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether the hook evaluation endpoint is active"
+            },
+            "fail_open": {
+              "type": "boolean",
+              "default": true,
+              "description": "If true, allow tool calls when daemon is unreachable. If false, deny them."
+            },
+            "correlation_ttl_seconds": {
+              "type": "integer",
+              "default": 5,
+              "minimum": 1,
+              "maximum": 30,
+              "description": "Seconds before pending session correlation entries expire"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}
