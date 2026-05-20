@@ -64,7 +64,21 @@ type Client struct {
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
+
+	// consecutiveHealthFailures counts back-to-back transient health-check
+	// failures. The state-machine only flips to Error once it reaches
+	// healthCheckFailureThreshold; one success resets it. Hard failures
+	// (connection refused, no such host, unreachable) bypass the counter
+	// and trigger Error immediately. See recordHealthCheckFailure().
+	consecutiveHealthFailures int
 }
+
+// healthCheckFailureThreshold is the number of consecutive transient
+// health-check failures we tolerate before marking the server Error.
+// With a 30-second tick this is ~90s of unreachability — long enough that a
+// real outage still surfaces promptly, short enough that one slow upstream
+// request doesn't paint the UI red and clear the tools list.
+const healthCheckFailureThreshold = 3
 
 // NewClient creates a new managed client with state management
 func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
@@ -228,6 +242,11 @@ func (mc *Client) Connect(ctx context.Context) error {
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
+
+	// Wipe any consecutive-failure debt accumulated before reconnect so the
+	// new session starts at zero. Without this, a server that flapped, then
+	// recovered, would carry stale counts into the next health-check window.
+	mc.resetHealthCheckFailures()
 
 	// Update state manager with server info
 	if serverInfo := mc.coreClient.GetServerInfo(); serverInfo != nil {
@@ -831,10 +850,19 @@ func (mc *Client) performHealthCheck() {
 	if err != nil {
 		// Only mark as error if it's a real connection issue, not timeout during high activity
 		if mc.isConnectionError(err) {
-			mc.logger.Warn("Health check failed with connection error, marking as error",
-				zap.String("server", mc.Config.Name),
-				zap.Error(err))
-			mc.StateManager.SetError(err)
+			if mc.recordHealthCheckFailure(err) {
+				mc.logger.Warn("Health check failed repeatedly, marking as error",
+					zap.String("server", mc.Config.Name),
+					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+					zap.Error(err))
+				mc.StateManager.SetError(err)
+			} else {
+				mc.logger.Info("Health check failed transiently, tolerating below threshold",
+					zap.String("server", mc.Config.Name),
+					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+					zap.Int("threshold", healthCheckFailureThreshold),
+					zap.Error(err))
+			}
 		} else {
 			mc.logger.Debug("Health check failed with timeout (high activity), ignoring",
 				zap.String("server", mc.Config.Name),
@@ -843,8 +871,72 @@ func (mc *Client) performHealthCheck() {
 		return
 	}
 
+	mc.recordHealthCheckSuccess()
 	mc.logger.Debug("Health check passed successfully",
 		zap.String("server", mc.Config.Name))
+}
+
+// recordHealthCheckFailure increments the consecutive-failure counter and
+// returns whether the caller should now flip the state machine to Error.
+//
+// Transient errors (timeout, deadline exceeded, context canceled) need
+// healthCheckFailureThreshold consecutive misses before they're considered a
+// real outage — slow upstreams (e.g. hf.co/mcp under load) routinely miss a
+// single 5-second health-check window without actually being down. Hard
+// failures (connection refused, host unreachable, DNS gone) trigger Error
+// immediately because waiting buys nothing — the server is genuinely
+// unreachable and the user should see that.
+func (mc *Client) recordHealthCheckFailure(err error) bool {
+	mc.consecutiveHealthFailures++
+	if !isTransientHealthCheckError(err) {
+		return true
+	}
+	return mc.consecutiveHealthFailures >= healthCheckFailureThreshold
+}
+
+// recordHealthCheckSuccess resets the consecutive-failure counter. One good
+// check is enough to wipe the slate — we're not trying to track flap
+// frequency, just preventing single misses from looking like outages.
+func (mc *Client) recordHealthCheckSuccess() {
+	mc.consecutiveHealthFailures = 0
+}
+
+// resetHealthCheckFailures clears the counter. Called from the connect
+// success path so a successful reconnect doesn't carry stale failure debt
+// from before the disconnect.
+func (mc *Client) resetHealthCheckFailures() {
+	mc.consecutiveHealthFailures = 0
+}
+
+// isTransientHealthCheckError identifies failure modes that warrant
+// flap-resistance — slow upstream / momentary timeout — vs. hard failures
+// that should surface to the user immediately.
+func isTransientHealthCheckError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Hard failures: short-circuit to "not transient" so the caller flips
+	// Error on the first miss. Order matters — check these BEFORE the
+	// generic timeout heuristics below.
+	switch {
+	case strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "no such host"),
+		strings.Contains(msg, "network is unreachable"),
+		strings.Contains(msg, "no route to host"),
+		strings.Contains(msg, "connection reset"),
+		strings.Contains(msg, "broken pipe"),
+		strings.Contains(msg, "econnrefused"):
+		return false
+	}
+	// Soft failures: short-window misses we want to tolerate.
+	switch {
+	case strings.Contains(msg, "deadline exceeded"),
+		strings.Contains(msg, "timeout"),
+		strings.Contains(msg, "context canceled"):
+		return true
+	}
+	return false
 }
 
 // RefreshOAuthTokenDirect forces an OAuth token refresh without reconnecting.
