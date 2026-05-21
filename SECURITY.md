@@ -299,7 +299,25 @@ The system tray includes quarantine management:
 
 ### Reporting
 
-If you discover Tool Poisoning Attacks or other security vulnerabilities, please report them through the appropriate channels for your organization or the mcpproxy-go project.
+We take security seriously. **Please do not report security vulnerabilities through
+public GitHub issues, discussions, or pull requests.**
+
+Instead, report them privately using
+**[GitHub Security Advisories](https://github.com/smart-mcp-proxy/mcpproxy-go/security/advisories/new)**
+("Report a vulnerability" on the repository's Security tab). This creates a private,
+coordinated disclosure channel visible only to maintainers.
+
+Please include, where possible:
+
+- A description of the vulnerability and its impact
+- Steps to reproduce (proof-of-concept welcome)
+- Affected version(s) (`mcpproxy version`)
+- Any suggested remediation
+
+**Response targets:** initial acknowledgement within 48 hours, triage and severity
+assessment within 5 business days. We follow coordinated disclosure and aim to ship a
+fix or mitigation before public disclosure (typically within 90 days). We are happy to
+credit reporters in the release notes unless you prefer to remain anonymous.
 
 ## References
 
