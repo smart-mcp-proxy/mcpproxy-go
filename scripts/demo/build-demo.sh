@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Stitch the demo GIF from four web-UI video segments (web-UI-only; the macOS tray
+# is shown as a static screenshot in the README instead).
+#
+# Inputs (produced by capture-webui.spec.ts):
+#   /tmp/demo-webui/*1-servers*/video.webm    server cards / federation
+#   /tmp/demo-webui/*2-tools*/video.webm      tools / discovery
+#   /tmp/demo-webui/*3-activity*/video.webm   activity log / audit (detail drawer)
+#   /tmp/demo-webui/*4-security*/video.webm   quarantine close-up
+# Outputs: docs/demo.gif + docs/demo.webp
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+WEB=/tmp/demo-webui
+WORK=$(mktemp -d)
+W=860; H=538; FPS=15; BG="#0f172a"; WEBSPEED=1.8   # speed up web segments to fit size budget
+
+# Ordered web segments (the leading number in the test name fixes the order).
+# Portable array fill (avoid mapfile — macOS ships bash 3.2).
+WEBS=()
+for pat in 1-servers 2-tools 3-activity 4-security; do
+  f=$(find "$WEB" -name '*.webm' -path "*$pat*" | head -1)
+  [ -n "$f" ] && WEBS+=("$f")
+done
+[ "${#WEBS[@]}" -eq 4 ] || { echo "expected 4 web videos in $WEB, got ${#WEBS[@]} (run capture-webui.spec.ts)"; exit 1; }
+
+# Segments 0..3 — web videos, scaled to canvas, sped up, no audio
+i=0
+for v in "${WEBS[@]}"; do
+  ffmpeg -y -i "$v" -an \
+    -vf "setpts=PTS/${WEBSPEED},scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${BG},fps=${FPS},format=yuv420p" \
+    -c:v libx264 -pix_fmt yuv420p "$WORK/seg${i}.mp4"
+  i=$((i+1))
+done
+
+# Concat with the concat FILTER (re-encodes — normalizes SAR/timebase; the concat
+# demuxer with -c copy silently drops mismatched segments).
+ffmpeg -y -i "$WORK/seg0.mp4" -i "$WORK/seg1.mp4" -i "$WORK/seg2.mp4" -i "$WORK/seg3.mp4" \
+  -filter_complex "[0:v]setsar=1,fps=${FPS}[a];[1:v]setsar=1,fps=${FPS}[b];[2:v]setsar=1,fps=${FPS}[c];[3:v]setsar=1,fps=${FPS}[d];[a][b][c][d]concat=n=4:v=1:a=0[v]" \
+  -map "[v]" -c:v libx264 -pix_fmt yuv420p "$WORK/full.mp4"
+
+# Palette-optimized GIF (-threads 1 dodges an ffmpeg 8.0 paletteuse threading bug)
+ffmpeg -y -threads 1 -i "$WORK/full.mp4" -vf "fps=${FPS},scale=${W}:-2:flags=lanczos,palettegen=stats_mode=diff" "$WORK/pal.png"
+ffmpeg -y -threads 1 -i "$WORK/full.mp4" -i "$WORK/pal.png" \
+  -lavfi "fps=${FPS},scale=${W}:-2:flags=lanczos,paletteuse=dither=bayer:bayer_scale=3" "$ROOT/docs/demo.gif"
+
+# WebP (smaller; also autoplays in README). Non-fatal — the GIF is the README embed.
+ffmpeg -y -threads 1 -i "$WORK/full.mp4" -vcodec libwebp -filter:v "fps=${FPS},scale=${W}:-2" \
+  -lossless 0 -compression_level 6 -q:v 55 -loop 0 -an "$ROOT/docs/demo.webp" || \
+  { echo "WARN: webp encode failed (non-fatal); removing partial"; rm -f "$ROOT/docs/demo.webp"; }
+
+echo "Wrote docs/demo.gif ($(du -h "$ROOT/docs/demo.gif" | cut -f1)) and docs/demo.webp ($(du -h "$ROOT/docs/demo.webp" | cut -f1))"
+rm -rf "$WORK"

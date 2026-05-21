@@ -155,3 +155,6 @@ native/macos/MCPProxy/.build/
 .wrangler/
 
 .run
+
+# demo pipeline: playwright node_modules symlink (recreated at capture time)
+scripts/demo/node_modules
