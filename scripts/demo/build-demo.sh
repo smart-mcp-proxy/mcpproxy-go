@@ -25,11 +25,31 @@ for pat in 1-servers 2-tools 3-activity 4-security; do
 done
 [ "${#WEBS[@]}" -eq 4 ] || { echo "expected 4 web videos in $WEB, got ${#WEBS[@]} (run Task 6)"; exit 1; }
 
-# Segment 0 — tray still: pad onto navy canvas, gentle Ken-Burns zoom (~3.5s)
-ffmpeg -y -i "$TRAY" -vf "scale=-2:498,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${BG}" "$WORK/tray-canvas.png"
-ffmpeg -y -loop 1 -i "$WORK/tray-canvas.png" -t 3.5 -r ${FPS} \
-  -vf "zoompan=z='min(zoom+0.0009,1.10)':d=52:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=${W}x${H}:fps=${FPS},format=yuv420p" \
-  -c:v libx264 -pix_fmt yuv420p "$WORK/seg0.mp4"
+# Segment 0 — tray animation (~3.6s): roll the menu down, highlight the "Open Web UI"
+# item, then a 1s shake (as if clicking it) before cutting to the web UI.
+# Built in 3 phases (A roll, B settle+highlight, C shake) then concatenated.
+MENU_H=470            # menu height on the canvas
+HL_Y=264              # y of the "Open Web UI" row within the 470px-tall menu (calibrated)
+ROLL=0.8; HOLD=1.8; SHAKE=1.0
+SETTLE_Y=$(( (H - MENU_H) / 2 ))                 # final menu top (centered vertically)
+ROLL_SPAN=$(( MENU_H + SETTLE_Y ))               # distance travelled during roll-down
+ffmpeg -y -i "$TRAY" -vf "scale=-2:${MENU_H}" "$WORK/menu.png"
+ffmpeg -y -f lavfi -i "color=c=${BG}:s=${W}x${H}" -frames:v 1 "$WORK/navy.png"
+ffmpeg -y -i "$WORK/menu.png" -vf "drawbox=x=4:y=${HL_Y}:w=306:h=24:color=0x3b82f6@0.45:t=fill" "$WORK/menu_hl.png"
+# A — roll down: menu slides from above to the settle position by t=ROLL-0.1
+ffmpeg -y -loop 1 -i "$WORK/navy.png" -loop 1 -i "$WORK/menu.png" \
+  -filter_complex "[0:v][1:v]overlay=x='(main_w-overlay_w)/2':y='-${MENU_H}+${ROLL_SPAN}*min(t/0.7\,1)'" \
+  -r ${FPS} -t ${ROLL} -pix_fmt yuv420p -c:v libx264 "$WORK/segA.mp4"
+# B — settle, then highlight "Open Web UI" at 0.7s in
+ffmpeg -y -loop 1 -i "$WORK/navy.png" -loop 1 -i "$WORK/menu.png" -loop 1 -i "$WORK/menu_hl.png" \
+  -filter_complex "[0:v][1:v]overlay=x='(main_w-overlay_w)/2':y=${SETTLE_Y}:enable='lt(t\,0.7)'[a];[a][2:v]overlay=x='(main_w-overlay_w)/2':y=${SETTLE_Y}:enable='gte(t\,0.7)'" \
+  -r ${FPS} -t ${HOLD} -pix_fmt yuv420p -c:v libx264 "$WORK/segB.mp4"
+# C — 1s shake (with highlight on)
+ffmpeg -y -loop 1 -i "$WORK/navy.png" -loop 1 -i "$WORK/menu_hl.png" \
+  -filter_complex "[0:v][1:v]overlay=x='(main_w-overlay_w)/2+5*sin(2*PI*t*9)':y='${SETTLE_Y}+3*sin(2*PI*t*8)'" \
+  -r ${FPS} -t ${SHAKE} -pix_fmt yuv420p -c:v libx264 "$WORK/segC.mp4"
+printf "file '%s'\nfile '%s'\nfile '%s'\n" "$WORK/segA.mp4" "$WORK/segB.mp4" "$WORK/segC.mp4" > "$WORK/traylist.txt"
+ffmpeg -y -f concat -safe 0 -i "$WORK/traylist.txt" -c copy "$WORK/seg0.mp4"
 
 # Segments 1..4 — web videos, scaled to canvas, sped up, no audio
 i=1

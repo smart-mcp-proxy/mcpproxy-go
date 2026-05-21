@@ -53,21 +53,27 @@ test('1 servers', async ({ page }) => {
 
 test('2 tools discovery', async ({ page }) => {
   await page.goto(`/ui/tools${q}`);
-  await ready(page, 2800);
-  try {
-    const search = page.locator('input[type="search"], input[placeholder*="ear" i]').first();
-    await search.fill('time', { timeout: 4000 });
-    await page.waitForTimeout(2200);
-  } catch {
-    await page.waitForTimeout(2000);
-  }
+  await ready(page, 3000);                 // 39 tools, approval states — no search interaction
+  await page.mouse.wheel(0, 320);
+  await page.waitForTimeout(1800);
+  await page.mouse.wheel(0, -320);
+  await page.waitForTimeout(700);
 });
 
 test('3 activity log', async ({ page }) => {
   await page.goto(`/ui/activity${q}`);
-  await ready(page, 3000);                 // populated: successes + a sensitive-data flag
-  await page.mouse.wheel(0, 300);
-  await page.waitForTimeout(2200);
+  await ready(page, 2600);                 // populated: successes + a sensitive-data flag
+  // Open the detail drawer for the newest *Tool Call* (the sensitive-data echo) to
+  // show full event details. Each row's last button is the chevron -> selectActivity().
+  // Targeting a Tool Call (not System Start/Stop) gives a meaningful payload + the
+  // sensitive-data detection.
+  try {
+    const toolRow = page.locator('tbody tr').filter({ hasText: /Tool Call/i }).first();
+    await toolRow.locator('button').last().click({ timeout: 4000 });
+    await page.waitForTimeout(3200);       // dwell on the detail drawer
+  } catch {
+    await page.waitForTimeout(2500);
+  }
 });
 
 test('4 security quarantine', async ({ page }) => {
