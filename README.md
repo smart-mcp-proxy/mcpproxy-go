@@ -14,7 +14,7 @@
 </a>
 
 <p align="center">
-  <img src="docs/demo.gif" alt="MCPProxy demo: tray menu, server dashboard, and activity log" width="900" />
+  <img src="docs/demo.gif" alt="MCPProxy web UI demo: server dashboard, tool discovery, activity log, and security quarantine" width="900" />
 </p>
 
 <p align="center">
@@ -23,13 +23,23 @@
   <strong>🌐 <a href="https://mcpproxy.app">mcpproxy.app</a></strong>
 </p>
 
+> The demo above shows the **embedded web UI**. The MCPProxy **core is a single binary for macOS, Linux, and Windows** — the web UI ships inside it, with no extra service to run. On **macOS**, an optional **menu‑bar app** adds one‑click convenience (start/stop, server health, quarantine, logs).
+
+<div align="center">
+  <img src="docs/screenshot-macos-tray.png" height="300" alt="MCPProxy macOS menu-bar app" />
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/screenshot-macos-activity.png" height="300" alt="MCPProxy macOS app — Activity log with sensitive-data detection" />
+  <br />
+  <em>macOS menu‑bar app &nbsp;&nbsp;·&nbsp;&nbsp; Activity log &amp; audit in the macOS app</em>
+</div>
+
 
 ## Why MCPProxy?
 
 - **Scale beyond API limits** – Federate hundreds of MCP servers while bypassing Cursor's 40-tool limit and OpenAI's 128-function cap.
 - **Save tokens & accelerate responses** – Agents load just one `retrieve_tools` function instead of hundreds of schemas. Research shows ~99 % token reduction with **43 % accuracy improvement**.
 - **Advanced security protection** – Automatic quarantine blocks Tool Poisoning Attacks until you manually approve new servers.
-- **Works offline & cross-platform** – Native binaries for macOS (Intel & Apple Silicon), Windows (x64 & ARM64), and Linux (x64 & ARM64) with system-tray UI.
+- **Works offline & cross-platform** – A single core binary for macOS (Intel & Apple Silicon), Windows (x64 & ARM64), and Linux (x64 & ARM64), with the **web UI embedded**. macOS additionally ships an optional menu-bar app.
 
 ---
 
