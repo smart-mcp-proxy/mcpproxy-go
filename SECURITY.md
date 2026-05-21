@@ -74,7 +74,7 @@ Returns:
 {
   "servers": [
     {
-      "name": "untrusted-server", 
+      "name": "untrusted-server",
       "quarantined": true,
       "url": "http://example.com",
       "created": "2024-01-01T00:00:00Z"
@@ -95,7 +95,7 @@ Returns detailed tool descriptions for security analysis with quoted description
 ```json
 {
   "server": "untrusted-server",
-  "quarantine_status": "ACTIVE", 
+  "quarantine_status": "ACTIVE",
   "tools": [
     {
       "name": "suspicious_tool",
@@ -239,7 +239,7 @@ The system tray includes quarantine management:
 ### For Users
 
 1. **Always review quarantined servers** before approving
-2. **Be suspicious of complex tool descriptions** 
+2. **Be suspicious of complex tool descriptions**
 3. **Check for hidden instructions** in tool descriptions
 4. **Verify server sources** before adding to mcpproxy
 5. **Use quarantine management tools** regularly
@@ -616,7 +616,7 @@ When reviewing quarantined tools, look for:
 - [ ] Social engineering language and urgency tactics
 - [ ] Credential theft attempts
 - [ ] Instructions to conceal actions from users
-- [ ] Base64 encoding or other obfuscation methods 
+- [ ] Base64 encoding or other obfuscation methods
 
 ## LLM Security Analysis Guide
 
@@ -632,7 +632,7 @@ upstream_servers list_quarantined
 This shows all servers currently in quarantine that need security review.
 
 #### Step 2: Inspect Each Server's Tools
-```bash  
+```bash
 upstream_servers inspect_quarantined name="server-name"
 ```
 
@@ -694,4 +694,4 @@ Based on your analysis:
 **Analysis:**
 ❌ **MALICIOUS** - Contains hidden instruction in `<IMPORTANT>` tag requesting SSH key access. This is a classic Tool Poisoning Attack attempting to exfiltrate sensitive credentials.
 
-**Recommendation:** Keep server quarantined indefinitely. 
+**Recommendation:** Keep server quarantined indefinitely.
