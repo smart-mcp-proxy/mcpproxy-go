@@ -1,25 +1,27 @@
-# MCPProxy – Smart Proxy for AI Agents
+# 🛡️ MCPProxy — Supercharge AI Agents, Safely
 
-**MCPProxy** is an open-source desktop application that super-charges AI agents with intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
+> One safe endpoint in front of every MCP server.
 
-### **📚 [Read the Documentation](https://docs.mcpproxy.app/)**
+[![Release](https://img.shields.io/github/v/release/smart-mcp-proxy/mcpproxy-go?sort=semver)](https://github.com/smart-mcp-proxy/mcpproxy-go/releases)
+[![Build](https://github.com/smart-mcp-proxy/mcpproxy-go/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/smart-mcp-proxy/mcpproxy-go/actions/workflows/unit-tests.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/smart-mcp-proxy/mcpproxy-go)](https://goreportcard.com/report/github.com/smart-mcp-proxy/mcpproxy-go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/smart-mcp-proxy/mcpproxy-go.svg)](https://pkg.go.dev/github.com/smart-mcp-proxy/mcpproxy-go)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/smart-mcp-proxy/mcpproxy-go?style=social)](https://github.com/smart-mcp-proxy/mcpproxy-go/stargazers)
 
-<!-- Old video: https://youtu.be/l4hh6WOuSFM -->
-[![MCPProxy Demo](https://img.youtube.com/vi/2aKrgJnbbcw/0.jpg)](https://youtu.be/2aKrgJnbbcw)
+<a href="https://mcpproxy.app" target="_blank" rel="noopener">
+  <img src="docs/social.png" alt="MCPProxy — Supercharge AI Agents, Safely" width="100%" />
+</a>
 
-<a href="https://mcpproxy.app" target="_blank" rel="noopener">🌐 Visit mcpproxy.app</a>
+<p align="center">
+  <img src="docs/demo.gif" alt="MCPProxy demo: tray menu, server dashboard, and activity log" width="900" />
+</p>
 
-<div align="center">
-  <a href="https://mcpproxy.app/images/menu_upstream_servers.png" target="_blank">
-    <img src="https://mcpproxy.app/images/menu_upstream_servers.png" alt="System Tray - Upstream Servers" width="250" />
-  </a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://mcpproxy.app/images/menu_security_quarantine.png" target="_blank">
-    <img src="https://mcpproxy.app/images/menu_security_quarantine.png" alt="System Tray - Quarantine Management" width="250" />
-  </a>
-  <br />
-  <em>System Tray - Upstream Servers &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; System Tray - Quarantine Management</em>
-</div>
+<p align="center">
+  <strong>📺 <a href="https://youtu.be/2aKrgJnbbcw">Watch the full walkthrough</a></strong> &nbsp;·&nbsp;
+  <strong>📚 <a href="https://docs.mcpproxy.app/">Read the docs</a></strong> &nbsp;·&nbsp;
+  <strong>🌐 <a href="https://mcpproxy.app">mcpproxy.app</a></strong>
+</p>
 
 
 ## Why MCPProxy?
