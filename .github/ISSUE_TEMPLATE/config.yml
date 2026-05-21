@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & ideas (GitHub Discussions)
+    url: https://github.com/smart-mcp-proxy/mcpproxy-go/discussions
+    about: Ask usage questions, propose RFCs, or share your setup here.
+  - name: Report a security vulnerability
+    url: https://github.com/smart-mcp-proxy/mcpproxy-go/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories, not public issues.
+  - name: Documentation
+    url: https://docs.mcpproxy.app/
+    about: Read the docs before filing; your answer may already be there.
