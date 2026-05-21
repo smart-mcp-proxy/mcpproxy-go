@@ -64,8 +64,11 @@ echo 'export MCPPROXY_ALLOW_PRERELEASE_UPDATES=true' >> ~/.zshrc
 Auto-update is **automatically disabled** when installed via Homebrew to prevent conflicts:
 
 ```bash
-# Homebrew installation - auto-update disabled automatically
-brew install smart-mcp-proxy/tap/mcpproxy
+# Homebrew installation - auto-update disabled automatically.
+# The fully-qualified name auto-taps smart-mcp-proxy/mcpproxy, so no
+# separate `brew tap` step is needed.
+brew install smart-mcp-proxy/mcpproxy/mcpproxy          # CLI
+brew install --cask smart-mcp-proxy/mcpproxy/mcpproxy   # tray app
 
 # Use Homebrew for updates
 brew upgrade mcpproxy
@@ -93,7 +96,7 @@ The system detects common package manager paths and disables auto-update accordi
 ### File Format Support
 
 - **Windows**: `.zip` archives
-- **macOS**: `.tar.gz` archives  
+- **macOS**: `.tar.gz` archives
 - **Linux**: `.tar.gz` archives
 
 ### Asset Detection Priority
@@ -125,7 +128,7 @@ mcpproxy
 ├── Status: Running (localhost:8080)
 ├── ─────────────────────────────
 ├── Start/Stop Server
-├── ─────────────────────────────  
+├── ─────────────────────────────
 ├── Check for Updates...          ← Manual update check
 │   ├── Auto-update: Enabled      ← Shows current mode
 │   └── [Disabled for Homebrew]   ← If package manager detected
@@ -207,4 +210,4 @@ Each release includes:
 - `mcpproxy-latest-linux-amd64.tar.gz` (latest)
 - Similar files for all supported platforms
 
-The auto-updater prioritizes "latest" assets for consistency with website download links. 
+The auto-updater prioritizes "latest" assets for consistency with website download links.
