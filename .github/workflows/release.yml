@@ -1256,7 +1256,9 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     environment: production
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Stable channel only: skip pre-release tags (v*-rc1, v*-beta, etc.) so an
+    # RC tag never overwrites the stable formula/cask in the tap.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
 
     steps:
       - name: Checkout tap repository
