@@ -29,13 +29,13 @@ done
 # item, then a 1s shake (as if clicking it) before cutting to the web UI.
 # Built in 3 phases (A roll, B settle+highlight, C shake) then concatenated.
 MENU_H=470            # menu height on the canvas
-HL_Y=264              # y of the "Open Web UI" row within the 470px-tall menu (calibrated)
+HL_Y=257              # y of the "Open Web UI" row within the 470px-tall menu (calibrated)
 ROLL=0.8; HOLD=1.8; SHAKE=1.0
 SETTLE_Y=$(( (H - MENU_H) / 2 ))                 # final menu top (centered vertically)
 ROLL_SPAN=$(( MENU_H + SETTLE_Y ))               # distance travelled during roll-down
 ffmpeg -y -i "$TRAY" -vf "scale=-2:${MENU_H}" "$WORK/menu.png"
 ffmpeg -y -f lavfi -i "color=c=${BG}:s=${W}x${H}" -frames:v 1 "$WORK/navy.png"
-ffmpeg -y -i "$WORK/menu.png" -vf "drawbox=x=4:y=${HL_Y}:w=306:h=24:color=0x3b82f6@0.45:t=fill" "$WORK/menu_hl.png"
+ffmpeg -y -i "$WORK/menu.png" -vf "drawbox=x=4:y=${HL_Y}:w=306:h=22:color=0x3b82f6@0.45:t=fill" "$WORK/menu_hl.png"
 # A — roll down: menu slides from above to the settle position by t=ROLL-0.1
 ffmpeg -y -loop 1 -i "$WORK/navy.png" -loop 1 -i "$WORK/menu.png" \
   -filter_complex "[0:v][1:v]overlay=x='(main_w-overlay_w)/2':y='-${MENU_H}+${ROLL_SPAN}*min(t/0.7\,1)'" \
