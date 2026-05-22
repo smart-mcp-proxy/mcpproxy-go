@@ -1,0 +1,99 @@
+# cliff.toml — git-cliff configuration for mcpproxy-go
+# https://git-cliff.org/docs/configuration
+#
+# Generates a cumulative CHANGELOG.md from Conventional Commits.
+# Run locally:  git-cliff --config cliff.toml --output CHANGELOG.md
+# CI wires this via orhun/git-cliff-action@v4.8.0 in release.yml.
+
+[changelog]
+# Markdown header written once at the top of the file.
+header = """
+# Changelog
+
+All notable changes to [MCPProxy](https://mcpproxy.app) are documented here.
+Releases follow [Semantic Versioning](https://semver.org/).
+
+"""
+
+# Per-release body template (Tera / Jinja2-like).
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+{{ commit.message | upper_first }}\
+{% if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}](https://github.com/smart-mcp-proxy/mcpproxy-go/pull/{{ commit.remote.pr_number }})){% endif %} \
+([`{{ commit.id | truncate(length=7, end="") }}`](https://github.com/smart-mcp-proxy/mcpproxy-go/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}\n
+"""
+
+# Optional footer appended after all release sections.
+footer = """
+---
+[Full commit history](https://github.com/smart-mcp-proxy/mcpproxy-go/commits)
+"""
+
+# Strip leading/trailing whitespace from the template output.
+trim = true
+
+[git]
+# Only process tags matching vX.Y.Z (stable + pre-release like v1.2.3-rc1).
+tag_pattern = "v[0-9]*"
+
+# Do NOT sort tags alphanumerically — use semantic versioning order.
+topo_order = false
+
+# Include commits that don't match any parser rule? No — keep the log clean.
+filter_unconventional = true
+
+# Split feat(scope): ... on the colon so scope is extracted properly.
+split_commits = false
+
+# Preprocess commit messages before parsing.
+# Strip trailing "(#NNN)" suffixes that GitHub appends to squash-merge subjects —
+# those PR numbers are exposed via commit.remote.pr_number by the GitHub integration
+# and rendered in the body template, so we don't double-link them here.
+commit_preprocessors = [
+  { pattern = ' \(#[0-9]+\)$', replace = "" },
+]
+
+# Map conventional commit types to changelog section headings.
+# Commits not matched by any rule are dropped (skip = true implied by absence).
+commit_parsers = [
+  # --- visible groups ---
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^ci|^build", group = "CI/Build" },
+  # deps: covers both "chore(deps)" and standalone "deps:" prefixes
+  { message = "^chore\\(deps\\)|^deps", group = "Dependencies" },
+
+  # --- skip (hidden) ---
+  # Pure chore, release bumps, test-only commits, and merge commits are noise.
+  { message = "^chore\\(release\\)", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^test", skip = true },
+  # Merge commits (GitHub squash-merges don't produce these, but just in case).
+  { message = "^Merge", skip = true },
+]
+
+# Do not include commits already part of a previous release.
+# (git-cliff's default behaviour — stated explicitly for clarity.)
+filter_commits = false
+
+# Protect against publishing private/secret data in commit messages.
+protect_breaking_changes = false
+
+# Link refs to GitHub (used by the body template above via commit.remote.*).
+# GitHub integration enriches commits with PR numbers; requires GITHUB_TOKEN in CI.
+[remote.github]
+owner = "smart-mcp-proxy"
+repo  = "mcpproxy-go"

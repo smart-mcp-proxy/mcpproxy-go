@@ -1160,6 +1160,27 @@ jobs:
           upload-artifact: false
           upload-release-assets: false
 
+      # WP-C4: Generate cumulative CHANGELOG.md with git-cliff and place it in
+      # release-files/ so it is checksummed + uploaded alongside all other assets.
+      #
+      # Rationale for NOT committing back to main:
+      #   Pushing a generated file back to main requires a PAT (GITHUB_TOKEN lacks
+      #   push access on protected branches) and creates a race condition when two
+      #   releases are cut close together.  Distributing CHANGELOG.md as a release
+      #   asset is simpler, reproducible, and sufficient for open-source consumers.
+      #
+      # fetch-depth: 0 is already set on this job's Checkout step (line ~1065) so
+      # git-cliff sees the full tag history without an extra checkout here.
+      - name: Generate CHANGELOG (git-cliff)
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        with:
+          config: cliff.toml
+          args: --verbose
+        env:
+          OUTPUT: release-files/CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Generate checksums
         id: checksums
         run: |
