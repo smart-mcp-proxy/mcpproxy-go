@@ -139,7 +139,7 @@ test-coverage:
 # Run linter
 lint:
 	@echo "🔍 Running Go linter..."
-	golangci-lint run ./...
+	golangci-lint run --config .github/.golangci.yml ./...
 	@echo "🔍 Running frontend linter..."
 	cd frontend && npm install && npm run lint
 
