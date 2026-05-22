@@ -1057,6 +1057,9 @@ jobs:
     needs: [build, sign-windows, generate-notes]  # add build-docker when server MVP is ready
     runs-on: ubuntu-latest
     environment: production
+    outputs:
+      # base64-encoded checksums.txt — consumed by the SLSA provenance job (WP-C3)
+      hashes: ${{ steps.checksums.outputs.hashes }}
 
     steps:
       - name: Checkout
@@ -1133,17 +1136,71 @@ jobs:
             fi
           done
 
+      # Set version variable early so SBOM step (WP-C2) and the release body
+      # can both reference $CLEAN_VERSION. Moved before "Generate checksums"
+      # so the SBOM filename is deterministic and the SBOM file itself is
+      # present in release-files/ when checksums run (WP-C2 ordering requirement).
+      - name: Set version variable
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      # WP-C2: Generate SPDX-JSON SBOM from source tree and drop it into
+      # release-files/ so it is included in the checksums + uploaded with all
+      # other release assets by the "Create release" step below.
+      # upload-artifact/upload-release-assets are both disabled because this
+      # workflow is tag-push triggered (not a `release` event), so we handle
+      # distribution ourselves via the release-files/ directory.
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: release-files/mcpproxy-${{ env.CLEAN_VERSION }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # WP-C4: Generate cumulative CHANGELOG.md with git-cliff and place it in
+      # release-files/ so it is checksummed + uploaded alongside all other assets.
+      #
+      # Rationale for NOT committing back to main:
+      #   Pushing a generated file back to main requires a PAT (GITHUB_TOKEN lacks
+      #   push access on protected branches) and creates a race condition when two
+      #   releases are cut close together.  Distributing CHANGELOG.md as a release
+      #   asset is simpler, reproducible, and sufficient for open-source consumers.
+      #
+      # fetch-depth: 0 is already set on this job's Checkout step (line ~1065) so
+      # git-cliff sees the full tag history without an extra checkout here.
+      - name: Generate CHANGELOG (git-cliff)
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        with:
+          config: cliff.toml
+          args: --verbose
+        env:
+          OUTPUT: release-files/CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate checksums
+        id: checksums
+        run: |
+          cd release-files
+          # checksum every artifact except the checksums file and its signature
+          # bundle, so re-runs / pre-existing files can't make checksums.txt
+          # reference itself. xargs -r guards against an empty artifact list.
+          find . -maxdepth 1 -type f ! -name 'checksums.txt' ! -name 'checksums.txt.cosign.bundle' -printf '%P\n' \
+            | sort | xargs -r sha256sum > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+          # base64-encode for SLSA provenance generator (WP-C3)
+          echo "hashes=$(base64 -w0 checksums.txt)" >> "$GITHUB_OUTPUT"
+
       - name: List files for upload
         run: |
           echo "Files to upload:"
           ls -la release-files/
           echo "Pending notarizations:"
           ls -la pending-notarizations/ || echo "No pending notarizations"
-
-      - name: Set version variable
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Create release with binaries
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
@@ -1239,6 +1296,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign checksums (keyless)
+        # Cosign keyless signing — OIDC identity comes from the GitHub Actions JWT
+        # (id-token: write is granted at the workflow level).
+        # Produces a single bundle file (signature + certificate + Rekor transparency log entry).
+        #
+        # To verify after download:
+        #   cosign verify-blob \
+        #     --bundle checksums.txt.cosign.bundle \
+        #     --certificate-identity-regexp "^https://github.com/smart-mcp-proxy/mcpproxy-go/.github/workflows/release.yml@refs/tags/v" \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        #     checksums.txt
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle release-files/checksums.txt.cosign.bundle \
+            release-files/checksums.txt
+
+      - name: Upload cosign bundle to release
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            release-files/checksums.txt.cosign.bundle \
+            --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload pending notarizations
         if: hashFiles('pending-notarizations/*.pending') != ''
         run: |
@@ -1251,6 +1336,23 @@ jobs:
           done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # WP-C3: SLSA build provenance — generates a SLSA v1 attestation for all
+  # release artifacts and uploads it to the GitHub release as a .intoto.jsonl file.
+  provenance:
+    needs: [release]
+    permissions:
+      actions: read       # detect the GitHub Actions environment (trusted builder)
+      id-token: write     # keyless signing of the provenance via OIDC
+      contents: write     # upload the attestation to the release
+    # SLSA generator MUST be referenced by semver tag, not SHA — it verifies its own
+    # ref to establish the trusted builder identity; SHA or branch references break the
+    # provenance trust model. This is the documented exception to the repo's SHA-pin rule
+    # (see WP-C3 spec, WP-B5 exception).
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      upload-assets: true   # attach the .intoto.jsonl attestation to the release
 
   update-homebrew:
     needs: release
