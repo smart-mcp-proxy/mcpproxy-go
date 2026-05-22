@@ -8,6 +8,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/smart-mcp-proxy/mcpproxy-go.svg)](https://pkg.go.dev/github.com/smart-mcp-proxy/mcpproxy-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/smart-mcp-proxy/mcpproxy-go?style=social)](https://github.com/smart-mcp-proxy/mcpproxy-go/stargazers)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/smart-mcp-proxy/mcpproxy-go/badge)](https://securityscorecards.dev/viewer/?uri=github.com/smart-mcp-proxy/mcpproxy-go)
 
 <a href="https://mcpproxy.app" target="_blank" rel="noopener">
   <img src="docs/social.png" alt="MCPProxy — Supercharge AI Agents, Safely" width="100%" />
