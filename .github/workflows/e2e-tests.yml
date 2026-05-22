@@ -241,7 +241,7 @@ jobs:
           go tool cover -html=coverage-logs.out -o coverage-logs.html
 
       - name: Upload coverage reports
-        uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457  # v3.1.6
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354  # v6.0.1
         with:
           file: ./coverage.out
           flags: e2e-tests
