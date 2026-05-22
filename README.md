@@ -1,7 +1,10 @@
-<p align="center"><img src="assets/logo.svg" alt="MCPProxy logo" height="80"></p>
-<h1 align="center">MCPProxy — Supercharge AI Agents, Safely</h1>
+<p align="center">
+  <a href="https://mcpproxy.app" target="_blank" rel="noopener">
+    <img src="docs/social.png" alt="MCPProxy — Supercharge AI Agents, Safely · One safe endpoint in front of every MCP server" width="100%" />
+  </a>
+</p>
 
-> One safe endpoint in front of every MCP server.
+<div align="center">
 
 [![Release](https://img.shields.io/github/v/release/smart-mcp-proxy/mcpproxy-go?sort=semver)](https://github.com/smart-mcp-proxy/mcpproxy-go/releases)
 [![Build](https://github.com/smart-mcp-proxy/mcpproxy-go/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/smart-mcp-proxy/mcpproxy-go/actions/workflows/unit-tests.yml)
@@ -11,9 +14,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/smart-mcp-proxy/mcpproxy-go?style=social)](https://github.com/smart-mcp-proxy/mcpproxy-go/stargazers)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/smart-mcp-proxy/mcpproxy-go/badge)](https://securityscorecards.dev/viewer/?uri=github.com/smart-mcp-proxy/mcpproxy-go)
 
-<a href="https://mcpproxy.app" target="_blank" rel="noopener">
-  <img src="docs/social.png" alt="MCPProxy — Supercharge AI Agents, Safely" width="100%" />
-</a>
+</div>
 
 <p align="center">
   <img src="docs/demo.gif" alt="MCPProxy web UI demo: server dashboard, tool discovery, activity log, and security quarantine" width="900" />
