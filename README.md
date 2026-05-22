@@ -347,3 +347,5 @@ make test           # Unit tests
 make test-e2e       # E2E tests
 make lint           # Run linters
 ```
+
+<!-- dependency-review verification PR — do not merge -->
