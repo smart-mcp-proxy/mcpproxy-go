@@ -27,12 +27,11 @@ jobs:
       matrix:
         include:
           - language: go
-            # build-mode: none — GA for Go in codeql-action v4; performs
-            # dependency-free source analysis without running `go build`.
-            # Preferred over autobuild here because the repo uses build tags
-            # (-tags server) that autobuild can't infer, and CGO on Ubuntu
-            # runners is fragile for cross-platform code.
-            build-mode: none
+            # build-mode: autobuild — CodeQL 2.25.x does not support
+            # build-mode:none for Go; autobuild runs `go build ./...` which
+            # is sufficient because the standard module builds cleanly on
+            # ubuntu-latest (verified by the Build CI job).
+            build-mode: autobuild
           - language: javascript-typescript
             # build-mode: none — default for JS/TS; no compilation needed.
             build-mode: none
@@ -46,6 +45,10 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4.35.5
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@9e0d7b8d25671d64c341c19c0152d693099fb5ba  # v4.35.5
