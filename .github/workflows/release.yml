@@ -1136,6 +1136,30 @@ jobs:
             fi
           done
 
+      # Set version variable early so SBOM step (WP-C2) and the release body
+      # can both reference $CLEAN_VERSION. Moved before "Generate checksums"
+      # so the SBOM filename is deterministic and the SBOM file itself is
+      # present in release-files/ when checksums run (WP-C2 ordering requirement).
+      - name: Set version variable
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      # WP-C2: Generate SPDX-JSON SBOM from source tree and drop it into
+      # release-files/ so it is included in the checksums + uploaded with all
+      # other release assets by the "Create release" step below.
+      # upload-artifact/upload-release-assets are both disabled because this
+      # workflow is tag-push triggered (not a `release` event), so we handle
+      # distribution ourselves via the release-files/ directory.
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: release-files/mcpproxy-${{ env.CLEAN_VERSION }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
       - name: Generate checksums
         id: checksums
         run: |
@@ -1152,11 +1176,6 @@ jobs:
           ls -la release-files/
           echo "Pending notarizations:"
           ls -la pending-notarizations/ || echo "No pending notarizations"
-
-      - name: Set version variable
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
 
       - name: Create release with binaries
         uses: softprops/action-gh-release@v2
