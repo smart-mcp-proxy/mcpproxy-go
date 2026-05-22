@@ -1185,7 +1185,11 @@ jobs:
         id: checksums
         run: |
           cd release-files
-          sha256sum * > checksums.txt
+          # checksum every artifact except the checksums file and its signature
+          # bundle, so re-runs / pre-existing files can't make checksums.txt
+          # reference itself. xargs -r guards against an empty artifact list.
+          find . -maxdepth 1 -type f ! -name 'checksums.txt' ! -name 'checksums.txt.cosign.bundle' -printf '%P\n' \
+            | sort | xargs -r sha256sum > checksums.txt
           echo "Generated checksums:"
           cat checksums.txt
           # base64-encode for SLSA provenance generator (WP-C3)
@@ -1311,8 +1315,6 @@ jobs:
             --yes \
             --bundle release-files/checksums.txt.cosign.bundle \
             release-files/checksums.txt
-        env:
-          COSIGN_EXPERIMENTAL: "1"
 
       - name: Upload cosign bundle to release
         run: |
