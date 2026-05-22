@@ -24,6 +24,24 @@ independent work packages (WPs) so each can be executed in its own session/PR.
 
 ---
 
+## Execution status
+
+| Work package | State | Reference |
+|--------------|-------|-----------|
+| WP-A1, WP-A3 | ✅ Shipped (merged) | PR #500 |
+| WP-B1, WP-B2, WP-B3, WP-B4, WP-B5 | ✅ Shipped (merged) | PR #501 |
+| WP-C1, WP-C2, WP-C3, WP-C4 | ✅ Shipped (merged) | PR #502 |
+| WP-D1 (Go Report Card A+; pkg.go.dev indexed; badges already in README), WP-B6 | 🔄 In review | PR #507 |
+| WP-C5 (commitlint PR-title check) | 🔄 In review | PR #508 |
+| WP-D2 (server.json → v0.33.1 + publish guide; `packages[]` empty until Docker image ships, `remotes[]` describes HTTP transport) | 🔄 In review | PR #509 |
+| WP-A2, WP-F1, WP-F2 (GitHub Sponsors + tiers + outreach) | ⛔ Blocked on user | needs accounts/Stripe |
+| WP-F3 | ⛔ Blocked on user | depends on A2/F1 |
+| WP-D2 publishing step (registry auth), WP-D3 (awesome-list PRs) | ⛔ Blocked on user | external submission |
+| WP-E1, WP-E2, WP-E3 (blog drafts) | ⛔ Blocked on user | drafts agent-able, launch user-led |
+| WP-G1 (docs Diátaxis restructure) | ⛔ Blocked on user | — |
+
+---
+
 ## Track A — Finish Phase 1 (quick wins)
 
 ### WP-A1 · Kubernetes-style label taxonomy
