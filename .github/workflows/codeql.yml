@@ -1,0 +1,53 @@
+name: CodeQL Analysis
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Weekly scan — Tuesday 03:17 UTC (off-peak, avoids Monday congestion)
+    - cron: '17 3 * * 2'
+
+permissions:
+  security-events: write
+  packages: read
+  actions: read
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            # build-mode: none — GA for Go in codeql-action v4; performs
+            # dependency-free source analysis without running `go build`.
+            # Preferred over autobuild here because the repo uses build tags
+            # (-tags server) that autobuild can't infer, and CGO on Ubuntu
+            # runners is fragile for cross-platform code.
+            build-mode: none
+          - language: javascript-typescript
+            # build-mode: none — default for JS/TS; no compilation needed.
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
+        with:
+          category: /language:${{ matrix.language }}
