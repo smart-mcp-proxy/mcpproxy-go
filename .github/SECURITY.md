@@ -74,7 +74,7 @@ Returns:
 {
   "servers": [
     {
-      "name": "untrusted-server", 
+      "name": "untrusted-server",
       "quarantined": true,
       "url": "http://example.com",
       "created": "2024-01-01T00:00:00Z"
@@ -95,7 +95,7 @@ Returns detailed tool descriptions for security analysis with quoted description
 ```json
 {
   "server": "untrusted-server",
-  "quarantine_status": "ACTIVE", 
+  "quarantine_status": "ACTIVE",
   "tools": [
     {
       "name": "suspicious_tool",
@@ -239,7 +239,7 @@ The system tray includes quarantine management:
 ### For Users
 
 1. **Always review quarantined servers** before approving
-2. **Be suspicious of complex tool descriptions** 
+2. **Be suspicious of complex tool descriptions**
 3. **Check for hidden instructions** in tool descriptions
 4. **Verify server sources** before adding to mcpproxy
 5. **Use quarantine management tools** regularly
@@ -299,7 +299,25 @@ The system tray includes quarantine management:
 
 ### Reporting
 
-If you discover Tool Poisoning Attacks or other security vulnerabilities, please report them through the appropriate channels for your organization or the mcpproxy-go project.
+We take security seriously. **Please do not report security vulnerabilities through
+public GitHub issues, discussions, or pull requests.**
+
+Instead, report them privately using
+**[GitHub Security Advisories](https://github.com/smart-mcp-proxy/mcpproxy-go/security/advisories/new)**
+("Report a vulnerability" on the repository's Security tab). This creates a private,
+coordinated disclosure channel visible only to maintainers.
+
+Please include, where possible:
+
+- A description of the vulnerability and its impact
+- Steps to reproduce (proof-of-concept welcome)
+- Affected version(s) (`mcpproxy version`)
+- Any suggested remediation
+
+**Response targets:** initial acknowledgement within 48 hours, triage and severity
+assessment within 5 business days. We follow coordinated disclosure and aim to ship a
+fix or mitigation before public disclosure (typically within 90 days). We are happy to
+credit reporters in the release notes unless you prefer to remain anonymous.
 
 ## References
 
@@ -598,7 +616,7 @@ When reviewing quarantined tools, look for:
 - [ ] Social engineering language and urgency tactics
 - [ ] Credential theft attempts
 - [ ] Instructions to conceal actions from users
-- [ ] Base64 encoding or other obfuscation methods 
+- [ ] Base64 encoding or other obfuscation methods
 
 ## LLM Security Analysis Guide
 
@@ -614,7 +632,7 @@ upstream_servers list_quarantined
 This shows all servers currently in quarantine that need security review.
 
 #### Step 2: Inspect Each Server's Tools
-```bash  
+```bash
 upstream_servers inspect_quarantined name="server-name"
 ```
 
@@ -676,4 +694,4 @@ Based on your analysis:
 **Analysis:**
 ❌ **MALICIOUS** - Contains hidden instruction in `<IMPORTANT>` tag requesting SSH key access. This is a classic Tool Poisoning Attack attempting to exfiltrate sensitive credentials.
 
-**Recommendation:** Keep server quarantined indefinitely. 
+**Recommendation:** Keep server quarantined indefinitely.
