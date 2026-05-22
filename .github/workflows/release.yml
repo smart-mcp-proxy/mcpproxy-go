@@ -1314,6 +1314,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # WP-C3: SLSA build provenance — generates a SLSA v1 attestation for all
+  # release artifacts and uploads it to the GitHub release as a .intoto.jsonl file.
+  provenance:
+    needs: [release]
+    permissions:
+      actions: read       # detect the GitHub Actions environment (trusted builder)
+      id-token: write     # keyless signing of the provenance via OIDC
+      contents: write     # upload the attestation to the release
+    # SLSA generator MUST be referenced by semver tag, not SHA — it verifies its own
+    # ref to establish the trusted builder identity; SHA or branch references break the
+    # provenance trust model. This is the documented exception to the repo's SHA-pin rule
+    # (see WP-C3 spec, WP-B5 exception).
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      upload-assets: true   # attach the .intoto.jsonl attestation to the release
+
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest
