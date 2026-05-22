@@ -1,0 +1,176 @@
+# Kubernetes-style label taxonomy for mcpproxy-go
+# Synced to GitHub via .github/workflows/label-sync.yml (crazy-max/ghaction-github-labeler)
+#
+# Color families:
+#   kind/*      — indigo/purple  (#5C4DBF – #7C6DD8)
+#   area/*      — teal/cyan      (#0B7A75 – #1AA3A0)
+#   priority/*  — red/orange     (#B60205 – #E4A000)
+#   triage/*    — grey/slate     (#4A5568 – #B0BEC5)
+#   size/*      — green          (#1A7F37 – #A2D7A0)
+#   kept defaults — GitHub conventional colours
+
+# ---------------------------------------------------------------------------
+# kind/*  — what type of change is this?
+# ---------------------------------------------------------------------------
+- name: "kind/bug"
+  color: "D93F0B"
+  description: "Something isn't working"
+
+- name: "kind/feature"
+  color: "6E40C9"
+  description: "New capability or user-visible behaviour"
+
+- name: "kind/enhancement"
+  color: "7C6DD8"
+  description: "Improvement to an existing feature"
+
+- name: "kind/docs"
+  color: "5C4DBF"
+  description: "Documentation only changes"
+
+- name: "kind/refactor"
+  color: "8B7FE8"
+  description: "Code restructuring with no behaviour change"
+
+- name: "kind/test"
+  color: "9B8FF5"
+  description: "Adding or improving tests"
+
+- name: "kind/chore"
+  color: "A89FD8"
+  description: "Maintenance, build, dependency, or CI changes"
+
+- name: "kind/security"
+  color: "B60205"
+  description: "Security fix or hardening"
+
+- name: "kind/question"
+  color: "C0B0EF"
+  description: "Further information is requested or a design question"
+
+# ---------------------------------------------------------------------------
+# area/*  — which part of the codebase / product domain?
+# ---------------------------------------------------------------------------
+- name: "area/proxy"
+  color: "0B7A75"
+  description: "Core MCP proxy engine and tool routing"
+
+- name: "area/oauth"
+  color: "0E8F89"
+  description: "OAuth 2.1 / PKCE authentication flows"
+
+- name: "area/docker"
+  color: "11A39D"
+  description: "Docker security isolation and container lifecycle"
+
+- name: "area/tray"
+  color: "14B8B1"
+  description: "macOS / Windows system-tray application"
+
+- name: "area/web-ui"
+  color: "17CCC4"
+  description: "Vue 3 web dashboard (frontend/)"
+
+- name: "area/cli"
+  color: "1AA3A0"
+  description: "Command-line interface (mcpproxy CLI commands)"
+
+- name: "area/storage"
+  color: "0E8080"
+  description: "BBolt database, config, and persistence"
+
+- name: "area/search"
+  color: "1296A0"
+  description: "BM25 / Bleve search index and tool discovery"
+
+- name: "area/teams"
+  color: "0A6E6E"
+  description: "Server edition multi-user / teams features"
+
+- name: "area/telemetry"
+  color: "178080"
+  description: "Anonymous usage telemetry and feedback"
+
+- name: "area/build-ci"
+  color: "1BAAAA"
+  description: "GitHub Actions, Makefile, build scripts"
+
+- name: "area/packaging"
+  color: "1DB8B8"
+  description: "Homebrew, .deb, Windows installer, Docker image"
+
+# ---------------------------------------------------------------------------
+# priority/*  — how urgent / impactful?
+# ---------------------------------------------------------------------------
+- name: "priority/critical"
+  color: "B60205"
+  description: "Must fix immediately — data loss, security, or total breakage"
+
+- name: "priority/high"
+  color: "D93F0B"
+  description: "Should be addressed in the current or next release"
+
+- name: "priority/medium"
+  color: "E4A000"
+  description: "Important but not blocking a release"
+
+- name: "priority/low"
+  color: "F9D0C4"
+  description: "Nice to have; address when bandwidth allows"
+
+# ---------------------------------------------------------------------------
+# triage/*  — where is this issue in the triage lifecycle?
+# ---------------------------------------------------------------------------
+- name: "triage/needs-triage"
+  color: "4A5568"
+  description: "Newly opened; not yet reviewed by a maintainer"
+
+- name: "triage/accepted"
+  color: "718096"
+  description: "Triaged and accepted for the backlog"
+
+- name: "triage/duplicate"
+  color: "A0AEC0"
+  description: "This issue or PR already exists"
+
+- name: "triage/wontfix"
+  color: "B0BEC5"
+  description: "This will not be worked on"
+
+- name: "triage/needs-information"
+  color: "CBD5E0"
+  description: "More information is needed from the reporter"
+
+# ---------------------------------------------------------------------------
+# size/*  — estimated effort (set by maintainer or PR automation)
+# ---------------------------------------------------------------------------
+- name: "size/XS"
+  color: "1A7F37"
+  description: "Trivial change — a few lines"
+
+- name: "size/S"
+  color: "2EA44F"
+  description: "Small — less than a day of work"
+
+- name: "size/M"
+  color: "57C374"
+  description: "Medium — a few days of work"
+
+- name: "size/L"
+  color: "85D99E"
+  description: "Large — up to a week of work"
+
+- name: "size/XL"
+  color: "A2D7A0"
+  description: "Extra-large — multi-week or architectural change"
+
+# ---------------------------------------------------------------------------
+# GitHub conventional labels — keep as-is
+# ---------------------------------------------------------------------------
+- name: "good first issue"
+  color: "7057FF"
+  description: "Good for newcomers"
+
+- name: "help wanted"
+  color: "008672"
+  description: "Extra attention is needed"
