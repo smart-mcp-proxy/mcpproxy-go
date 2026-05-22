@@ -45,10 +45,12 @@ jobs:
 
     strategy:
       matrix:
-        # On PRs: test only latest Go on ubuntu-latest
-        # On main/push: test full matrix
+        # On PRs: test only ubuntu-latest. On main/push: test all OSes.
+        # Go is pinned to "1.25" because go.mod requires go 1.25.5 — older
+        # toolchains can't build the module, and auto-downloading 1.25.x under
+        # setup-go's module cache collides ("tar: ... File exists").
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') }}
-        go-version: ${{ github.event_name == 'pull_request' && fromJSON('["1.25"]') || fromJSON('["1.23.10", "1.24.5", "1.25"]') }}
+        go-version: ["1.25"]
 
     steps:
       - name: Checkout code
@@ -155,13 +157,13 @@ jobs:
           GO_TEST_TIMEOUT: 300s
 
       - name: Run E2E tests with race detector
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23.10'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
         run: go test -v -race -timeout 10m ./internal/server -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
 
       - name: Run Logging E2E tests with race detector
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.23.10'
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
         run: go test -v -race -timeout 10m ./internal/logs -run TestE2E
         env:
           GO_TEST_TIMEOUT: 600s
