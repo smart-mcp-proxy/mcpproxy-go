@@ -1057,6 +1057,9 @@ jobs:
     needs: [build, sign-windows, generate-notes]  # add build-docker when server MVP is ready
     runs-on: ubuntu-latest
     environment: production
+    outputs:
+      # base64-encoded checksums.txt — consumed by the SLSA provenance job (WP-C3)
+      hashes: ${{ steps.checksums.outputs.hashes }}
 
     steps:
       - name: Checkout
@@ -1132,6 +1135,16 @@ jobs:
               cp "$installer_file" "release-files/$filename"
             fi
           done
+
+      - name: Generate checksums
+        id: checksums
+        run: |
+          cd release-files
+          sha256sum * > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+          # base64-encode for SLSA provenance generator (WP-C3)
+          echo "hashes=$(base64 -w0 checksums.txt)" >> "$GITHUB_OUTPUT"
 
       - name: List files for upload
         run: |
@@ -1236,6 +1249,36 @@ jobs:
             ```
 
             </details>
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign checksums (keyless)
+        # Cosign keyless signing — OIDC identity comes from the GitHub Actions JWT
+        # (id-token: write is granted at the workflow level).
+        # Produces a single bundle file (signature + certificate + Rekor transparency log entry).
+        #
+        # To verify after download:
+        #   cosign verify-blob \
+        #     --bundle checksums.txt.cosign.bundle \
+        #     --certificate-identity-regexp "^https://github.com/smart-mcp-proxy/mcpproxy-go/.github/workflows/release.yml@refs/tags/v" \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        #     checksums.txt
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle release-files/checksums.txt.cosign.bundle \
+            release-files/checksums.txt
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+      - name: Upload cosign bundle to release
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            release-files/checksums.txt.cosign.bundle \
+            --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
