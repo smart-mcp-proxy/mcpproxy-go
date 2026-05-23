@@ -97,8 +97,8 @@ mcp-publisher status --status deleted \
 
 - `version` must be a plain semantic version string (`0.33.1`) — no `v` prefix, no ranges.
 - `packages[]` is empty because none of the supported `registryType` values (`npm`, `pypi`, `oci`, `nuget`, `mcpb`) match MCPProxy's distribution channels (Homebrew tap, GitHub release tarballs, `.deb`/`.rpm`, `go install`). The Docker server-edition image at `ghcr.io/smart-mcp-proxy/mcpproxy-server` is not yet published to releases (gated behind `if: false` in the release workflow).
-- `remotes[]` describes the actual MCP transport: a locally-run `mcpproxy serve` instance that exposes a Streamable HTTP endpoint at `http://localhost:8080/mcp`. MCP clients that support HTTP transport connect directly to this address.
-- If a Docker image for the server edition is published in a future release, add an `oci` entry to `packages[]` pointing at `ghcr.io/smart-mcp-proxy/mcpproxy-server:{version}` with `"transport": {"type": "stdio"}` and the appropriate `runtimeArguments` for `docker run`.
+- `remotes[]` is intentionally **omitted**. mcpproxy runs locally (`mcpproxy serve` exposes Streamable HTTP at `http://localhost:8080/mcp`), but the registry's semantic validation **rejects localhost/private remote URLs** (`invalid-remote-url`) — `remotes[]` is reserved for publicly reachable hosted endpoints. With no public remote and no installable package type, the entry is **discovery-only**: it lists the server, description, and repository link so clients can find it and follow the repo's install instructions.
+- If a Docker image for the server edition is published in a future release, add an `oci` entry to `packages[]` pointing at `ghcr.io/smart-mcp-proxy/mcpproxy-server:{version}` with `"transport": {"type": "stdio"}` and the appropriate `runtimeArguments` for `docker run`. That would upgrade the entry from discovery-only to one-click installable.
 
 ## References
 

@@ -9,11 +9,5 @@
     "source": "github"
   },
   "version": "0.33.1",
-  "packages": [],
-  "remotes": [
-    {
-      "type": "streamable-http",
-      "url": "http://localhost:8080/mcp"
-    }
-  ]
+  "packages": []
 }
