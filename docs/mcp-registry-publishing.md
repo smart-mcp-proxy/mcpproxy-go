@@ -1,6 +1,8 @@
 # Publishing MCPProxy to the MCP Registry
 
-This guide covers how to publish (or update) the `server.json` at the repo root to the official [MCP Registry](https://registry.modelcontextprotocol.io). This is a manual step that requires authentication as the namespace owner — it cannot be automated without a GitHub OIDC workflow scoped to the `smart-mcp-proxy` org.
+This guide covers how to publish (or update) the `server.json` at the repo root to the official [MCP Registry](https://registry.modelcontextprotocol.io).
+
+**Publishing is automated.** The [`.github/workflows/publish-mcp-registry.yml`](../.github/workflows/publish-mcp-registry.yml) workflow publishes `server.json` on every GitHub Release using keyless GitHub OIDC auth — no stored token or secret. It syncs `server.json`'s `version` to the release tag at publish time, so you don't need to hand-bump it. The manual steps below remain useful for first-time setup, validation, ad-hoc `workflow_dispatch` runs, and deprecating versions.
 
 ## Prerequisites
 
@@ -91,7 +93,7 @@ mcp-publisher status --status deleted \
 ## What Requires the User
 
 - **GitHub authentication**: Only a member/owner of the `smart-mcp-proxy` GitHub org can authenticate for the `io.github.smart-mcp-proxy` namespace. There is no way to delegate or automate this without adding a GitHub Actions workflow with `id-token: write` permission to the release pipeline.
-- **Automating via CI**: To run `mcp-publisher login github-oidc` + `mcp-publisher publish` in the release workflow, add a new job after the `release` job in `.github/workflows/release.yml`, grant `id-token: write` in its `permissions` block, and run the two commands against the tagged `server.json`. The OIDC token is valid for the duration of the workflow run only.
+- **Automating via CI** (done): [`.github/workflows/publish-mcp-registry.yml`](../.github/workflows/publish-mcp-registry.yml) runs `mcp-publisher login github-oidc` + `mcp-publisher publish` on `release: published` (and via manual `workflow_dispatch`). It declares `id-token: write`, downloads the pinned `mcp-publisher` binary, syncs `version` from the release tag, validates, then publishes. The OIDC token is minted per run and valid only for that run — no secret is stored. The first run must succeed as a member identity of the `smart-mcp-proxy` org (the workflow's repo identity satisfies this).
 
 ## Registry Schema Notes
 
