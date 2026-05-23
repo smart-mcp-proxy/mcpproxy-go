@@ -1,0 +1,73 @@
+name: Publish to MCP Registry
+
+# Publishes the repo-root server.json to the official MCP Registry
+# (registry.modelcontextprotocol.io) whenever a GitHub Release is published.
+#
+# Auth is keyless: mcp-publisher exchanges the workflow's GitHub OIDC token for a
+# short-lived Registry JWT. The OIDC token proves this repo lives in the
+# `smart-mcp-proxy` org, which owns the `io.github.smart-mcp-proxy` namespace —
+# so no secrets or stored login are required. See docs/mcp-registry-publishing.md.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (no leading v, e.g. 0.34.0). Defaults to server.json's value."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write   # required for mcp-publisher login github-oidc
+
+concurrency:
+  group: mcp-registry-publish
+  cancel-in-progress: false
+
+env:
+  MCP_PUBLISHER_VERSION: "1.7.9"
+
+jobs:
+  publish:
+    name: Publish server.json
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          url="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "Downloading $url"
+          curl -fsSL "$url" -o mcp-publisher.tar.gz
+          tar -xzf mcp-publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --version || true
+
+      - name: Sync version into server.json
+        run: |
+          set -euo pipefail
+          # Prefer the release tag; fall back to the workflow_dispatch input; else keep server.json's value.
+          raw="${{ github.event.release.tag_name || inputs.version }}"
+          if [ -n "$raw" ]; then
+            ver="${raw#v}"   # strip leading v
+            echo "Setting server.json version to $ver"
+            tmp="$(mktemp)"
+            jq --arg v "$ver" '.version = $v' server.json > "$tmp"
+            mv "$tmp" server.json
+          else
+            echo "No tag/input supplied; publishing server.json as committed ($(jq -r .version server.json))."
+          fi
+          cat server.json
+
+      - name: Validate
+        run: ./mcp-publisher validate server.json
+
+      - name: Authenticate (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish server.json
