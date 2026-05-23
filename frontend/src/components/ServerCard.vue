@@ -35,13 +35,13 @@
             </svg>
             {{ blockedToolCount }} disabled
           </div>
-          <div v-else-if="quarantineToolCount > 0" class="stat-desc text-xs text-warning flex items-center gap-1">
+          <div v-if="quarantineToolCount > 0" class="stat-desc text-xs text-warning flex items-center gap-1">
             <svg class="w-3 h-3 inline-block flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
             </svg>
             {{ quarantineToolCount }} pending approval
           </div>
-          <div v-else-if="server.tool_list_token_size" class="stat-desc text-xs">
+          <div v-if="blockedToolCount === 0 && quarantineToolCount === 0 && server.tool_list_token_size" class="stat-desc text-xs">
             {{ server.tool_list_token_size.toLocaleString() }} tokens
           </div>
         </div>
@@ -106,12 +106,33 @@
         <span class="text-xs">{{ server.last_error }}</span>
       </div>
 
-      <!-- Quarantine warning -->
+      <!-- Server-level quarantine warning. Server is held back entirely until
+           the user approves it. Drives the Approve button below via
+           health.action='approve'. -->
       <div v-if="server.quarantined" class="alert alert-warning alert-sm mb-4">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
         </svg>
         <span class="text-xs">Server is quarantined</span>
+      </div>
+
+      <!-- Tool-level quarantine warning (Spec 032). Independent of server
+           quarantine: when a server is trusted at the server level but ships
+           tools with descriptions/schemas that have not yet been approved
+           (or that changed since last approval — rug-pull guard), they are
+           silently blocked from agent use. Surface this on the list so users
+           don't have to open Details to discover it. -->
+      <div v-else-if="quarantineToolCount > 0" class="alert alert-warning alert-sm mb-4">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+        </svg>
+        <span class="text-xs flex-1">{{ toolQuarantineSummary }}</span>
+        <router-link
+          :to="`/servers/${server.name}?tab=tools`"
+          class="btn btn-xs btn-warning"
+        >
+          Review
+        </router-link>
       </div>
 
       <!-- Actions - uses unified health.action when available -->
@@ -406,6 +427,34 @@ const blockedToolCount = computed(() => {
   const q = props.server.quarantine
   if (!q) return 0
   return q.blocked_count ?? 0
+})
+
+// Human-readable summary for the tool-quarantine banner. Differentiates
+// fully-quarantined (every tool needs approval) from partially-quarantined,
+// and surfaces "changed" tools separately because they indicate a rug-pull
+// rather than a first-time review.
+const toolQuarantineSummary = computed(() => {
+  const q = props.server.quarantine
+  if (!q) return ''
+  const pending = q.pending_count ?? 0
+  const changed = q.changed_count ?? 0
+  const total = pending + changed
+  if (total === 0) return ''
+  const toolCount = props.server.tool_count ?? 0
+  const noun = (n: number) => (n === 1 ? 'tool' : 'tools')
+  if (changed > 0 && pending > 0) {
+    return `${pending} ${noun(pending)} pending, ${changed} changed — approval needed`
+  }
+  if (changed > 0) {
+    return `${changed} ${noun(changed)} changed since approval — re-review needed`
+  }
+  if (toolCount > 0 && pending === toolCount) {
+    return `All ${pending} ${noun(pending)} pending security approval`
+  }
+  if (toolCount > 0) {
+    return `${pending} of ${toolCount} ${noun(toolCount)} pending security approval`
+  }
+  return `${pending} ${noun(pending)} pending security approval`
 })
 
 // Security scan badge (Spec 039)
