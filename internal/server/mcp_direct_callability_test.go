@@ -56,7 +56,11 @@ func TestDirectToolCallabilityBlock_ConfigDeniedTool(t *testing.T) {
 
 func TestDirectToolCallabilityBlock_DisabledTool(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
-	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "github", Enabled: true}))
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name:          "github",
+		Enabled:       true,
+		DisabledTools: []string{"config_disabled"},
+	}))
 	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: "github",
 		ToolName:   "delete_repo",
@@ -128,7 +132,11 @@ func TestDirectToolCallabilityBlock_ApprovedToolAllowed(t *testing.T) {
 
 func TestFilterDirectToolsForAgentCallability_AgentOnly(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
-	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{Name: "github", Enabled: true}))
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name:          "github",
+		Enabled:       true,
+		DisabledTools: []string{"config_disabled"},
+	}))
 	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: "github",
 		ToolName:   "allowed",
@@ -150,6 +158,7 @@ func TestFilterDirectToolsForAgentCallability_AgentOnly(t *testing.T) {
 		{Name: FormatDirectToolName("github", "allowed")},
 		{Name: FormatDirectToolName("github", "disabled")},
 		{Name: FormatDirectToolName("github", "pending")},
+		{Name: FormatDirectToolName("github", "config_disabled")},
 	}
 
 	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{

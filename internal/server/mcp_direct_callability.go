@@ -97,6 +97,10 @@ func (p *MCPProxyServer) isDirectToolCallable(serverName, toolName string) bool 
 		return false
 	}
 
+	if !serverConfig.IsToolAllowedByConfig(toolName) {
+		return false
+	}
+
 	if p.config != nil && p.config.IsQuarantineEnabled() && !serverConfig.IsQuarantineSkipped() {
 		approval, approvalErr := p.storage.GetToolApproval(serverName, toolName)
 		if approvalErr == nil && approval != nil {
