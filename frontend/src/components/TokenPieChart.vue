@@ -35,7 +35,7 @@ const chartData = computed(() => ({
       data: props.data.map(d => d.value),
       backgroundColor: props.data.map(d => d.color),
       borderWidth: 2,
-      borderColor: 'hsl(var(--b1))'
+      borderColor: 'var(--color-base-100)'
     }
   ]
 }))

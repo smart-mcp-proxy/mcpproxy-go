@@ -63,10 +63,15 @@ if os.path.isdir(EXTRAS):
     <table>
       <tr><th>Regression</th><th>Cause (v5 breaking change)</th><th>Fix</th></tr>
       <tr><td>Form labels/inputs misaligned across ~16 views</td><td>v5 removed <code>.form-control</code> and repurposed <code>.label</code>/<code>.label-text</code></td><td>Unlayered compat shim in <code>main.css</code> restoring v4 stack semantics (overrides DaisyUI's cascade layer)</td></tr>
+      <tr><td>Form inputs only ~half width</td><td>v5 gives <code>.input</code>/<code>.select</code>/<code>.textarea</code> an intrinsic width, so <code>form-control</code>'s flex stretch no longer fills the row</td><td><code>.form-control :where(.input,.select,.textarea){{width:100%}}</code> in the shim</td></tr>
       <tr><td>Manual/Import &amp; server-detail tabs looked like plain text</td><td><code>tabs-boxed</code>→<code>tabs-box</code>, <code>tabs-bordered</code>→<code>tabs-border</code> renamed in v5</td><td>Renamed tab containers in AddServerModal, OnboardingWizard, ServerDetail</td></tr>
       <tr><td>Theme dropdown clipped (labels + title cut off-screen)</td><td>Menu too narrow (<code>w-64</code>) and <code>dropdown-end</code> pushed a wider menu off the left of the viewport from the left sidebar</td><td>Widened to <code>w-72</code> + <code>flex-nowrap</code>; dropped <code>dropdown-end</code> so it opens rightward (left edge x: −85px → +12px, on-screen)</td></tr>
+      <tr><td>Sidebar nav items + active highlight only content-width</td><td>v5 <code>.menu</code> defaults to <code>width: max-content</code> (v4 filled the rail)</td><td>Added <code>w-full</code> to the sidebar <code>.menu</code> lists (ul width 117px → 231px)</td></tr>
+      <tr><td>Dashboard connection dots/lines black; MCP logo glow gone</td><td>v5 renamed all theme CSS vars (<code>--su</code>→<code>--color-success</code>, <code>--p</code>→<code>--color-primary</code>, <code>--b1/2/3</code>, <code>--bc</code>) and the var now holds the full color (no <code>hsl()</code>/<code>oklch()</code> wrapper); undefined short vars resolved to black/none</td><td>Converted ~50 refs across Dashboard, TokenPieChart, Hints panels to v5 vars; opacity uses → <code>color-mix(in oklch, …, transparent)</code></td></tr>
     </table>
-    <div class="pair">
+    <div class="qa-grid">
+      <figure><figcaption>Dashboard — fixed (green connection dots/lines + MCP logo glow restored)</figcaption>{img(os.path.join(EXTRAS, "dashboard-fixed.png"))}</figure>
+      <figure><figcaption>Sidebar nav — fixed (items + active highlight fill the rail)</figcaption>{img(os.path.join(EXTRAS, "sidebar-servers.png"))}</figure>
       <figure><figcaption>Add-server form — fixed (labels stack, full-width inputs, boxed tabs)</figcaption>{img(form)}</figure>
       <figure><figcaption>Theme dropdown — fixed (on-screen, all 32 themes + swatches fit)</figcaption>{img(theme)}</figure>
     </div>"""

@@ -142,40 +142,40 @@
         <!-- Connection lines: one fat horizontal line each side, big green running dot -->
         <svg class="absolute inset-0 w-full h-full pointer-events-none hidden lg:block overflow-visible" preserveAspectRatio="none">
           <!-- Left fat line (clients → hub) -->
-          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="oklch(var(--su))" stroke-width="4" stroke-opacity="0.25" />
+          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
           <!-- Right fat line (hub → servers) -->
-          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="oklch(var(--su))" stroke-width="4" stroke-opacity="0.25" />
+          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
 
           <!-- Green dots travel once every 20s cycle, 4 dots total -->
           <!-- Left dot 1: clients → hub -->
-          <circle r="7" fill="oklch(var(--su))" opacity="0">
+          <circle r="7" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.05;0.15;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.05;0.13;0.15;1" dur="20s" repeatCount="indefinite" />
           </circle>
           <!-- Left dot 2: clients → hub, staggered -->
-          <circle r="6" fill="oklch(var(--su))" opacity="0">
+          <circle r="6" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.1;0.2;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.1;0.18;0.2;1" dur="20s" repeatCount="indefinite" />
           </circle>
 
           <!-- Right dot 1: servers → hub -->
-          <circle r="7" fill="oklch(var(--su))" opacity="0">
+          <circle r="7" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.07;0.17;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.07;0.15;0.17;1" dur="20s" repeatCount="indefinite" />
           </circle>
           <!-- Right dot 2: servers → hub, staggered -->
-          <circle r="6" fill="oklch(var(--su))" opacity="0">
+          <circle r="6" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.12;0.22;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.12;0.2;0.22;1" dur="20s" repeatCount="indefinite" />
           </circle>
 
           <!-- Static green dots at hub connection points -->
-          <circle cx="42%" cy="50%" r="5" fill="oklch(var(--su))" opacity="0.7" />
-          <circle cx="58%" cy="50%" r="5" fill="oklch(var(--su))" opacity="0.7" />
+          <circle cx="42%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
+          <circle cx="58%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
         </svg>
 
         <!-- Token savings badge (above hub) -->
@@ -824,10 +824,10 @@ onUnmounted(() => {
 /* Hub glow animation when MCPProxy is active — uses drop-shadow to follow the logo shape */
 @keyframes hubGlow {
   0%, 100% {
-    filter: drop-shadow(0 4px 8px oklch(var(--p) / 0.15)) drop-shadow(0 2px 4px oklch(var(--p) / 0.1));
+    filter: drop-shadow(0 4px 8px color-mix(in oklch, var(--color-primary) 15%, transparent)) drop-shadow(0 2px 4px color-mix(in oklch, var(--color-primary) 10%, transparent));
   }
   50% {
-    filter: drop-shadow(0 6px 16px oklch(var(--p) / 0.3)) drop-shadow(0 3px 8px oklch(var(--p) / 0.15));
+    filter: drop-shadow(0 6px 16px color-mix(in oklch, var(--color-primary) 30%, transparent)) drop-shadow(0 3px 8px color-mix(in oklch, var(--color-primary) 15%, transparent));
   }
 }
 
