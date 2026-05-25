@@ -81,6 +81,8 @@ components:
         oauth_expiry_warning_hours:
           description: Health status settings
           type: number
+        output_validation:
+          $ref: '#/components/schemas/config.OutputValidationConfig'
         quarantine_enabled:
           description: |-
             QuarantineEnabled controls whether quarantine is active. It gates two
@@ -388,6 +390,22 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    config.OutputValidationConfig:
+      description: Output-schema validation settings (Spec 056)
+      properties:
+        max_bytes:
+          description: structured payload byte cap; default 5<<20
+          type: integer
+        max_depth:
+          description: nesting depth cap; default 64
+          type: integer
+        missing_structured_content:
+          description: '"allow" | "block"; default "allow"'
+          type: string
+        mode:
+          description: '"off" | "warn" | "strict"; default "warn"'
+          type: string
       type: object
     config.RegistryEntry:
       properties:
