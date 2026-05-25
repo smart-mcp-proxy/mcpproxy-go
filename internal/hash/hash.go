@@ -7,9 +7,17 @@ import (
 	"fmt"
 )
 
-// ToolHash computes SHA-256 hash for tool change detection
+// ToolHash computes SHA-256 hash for tool change detection.
 // Format: sha256(serverName + toolName + description + parametersSchemaJSON)
 func ToolHash(serverName, toolName, description string, parametersSchema interface{}) (string, error) {
+	return ToolHashWithOutputSchema(serverName, toolName, description, parametersSchema, "")
+}
+
+// ToolHashWithOutputSchema computes SHA-256 hash for the full tool contract.
+// Output schema is included because it describes the data shape returned to the
+// agent and therefore belongs to the human-approved tool contract.
+// Format: sha256(serverName + toolName + description + parametersSchemaJSON + outputSchemaJSON)
+func ToolHashWithOutputSchema(serverName, toolName, description string, parametersSchema interface{}, outputSchemaJSON string) (string, error) {
 	// Serialize parameters schema to JSON for consistent hashing
 	var schemaBytes []byte
 	var err error
@@ -21,8 +29,8 @@ func ToolHash(serverName, toolName, description string, parametersSchema interfa
 		}
 	}
 
-	// Combine server name, tool name, description, and schema JSON
-	combined := serverName + toolName + description + string(schemaBytes)
+	// Combine server name, tool name, description, input schema JSON, and output schema JSON
+	combined := serverName + toolName + description + string(schemaBytes) + outputSchemaJSON
 
 	// Compute SHA-256 hash
 	hasher := sha256.New()
@@ -60,7 +68,12 @@ func VerifyToolHash(serverName, toolName, description string, parametersSchema i
 
 // ComputeToolHash computes a SHA256 hash for a tool (alias for ToolHash that doesn't return error)
 func ComputeToolHash(serverName, toolName, description string, inputSchema interface{}) string {
-	hash, err := ToolHash(serverName, toolName, description, inputSchema)
+	return ComputeToolHashWithOutputSchema(serverName, toolName, description, inputSchema, "")
+}
+
+// ComputeToolHashWithOutputSchema computes a SHA256 hash for a tool including output schema.
+func ComputeToolHashWithOutputSchema(serverName, toolName, description string, inputSchema interface{}, outputSchemaJSON string) string {
+	hash, err := ToolHashWithOutputSchema(serverName, toolName, description, inputSchema, outputSchemaJSON)
 	if err != nil {
 		// If hashing fails, return a default hash based on server and tool name
 		fallback := StringHash(fmt.Sprintf("%s:%s", serverName, toolName))

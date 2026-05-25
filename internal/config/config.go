@@ -239,9 +239,9 @@ type ServerConfig struct {
 	// when the server is configured with both Command and an HTTP/SSE URL — i.e.,
 	// mcpproxy starts the process AND connects via network. Stdio servers ignore
 	// this field. Zero or unset → 30s default.
-	LauncherWaitTimeout Duration  `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
-	EnabledTools        []string  `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
-	DisabledTools       []string  `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
+	LauncherWaitTimeout Duration `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
+	EnabledTools        []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
+	DisabledTools       []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -523,14 +523,15 @@ func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
 
 // ToolMetadata represents tool information stored in the index
 type ToolMetadata struct {
-	Name        string           `json:"name"`
-	ServerName  string           `json:"server_name"`
-	Description string           `json:"description"`
-	ParamsJSON  string           `json:"params_json"`
-	Hash        string           `json:"hash"`
-	Created     time.Time        `json:"created"`
-	Updated     time.Time        `json:"updated"`
-	Annotations *ToolAnnotations `json:"annotations,omitempty"`
+	Name             string           `json:"name"`
+	ServerName       string           `json:"server_name"`
+	Description      string           `json:"description"`
+	ParamsJSON       string           `json:"params_json"`
+	OutputSchemaJSON string           `json:"output_schema_json,omitempty"`
+	Hash             string           `json:"hash"`
+	Created          time.Time        `json:"created"`
+	Updated          time.Time        `json:"updated"`
+	Annotations      *ToolAnnotations `json:"annotations,omitempty"`
 }
 
 // ToolAnnotations represents MCP tool behavior hints

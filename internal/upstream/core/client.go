@@ -285,11 +285,14 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			paramsJSON = string(schemaBytes)
 		}
 
+		outputSchemaJSON := captureOutputSchemaJSON(tool)
+
 		toolMeta := &config.ToolMetadata{
-			ServerName:  c.config.Name,
-			Name:        tool.Name,
-			Description: tool.Description,
-			ParamsJSON:  paramsJSON,
+			ServerName:       c.config.Name,
+			Name:             tool.Name,
+			Description:      tool.Description,
+			ParamsJSON:       paramsJSON,
+			OutputSchemaJSON: outputSchemaJSON,
 		}
 
 		// Copy tool annotations if any are set
@@ -318,9 +321,9 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			}
 		}
 
-		// Compute hash for tool change detection
-		// Hash is based on serverName + toolName + inputSchema
-		toolMeta.Hash = hash.ComputeToolHash(c.config.Name, tool.Name, tool.Description, tool.InputSchema)
+		// Compute hash for tool change detection.
+		// Hash is based on serverName + toolName + description + inputSchema + outputSchema.
+		toolMeta.Hash = hash.ComputeToolHashWithOutputSchema(c.config.Name, tool.Name, tool.Description, tool.InputSchema, outputSchemaJSON)
 
 		tools = append(tools, toolMeta)
 	}

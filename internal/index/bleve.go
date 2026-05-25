@@ -21,14 +21,15 @@ type BleveIndex struct {
 
 // ToolDocument represents a tool document in the index
 type ToolDocument struct {
-	ToolName       string `json:"tool_name"`      // Just the tool name (without server prefix)
-	FullToolName   string `json:"full_tool_name"` // Complete server:tool format
-	ServerName     string `json:"server_name"`
-	Description    string `json:"description"`
-	ParamsJSON     string `json:"params_json"`
-	Hash           string `json:"hash"`
-	Tags           string `json:"tags"`
-	SearchableText string `json:"searchable_text"` // Combined searchable content
+	ToolName         string `json:"tool_name"`      // Just the tool name (without server prefix)
+	FullToolName     string `json:"full_tool_name"` // Complete server:tool format
+	ServerName       string `json:"server_name"`
+	Description      string `json:"description"`
+	ParamsJSON       string `json:"params_json"`
+	OutputSchemaJSON string `json:"output_schema_json,omitempty"`
+	Hash             string `json:"hash"`
+	Tags             string `json:"tags"`
+	SearchableText   string `json:"searchable_text"` // Combined searchable content
 }
 
 // NewBleveIndex creates a new Bleve index
@@ -147,14 +148,15 @@ func (b *BleveIndex) IndexTool(toolMeta *config.ToolMetadata) error {
 		toolMeta.ParamsJSON)
 
 	doc := &ToolDocument{
-		ToolName:       toolName,
-		FullToolName:   toolMeta.Name,
-		ServerName:     toolMeta.ServerName,
-		Description:    toolMeta.Description,
-		ParamsJSON:     toolMeta.ParamsJSON,
-		Hash:           toolMeta.Hash,
-		Tags:           "", // Can be extended later
-		SearchableText: searchableText,
+		ToolName:         toolName,
+		FullToolName:     toolMeta.Name,
+		ServerName:       toolMeta.ServerName,
+		Description:      toolMeta.Description,
+		ParamsJSON:       toolMeta.ParamsJSON,
+		OutputSchemaJSON: toolMeta.OutputSchemaJSON,
+		Hash:             toolMeta.Hash,
+		Tags:             "", // Can be extended later
+		SearchableText:   searchableText,
 	}
 
 	// Use server:tool format as document ID for uniqueness
@@ -249,7 +251,7 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	// Create search request
 	searchReq := bleve.NewSearchRequest(boolQuery)
 	searchReq.Size = limit
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
 	searchReq.Highlight = bleve.NewHighlight()
 
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
@@ -263,11 +265,12 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	var results []*config.SearchResult
 	for _, hit := range searchResult.Hits {
 		toolMeta := &config.ToolMetadata{
-			Name:        getStringField(hit.Fields, "full_tool_name"),
-			ServerName:  getStringField(hit.Fields, "server_name"),
-			Description: getStringField(hit.Fields, "description"),
-			ParamsJSON:  getStringField(hit.Fields, "params_json"),
-			Hash:        getStringField(hit.Fields, "hash"),
+			Name:             getStringField(hit.Fields, "full_tool_name"),
+			ServerName:       getStringField(hit.Fields, "server_name"),
+			Description:      getStringField(hit.Fields, "description"),
+			ParamsJSON:       getStringField(hit.Fields, "params_json"),
+			OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
+			Hash:             getStringField(hit.Fields, "hash"),
 		}
 
 		results = append(results, &config.SearchResult{
