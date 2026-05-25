@@ -154,6 +154,14 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		// Get arguments from the request
 		args := request.GetArguments()
 
+		// Enforce direct-mode callability before emitting a tool-started event or
+		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
+		// approval controls enforced by call_tool_* variants.
+		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, injectAuthMetadata(ctx, args)); blocked != nil {
+			p.emitActivityPolicyDecision(serverName, toolName, sessionID, "blocked", "direct tool is not callable")
+			return blocked, nil
+		}
+
 		// Emit activity event
 		enrichedArgs := injectAuthMetadata(ctx, args)
 		p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
@@ -489,10 +497,12 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	}
 
 	// Create direct mode server
+	directOpts := append([]mcpserver.ServerOption{}, opts...)
+	directOpts = append(directOpts, mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability))
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		opts...,
+		directOpts...,
 	)
 
 	// Create code execution mode server
