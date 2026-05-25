@@ -97,7 +97,7 @@ The E2E tests use `@modelcontextprotocol/server-everything`:
 ./scripts/run-linter.sh
 
 # Or directly
-golangci-lint run ./...
+golangci-lint run --config .github/.golangci.yml ./...
 ```
 
 ## Writing Tests

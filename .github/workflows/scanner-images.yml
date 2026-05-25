@@ -29,6 +29,7 @@ on:
 permissions:
   contents: read
   packages: write
+  security-events: write  # required for SARIF upload to the Security tab
 
 jobs:
   build:
@@ -51,21 +52,21 @@ jobs:
             context: docker/scanners/proximity
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Skip if not selected
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.scanner != '' && inputs.scanner != matrix.id }}
         run: echo "Skipping ${{ matrix.id }} (workflow_dispatch selected ${{ inputs.scanner }})" && exit 0
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4.0.0
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca  # v3.9.0
 
       - name: Log in to GHCR
         if: ${{ github.event_name != 'pull_request' }}
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -84,7 +85,7 @@ jobs:
           fi
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75  # v6.9.0
         with:
           context: ${{ matrix.context }}
           platforms: linux/amd64,linux/arm64
@@ -95,3 +96,41 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/smart-mcp-proxy/mcpproxy-go
             org.opencontainers.image.revision=${{ github.sha }}
+
+      # Trivy image scan — runs only on push/workflow_dispatch (not pull_request) because
+      # multi-platform builds (linux/amd64,linux/arm64) cannot be loaded to the runner with
+      # `load: true`, so there is no local image to scan on PRs. On push the image is
+      # already in GHCR and Trivy pulls it directly.
+      # exit-code: '0' → report-only, never fails the build. Scanner base images routinely
+      # carry unfixable CVEs (upstream OS packages); blocking builds on those would create
+      # constant noise with no actionable remediation. Visibility via the Security tab and
+      # the workflow log is the goal.
+      - name: Scan image with Trivy
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:${{ steps.tags.outputs.short_sha }}
+          scan-type: image
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '0'
+          format: table
+
+      - name: Upload Trivy SARIF to Security tab
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}:${{ steps.tags.outputs.short_sha }}
+          scan-type: image
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          exit-code: '0'
+          format: sarif
+          output: trivy-results-${{ matrix.id }}.sarif
+
+      - name: Upload SARIF
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          sarif_file: trivy-results-${{ matrix.id }}.sarif
+          category: trivy-${{ matrix.id }}

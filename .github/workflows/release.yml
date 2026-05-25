@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           fetch-depth: 0  # Full history for git log
 
@@ -179,7 +179,7 @@ jobs:
           echo "notes_file=$NOTES_FILE" >> $GITHUB_OUTPUT
 
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: release-notes
           path: RELEASE_NOTES-${{ github.ref_name }}.md
@@ -249,24 +249,24 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Download release notes artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: release-notes
           path: .
         continue-on-error: true  # Don't fail if notes not yet available
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version: "1.25"
 
       - name: Cache Go modules and build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: |
             ~/.cache/go-build
@@ -280,7 +280,7 @@ jobs:
         run: go mod download
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '20'
 
@@ -695,7 +695,7 @@ jobs:
 
       - name: Upload unsigned Windows installer for signing
         if: matrix.goos == 'windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         id: upload-unsigned-installer
         with:
           name: unsigned-installer-windows-${{ matrix.goarch }}
@@ -909,13 +909,13 @@ jobs:
           fi
 
       - name: Upload versioned archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: versioned-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload latest archive artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: latest-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
@@ -951,7 +951,7 @@ jobs:
 
       - name: Upload macOS installers artifact
         if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
           path: installers-artifact/*
@@ -968,21 +968,21 @@ jobs:
 
     steps:
       - name: Download unsigned installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           name: unsigned-installer-windows-${{ matrix.arch }}
           path: unsigned
 
       - name: Re-upload for SignPath
         id: reupload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: signpath-input-windows-${{ matrix.arch }}
           # Upload exe - GitHub Actions will ZIP it for SignPath
           path: unsigned/*.exe
 
       - name: Submit to SignPath for signing
-        uses: signpath/github-action-submit-signing-request@v1
+        uses: signpath/github-action-submit-signing-request@b9d91eadd323de506c0c81cf0c7fe7438f3360fd  # v2.2
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '84efd51b-c11c-4a85-82e6-7c3b1157d7ca'
@@ -1020,7 +1020,7 @@ jobs:
           fi
 
       - name: Upload signed Windows installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: installer-windows-${{ matrix.arch }}
           path: signed/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.arch }}.exe
@@ -1034,14 +1034,14 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca  # v3.9.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5.4.0
         with:
           context: .
           push: true
@@ -1057,15 +1057,18 @@ jobs:
     needs: [build, sign-windows, generate-notes]  # add build-docker when server MVP is ready
     runs-on: ubuntu-latest
     environment: production
+    outputs:
+      # base64-encoded checksums.txt — consumed by the SLSA provenance job (WP-C3)
+      hashes: ${{ steps.checksums.outputs.hashes }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: dist
 
@@ -1133,6 +1136,65 @@ jobs:
             fi
           done
 
+      # Set version variable early so SBOM step (WP-C2) and the release body
+      # can both reference $CLEAN_VERSION. Moved before "Generate checksums"
+      # so the SBOM filename is deterministic and the SBOM file itself is
+      # present in release-files/ when checksums run (WP-C2 ordering requirement).
+      - name: Set version variable
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
+
+      # WP-C2: Generate SPDX-JSON SBOM from source tree and drop it into
+      # release-files/ so it is included in the checksums + uploaded with all
+      # other release assets by the "Create release" step below.
+      # upload-artifact/upload-release-assets are both disabled because this
+      # workflow is tag-push triggered (not a `release` event), so we handle
+      # distribution ourselves via the release-files/ directory.
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: release-files/mcpproxy-${{ env.CLEAN_VERSION }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # WP-C4: Generate cumulative CHANGELOG.md with git-cliff and place it in
+      # release-files/ so it is checksummed + uploaded alongside all other assets.
+      #
+      # Rationale for NOT committing back to main:
+      #   Pushing a generated file back to main requires a PAT (GITHUB_TOKEN lacks
+      #   push access on protected branches) and creates a race condition when two
+      #   releases are cut close together.  Distributing CHANGELOG.md as a release
+      #   asset is simpler, reproducible, and sufficient for open-source consumers.
+      #
+      # fetch-depth: 0 is already set on this job's Checkout step (line ~1065) so
+      # git-cliff sees the full tag history without an extra checkout here.
+      - name: Generate CHANGELOG (git-cliff)
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        with:
+          config: cliff.toml
+          args: --verbose
+        env:
+          OUTPUT: release-files/CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate checksums
+        id: checksums
+        run: |
+          cd release-files
+          # checksum every artifact except the checksums file and its signature
+          # bundle, so re-runs / pre-existing files can't make checksums.txt
+          # reference itself. xargs -r guards against an empty artifact list.
+          find . -maxdepth 1 -type f ! -name 'checksums.txt' ! -name 'checksums.txt.cosign.bundle' -printf '%P\n' \
+            | sort | xargs -r sha256sum > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+          # base64-encode for SLSA provenance generator (WP-C3)
+          echo "hashes=$(base64 -w0 checksums.txt)" >> "$GITHUB_OUTPUT"
+
       - name: List files for upload
         run: |
           echo "Files to upload:"
@@ -1140,13 +1202,8 @@ jobs:
           echo "Pending notarizations:"
           ls -la pending-notarizations/ || echo "No pending notarizations"
 
-      - name: Set version variable
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "CLEAN_VERSION=${VERSION}" >> $GITHUB_ENV
-
       - name: Create release with binaries
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
           files: release-files/*
           body: |
@@ -1239,6 +1296,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign checksums (keyless)
+        # Cosign keyless signing — OIDC identity comes from the GitHub Actions JWT
+        # (id-token: write is granted at the workflow level).
+        # Produces a single bundle file (signature + certificate + Rekor transparency log entry).
+        #
+        # To verify after download:
+        #   cosign verify-blob \
+        #     --bundle checksums.txt.cosign.bundle \
+        #     --certificate-identity-regexp "^https://github.com/smart-mcp-proxy/mcpproxy-go/.github/workflows/release.yml@refs/tags/v" \
+        #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+        #     checksums.txt
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle release-files/checksums.txt.cosign.bundle \
+            release-files/checksums.txt
+
+      - name: Upload cosign bundle to release
+        run: |
+          gh release upload "${{ github.ref_name }}" \
+            release-files/checksums.txt.cosign.bundle \
+            --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Upload pending notarizations
         if: hashFiles('pending-notarizations/*.pending') != ''
         run: |
@@ -1252,6 +1337,23 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # WP-C3: SLSA build provenance — generates a SLSA v1 attestation for all
+  # release artifacts and uploads it to the GitHub release as a .intoto.jsonl file.
+  provenance:
+    needs: [release]
+    permissions:
+      actions: read       # detect the GitHub Actions environment (trusted builder)
+      id-token: write     # keyless signing of the provenance via OIDC
+      contents: write     # upload the attestation to the release
+    # SLSA generator MUST be referenced by semver tag, not SHA — it verifies its own
+    # ref to establish the trusted builder identity; SHA or branch references break the
+    # provenance trust model. This is the documented exception to the repo's SHA-pin rule
+    # (see WP-C3 spec, WP-B5 exception).
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.release.outputs.hashes }}
+      upload-assets: true   # attach the .intoto.jsonl attestation to the release
+
   update-homebrew:
     needs: release
     runs-on: ubuntu-latest
@@ -1262,7 +1364,7 @@ jobs:
 
     steps:
       - name: Checkout tap repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           repository: smart-mcp-proxy/homebrew-mcpproxy
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -1463,7 +1565,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Install repo tooling
         run: |
@@ -1472,7 +1574,7 @@ jobs:
           aws --version
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: release-artifacts
           pattern: linux-packages-*
@@ -1502,10 +1604,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -1531,7 +1633,7 @@ jobs:
           npm run build
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@9681c2997648301493e78cacbfb790a9f19c833f  # v3.9.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -1547,7 +1649,7 @@ jobs:
 
     steps:
       - name: Trigger marketing site update
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@ff45666b9427631e3450c54a1bcbee4d9ff4d7c0  # v3.0.0
         with:
           token: ${{ secrets.MARKETING_SITE_DISPATCH_TOKEN }}
           repository: smart-mcp-proxy/mcpproxy.app-website
@@ -1561,7 +1663,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Extract version from tag
         id: version

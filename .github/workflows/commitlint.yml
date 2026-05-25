@@ -1,0 +1,39 @@
+name: Commitlint
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+
+permissions:
+  pull-requests: read
+  statuses: write
+
+jobs:
+  validate-pr-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title follows Conventional Commits
+        uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017  # v5.5.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Allowed Conventional Commit types for this repo.
+          # Keep in sync with the types used in squash-merge commit messages.
+          types: |
+            feat
+            fix
+            docs
+            chore
+            ci
+            refactor
+            test
+            perf
+            build
+            style
+            revert
+          # Scope is optional; allow any scope string when present.
+          requireScope: false
