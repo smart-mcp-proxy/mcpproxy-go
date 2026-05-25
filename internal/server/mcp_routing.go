@@ -48,13 +48,16 @@ func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
 	// Use DiscoverTools which already filters for connected, enabled, non-quarantined servers
 	tools, err := p.upstreamManager.DiscoverTools(ctx)
 	if err != nil {
+		p.setDirectToolPermissions(nil)
 		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
 		return nil
 	}
 
 	serverTools := make([]mcpserver.ServerTool, 0, len(tools))
+	directToolPerms := make(map[string]string, len(tools))
 	for _, tool := range tools {
 		directName := FormatDirectToolName(tool.ServerName, tool.Name)
+		directToolPerms[directName] = requiredPermissionForDirectTool(tool.Annotations)
 
 		// Build MCP tool options
 		opts := []mcp.ToolOption{
@@ -113,6 +116,8 @@ func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
 			Handler: p.makeDirectModeHandler(tool.ServerName, tool.Name, tool.Annotations),
 		})
 	}
+
+	p.setDirectToolPermissions(directToolPerms)
 
 	p.logger.Info("built direct mode tools",
 		zap.Int("tool_count", len(serverTools)))
@@ -500,9 +505,16 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		opts = append(opts, mcpserver.WithHooks(p.hooks))
 	}
 
-	// Create direct mode server
+	// Create direct mode server. Both direct-mode tool filters are agent-scoped
+	// discovery filters and belong only on the direct server (not the shared
+	// code-exec / call-tool servers): filterDirectModeToolsForAuth enforces
+	// agent-token server/permission scope, filterDirectToolsForAgentCallability
+	// hides tools the agent could not actually invoke.
 	directOpts := append([]mcpserver.ServerOption{}, opts...)
-	directOpts = append(directOpts, mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability))
+	directOpts = append(directOpts,
+		mcpserver.WithToolFilter(p.filterDirectModeToolsForAuth),
+		mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability),
+	)
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),

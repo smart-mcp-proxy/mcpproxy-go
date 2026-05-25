@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -108,6 +109,13 @@ type MCPProxyServer struct {
 
 	// Hooks shared across all routing mode servers
 	hooks *mcpserver.Hooks
+
+	// directToolPerms maps direct-mode tool names (server__tool) to the
+	// operation permission required to call them. It is populated with the
+	// direct-mode registry and used only to filter tools/list for scoped agent
+	// tokens; execution-time authorization remains authoritative.
+	directToolPermsMu sync.RWMutex
+	directToolPerms   map[string]string
 
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
