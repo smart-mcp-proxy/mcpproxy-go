@@ -180,12 +180,12 @@ func TestFilterDirectToolsForAgentCallability_AgentOnly(t *testing.T) {
 	})
 
 	filtered := proxy.filterDirectToolsForAgentCallability(agentCtx, tools)
-	assert.Equal(t, []string{FormatDirectToolName("github", "allowed")}, directToolNamesForTest(filtered))
+	assert.Equal(t, []string{FormatDirectToolName("github", "allowed")}, directCallabilityToolNamesForTest(filtered))
 
 	assert.Equal(t, tools, proxy.filterDirectToolsForAgentCallability(context.Background(), tools))
 }
 
-func directToolNamesForTest(tools []mcp.Tool) []string {
+func directCallabilityToolNamesForTest(tools []mcp.Tool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
 		names = append(names, tool.Name)
