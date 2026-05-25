@@ -3,13 +3,44 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
+
+type directCallabilityDecision struct {
+	callable       bool
+	serverName     string
+	toolName       string
+	serverConfig   *config.ServerConfig
+	approval       *storage.ToolApprovalRecord
+	approvalStatus string
+	configDenied   bool
+	storageErr     error
+}
+
+type directCallabilityEvaluator struct {
+	proxy         *MCPProxyServer
+	serverConfigs map[string]*config.ServerConfig
+	serverErrors  map[string]error
+	approvals     map[string]*storage.ToolApprovalRecord
+	approvalErrs  map[string]error
+}
+
+func newDirectCallabilityEvaluator(proxy *MCPProxyServer) *directCallabilityEvaluator {
+	return &directCallabilityEvaluator{
+		proxy:         proxy,
+		serverConfigs: make(map[string]*config.ServerConfig),
+		serverErrors:  make(map[string]error),
+		approvals:     make(map[string]*storage.ToolApprovalRecord),
+		approvalErrs:  make(map[string]error),
+	}
+}
 
 // filterDirectToolsForAgentCallability hides direct-mode tools that an agent
 // token cannot actually invoke because they are disabled, quarantined, pending
@@ -25,6 +56,7 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 		return tools
 	}
 
+	evaluator := newDirectCallabilityEvaluator(p)
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, tool := range tools {
 		serverName, toolName, ok := ParseDirectToolName(tool.Name)
@@ -33,7 +65,7 @@ func (p *MCPProxyServer) filterDirectToolsForAgentCallability(ctx context.Contex
 			continue
 		}
 
-		if p.isDirectToolCallable(serverName, toolName) {
+		if evaluator.evaluate(serverName, toolName).callable {
 			filtered = append(filtered, tool)
 		}
 	}
@@ -52,64 +84,110 @@ func (p *MCPProxyServer) directToolCallabilityBlock(ctx context.Context, serverN
 		return nil
 	}
 
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err != nil || serverConfig == nil {
-		return mcp.NewToolResultError(p.blockedToolMessage(serverName, toolName))
+	decision := newDirectCallabilityEvaluator(p).evaluate(serverName, toolName)
+	if decision.callable {
+		return nil
 	}
 
-	if serverConfig.Quarantined {
-		return p.handleQuarantinedToolCall(ctx, serverName, toolName, args)
+	return p.directToolCallabilityResult(ctx, decision, args)
+}
+
+func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) directCallabilityDecision {
+	decision := directCallabilityDecision{
+		serverName: serverName,
+		toolName:   toolName,
+	}
+
+	if e.proxy.storage == nil {
+		return decision
+	}
+
+	serverConfig, serverErr := e.getServerConfig(serverName)
+	if serverErr != nil || serverConfig == nil {
+		decision.storageErr = serverErr
+		return decision
+	}
+	decision.serverConfig = serverConfig
+
+	if !serverConfig.Enabled || serverConfig.Quarantined {
+		return decision
 	}
 
 	if !serverConfig.IsToolAllowedByConfig(toolName) {
+		decision.configDenied = true
+		return decision
+	}
+
+	approval, approvalErr := e.getToolApproval(serverName, toolName)
+	if approvalErr != nil && !errors.Is(approvalErr, storage.ErrToolApprovalNotFound) {
+		decision.storageErr = approvalErr
+		return decision
+	}
+	decision.approval = approval
+
+	if e.proxy.config != nil && e.proxy.config.IsQuarantineEnabled() && !serverConfig.IsQuarantineSkipped() && approval != nil {
+		switch approval.Status {
+		case storage.ToolApprovalStatusPending, storage.ToolApprovalStatusChanged:
+			decision.approvalStatus = approval.Status
+			return decision
+		}
+	}
+
+	if approval != nil && approval.Disabled {
+		return decision
+	}
+
+	decision.callable = true
+	return decision
+}
+
+func (e *directCallabilityEvaluator) getServerConfig(serverName string) (*config.ServerConfig, error) {
+	if serverConfig, ok := e.serverConfigs[serverName]; ok {
+		return serverConfig, e.serverErrors[serverName]
+	}
+
+	serverConfig, err := e.proxy.storage.GetUpstreamServer(serverName)
+	e.serverConfigs[serverName] = serverConfig
+	e.serverErrors[serverName] = err
+	return serverConfig, err
+}
+
+func (e *directCallabilityEvaluator) getToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
+	key := serverName + "\x00" + toolName
+	if approval, ok := e.approvals[key]; ok {
+		return approval, e.approvalErrs[key]
+	}
+	if err, ok := e.approvalErrs[key]; ok {
+		return nil, err
+	}
+
+	approval, err := e.proxy.storage.GetToolApproval(serverName, toolName)
+	if approval != nil {
+		e.approvals[key] = approval
+	}
+	e.approvalErrs[key] = err
+	return approval, err
+}
+
+func (p *MCPProxyServer) directToolCallabilityResult(ctx context.Context, decision directCallabilityDecision, args map[string]interface{}) *mcp.CallToolResult {
+	if decision.serverConfig != nil && decision.serverConfig.Quarantined {
+		return p.handleQuarantinedToolCall(ctx, decision.serverName, decision.toolName, args)
+	}
+
+	if decision.configDenied {
 		return mcp.NewToolResultError(blockedToolMessageFor(true))
 	}
 
-	if p.config != nil && p.config.IsQuarantineEnabled() && !serverConfig.IsQuarantineSkipped() {
-		approval, approvalErr := p.storage.GetToolApproval(serverName, toolName)
-		if approvalErr == nil && approval != nil {
-			switch approval.Status {
-			case storage.ToolApprovalStatusPending:
-				return directPendingApprovalResult(serverName, toolName, approval)
-			case storage.ToolApprovalStatusChanged:
-				return directChangedApprovalResult(serverName, toolName, approval)
-			}
+	if decision.approval != nil {
+		switch decision.approvalStatus {
+		case storage.ToolApprovalStatusPending:
+			return directPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
+		case storage.ToolApprovalStatusChanged:
+			return directChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
 		}
 	}
 
-	if !p.isToolCallable(serverName, toolName) {
-		return mcp.NewToolResultError(p.blockedToolMessage(serverName, toolName))
-	}
-
-	return nil
-}
-
-// isDirectToolCallable is the direct-mode discovery predicate. It includes the
-// generic callable check plus tool-level pending/changed quarantine, because
-// isToolCallable intentionally handles only disabled/config/server state.
-func (p *MCPProxyServer) isDirectToolCallable(serverName, toolName string) bool {
-	if p.storage == nil || !p.isToolCallable(serverName, toolName) {
-		return false
-	}
-
-	serverConfig, err := p.storage.GetUpstreamServer(serverName)
-	if err != nil || serverConfig == nil || serverConfig.Quarantined {
-		return false
-	}
-
-	if !serverConfig.IsToolAllowedByConfig(toolName) {
-		return false
-	}
-
-	if p.config != nil && p.config.IsQuarantineEnabled() && !serverConfig.IsQuarantineSkipped() {
-		approval, approvalErr := p.storage.GetToolApproval(serverName, toolName)
-		if approvalErr == nil && approval != nil {
-			return approval.Status != storage.ToolApprovalStatusPending &&
-				approval.Status != storage.ToolApprovalStatusChanged
-		}
-	}
-
-	return true
+	return mcp.NewToolResultError(p.blockedToolMessage(decision.serverName, decision.toolName))
 }
 
 func directPendingApprovalResult(serverName, toolName string, approval *storage.ToolApprovalRecord) *mcp.CallToolResult {
@@ -122,8 +200,7 @@ func directPendingApprovalResult(serverName, toolName string, approval *storage.
 		"current_description": approval.CurrentDescription,
 		"action":              fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
 	}
-	jsonResult, _ := json.Marshal(response)
-	return mcp.NewToolResultText(string(jsonResult))
+	return directPolicyJSONResult(response, "pending tool approval")
 }
 
 func directChangedApprovalResult(serverName, toolName string, approval *storage.ToolApprovalRecord) *mcp.CallToolResult {
@@ -137,6 +214,13 @@ func directChangedApprovalResult(serverName, toolName string, approval *storage.
 		"current_description":  approval.CurrentDescription,
 		"action":               fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
 	}
-	jsonResult, _ := json.Marshal(response)
+	return directPolicyJSONResult(response, "changed tool approval")
+}
+
+func directPolicyJSONResult(response map[string]interface{}, description string) *mcp.CallToolResult {
+	jsonResult, err := json.Marshal(response)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize %s response: %v", description, err))
+	}
 	return mcp.NewToolResultText(string(jsonResult))
 }

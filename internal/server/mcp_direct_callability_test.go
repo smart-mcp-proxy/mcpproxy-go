@@ -92,7 +92,12 @@ func TestDirectToolCallabilityBlock_PendingApproval(t *testing.T) {
 	text := result.Content[0].(mcp.TextContent).Text
 	require.NoError(t, json.Unmarshal([]byte(text), &response))
 	assert.Equal(t, "TOOL_QUARANTINED", response["status"])
+	assert.Equal(t, "github", response["server_name"])
+	assert.Equal(t, "new_tool", response["tool_name"])
 	assert.Equal(t, "new_unapproved_tool", response["reason"])
+	assert.Contains(t, response["message"], "has not been approved")
+	assert.Equal(t, "new capability", response["current_description"])
+	assert.Contains(t, response["action"], "/api/v1/servers/github/tools/approve")
 }
 
 func TestDirectToolCallabilityBlock_ChangedApproval(t *testing.T) {
@@ -114,7 +119,13 @@ func TestDirectToolCallabilityBlock_ChangedApproval(t *testing.T) {
 	text := result.Content[0].(mcp.TextContent).Text
 	require.NoError(t, json.Unmarshal([]byte(text), &response))
 	assert.Equal(t, "TOOL_QUARANTINED", response["status"])
+	assert.Equal(t, "github", response["server_name"])
+	assert.Equal(t, "mutated_tool", response["tool_name"])
 	assert.Equal(t, "tool_description_changed", response["reason"])
+	assert.Contains(t, response["message"], "description has changed")
+	assert.Equal(t, "old", response["previous_description"])
+	assert.Equal(t, "new", response["current_description"])
+	assert.Contains(t, response["action"], "/api/v1/servers/github/tools/approve")
 }
 
 func TestDirectToolCallabilityBlock_ApprovedToolAllowed(t *testing.T) {

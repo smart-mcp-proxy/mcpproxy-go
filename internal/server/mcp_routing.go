@@ -153,17 +153,17 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 
 		// Get arguments from the request
 		args := request.GetArguments()
+		enrichedArgs := injectAuthMetadata(ctx, args)
 
 		// Enforce direct-mode callability before emitting a tool-started event or
 		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
 		// approval controls enforced by call_tool_* variants.
-		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, injectAuthMetadata(ctx, args)); blocked != nil {
+		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, enrichedArgs); blocked != nil {
 			p.emitActivityPolicyDecision(serverName, toolName, sessionID, "blocked", "direct tool is not callable")
 			return blocked, nil
 		}
 
 		// Emit activity event
-		enrichedArgs := injectAuthMetadata(ctx, args)
 		p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
 
 		// Call upstream
