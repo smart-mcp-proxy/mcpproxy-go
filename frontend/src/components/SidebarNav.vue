@@ -353,9 +353,12 @@
           :class="collapsed ? 'flex-col' : ''"
         >
           <!-- Theme dropdown -->
+          <!-- Sidebar sits at the left edge, so the theme menu must open rightward
+               (start-aligned). dropdown-end would anchor the menu's right edge to the
+               button and push a ~288px menu off the left of the viewport. -->
           <div
             class="dropdown dropdown-top"
-            :class="collapsed ? '' : 'dropdown-end flex-1'"
+            :class="collapsed ? '' : 'flex-1'"
           >
             <div
               tabindex="0"
@@ -369,7 +372,7 @@
               </svg>
               <span v-show="!collapsed">Theme</span>
             </div>
-            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-2xl bg-base-300 rounded-box w-64 max-h-96 overflow-y-auto mb-2">
+            <ul tabindex="0" class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2">
               <li class="menu-title">
                 <span>Choose theme</span>
               </li>

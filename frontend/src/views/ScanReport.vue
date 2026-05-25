@@ -179,7 +179,7 @@
                 <input type="checkbox" />
                 <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
                   <span
-                    class="badge badge-sm flex-shrink-0"
+                    class="badge badge-sm shrink-0"
                     :class="{
                       'badge-error': finding.threat_level === 'dangerous',
                       'badge-warning': finding.threat_level === 'warning',
@@ -276,7 +276,7 @@
                 <input type="checkbox" />
                 <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
                   <span
-                    class="badge badge-sm flex-shrink-0"
+                    class="badge badge-sm shrink-0"
                     :class="{
                       'badge-error': finding.threat_level === 'dangerous',
                       'badge-warning': finding.threat_level === 'warning',
@@ -440,14 +440,14 @@
                 class="flex items-start gap-2 py-0.5"
                 :class="file.suspicious ? 'bg-error/5 -mx-2 px-2 rounded' : ''"
               >
-                <span class="text-base-content/30 select-none w-4 text-right flex-shrink-0">{{ idx === scanFiles.length - 1 ? '└' : '├' }}</span>
-                <span v-if="file.suspicious" class="text-error flex-shrink-0" title="File has at least one finding">●</span>
-                <span v-else class="text-base-content/20 flex-shrink-0">○</span>
+                <span class="text-base-content/30 select-none w-4 text-right shrink-0">{{ idx === scanFiles.length - 1 ? '└' : '├' }}</span>
+                <span v-if="file.suspicious" class="text-error shrink-0" title="File has at least one finding">●</span>
+                <span v-else class="text-base-content/20 shrink-0">○</span>
                 <code
                   class="break-all"
                   :class="file.suspicious ? 'text-error font-medium' : 'text-base-content/80'"
                 >{{ file.path }}</code>
-                <div v-if="file.findings && file.findings.length" class="flex flex-wrap gap-1 ml-auto flex-shrink-0">
+                <div v-if="file.findings && file.findings.length" class="flex flex-wrap gap-1 ml-auto shrink-0">
                   <span
                     v-for="(t, i) in file.findings.slice(0, 3)"
                     :key="i"

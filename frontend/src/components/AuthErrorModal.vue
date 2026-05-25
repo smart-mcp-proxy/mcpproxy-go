@@ -79,7 +79,7 @@
     </div>
 
     <!-- Backdrop (clicking outside won't close to prevent accidental dismissal) -->
-    <div class="modal-backdrop bg-black bg-opacity-50"></div>
+    <div class="modal-backdrop bg-black/50"></div>
   </div>
 </template>
 
