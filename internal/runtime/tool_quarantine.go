@@ -234,7 +234,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		// Look up existing approval record
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
 
-		if existing != nil && existing.Status == storage.ToolApprovalStatusApproved && outputSchemaHashMigration {
+		if existing != nil && existing.Status == storage.ToolApprovalStatusApproved && outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
 			// One-time output-schema hash backfill: previously approved tools did
 			// not store outputSchema in the approved contract hash. Rebaseline the
 			// approved/current hash using the currently observed output schema so the
@@ -455,9 +455,12 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			legacyHash := calculateLegacyToolApprovalHash(toolName, tool.Description, schemaJSON)
 			annotationsHash := calculateHashWithAnnotations(toolName, tool.Description, schemaJSON, tool.Annotations)
 
-			isFormulaChange := rehashedFromStored == currentHash ||
-				existing.ApprovedHash == legacyHash ||
-				existing.ApprovedHash == annotationsHash
+			isFormulaChange := rehashedFromStored == currentHash
+			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+				isFormulaChange = isFormulaChange ||
+					existing.ApprovedHash == legacyHash ||
+					existing.ApprovedHash == annotationsHash
+			}
 
 			if isFormulaChange {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonFormulaMigration); err != nil {
