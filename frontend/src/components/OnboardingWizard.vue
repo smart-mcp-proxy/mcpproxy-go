@@ -21,7 +21,7 @@
       </div>
 
       <!-- Tabs -->
-      <div role="tablist" class="tabs tabs-bordered px-6 shrink-0">
+      <div role="tablist" class="tabs tabs-border px-6 shrink-0">
         <a
           v-for="tab in tabs"
           :key="tab.id"
@@ -1112,7 +1112,7 @@ const ClientRow: FunctionalComponent<{ client: ClientStatus; busy?: boolean }, {
         h('div', { class: 'font-medium text-sm truncate' }, c.name),
         h('div', { class: 'text-xs opacity-50 truncate', title: c.config_path }, c.config_path),
       ]),
-      h('div', { class: 'flex-shrink-0 ml-2' }, [
+      h('div', { class: 'shrink-0 ml-2' }, [
         !c.supported
           ? h('span', { class: 'badge badge-ghost badge-sm' }, c.reason || 'Not supported')
           : !c.exists

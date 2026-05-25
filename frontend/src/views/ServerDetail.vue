@@ -254,7 +254,7 @@
       </div>
 
       <!-- Tabs -->
-      <div class="tabs tabs-bordered">
+      <div class="tabs tabs-border">
         <button
           :class="['tab tab-lg', activeTab === 'tools' ? 'tab-active' : '']"
           @click="activeTab = 'tools'"

@@ -102,7 +102,7 @@
           <div class="card-body py-3 px-4">
             <div v-if="connectedClientNames.length > 0" class="mb-1">
               <div class="flex items-center gap-2 mb-1">
-                <div class="w-2.5 h-2.5 rounded-full bg-success flex-shrink-0"></div>
+                <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
                 <span class="text-xs font-bold uppercase tracking-wide opacity-50">Connected</span>
               </div>
               <div class="text-sm font-medium">{{ connectedClientNames.join(', ') }}</div>
@@ -142,40 +142,40 @@
         <!-- Connection lines: one fat horizontal line each side, big green running dot -->
         <svg class="absolute inset-0 w-full h-full pointer-events-none hidden lg:block overflow-visible" preserveAspectRatio="none">
           <!-- Left fat line (clients → hub) -->
-          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="oklch(var(--su))" stroke-width="4" stroke-opacity="0.25" />
+          <line x1="0" y1="50%" x2="42%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
           <!-- Right fat line (hub → servers) -->
-          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="oklch(var(--su))" stroke-width="4" stroke-opacity="0.25" />
+          <line x1="58%" y1="50%" x2="100%" y2="50%" stroke="var(--color-success)" stroke-width="4" stroke-opacity="0.25" />
 
           <!-- Green dots travel once every 20s cycle, 4 dots total -->
           <!-- Left dot 1: clients → hub -->
-          <circle r="7" fill="oklch(var(--su))" opacity="0">
+          <circle r="7" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.05;0.15;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.05;0.13;0.15;1" dur="20s" repeatCount="indefinite" />
           </circle>
           <!-- Left dot 2: clients → hub, staggered -->
-          <circle r="6" fill="oklch(var(--su))" opacity="0">
+          <circle r="6" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="0%;0%;42%;42%" keyTimes="0;0.1;0.2;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.1;0.18;0.2;1" dur="20s" repeatCount="indefinite" />
           </circle>
 
           <!-- Right dot 1: servers → hub -->
-          <circle r="7" fill="oklch(var(--su))" opacity="0">
+          <circle r="7" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.07;0.17;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.9;0.9;0;0" keyTimes="0;0.07;0.15;0.17;1" dur="20s" repeatCount="indefinite" />
           </circle>
           <!-- Right dot 2: servers → hub, staggered -->
-          <circle r="6" fill="oklch(var(--su))" opacity="0">
+          <circle r="6" fill="var(--color-success)" opacity="0">
             <animate attributeName="cx" values="100%;100%;58%;58%" keyTimes="0;0.12;0.22;1" dur="20s" repeatCount="indefinite" />
             <animate attributeName="cy" values="50%;50%;50%;50%" dur="20s" repeatCount="indefinite" />
             <animate attributeName="opacity" values="0;0.7;0.7;0;0" keyTimes="0;0.12;0.2;0.22;1" dur="20s" repeatCount="indefinite" />
           </circle>
 
           <!-- Static green dots at hub connection points -->
-          <circle cx="42%" cy="50%" r="5" fill="oklch(var(--su))" opacity="0.7" />
-          <circle cx="58%" cy="50%" r="5" fill="oklch(var(--su))" opacity="0.7" />
+          <circle cx="42%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
+          <circle cx="58%" cy="50%" r="5" fill="var(--color-success)" opacity="0.7" />
         </svg>
 
         <!-- Token savings badge (above hub) -->
@@ -215,7 +215,7 @@
                flashing a false "disabled" state on initial page load) -->
           <div v-if="dockerStatus" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
                :class="dockerStatus.available ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
-            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
@@ -226,7 +226,7 @@
           <!-- Quarantine (hidden until config fetch completes) -->
           <div v-if="quarantineEnabled !== null" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg"
                :class="quarantineEnabled ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning'">
-            <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                     d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
             </svg>
@@ -236,7 +236,7 @@
 
           <!-- Activity Log link -->
           <router-link to="/activity" class="flex items-center gap-2 text-xs px-3 py-2 rounded-lg bg-base-100/50 border border-base-300 hover:bg-base-200 transition-colors">
-            <svg class="w-4 h-4 flex-shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-4 h-4 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
             </svg>
@@ -253,7 +253,7 @@
         <router-link to="/servers" class="card card-compact bg-base-100 shadow-sm border border-base-300 w-full max-w-[240px] hover:shadow-md transition-shadow">
           <div class="card-body py-3 px-4">
             <div class="flex items-center gap-2">
-              <div class="w-2.5 h-2.5 rounded-full bg-success flex-shrink-0"></div>
+              <div class="w-2.5 h-2.5 rounded-full bg-success shrink-0"></div>
               <span class="text-2xl font-bold leading-none">{{ serversStore.serverCount.connected }}</span>
               <span class="text-sm opacity-60">connected</span>
             </div>
@@ -278,7 +278,7 @@
         >
           <div class="card-body py-3 px-4">
             <div class="flex items-center gap-2">
-              <svg class="w-4 h-4 text-warning flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg class="w-4 h-4 text-warning shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
               </svg>
               <span class="text-lg font-bold text-warning leading-none">{{ serversStore.serverCount.quarantined }}</span>
@@ -360,10 +360,10 @@
                 class="flex items-center justify-between text-sm"
               >
                 <div class="flex items-center space-x-2 min-w-0">
-                  <div class="w-2.5 h-2.5 rounded flex-shrink-0" :style="{ backgroundColor: segment.color }"></div>
+                  <div class="w-2.5 h-2.5 rounded shrink-0" :style="{ backgroundColor: segment.color }"></div>
                   <span class="truncate text-xs">{{ segment.name }}</span>
                 </div>
-                <div class="flex items-center space-x-2 flex-shrink-0">
+                <div class="flex items-center space-x-2 shrink-0">
                   <span class="font-mono text-xs">{{ formatNumber(segment.value) }}</span>
                   <span class="text-xs opacity-50">({{ segment.percentage.toFixed(1) }}%)</span>
                 </div>
@@ -824,10 +824,10 @@ onUnmounted(() => {
 /* Hub glow animation when MCPProxy is active — uses drop-shadow to follow the logo shape */
 @keyframes hubGlow {
   0%, 100% {
-    filter: drop-shadow(0 4px 8px oklch(var(--p) / 0.15)) drop-shadow(0 2px 4px oklch(var(--p) / 0.1));
+    filter: drop-shadow(0 4px 8px color-mix(in oklch, var(--color-primary) 15%, transparent)) drop-shadow(0 2px 4px color-mix(in oklch, var(--color-primary) 10%, transparent));
   }
   50% {
-    filter: drop-shadow(0 6px 16px oklch(var(--p) / 0.3)) drop-shadow(0 3px 8px oklch(var(--p) / 0.15));
+    filter: drop-shadow(0 6px 16px color-mix(in oklch, var(--color-primary) 30%, transparent)) drop-shadow(0 3px 8px color-mix(in oklch, var(--color-primary) 15%, transparent));
   }
 }
 

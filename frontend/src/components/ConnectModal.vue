@@ -27,7 +27,7 @@
           class="flex items-center justify-between p-3 rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors"
         >
           <div class="flex items-center gap-3 min-w-0 flex-1">
-            <div class="w-8 h-8 flex items-center justify-center text-lg flex-shrink-0" :title="client.name">
+            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" :title="client.name">
               {{ clientIcon(client) }}
             </div>
             <div class="min-w-0 flex-1">
@@ -35,7 +35,7 @@
               <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
             </div>
           </div>
-          <div class="flex-shrink-0 ml-2">
+          <div class="shrink-0 ml-2">
             <span v-if="!client.supported" class="badge badge-ghost badge-sm">{{ client.reason || 'Not supported' }}</span>
             <span v-else-if="!client.exists" class="text-xs opacity-40">Config not found</span>
             <button

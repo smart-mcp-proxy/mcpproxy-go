@@ -93,7 +93,7 @@
       >
         <!-- Server Edition: User Menu -->
         <template v-if="authStore.isTeamsEdition">
-          <ul class="menu menu-sm gap-0.5 p-0">
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li v-if="authStore.isAdmin && !collapsed" class="menu-title px-3 !py-1">
               <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40">My Workspace</span>
             </li>
@@ -111,7 +111,7 @@
 
           <template v-if="authStore.isAdmin">
             <div class="divider my-2 px-2"></div>
-            <ul class="menu menu-sm gap-0.5 p-0">
+            <ul class="menu menu-sm w-full gap-0.5 p-0">
               <li v-if="!collapsed" class="menu-title px-3 !py-1">
                 <span class="text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40">Administration</span>
               </li>
@@ -136,7 +136,7 @@
                to a quiet checkmark when all three tabs (clients/servers/verify)
                are satisfied. Click reopens the wizard at the first
                incomplete tab. -->
-          <ul class="menu menu-sm gap-0.5 p-0 mb-1">
+          <ul class="menu menu-sm w-full gap-0.5 p-0 mb-1">
             <li>
               <a
                 href="#"
@@ -178,7 +178,7 @@
           </ul>
 
           <!-- Dashboard (solo top row, no section label) -->
-          <ul class="menu menu-sm gap-0.5 p-0">
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
                 to="/"
@@ -201,7 +201,7 @@
           </div>
           <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
 
-          <ul class="menu menu-sm gap-0.5 p-0">
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
                 to="/servers"
@@ -296,7 +296,7 @@
           </div>
           <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
 
-          <ul class="menu menu-sm gap-0.5 p-0">
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
                 to="/repositories"
@@ -353,9 +353,12 @@
           :class="collapsed ? 'flex-col' : ''"
         >
           <!-- Theme dropdown -->
+          <!-- Sidebar sits at the left edge, so the theme menu must open rightward
+               (start-aligned). dropdown-end would anchor the menu's right edge to the
+               button and push a ~288px menu off the left of the viewport. -->
           <div
             class="dropdown dropdown-top"
-            :class="collapsed ? '' : 'dropdown-end flex-1'"
+            :class="collapsed ? '' : 'flex-1'"
           >
             <div
               tabindex="0"
@@ -369,7 +372,7 @@
               </svg>
               <span v-show="!collapsed">Theme</span>
             </div>
-            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-2xl bg-base-300 rounded-box w-64 max-h-96 overflow-y-auto mb-2">
+            <ul tabindex="0" class="dropdown-content z-[1] menu flex-nowrap p-2 shadow-2xl bg-base-300 rounded-box w-72 max-h-96 overflow-y-auto mb-2">
               <li class="menu-title">
                 <span>Choose theme</span>
               </li>

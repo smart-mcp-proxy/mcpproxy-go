@@ -160,7 +160,7 @@
               </div>
 
               <!-- Action Buttons -->
-              <div class="flex flex-col gap-2 flex-shrink-0">
+              <div class="flex flex-col gap-2 shrink-0">
                 <button
                   class="btn btn-sm btn-primary"
                   @click="viewToolDetails(result)"

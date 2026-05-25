@@ -103,7 +103,7 @@ const copyToClipboard = async (text: string) => {
 }
 
 .collapse {
-  border: 1px solid hsl(var(--bc) / 0.1);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
 }
 
 .collapse-title {
@@ -129,17 +129,17 @@ code {
 
 .mockup-code {
   padding: 1rem;
-  background: hsl(var(--b3));
+  background: var(--color-base-300);
   border-radius: 0.5rem;
 }
 
 .prose {
-  color: hsl(var(--bc));
+  color: var(--color-base-content);
 }
 
 .prose h4 {
   margin: 0.5rem 0;
-  color: hsl(var(--bc));
+  color: var(--color-base-content);
 }
 
 .prose p {

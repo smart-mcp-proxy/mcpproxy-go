@@ -154,8 +154,8 @@ const copyToClipboard = async (text: string) => {
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem 1.25rem;
-  background: hsl(var(--b2));
-  border: 1px solid hsl(var(--bc) / 0.15);
+  background: var(--color-base-200);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 15%, transparent);
   border-radius: 0.5rem;
   cursor: pointer;
   transition: all 0.2s ease;
@@ -163,8 +163,8 @@ const copyToClipboard = async (text: string) => {
 }
 
 .hints-collapsed:hover {
-  background: hsl(var(--b3));
-  border-color: hsl(var(--bc) / 0.25);
+  background: var(--color-base-300);
+  border-color: color-mix(in oklch, var(--color-base-content) 25%, transparent);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
@@ -177,7 +177,7 @@ const copyToClipboard = async (text: string) => {
   font-weight: 600;
   font-size: 0.95rem;
   flex: 1;
-  color: hsl(var(--bc) / 0.85);
+  color: color-mix(in oklch, var(--color-base-content) 85%, transparent);
 }
 
 .expand-icon,
@@ -185,14 +185,14 @@ const copyToClipboard = async (text: string) => {
   width: 1.25rem;
   height: 1.25rem;
   flex-shrink: 0;
-  color: hsl(var(--bc) / 0.6);
+  color: color-mix(in oklch, var(--color-base-content) 60%, transparent);
   transition: transform 0.2s ease;
 }
 
 /* Expanded State */
 .hints-expanded {
-  background: hsl(var(--b2));
-  border: 1px solid hsl(var(--bc) / 0.15);
+  background: var(--color-base-200);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 15%, transparent);
   border-radius: 0.5rem;
   overflow: hidden;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
@@ -216,12 +216,12 @@ const copyToClipboard = async (text: string) => {
   justify-content: space-between;
   padding: 0.75rem 1.25rem;
   cursor: pointer;
-  border-bottom: 1px solid hsl(var(--bc) / 0.1);
-  background: hsl(var(--b3));
+  border-bottom: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
+  background: var(--color-base-300);
 }
 
 .hints-header:hover {
-  background: hsl(var(--b2));
+  background: var(--color-base-200);
 }
 
 .hints-header-left {
@@ -240,7 +240,7 @@ const copyToClipboard = async (text: string) => {
 .hint-section {
   margin-bottom: 2rem;
   padding-bottom: 2rem;
-  border-bottom: 1px solid hsl(var(--bc) / 0.1);
+  border-bottom: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
 }
 
 .hint-section:last-child {
@@ -264,13 +264,13 @@ const copyToClipboard = async (text: string) => {
 .hint-section-title {
   font-size: 1.1rem;
   font-weight: 600;
-  color: hsl(var(--bc));
+  color: var(--color-base-content);
   margin: 0;
 }
 
 .hint-description {
   margin: 0 0 1rem 0;
-  color: hsl(var(--bc) / 0.7);
+  color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
   font-size: 0.9rem;
   line-height: 1.5;
 }
@@ -287,21 +287,21 @@ const copyToClipboard = async (text: string) => {
 .subsection-title {
   font-size: 0.95rem;
   font-weight: 600;
-  color: hsl(var(--bc) / 0.9);
+  color: color-mix(in oklch, var(--color-base-content) 90%, transparent);
   margin: 0 0 0.5rem 0;
 }
 
 .subsection-text {
   margin: 0 0 0.75rem 0;
-  color: hsl(var(--bc) / 0.7);
+  color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
   font-size: 0.875rem;
   line-height: 1.5;
 }
 
 /* Code Blocks */
 .code-block-wrapper {
-  background: hsl(var(--b3));
-  border: 1px solid hsl(var(--bc) / 0.1);
+  background: var(--color-base-300);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
   border-radius: 0.5rem;
   overflow: hidden;
   margin: 0.5rem 0;
@@ -312,14 +312,14 @@ const copyToClipboard = async (text: string) => {
   align-items: center;
   justify-content: space-between;
   padding: 0.5rem 0.75rem;
-  background: hsl(var(--b2));
-  border-bottom: 1px solid hsl(var(--bc) / 0.1);
+  background: var(--color-base-200);
+  border-bottom: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
 }
 
 .code-language {
   font-size: 0.75rem;
   font-family: 'Courier New', Courier, monospace;
-  color: hsl(var(--bc) / 0.6);
+  color: color-mix(in oklch, var(--color-base-content) 60%, transparent);
   text-transform: uppercase;
 }
 
@@ -327,17 +327,17 @@ const copyToClipboard = async (text: string) => {
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
   background: transparent;
-  border: 1px solid hsl(var(--bc) / 0.2);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 20%, transparent);
   border-radius: 0.25rem;
   cursor: pointer;
-  color: hsl(var(--bc) / 0.7);
+  color: color-mix(in oklch, var(--color-base-content) 70%, transparent);
   transition: all 0.2s ease;
 }
 
 .copy-button:hover {
-  background: hsl(var(--bc) / 0.1);
-  border-color: hsl(var(--bc) / 0.3);
-  color: hsl(var(--bc));
+  background: color-mix(in oklch, var(--color-base-content) 10%, transparent);
+  border-color: color-mix(in oklch, var(--color-base-content) 30%, transparent);
+  color: var(--color-base-content);
 }
 
 .code-block {
@@ -347,8 +347,8 @@ const copyToClipboard = async (text: string) => {
   font-family: 'Courier New', Courier, monospace;
   font-size: 0.8rem;
   line-height: 1.5;
-  color: hsl(var(--bc));
-  background: hsl(var(--b3));
+  color: var(--color-base-content);
+  background: var(--color-base-300);
 }
 
 .code-block code {
@@ -358,8 +358,8 @@ const copyToClipboard = async (text: string) => {
 
 /* Simple Code (backward compatibility) */
 .simple-code {
-  background: hsl(var(--b3));
-  border: 1px solid hsl(var(--bc) / 0.1);
+  background: var(--color-base-300);
+  border: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
   border-radius: 0.5rem;
   padding: 0.75rem;
   margin: 0.5rem 0;
@@ -376,7 +376,7 @@ const copyToClipboard = async (text: string) => {
 .hint-list {
   margin: 0.5rem 0;
   padding-left: 1.5rem;
-  color: hsl(var(--bc) / 0.8);
+  color: color-mix(in oklch, var(--color-base-content) 80%, transparent);
   font-size: 0.875rem;
   line-height: 1.6;
 }
@@ -395,16 +395,16 @@ const copyToClipboard = async (text: string) => {
 }
 
 .hints-content::-webkit-scrollbar-track {
-  background: hsl(var(--b3));
+  background: var(--color-base-300);
   border-radius: 0.25rem;
 }
 
 .hints-content::-webkit-scrollbar-thumb {
-  background: hsl(var(--bc) / 0.3);
+  background: color-mix(in oklch, var(--color-base-content) 30%, transparent);
   border-radius: 0.25rem;
 }
 
 .hints-content::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--bc) / 0.5);
+  background: color-mix(in oklch, var(--color-base-content) 50%, transparent);
 }
 </style>

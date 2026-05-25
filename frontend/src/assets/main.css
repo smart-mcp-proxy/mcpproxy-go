@@ -1,6 +1,14 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@plugin "@tailwindcss/typography";
+
+@plugin "daisyui" {
+  themes: light --default, dark --prefersdark, cupcake, bumblebee, emerald,
+          corporate, synthwave, retro, cyberpunk, valentine, halloween,
+          garden, forest, aqua, lofi, pastel, fantasy, wireframe, black,
+          luxury, dracula, cmyk, autumn, business, acid, lemonade, night,
+          coffee, winter, dim, nord, sunset;
+}
 
 /* Prevent horizontal scroll globally */
 html,
@@ -23,6 +31,38 @@ body {
   max-width: 100%;
 }
 
+/*
+ * DaisyUI v5 compatibility shim.
+ * v5 removed `.form-control` and repurposed `.label` / `.label-text` (which v4 used
+ * to stack a label above a full-width input). The existing markup across ~16 views
+ * relies on the v4 semantics, so restore them here. These rules are intentionally
+ * UNLAYERED — unlayered CSS wins over DaisyUI's `@layer` styles regardless of
+ * specificity — so they reassert the v4 form layout without touching every file.
+ */
+.form-control {
+  display: flex;
+  flex-direction: column;
+}
+.form-control > .label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-block: 0.5rem;
+  padding-inline: 0.25rem;
+}
+.label-text {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--color-base-content);
+}
+/* v5 gives .input/.select/.textarea an intrinsic width, so form-control's
+   flex `align-items: stretch` no longer fills the row the way v4 did. Restore
+   full-width controls inside form fields (low specificity via :where, but
+   unlayered so it still beats DaisyUI's layer). */
+.form-control :where(.input, .select, .textarea, .input-group) {
+  width: 100%;
+}
+
 /* Custom styles */
 @layer components {
   .btn-primary {
@@ -38,19 +78,19 @@ body {
   }
 
   .status-online {
-    @apply status-badge badge-success;
+    @apply badge font-medium badge-success;
   }
 
   .status-offline {
-    @apply status-badge badge-error;
+    @apply badge font-medium badge-error;
   }
 
   .status-connecting {
-    @apply status-badge badge-warning;
+    @apply badge font-medium badge-warning;
   }
 
   .status-unknown {
-    @apply status-badge badge-neutral;
+    @apply badge font-medium badge-neutral;
   }
 }
 

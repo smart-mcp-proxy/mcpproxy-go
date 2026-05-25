@@ -143,6 +143,8 @@ watch(
 </script>
 
 <style scoped>
+@reference "../assets/main.css";
+
 .json-viewer-container {
   @apply w-full;
 }

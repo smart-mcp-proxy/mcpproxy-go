@@ -43,7 +43,7 @@
       </div>
 
       <!-- Right: Stats + Proxy Info -->
-      <div class="hidden md:flex items-center space-x-3 flex-shrink-0">
+      <div class="hidden md:flex items-center space-x-3 shrink-0">
         <!-- Servers -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
           <div
@@ -102,7 +102,7 @@
                 </div>
                 <button
                   @click.stop="copyEndpoint(ep)"
-                  class="btn btn-ghost btn-xs p-1 opacity-0 group-hover:opacity-100 transition-opacity tooltip tooltip-left flex-shrink-0 ml-2"
+                  class="btn btn-ghost btn-xs p-1 opacity-0 group-hover:opacity-100 transition-opacity tooltip tooltip-left shrink-0 ml-2"
                   :data-tip="ep.copyTooltip"
                 >
                   <svg v-if="ep.copyTooltip === 'Copied!'" class="w-3.5 h-3.5 text-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
