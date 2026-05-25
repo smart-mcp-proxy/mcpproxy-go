@@ -1379,3 +1379,111 @@ func TestServerConfig_IsToolAllowedByConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultOutputValidationConfig(t *testing.T) {
+	cfg := DefaultOutputValidationConfig()
+
+	// Verify the four defaults
+	assert.Equal(t, "warn", cfg.Mode, "default mode should be warn")
+	assert.Equal(t, 5<<20, cfg.MaxBytes, "default MaxBytes should be 5<<20")
+	assert.Equal(t, 64, cfg.MaxDepth, "default MaxDepth should be 64")
+	assert.Equal(t, "allow", cfg.MissingStructuredContent, "default MissingStructuredContent should be allow")
+}
+
+func TestOutputValidationConfig_NilSafeHelpers(t *testing.T) {
+	var c *OutputValidationConfig
+
+	// nil receiver behaves as defaults (warn-mode enabled)
+	assert.True(t, c.IsEnabled(), "nil: IsEnabled should return true (warn by default)")
+	assert.False(t, c.IsStrict(), "nil: IsStrict should return false")
+	assert.True(t, c.IsWarn(), "nil: IsWarn should return true")
+	assert.Equal(t, 5<<20, c.EffectiveMaxBytes(), "nil: EffectiveMaxBytes should return 5<<20")
+	assert.Equal(t, 64, c.EffectiveMaxDepth(), "nil: EffectiveMaxDepth should return 64")
+	assert.False(t, c.BlockOnMissingStructured(), "nil: BlockOnMissingStructured should return false")
+}
+
+func TestOutputValidationConfig_ModeOff(t *testing.T) {
+	c := &OutputValidationConfig{Mode: "off"}
+	assert.False(t, c.IsEnabled(), "mode=off: IsEnabled should be false")
+	assert.False(t, c.IsStrict(), "mode=off: IsStrict should be false")
+	assert.False(t, c.IsWarn(), "mode=off: IsWarn should be false")
+}
+
+func TestOutputValidationConfig_ModeStrict(t *testing.T) {
+	c := &OutputValidationConfig{Mode: "strict"}
+	assert.True(t, c.IsEnabled(), "mode=strict: IsEnabled should be true")
+	assert.True(t, c.IsStrict(), "mode=strict: IsStrict should be true")
+	assert.False(t, c.IsWarn(), "mode=strict: IsWarn should be false (strict, not warn)")
+}
+
+func TestOutputValidationConfig_BlockOnMissingStructured(t *testing.T) {
+	c := &OutputValidationConfig{Mode: "strict", MissingStructuredContent: "block"}
+	assert.True(t, c.BlockOnMissingStructured(), "MissingStructuredContent=block should return true")
+}
+
+func TestOutputValidationConfig_EffectiveDefaults(t *testing.T) {
+	// Zero values fall back to defaults
+	c := &OutputValidationConfig{Mode: "warn"}
+	assert.Equal(t, 5<<20, c.EffectiveMaxBytes(), "zero MaxBytes falls back to 5<<20")
+	assert.Equal(t, 64, c.EffectiveMaxDepth(), "zero MaxDepth falls back to 64")
+
+	// Non-zero values are preserved
+	c2 := &OutputValidationConfig{Mode: "warn", MaxBytes: 1024, MaxDepth: 32}
+	assert.Equal(t, 1024, c2.EffectiveMaxBytes(), "non-zero MaxBytes is preserved")
+	assert.Equal(t, 32, c2.EffectiveMaxDepth(), "non-zero MaxDepth is preserved")
+}
+
+func TestOutputValidationConfig_JSONRoundTrip(t *testing.T) {
+	// Build a root Config with an OutputValidation block and round-trip it
+	orig := &Config{
+		Listen: "127.0.0.1:9090",
+		OutputValidation: &OutputValidationConfig{
+			Mode:                     "strict",
+			MaxBytes:                 1 << 20,
+			MaxDepth:                 32,
+			MissingStructuredContent: "block",
+		},
+	}
+
+	data, err := json.Marshal(orig)
+	require.NoError(t, err, "marshal should not fail")
+
+	var restored Config
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err, "unmarshal should not fail")
+
+	require.NotNil(t, restored.OutputValidation, "OutputValidation should survive round-trip")
+	assert.Equal(t, "strict", restored.OutputValidation.Mode)
+	assert.Equal(t, 1<<20, restored.OutputValidation.MaxBytes)
+	assert.Equal(t, 32, restored.OutputValidation.MaxDepth)
+	assert.Equal(t, "block", restored.OutputValidation.MissingStructuredContent)
+}
+
+func TestToolMetadata_OutputSchemaJSON(t *testing.T) {
+	// Verify OutputSchemaJSON field exists on ToolMetadata
+	meta := &ToolMetadata{
+		Name:             "test_tool",
+		ServerName:       "test_server",
+		Description:      "A test tool",
+		ParamsJSON:       `{"type":"object"}`,
+		OutputSchemaJSON: `{"type":"string"}`,
+	}
+
+	data, err := json.Marshal(meta)
+	require.NoError(t, err)
+
+	var restored ToolMetadata
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err)
+	assert.Equal(t, `{"type":"string"}`, restored.OutputSchemaJSON)
+
+	// Empty OutputSchemaJSON should be omitted from JSON (omitempty)
+	metaNoSchema := &ToolMetadata{
+		Name:       "test_tool",
+		ServerName: "test_server",
+		ParamsJSON: `{"type":"object"}`,
+	}
+	data2, err := json.Marshal(metaNoSchema)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data2), "output_schema_json", "empty OutputSchemaJSON should be omitted")
+}
