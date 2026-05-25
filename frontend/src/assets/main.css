@@ -55,6 +55,13 @@ body {
   line-height: 1.25rem;
   color: var(--color-base-content);
 }
+/* v5 gives .input/.select/.textarea an intrinsic width, so form-control's
+   flex `align-items: stretch` no longer fills the row the way v4 did. Restore
+   full-width controls inside form fields (low specificity via :where, but
+   unlayered so it still beats DaisyUI's layer). */
+.form-control :where(.input, .select, .textarea, .input-group) {
+  width: 100%;
+}
 
 /* Custom styles */
 @layer components {
