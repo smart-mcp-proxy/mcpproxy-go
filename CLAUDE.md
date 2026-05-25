@@ -774,7 +774,6 @@ See `docs/prerelease-builds.md` for download instructions.
 - Swift 5.9 (macOS 13+); Go 1.24 only for the verification harness, no Go changes in scope. + SwiftUI/AppKit (existing), Combine (existing for the periodic timer pattern). No new deps. (048-tray-refetch-elimination)
 - None. Pure in-memory state. (048-tray-refetch-elimination)
 - Go 1.24 / Vue 3.5; no new deps; read-only BBolt reuse, no schema change (050-global-tools-page)
-- Frontend (055): Tailwind v4 (CSS-first, no `tailwind.config.*`) + DaisyUI v5 + Vite 8 + TS 6 (no `baseUrl`), Node ≥22.18. v4/v5 migration gotchas in `specs/055-frontend-major-upgrades/`.
 
 ## Recent Changes
 - 001-update-version-display: Added Go 1.24 (toolchain go1.24.10)
