@@ -2,3 +2,10 @@
 # checked out identically on Windows (core.autocrlf=true would otherwise yield
 # CRLF and break cmd/generate-types TestContractsInSync).
 frontend/src/types/contracts.ts text eol=lf
+
+# Self-contained verification/QA reports embed base64 PNG screenshots, so a
+# single file is multiple MB of "HTML". They are point-in-time artifacts, not
+# source. Mark them linguist-generated so GitHub's language stats reflect the
+# actual Go/Vue/Swift source instead of being dominated by these reports.
+specs/**/verification/*.html linguist-generated
+docs/qa/*.html linguist-generated
