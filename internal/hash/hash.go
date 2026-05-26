@@ -7,29 +7,101 @@ import (
 	"fmt"
 )
 
-// ToolHash computes SHA-256 hash for tool change detection
-// Format: sha256(serverName + toolName + description + parametersSchemaJSON)
-func ToolHash(serverName, toolName, description string, parametersSchema interface{}) (string, error) {
-	// Serialize parameters schema to JSON for consistent hashing
-	var schemaBytes []byte
-	var err error
+type toolHashContract struct {
+	ServerName       string          `json:"server_name"`
+	ToolName         string          `json:"tool_name"`
+	Description      string          `json:"description"`
+	InputSchema      json.RawMessage `json:"input_schema,omitempty"`
+	OutputSchemaJSON json.RawMessage `json:"output_schema,omitempty"`
+}
 
-	if parametersSchema != nil {
-		schemaBytes, err = json.Marshal(parametersSchema)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal parameters schema: %w", err)
-		}
+// ToolHash computes SHA-256 hash for tool change detection.
+// Format: sha256(canonical JSON of serverName, toolName, description, input schema)
+func ToolHash(serverName, toolName, description string, parametersSchema interface{}) (string, error) {
+	return ToolHashWithOutputSchema(serverName, toolName, description, parametersSchema, "")
+}
+
+// ToolHashWithOutputSchema computes SHA-256 hash for the full tool contract.
+// Output schema is included because it describes the data shape returned to the
+// agent and therefore belongs to the human-approved tool contract.
+// Format: sha256(canonical JSON of serverName, toolName, description, input schema, output schema)
+func ToolHashWithOutputSchema(serverName, toolName, description string, parametersSchema interface{}, outputSchemaJSON string) (string, error) {
+	inputSchema, err := canonicalSchemaFromInterface(parametersSchema)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal parameters schema: %w", err)
 	}
 
-	// Combine server name, tool name, description, and schema JSON
-	combined := serverName + toolName + description + string(schemaBytes)
+	outputSchema, err := canonicalSchemaFromString(outputSchemaJSON)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal output schema: %w", err)
+	}
 
-	// Compute SHA-256 hash
+	contract := toolHashContract{
+		ServerName:       serverName,
+		ToolName:         toolName,
+		Description:      description,
+		InputSchema:      inputSchema,
+		OutputSchemaJSON: outputSchema,
+	}
+
+	contractBytes, err := json.Marshal(contract)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal tool hash contract: %w", err)
+	}
+
 	hasher := sha256.New()
-	hasher.Write([]byte(combined))
+	hasher.Write(contractBytes)
 	hashBytes := hasher.Sum(nil)
 
 	return hex.EncodeToString(hashBytes), nil
+}
+
+func canonicalSchemaFromInterface(schema interface{}) (json.RawMessage, error) {
+	if schema == nil {
+		return nil, nil
+	}
+
+	var raw json.RawMessage
+	switch value := schema.(type) {
+	case json.RawMessage:
+		raw = value
+	case []byte:
+		raw = value
+	case string:
+		raw = []byte(value)
+	default:
+		data, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		raw = data
+	}
+
+	return canonicalSchemaFromBytes(raw)
+}
+
+func canonicalSchemaFromString(schemaJSON string) (json.RawMessage, error) {
+	if schemaJSON == "" {
+		return nil, nil
+	}
+	return canonicalSchemaFromBytes([]byte(schemaJSON))
+}
+
+func canonicalSchemaFromBytes(schemaJSON []byte) (json.RawMessage, error) {
+	if len(schemaJSON) == 0 {
+		return nil, nil
+	}
+
+	var parsed interface{}
+	if err := json.Unmarshal(schemaJSON, &parsed); err != nil {
+		return nil, err
+	}
+
+	canonical, err := json.Marshal(parsed)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(canonical), nil
 }
 
 // StringHash computes SHA-256 hash of a string
@@ -60,7 +132,12 @@ func VerifyToolHash(serverName, toolName, description string, parametersSchema i
 
 // ComputeToolHash computes a SHA256 hash for a tool (alias for ToolHash that doesn't return error)
 func ComputeToolHash(serverName, toolName, description string, inputSchema interface{}) string {
-	hash, err := ToolHash(serverName, toolName, description, inputSchema)
+	return ComputeToolHashWithOutputSchema(serverName, toolName, description, inputSchema, "")
+}
+
+// ComputeToolHashWithOutputSchema computes a SHA256 hash for a tool including output schema.
+func ComputeToolHashWithOutputSchema(serverName, toolName, description string, inputSchema interface{}, outputSchemaJSON string) string {
+	hash, err := ToolHashWithOutputSchema(serverName, toolName, description, inputSchema, outputSchemaJSON)
 	if err != nil {
 		// If hashing fails, return a default hash based on server and tool name
 		fallback := StringHash(fmt.Sprintf("%s:%s", serverName, toolName))

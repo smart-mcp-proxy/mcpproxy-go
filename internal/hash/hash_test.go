@@ -136,6 +136,27 @@ func TestComputeToolHash_FallbackOnMarshalError(t *testing.T) {
 	assert.NotEmpty(t, hash, "Should return fallback hash on marshal error")
 }
 
+func TestComputeToolHashWithOutputSchema_CanonicalizesOutputSchemaJSON(t *testing.T) {
+	inputSchema := map[string]interface{}{"type": "object"}
+
+	hash1 := ComputeToolHashWithOutputSchema("server", "tool", "desc", inputSchema, `{"type":"object","properties":{"url":{"type":"string"}}}`)
+	hash2 := ComputeToolHashWithOutputSchema("server", "tool", "desc", inputSchema, `{
+		"properties": {"url": {"type": "string"}},
+		"type": "object"
+	}`)
+
+	assert.Equal(t, hash1, hash2, "Semantically identical output schemas should hash the same")
+}
+
+func TestToolHashWithOutputSchema_UsesStructuredEncoding(t *testing.T) {
+	hash1, err := ToolHashWithOutputSchema("ab", "c", "d", map[string]interface{}{"type": "object"}, `{"type":"object"}`)
+	require.NoError(t, err)
+	hash2, err := ToolHashWithOutputSchema("a", "bc", "d", map[string]interface{}{"type": "object"}, `{"type":"object"}`)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, hash1, hash2, "Different contract field tuples must not collide through string concatenation")
+}
+
 func TestComputeToolHash_DescriptionOnlyChange(t *testing.T) {
 	schema := map[string]interface{}{
 		"type": "object",

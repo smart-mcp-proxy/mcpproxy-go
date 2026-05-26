@@ -104,6 +104,10 @@ func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
 			}
 		}
 
+		// Apply output schema from upstream tool so direct-mode tools/list preserves
+		// the full MCP tool contract exposed by the upstream server.
+		applyToolOutputSchemaJSON(&mcpTool, tool.OutputSchemaJSON)
+
 		serverTools = append(serverTools, mcpserver.ServerTool{
 			Tool:    mcpTool,
 			Handler: p.makeDirectModeHandler(tool.ServerName, tool.Name, tool.Annotations),

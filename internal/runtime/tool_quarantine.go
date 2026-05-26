@@ -17,14 +17,18 @@ import (
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
-// Uses toolName + description + schemaJSON only.
+// Uses toolName + description + input schema JSON + output schema JSON.
 // Annotations are intentionally EXCLUDED because:
 // 1. They are metadata hints, not functional changes to the tool
 // 2. They may not be stable across reconnections (some servers omit them)
 // 3. Including them caused false "tool_description_changed" spam on every reconnect
-// 4. This matches the upstream client's hash.ComputeToolHash approach
+// 4. This matches the upstream client's hash.ComputeToolHashWithOutputSchema approach
 // The annotations parameter is kept for API compatibility but ignored.
 func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
+	return calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, "", annotations)
+}
+
+func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) string {
 	h := sha256.New()
 	h.Write([]byte(toolName))
 	h.Write([]byte("|"))
@@ -33,6 +37,15 @@ func calculateToolApprovalHash(toolName, description, schemaJSON string, annotat
 	// Normalize JSON schema to prevent key-order differences from causing
 	// false "tool_description_changed" events. Parse → sort keys → serialize.
 	h.Write([]byte(normalizeJSON(schemaJSON)))
+	// Only fold the output schema into the hash when the tool actually exposes
+	// one. This keeps the hash byte-identical to the pre-output-schema formula
+	// for tools without an outputSchema, so they are NOT re-baselined or
+	// re-quarantined on upgrade. Tools that do expose an outputSchema get a new
+	// hash, which the version-gated migration in checkToolApprovals handles.
+	if normalized := normalizeJSON(outputSchemaJSON); normalized != "" {
+		h.Write([]byte("|"))
+		h.Write([]byte(normalized))
+	}
 	// Annotations excluded from hash — see comment above
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -201,6 +214,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		BlockedTools: make(map[string]bool),
 	}
 
+	schemaVersion, schemaVersionErr := r.storageManager.GetSchemaVersion()
+	outputSchemaHashMigration := schemaVersionErr == nil && schemaVersion < storage.OutputSchemaHashSchemaVersion
+	migratedOutputSchemaApprovals := false
+
 	for _, tool := range tools {
 		// Extract the bare tool name (without server prefix)
 		toolName := extractToolName(tool.Name)
@@ -212,14 +229,54 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			schemaJSON = "{}"
 		}
 
-		// Normalize JSON schema before hashing and storage to ensure stable key ordering
+		// Normalize JSON schemas before hashing and storage to ensure stable key ordering
 		schemaJSON = normalizeJSON(schemaJSON)
+		outputSchemaJSON := normalizeJSON(tool.OutputSchemaJSON)
 
-		// Calculate current hash (includes annotations for rug-pull detection)
-		currentHash := calculateToolApprovalHash(toolName, tool.Description, schemaJSON, tool.Annotations)
+		// Calculate current hash for the full approved contract, including output schema.
+		currentHash := calculateToolApprovalHashWithOutputSchema(toolName, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations)
 
 		// Look up existing approval record
 		existing, err := r.storageManager.GetToolApproval(serverName, toolName)
+
+		if existing != nil && existing.Status == storage.ToolApprovalStatusApproved && outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+			// One-time output-schema hash backfill: previously approved tools did
+			// not store outputSchema in the approved contract hash. Rebaseline using
+			// the stored approved description/input schema plus the currently observed
+			// output schema. If description/input schema changed, route through the
+			// normal rug-pull detection path instead of silently approving it.
+			storedDesc := existing.CurrentDescription
+			storedSchema := existing.CurrentSchema
+			if storedDesc == "" {
+				storedDesc = tool.Description
+			}
+			if storedSchema == "" {
+				storedSchema = schemaJSON
+			}
+			descMatch := storedDesc == tool.Description
+			schemaMatch := normalizeJSON(storedSchema) == normalizeJSON(schemaJSON)
+			if descMatch && schemaMatch {
+				backfilledHash := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, outputSchemaJSON, tool.Annotations)
+				existing.ApprovedHash = backfilledHash
+				existing.CurrentHash = backfilledHash
+				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.CurrentDescription = storedDesc
+				existing.CurrentSchema = normalizeJSON(storedSchema)
+				existing.CurrentOutputSchema = outputSchemaJSON
+				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+					r.logger.Debug("Failed to backfill output schema approval hash",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+				} else {
+					migratedOutputSchemaApprovals = true
+					r.logger.Info("Tool approval hash backfilled with output schema",
+						zap.String("server", serverName),
+						zap.String("tool", toolName))
+				}
+				continue
+			}
+		}
 
 		if err != nil {
 			// No existing record - this is a new tool.
@@ -227,15 +284,17 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				// Quarantine disabled or server has skip_quarantine - auto-approve
 				now := time.Now().UTC()
 				record := &storage.ToolApprovalRecord{
-					ServerName:         serverName,
-					ToolName:           toolName,
-					CurrentHash:        currentHash,
-					ApprovedHash:       currentHash,
-					Status:             storage.ToolApprovalStatusApproved,
-					ApprovedBy:         "auto",
-					ApprovedAt:         now,
-					CurrentDescription: tool.Description,
-					CurrentSchema:      schemaJSON,
+					ServerName:          serverName,
+					ToolName:            toolName,
+					CurrentHash:         currentHash,
+					ApprovedHash:        currentHash,
+					HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
+					Status:              storage.ToolApprovalStatusApproved,
+					ApprovedBy:          "auto",
+					ApprovedAt:          now,
+					CurrentDescription:  tool.Description,
+					CurrentSchema:       schemaJSON,
+					CurrentOutputSchema: outputSchemaJSON,
 				}
 
 				if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
@@ -260,12 +319,14 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// This applies to ALL servers (including trusted ones) to prevent
 			// injection attacks via new tool additions on compromised servers.
 			record := &storage.ToolApprovalRecord{
-				ServerName:         serverName,
-				ToolName:           toolName,
-				CurrentHash:        currentHash,
-				Status:             storage.ToolApprovalStatusPending,
-				CurrentDescription: tool.Description,
-				CurrentSchema:      schemaJSON,
+				ServerName:          serverName,
+				ToolName:            toolName,
+				CurrentHash:         currentHash,
+				HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
+				Status:              storage.ToolApprovalStatusPending,
+				CurrentDescription:  tool.Description,
+				CurrentSchema:       schemaJSON,
+				CurrentOutputSchema: outputSchemaJSON,
 			}
 
 			if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
@@ -308,16 +369,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
 				needsSave = true
 				r.logger.Info("Tool restored to approved (hash matches after formula update)",
 					zap.String("server", serverName),
 					zap.String("tool", toolName))
 			}
-			// Update current hash/description in case they differ from storage
-			if existing.CurrentHash != currentHash {
+			// Update current hash/description/schema in case they differ from storage
+			if existing.CurrentHash != currentHash || existing.CurrentOutputSchema != outputSchemaJSON || existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
 				existing.CurrentHash = currentHash
+				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
 				needsSave = true
 			}
 			if needsSave {
@@ -336,6 +400,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			existing.CurrentHash = currentHash
 			existing.CurrentDescription = tool.Description
 			existing.CurrentSchema = schemaJSON
+			existing.CurrentOutputSchema = outputSchemaJSON
 			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 				r.logger.Debug("Failed to update pending tool approval",
 					zap.String("server", serverName),
@@ -369,6 +434,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
@@ -393,21 +459,28 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// actually changed — only the hash formula did.
 			storedDesc := existing.CurrentDescription
 			storedSchema := existing.CurrentSchema
+			storedOutputSchema := existing.CurrentOutputSchema
 			if storedDesc == "" {
 				storedDesc = tool.Description
 			}
 			if storedSchema == "" {
 				storedSchema = schemaJSON
 			}
-			rehashedFromStored := calculateToolApprovalHash(toolName, storedDesc, storedSchema, nil)
+			if storedOutputSchema == "" {
+				storedOutputSchema = outputSchemaJSON
+			}
+			rehashedFromStored := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, storedOutputSchema, nil)
 
 			// Also check legacy and with-annotations formulas
 			legacyHash := calculateLegacyToolApprovalHash(toolName, tool.Description, schemaJSON)
 			annotationsHash := calculateHashWithAnnotations(toolName, tool.Description, schemaJSON, tool.Annotations)
 
-			isFormulaChange := rehashedFromStored == currentHash ||
-				existing.ApprovedHash == legacyHash ||
-				existing.ApprovedHash == annotationsHash
+			isFormulaChange := rehashedFromStored == currentHash
+			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+				isFormulaChange = isFormulaChange ||
+					existing.ApprovedHash == legacyHash ||
+					existing.ApprovedHash == annotationsHash
+			}
 
 			if isFormulaChange {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonFormulaMigration); err != nil {
@@ -420,6 +493,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
@@ -454,7 +528,13 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				// Normalize both schemas and compare
 				schemaMatch = normalizeJSON(schemaJSON) == normalizeJSON(existing.CurrentSchema)
 			}
-			if descMatch && schemaMatch {
+			var outputSchemaMatch bool
+			if existing.CurrentOutputSchema == "" || outputSchemaJSON == existing.CurrentOutputSchema {
+				outputSchemaMatch = true
+			} else {
+				outputSchemaMatch = normalizeJSON(outputSchemaJSON) == normalizeJSON(existing.CurrentOutputSchema)
+			}
+			if descMatch && schemaMatch && outputSchemaMatch {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -465,6 +545,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
@@ -481,15 +562,16 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				zap.String("tool", toolName),
 				zap.Bool("desc_match", descMatch),
 				zap.Bool("schema_match", schemaMatch),
+				zap.Bool("output_schema_match", outputSchemaMatch),
 				zap.Int("stored_desc_len", len(existing.CurrentDescription)),
 				zap.Int("current_desc_len", len(tool.Description)),
 				zap.Int("stored_schema_len", len(existing.CurrentSchema)),
 				zap.Int("current_schema_len", len(schemaJSON)))
 
-			// LAST RESORT: If description matches (most important for security),
-			// auto-approve even if schema normalization differs.
-			// Schema formatting differences are NOT security concerns.
-			if descMatch {
+			// LAST RESORT: If description and output schema match, auto-approve even
+			// if input schema normalization differs. Output schema is part of the
+			// approved contract and must not be bypassed here.
+			if descMatch && outputSchemaMatch {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -500,6 +582,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentHash = currentHash
 				existing.CurrentDescription = tool.Description
 				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
@@ -513,18 +596,23 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// Hash differs AND description differs - genuine tool change (rug pull)
 			oldDesc := existing.CurrentDescription
 			oldSchema := existing.CurrentSchema
+			oldOutputSchema := existing.CurrentOutputSchema
 			if existing.Status == storage.ToolApprovalStatusApproved {
 				// Transitioning from approved to changed
 				oldDesc = existing.CurrentDescription
 				oldSchema = existing.CurrentSchema
+				oldOutputSchema = existing.CurrentOutputSchema
 			}
 
 			existing.Status = storage.ToolApprovalStatusChanged
 			existing.PreviousDescription = oldDesc
 			existing.PreviousSchema = oldSchema
+			existing.PreviousOutputSchema = oldOutputSchema
 			existing.CurrentHash = currentHash
+			existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
 			existing.CurrentDescription = tool.Description
 			existing.CurrentSchema = schemaJSON
+			existing.CurrentOutputSchema = outputSchemaJSON
 
 			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 				r.logger.Error("Failed to update changed tool approval",
@@ -557,6 +645,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 	}
 
+	if migratedOutputSchemaApprovals {
+		r.markOutputSchemaHashMigrationCompleteIfReady()
+	}
+
 	if len(result.BlockedTools) > 0 {
 		r.logger.Info("Tool-level quarantine: tools blocked",
 			zap.String("server", serverName),
@@ -566,6 +658,33 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	}
 
 	return result, nil
+}
+
+func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
+	if r.storageManager == nil {
+		return
+	}
+
+	records, err := r.storageManager.ListToolApprovals("")
+	if err != nil {
+		r.logger.Debug("Failed to list tool approvals for output schema hash migration",
+			zap.Error(err))
+		return
+	}
+
+	for _, record := range records {
+		if record.Status == storage.ToolApprovalStatusApproved && record.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
+			return
+		}
+	}
+
+	if err := r.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion); err != nil {
+		r.logger.Debug("Failed to mark output schema hash migration complete",
+			zap.Error(err))
+		return
+	}
+
+	r.logger.Info("Output schema hash migration completed")
 }
 
 // ApproveTools approves specific tools for a server, updating their status to approved.
@@ -591,10 +710,12 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 
 		record.Status = storage.ToolApprovalStatusApproved
 		record.ApprovedHash = record.CurrentHash
+		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
 		record.ApprovedAt = time.Now().UTC()
 		record.ApprovedBy = approvedBy
 		record.PreviousDescription = ""
 		record.PreviousSchema = ""
+		record.PreviousOutputSchema = ""
 
 		if err := r.storageManager.SaveToolApproval(record); err != nil {
 			return err

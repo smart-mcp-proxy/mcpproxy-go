@@ -103,11 +103,15 @@ func (b *BoltDB) initBuckets() error {
 			}
 		}
 
-		// Set schema version
+		// Set schema version only for new databases. Existing databases keep their
+		// stored version so migrations can observe and upgrade them.
 		metaBucket := tx.Bucket([]byte(MetaBucket))
-		versionBytes := make([]byte, 8)
-		binary.LittleEndian.PutUint64(versionBytes, CurrentSchemaVersion)
-		return metaBucket.Put([]byte(SchemaVersionKey), versionBytes)
+		if metaBucket.Get([]byte(SchemaVersionKey)) == nil {
+			versionBytes := make([]byte, 8)
+			binary.LittleEndian.PutUint64(versionBytes, CurrentSchemaVersion)
+			return metaBucket.Put([]byte(SchemaVersionKey), versionBytes)
+		}
+		return nil
 	})
 }
 
@@ -131,6 +135,20 @@ func (b *BoltDB) GetSchemaVersion() (uint64, error) {
 	})
 
 	return version, err
+}
+
+// SetSchemaVersion stores the current migration schema version.
+func (b *BoltDB) SetSchemaVersion(version uint64) error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return fmt.Errorf("meta bucket not found")
+		}
+
+		versionBytes := make([]byte, 8)
+		binary.LittleEndian.PutUint64(versionBytes, version)
+		return bucket.Put([]byte(SchemaVersionKey), versionBytes)
+	})
 }
 
 // Upstream operations

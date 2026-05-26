@@ -204,16 +204,16 @@ func (m *Manager) ListQuarantinedUpstreamServers() ([]*config.ServerConfig, erro
 
 		if record.Quarantined {
 			quarantinedServers = append(quarantinedServers, &config.ServerConfig{
-				Name:        record.Name,
-				URL:         record.URL,
-				Protocol:    record.Protocol,
-				Command:     record.Command,
-				Args:        record.Args,
-				WorkingDir:  record.WorkingDir,
-				Env:         record.Env,
-				Headers:     record.Headers,
-				OAuth:       record.OAuth,
-				Enabled:     record.Enabled,
+				Name:          record.Name,
+				URL:           record.URL,
+				Protocol:      record.Protocol,
+				Command:       record.Command,
+				Args:          record.Args,
+				WorkingDir:    record.WorkingDir,
+				Env:           record.Env,
+				Headers:       record.Headers,
+				OAuth:         record.OAuth,
+				Enabled:       record.Enabled,
 				Quarantined:   record.Quarantined,
 				Created:       record.Created,
 				Updated:       record.Updated,
@@ -689,6 +689,14 @@ func (m *Manager) GetSchemaVersion() (uint64, error) {
 	defer m.mu.RUnlock()
 
 	return m.db.GetSchemaVersion()
+}
+
+// SetSchemaVersion stores the current migration schema version.
+func (m *Manager) SetSchemaVersion(version uint64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.SetSchemaVersion(version)
 }
 
 // GetStats returns storage statistics

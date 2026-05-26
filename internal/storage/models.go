@@ -74,7 +74,11 @@ const (
 )
 
 // Current schema version
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
+
+// OutputSchemaHashSchemaVersion is the schema version that starts including
+// MCP outputSchema in the tool approval hash baseline.
+const OutputSchemaHashSchemaVersion = 3
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
@@ -124,18 +128,21 @@ const (
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
 type ToolApprovalRecord struct {
-	ServerName          string    `json:"server_name"`
-	ToolName            string    `json:"tool_name"`
-	ApprovedHash        string    `json:"approved_hash"`
-	CurrentHash         string    `json:"current_hash"`
-	Status              string    `json:"status"` // "approved", "pending", "changed"
-	ApprovedAt          time.Time `json:"approved_at"`
-	ApprovedBy          string    `json:"approved_by"`
-	PreviousDescription string    `json:"previous_description,omitempty"`
-	CurrentDescription  string    `json:"current_description,omitempty"`
-	PreviousSchema      string    `json:"previous_schema,omitempty"`
-	CurrentSchema       string    `json:"current_schema,omitempty"`
-	Disabled            bool      `json:"disabled,omitempty"`
+	ServerName           string    `json:"server_name"`
+	ToolName             string    `json:"tool_name"`
+	ApprovedHash         string    `json:"approved_hash"`
+	CurrentHash          string    `json:"current_hash"`
+	HashSchemaVersion    uint64    `json:"hash_schema_version,omitempty"`
+	Status               string    `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt           time.Time `json:"approved_at"`
+	ApprovedBy           string    `json:"approved_by"`
+	PreviousDescription  string    `json:"previous_description,omitempty"`
+	CurrentDescription   string    `json:"current_description,omitempty"`
+	PreviousSchema       string    `json:"previous_schema,omitempty"`
+	CurrentSchema        string    `json:"current_schema,omitempty"`
+	PreviousOutputSchema string    `json:"previous_output_schema,omitempty"`
+	CurrentOutputSchema  string    `json:"current_output_schema,omitempty"`
+	Disabled             bool      `json:"disabled,omitempty"`
 }
 
 // ToolApprovalKey returns the storage key for a tool approval record.
