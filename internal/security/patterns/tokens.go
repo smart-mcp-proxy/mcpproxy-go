@@ -42,8 +42,9 @@ func GetTokenPatterns() []*Pattern {
 func githubPATPattern() *Pattern {
 	// ghp_ = classic PAT, github_pat_ = fine-grained PAT
 	// Fine-grained format: github_pat_<base62>_<base62> (variable lengths)
+	// Length is open-ended ({36,}): GitHub's new stateless token format can be ~520 chars.
 	return NewPattern("github_pat").
-		WithRegex(`(?:ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9]+_[a-zA-Z0-9]{30,})`).
+		WithRegex(`(?:ghp_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9]+_[a-zA-Z0-9]{30,})`).
 		WithCategory(CategoryAPIToken).
 		WithSeverity(SeverityCritical).
 		WithDescription("GitHub Personal Access Token").
@@ -53,7 +54,7 @@ func githubPATPattern() *Pattern {
 // GitHub OAuth Token
 func githubOAuthPattern() *Pattern {
 	return NewPattern("github_oauth").
-		WithRegex(`gho_[a-zA-Z0-9]{36}`).
+		WithRegex(`gho_[a-zA-Z0-9]{36,}`).
 		WithCategory(CategoryAPIToken).
 		WithSeverity(SeverityHigh).
 		WithDescription("GitHub OAuth access token").
@@ -63,7 +64,7 @@ func githubOAuthPattern() *Pattern {
 // GitHub App Installation Token
 func githubAppPattern() *Pattern {
 	return NewPattern("github_app").
-		WithRegex(`ghs_[a-zA-Z0-9]{36}`).
+		WithRegex(`ghs_[a-zA-Z0-9]{36,}`).
 		WithCategory(CategoryAPIToken).
 		WithSeverity(SeverityHigh).
 		WithDescription("GitHub App installation access token").
@@ -73,7 +74,7 @@ func githubAppPattern() *Pattern {
 // GitHub App Refresh Token
 func githubRefreshPattern() *Pattern {
 	return NewPattern("github_refresh").
-		WithRegex(`ghr_[a-zA-Z0-9]{36}`).
+		WithRegex(`ghr_[a-zA-Z0-9]{36,}`).
 		WithCategory(CategoryAPIToken).
 		WithSeverity(SeverityHigh).
 		WithDescription("GitHub App refresh token").
