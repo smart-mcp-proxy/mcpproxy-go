@@ -737,12 +737,77 @@ func TestSanitizeCiscoStdout_HandlesCRLF(t *testing.T) {
 	}
 }
 
-func TestParseCiscoScannerOutput_UnaffectedBySanitization(t *testing.T) {
-	raw := []byte(`{"scan_results": [{"tool_name": "t1", "is_safe": false,
-		"findings": {"yara_analyzer": {"severity": "HIGH",
-		"threat_names": ["test"], "total_findings": 1}}}]}`)
-	findings := parseCiscoScannerOutput(raw, "cisco-mcp-scanner")
-	if len(findings) != 1 {
-		t.Errorf("expected 1 finding, got %d", len(findings))
+func TestSetScannerLogs_CiscoStdoutSanitized(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	registry := NewRegistry(dir, logger)
+	docker := NewDockerRunner(logger)
+	engine := NewEngine(docker, registry, dir, logger)
+
+	job := &ScanJob{
+		ID:         "job-sanitize",
+		ServerName: "test-server",
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: ciscoScannerID, Status: ScanJobStatusRunning},
+		},
+	}
+
+	rawStdout := `{
+  "server_url": "https://mcp.deepwiki.com/mcp",
+  "scan_results": [{"tool_name": "test_tool", "is_safe": true}]
+}`
+	engine.setScannerLogs(job, ciscoScannerID, scannerLogs{
+		Stdout:   rawStdout,
+		Stderr:   "some stderr",
+		ExitCode: 0,
+	})
+
+	got := job.ScannerStatuses[0].Stdout
+	if strings.Contains(got, "deepwiki") {
+		t.Errorf("expected deepwiki URL removed from cisco stdout, got:\n%s", got)
+	}
+	if !strings.Contains(got, "// [mcpproxy]") {
+		t.Error("expected annotation comment in sanitized output")
+	}
+	if !strings.Contains(got, `"scan_results"`) {
+		t.Error("scan_results should be preserved after sanitization")
+	}
+	// Verify indentation of the line following the removed URL is intact.
+	if !strings.Contains(got, `  "scan_results"`) {
+		t.Errorf("next line indentation damaged, got:\n%s", got)
+	}
+}
+
+func TestSetScannerLogs_NonCiscoScannerStdoutPreserved(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	registry := NewRegistry(dir, logger)
+	docker := NewDockerRunner(logger)
+	engine := NewEngine(docker, registry, dir, logger)
+
+	const otherScanner = "semgrep"
+	job := &ScanJob{
+		ID:         "job-preserve",
+		ServerName: "test-server",
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: otherScanner, Status: ScanJobStatusRunning},
+		},
+	}
+
+	// Stdout happens to contain "deepwiki" but should NOT be sanitized
+	// because this is not the cisco scanner.
+	rawStdout := `{"server_url": "https://mcp.deepwiki.com/mcp", "results": []}`
+	engine.setScannerLogs(job, otherScanner, scannerLogs{
+		Stdout:   rawStdout,
+		Stderr:   "",
+		ExitCode: 0,
+	})
+
+	got := job.ScannerStatuses[0].Stdout
+	if !strings.Contains(got, "deepwiki") {
+		t.Errorf("non-cisco scanner stdout should not be sanitized, got:\n%s", got)
+	}
+	if got != rawStdout {
+		t.Errorf("stdout should be preserved verbatim for non-cisco scanner\nwant: %s\ngot:  %s", rawStdout, got)
 	}
 }

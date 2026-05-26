@@ -605,11 +605,11 @@ type scannerLogs struct {
 
 // setScannerLogs stores stdout/stderr on a scanner's job status
 func (e *Engine) setScannerLogs(job *ScanJob, scannerID string, logs scannerLogs) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if scannerID == "cisco-mcp-scanner" {
+	if scannerID == ciscoScannerID {
 		logs.Stdout = sanitizeCiscoStdout(logs.Stdout)
 	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	for i := range job.ScannerStatuses {
 		if job.ScannerStatuses[i].ScannerID == scannerID {
 			job.ScannerStatuses[i].Stdout = truncate(logs.Stdout, MaxLogBytes)
@@ -1046,18 +1046,25 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
+// ciscoScannerID matches the bundled Cisco AI Defense scanner registered
+// in registry_bundled.go. Keep in sync with that file's ID literal.
+const ciscoScannerID = "cisco-mcp-scanner"
+
 // ciscoServerURLPattern matches the placeholder server_url line emitted by
 // the upstream cisco-ai-mcp-scanner PyPI package in its raw stdout output.
 // The URL is hardcoded in the upstream tool and does not represent a real
 // network request; mcpproxy strips it from the user-visible execution log
 // to avoid the false impression of data exfiltration. See issue #383.
 var ciscoServerURLPattern = regexp.MustCompile(
-	`(?m)^\s*"server_url"\s*:\s*"https?://[^"]*deepwiki[^"]*"\s*,?\s*\r?\n?`,
+	`(?m)^[ \t]*"server_url"[ \t]*:[ \t]*"https?://[^"]*deepwiki[^"]*"[ \t]*,?[ \t]*\r?\n?`,
 )
 
 // sanitizeCiscoStdout replaces the upstream-hardcoded deepwiki placeholder
 // URL line with a short annotation referencing the tracking issue. The rest
 // of the raw output is preserved for debugging.
+//
+// Assumes pretty-printed multi-line output; minified single-line JSON
+// bypasses this filter (acceptable since the cisco scanner emits multi-line).
 func sanitizeCiscoStdout(stdout string) string {
 	if !strings.Contains(stdout, "deepwiki") {
 		return stdout
