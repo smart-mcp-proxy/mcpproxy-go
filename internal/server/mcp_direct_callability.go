@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
@@ -113,7 +111,7 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 		return decision
 	}
 
-	if !serverConfig.IsToolAllowedByConfig(toolName) {
+	if e.proxy.isToolConfigDenied(serverName, toolName, serverConfig) {
 		decision.configDenied = true
 		return decision
 	}
@@ -181,46 +179,11 @@ func (p *MCPProxyServer) directToolCallabilityResult(ctx context.Context, decisi
 	if decision.approval != nil {
 		switch decision.approvalStatus {
 		case storage.ToolApprovalStatusPending:
-			return directPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
+			return toolPendingApprovalResult(decision.serverName, decision.toolName, decision.approval)
 		case storage.ToolApprovalStatusChanged:
-			return directChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
+			return toolChangedApprovalResult(decision.serverName, decision.toolName, decision.approval)
 		}
 	}
 
 	return mcp.NewToolResultError(p.blockedToolMessage(decision.serverName, decision.toolName))
-}
-
-func directPendingApprovalResult(serverName, toolName string, approval *storage.ToolApprovalRecord) *mcp.CallToolResult {
-	response := map[string]interface{}{
-		"status":              "TOOL_QUARANTINED",
-		"server_name":         serverName,
-		"tool_name":           toolName,
-		"reason":              "new_unapproved_tool",
-		"message":             fmt.Sprintf("Tool '%s:%s' has not been approved yet. New tools must be inspected and approved before use.", serverName, toolName),
-		"current_description": approval.CurrentDescription,
-		"action":              fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
-	}
-	return directPolicyJSONResult(response, "pending tool approval")
-}
-
-func directChangedApprovalResult(serverName, toolName string, approval *storage.ToolApprovalRecord) *mcp.CallToolResult {
-	response := map[string]interface{}{
-		"status":               "TOOL_QUARANTINED",
-		"server_name":          serverName,
-		"tool_name":            toolName,
-		"reason":               "tool_description_changed",
-		"message":              fmt.Sprintf("Tool '%s:%s' description has changed since last approval. Inspect changes before using.", serverName, toolName),
-		"previous_description": approval.PreviousDescription,
-		"current_description":  approval.CurrentDescription,
-		"action":               fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
-	}
-	return directPolicyJSONResult(response, "changed tool approval")
-}
-
-func directPolicyJSONResult(response map[string]interface{}, description string) *mcp.CallToolResult {
-	jsonResult, err := json.Marshal(response)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize %s response: %v", description, err))
-	}
-	return mcp.NewToolResultText(string(jsonResult))
 }

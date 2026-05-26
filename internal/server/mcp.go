@@ -1572,17 +1572,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
 						"Tool is pending approval (new unapproved tool)")
 
-					response := map[string]interface{}{
-						"status":              "TOOL_QUARANTINED",
-						"server_name":         serverName,
-						"tool_name":           actualToolName,
-						"reason":              "new_unapproved_tool",
-						"message":             fmt.Sprintf("Tool '%s:%s' has not been approved yet. New tools must be inspected and approved before use.", serverName, actualToolName),
-						"current_description": approval.CurrentDescription,
-						"action":              fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
-					}
-					jsonResult, _ := json.Marshal(response)
-					return mcp.NewToolResultText(string(jsonResult)), nil
+					return toolPendingApprovalResult(serverName, actualToolName, approval), nil
 				}
 				if approval.Status == storage.ToolApprovalStatusChanged {
 					p.logger.Debug("handleCallToolVariant: tool description changed (quarantined)",
@@ -1592,18 +1582,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 					p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked",
 						"Tool description/schema changed since last approval")
 
-					response := map[string]interface{}{
-						"status":               "TOOL_QUARANTINED",
-						"server_name":          serverName,
-						"tool_name":            actualToolName,
-						"reason":               "tool_description_changed",
-						"message":              fmt.Sprintf("Tool '%s:%s' description has changed since last approval. Inspect changes before using.", serverName, actualToolName),
-						"previous_description": approval.PreviousDescription,
-						"current_description":  approval.CurrentDescription,
-						"action":               fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
-					}
-					jsonResult, _ := json.Marshal(response)
-					return mcp.NewToolResultText(string(jsonResult)), nil
+					return toolChangedApprovalResult(serverName, actualToolName, approval), nil
 				}
 			}
 		}
@@ -4833,9 +4812,24 @@ func (p *MCPProxyServer) isToolCallable(serverName, toolName string) bool {
 // runtime disable, so an agent relays the correct remediation instead of
 // telling the user to toggle a switch that cannot lift the lock.
 func (p *MCPProxyServer) blockedToolMessage(serverName, toolName string) string {
-	configDenied := p.mainServer != nil && p.mainServer.runtime != nil &&
-		p.mainServer.runtime.IsToolConfigDenied(serverName, toolName)
-	return blockedToolMessageFor(configDenied)
+	return blockedToolMessageFor(p.isToolConfigDenied(serverName, toolName, nil))
+}
+
+// isToolConfigDenied is the single authority for "is this tool denied by the
+// operator's enabled_tools/disabled_tools config". It prefers the live runtime
+// config (the same source isToolCallable consults) so every call-time policy
+// check agrees. When the runtime is unavailable (e.g. unit tests construct a
+// bare MCPProxyServer) it falls back to the passed stored server config; in
+// production the two agree because config-file tool filters are persisted to the
+// upstream record.
+func (p *MCPProxyServer) isToolConfigDenied(serverName, toolName string, serverConfig *config.ServerConfig) bool {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		return p.mainServer.runtime.IsToolConfigDenied(serverName, toolName)
+	}
+	if serverConfig != nil {
+		return !serverConfig.IsToolAllowedByConfig(toolName)
+	}
+	return false
 }
 
 // blockedToolMessageFor is the pure message-selection half of

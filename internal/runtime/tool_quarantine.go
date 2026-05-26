@@ -13,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -51,20 +52,11 @@ func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON
 }
 
 // normalizeJSON parses a JSON string and re-serializes with sorted keys.
-// Returns the original string if parsing fails (non-JSON content).
+// Returns the original string if parsing fails (non-JSON content). Delegates to
+// hash.NormalizeJSON so the approval hash and the upstream tool capture share a
+// single canonical normalizer.
 func normalizeJSON(s string) string {
-	if s == "" {
-		return s
-	}
-	var parsed interface{}
-	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
-		return s // Not valid JSON, return as-is
-	}
-	normalized, err := json.Marshal(parsed)
-	if err != nil {
-		return s
-	}
-	return string(normalized)
+	return hash.NormalizeJSON(s)
 }
 
 // calculateLegacyToolApprovalHash computes the old hash format (without annotations).
