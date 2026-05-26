@@ -104,6 +104,29 @@ func canonicalSchemaFromBytes(schemaJSON []byte) (json.RawMessage, error) {
 	return json.RawMessage(canonical), nil
 }
 
+// NormalizeJSON parses s and re-serializes it with object keys sorted, so that
+// semantically identical JSON with different key order or whitespace produces a
+// stable, comparable string. Empty or non-JSON input is returned unchanged.
+//
+// This is the single canonical JSON normalizer shared by the upstream tool
+// capture (internal/upstream/core) and the tool-approval hash
+// (internal/runtime), so a schema hashes identically no matter which path
+// observed it.
+func NormalizeJSON(s string) string {
+	if s == "" {
+		return s
+	}
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		return s
+	}
+	normalized, err := json.Marshal(parsed)
+	if err != nil {
+		return s
+	}
+	return string(normalized)
+}
+
 // StringHash computes SHA-256 hash of a string
 func StringHash(input string) string {
 	hasher := sha256.New()

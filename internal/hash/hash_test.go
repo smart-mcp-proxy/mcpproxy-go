@@ -214,3 +214,16 @@ func TestBytesHash(t *testing.T) {
 	assert.NotEqual(t, hash1, hash3, "Different input should produce different hash")
 	assert.Len(t, hash1, 64, "SHA-256 hex string should be 64 characters")
 }
+
+func TestNormalizeJSON(t *testing.T) {
+	// Empty and non-JSON inputs pass through unchanged.
+	assert.Equal(t, "", NormalizeJSON(""))
+	assert.Equal(t, "not json", NormalizeJSON("not json"))
+
+	// Object keys are sorted, whitespace collapsed, so semantically identical
+	// JSON normalizes to one stable string.
+	a := NormalizeJSON(`{"type":"object","properties":{"url":{"type":"string"}}}`)
+	b := NormalizeJSON("{\n  \"properties\": {\"url\": {\"type\": \"string\"}},\n  \"type\": \"object\"\n}")
+	assert.Equal(t, a, b)
+	assert.Equal(t, `{"properties":{"url":{"type":"string"}},"type":"object"}`, a)
+}
