@@ -209,9 +209,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 	schemaVersion, schemaVersionErr := r.storageManager.GetSchemaVersion()
 	outputSchemaHashMigration := schemaVersionErr == nil && schemaVersion < storage.OutputSchemaHashSchemaVersion
-	if outputSchemaHashMigration {
-		defer r.markOutputSchemaHashMigrationCompleteIfReady()
-	}
+	migratedOutputSchemaApprovals := false
 
 	for _, tool := range tools {
 		// Extract the bare tool name (without server prefix)
@@ -236,26 +234,41 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 		if existing != nil && existing.Status == storage.ToolApprovalStatusApproved && outputSchemaHashMigration && existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
 			// One-time output-schema hash backfill: previously approved tools did
-			// not store outputSchema in the approved contract hash. Rebaseline the
-			// approved/current hash using the currently observed output schema so the
-			// algorithm upgrade does not masquerade as an upstream rug-pull.
-			existing.ApprovedHash = currentHash
-			existing.CurrentHash = currentHash
-			existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
-			existing.CurrentDescription = tool.Description
-			existing.CurrentSchema = schemaJSON
-			existing.CurrentOutputSchema = outputSchemaJSON
-			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
-				r.logger.Debug("Failed to backfill output schema approval hash",
-					zap.String("server", serverName),
-					zap.String("tool", toolName),
-					zap.Error(saveErr))
-			} else {
-				r.logger.Info("Tool approval hash backfilled with output schema",
-					zap.String("server", serverName),
-					zap.String("tool", toolName))
+			// not store outputSchema in the approved contract hash. Rebaseline using
+			// the stored approved description/input schema plus the currently observed
+			// output schema. If description/input schema changed, route through the
+			// normal rug-pull detection path instead of silently approving it.
+			storedDesc := existing.CurrentDescription
+			storedSchema := existing.CurrentSchema
+			if storedDesc == "" {
+				storedDesc = tool.Description
 			}
-			continue
+			if storedSchema == "" {
+				storedSchema = schemaJSON
+			}
+			descMatch := storedDesc == tool.Description
+			schemaMatch := normalizeJSON(storedSchema) == normalizeJSON(schemaJSON)
+			if descMatch && schemaMatch {
+				backfilledHash := calculateToolApprovalHashWithOutputSchema(toolName, storedDesc, storedSchema, outputSchemaJSON, tool.Annotations)
+				existing.ApprovedHash = backfilledHash
+				existing.CurrentHash = backfilledHash
+				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.CurrentDescription = storedDesc
+				existing.CurrentSchema = normalizeJSON(storedSchema)
+				existing.CurrentOutputSchema = outputSchemaJSON
+				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+					r.logger.Debug("Failed to backfill output schema approval hash",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+				} else {
+					migratedOutputSchemaApprovals = true
+					r.logger.Info("Tool approval hash backfilled with output schema",
+						zap.String("server", serverName),
+						zap.String("tool", toolName))
+				}
+				continue
+			}
 		}
 
 		if err != nil {
@@ -623,6 +636,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				oldDesc, tool.Description,
 				oldSchema, schemaJSON)
 		}
+	}
+
+	if migratedOutputSchemaApprovals {
+		r.markOutputSchemaHashMigrationCompleteIfReady()
 	}
 
 	if len(result.BlockedTools) > 0 {

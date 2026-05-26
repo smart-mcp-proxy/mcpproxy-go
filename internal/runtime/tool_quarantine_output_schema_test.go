@@ -49,6 +49,40 @@ func TestOutputSchemaHashMigration_ApprovedToolStaysApproved(t *testing.T) {
 	assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), version)
 }
 
+func TestOutputSchemaHashMigration_DescriptionDriftRoutesToChanged(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "github", Enabled: true}})
+	require.NoError(t, rt.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion-1))
+
+	legacyHash := calculateLegacyToolApprovalHash("create_issue", "Creates a GitHub issue", `{"type":"object"}`)
+	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName:         "github",
+		ToolName:           "create_issue",
+		ApprovedHash:       legacyHash,
+		CurrentHash:        legacyHash,
+		Status:             storage.ToolApprovalStatusApproved,
+		CurrentDescription: "Creates a GitHub issue",
+		CurrentSchema:      `{"type":"object"}`,
+	}))
+
+	result, err := rt.checkToolApprovals("github", []*config.ToolMetadata{{
+		ServerName:       "github",
+		Name:             "create_issue",
+		Description:      "Creates a GitHub issue and edits labels",
+		ParamsJSON:       `{"type":"object"}`,
+		OutputSchemaJSON: `{"type":"object","properties":{"url":{"type":"string"}}}`,
+	}})
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"])
+	assert.Equal(t, 1, result.ChangedCount)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, record.Status)
+	assert.Equal(t, legacyHash, record.ApprovedHash)
+	assert.Equal(t, "Creates a GitHub issue", record.PreviousDescription)
+	assert.Equal(t, "Creates a GitHub issue and edits labels", record.CurrentDescription)
+}
+
 func TestOutputSchemaHashMigration_PendingAndChangedRemainUntouched(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "github", Enabled: true}})
 	require.NoError(t, rt.storageManager.SetSchemaVersion(storage.OutputSchemaHashSchemaVersion-1))
