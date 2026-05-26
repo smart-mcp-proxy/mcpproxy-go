@@ -313,7 +313,7 @@ The Security page at `/security` in the Web UI mirrors the CLI and provides:
 ## Known limitations
 
 - **Ramparts on arm64 macOS** — the upstream scanner image ships a binary linked against a newer GLIBC than the image base and fails every run on arm64. Track the [scanner-ramparts image rebuild](https://github.com/smart-mcp-proxy/mcpproxy-go/issues) for a fix. Other 6 of 7 scanners work out of the box on arm64 macOS.
-- **Cisco scanner output has a hardcoded `server_url`** header in its stdout (`https://mcp.deepwiki.com/mcp`). Cosmetic, does not affect findings.
+- **Cisco scanner output has a hardcoded `server_url`** header in its stdout (`https://mcp.deepwiki.com/mcp`). This is cosmetic and does not affect findings. Since #383, mcpproxy strips this line from the user-visible execution log and replaces it with an annotation explaining no network request was made.
 - **Pass 2 (supply-chain audit)** currently requires Docker isolation to be enabled, otherwise it fails source resolution. The UI doesn't yet surface this precondition.
 
 ## Related reading

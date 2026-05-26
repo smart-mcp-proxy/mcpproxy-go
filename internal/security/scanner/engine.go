@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -604,6 +605,9 @@ type scannerLogs struct {
 
 // setScannerLogs stores stdout/stderr on a scanner's job status
 func (e *Engine) setScannerLogs(job *ScanJob, scannerID string, logs scannerLogs) {
+	if scannerID == ciscoScannerID {
+		logs.Stdout = sanitizeCiscoStdout(logs.Stdout)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for i := range job.ScannerStatuses {
@@ -1040,4 +1044,35 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// ciscoScannerID is the single source of truth for the bundled Cisco AI Defense
+// scanner's plugin ID. registry_bundled.go references this const, and
+// setScannerLogs uses it to gate Cisco-specific stdout sanitization.
+const ciscoScannerID = "cisco-mcp-scanner"
+
+// ciscoServerURLPattern matches the placeholder server_url line emitted by
+// the upstream cisco-ai-mcp-scanner PyPI package in its raw stdout output.
+// The URL is hardcoded in the upstream tool and does not represent a real
+// network request; mcpproxy strips it from the user-visible execution log
+// to avoid the false impression of data exfiltration. See issue #383.
+var ciscoServerURLPattern = regexp.MustCompile(
+	`(?m)^[ \t]*"server_url"[ \t]*:[ \t]*"https?://[^"]*deepwiki[^"]*"[ \t]*,?[ \t]*\r?\n?`,
+)
+
+// sanitizeCiscoStdout replaces the upstream-hardcoded deepwiki placeholder
+// URL line with a short annotation referencing the tracking issue. The rest
+// of the raw output is preserved for debugging.
+//
+// Assumes pretty-printed multi-line output; minified single-line JSON
+// bypasses this filter (acceptable since the cisco scanner emits multi-line).
+func sanitizeCiscoStdout(stdout string) string {
+	if !strings.Contains(stdout, "deepwiki") {
+		return stdout
+	}
+	return ciscoServerURLPattern.ReplaceAllString(
+		stdout,
+		"// [mcpproxy] upstream cisco-ai-mcp-scanner emits a hardcoded "+
+			"placeholder server_url; no network request was made (see issue #383)\n",
+	)
 }
