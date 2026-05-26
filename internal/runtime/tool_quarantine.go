@@ -37,8 +37,15 @@ func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON
 	// Normalize JSON schema to prevent key-order differences from causing
 	// false "tool_description_changed" events. Parse → sort keys → serialize.
 	h.Write([]byte(normalizeJSON(schemaJSON)))
-	h.Write([]byte("|"))
-	h.Write([]byte(normalizeJSON(outputSchemaJSON)))
+	// Only fold the output schema into the hash when the tool actually exposes
+	// one. This keeps the hash byte-identical to the pre-output-schema formula
+	// for tools without an outputSchema, so they are NOT re-baselined or
+	// re-quarantined on upgrade. Tools that do expose an outputSchema get a new
+	// hash, which the version-gated migration in checkToolApprovals handles.
+	if normalized := normalizeJSON(outputSchemaJSON); normalized != "" {
+		h.Write([]byte("|"))
+		h.Write([]byte(normalized))
+	}
 	// Annotations excluded from hash — see comment above
 	return hex.EncodeToString(h.Sum(nil))
 }
