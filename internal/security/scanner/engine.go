@@ -1046,8 +1046,9 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// ciscoScannerID matches the bundled Cisco AI Defense scanner registered
-// in registry_bundled.go. Keep in sync with that file's ID literal.
+// ciscoScannerID is the single source of truth for the bundled Cisco AI Defense
+// scanner's plugin ID. registry_bundled.go references this const, and
+// setScannerLogs uses it to gate Cisco-specific stdout sanitization.
 const ciscoScannerID = "cisco-mcp-scanner"
 
 // ciscoServerURLPattern matches the placeholder server_url line emitted by

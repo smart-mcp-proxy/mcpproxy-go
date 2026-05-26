@@ -16,7 +16,7 @@ package scanner
 // deterministic across API, CLI, and UI.
 var bundledScanners = []*ScannerPlugin{
 	{
-		ID:          "cisco-mcp-scanner",
+		ID:          ciscoScannerID,
 		Name:        "Cisco MCP Scanner",
 		Vendor:      "Cisco AI Defense",
 		Description: "YARA rules + readiness analysis. Detects tool poisoning, prompt injection, credential harvesting, and data exfiltration. No API key needed for offline mode.",
