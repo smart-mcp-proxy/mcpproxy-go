@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -690,5 +691,58 @@ func TestPrepareReportDirForEngine(t *testing.T) {
 	}
 	if _, err := os.Stat(reportDir); os.IsNotExist(err) {
 		t.Error("directory should exist")
+	}
+}
+
+func TestSanitizeCiscoStdout_RemovesHardcodedDeepwikiURL(t *testing.T) {
+	in := `{
+  "server_url": "https://mcp.deepwiki.com/mcp",
+  "scan_results": [{"tool_name": "test_tool", "is_safe": true}]
+}`
+	out := sanitizeCiscoStdout(in)
+	if strings.Contains(out, "deepwiki") {
+		t.Errorf("expected deepwiki URL stripped, got: %s", out)
+	}
+	if !strings.Contains(out, "// [mcpproxy] upstream cisco-ai-mcp-scanner") {
+		t.Error("expected explanatory annotation")
+	}
+}
+
+func TestSanitizeCiscoStdout_PreservesScanResults(t *testing.T) {
+	in := `{
+  "server_url": "https://mcp.deepwiki.com/mcp",
+  "scan_results": [{"tool_name": "test_tool", "is_safe": true}]
+}`
+	out := sanitizeCiscoStdout(in)
+	if !strings.Contains(out, `"scan_results"`) {
+		t.Error("scan_results lost")
+	}
+	if !strings.Contains(out, "test_tool") {
+		t.Error("tool_name lost")
+	}
+}
+
+func TestSanitizeCiscoStdout_NoOpWithoutDeepwiki(t *testing.T) {
+	in := `{"scan_results": [{"tool_name": "x", "is_safe": true}]}`
+	if got := sanitizeCiscoStdout(in); got != in {
+		t.Errorf("expected no-op, got diff: %s", got)
+	}
+}
+
+func TestSanitizeCiscoStdout_HandlesCRLF(t *testing.T) {
+	in := "  \"server_url\": \"https://mcp.deepwiki.com/mcp\",\r\n{...}\r\n"
+	out := sanitizeCiscoStdout(in)
+	if strings.Contains(out, "deepwiki") {
+		t.Error("CRLF variant not handled")
+	}
+}
+
+func TestParseCiscoScannerOutput_UnaffectedBySanitization(t *testing.T) {
+	raw := []byte(`{"scan_results": [{"tool_name": "t1", "is_safe": false,
+		"findings": {"yara_analyzer": {"severity": "HIGH",
+		"threat_names": ["test"], "total_findings": 1}}}]}`)
+	findings := parseCiscoScannerOutput(raw, "cisco-mcp-scanner")
+	if len(findings) != 1 {
+		t.Errorf("expected 1 finding, got %d", len(findings))
 	}
 }
