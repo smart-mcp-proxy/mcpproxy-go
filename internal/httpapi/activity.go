@@ -108,6 +108,15 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 		filter.AuthType = authType
 	}
 
+	// Spec 027: Data flow security filters
+	if flowType := q.Get("flow_type"); flowType != "" {
+		filter.FlowType = flowType
+	}
+
+	if riskLevel := q.Get("risk_level"); riskLevel != "" {
+		filter.RiskLevel = riskLevel
+	}
+
 	filter.Validate()
 	return filter
 }
@@ -118,7 +127,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Tags Activity
 // @Accept json
 // @Produce json
-// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change)
+// @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024, 027)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change, hook_evaluation, flow_summary)
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
 // @Param session_id query string false "Filter by MCP session ID"
@@ -131,6 +140,8 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param severity query string false "Filter by severity level" Enums(critical, high, medium, low)
 // @Param agent query string false "Filter by agent token name (Spec 028)"
 // @Param auth_type query string false "Filter by auth type (Spec 028)" Enums(admin, agent)
+// @Param flow_type query string false "Filter by flow type (Spec 027)" Enums(internal_to_internal, internal_to_external, external_to_internal, external_to_external)
+// @Param risk_level query string false "Filter by minimum risk level (Spec 027, >= comparison)" Enums(none, low, medium, high, critical)
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"

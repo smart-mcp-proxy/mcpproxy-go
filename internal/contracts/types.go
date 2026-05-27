@@ -460,6 +460,7 @@ type Diagnostics struct {
 	RuntimeWarnings   []string                  `json:"runtime_warnings"`
 	DeprecatedConfigs []DeprecatedConfigWarning `json:"deprecated_configs,omitempty"` // Deprecated config fields found
 	DockerStatus      *DockerStatus             `json:"docker_status,omitempty"`
+	Recommendations   []Recommendation          `json:"recommendations,omitempty"`
 	Timestamp         time.Time                 `json:"timestamp"`
 }
 
@@ -468,6 +469,16 @@ type DeprecatedConfigWarning struct {
 	Field       string `json:"field"`
 	Message     string `json:"message"`
 	Replacement string `json:"replacement,omitempty"`
+}
+
+// Recommendation represents a suggested action to improve system configuration.
+type Recommendation struct {
+	ID          string `json:"id"`
+	Category    string `json:"category"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Command     string `json:"command,omitempty"`
+	Priority    string `json:"priority"`
 }
 
 // UpstreamError represents a connection or runtime error from an upstream MCP server.

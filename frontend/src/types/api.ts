@@ -328,6 +328,9 @@ export interface StatusUpdate {
   }
   status: Record<string, any>
   timestamp: number
+  // Spec 027: Security coverage information
+  security_coverage?: 'proxy_only' | 'full'
+  hooks_active?: boolean
 }
 
 // Routing mode types
