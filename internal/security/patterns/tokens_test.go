@@ -84,6 +84,42 @@ func TestGitHubTokenPatterns(t *testing.T) {
 	}
 }
 
+// TestGitHubTokenPatterns_LongStatelessFormat verifies the new long stateless
+// GitHub token format (~520 chars, e.g. ghs_ App installation tokens) is matched
+// in full. A fixed {36} length truncates the match and leaks the token tail.
+func TestGitHubTokenPatterns_LongStatelessFormat(t *testing.T) {
+	const tail = 516 // total length 520 incl. "ghs_"/"ghp_"/etc. prefix
+	body := strings.Repeat("aB3", (tail/3)+1)[:tail]
+
+	tests := []struct {
+		name        string
+		input       string
+		patternName string
+	}{
+		{"ghs_ stateless installation token", "ghs_" + body, "github_app"},
+		{"ghp_ long PAT", "ghp_" + body, "github_pat"},
+		{"gho_ long OAuth token", "gho_" + body, "github_oauth"},
+		{"ghr_ long refresh token", "ghr_" + body, "github_refresh"},
+	}
+
+	patterns := GetTokenPatterns()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern := findPatternByName(patterns, tt.patternName)
+			if pattern == nil {
+				t.Fatalf("%s pattern not found", tt.patternName)
+			}
+			matches := pattern.Match(tt.input)
+			assert.NotEmpty(t, matches, "expected match for long token: %s", tt.input)
+			if len(matches) > 0 {
+				assert.Equal(t, tt.input, matches[0],
+					"expected full token captured, got truncated match (len %d of %d)",
+					len(matches[0]), len(tt.input))
+			}
+		})
+	}
+}
+
 // Test GitLab Token patterns
 func TestGitLabTokenPatterns(t *testing.T) {
 	tests := []struct {

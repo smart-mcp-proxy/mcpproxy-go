@@ -39,9 +39,11 @@ func NewSecretSanitizer(core zapcore.Core) *SecretSanitizer {
 // registerDefaultPatterns registers patterns for common secret formats
 func (s *SecretSanitizer) registerDefaultPatterns() {
 	// GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+	// Open-ended length ({36,}): the new stateless token format can be ~520 chars,
+	// and an alphanumeric run has no \b boundary mid-token to stop a fixed upper bound.
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "github_token",
-		regex: regexp.MustCompile(`\b(gh[poushr]_[A-Za-z0-9]{36,255})\b`),
+		regex: regexp.MustCompile(`\b(gh[poushr]_[A-Za-z0-9]{36,})\b`),
 		maskFunc: func(token string) string {
 			if len(token) <= 7 {
 				return "****"
