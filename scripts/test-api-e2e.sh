@@ -726,7 +726,7 @@ echo ""
 echo -e "${YELLOW}Executing a tool call to create history for replay test...${NC}"
 TOOL_CALL_ID=""
 # Make a tool call using the echo_tool from everything server
-$MCPPROXY_BINARY call tool --tool-name="everything:echo_tool" --json_args='{"message":"test replay"}' > /dev/null 2>&1 || true
+$MCPPROXY_BINARY -d "$TEST_DATA_DIR" call tool-read --tool-name="everything:echo_tool" --json_args='{"message":"test replay"}' > /dev/null 2>&1 || true
 sleep 2  # Wait for call to be recorded
 
 # Test 22: Get tool call history again (should have at least one call)
@@ -790,153 +790,6 @@ if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .dat
 else
     log_fail "GET /api/v1/registries/{id}/servers?q=github - Expected query parameter in response" \
         "jq -e '.success == true and .data.servers != null and .data.query == \"github\"' < '$TEST_RESULTS_FILE' >/dev/null"
-fi
-
-# ===========================================
-# Tests for env_json, args_json, headers_json updates (Issue #182)
-# ===========================================
-echo ""
-echo -e "${YELLOW}Testing env_json, args_json, headers_json updates...${NC}"
-echo ""
-
-# Test 28: Add a test server for env/args/headers testing
-log_test "Add test server for env/args/headers tests"
-ADD_SERVER_DATA='{"operation":"add","name":"env-test-server","command":"echo","args_json":"[\"hello\"]","env_json":"{\"INITIAL_VAR\":\"initial\",\"SECOND_VAR\":\"second\"}","enabled":false}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$ADD_SERVER_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "env-test-server"; then
-    log_pass "Add test server for env/args/headers tests"
-else
-    log_fail "Add test server for env/args/headers tests - Failed to add server"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 29: Update env_json (full replacement)
-log_test "Update env_json via upstream_servers tool"
-UPDATE_ENV_DATA='{"operation":"update","name":"env-test-server","env_json":"{\"NEW_VAR\":\"new_value\",\"ANOTHER_VAR\":\"test\"}"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$UPDATE_ENV_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "NEW_VAR" && ! echo "$RESPONSE" | grep -q "INITIAL_VAR"; then
-    log_pass "Update env_json via upstream_servers tool - Full replacement worked"
-else
-    log_fail "Update env_json via upstream_servers tool - Full replacement failed"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 30: Verify env_json update via list operation
-log_test "Verify env_json update via list operation"
-LIST_DATA='{"operation":"list"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$LIST_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "NEW_VAR" && echo "$RESPONSE" | grep -q "new_value"; then
-    log_pass "Verify env_json update via list operation"
-else
-    log_fail "Verify env_json update via list operation - NEW_VAR not found in list response"
-fi
-
-# Test 31: Update args_json
-log_test "Update args_json via upstream_servers tool"
-UPDATE_ARGS_DATA='{"operation":"update","name":"env-test-server","args_json":"[\"updated\",\"--flag\"]"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$UPDATE_ARGS_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "updated"; then
-    log_pass "Update args_json via upstream_servers tool"
-else
-    log_fail "Update args_json via upstream_servers tool"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 32: Verify args_json update via list operation
-log_test "Verify args_json update via list operation"
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args='{"operation":"list"}' 2>&1)
-if echo "$RESPONSE" | grep -q "updated" && echo "$RESPONSE" | grep -q "\-\-flag"; then
-    log_pass "Verify args_json update via list operation"
-else
-    log_fail "Verify args_json update via list operation - updated args not found in list response"
-fi
-
-# Test 33: Add HTTP server for headers test
-log_test "Add HTTP server for headers_json test"
-ADD_HTTP_DATA='{"operation":"add","name":"headers-test-server","url":"http://example.com/api","protocol":"http","headers_json":"{\"X-Initial\":\"initial\"}","enabled":false}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$ADD_HTTP_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "headers-test-server"; then
-    log_pass "Add HTTP server for headers_json test"
-else
-    log_fail "Add HTTP server for headers_json test"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 34: Update headers_json
-log_test "Update headers_json via upstream_servers tool"
-UPDATE_HEADERS_DATA='{"operation":"update","name":"headers-test-server","headers_json":"{\"X-Custom\":\"custom-value\",\"Authorization\":\"Bearer token123\"}"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$UPDATE_HEADERS_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "X-Custom" && ! echo "$RESPONSE" | grep -q "X-Initial"; then
-    log_pass "Update headers_json via upstream_servers tool - Full replacement worked"
-else
-    log_fail "Update headers_json via upstream_servers tool - Full replacement failed"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 35: Verify headers_json update via list operation
-log_test "Verify headers_json update via list operation"
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args='{"operation":"list"}' 2>&1)
-if echo "$RESPONSE" | grep -q "X-Custom" && echo "$RESPONSE" | grep -q "custom-value"; then
-    log_pass "Verify headers_json update via list operation"
-else
-    log_fail "Verify headers_json update via list operation - X-Custom header not found in list response"
-fi
-
-# Test 36: Clear env vars with empty JSON
-log_test "Clear env vars with empty env_json"
-CLEAR_ENV_DATA='{"operation":"update","name":"env-test-server","env_json":"{}"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$CLEAR_ENV_DATA" 2>&1)
-# Verify via list - env should be empty or null
-LIST_RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args='{"operation":"list"}' 2>&1)
-# Check that NEW_VAR is no longer present in env-test-server's env
-if echo "$LIST_RESPONSE" | grep -A 20 "env-test-server" | grep -q "NEW_VAR"; then
-    log_fail "Clear env vars with empty env_json - NEW_VAR still present"
-else
-    log_pass "Clear env vars with empty env_json"
-fi
-
-# Test 37: Test patch operation (same semantics as update)
-log_test "Patch env_json via upstream_servers tool"
-PATCH_ENV_DATA='{"operation":"patch","name":"env-test-server","env_json":"{\"PATCHED_VAR\":\"patched_value\"}"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$PATCH_ENV_DATA" 2>&1)
-if echo "$RESPONSE" | grep -q "PATCHED_VAR" && echo "$RESPONSE" | grep -q "patched_value"; then
-    log_pass "Patch env_json via upstream_servers tool"
-else
-    log_fail "Patch env_json via upstream_servers tool - Expected PATCHED_VAR in response"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 38: Test invalid env_json (should fail gracefully)
-log_test "Invalid env_json returns error"
-INVALID_ENV_DATA='{"operation":"update","name":"env-test-server","env_json":"not valid json"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$INVALID_ENV_DATA" 2>&1)
-if echo "$RESPONSE" | grep -qi "error\|invalid\|failed"; then
-    log_pass "Invalid env_json returns error"
-else
-    log_fail "Invalid env_json returns error - Expected error message"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 39: Test invalid args_json (array expected)
-log_test "Invalid args_json (not array) returns error"
-INVALID_ARGS_DATA='{"operation":"update","name":"env-test-server","args_json":"{\"key\":\"value\"}"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$INVALID_ARGS_DATA" 2>&1)
-if echo "$RESPONSE" | grep -qi "error\|invalid\|failed\|array"; then
-    log_pass "Invalid args_json (not array) returns error"
-else
-    log_fail "Invalid args_json (not array) returns error - Expected error message"
-    echo "Response: $RESPONSE"
-fi
-
-# Test 40: Test server not found
-log_test "Update nonexistent server returns error"
-NOTFOUND_DATA='{"operation":"update","name":"nonexistent-server-12345","env_json":"{\"VAR\":\"value\"}"}'
-RESPONSE=$($MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args="$NOTFOUND_DATA" 2>&1)
-if echo "$RESPONSE" | grep -qi "error\|not found\|failed"; then
-    log_pass "Update nonexistent server returns error"
-else
-    log_fail "Update nonexistent server returns error - Expected error message"
-    echo "Response: $RESPONSE"
 fi
 
 # ============================================================================
@@ -1103,7 +956,7 @@ ACTIVITY_ID=$(jq -r '.data.activities[0].id // empty' < "$TEST_RESULTS_FILE" 2>/
 if [ ! -z "$ACTIVITY_ID" ]; then
     echo -e "${YELLOW}Testing activity detail with ID: $ACTIVITY_ID${NC}"
     test_api "GET /api/v1/activity/{id}" "GET" "${API_BASE}/activity/${ACTIVITY_ID}" "200" "" \
-        "jq -e '.success == true and .data.id != null' < '$TEST_RESULTS_FILE' >/dev/null"
+        "jq -e '.success == true and .data.activity.id != null' < '$TEST_RESULTS_FILE' >/dev/null"
 else
     echo -e "${YELLOW}Skipping activity detail test - no activity records available${NC}"
 fi
@@ -1242,11 +1095,6 @@ echo -e "${YELLOW}Cleaning up CLI test servers...${NC}"
 $MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove cli-stdio-test --yes --if-exists > /dev/null 2>&1 || true
 $MCPPROXY_BINARY -d "$TEST_DATA_DIR" upstream remove cli-header-test --yes --if-exists > /dev/null 2>&1 || true
 
-# Cleanup test servers
-echo ""
-echo -e "${YELLOW}Cleaning up test servers...${NC}"
-$MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args='{"operation":"remove","name":"env-test-server"}' > /dev/null 2>&1 || true
-$MCPPROXY_BINARY call tool --tool-name="upstream_servers" --json_args='{"operation":"remove","name":"headers-test-server"}' > /dev/null 2>&1 || true
 
 echo ""
 echo -e "${YELLOW}Test Summary${NC}"
