@@ -1,6 +1,6 @@
 # Feature Specification: MCP Protocol Upgrade to the 2026-07-28 Spec Revision
 
-**Feature Branch**: `057-mcp-2026-upgrade`
+**Feature Branch**: `058-mcp-2026-upgrade`
 **Created**: 2026-05-28
 **Status**: Draft (BLOCKED — see Dependency Gate)
 **Input**: User description: "MCP protocol upgrade to the 2026-07-28 spec revision"
