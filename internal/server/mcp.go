@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
@@ -87,6 +88,7 @@ type MCPProxyServer struct {
 	upstreamManager *upstream.Manager
 	cacheManager    *cache.Manager
 	truncator       *truncate.Truncator
+	outputValidator *outputvalidation.Validator // Spec 056: output-schema validation (nil when disabled)
 	logger          *zap.Logger
 	mainServer      *Server        // Reference to main server for config persistence
 	config          *config.Config // Add config reference for security checks
@@ -269,6 +271,17 @@ func NewMCPProxyServer(
 		}
 	}
 
+	// Spec 056: construct the output-schema validator when validation is enabled
+	// (mode != "off"). A nil validator means "no validation" on the hot path.
+	var outputValidator *outputvalidation.Validator
+	if config.OutputValidation.IsEnabled() {
+		outputValidator = outputvalidation.New(
+			config.OutputValidation.EffectiveMaxBytes(),
+			config.OutputValidation.EffectiveMaxDepth(),
+			logger,
+		)
+	}
+
 	proxy := &MCPProxyServer{
 		server:          mcpServer,
 		storage:         storage,
@@ -276,6 +289,7 @@ func NewMCPProxyServer(
 		upstreamManager: upstreamManager,
 		cacheManager:    cacheManager,
 		truncator:       truncator,
+		outputValidator: outputValidator,
 		logger:          logger,
 		mainServer:      mainServer,
 		config:          config,
@@ -1780,6 +1794,13 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// found" symptom needs to be debuggable from the server logs.
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
+	// Spec 056: output-schema validation. Strict mode blocks a violating result
+	// (returns an error); warn mode forwards unchanged after recording a
+	// policy_decision. No-op when disabled / no schema / error result.
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
+		return blockResult, nil
+	}
+
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
 		tokenizer := p.mainServer.runtime.Tokenizer()
@@ -2151,6 +2172,13 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// a zap.Warn if the cache write fails — the resulting "cache key not
 	// found" symptom needs to be debuggable from the server logs.
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
+
+	// Spec 056: output-schema validation. Strict mode blocks a violating result
+	// (returns an error); warn mode forwards unchanged after recording a
+	// policy_decision. No-op when disabled / no schema / error result.
+	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
+		return blockResult, nil
+	}
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -4927,5 +4955,76 @@ func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *con
 		}
 	}
 
+	return nil
+}
+
+// lookupOutputSchema returns the declared output schema (raw JSON) for a tool,
+// or "" when the tool declares none or cannot be found. Mirrors
+// lookupToolAnnotations, reading from the in-memory stateview snapshot so the
+// hot path stays a cheap map lookup (Spec 056 FR-A1/FR-A2).
+func (p *MCPProxyServer) lookupOutputSchema(serverName, toolName string) string {
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return ""
+	}
+	supervisor := p.mainServer.runtime.Supervisor()
+	if supervisor == nil {
+		return ""
+	}
+	snapshot := supervisor.StateView().Snapshot()
+	serverStatus, exists := snapshot.Servers[serverName]
+	if !exists {
+		return ""
+	}
+	for _, tool := range serverStatus.Tools {
+		if tool.Name == toolName || tool.Name == serverName+":"+toolName {
+			return tool.OutputSchemaJSON
+		}
+	}
+	return ""
+}
+
+// applyOutputValidation runs Spec 056 output-schema validation against a
+// proxied tool result. It returns a non-nil *mcp.CallToolResult error when the
+// call MUST be blocked (strict mode); it returns nil when the result should be
+// forwarded unchanged (no validation, no schema, warn-mode tag, or a clean
+// pass). It never mutates the result on the success path (FR-A3).
+//
+// forwarded is the result produced by forwardContentResult; its StructuredContent
+// is identical to the upstream's (forwardContentResult only truncates text
+// blocks), so validating it here is equivalent to validating the original.
+func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName string, forwarded *mcp.CallToolResult) *mcp.CallToolResult {
+	// Disabled (mode=off) or validator not constructed -> no-op (FR-A4/FR-A7).
+	if p.outputValidator == nil || !p.config.OutputValidation.IsEnabled() {
+		return nil
+	}
+	if forwarded == nil || forwarded.IsError {
+		return nil // no successful structured payload to validate (FR-A10)
+	}
+	schemaJSON := p.lookupOutputSchema(serverName, toolName)
+	if schemaJSON == "" {
+		return nil // tool declares no output schema (FR-A7)
+	}
+
+	d := evaluateOutputValidation(
+		p.outputValidator,
+		serverName+":"+toolName,
+		schemaJSON,
+		p.config.OutputValidation.IsStrict(),
+		p.config.OutputValidation.BlockOnMissingStructured(),
+		forwarded,
+	)
+	if d.decision == "" {
+		return nil // clean pass / no-op
+	}
+
+	sessionID := ""
+	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+		sessionID = sess.SessionID()
+	}
+	p.emitActivityPolicyDecision(serverName, toolName, sessionID, d.decision, d.reason)
+	if d.block {
+		return mcp.NewToolResultError("output schema validation failed: " + d.reason)
+	}
+	// Warn mode: forward the original payload unchanged (FR-A11).
 	return nil
 }

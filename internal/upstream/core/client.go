@@ -285,6 +285,11 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 			paramsJSON = string(schemaBytes)
 		}
 
+		// Spec 056 (FR-A1): capture the tool's declared output schema so it is
+		// available at call time for output-schema validation. captureOutputSchemaJSON
+		// (Spec 056 / #527) prefers raw schema bytes and normalizes them for a stable
+		// contract hash; a tool with no declared schema yields "", making validation a
+		// no-op (FR-A7).
 		outputSchemaJSON := captureOutputSchemaJSON(tool)
 
 		toolMeta := &config.ToolMetadata{

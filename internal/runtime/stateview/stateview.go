@@ -15,6 +15,9 @@ type ToolInfo struct {
 	Description string
 	InputSchema map[string]interface{}
 	Annotations *config.ToolAnnotations
+	// OutputSchemaJSON is the tool's declared output schema (raw JSON), empty
+	// when the tool declares none. Used for output-schema validation (Spec 056).
+	OutputSchemaJSON string
 }
 
 // ServerStatus represents the runtime status of an upstream server.

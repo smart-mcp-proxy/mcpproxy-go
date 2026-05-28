@@ -140,6 +140,9 @@ type Config struct {
 	// Sensitive data detection settings (Spec 026)
 	SensitiveDataDetection *SensitiveDataDetectionConfig `json:"sensitive_data_detection,omitempty" mapstructure:"sensitive-data-detection"`
 
+	// Output-schema validation settings (Spec 056)
+	OutputValidation *OutputValidationConfig `json:"output_validation,omitempty" mapstructure:"output-validation"`
+
 	// Telemetry settings (Spec 036)
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty" mapstructure:"telemetry"`
 
@@ -467,6 +470,71 @@ func (c *SensitiveDataDetectionConfig) GetEntropyThreshold() float64 {
 	return c.EntropyThreshold
 }
 
+// OutputValidationConfig controls output-schema validation behaviour (Spec 056).
+type OutputValidationConfig struct {
+	Mode                     string `json:"mode,omitempty" mapstructure:"mode"`                                             // "off" | "warn" | "strict"; default "warn"
+	MaxBytes                 int    `json:"max_bytes,omitempty" mapstructure:"max-bytes"`                                   // structured payload byte cap; default 5<<20
+	MaxDepth                 int    `json:"max_depth,omitempty" mapstructure:"max-depth"`                                   // nesting depth cap; default 64
+	MissingStructuredContent string `json:"missing_structured_content,omitempty" mapstructure:"missing-structured-content"` // "allow" | "block"; default "allow"
+}
+
+// DefaultOutputValidationConfig returns the default configuration for output-schema validation.
+func DefaultOutputValidationConfig() *OutputValidationConfig {
+	return &OutputValidationConfig{
+		Mode:                     "warn",
+		MaxBytes:                 5 << 20,
+		MaxDepth:                 64,
+		MissingStructuredContent: "allow",
+	}
+}
+
+// IsEnabled returns true unless Mode is "off". A nil receiver defaults to true (warn).
+func (c *OutputValidationConfig) IsEnabled() bool {
+	if c == nil {
+		return true
+	}
+	return c.Mode != "off"
+}
+
+// IsStrict returns true when Mode is "strict". A nil receiver returns false.
+func (c *OutputValidationConfig) IsStrict() bool {
+	if c == nil {
+		return false
+	}
+	return c.Mode == "strict"
+}
+
+// IsWarn returns true when validation is enabled but not strict (i.e. warn mode).
+// A nil receiver returns true (default is warn).
+func (c *OutputValidationConfig) IsWarn() bool {
+	return c.IsEnabled() && !c.IsStrict()
+}
+
+// EffectiveMaxBytes returns MaxBytes, falling back to 5<<20 when zero or nil.
+func (c *OutputValidationConfig) EffectiveMaxBytes() int {
+	if c == nil || c.MaxBytes <= 0 {
+		return 5 << 20
+	}
+	return c.MaxBytes
+}
+
+// EffectiveMaxDepth returns MaxDepth, falling back to 64 when zero or nil.
+func (c *OutputValidationConfig) EffectiveMaxDepth() int {
+	if c == nil || c.MaxDepth <= 0 {
+		return 64
+	}
+	return c.MaxDepth
+}
+
+// BlockOnMissingStructured returns true when MissingStructuredContent is "block".
+// A nil receiver returns false (default is "allow").
+func (c *OutputValidationConfig) BlockOnMissingStructured() bool {
+	if c == nil {
+		return false
+	}
+	return c.MissingStructuredContent == "block"
+}
+
 // RegistryEntry represents a registry in the configuration
 type RegistryEntry struct {
 	ID          string      `json:"id"`
@@ -527,7 +595,7 @@ type ToolMetadata struct {
 	ServerName       string           `json:"server_name"`
 	Description      string           `json:"description"`
 	ParamsJSON       string           `json:"params_json"`
-	OutputSchemaJSON string           `json:"output_schema_json,omitempty"`
+	OutputSchemaJSON string           `json:"output_schema_json,omitempty"` // declared output schema, raw JSON bytes (Spec 056)
 	Hash             string           `json:"hash"`
 	Created          time.Time        `json:"created"`
 	Updated          time.Time        `json:"updated"`
@@ -693,6 +761,9 @@ func DefaultConfig() *Config {
 
 		// Default sensitive data detection settings (enabled by default for security)
 		SensitiveDataDetection: DefaultSensitiveDataDetectionConfig(),
+
+		// Default output-schema validation settings (Spec 056)
+		OutputValidation: DefaultOutputValidationConfig(),
 
 		// Default registries for MCP server discovery
 		Registries: []RegistryEntry{

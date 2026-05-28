@@ -621,10 +621,11 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				}
 
 				status.Tools[i] = stateview.ToolInfo{
-					Name:        tool.Name,
-					Description: tool.Description,
-					InputSchema: inputSchema,
-					Annotations: tool.Annotations,
+					Name:             tool.Name,
+					Description:      tool.Description,
+					InputSchema:      inputSchema,
+					Annotations:      tool.Annotations,
+					OutputSchemaJSON: tool.OutputSchemaJSON,
 				}
 			}
 		} else {
@@ -809,10 +810,11 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 				}
 
 				status.Tools[i] = stateview.ToolInfo{
-					Name:        tool.Name,
-					Description: tool.Description,
-					InputSchema: inputSchema,
-					Annotations: tool.Annotations,
+					Name:             tool.Name,
+					Description:      tool.Description,
+					InputSchema:      inputSchema,
+					Annotations:      tool.Annotations,
+					OutputSchemaJSON: tool.OutputSchemaJSON,
 				}
 			}
 		})
