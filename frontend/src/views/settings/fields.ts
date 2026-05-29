@@ -252,12 +252,19 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
 ]
 
 // ---- path helpers ----
+// Keys that would mutate the prototype chain. setPath refuses to traverse or
+// assign these so a crafted dot-path can never pollute Object.prototype
+// (CodeQL js/prototype-polluting-assignment). Settings keys come from the
+// static catalogue above, but we guard the generic helper regardless.
+const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+
 export function getPath(obj: any, path: string): any {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
 }
 
 export function setPath(obj: any, path: string, value: any): void {
   const keys = path.split('.')
+  if (keys.some((k) => UNSAFE_KEYS.has(k))) return // guard against prototype pollution
   let cur = obj
   for (let i = 0; i < keys.length - 1; i++) {
     if (cur[keys[i]] == null || typeof cur[keys[i]] !== 'object') cur[keys[i]] = {}
