@@ -20,6 +20,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
 
@@ -56,6 +57,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 NSLog("[MCPProxy] Cmd+N: show add server")
                 self?.showAddServer()
                 return nil
+            case ",":
+                // Intercept ⌘, before SwiftUI's Settings scene sees it, so it
+                // opens our config window instead of the (unreliable) scene.
+                NSLog("[MCPProxy] Cmd+,: show settings")
+                self?.showSettingsWindow()
+                return nil
             default:
                 return event
             }
@@ -63,6 +70,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         // Set up the app's main menu bar with View > Text Size commands
         setupMainMenu()
+
+        // The SwiftUI Settings scene window is owned by SwiftUI, not us, so it
+        // never hits our NSWindowDelegate. Observe all window closes so we can
+        // drop back to a menu-bar-only app when the Settings window is dismissed.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.async { self?.restoreAccessoryIfNoVisibleWindows() }
+        }
 
         // Create the status bar item with the MCPProxy monochrome icon
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -231,6 +247,55 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         showMainWindow()
     }
 
+    // Our single config window. Both the tray "Settings…" item and the app
+    // menu's "Settings…" / ⌘, route here (the latter via the key monitor +
+    // menu-item repoint in setupMainMenu) — never the SwiftUI Settings scene,
+    // whose programmatic opening proved unreliable from a menu-bar app.
+    @objc private func showSettingsWindow() {
+        // Reuse the existing window if it's already open.
+        if let window = settingsWindow, window.isVisible {
+            NSApp.setActivationPolicy(.regular)
+            setupMainMenu()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // A menu-bar (.accessory) app can't make a window key without first
+        // becoming a regular app — same dance as showMainWindow().
+        NSApp.setActivationPolicy(.regular)
+
+        let hostingView = NSHostingView(rootView: SettingsView(appState: appState))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 660),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "MCPProxy Settings"
+        window.contentView = hostingView
+        window.setFrameAutosaveName("MCPProxySettingsWindow")
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        setupMainMenu()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        settingsWindow = window
+    }
+
+    /// Called from the SwiftUI Settings scene bridge: open the real config
+    /// window, then close the empty SwiftUI scene window SwiftUI just created.
+    func openSettingsFromScene() {
+        showSettingsWindow()
+        DispatchQueue.main.async {
+            NSApp.windows
+                .first { $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" }?
+                .close()
+        }
+    }
+
     @objc private func showAddServer() {
         showMainWindow()
         // First switch to the Servers tab so ServersView is mounted and
@@ -253,16 +318,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    // NSWindowDelegate — hide from Dock when window closes
+    // NSWindowDelegate — hide from Dock when the last managed window closes.
     func windowWillClose(_ notification: Notification) {
-        // Return to accessory (menu bar only) when main window closes
-        NSApp.setActivationPolicy(.accessory)
+        // Defer so the closing window has already left the visible set.
+        DispatchQueue.main.async { [weak self] in self?.restoreAccessoryIfNoVisibleWindows() }
+    }
+
+    // Drop back to a menu-bar-only (.accessory) app once no real window remains.
+    // Covers both the AppKit main window (delegate) and the SwiftUI Settings
+    // scene window (which we don't own — handled via a global close observer).
+    private func restoreAccessoryIfNoVisibleWindows() {
+        let anyVisible = NSApp.windows.contains { win in
+            win.isVisible && win.styleMask.contains(.titled) && !(win is NSPanel)
+        }
+        if !anyVisible {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     // MARK: - Main Menu Bar (View > Text Size)
 
     private func setupMainMenu() {
         guard let mainMenu = NSApp.mainMenu else { return }
+
+        // Route a CLICK on the app-menu "Settings…" item to our config window
+        // (the ⌘, keyboard shortcut is intercepted separately in the key
+        // monitor). Both bypass the empty SwiftUI `Settings {}` scene.
+        if let appMenu = mainMenu.item(at: 0)?.submenu {
+            for item in appMenu.items where item.title.hasPrefix("Settings") || item.title.hasPrefix("Preferences") {
+                item.target = self
+                item.action = #selector(showSettingsWindow)
+                item.keyEquivalent = ","
+                item.keyEquivalentModifierMask = .command
+            }
+        }
 
         // Find or create View menu and add text size items
         let viewMenu: NSMenu
@@ -607,9 +696,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         addServer.target = self
         menu.addItem(addServer)
 
-        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: ",")
+        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: "")
         openApp.target = self
         menu.addItem(openApp)
+
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(showSettingsWindow), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         let webUI = NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
@@ -917,14 +1010,30 @@ struct MCPProxyApp: App {
     @NSApplicationDelegateAdaptor(AppController.self) var controller
 
     var body: some Scene {
-        // No SwiftUI scenes — the tray menu is pure AppKit (NSStatusItem + NSMenu).
-        // This avoids the MenuBarExtra .menu style bug where ForEach duplicates items.
-        // Settings scene intentionally hidden — Cmd+, is handled by tray menu "Open MCPProxy..." item.
+        // The tray menu is pure AppKit (NSStatusItem + NSMenu) — this avoids the
+        // MenuBarExtra .menu ForEach-duplication bug. There is ONE config window,
+        // the AppKit NSWindow in showSettingsWindow(). The tray "Settings…", the
+        // app-menu "Settings…" click, and ⌘, all route there. This SwiftUI
+        // Settings scene exists only to own the system "Settings…" slot; it is
+        // bridged away so it never actually shows.
         Settings {
-            Text("Use the MCPProxy tray menu to access settings.")
-                .frame(width: 300, height: 100)
-                .font(.body)
-                .foregroundColor(.secondary)
+            // Safety net only: ⌘, is intercepted by the key monitor and the
+            // app-menu "Settings…" click is repointed (both in AppController),
+            // so this scene normally never opens. If some path we didn't catch
+            // does open it, redirect to the real config window and dismiss this
+            // empty scene window — the user must never see a stub.
+            SettingsSceneBridge(controller: controller)
         }
+    }
+}
+
+/// Empty stand-in for the SwiftUI Settings scene that immediately hands off to
+/// the AppController's AppKit config window. See `body` above for why.
+private struct SettingsSceneBridge: View {
+    let controller: AppController
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onAppear { controller.openSettingsFromScene() }
     }
 }
