@@ -368,11 +368,10 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
 ]
 
 // ---- path helpers ----
-// Keys that would mutate the prototype chain. setPath refuses to traverse or
-// assign these so a crafted dot-path can never pollute Object.prototype
-// (CodeQL js/prototype-polluting-assignment). Settings keys come from the
-// static catalogue above, but we guard the generic helper regardless.
-const UNSAFE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+// setPath guards every key against prototype-polluting names (__proto__,
+// prototype, constructor) so a crafted dot-path can never reach Object.prototype.
+// Settings keys come from the static catalogue above, but the generic helper is
+// guarded regardless.
 
 export function getPath(obj: any, path: string): any {
   return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj)
@@ -380,13 +379,19 @@ export function getPath(obj: any, path: string): any {
 
 export function setPath(obj: any, path: string, value: any): void {
   const keys = path.split('.')
-  if (keys.some((k) => UNSAFE_KEYS.has(k))) return // guard against prototype pollution
   let cur = obj
   for (let i = 0; i < keys.length - 1; i++) {
-    if (cur[keys[i]] == null || typeof cur[keys[i]] !== 'object') cur[keys[i]] = {}
-    cur = cur[keys[i]]
+    const k = keys[i]
+    // Guard every traversal key against prototype pollution. The explicit
+    // per-key comparison (rather than a Set lookup) is what CodeQL recognises
+    // as a sanitising barrier for js/prototype-pollution-utility.
+    if (k === '__proto__' || k === 'prototype' || k === 'constructor') return
+    if (cur[k] == null || typeof cur[k] !== 'object') cur[k] = {}
+    cur = cur[k]
   }
-  cur[keys[keys.length - 1]] = value
+  const last = keys[keys.length - 1]
+  if (last === '__proto__' || last === 'prototype' || last === 'constructor') return
+  cur[last] = value
 }
 
 // buildPartial assembles a nested object containing ONLY the given dot-path
