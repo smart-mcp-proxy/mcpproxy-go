@@ -16,11 +16,11 @@ const (
 
 // Detector scans data for sensitive information
 type Detector struct {
-	patterns      []*Pattern
-	filePatterns  []*FilePathPattern
+	patterns       []*Pattern
+	filePatterns   []*FilePathPattern
 	customPatterns []*Pattern
-	config        *config.SensitiveDataDetectionConfig
-	mu            sync.RWMutex
+	config         *config.SensitiveDataDetectionConfig
+	mu             sync.RWMutex
 }
 
 // NewDetector creates a new detector with the given configuration
@@ -62,6 +62,72 @@ func (d *Detector) Scan(arguments, response string) *Result {
 
 	result.ScanDurationMs = time.Since(start).Milliseconds()
 	return result
+}
+
+// Redact scans content for sensitive data and replaces every detected secret
+// with a category-tagged placeholder (`[REDACTED:<category>]`), returning the
+// sanitized string and the list of detections that drove each replacement
+// (Spec 054 Track B). It is additive and does not alter Scan behavior.
+//
+// Patterns are applied sequentially over the evolving string. Matches that fail
+// validation or are known examples are left untouched. The number of detections
+// is capped at MaxDetectionsPerScan.
+func (d *Detector) Redact(content string) (redacted string, detections []Detection) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+
+	if !d.config.IsEnabled() {
+		return content, nil
+	}
+
+	redacted = content
+	allPatterns := append(d.patterns, d.customPatterns...)
+
+	for _, pattern := range allPatterns {
+		if len(detections) >= MaxDetectionsPerScan {
+			break
+		}
+
+		// Respect category enablement.
+		if !d.config.IsCategoryEnabled(string(pattern.Category)) {
+			continue
+		}
+
+		category := string(pattern.Category)
+		placeholder := "[REDACTED:" + category + "]"
+
+		// pattern.Match already filters through the pattern's validator (and
+		// delegate normalization). We additionally guard with IsValid /
+		// IsKnownExample so example values are never redacted.
+		matches := pattern.Match(redacted)
+		recorded := false
+		for _, match := range matches {
+			if len(detections) >= MaxDetectionsPerScan {
+				break
+			}
+			if match == "" {
+				continue
+			}
+			if !pattern.IsValid(match) || pattern.IsKnownExample(match) {
+				continue
+			}
+
+			redacted = strings.ReplaceAll(redacted, match, placeholder)
+
+			if !recorded {
+				detections = append(detections, Detection{
+					Type:            pattern.Name,
+					Category:        category,
+					Severity:        string(pattern.Severity),
+					Location:        "response",
+					IsLikelyExample: false,
+				})
+				recorded = true
+			}
+		}
+	}
+
+	return redacted, detections
 }
 
 // scanContent scans content for sensitive data
@@ -308,4 +374,3 @@ func buildCustomPattern(cp config.CustomPattern) *Pattern {
 
 	return builder.Build()
 }
-

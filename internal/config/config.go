@@ -143,6 +143,9 @@ type Config struct {
 	// Output-schema validation settings (Spec 056)
 	OutputValidation *OutputValidationConfig `json:"output_validation,omitempty" mapstructure:"output-validation"`
 
+	// Output sanitisation settings (Spec 054 Track B)
+	OutputSanitisation *OutputSanitisationConfig `json:"output_sanitisation,omitempty" mapstructure:"output-sanitisation"`
+
 	// Telemetry settings (Spec 036)
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty" mapstructure:"telemetry"`
 
@@ -535,6 +538,97 @@ func (c *OutputValidationConfig) BlockOnMissingStructured() bool {
 	return c.MissingStructuredContent == "block"
 }
 
+// OutputSanitisationConfig controls output sanitisation behaviour for proxied
+// tool responses (Spec 054 Track B).
+type OutputSanitisationConfig struct {
+	SpotlightUntrusted bool     `json:"spotlight_untrusted,omitempty" mapstructure:"spotlight-untrusted"` // wrap untrusted output in spotlight markers; default true
+	ResponseAction     string   `json:"response_action,omitempty" mapstructure:"response-action"`         // "spotlight" | "redact" | "block"; default "spotlight"
+	StripControlChars  bool     `json:"strip_control_chars,omitempty" mapstructure:"strip-control-chars"` // strip control-character classes; default false
+	StripClasses       []string `json:"strip_classes,omitempty" mapstructure:"strip-classes"`             // classes to strip: ansi/c0c1/bidi/zero_width
+	MaxRedactions      int      `json:"max_redactions,omitempty" mapstructure:"max-redactions"`           // cap on redactions per response; default 100
+}
+
+// DefaultOutputSanitisationConfig returns the default configuration for output sanitisation.
+func DefaultOutputSanitisationConfig() *OutputSanitisationConfig {
+	return &OutputSanitisationConfig{
+		SpotlightUntrusted: false,
+		ResponseAction:     "spotlight",
+		StripControlChars:  false,
+		StripClasses:       []string{"ansi", "c0c1", "bidi", "zero_width"},
+		MaxRedactions:      100,
+	}
+}
+
+// IsEnabled returns true unless the whole config is explicitly disabled.
+// A nil receiver defaults to true.
+func (c *OutputSanitisationConfig) IsEnabled() bool {
+	if c == nil {
+		return true
+	}
+	return c.ResponseAction != "off"
+}
+
+// IsSpotlightEnabled returns SpotlightUntrusted. Track B is fully opt-in: a nil
+// receiver (no output_sanitisation block configured) means spotlighting is off.
+func (c *OutputSanitisationConfig) IsSpotlightEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.SpotlightUntrusted
+}
+
+// IsRedact returns true when ResponseAction is "redact". A nil receiver returns false.
+func (c *OutputSanitisationConfig) IsRedact() bool {
+	if c == nil {
+		return false
+	}
+	return c.ResponseAction == "redact"
+}
+
+// IsBlock returns true when ResponseAction is "block". A nil receiver returns false.
+func (c *OutputSanitisationConfig) IsBlock() bool {
+	if c == nil {
+		return false
+	}
+	return c.ResponseAction == "block"
+}
+
+// IsStripEnabled returns StripControlChars. A nil receiver returns false.
+func (c *OutputSanitisationConfig) IsStripEnabled() bool {
+	if c == nil {
+		return false
+	}
+	return c.StripControlChars
+}
+
+// EnabledStripClasses returns the set of strip classes that are active. When
+// stripping is disabled the returned map is empty. Only the valid keys
+// (ansi/c0c1/zero_width/bidi) are included, lowercased.
+func (c *OutputSanitisationConfig) EnabledStripClasses() map[string]bool {
+	set := make(map[string]bool)
+	if !c.IsStripEnabled() {
+		return set
+	}
+	valid := map[string]bool{"ansi": true, "c0c1": true, "zero_width": true, "bidi": true}
+	for _, class := range c.StripClasses {
+		key := strings.ToLower(class)
+		if valid[key] {
+			set[key] = true
+		}
+	}
+	return set
+}
+
+// WouldMutate reports whether sanitisation would alter the response for the
+// given trust level. Redact and block always mutate; spotlight/strip only
+// mutate untrusted output.
+func (c *OutputSanitisationConfig) WouldMutate(trust string) bool {
+	if c.IsRedact() || c.IsBlock() {
+		return true
+	}
+	return trust == "untrusted" && (c.IsStripEnabled() || c.IsSpotlightEnabled())
+}
+
 // RegistryEntry represents a registry in the configuration
 type RegistryEntry struct {
 	ID          string      `json:"id"`
@@ -764,6 +858,9 @@ func DefaultConfig() *Config {
 
 		// Default output-schema validation settings (Spec 056)
 		OutputValidation: DefaultOutputValidationConfig(),
+
+		// Default output sanitisation settings (Spec 054 Track B)
+		OutputSanitisation: DefaultOutputSanitisationConfig(),
 
 		// Default registries for MCP server discovery
 		Registries: []RegistryEntry{

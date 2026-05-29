@@ -185,6 +185,36 @@ func maybeTruncateAndCacheText(text, toolName string, args map[string]interface{
 	return tr.TruncatedContent, true
 }
 
+// forwardedText recomputes the text representation of a (possibly sanitised)
+// forwarded result so logging/metrics reflect what the agent actually receives
+// after Spec 054 Track B mutation. It mirrors forwardContentResult's text
+// rendering (text verbatim, placeholders for non-text blocks). If forwarded is
+// nil or carries no renderable content, the supplied fallback is returned.
+func forwardedText(forwarded *mcp.CallToolResult, fallback string) string {
+	if forwarded == nil {
+		return fallback
+	}
+	var parts []string
+	for _, c := range forwarded.Content {
+		switch tc := c.(type) {
+		case mcp.TextContent:
+			parts = append(parts, tc.Text)
+		case mcp.ImageContent:
+			parts = append(parts, fmt.Sprintf("[image:%s len=%d]", tc.MIMEType, len(tc.Data)))
+		case mcp.AudioContent:
+			parts = append(parts, fmt.Sprintf("[audio:%s len=%d]", tc.MIMEType, len(tc.Data)))
+		default:
+			if b, err := json.Marshal(c); err == nil {
+				parts = append(parts, string(b))
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return fallback
+	}
+	return joinTextParts(parts)
+}
+
 // joinTextParts concatenates text parts with a newline separator.
 // Equivalent to strings.Join but avoids importing strings just for this.
 func joinTextParts(parts []string) string {
