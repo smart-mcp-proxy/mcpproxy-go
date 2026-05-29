@@ -49,14 +49,23 @@
     <!-- danger confirm -->
     <dialog ref="confirmEl" class="modal" :data-test="`settings-confirm-${sectionId}`">
       <div class="modal-box">
-        <h3 class="font-bold text-lg text-error">Confirm sensitive change</h3>
+        <h3 class="font-bold text-lg" :class="pendingInfoOnly ? '' : 'text-error'">
+          {{ pendingInfoOnly ? 'Are you sure?' : 'Confirm sensitive change' }}
+        </h3>
         <ul class="list-disc list-inside text-sm mt-3 space-y-2">
           <li v-for="(m, i) in pendingMessages" :key="i">{{ m }}</li>
         </ul>
         <div class="modal-action">
-          <button class="btn btn-sm" @click="cancelConfirm" data-test="settings-confirm-cancel">Cancel</button>
-          <button class="btn btn-sm btn-error" @click="proceedConfirm" data-test="settings-confirm-proceed">
-            Apply anyway
+          <button class="btn btn-sm" @click="cancelConfirm" data-test="settings-confirm-cancel">
+            {{ pendingInfoOnly ? 'Keep it on' : 'Cancel' }}
+          </button>
+          <button
+            class="btn btn-sm"
+            :class="pendingInfoOnly ? 'btn-primary' : 'btn-error'"
+            @click="proceedConfirm"
+            data-test="settings-confirm-proceed"
+          >
+            {{ pendingInfoOnly ? 'Turn off anyway' : 'Apply anyway' }}
           </button>
         </div>
       </div>
@@ -68,7 +77,7 @@
 <script setup lang="ts">
 import { ref, computed, getCurrentInstance } from 'vue'
 import SettingField from './SettingField.vue'
-import { getPath, setPath, buildPartial, type SettingField as Field } from '@/views/settings/fields'
+import { getPath, setPath, buildPartial, validateField, type SettingField as Field } from '@/views/settings/fields'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 
@@ -87,21 +96,13 @@ const lastResult = ref<any>(null)
 const dirty = ref<Record<string, true>>({})
 const confirmEl = ref<HTMLDialogElement | null>(null)
 const pendingMessages = ref<string[]>([])
+const pendingInfoOnly = ref(false)
 
 const dirtyKeys = computed(() => Object.keys(dirty.value))
 
-// crude validity gate: any number field out of range blocks save
+// Block Save when any field (number/duration) is invalid.
 const hasInvalid = computed(() =>
-  props.fields.some((f) => {
-    if (f.control !== 'number') return false
-    const v = getPath(props.working, f.key)
-    if (v === '' || v == null) return true
-    const n = Number(v)
-    if (Number.isNaN(n)) return true
-    if (f.min != null && n < f.min) return true
-    if (f.max != null && n > f.max) return true
-    return false
-  })
+  props.fields.some((f) => validateField(f, getPath(props.working, f.key)) != null)
 )
 
 function eq(a: any, b: any): boolean {
@@ -125,21 +126,22 @@ function isLoopback(addr: any): boolean {
   return /^(127\.|localhost|\[::1\]|::1)/.test(s.replace(/^.*@/, '')) || s.startsWith('127.0.0.1')
 }
 
-function dangerMessages(): string[] {
-  const msgs: string[] = []
+function dangerMessages(): Array<{ message: string; tone: 'danger' | 'info' }> {
+  const out: Array<{ message: string; tone: 'danger' | 'info' }> = []
   for (const key of dirtyKeys.value) {
     const f = props.fields.find((x) => x.key === key)
     if (!f?.danger) continue
     const val = getPath(props.working, key)
+    const entry = { message: f.danger.message, tone: f.danger.tone ?? 'danger' }
     if ('confirmValue' in f.danger) {
-      if (eq(val, f.danger.confirmValue)) msgs.push(f.danger.message)
+      if (eq(val, f.danger.confirmValue)) out.push(entry)
     } else if (f.key === 'listen') {
-      if (!isLoopback(val)) msgs.push(f.danger.message)
+      if (!isLoopback(val)) out.push(entry)
     } else {
-      msgs.push(f.danger.message)
+      out.push(entry)
     }
   }
-  return msgs
+  return out
 }
 
 function discard() {
@@ -152,9 +154,10 @@ function discard() {
 }
 
 function attemptSave() {
-  const msgs = dangerMessages()
-  if (msgs.length) {
-    pendingMessages.value = msgs
+  const items = dangerMessages()
+  if (items.length) {
+    pendingMessages.value = items.map((i) => i.message)
+    pendingInfoOnly.value = items.every((i) => i.tone === 'info')
     confirmEl.value?.showModal()
     return
   }

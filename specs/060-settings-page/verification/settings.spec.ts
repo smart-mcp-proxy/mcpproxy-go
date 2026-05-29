@@ -4,7 +4,11 @@
 //   rm -rf /tmp/settings-uitest && mkdir -p /tmp/settings-uitest
 //   cat > /tmp/settings-uitest/config.json <<'EOF'
 //   { "listen":"127.0.0.1:18099","data_dir":"/tmp/settings-uitest","api_key":"settingskey",
-//     "enable_socket":false,"telemetry":{"enabled":false},"mcpServers":[] }
+//     "enable_socket":false,
+//     "telemetry":{"enabled":true,"endpoint":"http://127.0.0.1:1/none"},
+//     "mcpServers":[] }
+//   (telemetry on — with a dead endpoint so nothing is sent — so the opt-out
+//    confirmation can be exercised.)
 //   EOF
 //   ./mcpproxy serve --config=/tmp/settings-uitest/config.json --log-level=warn &
 //
@@ -30,7 +34,20 @@ test('settings page: sections, search, posture, partial save, danger confirm', a
   // Security tab renders with the at-a-glance posture summary + connect helper.
   await expect(page.locator('[data-test="settings-posture"]')).toBeVisible()
   await expect(page.locator('[data-test="setting-secret-api_key"]')).toBeVisible()
+  await expect(page.locator('[data-test="setting-copy-api_key"]')).toBeVisible()
   await expect(page.locator('[data-test="settings-connect-client"]')).toBeVisible()
+
+  // Regenerating the API key asks for confirmation before changing the value.
+  const apiKeyVal = await page.locator('[data-test="setting-secret-api_key"]').inputValue()
+  await page.locator('[data-test="setting-regenerate-api_key"]').click()
+  const regenOpen = await page.evaluate(() => {
+    const d = document.querySelector('[data-test="setting-regenerate-confirm-api_key"]') as HTMLDialogElement | null
+    return !!d && d.open
+  })
+  expect(regenOpen).toBeTruthy()
+  await page.locator('[data-test="setting-regenerate-cancel-api_key"]').click()
+  // value unchanged after cancelling
+  expect(await page.locator('[data-test="setting-secret-api_key"]').inputValue()).toBe(apiKeyVal)
   // doc links: per-field (quarantine) + full config reference in the header
   await expect(page.locator('[data-test="setting-docs-quarantine_enabled"]')).toHaveAttribute('href', /docs\.mcpproxy\.app\/features\/security-quarantine/)
   await expect(page.locator('[data-test="settings-docs-reference"]')).toBeVisible()
@@ -62,9 +79,26 @@ test('settings page: sections, search, posture, partial save, danger confirm', a
   await shot(page, 's03-danger-confirm')
   await page.locator('[data-test="settings-confirm-security"] [data-test="settings-confirm-cancel"]').click()
 
-  // Other tabs render.
+  // General tab: duration validation + telemetry opt-out confirmation.
   await page.locator('[data-test="settings-tab-general"]').click()
   await expect(page.locator('[data-test="setting-select-routing_mode"]')).toBeVisible()
+
+  // Invalid duration is rejected (error shown, Save blocked).
+  await page.locator('[data-test="setting-text-call_tool_timeout"]').fill('not-a-duration')
+  await expect(page.locator('[data-test="setting-error-call_tool_timeout"]')).toBeVisible()
+  await expect(page.locator('[data-test="settings-apply-general"]')).toBeDisabled()
+  await page.locator('[data-test="setting-text-call_tool_timeout"]').fill('90s')
+  await expect(page.locator('[data-test="setting-error-call_tool_timeout"]')).toHaveCount(0)
+
+  // Turning telemetry OFF asks for confirmation (info tone).
+  await page.locator('[data-test="setting-toggle-telemetry.enabled"]').click()
+  await page.locator('[data-test="settings-apply-general"]').click()
+  const telemetryConfirm = await page.evaluate(() => {
+    const d = document.querySelector('[data-test="settings-confirm-general"]') as HTMLDialogElement | null
+    return !!d && d.open
+  })
+  expect(telemetryConfirm).toBeTruthy()
+  await page.locator('[data-test="settings-confirm-general"] [data-test="settings-confirm-cancel"]').click()
   await page.locator('[data-test="settings-tab-advanced"]').click()
   await expect(page.locator('[data-test="settings-accordion-output-sanitisation"]')).toBeVisible()
   await page.locator('[data-test="settings-tab-raw"]').click()

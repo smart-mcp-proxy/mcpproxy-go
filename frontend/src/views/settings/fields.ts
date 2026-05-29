@@ -23,6 +23,10 @@ export interface DangerSpec {
   // equals confirmValue (omit to always confirm on change).
   message: string
   confirmValue?: unknown
+  // 'danger' (default) = security-risky change, shown red + "sensitive" badge.
+  // 'info' = a gentle "are you sure?" (e.g. opting out of telemetry) — neutral
+  // styling, no sensitive badge.
+  tone?: 'danger' | 'info'
 }
 
 export interface SettingField {
@@ -54,6 +58,29 @@ export const DOCS_BASE = 'https://docs.mcpproxy.app'
 export function docsUrl(path?: string): string | undefined {
   if (!path) return undefined
   return path.startsWith('http') ? path : DOCS_BASE + path
+}
+
+// Matches Go time.Duration syntax: one or more <number><unit> segments,
+// e.g. "2m", "90s", "1h30m", "500ms". Used to validate duration fields.
+const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/
+
+// validateField returns a human-readable error string for an invalid value,
+// or null when the value is acceptable. Shared by the field control (to show
+// the error) and the section (to block Save).
+export function validateField(field: SettingField, value: unknown): string | null {
+  if (field.control === 'number') {
+    if (value === '' || value == null) return 'Enter a number'
+    const n = Number(value)
+    if (Number.isNaN(n)) return 'Must be a number'
+    if (field.min != null && n < field.min) return `Must be ≥ ${field.min}`
+    if (field.max != null && n > field.max) return `Must be ≤ ${field.max}`
+  }
+  if (field.control === 'duration') {
+    const s = String(value ?? '').trim()
+    if (s === '') return 'Enter a duration, e.g. 2m'
+    if (!DURATION_RE.test(s)) return 'Use a duration like 2m, 90s, or 1h30m'
+  }
+  return null
 }
 
 // ---- Section 1: Security & Access (prioritised, security-first) ----
@@ -160,8 +187,20 @@ export const GENERAL_FIELDS: SettingField[] = [
     control: 'select',
     options: ['trace', 'debug', 'info', 'warn', 'error'].map((v) => ({ value: v, label: v })),
   },
-  { key: 'telemetry.enabled', docs: '/features/telemetry', label: 'Anonymous usage telemetry', help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.', control: 'toggle' },
-  { key: 'enable_prompts', label: 'Expose MCP prompts to clients', help: 'Advertise prompt templates from your upstream servers to connected AI clients.', control: 'toggle' },
+  {
+    key: 'telemetry.enabled',
+    docs: '/features/telemetry',
+    label: 'Anonymous usage telemetry',
+    help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.',
+    control: 'toggle',
+    danger: {
+      confirmValue: false,
+      tone: 'info',
+      message:
+        'Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal. Turn it off anyway?',
+    },
+  },
+  { key: 'enable_prompts', label: 'Expose MCP prompts to clients', help: 'Advertises mcpproxy’s built-in guided prompts to connected AI clients: “setup-new-mcp-server” (add a server) and “troubleshoot-mcp-server” (diagnose connection issues).', control: 'toggle' },
 ]
 
 // ---- Section 3: Advanced (subsystem accordions) ----

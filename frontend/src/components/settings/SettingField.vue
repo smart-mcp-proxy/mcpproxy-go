@@ -22,7 +22,7 @@
         <span v-if="field.restart" class="badge badge-warning badge-xs gap-1" title="Requires restart">
           restart
         </span>
-        <span v-if="field.danger" class="badge badge-error badge-xs" title="Sensitive change">
+        <span v-if="field.danger && field.danger.tone !== 'info'" class="badge badge-error badge-xs" title="Sensitive change">
           sensitive
         </span>
       </div>
@@ -53,53 +53,87 @@
       </select>
 
       <!-- number -->
-      <input
-        v-else-if="field.control === 'number'"
-        type="number"
-        class="input input-bordered input-sm w-32"
-        :class="{ 'input-error': numberError }"
-        :value="modelValue"
-        :min="field.min"
-        :max="field.max"
-        :step="field.step"
-        :data-test="`setting-number-${field.key}`"
-        @input="onNumber(($event.target as HTMLInputElement).value)"
-      />
-
-      <!-- secret -->
-      <div v-else-if="field.control === 'secret'" class="join">
+      <div v-else-if="field.control === 'number'" class="flex flex-col items-end">
         <input
-          :type="showSecret ? 'text' : 'password'"
-          class="input input-bordered input-sm join-item w-56 font-mono"
-          :value="modelValue ?? ''"
-          :placeholder="field.placeholder"
-          :data-test="`setting-secret-${field.key}`"
-          @input="emitVal(($event.target as HTMLInputElement).value)"
+          type="number"
+          class="input input-bordered input-sm w-32"
+          :class="{ 'input-error': validationError }"
+          :value="modelValue"
+          :min="field.min"
+          :max="field.max"
+          :step="field.step"
+          :data-test="`setting-number-${field.key}`"
+          @input="onNumber(($event.target as HTMLInputElement).value)"
         />
-        <button type="button" class="btn btn-sm join-item" :title="showSecret ? 'Hide' : 'Show'" @click="showSecret = !showSecret">
-          {{ showSecret ? '🙈' : '👁' }}
-        </button>
-        <button
-          type="button"
-          class="btn btn-sm join-item"
-          :data-test="`setting-regenerate-${field.key}`"
-          title="Generate a new random key"
-          @click="regenerate"
-        >
-          ↻
-        </button>
+        <span v-if="validationError" class="text-error text-xs mt-1" :data-test="`setting-error-${field.key}`">{{ validationError }}</span>
       </div>
 
+      <!-- secret -->
+      <template v-else-if="field.control === 'secret'">
+        <div class="join">
+          <input
+            :type="showSecret ? 'text' : 'password'"
+            class="input input-bordered input-sm join-item w-56 font-mono"
+            :value="modelValue ?? ''"
+            :placeholder="field.placeholder"
+            :data-test="`setting-secret-${field.key}`"
+            @input="emitVal(($event.target as HTMLInputElement).value)"
+          />
+          <button type="button" class="btn btn-sm join-item" :title="showSecret ? 'Hide' : 'Show'" @click="showSecret = !showSecret">
+            {{ showSecret ? '🙈' : '👁' }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm join-item"
+            :class="{ 'btn-success': copied }"
+            :data-test="`setting-copy-${field.key}`"
+            :title="copied ? 'Copied!' : 'Copy to clipboard'"
+            :disabled="!modelValue"
+            @click="copy"
+          >
+            {{ copied ? '✓' : '📋' }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm join-item"
+            :data-test="`setting-regenerate-${field.key}`"
+            title="Generate a new random key"
+            @click="regenEl?.showModal()"
+          >
+            ↻
+          </button>
+        </div>
+        <dialog ref="regenEl" class="modal" :data-test="`setting-regenerate-confirm-${field.key}`">
+          <div class="modal-box">
+            <h3 class="font-bold text-lg">Generate a new {{ field.label }}?</h3>
+            <p class="text-sm mt-2">
+              A new random value will replace the current one in the field. Nothing changes until you click
+              <b>Save changes</b> — after saving you'll need to update connected clients and restart.
+            </p>
+            <div class="modal-action">
+              <button class="btn btn-sm" @click="regenEl?.close()" :data-test="`setting-regenerate-cancel-${field.key}`">Cancel</button>
+              <button class="btn btn-sm btn-primary" @click="confirmRegenerate" :data-test="`setting-regenerate-proceed-${field.key}`">
+                Generate
+              </button>
+            </div>
+          </div>
+          <form method="dialog" class="modal-backdrop"><button>close</button></form>
+        </dialog>
+      </template>
+
       <!-- text / duration -->
-      <input
-        v-else-if="field.control === 'text' || field.control === 'duration'"
-        type="text"
-        class="input input-bordered input-sm w-56 font-mono"
-        :value="modelValue ?? ''"
-        :placeholder="field.placeholder"
-        :data-test="`setting-text-${field.key}`"
-        @input="emitVal(($event.target as HTMLInputElement).value)"
-      />
+      <div v-else-if="field.control === 'text' || field.control === 'duration'" class="flex flex-col items-end">
+        <input
+          type="text"
+          class="input input-bordered input-sm w-56 font-mono"
+          :class="{ 'input-error': validationError }"
+          :value="modelValue ?? ''"
+          :placeholder="field.placeholder"
+          :data-test="`setting-text-${field.key}`"
+          @input="emitVal(($event.target as HTMLInputElement).value)"
+        />
+        <span v-if="validationError" class="text-error text-xs mt-1" :data-test="`setting-error-${field.key}`">{{ validationError }}</span>
+      </div>
 
       <!-- multiselect (checkbox group) -->
       <div v-else-if="field.control === 'multiselect'" class="flex flex-wrap gap-3 justify-end max-w-xs">
@@ -120,22 +154,46 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import { docsUrl, type SettingField } from '@/views/settings/fields'
+import { docsUrl, validateField, type SettingField } from '@/views/settings/fields'
 
 const props = defineProps<{ field: SettingField; modelValue: any; dirty?: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: any): void }>()
 
 const showSecret = ref(false)
+const copied = ref(false)
+const regenEl = ref<HTMLDialogElement | null>(null)
 const docsHref = computed(() => docsUrl(props.field.docs))
 
-const numberError = computed(() => {
-  if (props.field.control !== 'number' || props.modelValue == null || props.modelValue === '') return false
-  const n = Number(props.modelValue)
-  if (Number.isNaN(n)) return true
-  if (props.field.min != null && n < props.field.min) return true
-  if (props.field.max != null && n > props.field.max) return true
-  return false
-})
+async function copy() {
+  const val = props.modelValue
+  if (!val) return
+  try {
+    await navigator.clipboard.writeText(String(val))
+  } catch {
+    // clipboard API unavailable (e.g. non-secure context) — fall back
+    const ta = document.createElement('textarea')
+    ta.value = String(val)
+    document.body.appendChild(ta)
+    ta.select()
+    try {
+      document.execCommand('copy')
+    } catch {
+      /* ignore */
+    }
+    document.body.removeChild(ta)
+  }
+  copied.value = true
+  setTimeout(() => {
+    copied.value = false
+  }, 1500)
+}
+
+function confirmRegenerate() {
+  regenEl.value?.close()
+  regenerate()
+}
+
+const validationError = computed(() => validateField(props.field, props.modelValue))
 
 function emitVal(v: any) {
   emit('update:modelValue', v)
@@ -166,5 +224,5 @@ function regenerate() {
   emitVal(hex)
 }
 
-defineExpose({ numberError })
+defineExpose({ validationError })
 </script>
