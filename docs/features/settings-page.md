@@ -35,4 +35,4 @@ curl -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 
 Complex lists/maps (Docker image map, custom detection patterns, environment
 vars) and `mcpServers` / `registries` are managed on their own pages or the Raw
-JSON tab. See [configuration.md](../configuration.md) for the full option reference.
+JSON tab. See the [configuration reference](../configuration/config-file.md) for the full option list.
