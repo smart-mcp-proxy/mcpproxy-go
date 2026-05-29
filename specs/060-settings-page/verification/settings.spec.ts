@@ -1,0 +1,74 @@
+// Reproducible Web-UI verification for the Spec 060 Settings page.
+//
+// Setup (throwaway instance):
+//   rm -rf /tmp/settings-uitest && mkdir -p /tmp/settings-uitest
+//   cat > /tmp/settings-uitest/config.json <<'EOF'
+//   { "listen":"127.0.0.1:18099","data_dir":"/tmp/settings-uitest","api_key":"settingskey",
+//     "enable_socket":false,"telemetry":{"enabled":false},"mcpServers":[] }
+//   EOF
+//   ./mcpproxy serve --config=/tmp/settings-uitest/config.json --log-level=warn &
+//
+// Run:  BASE_URL=http://127.0.0.1:18099 API_KEY=settingskey \
+//         ./node_modules/.bin/playwright test settings.spec.ts
+//
+// Screenshots are written only when SHOT_DIR is set (kept out of the repo).
+import { test, expect } from '@playwright/test'
+
+const BASE = process.env.BASE_URL || 'http://127.0.0.1:18099'
+const KEY = process.env.API_KEY || 'settingskey'
+const SHOT = process.env.SHOT_DIR // optional; unset in CI
+
+async function shot(page: any, name: string) {
+  if (SHOT) await page.screenshot({ path: `${SHOT}/${name}.png`, fullPage: true })
+}
+
+test('settings page: sections, search, posture, partial save, danger confirm', async ({ page }) => {
+  await page.goto(`${BASE}/ui/settings?apikey=${KEY}`)
+  await page.waitForLoadState('domcontentloaded')
+  await page.waitForSelector('[data-test="settings-tabs"]')
+
+  // Security tab renders with the at-a-glance posture summary + connect helper.
+  await expect(page.locator('[data-test="settings-posture"]')).toBeVisible()
+  await expect(page.locator('[data-test="setting-secret-api_key"]')).toBeVisible()
+  await expect(page.locator('[data-test="settings-connect-client"]')).toBeVisible()
+  await shot(page, 's01-security')
+
+  // Cross-section search surfaces matching fields from any section.
+  await page.locator('[data-test="settings-search"]').fill('docker')
+  await expect(page.locator('[data-test="settings-search-results"]')).toBeVisible()
+  await shot(page, 's00-search')
+  await page.locator('[data-test="settings-search"]').fill('')
+
+  // Partial save: flip a non-dangerous toggle and confirm the saved indicator.
+  await page.locator('[data-test="setting-toggle-require_mcp_auth"]').click()
+  await page.locator('[data-test="settings-apply-security"]').click()
+  await page.waitForSelector(
+    '[data-test="settings-saved-security"], [data-test="settings-restart-security"]',
+    { timeout: 8000 }
+  )
+  await shot(page, 's02-security-saved')
+
+  // Dangerous toggle requires explicit confirmation.
+  await page.locator('[data-test="setting-toggle-reveal_secret_headers"]').click()
+  await page.locator('[data-test="settings-apply-security"]').click()
+  const dialogOpen = await page.evaluate(() => {
+    const d = document.querySelector('[data-test="settings-confirm-security"]') as HTMLDialogElement | null
+    return !!d && d.open
+  })
+  expect(dialogOpen).toBeTruthy()
+  await shot(page, 's03-danger-confirm')
+  await page.locator('[data-test="settings-confirm-security"] [data-test="settings-confirm-cancel"]').click()
+
+  // Other tabs render.
+  await page.locator('[data-test="settings-tab-general"]').click()
+  await expect(page.locator('[data-test="setting-select-routing_mode"]')).toBeVisible()
+  await page.locator('[data-test="settings-tab-advanced"]').click()
+  await expect(page.locator('[data-test="settings-accordion-output-sanitisation"]')).toBeVisible()
+  await page.locator('[data-test="settings-tab-raw"]').click()
+
+  // Connect-a-client helper opens the shared ConnectModal (done last so the
+  // modal doesn't overlay earlier interactions).
+  await page.locator('[data-test="settings-tab-security"]').click()
+  await page.locator('[data-test="settings-connect-client"]').click()
+  await expect(page.getByText('Connect MCPProxy to AI Agents')).toBeVisible()
+})

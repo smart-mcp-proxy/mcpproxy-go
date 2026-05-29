@@ -54,6 +54,15 @@
         <div class="card-body">
           <h2 class="card-title text-lg">🔒 Security &amp; Access</h2>
           <p class="text-sm text-base-content/60 mb-2">The settings that most affect how exposed and protected your instance is.</p>
+          <!-- connect-a-client helper -->
+          <div class="alert bg-base-200 border-base-300 mb-3 flex-col sm:flex-row items-start sm:items-center gap-2">
+            <span class="text-sm grow">
+              🔌 Connecting an AI client (Claude, Cursor, VS Code…)? The helper registers mcpproxy with the right endpoint and API key in the client's config.
+            </span>
+            <button class="btn btn-sm btn-primary" data-test="settings-connect-client" @click="showConnect = true">
+              Connect a client
+            </button>
+          </div>
           <!-- posture summary -->
           <div class="flex flex-wrap gap-2 mb-4" data-test="settings-posture">
             <span
@@ -141,6 +150,9 @@
     </template>
 
     <CollapsibleHintsPanel :hints="settingsHints" />
+
+    <!-- Connect-a-client helper (shared with Dashboard) -->
+    <ConnectModal :show="showConnect" @close="showConnect = false" />
   </div>
 </template>
 
@@ -152,6 +164,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
+import ConnectModal from '@/components/ConnectModal.vue'
 import SettingsSection from '@/components/settings/SettingsSection.vue'
 import {
   SECURITY_FIELDS,
@@ -178,6 +191,7 @@ const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref('')
 const activeTab = ref<string>('security')
+const showConnect = ref(false)
 const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
 const hasTeams = computed(() => state.working && state.working.teams != null)
 
