@@ -1,39 +1,55 @@
 // SettingsView.swift
 // MCPProxy
 //
-// Native Settings window for the menu-bar app. Per macOS HIG, the tray owns
-// only its OWN concerns (launch-at-login, interface size) plus the connection
-// bootstrap (endpoint/status); all backend configuration lives in the core and
-// is edited via the web UI ("Open full configuration…"). The app stays a
-// stateless controller (Constitution III) — it does not persist backend config.
+// Native Settings window. The tray is a full alternative client to the core:
+// every backend setting is edited here over REST (GET/PATCH /api/v1/config),
+// mirroring the web UI Configuration page — the config JSON file is never read
+// or written directly. The "App" tab holds the few OS-level prefs that are
+// genuinely the app's own concern (launch-at-login, interface size).
 
 import SwiftUI
 import ServiceManagement
 
 struct SettingsView: View {
     @ObservedObject var appState: AppState
-    /// Opens the web UI in the browser (with the session API key). Wired by the
-    /// AppController to its existing openWebUI action.
-    var onOpenWebUI: () -> Void
+    @StateObject private var store: ConfigStore
+    @State private var tab = 0
+
+    init(appState: AppState) {
+        self.appState = appState
+        _store = StateObject(wrappedValue: ConfigStore(appState: appState))
+    }
 
     var body: some View {
-        TabView {
-            GeneralSettingsTab(appState: appState, onOpenWebUI: onOpenWebUI)
-                .tabItem { Label("General", systemImage: "gearshape") }
+        TabView(selection: $tab) {
+            AppPrefsTab(appState: appState)
+                .tabItem { Label("App", systemImage: "macwindow") }.tag(0)
 
-            ConnectionSettingsTab(appState: appState, onOpenWebUI: onOpenWebUI)
-                .tabItem { Label("Connection", systemImage: "network") }
+            SecuritySettingsTab(store: store)
+                .tabItem { Label("Security", systemImage: "lock.shield") }.tag(1)
+
+            GeneralConfigTab(store: store)
+                .tabItem { Label("General", systemImage: "gearshape") }.tag(2)
+
+            AdvancedSettingsTab(store: store)
+                .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }.tag(3)
         }
-        .frame(width: 480)
+        .frame(minWidth: 540, minHeight: 560)
+        // ⌘1–⌘4 switch tabs (handy, and lets UI tests navigate).
+        .background {
+            ForEach(0..<4, id: \.self) { i in
+                Button("") { tab = i }
+                    .keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
+                    .opacity(0)
+            }
+        }
     }
 }
 
-// MARK: - General
+// MARK: - App preferences (OS-level, app-owned)
 
-private struct GeneralSettingsTab: View {
+private struct AppPrefsTab: View {
     @ObservedObject var appState: AppState
-    var onOpenWebUI: () -> Void
-
     @State private var launchAtLogin = AutoStartService.isEnabled
     @State private var launchError: String?
 
@@ -41,108 +57,49 @@ private struct GeneralSettingsTab: View {
         Form {
             Section {
                 Toggle("Launch MCPProxy at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { newValue in applyLaunchAtLogin(newValue) }
+                    .onChange(of: launchAtLogin) { applyLaunchAtLogin($0) }
                 if let launchError {
                     Text(launchError).font(.callout).foregroundColor(.red)
                 }
-            } header: {
-                Text("Startup")
-            }
+            } header: { Text("Startup") }
 
             Section {
                 HStack {
                     Text("Interface text size")
                     Spacer()
                     Stepper(value: $appState.fontScale, in: 0.8...1.6, step: 0.1) {
-                        Text("\(Int(appState.fontScale * 100))%")
-                            .monospacedDigit()
-                            .frame(width: 48, alignment: .trailing)
+                        Text("\(Int(appState.fontScale * 100))%").monospacedDigit().frame(width: 48, alignment: .trailing)
                     }
                 }
-            } header: {
-                Text("Appearance")
-            }
-
-            Section {
-                Button("Open full configuration in browser…", action: onOpenWebUI)
-            } header: {
-                Text("Configuration")
-            } footer: {
-                Text("Upstream servers, security, quarantine, tokens and all other settings are managed in the web UI.")
-                    .font(.callout)
-                    .foregroundColor(.secondary)
-            }
+            } header: { Text("Appearance") }
 
             Section {
                 LabeledContent("Version", value: appState.version)
-            } header: {
-                Text("About")
+                LabeledContent("Core") {
+                    HStack(spacing: 6) {
+                        Circle().fill(appState.isConnected ? .green : .secondary).frame(width: 8, height: 8)
+                        Text(appState.isConnected ? "Connected" : "Not connected")
+                    }
+                }
+            } header: { Text("About") } footer: {
+                Text("All server configuration is managed in the Security, General and Advanced tabs.")
+                    .font(.callout).foregroundColor(.secondary)
             }
         }
         .formStyle(.grouped)
         .padding(.vertical, 8)
-        .frame(width: 480)
         .onAppear { launchAtLogin = AutoStartService.isEnabled }
     }
 
     private func applyLaunchAtLogin(_ enabled: Bool) {
         do {
-            if enabled {
-                try AutoStartService.enable()
-            } else {
-                try AutoStartService.disable()
-            }
+            if enabled { try AutoStartService.enable() } else { try AutoStartService.disable() }
             launchError = nil
             appState.autoStartEnabled = AutoStartService.isEnabled
             AutostartSidecarService.refresh()
         } catch {
-            // Revert the toggle to the true system state on failure.
             launchAtLogin = AutoStartService.isEnabled
             launchError = error.localizedDescription
         }
-    }
-}
-
-// MARK: - Connection
-
-private struct ConnectionSettingsTab: View {
-    @ObservedObject var appState: AppState
-    var onOpenWebUI: () -> Void
-
-    var body: some View {
-        Form {
-            Section {
-                LabeledContent("Endpoint", value: appState.webUIBaseURL)
-                LabeledContent("Status") {
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 8, height: 8)
-                        Text(statusText)
-                    }
-                }
-            } header: {
-                Text("Core Connection")
-            } footer: {
-                Text("MCPProxy starts and manages the core automatically; the API key is generated per session. Use the web UI for full access.")
-                    .font(.callout)
-                    .foregroundColor(.secondary)
-            }
-
-            Section {
-                Button("Open Web UI…", action: onOpenWebUI)
-            }
-        }
-        .formStyle(.grouped)
-        .padding(.vertical, 8)
-        .frame(width: 480)
-    }
-
-    private var statusText: String {
-        appState.isConnected ? "Connected" : "Not connected"
-    }
-
-    private var statusColor: Color {
-        appState.isConnected ? .green : .secondary
     }
 }

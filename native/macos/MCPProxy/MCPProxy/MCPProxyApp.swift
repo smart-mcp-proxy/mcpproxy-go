@@ -246,23 +246,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // becoming a regular app — same dance as showMainWindow().
         NSApp.setActivationPolicy(.regular)
 
-        let view = SettingsView(appState: appState, onOpenWebUI: { [weak self] in self?.openWebUI() })
+        let view = SettingsView(appState: appState)
         let hostingView = NSHostingView(rootView: view)
 
-        // Fixed-size, content-driven Settings window per the macOS HIG
-        // (no .resizable). Height follows the SwiftUI content.
+        // Resizable Settings window — the config tabs (Security/General/
+        // Advanced) scroll and benefit from extra height.
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 580, height: 660),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "MCPProxy Settings"
         window.contentView = hostingView
-        // Size the window to the SwiftUI content so no section is clipped
-        // (content-driven, per the macOS HIG for Settings windows).
-        let fitting = hostingView.fittingSize
-        window.setContentSize(NSSize(width: 480, height: max(fitting.height, 420)))
+        window.setFrameAutosaveName("MCPProxySettingsWindow")
         window.center()
         window.setFrameAutosaveName("MCPProxySettingsWindow")
         window.isReleasedWhenClosed = false

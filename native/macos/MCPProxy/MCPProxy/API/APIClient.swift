@@ -540,6 +540,40 @@ actor APIClient {
         return data
     }
 
+    // MARK: - Configuration (Spec 060)
+
+    /// Fetch the full server configuration as a JSON dictionary.
+    /// GET /api/v1/config → { success, data: { config: {...} } }.
+    func getConfig() async throws -> [String: Any] {
+        let (data, response) = try await performRequest(path: "/api/v1/config", method: "GET")
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIClientError.httpError(statusCode: response.statusCode, message: "Malformed config response")
+        }
+        if let inner = root["data"] as? [String: Any], let cfg = inner["config"] as? [String: Any] {
+            return cfg
+        }
+        // Some builds may return the config object directly.
+        if let cfg = root["config"] as? [String: Any] { return cfg }
+        throw APIClientError.httpError(statusCode: response.statusCode, message: "Config not found in response")
+    }
+
+    /// Apply a partial config update (only the changed fields) via the
+    /// deep-merge PATCH endpoint, so unrelated settings and redacted secrets are
+    /// never clobbered. Returns the apply-result dictionary (success,
+    /// applied_immediately, requires_restart, restart_reason, changed_fields,
+    /// validation_errors).
+    @discardableResult
+    func patchConfig(_ partial: [String: Any]) async throws -> [String: Any] {
+        let bodyData = try JSONSerialization.data(withJSONObject: partial)
+        let (data, response) = try await performRequest(path: "/api/v1/config", method: "PATCH", body: bodyData)
+        let root = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        if let success = root["success"] as? Bool, !success {
+            let msg = (root["error"] as? String) ?? "Failed to apply configuration"
+            throw APIClientError.httpError(statusCode: response.statusCode, message: msg)
+        }
+        return (root["data"] as? [String: Any]) ?? [:]
+    }
+
     // MARK: - Private Helpers
 
     /// Fetch a resource wrapped in the standard `APIResponse` envelope.
