@@ -595,6 +595,16 @@ class APIService {
     })
   }
 
+  // patchConfig applies a partial (deep-merged) config update — only the
+  // fields present in `partial` are changed; everything else (including masked
+  // secrets like api_key) is preserved server-side. Spec 060.
+  async patchConfig(partial: Record<string, any>): Promise<APIResponse<ConfigApplyResult>> {
+    return this.request<ConfigApplyResult>('/api/v1/config', {
+      method: 'PATCH',
+      body: JSON.stringify(partial)
+    })
+  }
+
   // Token statistics endpoints
   async getTokenStats(): Promise<APIResponse<ServerTokenMetrics>> {
     return this.request<ServerTokenMetrics>('/api/v1/stats/tokens')

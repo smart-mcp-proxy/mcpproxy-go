@@ -613,6 +613,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/config", s.handleGetConfig)
 		r.Post("/config/validate", s.handleValidateConfig)
 		r.Post("/config/apply", s.handleApplyConfig)
+		r.Patch("/config", s.handlePatchConfig)
 		r.Patch("/config/docker-isolation", s.handlePatchDockerIsolation)
 
 		// Registry browsing (Phase 7)
@@ -3732,6 +3733,108 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
 	}
 	s.writeSuccess(w, response)
+}
+
+// handlePatchConfig godoc
+// @Summary      Partially update configuration
+// @Description  Deep-merges only the fields present in the request body onto the live in-memory configuration and routes the result through the existing apply pipeline (validation, change detection, disk persistence, hot-reload). Fields the client omits — including masked secrets such as `api_key` and secret request headers — are preserved verbatim. Nested objects are merged recursively; arrays and scalars replace wholesale.
+// @Tags         config
+// @Accept       json
+// @Produce      json
+// @Param        patch  body      object                        true  "Partial configuration with only the fields to change"
+// @Success      200    {object}  contracts.ConfigApplyResult   "Configuration patch applied (inspect validation_errors for rejected values)"
+// @Failure      400    {object}  contracts.ErrorResponse       "Invalid JSON payload or empty patch"
+// @Failure      401    {object}  contracts.ErrorResponse       "Unauthorized - missing or invalid API key"
+// @Failure      500    {object}  contracts.ErrorResponse       "Failed to read or apply configuration"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/config [patch]
+func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
+	var patchMap map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&patchMap); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid JSON payload")
+		return
+	}
+	if len(patchMap) == 0 {
+		s.writeError(w, r, http.StatusBadRequest, "Patch body must contain at least one field")
+		return
+	}
+
+	// Read the REAL in-memory config (secrets intact — redaction only happens
+	// on the GET response path). We deep-merge only the client-sent keys so
+	// untouched fields, including masked secrets, are preserved verbatim.
+	cfg, err := s.controller.GetConfig()
+	if err != nil {
+		s.logger.Error("Failed to get configuration for patch", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
+		return
+	}
+	if cfg == nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Configuration not available")
+		return
+	}
+
+	// Round-trip the live config through JSON to get a generic map we can
+	// deep-merge the patch onto without enumerating every field.
+	baseBytes, err := json.Marshal(cfg)
+	if err != nil {
+		s.logger.Error("Failed to marshal live configuration", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
+		return
+	}
+	var baseMap map[string]interface{}
+	if err := json.Unmarshal(baseBytes, &baseMap); err != nil {
+		s.logger.Error("Failed to unmarshal live configuration", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to read configuration")
+		return
+	}
+
+	deepMergeJSON(baseMap, patchMap)
+
+	mergedBytes, err := json.Marshal(baseMap)
+	if err != nil {
+		s.logger.Error("Failed to marshal merged configuration", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to build configuration")
+		return
+	}
+	var merged config.Config
+	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid configuration patch: %v", err))
+		return
+	}
+
+	result, err := s.controller.ApplyConfig(&merged, s.controller.GetConfigPath())
+	if err != nil {
+		s.logger.Error("Failed to apply configuration patch", "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to apply configuration: %v", err))
+		return
+	}
+
+	response := &contracts.ConfigApplyResult{
+		Success:            result.Success,
+		AppliedImmediately: result.AppliedImmediately,
+		RequiresRestart:    result.RequiresRestart,
+		RestartReason:      result.RestartReason,
+		ChangedFields:      result.ChangedFields,
+		ValidationErrors:   contracts.ConvertValidationErrors(result.ValidationErrors),
+	}
+	s.writeSuccess(w, response)
+}
+
+// deepMergeJSON recursively merges patch into base. When both base[k] and
+// patch[k] are JSON objects (map[string]interface{}), they are merged
+// recursively; otherwise patch[k] overwrites base[k] (arrays and scalars
+// replace wholesale). Keys present only in base are preserved.
+func deepMergeJSON(base, patch map[string]interface{}) {
+	for k, patchVal := range patch {
+		patchSub, patchIsMap := patchVal.(map[string]interface{})
+		baseSub, baseIsMap := base[k].(map[string]interface{})
+		if patchIsMap && baseIsMap {
+			deepMergeJSON(baseSub, patchSub)
+			continue
+		}
+		base[k] = patchVal
+	}
 }
 
 // handleCallTool godoc
