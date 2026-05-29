@@ -13,11 +13,13 @@ MCPProxy supports three routing modes that control how upstream MCP tools are ex
 
 ## Overview
 
-| Mode | Default MCP Endpoint | Tool Exposure | Best For |
-|------|---------------------|---------------|----------|
-| `retrieve_tools` | `/mcp` | BM25 search via `retrieve_tools` + `call_tool_read/write/destructive` | Large tool sets (50+ tools), token-sensitive workloads |
-| `direct` | `/mcp` | All tools exposed as `serverName__toolName` | Small tool sets, simple setups, maximum compatibility |
-| `code_execution` | `/mcp` | `code_execution` + `retrieve_tools` for discovery | Multi-step orchestration, reduced round-trips |
+| Mode | Tool Exposure | Best For |
+|------|---------------|----------|
+| `retrieve_tools` | BM25 search via `retrieve_tools` + `call_tool_read/write/destructive` | Large tool sets (50+ tools), token-sensitive workloads |
+| `direct` | All tools exposed as `serverName__toolName` | Small tool sets, simple setups, maximum compatibility |
+| `code_execution` | `code_execution` + `retrieve_tools` for discovery | Multi-step orchestration, reduced round-trips |
+
+> The configured mode is served on the default `/mcp` endpoint. Each mode also has a dedicated endpoint (`/mcp/call`, `/mcp/all`, `/mcp/code`) — see [Dedicated Endpoints](#dedicated-endpoints) below.
 
 ## Configuration
 

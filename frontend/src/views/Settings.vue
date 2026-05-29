@@ -4,141 +4,268 @@
     <div class="flex justify-between items-center">
       <div>
         <h1 class="text-3xl font-bold">Configuration</h1>
-        <p class="text-base-content/70 mt-1">Edit your MCPProxy configuration directly. Changes require restart for some settings.</p>
+        <p class="text-base-content/70 mt-1">
+          Manage mcpproxy settings. Changes save instantly; a badge marks fields that need a restart.
+          <a
+            :href="`${DOCS_BASE}/configuration/config-file`"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="link link-primary"
+            data-test="settings-docs-reference"
+          >Full configuration reference ↗</a>
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <label class="input input-bordered input-sm flex items-center gap-2 w-64">
+          <span class="opacity-50">🔍</span>
+          <input v-model="search" type="text" class="grow" placeholder="Search all settings…" data-test="settings-search" />
+          <button v-if="search" class="opacity-50 hover:opacity-100" @click="search = ''" title="Clear">✕</button>
+        </label>
+        <button class="btn btn-sm btn-outline" :disabled="loading" @click="loadConfig" data-test="settings-reload">
+          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+          <span v-else>Reload</span>
+        </button>
       </div>
     </div>
 
-    <!-- Configuration Editor -->
-    <div class="card bg-base-100 shadow-md">
+    <!-- Search results (across all sections) -->
+    <div v-if="loaded && search.trim()" class="card bg-base-100 shadow-md" data-test="settings-search-results">
       <div class="card-body">
-        <div class="flex justify-between items-center mb-4">
-          <div>
-            <h2 class="card-title">Configuration Editor</h2>
-            <p class="text-sm text-base-content/70 mt-1">
-              Edit your MCPProxy configuration directly. Changes require restart for some settings.
-            </p>
+        <h2 class="card-title text-lg">🔍 Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
+        <SettingsSection section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" />
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div v-show="!search.trim()" role="tablist" class="tabs tabs-bordered" data-test="settings-tabs">
+      <button
+        v-for="t in tabs"
+        :key="t.id"
+        role="tab"
+        class="tab gap-2"
+        :class="{ 'tab-active font-semibold': activeTab === t.id }"
+        :data-test="`settings-tab-${t.id}`"
+        @click="activeTab = t.id"
+      >
+        <span>{{ t.icon }}</span> {{ t.label }}
+      </button>
+    </div>
+
+    <div v-if="loadError" class="alert alert-error">
+      <span>{{ loadError }}</span>
+    </div>
+
+    <template v-else-if="loaded && !search.trim()">
+      <!-- Security & Access -->
+      <div v-show="activeTab === 'security'" class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title text-lg">🔒 Security &amp; Access</h2>
+          <p class="text-sm text-base-content/60 mb-2">The settings that most affect how exposed and protected your instance is.</p>
+          <!-- connect-a-client helper -->
+          <div class="alert bg-base-200 border-base-300 mb-3 flex-col sm:flex-row items-start sm:items-center gap-2">
+            <span class="text-sm grow">
+              🔌 Connecting an AI client (Claude, Cursor, VS Code…)? The helper registers mcpproxy with the right endpoint and API key in the client's config.
+            </span>
+            <button class="btn btn-sm btn-primary" data-test="settings-connect-client" @click="showConnect = true">
+              Connect a client
+            </button>
           </div>
-          <div class="flex items-center space-x-2">
+          <!-- posture summary -->
+          <div class="flex flex-wrap gap-2 mb-4" data-test="settings-posture">
+            <span
+              v-for="p in posture"
+              :key="p.label"
+              class="badge gap-1"
+              :class="p.good ? 'badge-success badge-outline' : 'badge-warning'"
+              :title="p.good ? 'OK' : 'Review this'"
+            >
+              {{ p.label }}: {{ p.on ? 'on' : 'off' }}
+            </span>
+          </div>
+          <SettingsSection section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
+        </div>
+      </div>
+
+      <!-- General -->
+      <div v-show="activeTab === 'general'" class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title text-lg">⚙️ General</h2>
+          <SettingsSection section-id="general" :fields="generalFields" :working="state.working" :original="state.original" />
+        </div>
+      </div>
+
+      <!-- Advanced -->
+      <div v-show="activeTab === 'advanced'" class="space-y-3">
+        <details v-for="acc in advancedAccordions" :key="acc.id" class="collapse collapse-arrow bg-base-100 shadow-md">
+          <summary class="collapse-title font-medium" :data-test="`settings-accordion-${acc.id}`">{{ acc.title }}</summary>
+          <div class="collapse-content">
+            <p v-if="acc.description || acc.docs" class="text-xs text-base-content/60 mb-2">
+              {{ acc.description }}
+              <a
+                v-if="acc.docs"
+                :href="docsUrl(acc.docs)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="link link-primary"
+                :data-test="`settings-accordion-docs-${acc.id}`"
+              >Learn more ↗</a>
+            </p>
+            <SettingsSection :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" />
+          </div>
+        </details>
+        <div class="text-xs text-base-content/50 px-1">
+          Complex lists/maps (image map, custom detection patterns, environment vars, registries) and
+          <RouterLink to="/" class="link">servers</RouterLink> are managed on their own pages or the Raw JSON tab.
+        </div>
+      </div>
+
+      <!-- Teams (server edition only) -->
+      <div v-if="hasTeams" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <h2 class="card-title text-lg">👥 Teams / Server</h2>
+          <SettingsSection section-id="teams" :fields="teamsFields" :working="state.working" :original="state.original" />
+        </div>
+      </div>
+
+      <!-- Raw JSON (existing Monaco editor) -->
+      <div v-show="activeTab === 'raw'" class="card bg-base-100 shadow-md">
+        <div class="card-body">
+          <div class="flex justify-between items-center mb-2">
+            <h2 class="card-title text-lg">{ } Raw JSON</h2>
             <div v-if="configStatus" :class="['badge', configStatus.valid ? 'badge-success' : 'badge-error']">
               {{ configStatus.valid ? '✓ Valid' : '✗ Invalid' }}
             </div>
-            <button
-              class="btn btn-sm btn-outline"
-              @click="loadConfig"
-              :disabled="loadingConfig"
-            >
-              <span v-if="loadingConfig" class="loading loading-spinner loading-xs"></span>
-              <span v-else>Reload</span>
+          </div>
+          <p class="text-sm text-base-content/60 mb-2">Full configuration editor. Edits here apply the entire document.</p>
+          <div class="border border-base-300 rounded-lg overflow-hidden" style="height: 560px;">
+            <vue-monaco-editor
+              v-model:value="configJson"
+              language="json"
+              theme="vs-dark"
+              :options="editorOptions"
+              @change="handleConfigChange"
+            />
+          </div>
+          <div v-if="configErrors.length > 0" class="alert alert-error mt-4">
+            <div>
+              <h3 class="font-bold">Validation Errors</h3>
+              <ul class="list-disc list-inside text-sm">
+                <li v-for="(err, i) in configErrors" :key="i"><span class="font-mono">{{ err.field }}</span>: {{ err.message }}</li>
+              </ul>
+            </div>
+          </div>
+          <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-outline btn-sm" :disabled="validatingConfig || !configJson" @click="validateConfig" data-test="settings-raw-validate">
+              <span v-if="validatingConfig" class="loading loading-spinner loading-xs"></span> Validate
             </button>
-          </div>
-        </div>
-
-        <!-- Monaco Editor -->
-        <div class="border border-base-300 rounded-lg overflow-hidden" style="height: 600px;">
-          <vue-monaco-editor
-            v-model:value="configJson"
-            language="json"
-            theme="vs-dark"
-            :options="editorOptions"
-            @mount="handleEditorMount"
-            @change="handleConfigChange"
-          />
-        </div>
-
-        <!-- Validation Errors -->
-        <div v-if="configErrors.length > 0" class="alert alert-error mt-4">
-          <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <div>
-            <h3 class="font-bold">Validation Errors</h3>
-            <ul class="list-disc list-inside text-sm">
-              <li v-for="(error, index) in configErrors" :key="index">
-                <span class="font-mono">{{ error.field }}</span>: {{ error.message }}
-              </li>
-            </ul>
-          </div>
-        </div>
-
-        <!-- Apply Configuration -->
-        <div class="flex justify-between items-center mt-4">
-          <div class="text-sm text-base-content/70">
-            <span v-if="applyResult && applyResult.requires_restart" class="text-warning">
-              ⚠️ {{ applyResult.restart_reason }}
-            </span>
-            <span v-else-if="applyResult && applyResult.applied_immediately" class="text-success">
-              ✓ Configuration applied successfully
-            </span>
-          </div>
-          <div class="flex items-center space-x-2">
-            <button
-              class="btn btn-outline"
-              @click="validateConfig"
-              :disabled="validatingConfig || !configJson"
-            >
-              <span v-if="validatingConfig" class="loading loading-spinner loading-sm"></span>
-              Validate
-            </button>
-            <button
-              class="btn btn-primary"
-              @click="applyConfig"
-              :disabled="applyingConfig || configErrors.length > 0 || !configJson"
-            >
-              <span v-if="applyingConfig" class="loading loading-spinner loading-sm"></span>
-              Apply Configuration
+            <button class="btn btn-primary btn-sm" :disabled="applyingConfig || configErrors.length > 0 || !configJson" @click="applyConfig" data-test="settings-raw-apply">
+              <span v-if="applyingConfig" class="loading loading-spinner loading-xs"></span> Apply
             </button>
           </div>
         </div>
       </div>
-    </div>
+    </template>
 
-    <!-- Configuration Info -->
-    <div class="card bg-base-100 shadow-md">
-      <div class="card-body">
-        <h3 class="card-title text-sm">Configuration Tips</h3>
-        <div class="text-sm text-base-content/70 space-y-2">
-          <p>• Use <kbd class="kbd kbd-xs">Ctrl+Space</kbd> for autocomplete</p>
-          <p>• Use <kbd class="kbd kbd-xs">Ctrl+F</kbd> to search in the configuration</p>
-          <p>• Invalid JSON will be highlighted with red squiggles</p>
-          <p>• <span class="font-semibold">Hot-reloadable</span>: server changes, limits, logging</p>
-          <p>• <span class="font-semibold">Requires restart</span>: listen address, data directory, API key, TLS</p>
-        </div>
-      </div>
-    </div>
-
-    <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="settingsHints" />
+
+    <!-- Connect-a-client helper (shared with Dashboard) -->
+    <ConnectModal :show="showConnect" @close="showConnect = false" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { RouterLink } from 'vue-router'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useServersStore } from '@/stores/servers'
+import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
+import ConnectModal from '@/components/ConnectModal.vue'
+import SettingsSection from '@/components/settings/SettingsSection.vue'
+import {
+  SECURITY_FIELDS,
+  GENERAL_FIELDS,
+  ADVANCED_ACCORDIONS,
+  DOCS_BASE,
+  docsUrl,
+  type SettingField,
+} from '@/views/settings/fields'
 import api from '@/services/api'
 
-// Store references
 const serversStore = useServersStore()
+const systemStore = useSystemStore()
 
-// Configuration editor state
+const securityFields = SECURITY_FIELDS
+const generalFields = GENERAL_FIELDS
+const advancedAccordions = ADVANCED_ACCORDIONS
+const teamsFields: SettingField[] = [
+  { key: 'teams.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
+  { key: 'teams.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
+  { key: 'teams.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
+]
+
+// ---- form state ----
+const loading = ref(false)
+const loaded = ref(false)
+const loadError = ref('')
+const activeTab = ref<string>('security')
+const showConnect = ref(false)
+const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
+const hasTeams = computed(() => state.working && state.working.teams != null)
+
+// cross-section search: type to find any setting across all tabs
+const search = ref('')
+const allFields = computed<SettingField[]>(() => [
+  ...securityFields,
+  ...generalFields,
+  ...advancedAccordions.flatMap((a) => a.fields),
+  ...(hasTeams.value ? teamsFields : []),
+])
+const filteredFields = computed<SettingField[]>(() => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return []
+  return allFields.value.filter(
+    (f) =>
+      f.label.toLowerCase().includes(q) ||
+      f.key.toLowerCase().includes(q) ||
+      (f.help?.toLowerCase().includes(q) ?? false)
+  )
+})
+
+// at-a-glance security posture (computed from the working config)
+const posture = computed(() => {
+  const w: any = state.working || {}
+  const sdd = w.sensitive_data_detection?.enabled !== false
+  const quarantine = w.quarantine_enabled !== false // default-on
+  return [
+    { label: 'Quarantine', on: quarantine, good: quarantine },
+    { label: 'MCP auth', on: !!w.require_mcp_auth, good: !!w.require_mcp_auth },
+    { label: 'Docker isolation', on: !!(w.docker_isolation && w.docker_isolation.enabled), good: !!(w.docker_isolation && w.docker_isolation.enabled) },
+    { label: 'Secret scan', on: sdd, good: sdd },
+    { label: 'Code exec', on: !!w.enable_code_execution, good: !w.enable_code_execution },
+    { label: 'Read-only', on: !!w.read_only_mode, good: true },
+    { label: 'Reveal headers', on: !!w.reveal_secret_headers, good: !w.reveal_secret_headers },
+  ]
+})
+
+const tabs = computed(() => {
+  const base = [
+    { id: 'security', label: 'Security & Access', icon: '🔒' },
+    { id: 'general', label: 'General', icon: '⚙️' },
+    { id: 'advanced', label: 'Advanced', icon: '🧰' },
+  ] as Array<{ id: string; label: string; icon: string }>
+  if (hasTeams.value) base.push({ id: 'teams', label: 'Teams', icon: '👥' })
+  base.push({ id: 'raw', label: 'Raw JSON', icon: '{ }' })
+  return base
+})
+
+// ---- Raw JSON (Monaco) state, preserved from the previous editor ----
 const configJson = ref('')
-const loadingConfig = ref(false)
 const validatingConfig = ref(false)
 const applyingConfig = ref(false)
 const configStatus = ref<{ valid: boolean } | null>(null)
 const configErrors = ref<Array<{ field: string; message: string }>>([])
-const applyResult = ref<{
-  success: boolean
-  applied_immediately: boolean
-  requires_restart: boolean
-  restart_reason?: string
-  changed_fields?: string[]
-} | null>(null)
-const editorInstance = ref<any>(null)
-
-// Monaco editor options
 const editorOptions = {
   automaticLayout: true,
   formatOnType: true,
@@ -147,77 +274,61 @@ const editorOptions = {
   scrollBeyondLastLine: false,
   fontSize: 14,
   tabSize: 2,
-  wordWrap: 'on' as 'on',
-  lineNumbers: 'on' as 'on',
-  glyphMargin: true,
-  folding: true,
-  lineDecorationsWidth: 10,
-  lineNumbersMinChars: 3
+  wordWrap: 'on' as const,
+  lineNumbers: 'on' as const,
 }
 
-// Configuration editor methods
-function handleEditorMount(editor: any) {
-  editorInstance.value = editor
-}
-
-function handleConfigChange() {
-  // Reset validation state on change
-  configErrors.value = []
-  configStatus.value = null
-  applyResult.value = null
-
-  // Try to parse JSON to check syntax
-  try {
-    JSON.parse(configJson.value)
-    configStatus.value = { valid: true }
-  } catch (e) {
-    configStatus.value = { valid: false }
-  }
+function clone<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v))
 }
 
 async function loadConfig() {
-  loadingConfig.value = true
-  configErrors.value = []
-  applyResult.value = null
-
+  loading.value = true
+  loadError.value = ''
   try {
     const response = await api.getConfig()
     if (response.success && response.data) {
-      configJson.value = JSON.stringify(response.data.config, null, 2)
+      const cfg = response.data.config
+      state.working = clone(cfg)
+      state.original = clone(cfg)
+      configJson.value = JSON.stringify(cfg, null, 2)
       configStatus.value = { valid: true }
+      loaded.value = true
     } else {
-      configErrors.value = [{ field: 'general', message: response.error || 'Failed to load configuration' }]
+      loadError.value = response.error || 'Failed to load configuration'
     }
-  } catch (error: any) {
-    console.error('Failed to load config:', error)
-    configErrors.value = [{ field: 'general', message: error.message || 'Failed to load configuration' }]
+  } catch (e: any) {
+    loadError.value = e?.message || 'Failed to load configuration'
   } finally {
-    loadingConfig.value = false
+    loading.value = false
+  }
+}
+
+function handleConfigChange() {
+  configErrors.value = []
+  try {
+    JSON.parse(configJson.value)
+    configStatus.value = { valid: true }
+  } catch {
+    configStatus.value = { valid: false }
   }
 }
 
 async function validateConfig() {
   validatingConfig.value = true
   configErrors.value = []
-
   try {
-    // Parse JSON first
-    const config = JSON.parse(configJson.value)
-
-    // Call validation endpoint
-    const response = await api.validateConfig(config)
+    const cfg = JSON.parse(configJson.value)
+    const response = await api.validateConfig(cfg)
     if (response.success && response.data) {
       configErrors.value = response.data.errors || []
       configStatus.value = { valid: response.data.valid }
-      if (response.data.valid) {
-        console.log('Configuration validated successfully')
-      }
     } else {
       configErrors.value = [{ field: 'general', message: response.error || 'Validation failed' }]
       configStatus.value = { valid: false }
     }
-  } catch (error: any) {
-    configErrors.value = [{ field: 'json', message: error.message || 'Invalid JSON syntax' }]
+  } catch (e: any) {
+    configErrors.value = [{ field: 'json', message: e?.message || 'Invalid JSON syntax' }]
     configStatus.value = { valid: false }
   } finally {
     validatingConfig.value = false
@@ -227,128 +338,53 @@ async function validateConfig() {
 async function applyConfig() {
   applyingConfig.value = true
   configErrors.value = []
-  applyResult.value = null
-
   try {
-    // Parse JSON first
-    const config = JSON.parse(configJson.value)
-
-    // Call apply configuration endpoint
-    const response = await api.applyConfig(config)
+    const cfg = JSON.parse(configJson.value)
+    const response = await api.applyConfig(cfg)
     if (response.success && response.data) {
-      applyResult.value = response.data
-      if (response.data.applied_immediately) {
-        // Refresh UI data to reflect changes
-        await serversStore.fetchServers()
-      }
-      console.log('Configuration applied successfully:', response.data)
+      systemStore.addToast({
+        type: response.data.requires_restart ? 'warning' : 'success',
+        title: response.data.requires_restart ? 'Applied — restart required' : 'Configuration applied',
+      })
+      if (response.data.applied_immediately) await serversStore.fetchServers()
+      await loadConfig()
     } else {
       configErrors.value = [{ field: 'apply', message: response.error || 'Failed to apply configuration' }]
     }
-  } catch (error: any) {
-    configErrors.value = [{ field: 'apply', message: error.message || 'Failed to apply configuration' }]
+  } catch (e: any) {
+    configErrors.value = [{ field: 'apply', message: e?.message || 'Failed to apply configuration' }]
   } finally {
     applyingConfig.value = false
   }
 }
 
-// Settings hints
-const settingsHints = computed<Hint[]>(() => {
-  return [
-    {
-      icon: '⚙️',
-      title: 'Configuration Management',
-      description: 'Edit MCPProxy configuration with JSON editor',
-      sections: [
-        {
-          title: 'Hot-Reloadable Settings',
-          text: 'These settings are applied immediately without restarting:',
-          list: [
-            'Server enable/disable status',
-            'Tool limits and search parameters',
-            'Log levels and output settings',
-            'Cache and timeout settings'
-          ]
-        },
-        {
-          title: 'Restart Required',
-          text: 'These settings require mcpproxy restart to take effect:',
-          list: [
-            'Listen address (network binding)',
-            'Data directory path',
-            'API key authentication',
-            'TLS/HTTPS configuration'
-          ]
-        }
-      ]
-    },
-    {
-      icon: '🔧',
-      title: 'CLI Configuration Tools',
-      description: 'Manage configuration from the command line',
-      sections: [
-        {
-          title: 'View current configuration',
-          codeBlock: {
-            language: 'bash',
-            code: `# View configuration location\nmcpproxy config path\n\n# Dump current config\ncat ~/.mcpproxy/mcp_config.json`
-          }
-        },
-        {
-          title: 'Backup configuration',
-          codeBlock: {
-            language: 'bash',
-            code: `# Create backup\ncp ~/.mcpproxy/mcp_config.json ~/.mcpproxy/mcp_config.backup.json`
-          }
-        }
-      ]
-    },
-    {
-      icon: '💡',
-      title: 'Configuration Tips',
-      description: 'Best practices for managing MCPProxy config',
-      sections: [
-        {
-          title: 'Editor features',
-          list: [
-            'Use Ctrl+Space for autocomplete suggestions',
-            'Use Ctrl+F to search within the configuration',
-            'Invalid JSON is highlighted with red squiggles',
-            'Format with Ctrl+Shift+F (or Cmd+Shift+F on Mac)'
-          ]
-        },
-        {
-          title: 'Version control',
-          text: 'Consider tracking your configuration in git (excluding secrets):',
-          codeBlock: {
-            language: 'bash',
-            code: `# Initialize git repo for configs\ncd ~/.mcpproxy\ngit init\necho "*.db" >> .gitignore\necho "*.bleve/" >> .gitignore\ngit add mcp_config.json\ngit commit -m "Initial MCPProxy configuration"`
-          }
-        }
-      ]
-    }
-  ]
-})
+const settingsHints = computed<Hint[]>(() => [
+  {
+    icon: '🔒',
+    title: 'Settings',
+    description: 'Manage configuration from friendly forms or raw JSON',
+    sections: [
+      {
+        title: 'Saving',
+        text: 'Each section saves only the fields you changed, so secrets like your API key are never overwritten.',
+      },
+      {
+        title: 'Requires restart',
+        list: ['Listen address', 'Data directory', 'API key', 'TLS/HTTPS settings'],
+      },
+    ],
+  },
+])
 
-// Configuration reload event listener
-function handleConfigSaved(event: Event) {
-  const customEvent = event as CustomEvent
-  console.log('Configuration saved event received, reloading config:', customEvent.detail)
-
-  // Reload configuration to show updated servers
+function handleConfigSaved() {
   loadConfig()
 }
 
-// Initialize component
 onMounted(() => {
-  loadConfig() // Load configuration when component mounts
-
-  // Listen for config.saved events from SSE
+  loadConfig()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
 })
-
 onUnmounted(() => {
-  // Clean up event listener
   window.removeEventListener('mcpproxy:config-saved', handleConfigSaved)
 })
 </script>

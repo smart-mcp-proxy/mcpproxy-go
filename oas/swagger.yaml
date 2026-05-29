@@ -2670,6 +2670,52 @@ paths:
       summary: Get current configuration
       tags:
       - config
+    patch:
+      description: Deep-merges only the fields present in the request body onto the
+        live in-memory configuration and routes the result through the existing apply
+        pipeline (validation, change detection, disk persistence, hot-reload). Fields
+        the client omits — including masked secrets such as `api_key` and secret request
+        headers — are preserved verbatim. Nested objects are merged recursively; arrays
+        and scalars replace wholesale.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+        description: Partial configuration with only the fields to change
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ConfigApplyResult'
+          description: Configuration patch applied (inspect validation_errors for
+            rejected values)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid JSON payload or empty patch
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unauthorized - missing or invalid API key
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to read or apply configuration
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Partially update configuration
+      tags:
+      - config
   /api/v1/config/apply:
     post:
       description: Applies a new MCPProxy configuration. Validates and persists the
