@@ -100,9 +100,13 @@ const pendingInfoOnly = ref(false)
 
 const dirtyKeys = computed(() => Object.keys(dirty.value))
 
-// Block Save when any field (number/duration) is invalid.
+// Block Save only when a CHANGED field is invalid — a pre-existing value the
+// user hasn't touched must never block saving unrelated edits.
 const hasInvalid = computed(() =>
-  props.fields.some((f) => validateField(f, getPath(props.working, f.key)) != null)
+  dirtyKeys.value.some((k) => {
+    const f = props.fields.find((x) => x.key === k)
+    return f != null && validateField(f, getPath(props.working, k)) != null
+  })
 )
 
 function eq(a: any, b: any): boolean {

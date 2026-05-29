@@ -29,6 +29,10 @@ export interface DangerSpec {
   tone?: 'danger' | 'info'
 }
 
+// Extra validation applied to text/secret fields (beyond number/duration,
+// which are validated from the control type). Centralised in validateField.
+export type ValueKind = 'hostport' | 'bytesize' | 'cpu' | 'hostname' | 'url' | 'secretkey'
+
 export interface SettingField {
   key: string // dot-path, e.g. "docker_isolation.enabled"
   label: string
@@ -42,6 +46,8 @@ export interface SettingField {
   danger?: DangerSpec
   placeholder?: string
   docs?: string // doc page path on docs.mcpproxy.app, e.g. "/features/docker-isolation"
+  valueKind?: ValueKind // extra format validation for text/secret fields
+  optional?: boolean // when true, an empty value is valid (skips kind validation)
 }
 
 export interface SettingsAccordion {
@@ -64,6 +70,32 @@ export function docsUrl(path?: string): string | undefined {
 // e.g. "2m", "90s", "1h30m", "500ms". Used to validate duration fields.
 const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/
 
+// validateHostPort checks a Go-style listen address: "[host]:port" where the
+// host part may be empty (all interfaces), an IPv4/hostname, or a bracketed
+// IPv6 literal. Port must be 1–65535.
+function validateHostPort(s: string): string | null {
+  let host: string
+  let portStr: string
+  if (s.startsWith('[')) {
+    const close = s.indexOf(']')
+    if (close === -1) return 'Unclosed “[” in IPv6 address'
+    host = s.slice(1, close)
+    const rest = s.slice(close + 1)
+    if (!rest.startsWith(':')) return 'Expected [ipv6]:port, e.g. [::1]:8080'
+    portStr = rest.slice(1)
+  } else {
+    const i = s.lastIndexOf(':')
+    if (i === -1) return 'Must include a port, e.g. 127.0.0.1:8080'
+    host = s.slice(0, i)
+    portStr = s.slice(i + 1)
+  }
+  if (!/^\d+$/.test(portStr)) return 'Port must be a number, e.g. 8080'
+  const port = Number(portStr)
+  if (port < 1 || port > 65535) return 'Port must be between 1 and 65535'
+  if (host && !/^[A-Za-z0-9.\-:]+$/.test(host)) return 'Invalid host in address'
+  return null
+}
+
 // validateField returns a human-readable error string for an invalid value,
 // or null when the value is acceptable. Shared by the field control (to show
 // the error) and the section (to block Save).
@@ -80,6 +112,27 @@ export function validateField(field: SettingField, value: unknown): string | nul
     if (s === '') return 'Enter a duration, e.g. 2m'
     if (!DURATION_RE.test(s)) return 'Use a duration like 2m, 90s, or 1h30m'
   }
+  if (field.valueKind && (field.control === 'text' || field.control === 'secret')) {
+    const s = String(value ?? '').trim()
+    if (s === '') return field.optional ? null : 'This field is required'
+    switch (field.valueKind) {
+      case 'hostport':
+        return validateHostPort(s)
+      case 'bytesize':
+        // Docker-style size: 512m, 1g, 256k, 1073741824 (bytes), optional unit
+        return /^\d+(\.\d+)?\s*([bkmgtBKMGT]i?b?)?$/.test(s) ? null : 'Use a size like 512m, 1g, or 256k'
+      case 'cpu':
+        return /^\d+(\.\d+)?$/.test(s) && Number(s) > 0 ? null : 'Use a positive number of CPUs, e.g. 1.0 or 0.5'
+      case 'hostname':
+        return /^[A-Za-z0-9.\-]+(:\d+)?(\/[^\s]*)?$/.test(s) ? null : 'Use a registry host like docker.io or ghcr.io'
+      case 'url':
+        return /^https?:\/\/[^\s]+$/.test(s) ? null : 'Use a URL starting with http:// or https://'
+      case 'secretkey':
+        // A non-empty key must be reasonably strong. Empty is handled above
+        // (api_key uses optional:true → blank keeps the current key).
+        return s.length >= 16 ? null : 'API key must be at least 16 characters'
+    }
+  }
   return null
 }
 
@@ -90,6 +143,8 @@ export const SECURITY_FIELDS: SettingField[] = [
     label: 'API key',
     help: 'Secret that authenticates clients to the REST API and Web UI (sent as the "X-API-Key" header or "?apikey=" in the URL). Leave blank to keep the current key; ↻ generates a new one. Changing it requires a restart and re-connecting clients.',
     control: 'secret',
+    valueKind: 'secretkey',
+    optional: true,
     restart: true,
     placeholder: '•••••••• (unchanged — type to replace)',
   },
@@ -154,6 +209,7 @@ export const SECURITY_FIELDS: SettingField[] = [
     label: 'Listen address',
     help: 'Where the server accepts connections. Keep 127.0.0.1:8080 for local-only use. To reach mcpproxy from other machines use 0.0.0.0:8080 — turn on “Require API key for MCP clients” first. Takes effect after restart.',
     control: 'text',
+    valueKind: 'hostport',
     restart: true,
     placeholder: '127.0.0.1:8080',
     danger: {
@@ -223,9 +279,9 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
     description: 'Defaults for containerised stdio servers (turn isolation on in Security & Access). The per-runtime image map and extra docker args are edited in the Raw JSON tab.',
     fields: [
       { key: 'docker_isolation.network_mode', label: 'Container network', help: 'none = no network (most secure), bridge = NAT, host = share host network.', control: 'select', options: ['bridge', 'none', 'host'].map((v) => ({ value: v, label: v })) },
-      { key: 'docker_isolation.memory_limit', label: 'Memory limit per container', control: 'text', placeholder: '512m' },
-      { key: 'docker_isolation.cpu_limit', label: 'CPU limit per container', control: 'text', placeholder: '1.0' },
-      { key: 'docker_isolation.registry', label: 'Container image registry', control: 'text', placeholder: 'docker.io' },
+      { key: 'docker_isolation.memory_limit', label: 'Memory limit per container', control: 'text', placeholder: '512m', valueKind: 'bytesize', optional: true },
+      { key: 'docker_isolation.cpu_limit', label: 'CPU limit per container', control: 'text', placeholder: '1.0', valueKind: 'cpu', optional: true },
+      { key: 'docker_isolation.registry', label: 'Container image registry', control: 'text', placeholder: 'docker.io', valueKind: 'hostname', optional: true },
       { key: 'docker_isolation.enable_cache_volume', label: 'Share a package cache volume', help: 'Speeds up repeated npm/uvx installs by caching across containers.', control: 'toggle' },
     ],
   },

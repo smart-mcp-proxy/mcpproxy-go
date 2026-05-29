@@ -48,6 +48,14 @@ test('settings page: sections, search, posture, partial save, danger confirm', a
   await page.locator('[data-test="setting-regenerate-cancel-api_key"]').click()
   // value unchanged after cancelling
   expect(await page.locator('[data-test="setting-secret-api_key"]').inputValue()).toBe(apiKeyVal)
+  // Listen address validation: a malformed host:port shows an error and blocks Save.
+  const origListen = await page.locator('[data-test="setting-text-listen"]').inputValue()
+  await page.locator('[data-test="setting-text-listen"]').fill('not-an-address')
+  await expect(page.locator('[data-test="setting-error-listen"]')).toBeVisible()
+  await expect(page.locator('[data-test="settings-apply-security"]')).toBeDisabled()
+  await page.locator('[data-test="setting-text-listen"]').fill(origListen) // restore (clears dirty)
+  await expect(page.locator('[data-test="setting-error-listen"]')).toHaveCount(0)
+
   // doc links: per-field (quarantine) + full config reference in the header
   await expect(page.locator('[data-test="setting-docs-quarantine_enabled"]')).toHaveAttribute('href', /docs\.mcpproxy\.app\/features\/security-quarantine/)
   await expect(page.locator('[data-test="settings-docs-reference"]')).toBeVisible()

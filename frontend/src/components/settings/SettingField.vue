@@ -193,7 +193,10 @@ function confirmRegenerate() {
   regenerate()
 }
 
-const validationError = computed(() => validateField(props.field, props.modelValue))
+// Only surface validation errors for fields the user has actually edited, so a
+// pre-existing value (e.g. a short legacy API key) never alarms or blocks
+// saving unrelated fields.
+const validationError = computed(() => (props.dirty ? validateField(props.field, props.modelValue) : null))
 
 function emitVal(v: any) {
   emit('update:modelValue', v)
