@@ -1,12 +1,14 @@
 <template>
   <div
-    class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-3 border-b border-base-200 last:border-0"
+    class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 py-3 px-2 -mx-2 border-b border-base-200 last:border-0 rounded transition-colors"
+    :class="dirty ? 'bg-warning/5 border-l-2 border-l-warning' : 'border-l-2 border-l-transparent'"
     :data-test="`setting-row-${field.key}`"
   >
     <!-- Label + help + badges -->
     <div class="sm:max-w-md">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="font-medium">{{ field.label }}</span>
+        <span v-if="dirty" class="badge badge-warning badge-xs" title="Unsaved change">●</span>
         <span v-if="field.restart" class="badge badge-warning badge-xs gap-1" title="Requires restart">
           restart
         </span>
@@ -110,7 +112,7 @@
 import { ref, computed } from 'vue'
 import type { SettingField } from '@/views/settings/fields'
 
-const props = defineProps<{ field: SettingField; modelValue: any }>()
+const props = defineProps<{ field: SettingField; modelValue: any; dirty?: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: any): void }>()
 
 const showSecret = ref(false)

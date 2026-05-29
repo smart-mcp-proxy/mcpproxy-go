@@ -8,14 +8,29 @@
           Manage mcpproxy settings. Changes save instantly; a badge marks fields that need a restart.
         </p>
       </div>
-      <button class="btn btn-sm btn-outline" :disabled="loading" @click="loadConfig" data-test="settings-reload">
-        <span v-if="loading" class="loading loading-spinner loading-xs"></span>
-        <span v-else>Reload</span>
-      </button>
+      <div class="flex items-center gap-2">
+        <label class="input input-bordered input-sm flex items-center gap-2 w-64">
+          <span class="opacity-50">🔍</span>
+          <input v-model="search" type="text" class="grow" placeholder="Search all settings…" data-test="settings-search" />
+          <button v-if="search" class="opacity-50 hover:opacity-100" @click="search = ''" title="Clear">✕</button>
+        </label>
+        <button class="btn btn-sm btn-outline" :disabled="loading" @click="loadConfig" data-test="settings-reload">
+          <span v-if="loading" class="loading loading-spinner loading-xs"></span>
+          <span v-else>Reload</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Search results (across all sections) -->
+    <div v-if="loaded && search.trim()" class="card bg-base-100 shadow-md" data-test="settings-search-results">
+      <div class="card-body">
+        <h2 class="card-title text-lg">🔍 Search results <span class="text-sm font-normal text-base-content/60">({{ filteredFields.length }})</span></h2>
+        <SettingsSection section-id="search" :fields="filteredFields" :working="state.working" :original="state.original" />
+      </div>
     </div>
 
     <!-- Tabs -->
-    <div role="tablist" class="tabs tabs-bordered" data-test="settings-tabs">
+    <div v-show="!search.trim()" role="tablist" class="tabs tabs-bordered" data-test="settings-tabs">
       <button
         v-for="t in tabs"
         :key="t.id"
@@ -33,12 +48,24 @@
       <span>{{ loadError }}</span>
     </div>
 
-    <template v-else-if="loaded">
+    <template v-else-if="loaded && !search.trim()">
       <!-- Security & Access -->
       <div v-show="activeTab === 'security'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg">🔒 Security &amp; Access</h2>
           <p class="text-sm text-base-content/60 mb-2">The settings that most affect how exposed and protected your instance is.</p>
+          <!-- posture summary -->
+          <div class="flex flex-wrap gap-2 mb-4" data-test="settings-posture">
+            <span
+              v-for="p in posture"
+              :key="p.label"
+              class="badge gap-1"
+              :class="p.good ? 'badge-success badge-outline' : 'badge-warning'"
+              :title="p.good ? 'OK' : 'Review this'"
+            >
+              {{ p.label }}: {{ p.on ? 'on' : 'off' }}
+            </span>
+          </div>
           <SettingsSection section-id="security" :fields="securityFields" :working="state.working" :original="state.original" />
         </div>
       </div>
@@ -153,6 +180,41 @@ const loadError = ref('')
 const activeTab = ref<string>('security')
 const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
 const hasTeams = computed(() => state.working && state.working.teams != null)
+
+// cross-section search: type to find any setting across all tabs
+const search = ref('')
+const allFields = computed<SettingField[]>(() => [
+  ...securityFields,
+  ...generalFields,
+  ...advancedAccordions.flatMap((a) => a.fields),
+  ...(hasTeams.value ? teamsFields : []),
+])
+const filteredFields = computed<SettingField[]>(() => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return []
+  return allFields.value.filter(
+    (f) =>
+      f.label.toLowerCase().includes(q) ||
+      f.key.toLowerCase().includes(q) ||
+      (f.help?.toLowerCase().includes(q) ?? false)
+  )
+})
+
+// at-a-glance security posture (computed from the working config)
+const posture = computed(() => {
+  const w: any = state.working || {}
+  const sdd = w.sensitive_data_detection?.enabled !== false
+  const quarantine = w.quarantine_enabled !== false // default-on
+  return [
+    { label: 'Quarantine', on: quarantine, good: quarantine },
+    { label: 'MCP auth', on: !!w.require_mcp_auth, good: !!w.require_mcp_auth },
+    { label: 'Docker isolation', on: !!(w.docker_isolation && w.docker_isolation.enabled), good: !!(w.docker_isolation && w.docker_isolation.enabled) },
+    { label: 'Secret scan', on: sdd, good: sdd },
+    { label: 'Code exec', on: !!w.enable_code_execution, good: !w.enable_code_execution },
+    { label: 'Read-only', on: !!w.read_only_mode, good: true },
+    { label: 'Reveal headers', on: !!w.reveal_secret_headers, good: !w.reveal_secret_headers },
+  ]
+})
 
 const tabs = computed(() => {
   const base = [

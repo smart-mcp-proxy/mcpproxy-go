@@ -5,8 +5,10 @@
       :key="f.key"
       :field="f"
       :model-value="getPath(working, f.key)"
+      :dirty="!!dirty[f.key]"
       @update:model-value="onChange(f, $event)"
     />
+    <p v-if="!fields.length" class="text-sm text-base-content/50 py-4">No settings match your search.</p>
 
     <!-- per-section action bar -->
     <div class="flex items-center justify-between pt-2">
@@ -22,15 +24,26 @@
           {{ dirtyKeys.length }} unsaved change{{ dirtyKeys.length > 1 ? 's' : '' }}
         </span>
       </div>
-      <button
-        class="btn btn-primary btn-sm"
-        :disabled="!dirtyKeys.length || saving || hasInvalid"
-        :data-test="`settings-apply-${sectionId}`"
-        @click="attemptSave"
-      >
-        <span v-if="saving" class="loading loading-spinner loading-xs"></span>
-        Save changes
-      </button>
+      <div class="flex items-center gap-2">
+        <button
+          v-if="dirtyKeys.length"
+          class="btn btn-ghost btn-sm"
+          :disabled="saving"
+          :data-test="`settings-discard-${sectionId}`"
+          @click="discard"
+        >
+          Discard
+        </button>
+        <button
+          class="btn btn-primary btn-sm"
+          :disabled="!dirtyKeys.length || saving || hasInvalid"
+          :data-test="`settings-apply-${sectionId}`"
+          @click="attemptSave"
+        >
+          <span v-if="saving" class="loading loading-spinner loading-xs"></span>
+          Save changes
+        </button>
+      </div>
     </div>
 
     <!-- danger confirm -->
@@ -127,6 +140,15 @@ function dangerMessages(): string[] {
     }
   }
   return msgs
+}
+
+function discard() {
+  for (const key of dirtyKeys.value) {
+    setPath(props.working, key, getPath(props.original, key))
+  }
+  dirty.value = {}
+  lastResult.value = null
+  error.value = ''
 }
 
 function attemptSave() {
