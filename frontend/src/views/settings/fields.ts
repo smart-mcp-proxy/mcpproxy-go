@@ -37,6 +37,7 @@ export interface SettingField {
   restart?: boolean // requires server restart to take effect
   danger?: DangerSpec
   placeholder?: string
+  docs?: string // doc page path on docs.mcpproxy.app, e.g. "/features/docker-isolation"
 }
 
 export interface SettingsAccordion {
@@ -44,6 +45,15 @@ export interface SettingsAccordion {
   title: string
   description?: string
   fields: SettingField[]
+  docs?: string // doc page path on docs.mcpproxy.app
+}
+
+// Base URL for the hosted documentation; field/accordion `docs` are paths under it.
+export const DOCS_BASE = 'https://docs.mcpproxy.app'
+
+export function docsUrl(path?: string): string | undefined {
+  if (!path) return undefined
+  return path.startsWith('http') ? path : DOCS_BASE + path
 }
 
 // ---- Section 1: Security & Access (prioritised, security-first) ----
@@ -64,6 +74,7 @@ export const SECURITY_FIELDS: SettingField[] = [
   },
   {
     key: 'quarantine_enabled',
+    docs: '/features/security-quarantine',
     label: 'Quarantine new servers & changed tools',
     help: 'Holds newly added servers and tools whose description/schema changed for your approval before agents can call them — protects against Tool Poisoning Attacks. Recommended ON.',
     control: 'toggle',
@@ -75,12 +86,14 @@ export const SECURITY_FIELDS: SettingField[] = [
   },
   {
     key: 'docker_isolation.enabled',
+    docs: '/features/docker-isolation',
     label: 'Run stdio servers in Docker',
     help: 'Runs command-based (stdio) MCP servers inside isolated Docker containers instead of directly on your machine. Requires Docker to be installed and running.',
     control: 'toggle',
   },
   {
     key: 'enable_code_execution',
+    docs: '/features/code-execution',
     label: 'Enable code execution tool',
     help: 'Adds a sandboxed JavaScript tool agents can use to orchestrate several tool calls in one request. Off by default.',
     control: 'toggle',
@@ -93,6 +106,7 @@ export const SECURITY_FIELDS: SettingField[] = [
   },
   {
     key: 'sensitive_data_detection.enabled',
+    docs: '/features/sensitive-data-detection',
     label: 'Scan for secrets in tool traffic',
     help: 'Inspects tool arguments and responses for credentials (API keys, tokens, private keys, …) and flags them in the Activity log.',
     control: 'toggle',
@@ -126,6 +140,7 @@ export const SECURITY_FIELDS: SettingField[] = [
 export const GENERAL_FIELDS: SettingField[] = [
   {
     key: 'routing_mode',
+    docs: '/features/routing-modes',
     label: 'How agents find tools',
     help: 'Retrieve = agents search for tools first (best when you have many servers); Direct = every tool is listed to the agent; Code execution = agents call tools from JavaScript.',
     control: 'select',
@@ -145,7 +160,7 @@ export const GENERAL_FIELDS: SettingField[] = [
     control: 'select',
     options: ['trace', 'debug', 'info', 'warn', 'error'].map((v) => ({ value: v, label: v })),
   },
-  { key: 'telemetry.enabled', label: 'Anonymous usage telemetry', help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.', control: 'toggle' },
+  { key: 'telemetry.enabled', docs: '/features/telemetry', label: 'Anonymous usage telemetry', help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.', control: 'toggle' },
   { key: 'enable_prompts', label: 'Expose MCP prompts to clients', help: 'Advertise prompt templates from your upstream servers to connected AI clients.', control: 'toggle' },
 ]
 
@@ -153,6 +168,7 @@ export const GENERAL_FIELDS: SettingField[] = [
 export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   {
     id: 'code-execution',
+    docs: '/features/code-execution',
     title: 'Code execution',
     description: 'Limits for the sandboxed JavaScript tool (enable it in Security & Access).',
     fields: [
@@ -163,6 +179,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   },
   {
     id: 'docker-isolation',
+    docs: '/features/docker-isolation',
     title: 'Docker isolation',
     description: 'Defaults for containerised stdio servers (turn isolation on in Security & Access). The per-runtime image map and extra docker args are edited in the Raw JSON tab.',
     fields: [
@@ -175,6 +192,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   },
   {
     id: 'sensitive-data',
+    docs: '/features/sensitive-data-detection',
     title: 'Secret detection',
     description: 'Tuning for the secret scanner (turn it on in Security & Access). Per-category toggles and custom patterns are edited in the Raw JSON tab.',
     fields: [
@@ -186,6 +204,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   },
   {
     id: 'output-validation',
+    docs: '/features/output-schema-validation',
     title: 'Output-schema validation',
     description: 'Checks a tool’s structured response against its declared schema before it reaches the agent (Spec 054 Track A).',
     fields: [
@@ -195,6 +214,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   },
   {
     id: 'output-sanitisation',
+    docs: '/features/output-sanitisation',
     title: 'Output sanitisation',
     description: 'Contains untrusted tool output before it reaches the agent (Spec 054 Track B). All opt-in.',
     fields: [
@@ -207,6 +227,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   },
   {
     id: 'activity',
+    docs: '/features/activity-log',
     title: 'Activity log retention',
     description: 'How long the audit log of tool calls is kept.',
     fields: [

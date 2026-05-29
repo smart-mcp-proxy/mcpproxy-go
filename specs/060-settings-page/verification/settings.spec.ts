@@ -31,6 +31,9 @@ test('settings page: sections, search, posture, partial save, danger confirm', a
   await expect(page.locator('[data-test="settings-posture"]')).toBeVisible()
   await expect(page.locator('[data-test="setting-secret-api_key"]')).toBeVisible()
   await expect(page.locator('[data-test="settings-connect-client"]')).toBeVisible()
+  // doc links: per-field (quarantine) + full config reference in the header
+  await expect(page.locator('[data-test="setting-docs-quarantine_enabled"]')).toHaveAttribute('href', /docs\.mcpproxy\.app\/features\/security-quarantine/)
+  await expect(page.locator('[data-test="settings-docs-reference"]')).toBeVisible()
   await shot(page, 's01-security')
 
   // Cross-section search surfaces matching fields from any section.

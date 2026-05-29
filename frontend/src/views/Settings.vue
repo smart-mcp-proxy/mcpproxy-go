@@ -6,6 +6,13 @@
         <h1 class="text-3xl font-bold">Configuration</h1>
         <p class="text-base-content/70 mt-1">
           Manage mcpproxy settings. Changes save instantly; a badge marks fields that need a restart.
+          <a
+            :href="`${DOCS_BASE}/configuration/config-file`"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="link link-primary"
+            data-test="settings-docs-reference"
+          >Full configuration reference ↗</a>
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -92,7 +99,17 @@
         <details v-for="acc in advancedAccordions" :key="acc.id" class="collapse collapse-arrow bg-base-100 shadow-md">
           <summary class="collapse-title font-medium" :data-test="`settings-accordion-${acc.id}`">{{ acc.title }}</summary>
           <div class="collapse-content">
-            <p v-if="acc.description" class="text-xs text-base-content/60 mb-2">{{ acc.description }}</p>
+            <p v-if="acc.description || acc.docs" class="text-xs text-base-content/60 mb-2">
+              {{ acc.description }}
+              <a
+                v-if="acc.docs"
+                :href="docsUrl(acc.docs)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="link link-primary"
+                :data-test="`settings-accordion-docs-${acc.id}`"
+              >Learn more ↗</a>
+            </p>
             <SettingsSection :section-id="acc.id" :fields="acc.fields" :working="state.working" :original="state.original" />
           </div>
         </details>
@@ -170,6 +187,8 @@ import {
   SECURITY_FIELDS,
   GENERAL_FIELDS,
   ADVANCED_ACCORDIONS,
+  DOCS_BASE,
+  docsUrl,
   type SettingField,
 } from '@/views/settings/fields'
 import api from '@/services/api'

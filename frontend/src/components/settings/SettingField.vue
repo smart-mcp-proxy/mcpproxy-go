@@ -9,6 +9,16 @@
       <div class="flex items-center gap-2 flex-wrap">
         <span class="font-medium">{{ field.label }}</span>
         <span v-if="dirty" class="badge badge-warning badge-xs" title="Unsaved change">●</span>
+        <a
+          v-if="docsHref"
+          :href="docsHref"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="link link-primary text-xs font-normal"
+          :data-test="`setting-docs-${field.key}`"
+          title="Open documentation"
+          @click.stop
+        >docs ↗</a>
         <span v-if="field.restart" class="badge badge-warning badge-xs gap-1" title="Requires restart">
           restart
         </span>
@@ -110,12 +120,13 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { SettingField } from '@/views/settings/fields'
+import { docsUrl, type SettingField } from '@/views/settings/fields'
 
 const props = defineProps<{ field: SettingField; modelValue: any; dirty?: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: any): void }>()
 
 const showSecret = ref(false)
+const docsHref = computed(() => docsUrl(props.field.docs))
 
 const numberError = computed(() => {
   if (props.field.control !== 'number' || props.modelValue == null || props.modelValue === '') return false
