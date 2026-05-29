@@ -184,12 +184,12 @@ func TestResult_AddDetection_Deduplication(t *testing.T) {
 // Integration tests for pattern detection
 func TestDetector_PatternDetection(t *testing.T) {
 	tests := []struct {
-		name           string
-		content        string
-		wantDetected   bool
-		wantType       string
-		wantCategory   string
-		wantSeverity   string
+		name            string
+		content         string
+		wantDetected    bool
+		wantType        string
+		wantCategory    string
+		wantSeverity    string
 		disableCategory string
 	}{
 		{
@@ -241,9 +241,9 @@ func TestDetector_PatternDetection(t *testing.T) {
 			wantSeverity: "high",
 		},
 		{
-			name:         "Category disabled",
-			content:      `{"api_key": "AKIAIOSFODNN7EXAMPLE"}`,
-			wantDetected: false,
+			name:            "Category disabled",
+			content:         `{"api_key": "AKIAIOSFODNN7EXAMPLE"}`,
+			wantDetected:    false,
 			disableCategory: "cloud_credentials",
 		},
 		{
@@ -358,4 +358,48 @@ func TestDetector_Scan_EdgeCases(t *testing.T) {
 			assert.Equal(t, tt.wantDetected, result.Detected)
 		})
 	}
+}
+
+func TestDetector_Redact(t *testing.T) {
+	const fakeAWSKey = "AKIA1234567890ABCDEF"
+
+	t.Run("redacts AWS access key", func(t *testing.T) {
+		d := NewDetector(nil)
+		content := "here is my key: " + fakeAWSKey + " ok"
+		redacted, detections := d.Redact(content)
+
+		assert.NotContains(t, redacted, fakeAWSKey)
+		assert.Contains(t, redacted, "[REDACTED:cloud_credentials]")
+		require.NotEmpty(t, detections)
+
+		found := false
+		for _, det := range detections {
+			if det.Type == "aws_access_key" {
+				found = true
+				assert.Equal(t, "cloud_credentials", det.Category)
+				assert.Equal(t, "critical", det.Severity)
+				assert.Equal(t, "response", det.Location)
+				assert.False(t, det.IsLikelyExample)
+			}
+		}
+		assert.True(t, found, "expected an aws_access_key detection")
+	})
+
+	t.Run("no secret leaves content unchanged", func(t *testing.T) {
+		d := NewDetector(nil)
+		content := "just some plain text without secrets"
+		redacted, detections := d.Redact(content)
+		assert.Equal(t, content, redacted)
+		assert.Nil(t, detections)
+	})
+
+	t.Run("disabled detector returns content unchanged", func(t *testing.T) {
+		cfg := config.DefaultSensitiveDataDetectionConfig()
+		cfg.Enabled = false
+		d := NewDetector(cfg)
+		content := "here is my key: " + fakeAWSKey
+		redacted, detections := d.Redact(content)
+		assert.Equal(t, content, redacted)
+		assert.Nil(t, detections)
+	})
 }

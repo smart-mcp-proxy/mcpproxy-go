@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -82,16 +83,17 @@ func mcpServerVersion() string {
 
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
-	server          *mcpserver.MCPServer
-	storage         *storage.Manager
-	index           *index.Manager
-	upstreamManager *upstream.Manager
-	cacheManager    *cache.Manager
-	truncator       *truncate.Truncator
-	outputValidator *outputvalidation.Validator // Spec 056: output-schema validation (nil when disabled)
-	logger          *zap.Logger
-	mainServer      *Server        // Reference to main server for config persistence
-	config          *config.Config // Add config reference for security checks
+	server               *mcpserver.MCPServer
+	storage              *storage.Manager
+	index                *index.Manager
+	upstreamManager      *upstream.Manager
+	cacheManager         *cache.Manager
+	truncator            *truncate.Truncator
+	outputValidator      *outputvalidation.Validator // Spec 056: output-schema validation (nil when disabled)
+	sanitisationDetector *security.Detector          // Spec 054 Track B: secret detector for redact/block (nil when neither used)
+	logger               *zap.Logger
+	mainServer           *Server        // Reference to main server for config persistence
+	config               *config.Config // Add config reference for security checks
 
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
@@ -282,20 +284,29 @@ func NewMCPProxyServer(
 		)
 	}
 
+	// Spec 054 Track B: construct a secret detector only when output
+	// sanitisation may need it (redact or block actions). nil otherwise keeps
+	// the spotlight-only default off the detector hot path.
+	var sanitisationDetector *security.Detector
+	if config.OutputSanitisation.IsRedact() || config.OutputSanitisation.IsBlock() {
+		sanitisationDetector = security.NewDetector(config.SensitiveDataDetection)
+	}
+
 	proxy := &MCPProxyServer{
-		server:          mcpServer,
-		storage:         storage,
-		index:           index,
-		upstreamManager: upstreamManager,
-		cacheManager:    cacheManager,
-		truncator:       truncator,
-		outputValidator: outputValidator,
-		logger:          logger,
-		mainServer:      mainServer,
-		config:          config,
-		jsPool:          jsPool,
-		sessionStore:    sessionStore,
-		hooks:           hooks,
+		server:               mcpServer,
+		storage:              storage,
+		index:                index,
+		upstreamManager:      upstreamManager,
+		cacheManager:         cacheManager,
+		truncator:            truncator,
+		outputValidator:      outputValidator,
+		sanitisationDetector: sanitisationDetector,
+		logger:               logger,
+		mainServer:           mainServer,
+		config:               config,
+		jsPool:               jsPool,
+		sessionStore:         sessionStore,
+		hooks:                hooks,
 	}
 
 	// Register proxy tools for the default (retrieve_tools) server
@@ -1792,6 +1803,15 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// store under the key embedded in the truncation banner. p.logger receives
 	// a zap.Warn if the cache write fails — the resulting "cache key not
 	// found" symptom needs to be debuggable from the server logs.
+	// Spec 054 Track B (pre-forward): redact secrets, strip control sequences,
+	// or block on critical detections — applied to the RAW result BEFORE
+	// forwardContentResult truncates/caches it, so the read_cache store never
+	// holds an unredacted secret and a blocked response is never cached. A
+	// non-nil result means the call was blocked.
+	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, contentTrust, result); blockResult != nil {
+		return blockResult, nil
+	}
+
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
@@ -1800,6 +1820,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
 		return blockResult, nil
 	}
+
+	// Spec 054 Track B (post-forward): spotlight untrusted text in
+	// source-identifying delimiters. Lossless and non-cacheable, so it runs
+	// after truncation. response is refreshed so logs/metrics match agent output.
+	p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
+	response = forwardedText(forwarded, response)
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
@@ -2106,6 +2132,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 	}
 
+	// Spec 054 Track B: content-trust classification for output sanitisation,
+	// derived from the same annotations snapshot used for the activity record.
+	contentTrust := contracts.ContentTrustForTool(toolCallRecord.Annotations)
+
 	if err != nil {
 		// Record error in tool call history
 		toolCallRecord.Error = err.Error()
@@ -2171,6 +2201,15 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// store under the key embedded in the truncation banner. p.logger receives
 	// a zap.Warn if the cache write fails — the resulting "cache key not
 	// found" symptom needs to be debuggable from the server logs.
+	// Spec 054 Track B (pre-forward): redact secrets, strip control sequences,
+	// or block on critical detections — applied to the RAW result BEFORE
+	// forwardContentResult truncates/caches it, so the read_cache store never
+	// holds an unredacted secret and a blocked response is never cached. A
+	// non-nil result means the call was blocked.
+	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, contentTrust, result); blockResult != nil {
+		return blockResult, nil
+	}
+
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
@@ -2179,6 +2218,12 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, forwarded); blockResult != nil {
 		return blockResult, nil
 	}
+
+	// Spec 054 Track B (post-forward): spotlight untrusted text in
+	// source-identifying delimiters. Lossless and non-cacheable, so it runs
+	// after truncation. response is refreshed so logs/metrics match agent output.
+	p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
+	response = forwardedText(forwarded, response)
 
 	// Track truncation in token metrics
 	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {

@@ -81,6 +81,8 @@ components:
         oauth_expiry_warning_hours:
           description: Health status settings
           type: number
+        output_sanitisation:
+          $ref: '#/components/schemas/config.OutputSanitisationConfig'
         output_validation:
           $ref: '#/components/schemas/config.OutputValidationConfig'
         quarantine_enabled:
@@ -390,6 +392,28 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    config.OutputSanitisationConfig:
+      description: Output sanitisation settings (Spec 054 Track B)
+      properties:
+        max_redactions:
+          description: cap on redactions per response; default 100
+          type: integer
+        response_action:
+          description: '"spotlight" | "redact" | "block"; default "spotlight"'
+          type: string
+        spotlight_untrusted:
+          description: wrap untrusted output in spotlight markers; default true
+          type: boolean
+        strip_classes:
+          description: 'classes to strip: ansi/c0c1/bidi/zero_width'
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        strip_control_chars:
+          description: strip control-character classes; default false
+          type: boolean
       type: object
     config.OutputValidationConfig:
       description: Output-schema validation settings (Spec 056)

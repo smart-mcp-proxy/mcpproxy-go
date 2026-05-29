@@ -1459,6 +1459,129 @@ func TestOutputValidationConfig_JSONRoundTrip(t *testing.T) {
 	assert.Equal(t, "block", restored.OutputValidation.MissingStructuredContent)
 }
 
+func TestDefaultOutputSanitisationConfig(t *testing.T) {
+	cfg := DefaultOutputSanitisationConfig()
+
+	assert.False(t, cfg.SpotlightUntrusted, "Track B is fully opt-in: default SpotlightUntrusted should be false")
+	assert.Equal(t, "spotlight", cfg.ResponseAction, "default ResponseAction should be spotlight")
+	assert.False(t, cfg.StripControlChars, "default StripControlChars should be false")
+	assert.Equal(t, []string{"ansi", "c0c1", "bidi", "zero_width"}, cfg.StripClasses, "default StripClasses")
+	assert.Equal(t, 100, cfg.MaxRedactions, "default MaxRedactions should be 100")
+}
+
+func TestOutputSanitisationConfig_NilSafeHelpers(t *testing.T) {
+	var c *OutputSanitisationConfig
+
+	assert.True(t, c.IsEnabled(), "nil: IsEnabled should default true")
+	assert.False(t, c.IsSpotlightEnabled(), "nil: IsSpotlightEnabled should be false (fully opt-in)")
+	assert.False(t, c.IsRedact(), "nil: IsRedact should be false")
+	assert.False(t, c.IsBlock(), "nil: IsBlock should be false")
+	assert.False(t, c.IsStripEnabled(), "nil: IsStripEnabled should be false")
+	assert.Empty(t, c.EnabledStripClasses(), "nil: EnabledStripClasses should be empty (strip disabled)")
+}
+
+func TestOutputSanitisationConfig_IsRedactIsBlock(t *testing.T) {
+	cases := []struct {
+		action string
+		redact bool
+		block  bool
+	}{
+		{"spotlight", false, false},
+		{"redact", true, false},
+		{"block", false, true},
+		{"", false, false},
+	}
+	for _, tc := range cases {
+		c := &OutputSanitisationConfig{ResponseAction: tc.action}
+		assert.Equal(t, tc.redact, c.IsRedact(), "IsRedact for action=%q", tc.action)
+		assert.Equal(t, tc.block, c.IsBlock(), "IsBlock for action=%q", tc.action)
+	}
+}
+
+func TestOutputSanitisationConfig_IsSpotlightEnabled(t *testing.T) {
+	cEnabled := &OutputSanitisationConfig{SpotlightUntrusted: true}
+	assert.True(t, cEnabled.IsSpotlightEnabled())
+
+	cDisabled := &OutputSanitisationConfig{SpotlightUntrusted: false}
+	assert.False(t, cDisabled.IsSpotlightEnabled())
+}
+
+func TestOutputSanitisationConfig_EnabledStripClasses(t *testing.T) {
+	// Strip disabled -> empty regardless of classes
+	cDisabled := &OutputSanitisationConfig{
+		StripControlChars: false,
+		StripClasses:      []string{"ansi", "bidi"},
+	}
+	assert.Empty(t, cDisabled.EnabledStripClasses(), "strip disabled -> empty map")
+
+	// Strip enabled -> set of valid, lowercased classes; invalid filtered out
+	cEnabled := &OutputSanitisationConfig{
+		StripControlChars: true,
+		StripClasses:      []string{"ANSI", "c0c1", "bogus", "Zero_Width", "bidi"},
+	}
+	set := cEnabled.EnabledStripClasses()
+	assert.True(t, set["ansi"], "ansi present")
+	assert.True(t, set["c0c1"], "c0c1 present")
+	assert.True(t, set["zero_width"], "zero_width present (lowercased)")
+	assert.True(t, set["bidi"], "bidi present")
+	assert.False(t, set["bogus"], "invalid class filtered out")
+	assert.Len(t, set, 4, "only the four valid classes")
+}
+
+func TestOutputSanitisationConfig_WouldMutate(t *testing.T) {
+	// default config is fully opt-in -> never mutates (any trust)
+	def := DefaultOutputSanitisationConfig()
+	assert.False(t, def.WouldMutate("trusted"), "default (opt-in) should not mutate trusted")
+	assert.False(t, def.WouldMutate("untrusted"), "default (opt-in) should not mutate untrusted")
+
+	// untrusted + spotlight explicitly enabled -> true
+	spot := &OutputSanitisationConfig{ResponseAction: "spotlight", SpotlightUntrusted: true}
+	assert.True(t, spot.WouldMutate("untrusted"), "untrusted + spotlight-on should mutate")
+	assert.False(t, spot.WouldMutate("trusted"), "trusted + spotlight should not mutate")
+
+	// redact regardless of trust -> true
+	redact := &OutputSanitisationConfig{ResponseAction: "redact"}
+	assert.True(t, redact.WouldMutate("trusted"), "redact mutates even for trusted")
+	assert.True(t, redact.WouldMutate("untrusted"), "redact mutates for untrusted")
+
+	// block regardless of trust -> true
+	block := &OutputSanitisationConfig{ResponseAction: "block"}
+	assert.True(t, block.WouldMutate("trusted"), "block mutates even for trusted")
+	assert.True(t, block.WouldMutate("untrusted"), "block mutates for untrusted")
+
+	// untrusted + strip enabled (spotlight off) -> true
+	strip := &OutputSanitisationConfig{ResponseAction: "spotlight", SpotlightUntrusted: false, StripControlChars: true}
+	assert.True(t, strip.WouldMutate("untrusted"), "untrusted + strip should mutate")
+	assert.False(t, strip.WouldMutate("trusted"), "trusted + strip-only should not mutate")
+}
+
+func TestOutputSanitisationConfig_JSONRoundTrip(t *testing.T) {
+	orig := &Config{
+		Listen: "127.0.0.1:9090",
+		OutputSanitisation: &OutputSanitisationConfig{
+			SpotlightUntrusted: true,
+			ResponseAction:     "redact",
+			StripControlChars:  true,
+			StripClasses:       []string{"ansi", "bidi"},
+			MaxRedactions:      42,
+		},
+	}
+
+	data, err := json.Marshal(orig)
+	require.NoError(t, err)
+
+	var restored Config
+	err = json.Unmarshal(data, &restored)
+	require.NoError(t, err)
+
+	require.NotNil(t, restored.OutputSanitisation)
+	assert.True(t, restored.OutputSanitisation.SpotlightUntrusted)
+	assert.Equal(t, "redact", restored.OutputSanitisation.ResponseAction)
+	assert.True(t, restored.OutputSanitisation.StripControlChars)
+	assert.Equal(t, []string{"ansi", "bidi"}, restored.OutputSanitisation.StripClasses)
+	assert.Equal(t, 42, restored.OutputSanitisation.MaxRedactions)
+}
+
 func TestToolMetadata_OutputSchemaJSON(t *testing.T) {
 	// Verify OutputSchemaJSON field exists on ToolMetadata
 	meta := &ToolMetadata{
