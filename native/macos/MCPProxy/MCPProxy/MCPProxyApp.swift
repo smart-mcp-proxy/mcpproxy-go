@@ -20,6 +20,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
 
@@ -231,6 +232,48 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         showMainWindow()
     }
 
+    @objc private func showSettingsWindow() {
+        // Reuse the existing window if it's already open.
+        if let window = settingsWindow, window.isVisible {
+            NSApp.setActivationPolicy(.regular)
+            setupMainMenu()
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // A menu-bar (.accessory) app can't make a window key without first
+        // becoming a regular app — same dance as showMainWindow().
+        NSApp.setActivationPolicy(.regular)
+
+        let view = SettingsView(appState: appState, onOpenWebUI: { [weak self] in self?.openWebUI() })
+        let hostingView = NSHostingView(rootView: view)
+
+        // Fixed-size, content-driven Settings window per the macOS HIG
+        // (no .resizable). Height follows the SwiftUI content.
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 360),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "MCPProxy Settings"
+        window.contentView = hostingView
+        // Size the window to the SwiftUI content so no section is clipped
+        // (content-driven, per the macOS HIG for Settings windows).
+        let fitting = hostingView.fittingSize
+        window.setContentSize(NSSize(width: 480, height: max(fitting.height, 420)))
+        window.center()
+        window.setFrameAutosaveName("MCPProxySettingsWindow")
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        setupMainMenu()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        settingsWindow = window
+    }
+
     @objc private func showAddServer() {
         showMainWindow()
         // First switch to the Servers tab so ServersView is mounted and
@@ -253,10 +296,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    // NSWindowDelegate — hide from Dock when window closes
+    // NSWindowDelegate — hide from Dock when the last managed window closes.
     func windowWillClose(_ notification: Notification) {
-        // Return to accessory (menu bar only) when main window closes
-        NSApp.setActivationPolicy(.accessory)
+        let closing = notification.object as? NSWindow
+        // If another managed window (main or settings) is still open, stay a
+        // regular app so it keeps its Dock icon / focus.
+        let othersOpen = [mainWindow, settingsWindow]
+            .compactMap { $0 }
+            .contains { $0 != closing && $0.isVisible }
+        if !othersOpen {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     // MARK: - Main Menu Bar (View > Text Size)
@@ -607,9 +657,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         addServer.target = self
         menu.addItem(addServer)
 
-        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: ",")
+        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: "")
         openApp.target = self
         menu.addItem(openApp)
+
+        let settingsItem = NSMenuItem(title: "Settings...", action: #selector(showSettingsWindow), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         let webUI = NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
