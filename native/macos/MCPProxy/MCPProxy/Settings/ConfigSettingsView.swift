@@ -384,15 +384,33 @@ struct GeneralConfigTab: View {
 
 struct AdvancedSettingsTab: View {
     @ObservedObject var store: ConfigStore
+    @State private var expanded: Set<String> = []
+
     var body: some View {
         ConfigTabContainer(store: store) {
             VStack(alignment: .leading, spacing: 8) {
                 ForEach(SettingsCatalog.advanced) { section in
-                    DisclosureGroup {
-                        ConfigSectionView(store: store, sectionId: section.id, fields: section.fields)
-                            .padding(.top, 6)
-                    } label: {
-                        Text(section.title).fontWeight(.semibold)
+                    let isOpen = expanded.contains(section.id)
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Whole header row toggles the section (not just the chevron).
+                        Button {
+                            if isOpen { expanded.remove(section.id) } else { expanded.insert(section.id) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isOpen ? "chevron.down" : "chevron.right")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundColor(.secondary)
+                                Text(section.title).fontWeight(.semibold)
+                                Spacer()
+                            }
+                            .contentShape(Rectangle()) // entire row is the hit target
+                        }
+                        .buttonStyle(.plain)
+
+                        if isOpen {
+                            ConfigSectionView(store: store, sectionId: section.id, fields: section.fields)
+                                .padding(.top, 6)
+                        }
                     }
                     .padding(12)
                     .background(Color(nsColor: .controlBackgroundColor))
