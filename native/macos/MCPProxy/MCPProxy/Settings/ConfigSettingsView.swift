@@ -9,6 +9,7 @@
 // directly (Constitution III).
 
 import SwiftUI
+import AppKit
 
 // MARK: - Store
 
@@ -43,6 +44,17 @@ final class ConfigStore: ObservableObject {
             loadError = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
         }
         loading = false
+    }
+
+    /// The core's current (saved) configuration, pretty-printed for the
+    /// read-only Raw tab. Reflects server truth — not unsaved form edits.
+    var prettyJSON: String {
+        guard JSONSerialization.isValidJSONObject(original),
+              let data = try? JSONSerialization.data(
+                withJSONObject: original, options: [.prettyPrinted, .sortedKeys]),
+              let str = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return str
     }
 
     // MARK: value access
@@ -416,6 +428,46 @@ struct AdvancedSettingsTab: View {
                     .background(Color(nsColor: .controlBackgroundColor))
                     .cornerRadius(8)
                 }
+            }
+        }
+    }
+}
+
+/// Read-only view of the effective configuration the core is running, sourced
+/// over REST (GET /api/v1/config via ConfigStore). Editing happens only in the
+/// other tabs — this tab never writes, mirroring the tray's REST-only contract.
+struct RawConfigTab: View {
+    @ObservedObject var store: ConfigStore
+    @State private var copied = false
+
+    var body: some View {
+        ConfigTabContainer(store: store) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top, spacing: 12) {
+                    Text("Read-only — the effective configuration the core is running. To change values, use the App, Security, General and Advanced tabs.")
+                        .font(.callout)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(store.prettyJSON, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+                    } label: {
+                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    }
+                    .help("Copy the full configuration JSON")
+                }
+
+                Text(store.prettyJSON)
+                    .font(.system(.callout, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(8)
             }
         }
     }

@@ -33,11 +33,14 @@ struct SettingsView: View {
 
             AdvancedSettingsTab(store: store)
                 .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }.tag(3)
+
+            RawConfigTab(store: store)
+                .tabItem { Label("Raw", systemImage: "curlybraces") }.tag(4)
         }
         .frame(minWidth: 540, minHeight: 560)
-        // ⌘1–⌘4 switch tabs (handy, and lets UI tests navigate).
+        // ⌘1–⌘5 switch tabs (handy, and lets UI tests navigate).
         .background {
-            ForEach(0..<4, id: \.self) { i in
+            ForEach(0..<5, id: \.self) { i in
                 Button("") { tab = i }
                     .keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
                     .opacity(0)
