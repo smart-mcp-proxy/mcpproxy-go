@@ -21,9 +21,16 @@ The DMG installers are signed and notarized by Apple.
 
 ### Homebrew
 
+Install the full macOS tray app (signed & notarized, bundles the core server):
+
 ```bash
-brew tap smart-mcp-proxy/mcpproxy
-brew install mcpproxy
+brew install --cask smart-mcp-proxy/mcpproxy/mcpproxy
+```
+
+Or install just the headless core CLI (no tray app):
+
+```bash
+brew install smart-mcp-proxy/mcpproxy/mcpproxy
 ```
 
 
