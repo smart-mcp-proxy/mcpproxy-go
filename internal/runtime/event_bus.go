@@ -397,7 +397,7 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string) {
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string, requestBytes, responseBytes int) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -437,6 +437,13 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	// Add content trust metadata if provided (Spec 035)
 	if contentTrust != "" {
 		payload["content_trust"] = contentTrust
+	}
+	// Spec 069 A1: pre-truncation byte sizes (0 means not measured / legacy callers)
+	if requestBytes > 0 {
+		payload["request_bytes"] = requestBytes
+	}
+	if responseBytes > 0 {
+		payload["response_bytes"] = responseBytes
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }

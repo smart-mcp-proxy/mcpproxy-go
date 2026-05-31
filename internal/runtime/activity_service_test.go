@@ -799,3 +799,42 @@ func TestHandleInternalToolCall_NoUserIdentity(t *testing.T) {
 	assert.Empty(t, records[0].UserID)
 	assert.Empty(t, records[0].UserEmail)
 }
+
+// TestHandleToolCallCompleted_ByteCapture verifies that RequestBytes and ResponseBytes
+// are populated from the event payload pre-truncation values. T003 Spec 069 A1.
+func TestHandleToolCallCompleted_ByteCapture(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	logger := zap.NewNop()
+	svc := NewActivityService(store, logger)
+
+	evt := Event{
+		Type:      EventTypeActivityToolCallCompleted,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name":    "test-server",
+			"tool_name":      "test-tool",
+			"session_id":     "sess-bytes",
+			"request_id":     "req-bytes",
+			"source":         "mcp",
+			"status":         "success",
+			"duration_ms":    int64(50),
+			"response":       "truncated...",
+			"request_bytes":  1500,
+			"response_bytes": 98304,
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	filter := storage.DefaultActivityFilter()
+	filter.ExcludeCallToolSuccess = false
+	records, _, err := store.ListActivities(filter)
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	record := records[0]
+	assert.Equal(t, 1500, record.RequestBytes, "RequestBytes must reflect pre-truncation request size")
+	assert.Equal(t, 98304, record.ResponseBytes, "ResponseBytes must reflect pre-truncation response size")
+}

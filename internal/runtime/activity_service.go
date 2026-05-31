@@ -258,6 +258,10 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		}
 	}
 
+	// Spec 069 A1: byte sizes measured pre-truncation by the emitter.
+	requestBytes := int(getInt64Payload(evt.Payload, "request_bytes"))
+	responseBytes := int(getInt64Payload(evt.Payload, "response_bytes"))
+
 	record := &storage.ActivityRecord{
 		Type:              storage.ActivityTypeToolCall,
 		Source:            activitySource,
@@ -273,6 +277,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		SessionID:         sessionID,
 		RequestID:         requestID,
 		Metadata:          metadata,
+		RequestBytes:      requestBytes,
+		ResponseBytes:     responseBytes,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (teams edition)
