@@ -12,6 +12,11 @@ type RegistryEntry struct {
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
 	Count       interface{} `json:"count,omitempty"` // number or string
+	// RequiresKey marks a registry that needs an API key to be queried. When
+	// true and no key is configured, SearchServers skips it with
+	// ErrRegistryKeyMissing so the calling surface can mark it unavailable
+	// instead of failing the whole search (FR-008).
+	RequiresKey bool `json:"requires_key,omitempty"`
 }
 
 // ServerEntry represents an MCP server discovered via a registry

@@ -6,38 +6,50 @@ import (
 
 var registryList []RegistryEntry
 
-// SetRegistriesFromConfig sets the registries list from configuration
+// SetRegistriesFromConfig builds the effective registry list by MERGING the
+// built-in defaults with the user's configured registries, keyed by ID
+// (FR-006). Built-in defaults come first (in their canonical order); a config
+// entry with a new ID is appended, and a config entry whose ID collides with a
+// default overrides it in place. This means adding one custom registry no
+// longer drops the shipped defaults, and no rebuild is required.
 func SetRegistriesFromConfig(cfg *config.Config) {
-	if cfg != nil && cfg.Registries != nil {
-		// Convert config.RegistryEntry to registries.RegistryEntry
-		registryList = make([]RegistryEntry, len(cfg.Registries))
+	index := make(map[string]int) // ID -> position in merged
+	merged := make([]RegistryEntry, 0, len(config.DefaultRegistries()))
+
+	upsert := func(r RegistryEntry) {
+		if pos, ok := index[r.ID]; ok {
+			merged[pos] = r
+			return
+		}
+		index[r.ID] = len(merged)
+		merged = append(merged, r)
+	}
+
+	defaults := config.DefaultRegistries()
+	for i := range defaults {
+		upsert(fromConfigEntry(&defaults[i]))
+	}
+	if cfg != nil {
 		for i := range cfg.Registries {
-			r := &cfg.Registries[i]
-			registryList[i] = RegistryEntry{
-				ID:          r.ID,
-				Name:        r.Name,
-				Description: r.Description,
-				URL:         r.URL,
-				ServersURL:  r.ServersURL,
-				Tags:        r.Tags,
-				Protocol:    r.Protocol,
-				Count:       r.Count,
-			}
+			upsert(fromConfigEntry(&cfg.Registries[i]))
 		}
-	} else {
-		// Use default registries
-		registryList = []RegistryEntry{
-			{
-				ID:          "smithery",
-				Name:        "Smithery MCP Registry",
-				Description: "The official community registry for Model Context Protocol (MCP) servers.",
-				URL:         "https://smithery.ai/protocols",
-				ServersURL:  "https://smithery.ai/api/smithery-protocol-registry",
-				Tags:        []string{"official", "community"},
-				Protocol:    "modelcontextprotocol/registry",
-				Count:       -1, // Will be populated at runtime
-			},
-		}
+	}
+
+	registryList = merged
+}
+
+// fromConfigEntry converts a config.RegistryEntry to a registries.RegistryEntry.
+func fromConfigEntry(r *config.RegistryEntry) RegistryEntry {
+	return RegistryEntry{
+		ID:          r.ID,
+		Name:        r.Name,
+		Description: r.Description,
+		URL:         r.URL,
+		ServersURL:  r.ServersURL,
+		Tags:        r.Tags,
+		Protocol:    r.Protocol,
+		Count:       r.Count,
+		RequiresKey: r.RequiresKey,
 	}
 }
 
