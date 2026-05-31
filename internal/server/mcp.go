@@ -909,6 +909,23 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	// Search for servers
 	servers, err := registries.SearchServers(ctx, registry, tag, search, limit, guesser)
 	if err != nil {
+		// FR-008: a registry that requires an unconfigured key is reported as
+		// unavailable (not a hard error) so an agent's search still succeeds and
+		// the reason is visible.
+		if errors.Is(err, registries.ErrRegistryKeyMissing) {
+			response := map[string]interface{}{
+				"servers":     []interface{}{},
+				"registry":    registry,
+				"total":       0,
+				"query":       search,
+				"tag":         tag,
+				"unavailable": map[string]interface{}{"reason": err.Error()},
+				"message":     fmt.Sprintf("Registry '%s' is unavailable: %v", registry, err),
+			}
+			jsonResult, _ := json.Marshal(response)
+			p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
+			return mcp.NewToolResultText(string(jsonResult)), nil
+		}
 		p.logger.Error("Registry search failed",
 			zap.String("registry", registry),
 			zap.String("search", search),

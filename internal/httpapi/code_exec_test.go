@@ -90,9 +90,10 @@ func (m *mockController) GetTokenSavings() (interface{}, error) {
 	return nil, nil
 }
 func (m *mockController) ListRegistries() ([]interface{}, error) { return nil, nil }
-func (m *mockController) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
-	return nil, nil
+func (m *mockController) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, *contracts.RegistryCacheInfo, error) {
+	return nil, nil, nil
 }
+func (m *mockController) RefreshRegistryCache(registryID string) (int, error) { return 0, nil }
 func (m *mockController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }

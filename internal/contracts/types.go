@@ -829,13 +829,37 @@ type GetRegistriesResponse struct {
 	Total      int        `json:"total"`
 }
 
+// RegistryCacheInfo describes how fresh a registry search result is. AgeSeconds
+// is the age of the cached server list (0 for a freshly fetched result); Stale
+// is true once the cache entry has passed its TTL but is still served pending a
+// manual refresh (FR-007).
+type RegistryCacheInfo struct {
+	AgeSeconds float64 `json:"age_seconds"`
+	Stale      bool    `json:"stale"`
+}
+
+// RegistryUnavailable marks a registry that could not be queried — e.g. it
+// requires an API key that is not configured. The overall search still
+// succeeds; this block makes the registry's unavailability visible (FR-008).
+type RegistryUnavailable struct {
+	Reason string `json:"reason"`
+}
+
 // SearchRegistryServersResponse is the response for GET /api/v1/registries/{id}/servers
 type SearchRegistryServersResponse struct {
-	RegistryID string             `json:"registry_id"`
-	Servers    []RepositoryServer `json:"servers"`
-	Total      int                `json:"total"`
-	Query      string             `json:"query,omitempty"`
-	Tag        string             `json:"tag,omitempty"`
+	RegistryID  string               `json:"registry_id"`
+	Servers     []RepositoryServer   `json:"servers"`
+	Total       int                  `json:"total"`
+	Query       string               `json:"query,omitempty"`
+	Tag         string               `json:"tag,omitempty"`
+	Cache       *RegistryCacheInfo   `json:"cache,omitempty"`
+	Unavailable *RegistryUnavailable `json:"unavailable,omitempty"`
+}
+
+// RefreshRegistryResponse is the response for POST /api/v1/registries/{id}/refresh.
+type RefreshRegistryResponse struct {
+	RegistryID string `json:"registry_id"`
+	Cleared    int    `json:"cleared"` // number of cached entries dropped
 }
 
 // AddFromRegistryRequest is the optional POST body for adding an upstream from

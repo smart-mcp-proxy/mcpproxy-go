@@ -444,6 +444,12 @@ components:
           type: string
         protocol:
           type: string
+        requires_key:
+          description: |-
+            RequiresKey marks a registry that needs an API key to be queried. When
+            true and no key is configured, the registry is skipped/marked unavailable
+            rather than failing the whole search (FR-008).
+          type: boolean
         servers_url:
           type: string
         tags:
@@ -1449,6 +1455,14 @@ components:
           description: Number of newly discovered tools awaiting approval
           type: integer
       type: object
+    contracts.RefreshRegistryResponse:
+      properties:
+        cleared:
+          description: number of cached entries dropped
+          type: integer
+        registry_id:
+          type: string
+      type: object
     contracts.Registry:
       properties:
         count:
@@ -1470,6 +1484,18 @@ components:
           type: array
           uniqueItems: false
         url:
+          type: string
+      type: object
+    contracts.RegistryCacheInfo:
+      properties:
+        age_seconds:
+          type: number
+        stale:
+          type: boolean
+      type: object
+    contracts.RegistryUnavailable:
+      properties:
+        reason:
           type: string
       type: object
     contracts.ReplayToolCallRequest:
@@ -1532,6 +1558,8 @@ components:
       type: object
     contracts.SearchRegistryServersResponse:
       properties:
+        cache:
+          $ref: '#/components/schemas/contracts.RegistryCacheInfo'
         query:
           type: string
         registry_id:
@@ -1545,6 +1573,8 @@ components:
           type: string
         total:
           type: integer
+        unavailable:
+          $ref: '#/components/schemas/contracts.RegistryUnavailable'
       type: object
     contracts.SearchResult:
       properties:
@@ -3275,6 +3305,40 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: List available MCP server registries
+      tags:
+      - registries
+  /api/v1/registries/{id}/refresh:
+    post:
+      description: Invalidates the cached server lists for a registry so the next
+        search re-fetches fresh data from the source (spec 070 FR-007). Returns how
+        many cache entries were dropped.
+      parameters:
+      - description: Registry ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.RefreshRegistryResponse'
+          description: Registry cache refreshed
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Registry ID is required
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to refresh registry cache
+      summary: Refresh a registry's cached server list
       tags:
       - registries
   /api/v1/registries/{id}/servers:

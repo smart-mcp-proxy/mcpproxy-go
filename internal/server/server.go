@@ -2436,8 +2436,13 @@ func (s *Server) ListRegistries() ([]interface{}, error) {
 }
 
 // SearchRegistryServers searches for servers in a specific registry (Phase 7)
-func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
+func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, *contracts.RegistryCacheInfo, error) {
 	return s.runtime.SearchRegistryServers(registryID, tag, query, limit)
+}
+
+// RefreshRegistryCache invalidates a registry's cached server lists (spec 070 FR-007).
+func (s *Server) RefreshRegistryCache(registryID string) (int, error) {
+	return s.runtime.RefreshRegistryCache(registryID)
 }
 
 // GetVersionInfo returns the current version information from the update checker.
