@@ -50,6 +50,13 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 		return nil, fmt.Errorf("registry '%s' not found", registryID)
 	}
 
+	// FR-008: skip a key-requiring registry when no key is configured, rather
+	// than performing a doomed fetch. Surfaces map ErrRegistryKeyMissing to an
+	// "unavailable" marker so the overall search still succeeds.
+	if err := checkRegistryKey(reg); err != nil {
+		return nil, err
+	}
+
 	if reg.ServersURL == "" {
 		return nil, fmt.Errorf("registry '%s' has no servers endpoint", reg.Name)
 	}
