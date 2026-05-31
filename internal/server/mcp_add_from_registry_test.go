@@ -14,12 +14,35 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
+
+// newAddFromRegistryTestServer builds an MCPProxyServer whose mainServer is a
+// real *Server backed by a live runtime+storage, so add_from_registry can run
+// through the keystone op (resolve → derive → persist) end-to-end. The base
+// createTestMCPProxyServer wires mainServer=nil, which is enough for read paths
+// but not for this write op.
+func newAddFromRegistryTestServer(t *testing.T) *MCPProxyServer {
+	t.Helper()
+
+	proxy := createTestMCPProxyServer(t)
+
+	logger := zap.NewNop()
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+
+	rt, err := runtime.NewRuntime(cfg, logger, "test")
+	require.NoError(t, err)
+
+	proxy.mainServer = NewServer(rt, logger)
+	return proxy
+}
 
 // startTestRegistry registers an in-memory registry (id="testreg") whose server
 // list is served by a local httptest server, so add_from_registry can resolve a
-// registry reference without touching the network. Returns nothing — the global
-// registry catalog is mutated additively via the exported config loader.
+// registry reference without touching the network. SetRegistriesFromConfig
+// replaces the global catalog; tests run sequentially so the last writer wins.
 func startTestRegistry(t *testing.T, servers []map[string]interface{}) {
 	t.Helper()
 
@@ -30,9 +53,11 @@ func startTestRegistry(t *testing.T, servers []map[string]interface{}) {
 	}))
 	t.Cleanup(srv.Close)
 
-	registries.LoadRegistriesFromConfig([]config.RegistryEntry{
-		{ID: "testreg", Name: "testreg", URL: srv.URL},
-	}, zap.NewNop())
+	registries.SetRegistriesFromConfig(&config.Config{
+		Registries: []config.RegistryEntry{
+			{ID: "testreg", Name: "testreg", ServersURL: srv.URL, Protocol: "modelcontextprotocol/registry"},
+		},
+	})
 }
 
 // callAddFromRegistry drives the upstream_servers handler with the
@@ -68,10 +93,10 @@ func toolResultJSON(t *testing.T, result *mcp.CallToolResult) map[string]interfa
 // equivalent to manual construction (spec 070 checkpoint / CN-004).
 func TestHandleUpstreamServers_AddFromRegistry_HappyPath(t *testing.T) {
 	startTestRegistry(t, []map[string]interface{}{
-		{"id": "everything", "name": "everything", "install_cmd": "npx -y @modelcontextprotocol/server-everything"},
+		{"id": "everything", "name": "everything", "installCmd": "npx -y @modelcontextprotocol/server-everything"},
 	})
 
-	srv, _ := newBlockedToolsTestServer(t)
+	srv := newAddFromRegistryTestServer(t)
 
 	result := callAddFromRegistry(t, srv, map[string]interface{}{
 		"operation": "add_from_registry",
@@ -96,10 +121,10 @@ func TestHandleUpstreamServers_AddFromRegistry_HappyPath(t *testing.T) {
 // carrying the stable cross-surface code and the offending input names (FR-003).
 func TestHandleUpstreamServers_AddFromRegistry_MissingRequiredInput(t *testing.T) {
 	startTestRegistry(t, []map[string]interface{}{
-		{"id": "gh", "name": "gh", "install_cmd": "npx github-mcp --token ${GITHUB_TOKEN}"},
+		{"id": "gh", "name": "gh", "installCmd": "npx github-mcp --token ${GITHUB_TOKEN}"},
 	})
 
-	srv, _ := newBlockedToolsTestServer(t)
+	srv := newAddFromRegistryTestServer(t)
 
 	result := callAddFromRegistry(t, srv, map[string]interface{}{
 		"operation": "add_from_registry",
