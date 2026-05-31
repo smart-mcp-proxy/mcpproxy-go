@@ -80,9 +80,9 @@ Web app: Go backend (`internal/`, `cmd/`) + embedded Vue frontend (`frontend/src
 **Goal**: merge-with-defaults, cache freshness/refresh, key-absent skip.
 **Independent test**: per quickstart US4.
 
-- [ ] T018 [P] [US4] Change `SetRegistriesFromConfig` to MERGE built-in defaults ∪ config by ID (`internal/registries/registry_data.go:10-42`) + unit test asserting custom entry doesn't drop the 5 defaults (FR-006).
-- [ ] T019 [P] [US4] Add `Refresh`/`Invalidate` + age/`stale` to `internal/cache/manager.go`; surface `cache:{age_seconds,stale}` on `GET /registries/{id}/servers` and add `POST /api/v1/registries/{id}/refresh` (FR-007).
-- [ ] T020 [US4] Add `RequiresKey` to registry entry + skip/mark `unavailable:{reason}` when key absent without failing overall search (`internal/registries/search.go`); unit test (FR-008/SC-006).
+- [X] T018 [P] [US4] Change `SetRegistriesFromConfig` to MERGE built-in defaults ∪ config by ID (`internal/registries/registry_data.go:10-42`) + unit test asserting custom entry doesn't drop the 5 defaults (FR-006).
+- [X] T019 [P] [US4] Add `Refresh`/`Invalidate` + age/`stale` to `internal/cache/manager.go`; surface `cache:{age_seconds,stale}` on `GET /registries/{id}/servers` and add `POST /api/v1/registries/{id}/refresh` (FR-007).
+- [X] T020 [US4] Add `RequiresKey` to registry entry + skip/mark `unavailable:{reason}` when key absent without failing overall search (`internal/registries/search.go`); unit test (FR-008/SC-006).
 
 ---
 
