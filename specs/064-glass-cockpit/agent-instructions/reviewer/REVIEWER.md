@@ -13,7 +13,8 @@ Your `accept` is a GitHub PR **approval** posted from a **bot identity distinct 
 
 ## RV-3 What to check (cite specifics)
 - Correctness against the spec's acceptance criteria + FRs.
-- Tests: required checks green; new behavior has a test; no coverage regression on touched code.
+- Checks: **every required check must be green** — a red or still-pending check (CI, or the other reviewer's `ai-review/*`) is an automatic `request_changes`, never an `accept`. New behavior has a test; no coverage regression on touched code.
+- Docs (ENG-9): if the change alters a CLI command/flag, the REST/MCP API, a config key, a default, the security model, or anything under `docs/`, the PR MUST include the matching docs update. Missing docs → `request_changes`.
 - Security (Constitution IV): no secret leakage, no new attack surface, quarantine/policy invariants intact.
 - Scope: the PR matches its approved design (no scope creep past the per-spec design gate).
 - Every finding cites a concrete `file:line` or observable behavior. No vague approvals.
