@@ -40,6 +40,15 @@ above are satisfied. (The engineer enabling `--auto` is acceptable here because 
 merge still cannot happen until the 2 approvals + checks gate clears — it does not
 bypass review.)
 
+## Applied 2026-05-31 — CI-context gate (Phase 1, no bot identity needed)
+Live on `main` now (`PUT /repos/smart-mcp-proxy/mcpproxy-go/branches/main/protection`):
+- `required_status_checks.strict = false`; **contexts (8):** `Lint`, `Unit Tests (ubuntu-latest, 1.25)`, `Build (ubuntu-latest)`, `Build (macos-latest)`, `Build (windows-latest)`, `Build Frontend`, `Validate PR title`, `Verify OpenAPI Artifacts`.
+- `required_pull_request_reviews.required_approving_review_count = 1` (unchanged); `enforce_admins = false` (admin can override).
+- **Deliberately NOT required** (requiring them would block unrelated PRs): path-conditional (`frontend-test`, `Cross-Platform Logging`, `Documentation`), heavy/conditional (`OAuth E2E Tests`, `End-to-End Tests`, `Integration`/`Stress`, `CodeQL`/`Analyze`, `dependency-review` — absent on some PRs), flaky OS unit tests (`Unit Tests (windows/macos-latest)` — matrix fail-fast cancellation + known Windows infra flakes), and external deploys (`Cloudflare Pages`).
+- ⚠ **Fragile context name:** `Unit Tests (ubuntu-latest, 1.25)` pins Go `1.25`. When CI bumps the Go version, update this required context or every PR will block on a check that never reports. (`Build (<os>)` names carry no version → stable.)
+- `strict:false` chosen so a slightly-behind branch can still merge (avoids auto-merge stalls); flip to `true` for "tested against latest main".
+- **Not yet wired:** `ai-review/codex` + `ai-review/kimi` contexts (need the reviewer→GitHub status step), and `required_approving_review_count: 2` + `allow_auto_merge` (need the bot identity). Phase 1 enforces "all CI green before merge" today; the AI-review auto-merge is Phase 2.
+
 ## Interim fallback (NO bot identity yet) — what's true TODAY
 - The two AI reviewers post their verdicts (as Paperclip review stages + PR comments), required CI must be green, but the **human performs the final merge click**. This keeps the model-diverse review gate without needing the bot identity. Current `main` protection already requires 1 approval; raise to 2 + add the reviewer checks when the bot identity lands.
 
