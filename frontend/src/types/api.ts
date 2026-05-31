@@ -525,6 +525,16 @@ export interface RepositoryInfo {
   // Future: pypi, docker_hub, etc.
 }
 
+// RequiredInput declares an env var / key a server needs before it can run.
+// Spec 070: detected server-side (explicit registry fields + ${VAR} heuristic)
+// and used by the Web UI to prompt the user before adding. Mirrors
+// registries.RequiredInput.
+export interface RequiredInput {
+  name: string
+  description?: string
+  secret?: boolean
+}
+
 export interface RepositoryServer {
   id: string
   name: string
@@ -537,6 +547,7 @@ export interface RepositoryServer {
   createdAt?: string
   registry?: string  // Which registry this came from
   repository_info?: RepositoryInfo  // Detected package info
+  required_inputs?: RequiredInput[]  // Spec 070: env/keys the user must supply before add
 }
 
 export interface GetRegistriesResponse {
