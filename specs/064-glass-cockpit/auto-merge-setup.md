@@ -43,10 +43,16 @@ bypass review.)
 ## Interim fallback (NO bot identity yet) — what's true TODAY
 - The two AI reviewers post their verdicts (as Paperclip review stages + PR comments), required CI must be green, but the **human performs the final merge click**. This keeps the model-diverse review gate without needing the bot identity. Current `main` protection already requires 1 approval; raise to 2 + add the reviewer checks when the bot identity lands.
 
-## Reviewer roster
-- **Gemini Critic** (`gemini_local`, model `gemini-2.5-pro` — pinned; `auto` was hitting the empty-prompt adapter bug). Known issue: the gemini adapter crashes on an empty `--prompt` (review-stage wake) — must be fixed or worked around for the Critic to actually post accepts.
-- **Codex reviewer** (`codex-local` adapter — verify CLI/creds). Second family.
-- **Human** — optional third reviewer + standing veto (RV-6); also the second reviewer when one AI reviewer is unavailable (FR-005f).
+## Reviewer roster — SUBSCRIPTION AUTH ONLY (user directive 2026-05-31)
+Both AI reviewers use the user's **paid subscription logins**, NOT API keys.
+
+- **Gemini Critic** — `gemini_local` adapter, **subscription/OAuth auth** (`~/.gemini/google_accounts.json`; no API key). CLI = `@google/gemini-cli` 0.42.0, `previewFeatures: true`.
+  - **Model:** pinned `gemini-2.5-pro` (best confirmed). **Gemini 3.5/3 could NOT be verified** — is it available? Unknown: every probe on 2026-05-31 hit `"You have exhausted your capacity on this model"` (subscription **quota exhausted**), so neither model-listing nor a test call succeeded. If a `gemini-3.x` exists on the subscription, switch the pin to it once quota recovers and it's confirmed.
+  - **TWO blockers for the Critic** (both must clear before it can `accept`): (1) **quota** — currently exhausted, the Critic literally cannot run; (2) the **empty-`--prompt` adapter bug** on review-stage wake (gemini yargs crash). The quota is the more fundamental one right now.
+- **Codex reviewer** — `codex-local` adapter, **ChatGPT subscription auth** (`~/.codex/auth.json` has `auth_mode` + `tokens`; an `OPENAI_API_KEY` is also present but subscription is preferred per user). CLI = `codex-cli` 0.46.0, default model **`gpt-5.5`** (adapter also knows `gpt-5.4`, `gpt-5.3-codex`, `gpt-5`). **Ready to use now** — this is the reliable reviewer while Gemini is quota-blocked.
+- **Human** — optional third reviewer + standing veto (RV-6); and, per FR-005f, the **de-facto second reviewer right now** because Gemini is quota-exhausted (Codex + human = the two accepts until Gemini recovers).
+
+> **Practical consequence:** until the Gemini subscription quota recovers (and the empty-prompt bug is fixed), the only working AI reviewer is **Codex (`gpt-5.5`)**. So the live two-reviewer set today is **Codex + human**; the Gemini Critic comes online as the second AI reviewer once its quota + adapter bug are resolved.
 
 ## Open items before this is live
 1. Human provisions the bot identity (above).

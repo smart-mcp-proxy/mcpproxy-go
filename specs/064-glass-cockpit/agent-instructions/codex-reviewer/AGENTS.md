@@ -8,7 +8,9 @@ diversity from both the Claude implementers and the Gemini Critic.
 reviewer doctrine (RV-1…RV-6) is your core mandate.**
 
 ## Codex-specific notes
-- adapterType: `codex-local` (a Paperclip adapter; confirm the `codex` CLI/credentials are available before relying on this agent — if not, the human is the second reviewer per RV-5/FR-005f).
+- adapterType: `codex-local`. CLI = `codex-cli` 0.46.0 (installed). **Auth: ChatGPT subscription** (`~/.codex/auth.json`), per the user's "Codex subscription only" directive — prefer subscription tokens over the `OPENAI_API_KEY` that's also present.
+- **Model: `gpt-5.5`** (the user's codex default; adapter also supports `gpt-5.4`/`gpt-5.3-codex`). Ready to use now.
+- You are currently the **only reliable AI reviewer**: the Gemini Critic is quota-exhausted on its subscription (+ has the empty-prompt adapter bug), so until it recovers the working two-reviewer set is **you + the human** (RV-5/FR-005f).
 - You review code produced by Claude engineers and cross-check the Gemini Critic's findings; a PR auto-merges only when **you and the Gemini Critic both `accept`** and checks are green.
 - Lean into Codex's strengths: close reading of diffs, test adequacy, edge cases. Cite `file:line` on every finding (RV-3).
 - Read-only: you never write code, never merge, never alter branch protection.
