@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"sort"
@@ -115,6 +116,11 @@ type ServerController interface {
 	// Registry browsing (Phase 7)
 	ListRegistries() ([]interface{}, error)
 	SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error)
+	// AddServerFromRegistryRef resolves a registry reference server-side and
+	// persists it quarantined (spec 070 keystone). On failure it returns a
+	// stable cross-surface error code (*contracts.RegistryAddError) alongside
+	// the raw error so the handler can map code → HTTP status.
+	AddServerFromRegistryRef(ctx context.Context, registryID, serverID, name string, env map[string]string, enabled *bool) (*config.ServerConfig, *contracts.RegistryAddError, error)
 
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
@@ -619,6 +625,7 @@ func (s *Server) setupRoutes() {
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
+		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
@@ -4032,6 +4039,97 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleAddFromRegistry godoc
+// @Summary      Add an upstream server from a registry reference
+// @Description  Resolves a registry server reference server-side, re-derives a validated config, and persists it quarantined (spec 070 keystone). The client never sends a config blob — command/args/url and the quarantine flag are derived from the registry entry, not the request.
+// @Tags         registries
+// @Accept       json
+// @Produce      json
+// @Param        id        path      string                            true   "Registry ID"
+// @Param        serverId  path      string                            true   "Server ID within the registry"
+// @Param        body      body      contracts.AddFromRegistryRequest  false  "Optional overrides (name, env, enabled)"
+// @Success      200       {object}  contracts.SuccessResponse         "Server added (quarantined)"
+// @Failure      400       {object}  contracts.ErrorResponse           "no_install_info | missing_required_input | duplicate_name"
+// @Failure      404       {object}  contracts.ErrorResponse           "registry_not_found | server_not_found"
+// @Failure      500       {object}  contracts.ErrorResponse           "Internal server error"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries/{id}/servers/{serverId}/add [post]
+func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	serverID := chi.URLParam(r, "serverId")
+	if registryID == "" || serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "registry id and server id are required")
+		return
+	}
+
+	// Body is optional: missing/empty body means "no overrides".
+	var req contracts.AddFromRegistryRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+			return
+		}
+	}
+
+	logger := s.getRequestLogger(r)
+	cfg, rerr, err := s.controller.AddServerFromRegistryRef(r.Context(), registryID, serverID, req.Name, req.Env, req.Enabled)
+	if err != nil {
+		status := registryAddErrorStatus(rerr.Code)
+		if status >= http.StatusInternalServerError {
+			logger.Error("Add from registry failed", "registry", registryID, "server", serverID, "error", err)
+		}
+		s.writeRegistryAddError(w, r, status, rerr)
+		return
+	}
+
+	s.writeSuccess(w, contracts.AddFromRegistryData{
+		Server: contracts.AddedServerSummary{
+			Name:        cfg.Name,
+			Protocol:    cfg.Protocol,
+			Command:     cfg.Command,
+			Args:        cfg.Args,
+			URL:         cfg.URL,
+			Enabled:     cfg.Enabled,
+			Quarantined: cfg.Quarantined,
+		},
+	})
+}
+
+// registryAddErrorStatus maps a stable add-from-registry error code to its HTTP
+// status (spec 070 contract). An unknown/empty code is an internal error.
+func registryAddErrorStatus(code string) int {
+	switch code {
+	case "registry_not_found", "server_not_found":
+		return http.StatusNotFound
+	case "no_install_info", "missing_required_input", "duplicate_name":
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// writeRegistryAddError writes the structured cross-surface error envelope so
+// every surface can read the same stable `code` and (for missing inputs) the
+// exact keys to supply.
+func (s *Server) writeRegistryAddError(w http.ResponseWriter, r *http.Request, status int, rerr *contracts.RegistryAddError) {
+	requestID := reqcontext.GetRequestID(r.Context())
+	body := struct {
+		Success       bool     `json:"success"`
+		Error         string   `json:"error"`
+		Code          string   `json:"code"`
+		MissingInputs []string `json:"missing_inputs,omitempty"`
+		RequestID     string   `json:"request_id,omitempty"`
+	}{
+		Success:       false,
+		Error:         rerr.Message,
+		Code:          rerr.Code,
+		MissingInputs: rerr.MissingInputs,
+		RequestID:     requestID,
+	}
+	s.writeJSON(w, status, body)
 }
 
 // Helper functions for type conversion

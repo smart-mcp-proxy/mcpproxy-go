@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
@@ -110,6 +111,45 @@ func (s *Server) AddServerFromRegistry(ctx context.Context, req *AddFromRegistry
 	}
 
 	return serverCfg, nil
+}
+
+// AddServerFromRegistryRef is the surface-facing adapter over the keystone
+// AddServerFromRegistry. It builds the reference request from primitive args
+// (so callers across the import graph need not depend on the server-internal
+// request type), and on failure projects the typed error into a stable
+// cross-surface contracts.RegistryAddError (CN-001) so REST/MCP/CLI report the
+// same code. On success the second return is nil.
+func (s *Server) AddServerFromRegistryRef(ctx context.Context, registryID, serverID, name string, env map[string]string, enabled *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
+	cfg, err := s.AddServerFromRegistry(ctx, &AddFromRegistryRequest{
+		RegistryID: registryID,
+		ServerID:   serverID,
+		Name:       name,
+		Env:        env,
+		Enabled:    enabled,
+	})
+	if err != nil {
+		return nil, newRegistryAddError(err), err
+	}
+	return cfg, nil, nil
+}
+
+// newRegistryAddError projects an add-from-registry failure onto the stable
+// cross-surface error contract. Returns nil for a nil error. For a
+// missing-required-input failure it carries the offending input names so a
+// surface can tell the user exactly which --env keys to supply (FR-003).
+func newRegistryAddError(err error) *contracts.RegistryAddError {
+	if err == nil {
+		return nil
+	}
+	re := &contracts.RegistryAddError{
+		Code:    RegistryAddErrorCode(err),
+		Message: err.Error(),
+	}
+	var missing *MissingRequiredInputError
+	if errors.As(err, &missing) {
+		re.MissingInputs = missing.Names
+	}
+	return re
 }
 
 // buildServerConfigFromEntry is the pure derivation core: registry entry +

@@ -11,6 +11,39 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
+// --- Cross-surface error projection (newRegistryAddError) --------------------
+
+func TestNewRegistryAddError(t *testing.T) {
+	assert.Nil(t, newRegistryAddError(nil))
+
+	missing := newRegistryAddError(&MissingRequiredInputError{Names: []string{"GITHUB_TOKEN", "API_KEY"}})
+	require.NotNil(t, missing)
+	assert.Equal(t, "missing_required_input", missing.Code)
+	assert.Equal(t, []string{"GITHUB_TOKEN", "API_KEY"}, missing.MissingInputs)
+	assert.Contains(t, missing.Message, "GITHUB_TOKEN")
+
+	noInfo := newRegistryAddError(ErrNoInstallInfo)
+	require.NotNil(t, noInfo)
+	assert.Equal(t, "no_install_info", noInfo.Code)
+	assert.Empty(t, noInfo.MissingInputs)
+
+	unknown := newRegistryAddError(errors.New("boom"))
+	require.NotNil(t, unknown)
+	assert.Equal(t, "", unknown.Code, "unrecognized errors carry an empty stable code")
+	assert.Equal(t, "boom", unknown.Message)
+}
+
+// --- REST adapter: surfaces the stable code on failure -----------------------
+
+func TestAddServerFromRegistryRef_RegistryNotFound(t *testing.T) {
+	s := &Server{}
+	cfg, rerr, err := s.AddServerFromRegistryRef(context.Background(), "does-not-exist-zzz", "whatever", "", nil, nil)
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	require.NotNil(t, rerr)
+	assert.Equal(t, "registry_not_found", rerr.Code)
+}
+
 // boolPtr is declared in mcp_annotations_test.go (same package).
 
 // --- Pure derivation: stdio install command ----------------------------------

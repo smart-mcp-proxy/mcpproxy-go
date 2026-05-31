@@ -1692,3 +1692,173 @@ func (c *Client) ApproveTools(ctx context.Context, serverName string, toolNames 
 
 	return apiResp.Data.Approved, nil
 }
+
+// ListRegistries returns the MCP server registries known to the daemon
+// (spec 070). Mirrors GetServers: GET /api/v1/registries → data.registries.
+func (c *Client) ListRegistries(ctx context.Context) ([]map[string]interface{}, error) {
+	u := c.baseURL + "/api/v1/registries"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call registries API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Registries []map[string]interface{} `json:"registries"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return apiResp.Data.Registries, nil
+}
+
+// SearchRegistry searches the servers in a registry via the daemon (spec 070).
+// GET /api/v1/registries/{id}/servers?q=&tag=&limit= → data.servers.
+func (c *Client) SearchRegistry(ctx context.Context, registryID, tag, query string, limit int) ([]map[string]interface{}, error) {
+	u := fmt.Sprintf("%s/api/v1/registries/%s/servers", c.baseURL, url.PathEscape(registryID))
+	q := url.Values{}
+	if query != "" {
+		q.Set("q", query)
+	}
+	if tag != "" {
+		q.Set("tag", tag)
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	if encoded := q.Encode(); encoded != "" {
+		u += "?" + encoded
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call registry search API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Servers []map[string]interface{} `json:"servers"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(bodyBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if !apiResp.Success {
+		return nil, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+	return apiResp.Data.Servers, nil
+}
+
+// RegistryAddError is the client-side projection of a failed add-from-registry
+// (spec 070). It carries the stable cross-surface Code and, for
+// missing_required_input, the names of the inputs the user must supply so the
+// CLI can name the exact --env keys.
+type RegistryAddError struct {
+	Code          string
+	Message       string
+	MissingInputs []string
+	RequestID     string
+}
+
+func (e *RegistryAddError) Error() string { return e.Message }
+
+// AddFromRegistry adds an upstream server from a registry reference via the
+// daemon (spec 070 keystone). The daemon re-derives the runnable config from
+// the registry entry — the client only sends optional overrides. On failure it
+// returns a *RegistryAddError carrying the stable code.
+func (c *Client) AddFromRegistry(ctx context.Context, registryID, serverID, name string, env map[string]string, enabled *bool) (*contracts.AddedServerSummary, error) {
+	body := contracts.AddFromRegistryRequest{Name: name, Env: env, Enabled: enabled}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	u := fmt.Sprintf("%s/api/v1/registries/%s/servers/%s/add",
+		c.baseURL, url.PathEscape(registryID), url.PathEscape(serverID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call add-from-registry API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp struct {
+		Success       bool                           `json:"success"`
+		Data          *contracts.AddFromRegistryData `json:"data"`
+		Error         string                         `json:"error"`
+		Code          string                         `json:"code"`
+		MissingInputs []string                       `json:"missing_inputs"`
+		RequestID     string                         `json:"request_id"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response (status %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	if !apiResp.Success || resp.StatusCode != http.StatusOK {
+		msg := apiResp.Error
+		if msg == "" {
+			msg = fmt.Sprintf("API returned status %d", resp.StatusCode)
+		}
+		return nil, &RegistryAddError{
+			Code:          apiResp.Code,
+			Message:       msg,
+			MissingInputs: apiResp.MissingInputs,
+			RequestID:     apiResp.RequestID,
+		}
+	}
+	if apiResp.Data == nil {
+		return nil, fmt.Errorf("daemon returned success with no server data")
+	}
+	return &apiResp.Data.Server, nil
+}

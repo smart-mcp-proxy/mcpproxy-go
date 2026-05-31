@@ -838,6 +838,48 @@ type SearchRegistryServersResponse struct {
 	Tag        string             `json:"tag,omitempty"`
 }
 
+// AddFromRegistryRequest is the optional POST body for adding an upstream from
+// a registry reference (spec 070, POST /registries/{id}/servers/{serverId}/add).
+// The registry id + server id come from the URL path; this body carries only
+// the optional overrides. The client never sends a config blob — the server
+// re-derives the runnable config from the registry entry (CN-001 / security
+// decision D1), so command/args/url and the quarantine flag cannot be smuggled.
+type AddFromRegistryRequest struct {
+	Name    string            `json:"name,omitempty"`    // optional name override
+	Env     map[string]string `json:"env,omitempty"`     // overrides + required-input values
+	Enabled *bool             `json:"enabled,omitempty"` // defaults to true when nil
+}
+
+// AddedServerSummary is the persisted-server view returned on a successful
+// add-from-registry. It is intentionally a slim, stable projection of the
+// re-derived config.ServerConfig (not the full struct) so the cross-surface
+// contract does not leak unrelated config fields.
+type AddedServerSummary struct {
+	Name        string   `json:"name"`
+	Protocol    string   `json:"protocol"`
+	Command     string   `json:"command,omitempty"`
+	Args        []string `json:"args,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	Enabled     bool     `json:"enabled"`
+	Quarantined bool     `json:"quarantined"`
+}
+
+// AddFromRegistryData is the success `data` payload for add-from-registry.
+type AddFromRegistryData struct {
+	Server AddedServerSummary `json:"server"`
+}
+
+// RegistryAddError carries the stable cross-surface failure code for an
+// add-from-registry attempt (spec 070 CN-001). Every surface (REST, MCP, CLI)
+// reports the same Code so a given failure reads identically everywhere.
+// MissingInputs is populated only for code == "missing_required_input" so the
+// caller can name the exact --env keys the user must supply (FR-003).
+type RegistryAddError struct {
+	Code          string   `json:"code"`
+	Message       string   `json:"message"`
+	MissingInputs []string `json:"missing_inputs,omitempty"`
+}
+
 // SuccessResponse is the standard success response wrapper for API endpoints.
 type SuccessResponse struct {
 	Success bool        `json:"success"`

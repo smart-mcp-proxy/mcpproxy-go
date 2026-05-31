@@ -190,6 +190,7 @@ func main() {
 	// Add commands to root
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(searchCmd)
+	rootCmd.AddCommand(GetRegistryCommand())
 	rootCmd.AddCommand(toolsCmd)
 	rootCmd.AddCommand(callCmd)
 	rootCmd.AddCommand(codeCmd)

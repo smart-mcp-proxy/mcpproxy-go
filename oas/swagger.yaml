@@ -845,6 +845,20 @@ components:
       - ActivityTypePolicyDecision
       - ActivityTypeQuarantineChange
       - ActivityTypeServerChange
+    contracts.AddFromRegistryRequest:
+      properties:
+        enabled:
+          description: defaults to true when nil
+          type: boolean
+        env:
+          additionalProperties:
+            type: string
+          description: overrides + required-input values
+          type: object
+        name:
+          description: optional name override
+          type: string
+      type: object
     contracts.ConfigApplyResult:
       properties:
         applied_immediately:
@@ -3319,6 +3333,62 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Search MCP servers in a registry
+      tags:
+      - registries
+  /api/v1/registries/{id}/servers/{serverId}/add:
+    post:
+      description: Resolves a registry server reference server-side, re-derives a
+        validated config, and persists it quarantined (spec 070 keystone). The client
+        never sends a config blob — command/args/url and the quarantine flag are derived
+        from the registry entry, not the request.
+      parameters:
+      - description: Registry ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: Server ID within the registry
+        in: path
+        name: serverId
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.AddFromRegistryRequest'
+        description: Optional overrides (name, env, enabled)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Server added (quarantined)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: no_install_info | missing_required_input | duplicate_name
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_not_found | server_not_found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Add an upstream server from a registry reference
       tags:
       - registries
   /api/v1/routing:

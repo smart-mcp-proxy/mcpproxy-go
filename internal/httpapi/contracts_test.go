@@ -308,6 +308,9 @@ func (m *MockServerController) ListRegistries() ([]interface{}, error) {
 func (m *MockServerController) SearchRegistryServers(_, _, _ string, _ int) ([]interface{}, error) {
 	return []interface{}{}, nil
 }
+func (m *MockServerController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 
 // Version and updates
 func (m *MockServerController) GetVersionInfo() *updatecheck.VersionInfo {

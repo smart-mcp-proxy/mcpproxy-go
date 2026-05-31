@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
 
@@ -91,6 +92,9 @@ func (m *mockController) GetTokenSavings() (interface{}, error) {
 func (m *mockController) ListRegistries() ([]interface{}, error) { return nil, nil }
 func (m *mockController) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
 	return nil, nil
+}
+func (m *mockController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
 }
 func (m *mockController) GetManagementService() interface{}                       { return nil }
 func (m *mockController) GetRuntime() interface{}                                 { return nil }
