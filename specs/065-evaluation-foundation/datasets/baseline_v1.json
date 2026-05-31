@@ -1,0 +1,26 @@
+{
+  "__doc__": "Spec 065 D1+D2 regression baseline. Retrieval metrics are TOP-LEVEL because mcp-eval RetrievalScorer reads baseline[\"recall_at\"][\"5\"] etc. directly (quickstart \u00a74: --baseline datasets/baseline_v1.json). The CI gate (FR-009/MCP-742) fails if a fresh Recall@5 < baseline.recall_at[5] - tolerance.recall_at_5. The \"security\" section is appended by the D2 issue (CN-004); it is intentionally empty here.",
+  "corpus_version": "corpus_v1",
+  "golden_version": "retrieval_golden_v1",
+  "generated_from": {
+    "harness": "mcp-eval retrieval @ cb37f84",
+    "source_config": "datasets/snapshot-servers.config.json",
+    "mcpproxy": "BM25 index over corpus_v1 (45 tools, 7 no-auth reference servers)",
+    "runs": 1,
+    "note": "Reference = current BM25 behavior, a regression anchor (NOT a quality target). Refresh requires re-freezing corpus + re-review."
+  },
+  "recall_at": {
+    "1": 0.4184397163120567,
+    "3": 0.5602836879432624,
+    "5": 0.6808510638297872,
+    "10": 0.7907801418439717
+  },
+  "mrr": 0.5684903748733535,
+  "ndcg_at_10": 0.6094872517781414,
+  "map": 0.5435916919959473,
+  "tolerance": {
+    "recall_at_5": 0.05
+  },
+  "runs_averaged": 1,
+  "security": {}
+}

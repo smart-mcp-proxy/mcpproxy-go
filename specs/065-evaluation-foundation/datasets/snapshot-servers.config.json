@@ -1,0 +1,335 @@
+{
+  "listen": "127.0.0.1:8092",
+  "enable_socket": false,
+  "data_dir": "/tmp/mcp740/data",
+  "debug_search": false,
+  "mcpServers": [
+    {
+      "name": "filesystem",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.376369+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    },
+    {
+      "name": "memory",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.376369+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    },
+    {
+      "name": "sequential-thinking",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.376369+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    },
+    {
+      "name": "git",
+      "protocol": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-git"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.37637+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    },
+    {
+      "name": "fetch",
+      "protocol": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-fetch"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.37637+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    },
+    {
+      "name": "time",
+      "protocol": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-time"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.37637+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    },
+    {
+      "name": "sqlite",
+      "protocol": "stdio",
+      "command": "uvx",
+      "args": [
+        "mcp-server-sqlite",
+        "--db-path",
+        "/tmp/mcpproxy-corpus-snapshot/snapshot.db"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-31T17:02:24.37637+03:00",
+      "updated": "0001-01-01T00:00:00Z"
+    }
+  ],
+  "tools_limit": 15,
+  "tool_response_limit": 20000,
+  "call_tool_timeout": "2m0s",
+  "max_result_size_chars": 500000,
+  "environment": {
+    "inherit_system_safe": true,
+    "allowed_system_vars": [
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "TEMP",
+      "TMP",
+      "SHELL",
+      "TERM",
+      "LANG",
+      "USER",
+      "USERNAME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "XDG_CACHE_HOME",
+      "XDG_RUNTIME_DIR",
+      "LC_ALL",
+      "LC_CTYPE",
+      "LC_NUMERIC",
+      "LC_TIME",
+      "LC_COLLATE",
+      "LC_MONETARY",
+      "LC_MESSAGES",
+      "LC_PAPER",
+      "LC_NAME",
+      "LC_ADDRESS",
+      "LC_TELEPHONE",
+      "LC_MEASUREMENT",
+      "LC_IDENTIFICATION"
+    ],
+    "custom_vars": {},
+    "enhance_path": false
+  },
+  "logging": {
+    "level": "info",
+    "enable_file": true,
+    "enable_console": true,
+    "filename": "main.log",
+    "max_size": 10,
+    "max_backups": 5,
+    "max_age": 30,
+    "compress": true,
+    "json_format": false
+  },
+  "api_key": "eval-corpus-snapshot",
+  "require_mcp_auth": false,
+  "read_only_mode": false,
+  "disable_management": false,
+  "allow_server_add": true,
+  "allow_server_remove": true,
+  "enable_prompts": true,
+  "check_server_repo": true,
+  "docker_isolation": {
+    "enabled": false,
+    "enable_cache_volume": true,
+    "default_images": {
+      "bash": "alpine:3.18",
+      "binary": "alpine:3.18",
+      "cargo": "rust:1.75-slim",
+      "composer": "php:8.2-cli-alpine",
+      "gem": "ruby:3.2-alpine",
+      "go": "golang:1.21-alpine",
+      "node": "node:22",
+      "npm": "node:22",
+      "npx": "node:22",
+      "php": "php:8.2-cli-alpine",
+      "pip": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "pipx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "python": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "python3": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "ruby": "ruby:3.2-alpine",
+      "rustc": "rust:1.75-slim",
+      "sh": "alpine:3.18",
+      "uvx": "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+      "yarn": "node:22"
+    },
+    "registry": "docker.io",
+    "network_mode": "bridge",
+    "memory_limit": "512m",
+    "cpu_limit": "1.0",
+    "timeout": "30s",
+    "log_max_size": "100m",
+    "log_max_files": "3"
+  },
+  "registries": [
+    {
+      "id": "pulse",
+      "name": "Pulse MCP",
+      "description": "Browse and discover MCP use-cases, servers, clients, and news",
+      "url": "https://www.pulsemcp.com/",
+      "servers_url": "https://api.pulsemcp.com/v0beta/servers",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/pulse"
+    },
+    {
+      "id": "docker-mcp-catalog",
+      "name": "Docker MCP Catalog",
+      "description": "A collection of secure, high-quality MCP servers as docker images",
+      "url": "https://hub.docker.com/catalogs/mcp",
+      "servers_url": "https://hub.docker.com/v2/repositories/mcp/",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/docker"
+    },
+    {
+      "id": "fleur",
+      "name": "Fleur",
+      "description": "Fleur is the app store for Claude",
+      "url": "https://www.fleurmcp.com/",
+      "servers_url": "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json",
+      "tags": [
+        "verified"
+      ],
+      "protocol": "custom/fleur"
+    },
+    {
+      "id": "azure-mcp-demo",
+      "name": "Azure MCP Registry Demo",
+      "description": "A reference implementation of MCP registry using Azure API Center",
+      "url": "https://demo.registry.azure-mcp.net/",
+      "servers_url": "https://demo.registry.azure-mcp.net/v0/servers",
+      "tags": [
+        "verified",
+        "demo",
+        "azure",
+        "reference"
+      ],
+      "protocol": "mcp/v0"
+    },
+    {
+      "id": "remote-mcp-servers",
+      "name": "Remote MCP Servers",
+      "description": "Community-maintained list of remote Model Context Protocol servers",
+      "url": "https://remote-mcp-servers.com/",
+      "servers_url": "https://remote-mcp-servers.com/api/servers",
+      "tags": [
+        "verified",
+        "community",
+        "remote"
+      ],
+      "protocol": "custom/remote"
+    }
+  ],
+  "features": {
+    "enable_runtime": true,
+    "enable_event_bus": true,
+    "enable_sse": true,
+    "enable_observability": true,
+    "enable_health_checks": true,
+    "enable_metrics": true,
+    "enable_tracing": false,
+    "enable_oauth": true,
+    "enable_quarantine": true,
+    "enable_docker_isolation": false,
+    "enable_search": true,
+    "enable_caching": true,
+    "enable_async_storage": true,
+    "enable_web_ui": true,
+    "enable_tray": true,
+    "enable_debug_logging": false,
+    "enable_contract_tests": false
+  },
+  "tls": {
+    "enabled": false,
+    "require_client_cert": false,
+    "hsts": true
+  },
+  "tokenizer": {
+    "enabled": true,
+    "default_model": "gpt-4",
+    "encoding": "cl100k_base"
+  },
+  "enable_code_execution": false,
+  "code_execution_timeout_ms": 120000,
+  "code_execution_pool_size": 10,
+  "activity_retention_days": 90,
+  "activity_max_records": 100000,
+  "activity_max_response_size": 65536,
+  "activity_cleanup_interval_min": 60,
+  "intent_declaration": {
+    "strict_server_validation": true
+  },
+  "sensitive_data_detection": {
+    "enabled": true,
+    "scan_requests": true,
+    "scan_responses": true,
+    "max_payload_size_kb": 1024,
+    "entropy_threshold": 4.5,
+    "categories": {
+      "api_token": true,
+      "auth_token": true,
+      "cloud_credentials": true,
+      "credit_card": true,
+      "database_credential": true,
+      "high_entropy": true,
+      "private_key": true,
+      "sensitive_file": true
+    }
+  },
+  "output_validation": {
+    "mode": "warn",
+    "max_bytes": 5242880,
+    "max_depth": 64,
+    "missing_structured_content": "allow"
+  },
+  "output_sanitisation": {
+    "response_action": "spotlight",
+    "strip_classes": [
+      "ansi",
+      "c0c1",
+      "bidi",
+      "zero_width"
+    ],
+    "max_redactions": 100
+  },
+  "telemetry": {
+    "enabled": false,
+    "last_startup_outcome": "success",
+    "notice_shown": true
+  },
+  "routing_mode": "retrieve_tools",
+  "quarantine_enabled": false
+}
