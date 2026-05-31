@@ -1,6 +1,6 @@
 {
   "generated_from": {
-    "note": "Spec 065 D1 frozen corpus: 7 no-auth reference MCP servers (filesystem, git, memory, sqlite, fetch, time, sequential-thinking) via corpus_v1.source.json (MCP-740/A2).",
+    "note": "Spec 065 D1 frozen corpus: 7 no-auth reference MCP servers (filesystem, git, memory, sqlite, fetch, time, sequential-thinking) via snapshot-servers.config.json (MCP-740/A2).",
     "source": "GET /api/v1/tools"
   },
   "tools": [

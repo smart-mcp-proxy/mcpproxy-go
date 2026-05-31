@@ -4,7 +4,7 @@
   "golden_version": "retrieval_golden_v1",
   "generated_from": {
     "harness": "mcp-eval retrieval @ cb37f84",
-    "source_config": "datasets/corpus_v1.source.json",
+    "source_config": "datasets/snapshot-servers.config.json",
     "mcpproxy": "BM25 index over corpus_v1 (45 tools, 7 no-auth reference servers)",
     "runs": 1,
     "note": "Reference = current BM25 behavior, a regression anchor (NOT a quality target). Refresh requires re-freezing corpus + re-review."
