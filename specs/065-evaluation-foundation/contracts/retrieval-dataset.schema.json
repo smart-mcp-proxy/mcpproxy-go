@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/specs/065/retrieval-dataset.schema.json",
+  "title": "D1 tool-retrieval golden set",
+  "type": "object",
+  "required": ["corpus_version", "queries"],
+  "properties": {
+    "corpus_version": { "type": "string", "description": "FK to the frozen corpus snapshot, e.g. 'corpus_v1'." },
+    "queries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "query", "labels"],
+        "properties": {
+          "id": { "type": "string" },
+          "query": { "type": "string", "description": "Paraphrased user intent. MUST NOT contain the relevant tool's name verbatim (R-C)." },
+          "labels": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["tool_id", "relevance"],
+              "properties": {
+                "tool_id": { "type": "string", "pattern": "^[^:]+:[^:]+$", "description": "<server>:<tool>; must exist in the corpus." },
+                "relevance": { "type": "integer", "enum": [0, 1, 2], "description": "2=primary, 1=acceptable, 0=irrelevant (for nDCG)." }
+              }
+            }
+          },
+          "notes": { "type": "string", "description": "e.g. 'hard-negative: near-dup of github:create_issue'." }
+        }
+      }
+    }
+  }
+}
