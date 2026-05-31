@@ -17,6 +17,14 @@
 - Q: What is the first proof? → A: A dry-run synthetic goal — a trivial, reversible repository change ("add a 'Running the test suite' note to CONTRIBUTING.md") that traverses every stage and all three gates to a real PR.
 - Q: What was wrong with the prior cockpit (045)? → A: It had a single, late, binary approval gate on a finished synthesis. The human approved a pre-framed conclusion instead of steering the framing. This feature inverts the default from "proceed" to "checkpoint at every design-decision boundary," with structured redirection.
 
+### Session 2026-05-31 (Session 2 — gate model: human-merge → dual-AI auto-merge)
+
+- Q: Paperclip never merges PRs — is that broken? → A: No, it was by design (FR-005 = human is sole merger). But the human merge-click became the throughput bottleneck (a queue of unmerged PRs). Decision: **replace the mandatory human-merge gate with dual-AI-review consensus auto-merge.**
+- Q: Where does the human fit now? → A: **Optional third reviewer with veto.** Two AI reviewers accepting + green checks → auto-merge; the human can block/hold any PR at any time. (Amends US3 + FR-005.)
+- Q: Who are the two reviewers? → A: **Gemini Critic + a Codex reviewer**, on different model families (model diversity preserved); never the implementer. Gemini pinned to `gemini-2.5-pro` (best available; `auto` was erroring on the empty-prompt adapter bug). A `codex-local` Paperclip adapter exists.
+- Q: Blocker? → A: **A separate bot GitHub identity is required** — GitHub forbids a PR author from approving their own PR, and the agents currently act as the human's `gh` identity (Dumbris). Until a bot identity (fine-grained PAT or GitHub App) exists, AI "approvals" cannot gate a merge. This is the prerequisite for true auto-merge; flagged in Assumptions/Dependencies. Interim fallback: 2-AI-review as a required status check with the human still clicking merge.
+- Q: Scope? → A: Amend this spec (064) + the agent instructions (draft-PR + reviewer protocol) + GitHub branch protection (require checks + 2 approvals + the review identities).
+
 ### Session 2026-05-31 (spec review)
 
 - Q: If the different-model-family reviewer is down or quota-exhausted, should the review gate block forever? → A: No — add a user-initiated, audited waiver (FR-011a). A board decision, not an agent self-bypass.
@@ -55,18 +63,22 @@ For each spec the fleet produces, the responsible engineer agent must get the us
 
 ---
 
-### User Story 3 — Nothing lands on the main branch without the user (Priority: P1)
+### User Story 3 — Code lands via dual-AI review consensus, with human veto (Priority: P1)
 
-When an engineer agent finishes implementation, it opens a pull request but **never merges it**. The work item cannot be marked complete until the user approves, and the repository's branch protection prevents any agent from merging. The user is the only actor who merges.
+> **Amended 2026-05-31 (Session 2 — see Clarifications).** Original model: agents open PRs, the human is the sole merger. New model: an engineer opens a **draft** PR; once the project's tests pass **and two independent AI reviewers on different model families both accept**, the PR auto-merges. The human is an **optional third reviewer with veto** — they may block or hold any PR at any time, but their merge click is no longer required on the happy path. This trades the mandatory human-merge gate for AI-consensus throughput while keeping a human override.
 
-**Why this priority**: This is the one hard, non-bypassable safety gate. It guarantees the user retains final control over what enters the codebase regardless of any agent misbehavior, and it is low-effort for the user (a single review-and-merge).
+When an engineer agent finishes implementation, it opens a **draft** PR (not directly mergeable). Two reviewer agents on **different model families** (a Gemini Critic + a Codex reviewer) each review; the implementer never reviews its own work. When tests pass **and both reviewers accept**, the PR is marked ready and **auto-merges**. The human may, at any point, request changes or apply a hold label to freeze auto-merge — that veto is honored over the AI consensus.
 
-**Independent Test**: Drive a work item to completion; confirm a PR is opened, the work item stays blocked (not "done"), and no merge occurs by any agent; confirm the user merging on the platform is what finally resolves the item.
+**Why this priority**: This is the throughput unlock — it removes the human merge-click bottleneck (the queue of unmerged PRs) while preserving safety through model-diverse review consensus plus a standing human veto. Model diversity (two families) is the safeguard that one model's blind spot does not auto-land.
+
+**Independent Test**: Drive a work item to completion; confirm a *draft* PR opens, that it does NOT merge until both AI reviewers accept and checks are green, that it then auto-merges, and that a human request-changes/hold at any point freezes the merge until cleared.
 
 **Acceptance Scenarios**:
 
-1. **Given** completed implementation, **When** the engineer finishes, **Then** a PR exists and the work item remains in a pre-completion blocked state.
-2. **Given** an open PR from an agent, **When** any agent attempts to merge it, **Then** the merge is refused; **When** the user merges it, **Then** the item is allowed to complete.
+1. **Given** completed implementation, **When** the engineer finishes, **Then** a **draft** PR exists and does not auto-merge while it is draft or while checks are pending.
+2. **Given** a draft PR with green checks, **When** both AI reviewers (different model families) accept, **Then** the PR auto-merges without a human merge click.
+3. **Given** any open PR, **When** the human requests changes or applies the hold label, **Then** auto-merge is frozen until the human clears it — the human veto overrides AI consensus.
+4. **Given** only one AI reviewer has accepted (or a reviewer is erroring/unavailable), **When** checks are green, **Then** the PR does NOT auto-merge (two distinct accepts are required; the human may stand in as the second reviewer if a reviewer is down).
 
 ---
 
@@ -127,7 +139,8 @@ The user can freeze or cancel any goal or subtree at any moment, with a preview 
 - **FR-002**: At the plan-of-attack gate, the lead agent MUST present its proposed breakdown and MUST NOT create downstream tasks until the user accepts.
 - **FR-003**: Each gate MUST support **structured redirection**, not only accept/reject: at minimum, editing the decomposition (add/drop/reorder/split) and rejecting-with-reason at the plan gate, and request-changes-with-comment at the design and merge gates.
 - **FR-004**: A spec at the design gate MUST block (no implementation begins) until approved; "request changes" MUST return it to the responsible agent with the comment attached.
-- **FR-005**: Agents MUST NOT merge pull requests. Merging MUST be performed only by the user, enforced by repository branch protection (not by agent convention alone).
+- **FR-005** *(amended 2026-05-31, Session 2)*: Code MUST land via **dual-AI-review consensus auto-merge**, not a mandatory human merge. Specifically: (a) engineers open **draft** PRs; (b) a PR MAY become merge-eligible only when the project's required checks pass AND **two independent AI reviewers on different model families both accept**; (c) the implementer agent MUST NOT be one of the two reviewers (no self-review); (d) merge-eligible PRs **auto-merge**; (e) the human is an **optional reviewer with override** — a human request-changes or hold label MUST freeze auto-merge until cleared; (f) if a reviewer is unavailable, the PR MUST NOT auto-merge on a single accept (the human may serve as the second reviewer). The implementer still MUST NOT merge its own PR, alter branch protection, or push to `main` directly.
+- **FR-005a**: The two AI reviewers MUST run on different model families to preserve model-diversity coverage (current roster: a **Gemini** Critic + a **Codex** reviewer). A reviewer's `accept` MUST come from an identity distinct from the PR author so the platform's "no self-approval" rule is satisfiable (requires a bot identity for the agents — see Assumptions).
 - **FR-006**: At each gate, the system MUST surface the responsible agent's rationale and at least one cited source on the approval surface itself.
 - **FR-007**: The system MUST provide a single consolidated view of all items currently awaiting the user, with an accurate count.
 - **FR-008**: Between gates, the fleet MUST operate without human input, surfacing only on a gate, a genuine block, or completion.
@@ -196,7 +209,9 @@ The user can freeze or cancel any goal or subtree at any moment, with a preview 
 
 - **Agent skips the plan-of-attack convention** (Phase A enforces it by instruction, not by the platform core): the subsequent per-spec design gate and the adversarial reviewer catch unsanctioned work; Phase C makes the gate enforced by the platform.
 - **Audit/wiki bus down**: the pipeline proceeds; audit writes are deferred or skipped (per CN-003 / SC-008).
-- **Agent attempts a self-merge**: refused by branch protection (FR-005).
+- **Agent attempts a self-merge / self-review**: refused — the implementer is excluded from the two reviewers (FR-005c) and cannot approve its own PR (bot identity ≠ author); branch protection enforces the required checks + two distinct approvals (FR-005 amended).
+- **A reviewer (e.g. Gemini Critic) is down/erroring**: the PR does NOT auto-merge on a single accept; the human may serve as the second reviewer (FR-005f). (This is the live state today — the Gemini adapter empty-prompt bug — so the human-as-second-reviewer fallback matters.)
+- **No bot identity provisioned yet**: auto-merge cannot function (GitHub forbids self-approval); the system falls back to 2-AI-review-as-required-check with the human performing the merge click until a bot identity exists.
 - **Runaway or looping agent**: bounded by conservative budgets (FR-015) and the user's freeze/cancel control (FR-012).
 - **A gate is left pending indefinitely**: the work item stays safely blocked; no progress is made and no timeout auto-approves.
 - **Reviewer (different model family) is unavailable**: the work item surfaces as blocked rather than proceeding unreviewed; the user may issue an audited waiver to unblock that specific item (FR-011a). No agent may self-bypass review.
