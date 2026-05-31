@@ -22,7 +22,9 @@ import { test, expect, Page } from '@playwright/test';
 
 const MCPPROXY_URL = process.env.MCPPROXY_URL;
 const API_KEY = process.env.MCPPROXY_API_KEY || 'uitest';
-const REGISTRY_ID = process.env.REGISTRY_ID || '';
+// docker-mcp-catalog reliably exposes addable stdio servers (docker run …), so
+// it is the default target for the no-input happy path. Override per env.
+const REGISTRY_ID = process.env.REGISTRY_ID || 'docker-mcp-catalog';
 const SEARCH_QUERY = process.env.SEARCH_QUERY || '';
 
 if (!MCPPROXY_URL) {
@@ -38,21 +40,22 @@ const api = async (request: any, method: string, path: string) => {
 };
 
 async function openRepositories(page: Page) {
-  await page.goto(`${MCPPROXY_URL}/ui/?apikey=${encodeURIComponent(API_KEY)}#/repositories`);
+  // Web UI is history-mode under base /ui/ (not hash routing).
+  await page.goto(`${MCPPROXY_URL}/ui/repositories?apikey=${encodeURIComponent(API_KEY)}`);
   await page.waitForLoadState('domcontentloaded'); // never networkidle — SSE keeps the channel open
-  await expect(page.locator('[data-test="registry-select"]')).toBeVisible();
+  await expect(page.locator('[data-test="registry-select"]')).toBeVisible({ timeout: 15000 });
 }
 
-async function selectRegistryAndSearch(page: Page) {
+async function selectRegistryAndSearch(page: Page, registryId: string, query: string) {
   const select = page.locator('[data-test="registry-select"]');
-  if (REGISTRY_ID) {
-    await select.selectOption(REGISTRY_ID);
+  if (registryId) {
+    await select.selectOption(registryId);
   } else {
     // Pick the first non-placeholder option.
     const value = await select.locator('option:not([disabled])').first().getAttribute('value');
     await select.selectOption(value!);
   }
-  await page.locator('[data-test="registry-search-input"]').fill(SEARCH_QUERY);
+  await page.locator('[data-test="registry-search-input"]').fill(query);
   await page.locator('[data-test="registry-search-button"]').click();
   // Wait for at least one result card.
   await expect(page.locator('[data-test^="registry-server-"]').first()).toBeVisible({ timeout: 15000 });
@@ -61,7 +64,7 @@ async function selectRegistryAndSearch(page: Page) {
 test.describe('Registry one-flow add (Spec 070)', () => {
   test('search → Add (no required input) → server appears quarantined', async ({ page, request }) => {
     await openRepositories(page);
-    await selectRegistryAndSearch(page);
+    await selectRegistryAndSearch(page, REGISTRY_ID, SEARCH_QUERY);
 
     // Add the first server without required inputs (no warning badge).
     const card = page
@@ -89,9 +92,13 @@ test.describe('Registry one-flow add (Spec 070)', () => {
   test('search → Add server that requires input → prompt blocks until provided → quarantined', async ({ page, request }) => {
     const requiredServerId = process.env.REQUIRED_SERVER_ID;
     test.skip(!requiredServerId, 'set REQUIRED_SERVER_ID to a registry server that declares a required input');
+    // The required-input server may live in a different registry than the
+    // no-input default; let it be targeted independently (defaults: fleur/stripe).
+    const requiredRegistry = process.env.REQUIRED_REGISTRY_ID || 'fleur';
+    const requiredQuery = process.env.REQUIRED_SEARCH_QUERY || requiredServerId!;
 
     await openRepositories(page);
-    await selectRegistryAndSearch(page);
+    await selectRegistryAndSearch(page, requiredRegistry, requiredQuery);
 
     const card = page.locator(`[data-test="registry-server-${requiredServerId}"]`);
     await expect(card).toBeVisible();
