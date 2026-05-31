@@ -29,4 +29,19 @@ type ServerEntry struct {
 
 	// Repository detection information
 	RepositoryInfo *experiments.GuessResult `json:"repository_info,omitempty"` // Detected npm/pypi package info
+
+	// RequiredInputs are env vars / keys the user must supply before the server
+	// can run (FR-003 plumbing). Best-effort: populated either from explicit
+	// registry payload fields or via a heuristic scan of the install command for
+	// ${VAR} / $VAR placeholders (see DetectRequiredInputs). Empty for most
+	// servers in this spec — no rich per-registry schema yet (decision O1).
+	RequiredInputs []RequiredInput `json:"required_inputs,omitempty"`
+}
+
+// RequiredInput declares a single env var / key a server needs before it will
+// work. Surfaces use this to prompt the user (FR-003).
+type RequiredInput struct {
+	Name        string `json:"name"`                  // Env var name (e.g. GITHUB_TOKEN)
+	Description string `json:"description,omitempty"` // Optional human hint
+	Secret      bool   `json:"secret,omitempty"`      // Mask in UI/logs when true
 }
