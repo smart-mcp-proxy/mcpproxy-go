@@ -14,7 +14,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // newAddFromRegistryTestServer builds an MCPProxyServer whose mainServer is a
@@ -32,10 +31,10 @@ func newAddFromRegistryTestServer(t *testing.T) *MCPProxyServer {
 	cfg.DataDir = t.TempDir()
 	cfg.Listen = "127.0.0.1:0"
 
-	rt, err := runtime.NewRuntime(cfg, logger, "test")
+	mainSrv, err := NewServer(cfg, logger)
 	require.NoError(t, err)
 
-	proxy.mainServer = NewServer(rt, logger)
+	proxy.mainServer = mainSrv
 	return proxy
 }
 
