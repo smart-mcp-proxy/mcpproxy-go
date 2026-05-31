@@ -1,0 +1,279 @@
+{
+  "generated_from": {
+    "note": "Spec 065 D1 frozen corpus: 7 no-auth reference MCP servers (filesystem, git, memory, sqlite, fetch, time, sequential-thinking) via corpus_v1.source.json (MCP-740/A2).",
+    "source": "GET /api/v1/tools"
+  },
+  "tools": [
+    {
+      "description": "Fetches a URL from the internet and optionally extracts its contents as markdown.\n\nAlthough originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.",
+      "server": "fetch",
+      "tool": "fetch",
+      "tool_id": "fetch:fetch"
+    },
+    {
+      "description": "Create a new directory or ensure a directory exists. Can create multiple nested directories in one operation. If the directory already exists, this operation will succeed silently. Perfect for setting up directory structures for projects or ensuring required paths exist. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "create_directory",
+      "tool_id": "filesystem:create_directory"
+    },
+    {
+      "description": "Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name', 'type' (file/directory), and 'children' for directories. Files have no children array, while directories always have a children array (which may be empty). The output is formatted with 2-space indentation for readability. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "directory_tree",
+      "tool_id": "filesystem:directory_tree"
+    },
+    {
+      "description": "Make line-based edits to a text file. Each edit replaces exact line sequences with new content. Returns a git-style diff showing the changes made. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "edit_file",
+      "tool_id": "filesystem:edit_file"
+    },
+    {
+      "description": "Retrieve detailed metadata about a file or directory. Returns comprehensive information including size, creation time, last modified time, permissions, and type. This tool is perfect for understanding file characteristics without reading the actual content. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "get_file_info",
+      "tool_id": "filesystem:get_file_info"
+    },
+    {
+      "description": "Returns the list of directories that this server is allowed to access. Subdirectories within these allowed directories are also accessible. Use this to understand which directories and their nested paths are available before trying to access files.",
+      "server": "filesystem",
+      "tool": "list_allowed_directories",
+      "tool_id": "filesystem:list_allowed_directories"
+    },
+    {
+      "description": "Get a detailed listing of all files and directories in a specified path. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes. This tool is essential for understanding directory structure and finding specific files within a directory. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "list_directory",
+      "tool_id": "filesystem:list_directory"
+    },
+    {
+      "description": "Get a detailed listing of all files and directories in a specified path, including sizes. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes. This tool is useful for understanding directory structure and finding specific files within a directory. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "list_directory_with_sizes",
+      "tool_id": "filesystem:list_directory_with_sizes"
+    },
+    {
+      "description": "Move or rename files and directories. Can move files between directories and rename them in a single operation. If the destination exists, the operation will fail. Works across different directories and can be used for simple renaming within the same directory. Both source and destination must be within allowed directories.",
+      "server": "filesystem",
+      "tool": "move_file",
+      "tool_id": "filesystem:move_file"
+    },
+    {
+      "description": "Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.",
+      "server": "filesystem",
+      "tool": "read_file",
+      "tool_id": "filesystem:read_file"
+    },
+    {
+      "description": "Read an image or audio file. Returns the base64 encoded data and MIME type. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "read_media_file",
+      "tool_id": "filesystem:read_media_file"
+    },
+    {
+      "description": "Read the contents of multiple files simultaneously. This is more efficient than reading files one by one when you need to analyze or compare multiple files. Each file's content is returned with its path as a reference. Failed reads for individual files won't stop the entire operation. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "read_multiple_files",
+      "tool_id": "filesystem:read_multiple_files"
+    },
+    {
+      "description": "Read the complete contents of a file from the file system as text. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file. Use the 'head' parameter to read only the first N lines of a file, or the 'tail' parameter to read only the last N lines of a file. Operates on the file as text regardless of extension. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "read_text_file",
+      "tool_id": "filesystem:read_text_file"
+    },
+    {
+      "description": "Recursively search for files and directories matching a pattern. The patterns should be glob-style patterns that match paths relative to the working directory. Use pattern like '*.ext' to match files in current directory, and '**/*.ext' to match files in all subdirectories. Returns full paths to all matching items. Great for finding files when you don't know their exact location. Only searches within allowed directories.",
+      "server": "filesystem",
+      "tool": "search_files",
+      "tool_id": "filesystem:search_files"
+    },
+    {
+      "description": "Create a new file or completely overwrite an existing file with new content. Use with caution as it will overwrite existing files without warning. Handles text content with proper encoding. Only works within allowed directories.",
+      "server": "filesystem",
+      "tool": "write_file",
+      "tool_id": "filesystem:write_file"
+    },
+    {
+      "description": "Adds file contents to the staging area",
+      "server": "git",
+      "tool": "git_add",
+      "tool_id": "git:git_add"
+    },
+    {
+      "description": "List Git branches",
+      "server": "git",
+      "tool": "git_branch",
+      "tool_id": "git:git_branch"
+    },
+    {
+      "description": "Switches branches",
+      "server": "git",
+      "tool": "git_checkout",
+      "tool_id": "git:git_checkout"
+    },
+    {
+      "description": "Records changes to the repository",
+      "server": "git",
+      "tool": "git_commit",
+      "tool_id": "git:git_commit"
+    },
+    {
+      "description": "Creates a new branch from an optional base branch",
+      "server": "git",
+      "tool": "git_create_branch",
+      "tool_id": "git:git_create_branch"
+    },
+    {
+      "description": "Shows differences between branches or commits",
+      "server": "git",
+      "tool": "git_diff",
+      "tool_id": "git:git_diff"
+    },
+    {
+      "description": "Shows changes that are staged for commit",
+      "server": "git",
+      "tool": "git_diff_staged",
+      "tool_id": "git:git_diff_staged"
+    },
+    {
+      "description": "Shows changes in the working directory that are not yet staged",
+      "server": "git",
+      "tool": "git_diff_unstaged",
+      "tool_id": "git:git_diff_unstaged"
+    },
+    {
+      "description": "Shows the commit logs",
+      "server": "git",
+      "tool": "git_log",
+      "tool_id": "git:git_log"
+    },
+    {
+      "description": "Unstages all staged changes",
+      "server": "git",
+      "tool": "git_reset",
+      "tool_id": "git:git_reset"
+    },
+    {
+      "description": "Shows the contents of a commit",
+      "server": "git",
+      "tool": "git_show",
+      "tool_id": "git:git_show"
+    },
+    {
+      "description": "Shows the working tree status",
+      "server": "git",
+      "tool": "git_status",
+      "tool_id": "git:git_status"
+    },
+    {
+      "description": "Add new observations to existing entities in the knowledge graph",
+      "server": "memory",
+      "tool": "add_observations",
+      "tool_id": "memory:add_observations"
+    },
+    {
+      "description": "Create multiple new entities in the knowledge graph",
+      "server": "memory",
+      "tool": "create_entities",
+      "tool_id": "memory:create_entities"
+    },
+    {
+      "description": "Create multiple new relations between entities in the knowledge graph. Relations should be in active voice",
+      "server": "memory",
+      "tool": "create_relations",
+      "tool_id": "memory:create_relations"
+    },
+    {
+      "description": "Delete multiple entities and their associated relations from the knowledge graph",
+      "server": "memory",
+      "tool": "delete_entities",
+      "tool_id": "memory:delete_entities"
+    },
+    {
+      "description": "Delete specific observations from entities in the knowledge graph",
+      "server": "memory",
+      "tool": "delete_observations",
+      "tool_id": "memory:delete_observations"
+    },
+    {
+      "description": "Delete multiple relations from the knowledge graph",
+      "server": "memory",
+      "tool": "delete_relations",
+      "tool_id": "memory:delete_relations"
+    },
+    {
+      "description": "Open specific nodes in the knowledge graph by their names",
+      "server": "memory",
+      "tool": "open_nodes",
+      "tool_id": "memory:open_nodes"
+    },
+    {
+      "description": "Read the entire knowledge graph",
+      "server": "memory",
+      "tool": "read_graph",
+      "tool_id": "memory:read_graph"
+    },
+    {
+      "description": "Search for nodes in the knowledge graph based on a query",
+      "server": "memory",
+      "tool": "search_nodes",
+      "tool_id": "memory:search_nodes"
+    },
+    {
+      "description": "A detailed tool for dynamic and reflective problem-solving through thoughts.\nThis tool helps analyze problems through a flexible thinking process that can adapt and evolve.\nEach thought can build on, question, or revise previous insights as understanding deepens.\n\nWhen to use this tool:\n- Breaking down complex problems into steps\n- Planning and design with room for revision\n- Analysis that might need course correction\n- Problems where the full scope might not be clear initially\n- Problems that require a multi-step solution\n- Tasks that need to maintain context over multiple steps\n- Situations where irrelevant information needs to be filtered out\n\nKey features:\n- You can adjust total_thoughts up or down as you progress\n- You can question or revise previous thoughts\n- You can add more thoughts even after reaching what seemed like the end\n- You can express uncertainty and explore alternative approaches\n- Not every thought needs to build linearly - you can branch or backtrack\n- Generates a solution hypothesis\n- Verifies the hypothesis based on the Chain of Thought steps\n- Repeats the process until satisfied\n- Provides a correct answer\n\nParameters explained:\n- thought: Your current thinking step, which can include:\n  * Regular analytical steps\n  * Revisions of previous thoughts\n  * Questions about previous decisions\n  * Realizations about needing more analysis\n  * Changes in approach\n  * Hypothesis generation\n  * Hypothesis verification\n- nextThoughtNeeded: True if you need more thinking, even if at what seemed like the end\n- thoughtNumber: Current number in sequence (can go beyond initial total if needed)\n- totalThoughts: Current estimate of thoughts needed (can be adjusted up/down)\n- isRevision: A boolean indicating if this thought revises previous thinking\n- revisesThought: If is_revision is true, which thought number is being reconsidered\n- branchFromThought: If branching, which thought number is the branching point\n- branchId: Identifier for the current branch (if any)\n- needsMoreThoughts: If reaching end but realizing more thoughts needed\n\nYou should:\n1. Start with an initial estimate of needed thoughts, but be ready to adjust\n2. Feel free to question or revise previous thoughts\n3. Don't hesitate to add more thoughts if needed, even at the \"end\"\n4. Express uncertainty when present\n5. Mark thoughts that revise previous thinking or branch into new paths\n6. Ignore information that is irrelevant to the current step\n7. Generate a solution hypothesis when appropriate\n8. Verify the hypothesis based on the Chain of Thought steps\n9. Repeat the process until satisfied with the solution\n10. Provide a single, ideally correct answer as the final output\n11. Only set nextThoughtNeeded to false when truly done and a satisfactory answer is reached",
+      "server": "sequential-thinking",
+      "tool": "sequentialthinking",
+      "tool_id": "sequential-thinking:sequentialthinking"
+    },
+    {
+      "description": "Add a business insight to the memo",
+      "server": "sqlite",
+      "tool": "append_insight",
+      "tool_id": "sqlite:append_insight"
+    },
+    {
+      "description": "Create a new table in the SQLite database",
+      "server": "sqlite",
+      "tool": "create_table",
+      "tool_id": "sqlite:create_table"
+    },
+    {
+      "description": "Get the schema information for a specific table",
+      "server": "sqlite",
+      "tool": "describe_table",
+      "tool_id": "sqlite:describe_table"
+    },
+    {
+      "description": "List all tables in the SQLite database",
+      "server": "sqlite",
+      "tool": "list_tables",
+      "tool_id": "sqlite:list_tables"
+    },
+    {
+      "description": "Execute a SELECT query on the SQLite database",
+      "server": "sqlite",
+      "tool": "read_query",
+      "tool_id": "sqlite:read_query"
+    },
+    {
+      "description": "Execute an INSERT, UPDATE, or DELETE query on the SQLite database",
+      "server": "sqlite",
+      "tool": "write_query",
+      "tool_id": "sqlite:write_query"
+    },
+    {
+      "description": "Convert time between timezones",
+      "server": "time",
+      "tool": "convert_time",
+      "tool_id": "time:convert_time"
+    },
+    {
+      "description": "Get current time in a specific timezones",
+      "server": "time",
+      "tool": "get_current_time",
+      "tool_id": "time:get_current_time"
+    }
+  ],
+  "version": "corpus_v1"
+}
