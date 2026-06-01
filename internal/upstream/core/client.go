@@ -75,6 +75,14 @@ type Client struct {
 	// Cached tools list from successful immediate call
 	cachedTools []mcp.Tool
 
+	// monitoringMu serializes the stderr/process monitoring lifecycle methods
+	// (Start*/Stop*Monitoring). Connect (StartStderrMonitoring) and Disconnect
+	// (StopStderrMonitoring) can run concurrently on the same client during a
+	// reconcile-vs-shutdown overlap, racing the ctx/cancel/WaitGroup fields
+	// below (notably WG.Add vs WG.Wait). This mutex makes start and stop
+	// mutually exclusive. It is never held across c.mu.
+	monitoringMu sync.Mutex
+
 	// Stderr monitoring
 	stderrMonitoringCtx    context.Context
 	stderrMonitoringCancel context.CancelFunc

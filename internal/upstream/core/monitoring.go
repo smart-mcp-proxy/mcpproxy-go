@@ -24,6 +24,9 @@ const (
 
 // StartStderrMonitoring starts monitoring stderr output and logging it
 func (c *Client) StartStderrMonitoring() {
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
+
 	if c.stderr == nil || c.transportType != transportStdio {
 		return
 	}
@@ -43,6 +46,9 @@ func (c *Client) StartStderrMonitoring() {
 
 // StopStderrMonitoring stops stderr monitoring
 func (c *Client) StopStderrMonitoring() {
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
+
 	if c.stderrMonitoringCancel != nil {
 		c.stderrMonitoringCancel()
 
@@ -66,6 +72,9 @@ func (c *Client) StopStderrMonitoring() {
 
 // StartProcessMonitoring starts monitoring the underlying process
 func (c *Client) StartProcessMonitoring() {
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
+
 	// Start monitoring even if processCmd is nil for Docker containers
 	if c.processCmd == nil && !c.isDockerCommand {
 		return
@@ -94,6 +103,9 @@ func (c *Client) StartProcessMonitoring() {
 
 // StopProcessMonitoring stops process monitoring
 func (c *Client) StopProcessMonitoring() {
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
+
 	if c.processMonitorCancel != nil {
 		c.processMonitorCancel()
 
