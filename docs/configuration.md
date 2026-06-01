@@ -829,6 +829,32 @@ See [Search Servers Documentation](search_servers.md) for complete details.
 
 ---
 
+## Observability
+
+Controls the usage-statistics aggregate that powers the Web UI usage graphs
+(spec 069). The aggregate is built incrementally from the activity log, kept in
+memory as an immutable snapshot, and periodically persisted so it survives
+restarts without a full re-scan.
+
+```json
+{
+  "observability": {
+    "usage_cache_ttl": "5s",
+    "usage_persist_interval": "30s"
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `usage_cache_ttl` | duration string | `5s` | Freshness bound for the usage endpoint's read cache on wide time windows. |
+| `usage_persist_interval` | duration string | `30s` | How often the in-memory usage aggregate snapshot is flushed to storage (also flushed on graceful shutdown). |
+
+Both fields are optional, accept Go duration strings (e.g. `"10s"`, `"1m"`),
+and are hot-reloadable. Non-positive values fall back to the defaults.
+
+---
+
 ## Complete Example
 
 Here's a complete configuration example with all major sections:

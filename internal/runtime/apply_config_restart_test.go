@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -105,6 +106,41 @@ func TestApplyConfig_HotReloadableChange(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 20, savedCfg.ToolsLimit, "Config file should be updated with new ToolsLimit value")
+}
+
+// TestApplyConfig_ObservabilityHotReload (MCP-835 / Codex finding #3): changing
+// the observability usage persist interval must hot-reload into the running
+// ActivityService — previously ApplyConfig only handled logging/truncator, so
+// SetUsagePersistInterval's "hot-reloadable" promise was unfulfilled.
+func TestApplyConfig_ObservabilityHotReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
+
+	initialCfg := config.DefaultConfig()
+	initialCfg.Listen = "127.0.0.1:8080"
+	initialCfg.DataDir = tmpDir
+	require.NoError(t, config.SaveConfig(initialCfg, cfgPath))
+
+	rt, err := New(initialCfg, cfgPath, zap.NewNop())
+	require.NoError(t, err)
+	defer func() { _ = rt.Close() }()
+
+	// Default cadence is 30s before the reload.
+	require.Equal(t, DefaultUsagePersistInterval, rt.ActivityService().usagePersistInterval())
+
+	newCfg := config.DefaultConfig()
+	newCfg.Listen = "127.0.0.1:8080"
+	newCfg.DataDir = tmpDir
+	newCfg.Observability.UsagePersistInterval = config.Duration(10 * time.Second)
+
+	result, err := rt.ApplyConfig(newCfg, cfgPath)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	assert.False(t, result.RequiresRestart, "observability cadence change is hot-reloadable")
+	assert.Contains(t, result.ChangedFields, "observability")
+	assert.Equal(t, 10*time.Second, rt.ActivityService().usagePersistInterval(),
+		"new persist interval must be applied to the running ActivityService")
 }
 
 // TestApplyConfig_SaveFailure tests handling of save errors

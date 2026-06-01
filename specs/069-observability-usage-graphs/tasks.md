@@ -31,12 +31,12 @@ Web app: Go backend under `internal/`; embedded Vue frontend under `frontend/src
 
 **Purpose**: Actor-owned incremental aggregate + snapshot + persistence + cold-start + TTL (CN-002/CN-003/FR-005).
 
-- [ ] T005 [BE] Failing unit tests in `internal/runtime/usage_aggregate_test.go`: incremental update math (calls, errors, blocked, byte sums excluding 0-byte, latency-bucket → approx p50/p95, time buckets per window).
-- [ ] T006 [BE] Implement `UsageAggregate`/`ToolUsage`/`TimeBucket` + incremental `Apply(record)` in `internal/runtime/usage_aggregate.go` (data-model.md §2); copy-on-write snapshot via atomic pointer.
-- [ ] T007 [BE] Wire aggregate into `ActivityService`: own it on the goroutine, `Apply` inside `handleEvent`; expose `UsageSnapshot()` returning the immutable snapshot. Test: snapshot reflects writes, reads never block.
-- [ ] T008 [BE] Failing test for persistence/rebuild in `internal/storage/activity_stats_test.go`: persist snapshot to `activity_stats` bucket (versioned key) + load; cold start with no snapshot triggers exactly one full-scan rebuild.
-- [ ] T009 [BE] Implement `internal/storage/activity_stats.go` persist/load; periodic flush (default 30s) + flush-on-shutdown; cold-start load-or-rebuild (reuse `AggregateToolUsage` scan). Make T008 green.
-- [ ] T010 [BE] [P] Add `observability.usage_cache_ttl` (5s) + `usage_persist_interval` (30s) to `internal/config/config.go` with defaults + hot-reload; test defaults.
+- [x] T005 [BE] Failing unit tests in `internal/runtime/usage_aggregate_test.go`: incremental update math (calls, errors, blocked, byte sums excluding 0-byte, latency-bucket → approx p50/p95, time buckets per window).
+- [x] T006 [BE] Implement `UsageAggregate`/`ToolUsage`/`TimeBucket` + incremental `Apply(record)` in `internal/runtime/usage_aggregate.go` (data-model.md §2); copy-on-write snapshot via atomic pointer.
+- [x] T007 [BE] Wire aggregate into `ActivityService`: own it on the goroutine, `Apply` inside `handleEvent`; expose `UsageSnapshot()` returning the immutable snapshot. Test: snapshot reflects writes, reads never block.
+- [x] T008 [BE] Failing test for persistence/rebuild in `internal/storage/activity_stats_test.go`: persist snapshot to `activity_stats` bucket (versioned key) + load; cold start with no snapshot triggers exactly one full-scan rebuild.
+- [x] T009 [BE] Implement `internal/storage/activity_stats.go` persist/load; periodic flush (default 30s) + flush-on-shutdown; cold-start load-or-rebuild (reuse `AggregateToolUsage` scan). Make T008 green.
+- [x] T010 [BE] [P] Add `observability.usage_cache_ttl` (5s) + `usage_persist_interval` (30s) to `internal/config/config.go` with defaults + hot-reload; test defaults.
 
 ---
 

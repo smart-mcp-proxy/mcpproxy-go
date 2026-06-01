@@ -19,6 +19,7 @@ All claims below cite the current codebase (verified 2026-05-31). Where a findin
 
 - **Decision**: Own the incremental usage aggregate inside the `ActivityService` goroutine and update it in `handleEvent` right where the record is built. Readers (the HTTP handler) receive an immutable **copy-on-write snapshot** (atomic pointer swap), mirroring the stateview pattern used elsewhere in `internal/runtime/stateview`.
 - **Rationale**: single-writer goroutine = no locks on the hot path (Constitution II); snapshot reads are O(1) and never block writes (CN-002).
+- **Refinement (MCP-835)**: the copy-on-write clone is **publish-on-read**, not publish-on-write. `Apply` mutates the working aggregate under a short writer lock and only marks the snapshot stale (O(1), no clone); the O(tools×buckets) clone is deferred to the first `Snapshot()` after a write burst (the A3 endpoint / 30s persist flush). This keeps the activity write path O(1) per CN-002 — an earlier publish-on-write implementation cloned the whole aggregate on every write, violating it.
 
 ## R3. Aggregation fast-path + cold start
 

@@ -81,6 +81,8 @@ components:
         oauth_expiry_warning_hours:
           description: Health status settings
           type: number
+        observability:
+          $ref: '#/components/schemas/config.ObservabilityConfig'
         output_sanitisation:
           $ref: '#/components/schemas/config.OutputSanitisationConfig'
         output_validation:
@@ -392,6 +394,21 @@ components:
             type: string
           type: array
           uniqueItems: false
+      type: object
+    config.ObservabilityConfig:
+      description: 'Observability settings (Spec 069): usage aggregate cache/persistence
+        cadence.'
+      properties:
+        usage_cache_ttl:
+          description: |-
+            UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
+            wide windows (FR-005). Default 5s.
+          type: string
+        usage_persist_interval:
+          description: |-
+            UsagePersistInterval is how often the actor-owned usage aggregate snapshot
+            is flushed to storage. Default 30s.
+          type: string
       type: object
     config.OutputSanitisationConfig:
       description: Output sanitisation settings (Spec 054 Track B)

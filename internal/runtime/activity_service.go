@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -49,11 +50,18 @@ type ActivityService struct {
 
 	// Event emitter for sensitive data detection events (Spec 026)
 	eventEmitter SensitiveDataEventEmitter
+
+	// Usage aggregate (Spec 069 A2): actor-owned rollup of tool-call activity.
+	// Mutated only on this goroutine via Apply; published to readers as an
+	// immutable snapshot. usagePersistIntervalNs is the hot-reloadable flush
+	// cadence in nanoseconds.
+	usage                  *UsageStore
+	usagePersistIntervalNs atomic.Int64
 }
 
 // NewActivityService creates a new activity service.
 func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityService {
-	return &ActivityService{
+	s := &ActivityService{
 		storage:       storage,
 		logger:        logger,
 		eventCh:       make(chan Event, 100), // Buffer for non-blocking event delivery
@@ -62,7 +70,10 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 		maxRecords:    DefaultRetentionMaxRecords,
 		checkInterval: DefaultRetentionCheckInterval,
 		detector:      nil, // Detector is optional, set via SetDetector
+		usage:         newUsageStore(),
 	}
+	s.usagePersistIntervalNs.Store(int64(DefaultUsagePersistInterval))
+	return s
 }
 
 // SetDetector sets the sensitive data detector for async scanning (Spec 026).
@@ -103,17 +114,25 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 	// Start retention loop in a separate goroutine
 	go s.runRetentionLoop(ctx)
 
+	// Spec 069 A2: load/rebuild the usage aggregate before processing events,
+	// then start the periodic snapshot flush loop.
+	s.initUsageFromStorage()
+	go s.runUsageFlushLoop(ctx)
+
 	s.logger.Info("Activity service started")
 
 	for {
 		select {
 		case <-ctx.Done():
 			s.logger.Info("Activity service shutting down")
+			// Flush-on-shutdown: persist the final usage snapshot (Spec 069 A2).
+			s.persistUsage()
 			close(s.done)
 			return
 		case evt, ok := <-eventCh:
 			if !ok {
 				s.logger.Info("Activity service event channel closed")
+				s.persistUsage()
 				close(s.done)
 				return
 			}
@@ -303,6 +322,13 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 			zap.String("tool_name", toolName),
 			zap.String("status", status))
 
+		// Fold the persisted call into the usage aggregate (Spec 069 A2). Done
+		// only on save success so the in-memory rollup stays consistent with a
+		// cold-start rebuild that re-scans persisted records.
+		if s.usage != nil {
+			s.usage.Apply(record)
+		}
+
 		// Run async sensitive data detection (Spec 026)
 		if s.detector != nil {
 			go s.runAsyncDetection(record.ID, arguments, response)
@@ -336,6 +362,15 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 			zap.Error(err),
 			zap.String("server_name", serverName),
 			zap.String("decision", decision))
+		return
+	}
+
+	// Fold blocked attempts into the usage aggregate (Spec 069 A2). Apply
+	// ignores non-blocked decisions, so passing every policy decision is safe.
+	// Done only on save success so the in-memory rollup stays consistent with a
+	// cold-start rebuild that re-scans persisted records.
+	if s.usage != nil {
+		s.usage.Apply(record)
 	}
 }
 

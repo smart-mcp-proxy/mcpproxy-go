@@ -55,6 +55,7 @@ Auth: `X-API-Key` (REST default).
 - `token_source: "bytes"` labels the size-based proxy (FR-006); FR-010 will switch this to `"estimated_tokens"`.
 - `tokens_saved*` echoed from existing `ServerTokenMetrics` (FR-007 / SC-008).
 - `avg_*` computed over `sized_calls` only (records with `0` bytes excluded); `null`/omitted when `sized_calls == 0`.
+- `blocked` counts policy-prevented attempts (persisted as blocked `policy_decision` records, not executed tool_calls). A blocked attempt never ran, so it is **not** included in `calls` and contributes no latency/bytes — it only increments `blocked` and `last_used`. The timeline tracks executed calls and excludes blocked attempts.
 - `other` present only when the tool list was truncated to `top`.
 - Empty log → `tools: []`, `timeline: []`, `tokens_saved` from metrics (or 0) — never an error (FR-009 / SC-007).
 

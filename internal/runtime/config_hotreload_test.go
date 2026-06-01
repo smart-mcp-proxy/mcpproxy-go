@@ -9,6 +9,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestDetectConfigChanges_Observability (MCP-835 / Codex finding #3): changing
+// the observability usage cadence must be detected as a hot-reloadable change so
+// ApplyConfig can push the new persist interval to the running ActivityService.
+// SetUsagePersistInterval advertises hot-reload; the detector must back it.
+func TestDetectConfigChanges_Observability(t *testing.T) {
+	base := &config.Config{
+		Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+		Observability: &config.ObservabilityConfig{
+			UsageCacheTTL:        config.Duration(5 * time.Second),
+			UsagePersistInterval: config.Duration(30 * time.Second),
+		},
+	}
+	changed := &config.Config{
+		Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+		Observability: &config.ObservabilityConfig{
+			UsageCacheTTL:        config.Duration(5 * time.Second),
+			UsagePersistInterval: config.Duration(10 * time.Second),
+		},
+	}
+
+	result := DetectConfigChanges(base, changed)
+	require.True(t, result.Success)
+	assert.Contains(t, result.ChangedFields, "observability")
+	assert.False(t, result.RequiresRestart, "cadence change is hot-reloadable")
+}
+
 func TestDetectConfigChanges(t *testing.T) {
 	baseConfig := &config.Config{
 		Listen:            "127.0.0.1:8080",
@@ -49,7 +75,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            ":9090", // Changed
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-		ToolsLimit:        15,
+				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -67,7 +93,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/different/data", // Changed
 				APIKey:            "test-key",
-		ToolsLimit:        15,
+				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -85,7 +111,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "new-key", // Changed
-		ToolsLimit:        15,
+				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -103,7 +129,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-		ToolsLimit:        15,
+				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -124,7 +150,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-		ToolsLimit:        20, // Changed
+				ToolsLimit:        20, // Changed
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers:           []*config.ServerConfig{},
@@ -144,7 +170,7 @@ func TestDetectConfigChanges(t *testing.T) {
 				Listen:            "127.0.0.1:8080",
 				DataDir:           "/test/data",
 				APIKey:            "test-key",
-		ToolsLimit:        15,
+				ToolsLimit:        15,
 				ToolResponseLimit: 1000,
 				CallToolTimeout:   config.Duration(60 * time.Second),
 				Servers: []*config.ServerConfig{ // Changed
