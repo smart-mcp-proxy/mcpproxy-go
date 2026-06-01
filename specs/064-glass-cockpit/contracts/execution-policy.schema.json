@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/specs/064-glass-cockpit/execution-policy.schema.json",
+  "title": "Glass Cockpit executionPolicy (attached to a Paperclip issue)",
+  "description": "The gate configuration the cockpit attaches to issues. Mirrors Paperclip's IssueExecutionStage model (stage types: review|approval). Gate 2 (per-spec design) and Gate 3 (pre-merge) are 'approval' stages with a user participant; the adversarial review (FR-011) is a 'review' stage with the Critic agent participant placed before the user gate.",
+  "type": "object",
+  "required": ["mode", "stages"],
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": ["normal", "auto"],
+      "default": "normal",
+      "description": "normal = stages enforced; auto = (not used by the cockpit) auto-advance."
+    },
+    "stages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["type", "participants"],
+        "properties": {
+          "id": { "type": "string", "description": "Optional stable stage id." },
+          "type": {
+            "type": "string",
+            "enum": ["review", "approval"],
+            "description": "review = feedback (e.g. Critic); approval = blocking sign-off (e.g. the human board)."
+          },
+          "label": { "type": "string", "description": "Human-readable stage name, e.g. 'Design sign-off' or 'Pre-merge'." },
+          "participants": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "type": "string", "enum": ["user", "agent"] },
+                "userId": { "type": "string", "description": "Required when type=user (the board)." },
+                "agentId": { "type": "string", "description": "Required when type=agent (e.g. the Gemini Critic)." }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "mode": "normal",
+      "stages": [
+        { "type": "review", "label": "Adversarial review (Gemini Critic)", "participants": [ { "type": "agent", "agentId": "4439bdfe-533b-44e7-bdff-b3d3515c15cb" } ] },
+        { "type": "approval", "label": "Per-spec design sign-off", "participants": [ { "type": "user", "userId": "local-board" } ] }
+      ]
+    },
+    {
+      "mode": "normal",
+      "stages": [
+        { "type": "approval", "label": "Pre-merge", "participants": [ { "type": "user", "userId": "local-board" } ] }
+      ]
+    }
+  ]
+}
