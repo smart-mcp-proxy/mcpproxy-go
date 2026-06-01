@@ -5084,6 +5084,10 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 
 // rawByteSize returns the JSON-serialized byte count of v, or 0 on error.
 // Used to capture pre-truncation sizes for Spec 069 A1.
+//
+// Profiling note: on the call-tool hot path the result is Marshaled here and
+// again inside forwardContentResult, so a large response is JSON-encoded twice.
+// If this shows up in profiles, capture the size from a single shared Marshal.
 func rawByteSize(v interface{}) int {
 	if v == nil {
 		return 0
