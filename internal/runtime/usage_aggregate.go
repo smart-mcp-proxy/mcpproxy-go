@@ -257,48 +257,86 @@ func (a *UsageAggregate) clone() *UsageAggregate {
 }
 
 // UsageStore owns the working aggregate and publishes immutable snapshots via
-// an atomic pointer (copy-on-write). Apply/Replace are invoked by the single
-// owning goroutine; Snapshot is safe for any number of concurrent readers and
-// never blocks.
+// an atomic pointer (copy-on-write).
+//
+// Spec 069 / MCP-835: the activity write path must stay O(1) and must not block.
+// Apply therefore folds the record into the working aggregate under a short
+// writer lock and only marks the published snapshot stale — it does NOT clone.
+// The O(tools×buckets) clone is deferred to Snapshot (publish-on-read): the
+// first reader after a burst of writes materializes one fresh snapshot; the
+// owning activity goroutine never pays the clone cost on the hot path. Reads
+// with no pending writes are lock-free (atomic load); the A3 endpoint and the
+// 30s persist flush are the only readers, so clones are rare relative to writes.
 type UsageStore struct {
-	mu      sync.Mutex // serializes working mutation (uncontended single-writer)
+	mu      sync.Mutex // guards working; held for O(1) mutation, and (on read) for the clone
 	working *UsageAggregate
+	dirty   atomic.Bool // working has unpublished mutations since the last clone
 	snap    atomic.Pointer[UsageAggregate]
+
+	// publishes counts clone+publish operations. It is both lightweight
+	// observability (publish rate) and the assertion hook for the hot-path
+	// contract test (MCP-835): Apply must not publish per write.
+	publishes atomic.Int64
 }
 
 func newUsageStore() *UsageStore {
 	s := &UsageStore{working: newUsageAggregate()}
+	// Publish an initial empty snapshot so Snapshot() is never nil and a
+	// no-write read is lock-free from the start.
+	s.mu.Lock()
 	s.publishLocked()
+	s.mu.Unlock()
 	return s
 }
 
-// Apply folds a record into the working aggregate and republishes the snapshot.
+// Apply folds a record into the working aggregate. O(1): it mutates under the
+// writer lock and marks the snapshot stale, but never clones on the hot path.
 func (s *UsageStore) Apply(rec *storage.ActivityRecord) {
 	s.mu.Lock()
 	s.working.Apply(rec)
-	s.publishLocked()
+	s.dirty.Store(true)
 	s.mu.Unlock()
 }
 
-// Replace swaps in a freshly built aggregate (cold-start load or rebuild) and
-// publishes it as the new snapshot.
+// Replace swaps in a freshly built aggregate (cold-start load or rebuild). The
+// new snapshot is materialized lazily on the next read, like Apply.
 func (s *UsageStore) Replace(agg *UsageAggregate) {
 	s.mu.Lock()
 	s.working = agg
-	s.publishLocked()
+	s.dirty.Store(true)
 	s.mu.Unlock()
 }
 
-// publishLocked deep-copies the working aggregate, stamps freshness, and stores
-// it as the current immutable snapshot. Caller must hold s.mu.
+// publishLocked deep-copies the working aggregate, stamps freshness, stores it
+// as the current immutable snapshot, and clears the dirty flag. Caller must
+// hold s.mu.
 func (s *UsageStore) publishLocked() {
 	c := s.working.clone()
 	c.UpdatedAt = time.Now()
 	s.snap.Store(c)
+	s.dirty.Store(false)
+	s.publishes.Add(1)
 }
 
-// Snapshot returns the latest immutable aggregate snapshot. Lock-free; never
-// blocks. The returned value must be treated as read-only.
+// Snapshot returns the latest immutable aggregate snapshot reflecting all writes
+// applied so far. When writes have occurred since the last publish it
+// materializes one fresh snapshot here (the clone runs off the activity hot
+// path); otherwise it is a lock-free atomic load. The returned value must be
+// treated as read-only.
 func (s *UsageStore) Snapshot() *UsageAggregate {
-	return s.snap.Load()
+	// Fast path: nothing written since the last publish — lock-free.
+	if !s.dirty.Load() {
+		if snap := s.snap.Load(); snap != nil {
+			return snap
+		}
+	}
+	// Stale: materialize a fresh snapshot. Double-check under the lock so
+	// concurrent readers don't each re-clone.
+	s.mu.Lock()
+	if s.dirty.Load() {
+		s.publishLocked()
+	}
+	snap := s.snap.Load()
+	s.mu.Unlock()
+	return snap
 }

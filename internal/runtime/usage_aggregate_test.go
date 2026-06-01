@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -193,4 +194,53 @@ func TestUsageStore_Replace_PublishesNewSnapshot(t *testing.T) {
 
 	store.Replace(rebuilt)
 	assert.Equal(t, int64(1), store.Snapshot().Tools[toolKey("s", "t")].Calls)
+}
+
+// TestUsageStore_ApplyDoesNotPublishPerWrite is the spec-069 hot-path contract
+// (MCP-835): Apply must be O(1) and must NOT clone/publish the aggregate on every
+// activity write. The O(tools×buckets) clone is deferred until a reader actually
+// reads the snapshot, so a burst of writes triggers zero publishes.
+func TestUsageStore_ApplyDoesNotPublishPerWrite(t *testing.T) {
+	store := newUsageStore()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	base := store.publishes.Load() // 1 from construction
+	const N = 500
+	for i := 0; i < N; i++ {
+		store.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
+	}
+	// No reader has called Snapshot since the writes: zero new clones/publishes.
+	assert.Equal(t, base, store.publishes.Load(),
+		"Apply must not clone/publish on the activity hot path")
+
+	// The next read materializes exactly one snapshot reflecting all writes.
+	snap := store.Snapshot()
+	require.NotNil(t, snap.Tools[toolKey("s", "t")])
+	assert.Equal(t, int64(N), snap.Tools[toolKey("s", "t")].Calls)
+	assert.Equal(t, base+1, store.publishes.Load(), "exactly one publish on first read")
+
+	// A second read with no intervening write must reuse the clean snapshot
+	// (lock-free fast path), not re-clone.
+	_ = store.Snapshot()
+	assert.Equal(t, base+1, store.publishes.Load(),
+		"clean reads must not re-clone")
+}
+
+// BenchmarkUsageStore_Apply primes the aggregate with many distinct tools so a
+// per-write clone would be O(tools)-expensive, then benchmarks Apply. After the
+// MCP-835 fix, allocs/op is a small constant independent of the primed size
+// (the per-write clone is gone); regress this if allocs/op scales with priming.
+func BenchmarkUsageStore_Apply(b *testing.B) {
+	store := newUsageStore()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	for i := 0; i < 1000; i++ {
+		store.Apply(toolCall(fmt.Sprintf("srv%04d", i), "t", "success", 10, 0, 100, ts))
+	}
+	_ = store.Snapshot() // publish once so the primed state is materialized
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		store.Apply(toolCall("s", "t", "success", 10, 0, 100, ts))
+	}
 }
