@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -31,9 +32,17 @@ func (c *Client) StartStderrMonitoring() {
 		return
 	}
 
+	// Capture the stderr reader as a local under monitoringMu. connectStdio
+	// reassigns c.stderr on every (re)connect (connection_stdio.go:217); passing
+	// the reader as a goroutine arg keeps monitorStderr from reading the shared
+	// field, so a later reconnect's write never races a lingering monitor's read
+	// (the connectStdio↔monitorStderr data race, MCP-816).
+	stderr := c.stderr
+
 	// Create context for stderr monitoring. The monitor goroutine receives the
-	// context and its done channel as locals so an abandoned (timed-out)
-	// goroutine never reads the shared fields a later Start may overwrite.
+	// context, stderr reader, and its done channel as locals so an abandoned
+	// (timed-out) goroutine never reads the shared fields a later Start may
+	// overwrite.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	c.stderrMonitoringCtx, c.stderrMonitoringCancel = ctx, cancel
@@ -41,7 +50,7 @@ func (c *Client) StartStderrMonitoring() {
 
 	go func() {
 		defer close(done)
-		c.monitorStderr(ctx)
+		c.monitorStderr(ctx, stderr)
 	}()
 
 	c.logger.Debug("Started stderr monitoring",
@@ -165,9 +174,12 @@ func (c *Client) monitorProcess(ctx context.Context) {
 	}
 }
 
-// monitorStderr monitors stderr output and logs it to both main and server-specific logs
-func (c *Client) monitorStderr(ctx context.Context) {
-	scanner := bufio.NewScanner(c.stderr)
+// monitorStderr monitors stderr output and logs it to both main and server-specific logs.
+// The stderr reader is passed as an argument (captured under monitoringMu by the
+// caller) rather than read from c.stderr, so a concurrent connectStdio reassigning
+// the shared field cannot race this goroutine's read (MCP-816).
+func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
+	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():

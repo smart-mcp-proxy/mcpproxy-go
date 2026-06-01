@@ -48,6 +48,49 @@ func TestStderrMonitoring_StartStopRace(t *testing.T) {
 	c.StopStderrMonitoring()
 }
 
+// TestStderrMonitoring_ReassignDuringMonitorNoRace reproduces the
+// connectStdio(connection_stdio.go:217)-write vs monitorStderr(monitoring.go:170)-read
+// data race on the shared c.stderr field, surfaced by TestCrossSurfaceConsistency_RegistryAdd
+// in CI (MCP-816 / MCP-809 RV-3). connectStdio reassigns c.stderr on every
+// (re)connect, then starts the monitor; the monitor goroutine built its scanner
+// from the shared c.stderr field instead of a captured local, so a reconnect's
+// field write raced the lingering goroutine's read. Run under `go test -race`:
+// trips before the capture-local fix, green after. Empty readers EOF immediately
+// so each monitor goroutine exits at once and the loop stays fast.
+func TestStderrMonitoring_ReassignDuringMonitorNoRace(t *testing.T) {
+	c := &Client{
+		transportType: transportStdio,
+		stderr:        strings.NewReader(""),
+		logger:        zap.NewNop(),
+		config:        &config.ServerConfig{Name: "race"},
+	}
+
+	const iterations = 500
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Mimics connectStdio: reassign c.stderr on each reconnect, then (re)start
+	// the monitor. The reassignment is the field write the detector flagged at
+	// connection_stdio.go:217; the monitor goroutine spawned by the previous
+	// iteration reads c.stderr at monitoring.go:170 concurrently.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			c.stderr = strings.NewReader("")
+			c.StartStderrMonitoring()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			c.StopStderrMonitoring()
+		}
+	}()
+
+	wg.Wait()
+	c.StopStderrMonitoring()
+}
+
 // TestStderrMonitoring_AbandonedMonitorNoRace models the round-5 escape: the
 // monitor goroutine is still alive when Stop is called (its stderr Read blocks),
 // so Stop hits the 500ms timeout and abandons it. With the old reused-WaitGroup
