@@ -2447,7 +2447,10 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Specific operation security checks
 	switch operation {
-	case operationAdd:
+	case operationAdd, "add_from_registry":
+		// add_from_registry persists a new upstream just like a plain add, so it
+		// must honor the same AllowServerAdd gate — otherwise the "Let agents add
+		// servers" setting is bypassable by registry reference (MCP-800 finding 1).
 		if !p.config.AllowServerAdd {
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil

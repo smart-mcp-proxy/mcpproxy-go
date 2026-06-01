@@ -1438,33 +1438,27 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// ListRegistries returns the list of available MCP server registries (Phase 7)
+// ListRegistries returns the list of available MCP server registries (Phase 7).
+//
+// It routes through the SAME merged source (built-in defaults + user-configured
+// registries, keyed by ID) that search/add use via SetRegistriesFromConfig, so
+// `mcpproxy registry list` / the Web UI never omit a built-in that is still
+// searchable/addable and never show the legacy hard-coded Smithery entry instead
+// of the shipped defaults (FR-006 / MCP-800 finding 2).
 func (r *Runtime) ListRegistries() ([]interface{}, error) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	cfg := r.cfg
+	r.mu.RUnlock()
 
-	// Import registries package dynamically to avoid import cycles
-	// For now, we'll return registries from config or use defaults
-	registries := r.cfg.Registries
-	if len(registries) == 0 {
-		// Return default registry (Smithery)
-		defaultRegistry := map[string]interface{}{
-			"id":          "smithery",
-			"name":        "Smithery MCP Registry",
-			"description": "The official community registry for Model Context Protocol (MCP) servers.",
-			"url":         "https://smithery.ai/protocols",
-			"servers_url": "https://smithery.ai/api/smithery-protocol-registry",
-			"tags":        []string{"official", "community"},
-			"protocol":    "modelcontextprotocol/registry",
-			"count":       -1,
-		}
-		return []interface{}{defaultRegistry}, nil
-	}
+	// Rebuild the effective catalog (defaults merged with custom) — same call the
+	// search/add paths make — then read it back.
+	registries.SetRegistriesFromConfig(cfg)
+	merged := registries.ListRegistries()
 
-	// Convert config registries to interface slice
-	result := make([]interface{}, 0, len(registries))
-	for _, reg := range registries {
-		regMap := map[string]interface{}{
+	result := make([]interface{}, 0, len(merged))
+	for i := range merged {
+		reg := &merged[i]
+		result = append(result, map[string]interface{}{
 			"id":          reg.ID,
 			"name":        reg.Name,
 			"description": reg.Description,
@@ -1473,8 +1467,7 @@ func (r *Runtime) ListRegistries() ([]interface{}, error) {
 			"tags":        reg.Tags,
 			"protocol":    reg.Protocol,
 			"count":       reg.Count,
-		}
-		result = append(result, regMap)
+		})
 	}
 
 	return result, nil

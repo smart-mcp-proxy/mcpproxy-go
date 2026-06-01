@@ -121,6 +121,32 @@ func TestHandleUpstreamServers_AddFromRegistry_HappyPath(t *testing.T) {
 	assert.Equal(t, true, server["quarantined"], "new registry server must be quarantined (CN-002)")
 }
 
+// Security gate: add_from_registry MUST honor AllowServerAdd, exactly like the
+// ordinary `add` op. With AllowServerAdd=false a registry-add via MCP must be
+// rejected before it can resolve/persist a server — otherwise the gate at
+// frontend/settings ("Let agents add servers") is bypassable by registry
+// reference (PR #555 Codex review / MCP-800 finding 1).
+func TestHandleUpstreamServers_AddFromRegistry_BlockedWhenAddDisallowed(t *testing.T) {
+	startTestRegistry(t, []map[string]interface{}{
+		{"id": "everything", "name": "everything", "installCmd": "npx -y @modelcontextprotocol/server-everything"},
+	})
+
+	srv := newAddFromRegistryTestServer(t)
+	srv.config.AllowServerAdd = false
+
+	result := callAddFromRegistry(t, srv, map[string]interface{}{
+		"operation": "add_from_registry",
+		"registry":  "testreg",
+		"id":        "everything",
+	})
+
+	require.True(t, result.IsError, "add_from_registry must be rejected when AllowServerAdd=false")
+	require.NotEmpty(t, result.Content)
+	tc, ok := result.Content[0].(mcp.TextContent)
+	require.True(t, ok, "expected text content")
+	assert.Contains(t, tc.Text, "Adding servers is not allowed")
+}
+
 // Missing required input: the entry declares ${GITHUB_TOKEN} but the request
 // supplies no env. The handler must return a structured error (isError=true)
 // carrying the stable cross-surface code and the offending input names (FR-003).
