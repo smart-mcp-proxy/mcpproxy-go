@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -20,8 +21,15 @@ import (
 
 // Client wraps a core client with state management, concurrency control, and background recovery
 type Client struct {
-	id           string
-	Config       *config.ServerConfig // Public field for compatibility with existing code
+	id string
+	// cfg holds the server configuration as an atomic pointer. SetConfig swaps it
+	// (reconcile add path, off mc.mu) while many readers — including detached
+	// state-change callback goroutines and Connect's unlocked phase — read it
+	// concurrently. An atomic pointer makes every read/write data-race-free and
+	// is lock-free, so it is safe to read whether or not mc.mu is held (the RLock
+	// accessor approach would deadlock the in-lock readers). Access via
+	// GetConfig() / SetConfig() only — never touch the field directly. (MCP-770)
+	cfg          atomic.Pointer[config.ServerConfig]
 	coreClient   *core.Client
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
@@ -91,7 +99,6 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 	// Create managed client
 	mc := &Client{
 		id:             id,
-		Config:         serverConfig,
 		coreClient:     coreClient,
 		logger:         logger.With(zap.String("component", "managed_client")),
 		StateManager:   types.NewStateManager(),
@@ -100,6 +107,7 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		storage:        storage,
 		stopMonitoring: make(chan struct{}),
 	}
+	mc.cfg.Store(serverConfig)
 
 	// Set up state change callback
 	mc.StateManager.SetStateChangeCallback(mc.onStateChange)
@@ -152,8 +160,14 @@ func (mc *Client) Connect(ctx context.Context) error {
 		return fmt.Errorf("connection already in progress or established (state: %s)", mc.StateManager.GetState().String())
 	}
 
+	// Snapshot the server name while mc.mu is held. Phase 3 below runs WITHOUT
+	// mc.mu, so dereferencing mc.GetConfig() there races with SetConfig swapping the
+	// pointer under the lock (MCP-770: SetConfig vs Connect). Use this local for
+	// any logging in the unlocked window.
+	serverName := mc.GetConfig().Name
+
 	mc.logger.Info("Starting managed connection to upstream server",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.String("current_state", mc.StateManager.GetState().String()),
 		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
 
@@ -164,11 +178,11 @@ func (mc *Client) Connect(ctx context.Context) error {
 	currentState := mc.StateManager.GetState()
 	if currentState == types.StateError || currentState == types.StateDisconnected {
 		mc.logger.Debug("Disconnecting core client before reconnect to clear stale state",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.String("from_state", currentState.String()))
 		if err := mc.coreClient.Disconnect(); err != nil {
 			mc.logger.Debug("Core client disconnect before reconnect returned",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
 		}
 	}
@@ -194,7 +208,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// Phase 3: Execute the actual connection (potentially slow - OAuth, MCP initialize)
 	// mc.mu is NOT held here, so Disconnect/SetConfig/GetConfig won't block
 	mc.logger.Debug("Invoking core client Connect for managed client",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", serverName))
 	connectErr := mc.coreClient.Connect(connectCtx)
 
 	// Phase 4: Re-acquire lock to update state based on result
@@ -205,7 +219,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 		// Check if this is a deferred OAuth requirement (pending user action)
 		if core.IsOAuthPending(connectErr) {
 			mc.logger.Info("⏳ OAuth authentication pending user action",
-				zap.String("server", mc.Config.Name))
+				zap.String("server", mc.GetConfig().Name))
 			// Transition to PendingAuth state instead of Error
 			mc.StateManager.TransitionTo(types.StatePendingAuth)
 			mc.StateManager.SetError(connectErr)
@@ -216,7 +230,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 			// Check if this is a token refresh scenario vs full re-auth
 			isRefreshScenario := mc.isTokenRefreshScenario(connectErr)
 			mc.logger.Info("🎯 OAuth authorization required during MCP initialization",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Bool("token_refresh_scenario", isRefreshScenario))
 			// Don't apply backoff for OAuth authorization requirement
 			mc.StateManager.SetError(connectErr)
@@ -225,7 +239,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 			// Check if this is a token refresh scenario vs full re-auth
 			isRefreshScenario := mc.isTokenRefreshScenario(connectErr)
 			mc.logger.Warn("OAuth authentication failed, applying extended backoff",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Bool("token_refresh_scenario", isRefreshScenario),
 				zap.Error(connectErr))
 			mc.StateManager.SetOAuthError(connectErr)
@@ -236,7 +250,7 @@ func (mc *Client) Connect(ctx context.Context) error {
 	}
 
 	mc.logger.Debug("Core client Connect returned successfully",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 
 	// Transition to ready state only if not already ready
 	if mc.StateManager.GetState() != types.StateReady {
@@ -254,11 +268,11 @@ func (mc *Client) Connect(ctx context.Context) error {
 	}
 
 	mc.logger.Info("Successfully established managed connection",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 
 	// Add a small delay before starting background monitoring to let connection stabilize
 	mc.logger.Debug("🔍 Adding stabilization delay before starting background monitoring",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 
 	// Create cancellable context for monitoring startup
 	monitoringCtx, monitoringCancel := context.WithCancel(context.Background())
@@ -271,13 +285,13 @@ func (mc *Client) Connect(ctx context.Context) error {
 			mc.mu.Lock()
 			if mc.monitoringCancelFunc != nil {
 				mc.logger.Debug("🔍 Starting background monitoring after stabilization delay",
-					zap.String("server", mc.Config.Name))
+					zap.String("server", mc.GetConfig().Name))
 				mc.startBackgroundMonitoring()
 			}
 			mc.mu.Unlock()
 		case <-monitoringCtx.Done():
 			mc.logger.Debug("🔍 Background monitoring startup cancelled",
-				zap.String("server", mc.Config.Name))
+				zap.String("server", mc.GetConfig().Name))
 		}
 	}()
 
@@ -292,7 +306,7 @@ func (mc *Client) Disconnect() error {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 
-	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.Config.Name))
+	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.GetConfig().Name))
 
 	// Ensure no ListTools operations remain after acquiring the lock
 	mc.cancelInFlightListTools()
@@ -315,7 +329,7 @@ func (mc *Client) Disconnect() error {
 	mc.StateManager.Reset()
 
 	mc.logger.Debug("Managed client disconnect complete",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.Bool("list_tools_in_progress", mc.listToolsInProgress))
 
 	return nil
@@ -341,18 +355,16 @@ func (mc *Client) GetConnectionInfo() types.ConnectionInfo {
 	return mc.StateManager.GetConnectionInfo()
 }
 
-// GetConfig returns a thread-safe copy of the server configuration
+// GetConfig returns the current server configuration pointer in a thread-safe,
+// lock-free manner. Safe to call whether or not mc.mu is held.
 func (mc *Client) GetConfig() *config.ServerConfig {
-	mc.mu.RLock()
-	defer mc.mu.RUnlock()
-	return mc.Config
+	return mc.cfg.Load()
 }
 
-// SetConfig updates the server configuration in a thread-safe manner
+// SetConfig atomically swaps the server configuration. Lock-free; callers must
+// not hold mc.mu (they don't need to — the swap is atomic).
 func (mc *Client) SetConfig(config *config.ServerConfig) {
-	mc.mu.Lock()
-	defer mc.mu.Unlock()
-	mc.Config = config
+	mc.cfg.Store(config)
 }
 
 // GetServerInfo returns server information
@@ -409,11 +421,11 @@ func (mc *Client) IsDockerIsolated() bool {
 		return false
 	}
 	// Check if server has isolation explicitly disabled
-	if mc.Config.Isolation != nil && mc.Config.Isolation.Enabled != nil && !*mc.Config.Isolation.Enabled {
+	if mc.GetConfig().Isolation != nil && mc.GetConfig().Isolation.Enabled != nil && !*mc.GetConfig().Isolation.Enabled {
 		return false
 	}
 	// Only stdio servers with commands get Docker-isolated
-	return mc.Config.Command != ""
+	return mc.GetConfig().Command != ""
 }
 
 // SetUserLoggedOut marks that the user has explicitly logged out
@@ -494,13 +506,13 @@ func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	mc.logger.Debug("🔍 ListTools called",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
 		zap.Bool("connected", mc.IsConnected()))
 
 	if !mc.IsConnected() {
 		mc.logger.Debug("🔍 ListTools rejected - client not connected",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.String("state", mc.StateManager.GetState().String()))
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -525,11 +537,11 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 			// Defensive fallback: every leader path is supposed to allocate a
 			// wait channel via acquireListToolsContext, so this should be
 			// unreachable. Fail fast rather than block forever on a nil channel.
-			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.Config.Name)
+			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 
 		select {
 		case <-ctx.Done():
@@ -554,10 +566,10 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 	defer func() {
 		if release() {
 			mc.logger.Debug("🔍 ListTools operation completed, flag reset",
-				zap.String("server", mc.Config.Name))
+				zap.String("server", mc.GetConfig().Name))
 		} else {
 			mc.logger.Debug("🔍 ListTools operation completed while disconnected",
-				zap.String("server", mc.Config.Name))
+				zap.String("server", mc.GetConfig().Name))
 		}
 	}()
 
@@ -566,12 +578,12 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 
 	if err != nil {
 		mc.logger.Error("ListTools operation failed",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 
 		if mc.isConnectionError(err) {
 			mc.logger.Warn("Connection error detected during ListTools, updating server state",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
 			mc.StateManager.SetError(err)
 		}
@@ -595,13 +607,13 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 			// Use different log levels based on error type
 			if mc.isNormalReconnectionError(err) {
 				mc.logger.Warn("Tool call failed due to connection loss, will attempt reconnection",
-					zap.String("server", mc.Config.Name),
+					zap.String("server", mc.GetConfig().Name),
 					zap.String("tool", toolName),
 					zap.String("error_type", "normal_reconnection"),
 					zap.Error(err))
 			} else {
 				mc.logger.Error("Tool call failed with connection error",
-					zap.String("server", mc.Config.Name),
+					zap.String("server", mc.GetConfig().Name),
 					zap.String("tool", toolName),
 					zap.Error(err))
 			}
@@ -609,7 +621,7 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 		} else {
 			// Log non-connection errors at error level
 			mc.logger.Error("Tool call failed",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.String("tool", toolName),
 				zap.Error(err))
 		}
@@ -630,7 +642,7 @@ func (mc *Client) cancelInFlightListTools() {
 	}
 
 	mc.logger.Debug("Cancelling in-flight ListTools operation",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 
 	cancel()
 
@@ -649,7 +661,7 @@ func (mc *Client) cancelInFlightListTools() {
 	}
 
 	mc.logger.Debug("Timed out waiting for ListTools operation to cancel",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 }
 
 // cancelInFlightConnect cancels any in-flight Connect() operation.
@@ -665,7 +677,7 @@ func (mc *Client) cancelInFlightConnect() {
 	}
 
 	mc.logger.Debug("Cancelling in-flight Connect operation",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 	cancel()
 }
 
@@ -674,15 +686,15 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 	mc.logger.Info("State transition",
 		zap.String("from", oldState.String()),
 		zap.String("to", newState.String()),
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 
 	// Handle error states with appropriate log levels
 	if newState == types.StateError && info.LastError != nil {
 		// Check for deprecated endpoint errors first - these require URL changes, not reconnection
 		if mc.isDeprecatedEndpointError(info.LastError) {
 			mc.logger.Error("⚠️ ENDPOINT DEPRECATED: Server URL needs to be updated",
-				zap.String("server", mc.Config.Name),
-				zap.String("current_url", mc.Config.URL),
+				zap.String("server", mc.GetConfig().Name),
+				zap.String("current_url", mc.GetConfig().URL),
 				zap.String("error_type", "endpoint_deprecated"),
 				zap.String("action", "Update the server URL in your configuration"),
 				zap.String("hint", "The server may have migrated from /sse to /mcp - check the server's documentation"),
@@ -692,13 +704,13 @@ func (mc *Client) onStateChange(oldState, newState types.ConnectionState, info *
 
 		if mc.isNormalReconnectionError(info.LastError) {
 			mc.logger.Warn("Connection error, will attempt automatic reconnection",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.String("error_type", "normal_reconnection"),
 				zap.Error(info.LastError),
 				zap.Int("retry_count", info.RetryCount))
 		} else {
 			mc.logger.Error("Connection error",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Error(info.LastError),
 				zap.Int("retry_count", info.RetryCount))
 		}
@@ -721,7 +733,7 @@ func (mc *Client) stopBackgroundMonitoring() {
 	// Only proceed if monitoring was actually started
 	if !mc.monitoringStarted {
 		mc.logger.Debug("Background monitoring was never started, skipping stop",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 		return
 	}
 
@@ -737,10 +749,10 @@ func (mc *Client) stopBackgroundMonitoring() {
 	select {
 	case <-done:
 		mc.logger.Debug("Background monitoring stopped successfully",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 	case <-time.After(1 * time.Second):
 		mc.logger.Warn("Background monitoring stop timed out after 1s, forcing shutdown",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 	}
 
 	mc.monitoringStarted = false
@@ -760,7 +772,7 @@ func (mc *Client) backgroundHealthCheck() {
 			mc.performHealthCheck()
 		case <-mc.stopMonitoring:
 			mc.logger.Debug("Background health monitoring stopped",
-				zap.String("server", mc.Config.Name))
+				zap.String("server", mc.GetConfig().Name))
 			return
 		}
 	}
@@ -771,7 +783,7 @@ func (mc *Client) performHealthCheck() {
 	// Skip all health/reconnect work when user explicitly logged out
 	if mc.IsUserLoggedOut() {
 		mc.logger.Debug("Health check skipped - user explicitly logged out",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 		return
 	}
 
@@ -780,14 +792,14 @@ func (mc *Client) performHealthCheck() {
 		if mc.StateManager.ShouldRetryOAuth() {
 			info := mc.StateManager.GetConnectionInfo()
 			mc.logger.Info("Attempting OAuth reconnection with extended backoff",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Int("oauth_retry_count", info.OAuthRetryCount),
 				zap.Time("last_oauth_attempt", info.LastOAuthAttempt))
 			mc.tryReconnect()
 		} else {
 			info := mc.StateManager.GetConnectionInfo()
 			mc.logger.Debug("OAuth backoff period not elapsed, skipping reconnection",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Int("oauth_retry_count", info.OAuthRetryCount),
 				zap.Time("last_oauth_attempt", info.LastOAuthAttempt))
 		}
@@ -801,14 +813,14 @@ func (mc *Client) performHealthCheck() {
 			// Log once at WARN then suppress — server needs manual reconnect
 			if info.RetryCount == types.MaxConnectionRetries {
 				mc.logger.Warn("Giving up automatic reconnection after max retries — use manual reconnect or reconnect-on-use",
-					zap.String("server", mc.Config.Name),
+					zap.String("server", mc.GetConfig().Name),
 					zap.Int("retry_count", info.RetryCount))
 			}
 			return
 		}
 		if mc.ShouldRetry() {
 			mc.logger.Info("Attempting automatic reconnection with exponential backoff",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Int("retry_count", info.RetryCount))
 
 			mc.tryReconnect()
@@ -824,8 +836,8 @@ func (mc *Client) performHealthCheck() {
 	// Skip health checks for Docker servers to avoid interference with container management
 	if mc.isDockerServer() {
 		mc.logger.Debug("Skipping health check for Docker server",
-			zap.String("server", mc.Config.Name),
-			zap.String("command", mc.Config.Command))
+			zap.String("server", mc.GetConfig().Name),
+			zap.String("command", mc.GetConfig().Command))
 		return
 	}
 
@@ -836,7 +848,7 @@ func (mc *Client) performHealthCheck() {
 	listCtx, release, ok := mc.acquireListToolsContext(ctx, 5*time.Second)
 	if !ok {
 		mc.logger.Debug("Health check skipped - ListTools already in progress",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 		return
 	}
 
@@ -852,20 +864,20 @@ func (mc *Client) performHealthCheck() {
 		if mc.isConnectionError(err) {
 			if mc.recordHealthCheckFailure(err) {
 				mc.logger.Warn("Health check failed repeatedly, marking as error",
-					zap.String("server", mc.Config.Name),
+					zap.String("server", mc.GetConfig().Name),
 					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
 					zap.Error(err))
 				mc.StateManager.SetError(err)
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",
-					zap.String("server", mc.Config.Name),
+					zap.String("server", mc.GetConfig().Name),
 					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
 					zap.Int("threshold", healthCheckFailureThreshold),
 					zap.Error(err))
 			}
 		} else {
 			mc.logger.Debug("Health check failed with timeout (high activity), ignoring",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
 		}
 		return
@@ -873,7 +885,7 @@ func (mc *Client) performHealthCheck() {
 
 	mc.recordHealthCheckSuccess()
 	mc.logger.Debug("Health check passed successfully",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 }
 
 // recordHealthCheckFailure increments the consecutive-failure counter and
@@ -957,14 +969,14 @@ func (mc *Client) ForceReconnect(reason string) {
 
 	if mc.IsUserLoggedOut() {
 		mc.logger.Info("Force reconnect skipped - user explicitly logged out",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.String("reason", reason))
 		return
 	}
 
 	serverName := ""
-	if mc.Config != nil {
-		serverName = mc.Config.Name
+	if mc.GetConfig() != nil {
+		serverName = mc.GetConfig().Name
 	}
 
 	if mc.IsConnected() {
@@ -995,7 +1007,7 @@ func (mc *Client) ForceReconnect(reason string) {
 func (mc *Client) tryReconnect() {
 	if mc.IsUserLoggedOut() {
 		mc.logger.Info("Skipping reconnection attempt - user explicitly logged out",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 		return
 	}
 
@@ -1004,7 +1016,7 @@ func (mc *Client) tryReconnect() {
 	if mc.reconnectInProgress {
 		mc.reconnectMu.Unlock()
 		mc.logger.Debug("Reconnection already in progress, skipping duplicate attempt",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 		return
 	}
 	mc.reconnectInProgress = true
@@ -1022,7 +1034,7 @@ func (mc *Client) tryReconnect() {
 	defer cancel()
 
 	mc.logger.Info("Starting reconnection attempt",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.String("current_state", mc.StateManager.GetState().String()))
 
 	// First, disconnect the current client to clean up any broken connections
@@ -1031,7 +1043,7 @@ func (mc *Client) tryReconnect() {
 	mc.cancelInFlightListTools()
 	if err := mc.coreClient.Disconnect(); err != nil {
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 	}
 
@@ -1046,19 +1058,19 @@ func (mc *Client) tryReconnect() {
 		// Use different log levels based on error type and retry count
 		if mc.isOAuthError(err) {
 			mc.logger.Warn("OAuth reconnection attempt failed, extended backoff will apply",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.String("error_type", "oauth_authentication"),
 				zap.Error(err),
 				zap.Int("oauth_retry_count", info.OAuthRetryCount))
 		} else if mc.isNormalReconnectionError(err) && info.RetryCount <= 5 {
 			mc.logger.Warn("Reconnection attempt failed, will retry with exponential backoff",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.String("error_type", "normal_reconnection"),
 				zap.Error(err),
 				zap.Int("retry_count", info.RetryCount))
 		} else {
 			mc.logger.Error("Reconnection attempt failed",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err),
 				zap.Int("retry_count", info.RetryCount))
 		}
@@ -1067,7 +1079,7 @@ func (mc *Client) tryReconnect() {
 	}
 
 	mc.logger.Info("Reconnection attempt successful",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.String("new_state", mc.StateManager.GetState().String()))
 }
 
@@ -1121,8 +1133,8 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 	}()
 
 	serverName := ""
-	if mc.Config != nil {
-		serverName = mc.Config.Name
+	if mc.GetConfig() != nil {
+		serverName = mc.GetConfig().Name
 	}
 
 	mc.logger.Info("TryReconnectSync: starting synchronous reconnect",
@@ -1261,7 +1273,7 @@ func (mc *Client) isTokenRefreshScenario(err error) bool {
 	for _, indicator := range tokenRefreshIndicators {
 		if containsString(errStr, indicator) {
 			mc.logger.Debug("🔄 Detected token refresh scenario",
-				zap.String("server", mc.Config.Name),
+				zap.String("server", mc.GetConfig().Name),
 				zap.String("indicator", indicator))
 			return true
 		}
@@ -1378,7 +1390,7 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 	// Cache miss or expired - need to fetch fresh count
 	if !mc.IsConnected() {
 		mc.logger.Debug("🔍 Tool count fetch skipped - client not connected",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.String("state", mc.StateManager.GetState().String()))
 		return 0, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -1386,14 +1398,14 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 	listCtx, release, ok := mc.acquireListToolsContext(ctx, 30*time.Second)
 	if !ok {
 		mc.logger.Debug("🔍 Tool count fetch skipped - ListTools already in progress",
-			zap.String("server", mc.Config.Name))
+			zap.String("server", mc.GetConfig().Name))
 		// Return cached count even if expired rather than causing another concurrent call
 		return cachedCount, nil
 	}
 	defer release()
 
 	mc.logger.Debug("🔍 Tool count cache miss - fetching fresh count",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.Bool("cache_expired", !cachedTime.IsZero()),
 		zap.Duration("cache_age", time.Since(cachedTime)))
 
@@ -1403,7 +1415,7 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 	mc.publishListToolsResult(tools, err)
 	if err != nil {
 		mc.logger.Debug("Tool count fetch failed, returning cached value",
-			zap.String("server", mc.Config.Name),
+			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err),
 			zap.Int("cached_count", cachedCount))
 
@@ -1425,7 +1437,7 @@ func (mc *Client) GetCachedToolCount(ctx context.Context) (int, error) {
 	mc.setToolCountCache(freshCount)
 
 	mc.logger.Debug("🔍 Tool count cache updated",
-		zap.String("server", mc.Config.Name),
+		zap.String("server", mc.GetConfig().Name),
 		zap.Int("fresh_count", freshCount),
 		zap.Int("previous_count", cachedCount))
 
@@ -1450,7 +1462,7 @@ func (mc *Client) InvalidateToolCountCache() {
 	mc.toolCountMu.Unlock()
 
 	mc.logger.Debug("🔍 Tool count cache invalidated",
-		zap.String("server", mc.Config.Name))
+		zap.String("server", mc.GetConfig().Name))
 }
 
 // Helper function to check if string contains substring
@@ -1493,5 +1505,5 @@ func (mc *Client) setToolCountCache(count int) {
 
 // isDockerServer checks if the server is running via Docker
 func (mc *Client) isDockerServer() bool {
-	return containsString(mc.Config.Command, "docker")
+	return containsString(mc.GetConfig().Command, "docker")
 }

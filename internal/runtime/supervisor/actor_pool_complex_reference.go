@@ -16,10 +16,10 @@ import (
 // ActorPool manages the lifecycle of server actors and provides stats for Supervisor.
 // This replaces UpstreamAdapter with direct Actor integration (Phase 7.2).
 type ActorPool struct {
-	actors   map[string]*actor.Actor
-	mu       sync.RWMutex
-	logger   *zap.Logger
-	manager  *upstream.Manager // Use existing manager for client creation
+	actors  map[string]*actor.Actor
+	mu      sync.RWMutex
+	logger  *zap.Logger
+	manager *upstream.Manager // Use existing manager for client creation
 
 	// Event aggregation
 	eventCh   chan Event
@@ -218,12 +218,12 @@ func (p *ActorPool) GetServerState(name string) (*ServerState, error) {
 
 	state := &ServerState{
 		Name:      name,
-		Config:    client.Config,
-		Enabled:   client.Config.Enabled,
+		Config:    client.GetConfig(),
+		Enabled:   client.GetConfig().Enabled,
 		Connected: client.IsConnected(),
 	}
 
-	if client.Config.Quarantined {
+	if client.GetConfig().Quarantined {
 		state.Quarantined = true
 	}
 
@@ -258,12 +258,12 @@ func (p *ActorPool) GetAllStates() map[string]*ServerState {
 		connected := client.IsConnected()
 		state := &ServerState{
 			Name:      name,
-			Config:    client.Config,
-			Enabled:   client.Config.Enabled,
+			Config:    client.GetConfig(),
+			Enabled:   client.GetConfig().Enabled,
 			Connected: connected,
 		}
 
-		if client.Config.Quarantined {
+		if client.GetConfig().Quarantined {
 			state.Quarantined = true
 		}
 
@@ -328,9 +328,9 @@ func (p *ActorPool) forwardActorEvents(name string, a *actor.Actor) {
 			ServerName: name,
 			Timestamp:  event.Timestamp,
 			Payload: map[string]interface{}{
-				"connected":    event.State == actor.StateConnected,
-				"state":        string(event.State),
-				"actor_event":  string(event.Type),
+				"connected":   event.State == actor.StateConnected,
+				"state":       string(event.State),
+				"actor_event": string(event.Type),
 			},
 		})
 	}

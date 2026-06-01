@@ -61,3 +61,50 @@ func TestDiscoverTools_ConfigRace(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestConnect_ConfigRace reproduces the sibling MCP-770 race surfaced on PR #555
+// (macOS -race unit job): reconcile spawns AddServer (-> SetConfig writes the
+// mc.Config pointer under mc.mu) and ConnectServer (-> Client.Connect) as
+// concurrent goroutines. Connect releases mc.mu before the slow core connect and
+// logged the server name by dereferencing mc.Config in that unlocked window,
+// racing SetConfig's write. The fix snapshots the name under the Phase-1 lock.
+// Run under `go test -race`.
+func TestConnect_ConfigRace(t *testing.T) {
+	serverConfig := &config.ServerConfig{
+		Name:     "race-server",
+		URL:      "http://127.0.0.1:0", // unreachable -> core Connect fails fast
+		Protocol: "http",
+		Enabled:  true,
+		Created:  time.Now(),
+	}
+
+	manager, client := createTestManagerWithClient(t, serverConfig)
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Writer: reconcile add path -> SetConfig swaps the mc.Config pointer.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			cfg := *serverConfig
+			cfg.Created = time.Now()
+			_ = manager.AddServerConfig(serverConfig.Name, &cfg)
+		}
+	}()
+
+	// Reader: reconcile connect path -> Client.Connect reads the config in its
+	// unlocked phase. The failing core connect leaves the client in Error state,
+	// so each iteration passes the connecting/ready guard and reaches the read.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			_ = client.Connect(ctx)
+			cancel()
+		}
+	}()
+
+	wg.Wait()
+}

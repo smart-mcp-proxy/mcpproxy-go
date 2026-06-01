@@ -18,9 +18,9 @@ import (
 func newTestReadyClient(t *testing.T) *Client {
 	t.Helper()
 	mc := &Client{
-		Config: &config.ServerConfig{Name: "test-server"},
 		logger: zap.NewNop(),
 	}
+	mc.SetConfig(&config.ServerConfig{Name: "test-server"})
 	mc.StateManager = types.NewStateManager()
 	mc.StateManager.TransitionTo(types.StateConnecting)
 	mc.StateManager.TransitionTo(types.StateReady)
