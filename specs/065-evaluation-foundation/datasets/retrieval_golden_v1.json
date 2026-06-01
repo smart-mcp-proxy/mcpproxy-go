@@ -1,0 +1,595 @@
+{
+  "corpus_version": "corpus_v1",
+  "queries": [
+    {
+      "id": "q-fs-read",
+      "query": "Show me the full text content stored inside a file on disk",
+      "labels": [
+        {
+          "tool_id": "filesystem:read_text_file",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:read_file",
+          "relevance": 1
+        },
+        {
+          "tool_id": "filesystem:read_multiple_files",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-fs-read-many",
+      "query": "Open several documents at once and return all of their contents together",
+      "labels": [
+        {
+          "tool_id": "filesystem:read_multiple_files",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:read_text_file",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-fs-write",
+      "query": "Save this text as a brand-new file, replacing whatever was there before",
+      "labels": [
+        {
+          "tool_id": "filesystem:write_file",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-fs-edit",
+      "query": "Change a handful of specific lines inside an existing text document",
+      "labels": [
+        {
+          "tool_id": "filesystem:edit_file",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:write_file",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-fs-list",
+      "query": "Give me a listing of everything contained in a particular folder",
+      "labels": [
+        {
+          "tool_id": "filesystem:list_directory",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:list_directory_with_sizes",
+          "relevance": 1
+        },
+        {
+          "tool_id": "filesystem:directory_tree",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-fs-list-sizes",
+      "query": "List a folder's contents and tell me how large each item is",
+      "labels": [
+        {
+          "tool_id": "filesystem:list_directory_with_sizes",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:list_directory",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-fs-tree",
+      "query": "Produce a nested map of a directory and all of its subfolders",
+      "labels": [
+        {
+          "tool_id": "filesystem:directory_tree",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:list_directory",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-fs-search",
+      "query": "Locate files anywhere beneath a folder whose names match a wildcard pattern",
+      "labels": [
+        {
+          "tool_id": "filesystem:search_files",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:search_nodes",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of memory:search_nodes (both 'search', but this is a filename lookup on disk, not a graph query)"
+    },
+    {
+      "id": "q-fs-mkdir",
+      "query": "Make sure a nested folder path exists, creating any missing parents",
+      "labels": [
+        {
+          "tool_id": "filesystem:create_directory",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-fs-move",
+      "query": "Rename a file or relocate it into a different directory",
+      "labels": [
+        {
+          "tool_id": "filesystem:move_file",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-fs-info",
+      "query": "Get detailed metadata such as size and timestamps for one file",
+      "labels": [
+        {
+          "tool_id": "filesystem:get_file_info",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-fs-media",
+      "query": "Load an image and return its base64 data along with the mime type",
+      "labels": [
+        {
+          "tool_id": "filesystem:read_media_file",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-fs-allowed",
+      "query": "Which directories is this sandbox actually permitted to touch?",
+      "labels": [
+        {
+          "tool_id": "filesystem:list_allowed_directories",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-stage",
+      "query": "Put my modified files into the staging area for the next commit",
+      "labels": [
+        {
+          "tool_id": "git:git_add",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-commit",
+      "query": "Permanently record my staged changes into the project's revision history",
+      "labels": [
+        {
+          "tool_id": "git:git_commit",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:add_observations",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of memory:add_observations (both 'record/add', but this writes a VCS commit, not graph facts)"
+    },
+    {
+      "id": "q-git-status",
+      "query": "Tell me which files are currently modified, staged, or untracked",
+      "labels": [
+        {
+          "tool_id": "git:git_status",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-log",
+      "query": "Show the history of past commits in this repository",
+      "labels": [
+        {
+          "tool_id": "git:git_log",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-diff-unstaged",
+      "query": "What edits have I made in my working copy that aren't staged yet?",
+      "labels": [
+        {
+          "tool_id": "git:git_diff_unstaged",
+          "relevance": 2
+        },
+        {
+          "tool_id": "git:git_diff",
+          "relevance": 1
+        },
+        {
+          "tool_id": "git:git_status",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-git-diff-staged",
+      "query": "Show only the changes I've already added to the index",
+      "labels": [
+        {
+          "tool_id": "git:git_diff_staged",
+          "relevance": 2
+        },
+        {
+          "tool_id": "git:git_diff",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-git-diff",
+      "query": "Compare two branches and show how they differ",
+      "labels": [
+        {
+          "tool_id": "git:git_diff",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-branch-list",
+      "query": "List all of the branches that exist in this repository",
+      "labels": [
+        {
+          "tool_id": "git:git_branch",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-create-branch",
+      "query": "Start a new branch based off the current one",
+      "labels": [
+        {
+          "tool_id": "git:git_create_branch",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-checkout",
+      "query": "Switch my working copy over to a different branch",
+      "labels": [
+        {
+          "tool_id": "git:git_checkout",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-show",
+      "query": "Display the full contents and changes of one specific commit",
+      "labels": [
+        {
+          "tool_id": "git:git_show",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-git-reset",
+      "query": "Unstage everything I've added, putting it back into the working directory",
+      "labels": [
+        {
+          "tool_id": "git:git_reset",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-mem-create-entity",
+      "query": "Add brand-new nodes to my knowledge graph",
+      "labels": [
+        {
+          "tool_id": "memory:create_entities",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:create_relations",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-mem-create-rel",
+      "query": "Connect two existing nodes together with a labeled relationship",
+      "labels": [
+        {
+          "tool_id": "memory:create_relations",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-mem-add-obs",
+      "query": "Attach a few additional facts to a node I already stored",
+      "labels": [
+        {
+          "tool_id": "memory:add_observations",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-mem-search",
+      "query": "Find stored notes in my knowledge base that mention a particular topic",
+      "labels": [
+        {
+          "tool_id": "memory:search_nodes",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:search_files",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of filesystem:search_files (both 'search', but this queries the graph, not the filesystem)"
+    },
+    {
+      "id": "q-mem-read-graph",
+      "query": "Dump out my entire knowledge graph at once",
+      "labels": [
+        {
+          "tool_id": "memory:read_graph",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-mem-open",
+      "query": "Retrieve a couple of specific nodes by their exact names",
+      "labels": [
+        {
+          "tool_id": "memory:open_nodes",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:search_nodes",
+          "relevance": 1
+        }
+      ]
+    },
+    {
+      "id": "q-mem-del-entity",
+      "query": "Remove some nodes and every link attached to them",
+      "labels": [
+        {
+          "tool_id": "memory:delete_entities",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-mem-del-rel",
+      "query": "Delete particular relationships between stored nodes",
+      "labels": [
+        {
+          "tool_id": "memory:delete_relations",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-mem-del-obs",
+      "query": "Strip specific facts off a node without deleting the node itself",
+      "labels": [
+        {
+          "tool_id": "memory:delete_observations",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-sql-select",
+      "query": "Run a query to pull matching rows out of my local relational database",
+      "labels": [
+        {
+          "tool_id": "sqlite:read_query",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:read_text_file",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of filesystem:read_text_file (both 'read', but this is a SQL SELECT, not reading a file)"
+    },
+    {
+      "id": "q-sql-write",
+      "query": "Insert, update, or delete records in the database",
+      "labels": [
+        {
+          "tool_id": "sqlite:write_query",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:write_file",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of filesystem:write_file (both 'write', but this mutates DB rows, not a file)"
+    },
+    {
+      "id": "q-sql-create-table",
+      "query": "Define a new table with its columns in the database",
+      "labels": [
+        {
+          "tool_id": "sqlite:create_table",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-sql-list-tables",
+      "query": "Show me every table that exists in this database",
+      "labels": [
+        {
+          "tool_id": "sqlite:list_tables",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-sql-describe",
+      "query": "What columns and types does a given table have?",
+      "labels": [
+        {
+          "tool_id": "sqlite:describe_table",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-sql-insight",
+      "query": "Record a business takeaway into the running analysis memo",
+      "labels": [
+        {
+          "tool_id": "sqlite:append_insight",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:add_observations",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of memory:add_observations (both append a fact, but this targets the SQLite insight memo)"
+    },
+    {
+      "id": "q-fetch",
+      "query": "Download a web page from a URL and give me its content as markdown",
+      "labels": [
+        {
+          "tool_id": "fetch:fetch",
+          "relevance": 2
+        },
+        {
+          "tool_id": "filesystem:read_text_file",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of filesystem:read_text_file (both return text, but this retrieves a remote URL, not a local file)"
+    },
+    {
+      "id": "q-time-now",
+      "query": "What is the current wall-clock time in a given city's timezone?",
+      "labels": [
+        {
+          "tool_id": "time:get_current_time",
+          "relevance": 2
+        },
+        {
+          "tool_id": "time:convert_time",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of time:convert_time (same server, but this reports 'now', it does not translate a supplied timestamp)"
+    },
+    {
+      "id": "q-time-convert",
+      "query": "Translate a specific timestamp from one timezone into another",
+      "labels": [
+        {
+          "tool_id": "time:convert_time",
+          "relevance": 2
+        },
+        {
+          "tool_id": "time:get_current_time",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of time:get_current_time (same server, but this converts a given time rather than reading the clock)"
+    },
+    {
+      "id": "q-seqthink",
+      "query": "Help me reason through a hard problem step by step, revising my thoughts as I go",
+      "labels": [
+        {
+          "tool_id": "sequential-thinking:sequentialthinking",
+          "relevance": 2
+        }
+      ]
+    },
+    {
+      "id": "q-hn-persist-fact",
+      "query": "I want to persist a new piece of structured information so I can recall it later",
+      "labels": [
+        {
+          "tool_id": "memory:create_entities",
+          "relevance": 2
+        },
+        {
+          "tool_id": "sqlite:write_query",
+          "relevance": 1
+        },
+        {
+          "tool_id": "filesystem:write_file",
+          "relevance": 1
+        }
+      ],
+      "notes": "graded: 'persist information' is genuinely ambiguous across graph/DB/file backends"
+    },
+    {
+      "id": "q-hn-history",
+      "query": "Look back over the recorded history of what changed and when",
+      "labels": [
+        {
+          "tool_id": "git:git_log",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:read_graph",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of memory:read_graph (both surface stored state, but 'history of changes' means the VCS log)"
+    },
+    {
+      "id": "q-hn-delete-records",
+      "query": "Get rid of some stored records I no longer need",
+      "labels": [
+        {
+          "tool_id": "sqlite:write_query",
+          "relevance": 2
+        },
+        {
+          "tool_id": "memory:delete_entities",
+          "relevance": 1
+        },
+        {
+          "tool_id": "filesystem:move_file",
+          "relevance": 0
+        }
+      ],
+      "notes": "hard-negative: near-dup of filesystem:move_file (deletion is not relocation); graded across DB/graph"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/specs/065/score-report.schema.json",
+  "title": "Evaluation score report (retrieval + security)",
+  "description": "Generated artifact; NOT committed into PRs (CN-003). One file may hold either or both report types.",
+  "type": "object",
+  "properties": {
+    "retrieval": {
+      "type": "object",
+      "required": ["metrics", "gate"],
+      "properties": {
+        "corpus_version": { "type": "string" },
+        "golden_version": { "type": "string" },
+        "runs_averaged": { "type": "integer", "minimum": 1 },
+        "metrics": {
+          "type": "object",
+          "required": ["recall_at", "mrr", "ndcg_at_10"],
+          "properties": {
+            "recall_at": { "type": "object", "properties": { "1": {"type":"number"}, "3": {"type":"number"}, "5": {"type":"number"}, "10": {"type":"number"} } },
+            "mrr": { "type": "number" },
+            "ndcg_at_10": { "type": "number" },
+            "map": { "type": "number" }
+          }
+        },
+        "baseline_delta": { "type": "object" },
+        "gate": {
+          "type": "object",
+          "required": ["passed"],
+          "properties": { "passed": {"type":"boolean"}, "metric": {"type":"string"}, "tolerance": {"type":"number"} }
+        }
+      }
+    },
+    "security": {
+      "type": "object",
+      "required": ["per_detector"],
+      "properties": {
+        "runs_averaged": { "type": "integer", "minimum": 1 },
+        "per_detector": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["detector", "precision", "recall", "f1", "fpr"],
+            "properties": {
+              "detector": { "type": "string" },
+              "precision": { "type": "number" },
+              "recall": { "type": "number" },
+              "f1": { "type": "number" },
+              "fpr": { "type": "number", "description": "False-positive rate — the quiet-security gate metric." },
+              "tp": {"type":"integer"}, "fp": {"type":"integer"}, "tn": {"type":"integer"}, "fn": {"type":"integer"},
+              "gate": {
+                "type": "object",
+                "properties": { "passed": {"type":"boolean"}, "fpr_ceiling": {"type":"number"}, "recall_floor": {"type":"number"} }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

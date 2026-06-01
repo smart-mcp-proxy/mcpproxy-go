@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/specs/065/scan-verdict.schema.json",
+  "title": "D2 scan-eval verdict output",
+  "description": "Per-entry, per-detector verdicts emitted by cmd/scan-eval. This is the contract the Python SecurityScorer (B3) consumes to derive per-detector TP/FP/TN/FN and P/R/F1/FPR (data-model §5). Generated artifact; NOT committed into PRs (CN-003).",
+  "type": "object",
+  "required": ["detectors", "entries"],
+  "properties": {
+    "corpus_version": {
+      "type": "string",
+      "description": "Echoed from the corpus (corpus_version|version), or 'unknown' when absent. FK back to the security corpus snapshot."
+    },
+    "detectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "description": "The detectors that were run, in order (e.g. ['sensitive-data'])."
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "category", "verdicts"],
+        "properties": {
+          "id": { "type": "string", "description": "Echoed corpus entry id (ground truth join key)." },
+          "label": { "type": "string", "enum": ["malicious", "benign"], "description": "Echoed ground-truth label." },
+          "category": {
+            "type": "string",
+            "enum": ["tool_poisoning", "prompt_injection", "shadowing", "rug_pull", "benign", "hard_negative"],
+            "description": "Echoed ground-truth category."
+          },
+          "verdicts": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["detector", "flagged", "detections"],
+              "properties": {
+                "detector": { "type": "string" },
+                "flagged": {
+                  "type": "boolean",
+                  "description": "True if the detector flagged the entry's description. B3 compares this against label=='malicious'."
+                },
+                "max_severity": {
+                  "type": "string",
+                  "description": "Highest severity among detections (critical|high|medium|low), or empty when not flagged.",
+                  "enum": ["", "critical", "high", "medium", "low"]
+                },
+                "detections": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["type", "category", "severity"],
+                    "properties": {
+                      "type": { "type": "string" },
+                      "category": { "type": "string" },
+                      "severity": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

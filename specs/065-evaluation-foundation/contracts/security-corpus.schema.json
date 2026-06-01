@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/specs/065/security-corpus.schema.json",
+  "title": "D2 security regression corpus",
+  "type": "object",
+  "required": ["entries"],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "description", "label", "category", "provenance"],
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string", "description": "The tool description text under test." },
+          "label": { "type": "string", "enum": ["malicious", "benign"] },
+          "category": { "type": "string", "enum": ["tool_poisoning", "prompt_injection", "shadowing", "rug_pull", "benign", "hard_negative"] },
+          "provenance": {
+            "type": "object",
+            "required": ["source", "license"],
+            "properties": {
+              "source": { "type": "string", "description": "e.g. 'DVMCP', 'self-authored', 'mcp-injection-experiments'." },
+              "license": { "type": "string", "description": "MUST be redistributable (e.g. MIT, self-authored); restricted corpora are referenced externally, not vendored (CN-005)." }
+            }
+          }
+        }
+      }
+    }
+  }
+}
