@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"sort"
@@ -24,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -114,7 +116,17 @@ type ServerController interface {
 
 	// Registry browsing (Phase 7)
 	ListRegistries() ([]interface{}, error)
-	SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error)
+	// SearchRegistryServers returns the registry's servers plus a cache
+	// freshness indicator (spec 070 FR-007). A registry requiring an
+	// unconfigured key surfaces as a wrapped registries.ErrRegistryKeyMissing.
+	SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, *contracts.RegistryCacheInfo, error)
+	// RefreshRegistryCache drops a registry's cached server lists (FR-007).
+	RefreshRegistryCache(registryID string) (int, error)
+	// AddServerFromRegistryRef resolves a registry reference server-side and
+	// persists it quarantined (spec 070 keystone). On failure it returns a
+	// stable cross-surface error code (*contracts.RegistryAddError) alongside
+	// the raw error so the handler can map code → HTTP status.
+	AddServerFromRegistryRef(ctx context.Context, registryID, serverID, name string, env map[string]string, enabled *bool) (*config.ServerConfig, *contracts.RegistryAddError, error)
 
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
@@ -619,6 +631,8 @@ func (s *Server) setupRoutes() {
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
+		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)           // spec 070 FR-007
+		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
@@ -3980,8 +3994,22 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	servers, err := s.controller.SearchRegistryServers(registryID, tag, query, limit)
+	servers, cacheInfo, err := s.controller.SearchRegistryServers(registryID, tag, query, limit)
 	if err != nil {
+		// FR-008: a registry that needs an unconfigured key is not an error —
+		// return an empty result marked unavailable so the overall search still
+		// succeeds and the unavailability is visible.
+		if errors.Is(err, registries.ErrRegistryKeyMissing) {
+			s.writeSuccess(w, contracts.SearchRegistryServersResponse{
+				RegistryID:  registryID,
+				Servers:     []contracts.RepositoryServer{},
+				Total:       0,
+				Query:       query,
+				Tag:         tag,
+				Unavailable: &contracts.RegistryUnavailable{Reason: err.Error()},
+			})
+			return
+		}
 		s.logger.Error("Failed to search registry servers", "registry", registryID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to search servers: %v", err))
 		return
@@ -4029,9 +4057,131 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 		Total:      len(contractServers),
 		Query:      query,
 		Tag:        tag,
+		Cache:      cacheInfo,
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// handleAddFromRegistry godoc
+// @Summary      Add an upstream server from a registry reference
+// @Description  Resolves a registry server reference server-side, re-derives a validated config, and persists it quarantined (spec 070 keystone). The client never sends a config blob — command/args/url and the quarantine flag are derived from the registry entry, not the request.
+// @Tags         registries
+// @Accept       json
+// @Produce      json
+// @Param        id        path      string                            true   "Registry ID"
+// @Param        serverId  path      string                            true   "Server ID within the registry"
+// @Param        body      body      contracts.AddFromRegistryRequest  false  "Optional overrides (name, env, enabled)"
+// @Success      200       {object}  contracts.SuccessResponse         "Server added (quarantined)"
+// @Failure      400       {object}  contracts.ErrorResponse           "no_install_info | missing_required_input | duplicate_name"
+// @Failure      404       {object}  contracts.ErrorResponse           "registry_not_found | server_not_found"
+// @Failure      500       {object}  contracts.ErrorResponse           "Internal server error"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries/{id}/servers/{serverId}/add [post]
+func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	serverID := chi.URLParam(r, "serverId")
+	if registryID == "" || serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "registry id and server id are required")
+		return
+	}
+
+	// Body is optional: missing/empty body means "no overrides".
+	var req contracts.AddFromRegistryRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+			return
+		}
+	}
+
+	logger := s.getRequestLogger(r)
+	cfg, rerr, err := s.controller.AddServerFromRegistryRef(r.Context(), registryID, serverID, req.Name, req.Env, req.Enabled)
+	if err != nil {
+		status := registryAddErrorStatus(rerr.Code)
+		if status >= http.StatusInternalServerError {
+			logger.Error("Add from registry failed", "registry", registryID, "server", serverID, "error", err)
+		}
+		s.writeRegistryAddError(w, r, status, rerr)
+		return
+	}
+
+	s.writeSuccess(w, contracts.AddFromRegistryData{
+		Server: contracts.AddedServerSummary{
+			Name:        cfg.Name,
+			Protocol:    cfg.Protocol,
+			Command:     cfg.Command,
+			Args:        cfg.Args,
+			URL:         cfg.URL,
+			Enabled:     cfg.Enabled,
+			Quarantined: cfg.Quarantined,
+		},
+	})
+}
+
+// handleRefreshRegistryCache godoc
+// @Summary      Refresh a registry's cached server list
+// @Description  Invalidates the cached server lists for a registry so the next search re-fetches fresh data from the source (spec 070 FR-007). Returns how many cache entries were dropped.
+// @Tags         registries
+// @Produce      json
+// @Param        id   path      string  true  "Registry ID"
+// @Success      200  {object}  contracts.RefreshRegistryResponse  "Registry cache refreshed"
+// @Failure      400  {object}  contracts.ErrorResponse            "Registry ID is required"
+// @Failure      500  {object}  contracts.ErrorResponse            "Failed to refresh registry cache"
+// @Router       /api/v1/registries/{id}/refresh [post]
+func (s *Server) handleRefreshRegistryCache(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	if registryID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
+		return
+	}
+
+	cleared, err := s.controller.RefreshRegistryCache(registryID)
+	if err != nil {
+		s.logger.Error("Failed to refresh registry cache", "registry", registryID, "error", err)
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to refresh registry cache: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, contracts.RefreshRegistryResponse{
+		RegistryID: registryID,
+		Cleared:    cleared,
+	})
+}
+
+// registryAddErrorStatus maps a stable add-from-registry error code to its HTTP
+// status (spec 070 contract). An unknown/empty code is an internal error.
+func registryAddErrorStatus(code string) int {
+	switch code {
+	case "registry_not_found", "server_not_found":
+		return http.StatusNotFound
+	case "no_install_info", "missing_required_input", "duplicate_name":
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// writeRegistryAddError writes the structured cross-surface error envelope so
+// every surface can read the same stable `code` and (for missing inputs) the
+// exact keys to supply.
+func (s *Server) writeRegistryAddError(w http.ResponseWriter, r *http.Request, status int, rerr *contracts.RegistryAddError) {
+	requestID := reqcontext.GetRequestID(r.Context())
+	body := struct {
+		Success       bool     `json:"success"`
+		Error         string   `json:"error"`
+		Code          string   `json:"code"`
+		MissingInputs []string `json:"missing_inputs,omitempty"`
+		RequestID     string   `json:"request_id,omitempty"`
+	}{
+		Success:       false,
+		Error:         rerr.Message,
+		Code:          rerr.Code,
+		MissingInputs: rerr.MissingInputs,
+		RequestID:     requestID,
+	}
+	s.writeJSON(w, status, body)
 }
 
 // Helper functions for type conversion

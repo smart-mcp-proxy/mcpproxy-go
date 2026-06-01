@@ -639,6 +639,10 @@ type RegistryEntry struct {
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
 	Count       interface{} `json:"count,omitempty" swaggertype:"primitive,string"` // number or string
+	// RequiresKey marks a registry that needs an API key to be queried. When
+	// true and no key is configured, the registry is skipped/marked unavailable
+	// rather than failing the whole search (FR-008).
+	RequiresKey bool `json:"requires_key,omitempty"`
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration
@@ -808,6 +812,60 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 	}
 }
 
+// DefaultRegistries returns the built-in MCP server discovery registries. It is
+// the single source of truth for the shipped defaults: DefaultConfig() seeds
+// them into a fresh config, and the registries package merges them with any
+// user-defined entries so a custom registry never drops the defaults (FR-006).
+func DefaultRegistries() []RegistryEntry {
+	return []RegistryEntry{
+		{
+			ID:          "pulse",
+			Name:        "Pulse MCP",
+			Description: "Browse and discover MCP use-cases, servers, clients, and news",
+			URL:         "https://www.pulsemcp.com/",
+			ServersURL:  "https://api.pulsemcp.com/v0beta/servers",
+			Tags:        []string{"verified"},
+			Protocol:    "custom/pulse",
+		},
+		{
+			ID:          "docker-mcp-catalog",
+			Name:        "Docker MCP Catalog",
+			Description: "A collection of secure, high-quality MCP servers as docker images",
+			URL:         "https://hub.docker.com/catalogs/mcp",
+			ServersURL:  "https://hub.docker.com/v2/repositories/mcp/",
+			Tags:        []string{"verified"},
+			Protocol:    "custom/docker",
+		},
+		{
+			ID:          "fleur",
+			Name:        "Fleur",
+			Description: "Fleur is the app store for Claude",
+			URL:         "https://www.fleurmcp.com/",
+			ServersURL:  "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json",
+			Tags:        []string{"verified"},
+			Protocol:    "custom/fleur",
+		},
+		{
+			ID:          "azure-mcp-demo",
+			Name:        "Azure MCP Registry Demo",
+			Description: "A reference implementation of MCP registry using Azure API Center",
+			URL:         "https://demo.registry.azure-mcp.net/",
+			ServersURL:  "https://demo.registry.azure-mcp.net/v0/servers",
+			Tags:        []string{"verified", "demo", "azure", "reference"},
+			Protocol:    "mcp/v0",
+		},
+		{
+			ID:          "remote-mcp-servers",
+			Name:        "Remote MCP Servers",
+			Description: "Community-maintained list of remote Model Context Protocol servers",
+			URL:         "https://remote-mcp-servers.com/",
+			ServersURL:  "https://remote-mcp-servers.com/api/servers",
+			Tags:        []string{"verified", "community", "remote"},
+			Protocol:    "custom/remote",
+		},
+	}
+}
+
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
@@ -862,54 +920,10 @@ func DefaultConfig() *Config {
 		// Default output sanitisation settings (Spec 054 Track B)
 		OutputSanitisation: DefaultOutputSanitisationConfig(),
 
-		// Default registries for MCP server discovery
-		Registries: []RegistryEntry{
-			{
-				ID:          "pulse",
-				Name:        "Pulse MCP",
-				Description: "Browse and discover MCP use-cases, servers, clients, and news",
-				URL:         "https://www.pulsemcp.com/",
-				ServersURL:  "https://api.pulsemcp.com/v0beta/servers",
-				Tags:        []string{"verified"},
-				Protocol:    "custom/pulse",
-			},
-			{
-				ID:          "docker-mcp-catalog",
-				Name:        "Docker MCP Catalog",
-				Description: "A collection of secure, high-quality MCP servers as docker images",
-				URL:         "https://hub.docker.com/catalogs/mcp",
-				ServersURL:  "https://hub.docker.com/v2/repositories/mcp/",
-				Tags:        []string{"verified"},
-				Protocol:    "custom/docker",
-			},
-			{
-				ID:          "fleur",
-				Name:        "Fleur",
-				Description: "Fleur is the app store for Claude",
-				URL:         "https://www.fleurmcp.com/",
-				ServersURL:  "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json",
-				Tags:        []string{"verified"},
-				Protocol:    "custom/fleur",
-			},
-			{
-				ID:          "azure-mcp-demo",
-				Name:        "Azure MCP Registry Demo",
-				Description: "A reference implementation of MCP registry using Azure API Center",
-				URL:         "https://demo.registry.azure-mcp.net/",
-				ServersURL:  "https://demo.registry.azure-mcp.net/v0/servers",
-				Tags:        []string{"verified", "demo", "azure", "reference"},
-				Protocol:    "mcp/v0",
-			},
-			{
-				ID:          "remote-mcp-servers",
-				Name:        "Remote MCP Servers",
-				Description: "Community-maintained list of remote Model Context Protocol servers",
-				URL:         "https://remote-mcp-servers.com/",
-				ServersURL:  "https://remote-mcp-servers.com/api/servers",
-				Tags:        []string{"verified", "community", "remote"},
-				Protocol:    "custom/remote",
-			},
-		},
+		// Default registries for MCP server discovery. Sourced from
+		// DefaultRegistries() so the built-in list has a single definition that
+		// the registries-package merge (FR-006) can reuse.
+		Registries: DefaultRegistries(),
 
 		// Default feature flags
 		Features: func() *FeatureFlags {

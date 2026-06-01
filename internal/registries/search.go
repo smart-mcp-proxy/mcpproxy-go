@@ -3,6 +3,7 @@ package registries
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -11,6 +12,19 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 )
+
+// Sentinel errors for single-server lookup. Surfaces map these to stable error
+// codes (registry_not_found / server_not_found) for cross-surface consistency
+// (CN-004).
+var (
+	ErrRegistryNotFound = errors.New("registry not found")
+	ErrServerNotFound   = errors.New("server not found in registry")
+)
+
+// findServerByIDLimit caps how many servers FindServerByID fetches before
+// matching. Most registries return far fewer; the resilience phase (US4) can
+// refine pagination if a target sits beyond this window.
+const findServerByIDLimit = 50
 
 // Constants for repeated strings
 const (
@@ -34,6 +48,13 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 	reg := FindRegistry(registryID)
 	if reg == nil {
 		return nil, fmt.Errorf("registry '%s' not found", registryID)
+	}
+
+	// FR-008: skip a key-requiring registry when no key is configured, rather
+	// than performing a doomed fetch. Surfaces map ErrRegistryKeyMissing to an
+	// "unavailable" marker so the overall search still succeeds.
+	if err := checkRegistryKey(reg); err != nil {
+		return nil, err
 	}
 
 	if reg.ServersURL == "" {
@@ -72,6 +93,35 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 	}
 
 	return filtered, nil
+}
+
+// FindServerByID resolves a single server within a registry by its exact ID.
+// It performs a live registry fetch and is the shared resolution path used by
+// every add-from-registry surface (CN-001/CN-004). Returns ErrRegistryNotFound
+// when registryID does not resolve and ErrServerNotFound when no server matches.
+func FindServerByID(ctx context.Context, registryID, serverID string, guesser *experiments.Guesser) (*ServerEntry, error) {
+	if FindRegistry(registryID) == nil {
+		return nil, ErrRegistryNotFound
+	}
+
+	servers, err := SearchServers(ctx, registryID, "", "", findServerByIDLimit, guesser)
+	if err != nil {
+		return nil, err
+	}
+
+	return findServerByIDIn(servers, serverID)
+}
+
+// findServerByIDIn returns the first server whose ID exactly matches serverID.
+// Pure (no network) so the not-found path is unit-testable.
+func findServerByIDIn(servers []ServerEntry, serverID string) (*ServerEntry, error) {
+	for i := range servers {
+		if servers[i].ID == serverID {
+			match := servers[i] // copy to avoid aliasing the slice backing array
+			return &match, nil
+		}
+	}
+	return nil, ErrServerNotFound
 }
 
 // fetchServers fetches and parses servers from a registry based on its protocol

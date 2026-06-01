@@ -1076,11 +1076,17 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 		return fmt.Errorf("failed to save server to storage: %w", err)
 	}
 
-	// Update runtime config
+	// Update runtime config.
+	// runtime.Config() returns the live immutable snapshot, which background
+	// goroutines (e.g. LoadConfiguredServers, DiscoverAndIndexTools) may be
+	// ranging over concurrently. Mutating its Servers slice in place is a data
+	// race, so copy-on-write: clone the config and its server list, append to
+	// the clone, then publish atomically via UpdateConfig.
 	currentConfig := s.runtime.Config()
 	if currentConfig != nil {
-		currentConfig.Servers = append(currentConfig.Servers, serverConfig)
-		s.runtime.UpdateConfig(currentConfig, "")
+		updatedConfig := *currentConfig
+		updatedConfig.Servers = append(append([]*config.ServerConfig(nil), currentConfig.Servers...), serverConfig)
+		s.runtime.UpdateConfig(&updatedConfig, "")
 	}
 
 	// Save configuration to file
@@ -2436,8 +2442,13 @@ func (s *Server) ListRegistries() ([]interface{}, error) {
 }
 
 // SearchRegistryServers searches for servers in a specific registry (Phase 7)
-func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
+func (s *Server) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, *contracts.RegistryCacheInfo, error) {
 	return s.runtime.SearchRegistryServers(registryID, tag, query, limit)
+}
+
+// RefreshRegistryCache invalidates a registry's cached server lists (spec 070 FR-007).
+func (s *Server) RefreshRegistryCache(registryID string) (int, error) {
+	return s.runtime.RefreshRegistryCache(registryID)
 }
 
 // GetVersionInfo returns the current version information from the update checker.

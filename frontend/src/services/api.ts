@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RepositoryServer, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -8,6 +8,30 @@ export interface APIAuthEvent {
 }
 
 type APIEventListener = (event: APIAuthEvent) => void
+
+// Spec 070: result of the reference-based add-from-registry flow. Unlike the
+// generic request() helper (which collapses errors to a single message), this
+// carries the stable cross-surface error `code` and the missing-input names so
+// the Web UI can drive the required-input prompt without re-parsing strings.
+export interface AddedServerSummary {
+  name: string
+  protocol?: string
+  command?: string
+  args?: string[]
+  url?: string
+  quarantined?: boolean
+}
+
+export interface AddFromRegistryResult {
+  success: boolean
+  server?: AddedServerSummary
+  error?: string
+  // Stable cross-surface code: missing_required_input | no_install_info |
+  // duplicate_name | registry_not_found | server_not_found
+  code?: string
+  // Names of unmet required inputs; present when code === 'missing_required_input'.
+  missingInputs?: string[]
+}
 
 class APIService {
   private baseUrl = ''
@@ -643,38 +667,56 @@ class APIService {
     return this.request<SearchRegistryServersResponse>(url)
   }
 
-  async addServerFromRepository(server: RepositoryServer): Promise<APIResponse<any>> {
-    // Use the upstream_servers tool to add the server
-    const args: Record<string, any> = {
-      operation: 'add',
-      name: server.id,
-      enabled: true,
-      protocol: 'stdio'
-    }
+  // Spec 070 (CN-001): add a server to upstream by *reference* — the server
+  // re-derives and validates the config from the registry entry. The client no
+  // longer splits install_cmd / chooses protocol (that client-side parsing was
+  // the source of issue #483 and let a buggy client smuggle in arbitrary
+  // command/args). All add surfaces (REST/MCP/CLI) funnel through the same
+  // backend keystone (AddServerFromRegistry), so identical input → identical
+  // persisted, quarantined config (CN-004).
+  async addServerFromRegistry(
+    registryId: string,
+    serverId: string,
+    opts?: { name?: string; enabled?: boolean; env?: Record<string, string> }
+  ): Promise<AddFromRegistryResult> {
+    const url = `/api/v1/registries/${encodeURIComponent(registryId)}/servers/${encodeURIComponent(serverId)}/add`
 
-    // Determine command and args from install_cmd or connect_url.
-    // NB: backend contracts.RepositoryServer serialises these as snake_case
-    // (install_cmd, connect_url). Reading the wrong casing here is the
-    // second half of issue #483 — for a stdio entry the install command
-    // was silently undefined and the call fell through to "neither url nor
-    // command supplied", surfaced as "Either 'url' or 'command' parameter
-    // is required".
-    if (server.install_cmd) {
-      const parts = server.install_cmd.split(' ').filter(Boolean)
-      args.command = parts[0]
-      if (parts.length > 1) {
-        args.args_json = JSON.stringify(parts.slice(1))
+    const body: Record<string, unknown> = {}
+    if (opts?.name) body.name = opts.name
+    if (opts?.enabled !== undefined) body.enabled = opts.enabled
+    if (opts?.env && Object.keys(opts.env).length > 0) body.env = opts.env
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    try {
+      const response = await fetch(`${this.baseUrl}${url}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      })
+
+      const payload: any = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
+        }
+        return {
+          success: false,
+          error: payload?.error || `HTTP ${response.status}: ${response.statusText}`,
+          code: payload?.code,
+          missingInputs: payload?.missing_inputs
+        }
       }
-    } else if (server.url) {
-      // Remote server with HTTP protocol
-      args.protocol = 'http'
-      args.url = server.url
-    } else if (server.connect_url) {
-      args.protocol = 'http'
-      args.url = server.connect_url
-    }
 
-    return this.callTool('upstream_servers', args)
+      return { success: true, server: payload?.data?.server }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
   }
 
   // Info endpoint (version and update information)

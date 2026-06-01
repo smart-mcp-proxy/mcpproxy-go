@@ -20,6 +20,7 @@
             <select
               v-model="selectedRegistry"
               class="select select-bordered w-full"
+              data-test="registry-select"
               @change="handleRegistryChange"
               :disabled="loadingRegistries"
             >
@@ -40,6 +41,7 @@
               type="text"
               placeholder="Search by name or description..."
               class="input input-bordered w-full"
+              data-test="registry-search-input"
               @input="handleSearchInput"
               :disabled="!selectedRegistry || loadingServers"
             />
@@ -50,6 +52,7 @@
             <button
               @click="searchServers"
               class="btn btn-primary"
+              data-test="registry-search-button"
               :disabled="!selectedRegistry || loadingServers"
             >
               <span v-if="loadingServers" class="loading loading-spinner loading-sm"></span>
@@ -101,7 +104,7 @@
         tag="div"
         class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
       >
-        <div v-for="server in servers" :key="server.id" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
+        <div v-for="server in servers" :key="server.id" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
           <div class="card-body">
             <div class="flex justify-between items-start">
               <h3 class="card-title text-lg">{{ server.name }}</h3>
@@ -127,6 +130,14 @@
                   <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
                 </svg>
                 Remote
+              </div>
+              <div
+                v-if="server.required_inputs && server.required_inputs.length > 0"
+                class="badge badge-warning badge-sm"
+                :data-test="`registry-requires-input-${server.id}`"
+                :title="`Requires: ${server.required_inputs.map(i => i.name).join(', ')}`"
+              >
+                Requires input
               </div>
             </div>
 
@@ -161,6 +172,7 @@
               <button
                 @click="addServer(server)"
                 class="btn btn-primary btn-sm"
+                :data-test="`registry-add-${server.id}`"
                 :disabled="addingServerId === server.id"
               >
                 <span v-if="addingServerId === server.id" class="loading loading-spinner loading-xs"></span>
@@ -198,8 +210,60 @@
       </div>
     </div>
 
+    <!-- Required-Input Prompt (Spec 070 — blocks add until provided) -->
+    <dialog :open="showPrompt" class="modal" data-test="registry-required-input-dialog">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg">Add "{{ promptServer?.name }}"</h3>
+        <p class="text-sm text-base-content/70 mt-1">
+          This server needs the following before it can be added. Values are stored as
+          environment variables on the (quarantined) server.
+        </p>
+
+        <form @submit.prevent="submitPrompt" class="mt-4 space-y-3">
+          <div v-for="input in promptInputs" :key="input.name" class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">{{ input.name }}</span>
+            </label>
+            <input
+              v-model="promptValues[input.name]"
+              :type="input.secret ? 'password' : 'text'"
+              :placeholder="input.description || input.name"
+              :data-test="`registry-input-${input.name}`"
+              class="input input-bordered w-full"
+              autocomplete="off"
+            />
+            <label v-if="input.description" class="label">
+              <span class="label-text-alt text-base-content/60">{{ input.description }}</span>
+            </label>
+          </div>
+
+          <div v-if="error" class="alert alert-error text-sm" data-test="registry-input-error">
+            <span>{{ error }}</span>
+          </div>
+
+          <div class="modal-action">
+            <button type="button" class="btn btn-ghost" data-test="registry-input-cancel" @click="closePrompt">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              data-test="registry-input-submit"
+              :disabled="!promptComplete || addingServerId !== null"
+            >
+              <span v-if="addingServerId !== null" class="loading loading-spinner loading-xs"></span>
+              <span v-else>Add to MCP</span>
+            </button>
+          </div>
+        </form>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button @click="closePrompt">close</button>
+      </form>
+    </dialog>
+
     <!-- Success Toast -->
-    <div v-if="showSuccessToast" class="toast toast-end">
+    <div v-if="showSuccessToast" class="toast toast-end" data-test="registry-add-success">
       <div class="alert alert-success">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -218,7 +282,7 @@ import { ref, computed, onMounted } from 'vue'
 import api from '@/services/api'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { Registry, RepositoryServer } from '@/types'
+import type { Registry, RepositoryServer, RequiredInput } from '@/types'
 
 // State
 const registries = ref<Registry[]>([])
@@ -232,12 +296,24 @@ const addingServerId = ref<string | null>(null)
 const showSuccessToast = ref(false)
 const successMessage = ref('')
 
+// Required-input prompt state (Spec 070, T016)
+const promptServer = ref<RepositoryServer | null>(null)
+const promptInputs = ref<RequiredInput[]>([])
+const promptValues = ref<Record<string, string>>({})
+
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 // Computed
 const selectedRegistryInfo = computed(() => {
   return registries.value.find(r => r.id === selectedRegistry.value)
 })
+
+const showPrompt = computed(() => promptServer.value !== null)
+
+// Add is blocked until every prompted input has a non-empty value.
+const promptComplete = computed(() =>
+  promptInputs.value.every(i => (promptValues.value[i.name] || '').trim() !== '')
+)
 
 const repositoriesHints = computed<Hint[]>(() => {
   return [
@@ -358,22 +434,70 @@ function handleSearchInput() {
   }, 500)
 }
 
-async function addServer(server: RepositoryServer) {
+// Add a server by reference (Spec 070, T015/T016). The server re-derives the
+// config from the registry entry — no client-side install_cmd parsing. When the
+// entry declares required inputs the backend returns `missing_required_input`
+// with the missing names; we open a prompt, collect values, and resubmit as env.
+async function addServer(server: RepositoryServer, env?: Record<string, string>) {
+  if (!server.registry) {
+    error.value = 'Cannot add: server is missing its registry id.'
+    return
+  }
+
   addingServerId.value = server.id
   error.value = null
 
   try {
-    const response = await api.addServerFromRepository(server)
-    if (response.success) {
-      showToast(`Server "${server.name}" added successfully!`)
-    } else {
-      error.value = response.error || 'Failed to add server'
+    const result = await api.addServerFromRegistry(server.registry, server.id, env ? { env } : undefined)
+
+    if (result.success) {
+      closePrompt()
+      const name = result.server?.name || server.name
+      showToast(`Added "${name}" — quarantined. Approve it on the Servers page to enable.`)
+      return
     }
+
+    if (result.code === 'missing_required_input') {
+      openPrompt(server, result.missingInputs || [])
+      return
+    }
+
+    error.value = result.error || 'Failed to add server'
   } catch (err) {
     error.value = 'Failed to add server: ' + (err as Error).message
   } finally {
     addingServerId.value = null
   }
+}
+
+// Open the required-input prompt. Prefer the rich declarations carried on the
+// search result (name + description + secret); fall back to bare names from the
+// backend's missing_required_input error when the search response omitted them.
+function openPrompt(server: RepositoryServer, missingNames: string[]) {
+  const declared = server.required_inputs || []
+  const inputs: RequiredInput[] = missingNames.length > 0
+    ? missingNames.map(name => declared.find(d => d.name === name) || { name })
+    : declared
+
+  promptServer.value = server
+  promptInputs.value = inputs
+  promptValues.value = Object.fromEntries(inputs.map(i => [i.name, '']))
+}
+
+function submitPrompt() {
+  if (!promptServer.value || !promptComplete.value) return
+  // Trim values; resubmit through the same add path with the collected env.
+  const env: Record<string, string> = {}
+  for (const input of promptInputs.value) {
+    env[input.name] = (promptValues.value[input.name] || '').trim()
+  }
+  addServer(promptServer.value, env)
+}
+
+function closePrompt() {
+  promptServer.value = null
+  promptInputs.value = []
+  promptValues.value = {}
 }
 
 function copyToClipboard(text: string) {

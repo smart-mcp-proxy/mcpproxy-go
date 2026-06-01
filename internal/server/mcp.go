@@ -634,11 +634,17 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch, tail_log. 'update' and 'patch' use smart merge - only specified fields change, others preserved. For quarantine operations, use the 'quarantine_security' tool."),
-				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log"),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log", "add_from_registry"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations)"),
+				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)"),
+			),
+			mcp.WithString("registry",
+				mcp.Description("Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids."),
+			),
+			mcp.WithString("id",
+				mcp.Description("Server id within the registry - required for add_from_registry."),
 			),
 			mcp.WithNumber("lines",
 				mcp.Description("Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation"),
@@ -903,6 +909,23 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	// Search for servers
 	servers, err := registries.SearchServers(ctx, registry, tag, search, limit, guesser)
 	if err != nil {
+		// FR-008: a registry that requires an unconfigured key is reported as
+		// unavailable (not a hard error) so an agent's search still succeeds and
+		// the reason is visible.
+		if errors.Is(err, registries.ErrRegistryKeyMissing) {
+			response := map[string]interface{}{
+				"servers":     []interface{}{},
+				"registry":    registry,
+				"total":       0,
+				"query":       search,
+				"tag":         tag,
+				"unavailable": map[string]interface{}{"reason": err.Error()},
+				"message":     fmt.Sprintf("Registry '%s' is unavailable: %v", registry, err),
+			}
+			jsonResult, _ := json.Marshal(response)
+			p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
+			return mcp.NewToolResultText(string(jsonResult)), nil
+		}
 		p.logger.Error("Registry search failed",
 			zap.String("registry", registry),
 			zap.String("search", search),
@@ -2309,6 +2332,79 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 	return mcp.NewToolResultText(string(jsonResult))
 }
 
+// handleAddServerFromRegistry implements the upstream_servers add_from_registry
+// operation (spec 070, Phase 4 / US3). An agent supplies a registry reference
+// (registry + id) plus optional name/env_json/enabled overrides; the server
+// re-derives the runnable config from the registry entry (CN-001 / security
+// decision D1) and persists it quarantined, so agents need not hand-construct
+// command/args/url. On failure it returns a structured error (isError=true)
+// carrying the same stable Code as the REST/CLI surfaces, plus the offending
+// input names for missing_required_input (FR-003).
+func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	registryID := request.GetString("registry", "")
+	serverID := request.GetString("id", "")
+	if registryID == "" || serverID == "" {
+		return mcp.NewToolResultError("add_from_registry requires both 'registry' and 'id'"), nil
+	}
+
+	name := request.GetString("name", "")
+
+	var env map[string]string
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
+		}
+	}
+
+	// enabled defaults to true; an explicit false disables on add.
+	enabledVal := request.GetBool("enabled", true)
+
+	if p.mainServer == nil {
+		return mcp.NewToolResultError("Server management is not available"), nil
+	}
+
+	cfg, rerr, err := p.mainServer.AddServerFromRegistryRef(ctx, registryID, serverID, name, env, &enabledVal)
+	if err != nil {
+		// Structured cross-surface error: same Code as REST/CLI (CN-001), only
+		// the envelope differs (JSON text + isError instead of an HTTP status).
+		errPayload := map[string]interface{}{
+			"success": false,
+			"message": err.Error(),
+		}
+		if rerr != nil {
+			errPayload["code"] = rerr.Code
+			if len(rerr.MissingInputs) > 0 {
+				errPayload["missing_inputs"] = rerr.MissingInputs
+			}
+		}
+		jsonData, mErr := json.Marshal(errPayload)
+		if mErr != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultError(string(jsonData)), nil
+	}
+
+	// Slim, stable projection mirroring the REST AddedServerSummary so every
+	// surface reports the persisted server identically.
+	summary := contracts.AddedServerSummary{
+		Name:        cfg.Name,
+		Protocol:    cfg.Protocol,
+		Command:     cfg.Command,
+		Args:        cfg.Args,
+		URL:         cfg.URL,
+		Enabled:     cfg.Enabled,
+		Quarantined: cfg.Quarantined,
+	}
+	jsonData, err := json.Marshal(map[string]interface{}{
+		"success": true,
+		"server":  summary,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(jsonData)), nil
+}
+
 // handleUpstreamServers implements upstream server management
 func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
@@ -2351,7 +2447,10 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Specific operation security checks
 	switch operation {
-	case operationAdd:
+	case operationAdd, "add_from_registry":
+		// add_from_registry persists a new upstream just like a plain add, so it
+		// must honor the same AllowServerAdd gate — otherwise the "Let agents add
+		// servers" setting is bypassable by registry reference (MCP-800 finding 1).
 		if !p.config.AllowServerAdd {
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
@@ -2366,7 +2465,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		switch operation {
-		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart":
+		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "add_from_registry":
 			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -2396,6 +2495,8 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		result, opErr = p.handleEnableUpstream(ctx, request, false)
 	case "restart":
 		result, opErr = p.handleRestartUpstream(ctx, request)
+	case "add_from_registry":
+		result, opErr = p.handleAddServerFromRegistry(ctx, request)
 	default:
 		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
