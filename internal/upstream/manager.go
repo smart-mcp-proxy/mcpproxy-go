@@ -822,14 +822,21 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	for id, client := range m.clients {
 		name := ""
 		quarantined := false
-		if client != nil && client.Config != nil {
-			name = client.Config.Name
-			quarantined = client.Config.Quarantined
+		enabled := false
+		// Read config through the thread-safe accessor (mc.mu) — the reconcile
+		// add path (AddServerConfig) calls SetConfig while holding only mc.mu,
+		// not m.mu, so a direct client.Config field read races with it (MCP-770).
+		if client != nil {
+			if cfg := client.GetConfig(); cfg != nil {
+				name = cfg.Name
+				quarantined = cfg.Quarantined
+				enabled = cfg.Enabled
+			}
 		}
 		snapshots = append(snapshots, clientSnapshot{
 			id:          id,
 			name:        name,
-			enabled:     client != nil && client.Config != nil && client.Config.Enabled,
+			enabled:     enabled,
 			quarantined: quarantined,
 			client:      client,
 		})
@@ -1312,15 +1319,22 @@ func (m *Manager) GetStats() map[string]interface{} {
 		// Get detailed connection info from state manager
 		connectionInfo := client.GetConnectionInfo()
 
+		// Read config through the thread-safe accessor to avoid racing with
+		// SetConfig on the reconcile add path (MCP-770).
+		name, url, protocol := "", "", ""
+		if cfg := client.GetConfig(); cfg != nil {
+			name, url, protocol = cfg.Name, cfg.URL, cfg.Protocol
+		}
+
 		status := map[string]interface{}{
 			"state":        connectionInfo.State.String(),
 			"connected":    connectionInfo.State == types.StateReady,
 			"connecting":   client.IsConnecting(),
 			"retry_count":  connectionInfo.RetryCount,
 			"should_retry": client.ShouldRetry(),
-			"name":         client.Config.Name,
-			"url":          client.Config.URL,
-			"protocol":     client.Config.Protocol,
+			"name":         name,
+			"url":          url,
+			"protocol":     protocol,
 		}
 
 		if connectionInfo.State == types.StateReady {
@@ -1386,7 +1400,12 @@ func (m *Manager) GetTotalToolCount() int {
 	// Now process clients without holding lock
 	totalTools := 0
 	for _, client := range clientsCopy {
-		if client == nil || client.Config == nil || !client.Config.Enabled || !client.IsConnected() {
+		if client == nil {
+			continue
+		}
+		// Read config through the thread-safe accessor (MCP-770).
+		cfg := client.GetConfig()
+		if cfg == nil || !cfg.Enabled || !client.IsConnected() {
 			continue
 		}
 
@@ -1403,7 +1422,8 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 
 	servers := make(map[string]*config.ServerConfig)
 	for id, client := range m.clients {
-		servers[id] = client.Config
+		// Read config through the thread-safe accessor (MCP-770).
+		servers[id] = client.GetConfig()
 	}
 	return servers
 }
