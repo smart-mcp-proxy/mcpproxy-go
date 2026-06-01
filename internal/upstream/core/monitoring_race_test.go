@@ -1,6 +1,7 @@
 package core
 
 import (
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,43 @@ func TestStderrMonitoring_StartStopRace(t *testing.T) {
 		}
 	}()
 
+	wg.Wait()
+	c.StopStderrMonitoring()
+}
+
+// TestStderrMonitoring_AbandonedMonitorNoRace models the round-5 escape: the
+// monitor goroutine is still alive when Stop is called (its stderr Read blocks),
+// so Stop hits the 500ms timeout and abandons it. With the old reused-WaitGroup
+// design the abandoned WG.Wait raced the next cycle's WG.Add; the per-cycle done
+// channel + ctx-as-param design must keep concurrent Start/Stop race-free even
+// while a prior monitor lingers. A blocking pipe keeps monitorStderr alive;
+// closing the writer on cleanup lets the leaked goroutines exit.
+func TestStderrMonitoring_AbandonedMonitorNoRace(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	c := &Client{
+		transportType: transportStdio,
+		stderr:        pr, // Read blocks until the writer is closed
+		logger:        zap.NewNop(),
+		config:        &config.ServerConfig{Name: "race"},
+	}
+
+	const cycles = 4 // each Stop times out at 500ms; keep small
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < cycles; i++ {
+			c.StartStderrMonitoring()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < cycles; i++ {
+			c.StopStderrMonitoring()
+		}
+	}()
 	wg.Wait()
 	c.StopStderrMonitoring()
 }
