@@ -147,30 +147,47 @@ func newUsageAggregate() *UsageAggregate {
 	}
 }
 
-// Apply folds a single activity record into the aggregate. Non tool_call
-// records and records without a tool name are ignored. Apply is not safe for
-// concurrent use; it is called only by the owning goroutine (see UsageStore).
-func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
-	if rec == nil || rec.Type != storage.ActivityTypeToolCall || rec.ToolName == "" {
-		return
-	}
-
-	key := toolKey(rec.ServerName, rec.ToolName)
+// tool returns the per-(server,tool) rollup, creating it on first use. It also
+// defensively resizes a persisted snapshot from an older latency-bucket layout
+// rather than panicking on index.
+func (a *UsageAggregate) tool(server, toolName string) *ToolUsage {
+	key := toolKey(server, toolName)
 	tu := a.Tools[key]
 	if tu == nil {
 		tu = &ToolUsage{
-			Server:         rec.ServerName,
-			Tool:           rec.ToolName,
+			Server:         server,
+			Tool:           toolName,
 			LatencyBuckets: make([]int64, numLatencyBuckets()),
 		}
 		a.Tools[key] = tu
 	} else if len(tu.LatencyBuckets) != numLatencyBuckets() {
-		// Defensive: a persisted snapshot from an older bucket layout is
-		// resized rather than panicking on index.
 		resized := make([]int64, numLatencyBuckets())
 		copy(resized, tu.LatencyBuckets)
 		tu.LatencyBuckets = resized
 	}
+	return tu
+}
+
+// Apply folds a single activity record into the aggregate. It accepts executed
+// tool_calls and blocked policy_decisions (the form a policy-prevented tool
+// attempt is persisted as — MCP-835); all other records, and records without a
+// tool name, are ignored. Apply is not safe for concurrent use; it is called
+// only by the owning goroutine (see UsageStore).
+func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
+	if rec == nil || rec.ToolName == "" {
+		return
+	}
+	switch {
+	case rec.Type == storage.ActivityTypeToolCall:
+		// folded below
+	case rec.Type == storage.ActivityTypePolicyDecision && rec.Status == "blocked":
+		a.applyBlocked(rec)
+		return
+	default:
+		return
+	}
+
+	tu := a.tool(rec.ServerName, rec.ToolName)
 
 	tu.Calls++
 	switch rec.Status {
@@ -193,6 +210,20 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 	}
 
 	a.applyTimeBucket(rec)
+}
+
+// applyBlocked folds a policy-blocked attempt into the per-tool Blocked counter.
+// A blocked attempt never executed the tool, so it contributes no Calls,
+// latency, or bytes, and does not enter the executed-call timeline — it only
+// bumps Blocked and LastUsed. This keeps the contract's per-tool `blocked`
+// count non-zero (the field was previously dead) without polluting latency
+// percentiles or byte averages with non-executed attempts.
+func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
+	tu := a.tool(rec.ServerName, rec.ToolName)
+	tu.Blocked++
+	if rec.Timestamp.After(tu.LastUsed) {
+		tu.LastUsed = rec.Timestamp
+	}
 }
 
 func (a *UsageAggregate) applyTimeBucket(rec *storage.ActivityRecord) {

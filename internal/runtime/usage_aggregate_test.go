@@ -56,11 +56,40 @@ func TestUsageAggregate_Apply_IgnoresNonToolCalls(t *testing.T) {
 	agg := newUsageAggregate()
 	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
 
-	// Non tool_call records and empty tool names are ignored.
-	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypePolicyDecision, ServerName: "x", ToolName: "y", Status: "blocked", Timestamp: ts})
+	// Non-blocked policy decisions and tool_calls with empty tool names are
+	// ignored. (Blocked policy decisions ARE counted — see the test below.)
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypePolicyDecision, ServerName: "x", ToolName: "y", Status: "approved", Timestamp: ts})
 	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypeToolCall, ServerName: "x", ToolName: "", Status: "success", Timestamp: ts})
 
 	assert.Empty(t, agg.Tools)
+}
+
+// TestUsageAggregate_Apply_CountsBlockedPolicyDecisions (MCP-835 / Codex
+// finding #2): blocked tool attempts are persisted as policy_decision records,
+// not tool_calls. The aggregate must still count them so the contract's
+// per-tool `blocked` field is non-zero. A blocked attempt never executed, so it
+// contributes ONLY to Blocked (and LastUsed) — not Calls, latency, bytes, or
+// the timeline (which tracks executed calls).
+func TestUsageAggregate_Apply_CountsBlockedPolicyDecisions(t *testing.T) {
+	agg := newUsageAggregate()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypePolicyDecision, ServerName: "github", ToolName: "search", Status: "blocked", Timestamp: ts})
+	agg.Apply(&storage.ActivityRecord{Type: storage.ActivityTypePolicyDecision, ServerName: "github", ToolName: "search", Status: "blocked", Timestamp: ts.Add(time.Minute)})
+
+	tu := agg.Tools[toolKey("github", "search")]
+	require.NotNil(t, tu, "blocked attempts must create a per-tool entry")
+	assert.Equal(t, int64(2), tu.Blocked, "both blocked attempts counted")
+	assert.Equal(t, int64(0), tu.Calls, "blocked attempts are not executed calls")
+	assert.Equal(t, int64(0), tu.Errors)
+	assert.Equal(t, ts.Add(time.Minute), tu.LastUsed, "LastUsed tracks the latest attempt")
+
+	var latencyTotal int64
+	for _, c := range tu.LatencyBuckets {
+		latencyTotal += c
+	}
+	assert.Equal(t, int64(0), latencyTotal, "blocked attempts have no latency sample")
+	assert.Empty(t, agg.Buckets, "blocked attempts do not enter the executed-call timeline")
 }
 
 func TestToolUsage_Averages_ExcludeZeroByteCalls(t *testing.T) {

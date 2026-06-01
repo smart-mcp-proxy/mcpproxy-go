@@ -132,6 +132,34 @@ func TestActivityService_HandleEvent_AppliesToolCallToUsage(t *testing.T) {
 	assert.Equal(t, int64(128), tu.ReqBytesSum)
 }
 
+// TestActivityService_HandleEvent_CountsBlockedPolicyDecision (MCP-835 / Codex
+// finding #2): a blocked tool attempt is emitted as a policy_decision event,
+// not a tool_call. The live path must fold it into the usage aggregate so the
+// per-tool `blocked` count is non-zero — matching what a cold-start scan would
+// rebuild from the persisted record.
+func TestActivityService_HandleEvent_CountsBlockedPolicyDecision(t *testing.T) {
+	svc, _ := newUsageTestService(t)
+	evt := Event{
+		Type:      EventTypeActivityPolicyDecision,
+		Timestamp: time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC),
+		Payload: map[string]any{
+			"server_name": "github",
+			"tool_name":   "search",
+			"decision":    "blocked",
+			"reason":      "Server is quarantined for security review",
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	snap := svc.UsageSnapshot()
+	require.NotNil(t, snap)
+	tu := snap.Tools[toolKey("github", "search")]
+	require.NotNil(t, tu, "blocked policy decision must reach the usage aggregate")
+	assert.Equal(t, int64(1), tu.Blocked)
+	assert.Equal(t, int64(0), tu.Calls, "blocked attempt is not an executed call")
+}
+
 func TestActivityService_SetUsagePersistInterval_HotReload(t *testing.T) {
 	svc, _ := newUsageTestService(t)
 	assert.Equal(t, DefaultUsagePersistInterval, svc.usagePersistInterval())

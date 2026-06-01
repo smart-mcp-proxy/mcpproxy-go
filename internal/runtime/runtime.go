@@ -1267,6 +1267,15 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
 	}
 
+	// Apply observability usage cadence (Spec 069 A2 — hot-reloadable). The
+	// usage flush loop re-reads the interval each cycle, so the setter suffices.
+	if contains(result.ChangedFields, "observability") && r.activityService != nil &&
+		newCfg.Observability != nil && newCfg.Observability.UsagePersistInterval.Duration() > 0 {
+		r.logger.Info("Observability usage persist interval changed",
+			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
+		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
+	}
+
 	// Capture app context, config path, and config copy while we still hold the lock
 	appCtx := r.appCtx
 	cfgPathCopy := r.cfgPath

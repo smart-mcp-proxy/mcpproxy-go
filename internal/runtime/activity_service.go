@@ -362,6 +362,15 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 			zap.Error(err),
 			zap.String("server_name", serverName),
 			zap.String("decision", decision))
+		return
+	}
+
+	// Fold blocked attempts into the usage aggregate (Spec 069 A2). Apply
+	// ignores non-blocked decisions, so passing every policy decision is safe.
+	// Done only on save success so the in-memory rollup stays consistent with a
+	// cold-start rebuild that re-scans persisted records.
+	if s.usage != nil {
+		s.usage.Apply(record)
 	}
 }
 

@@ -133,6 +133,12 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "environment")
 	}
 
+	// Observability cadence (Spec 069 A2 — can be hot-reloaded; the usage flush
+	// loop re-reads the interval each cycle, so applying it is just a setter).
+	if !reflect.DeepEqual(oldCfg.Observability, newCfg.Observability) {
+		result.ChangedFields = append(result.ChangedFields, "observability")
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false
