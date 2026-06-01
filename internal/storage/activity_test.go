@@ -71,6 +71,36 @@ func TestActivityRecord_MarshalUnmarshal(t *testing.T) {
 	assert.Equal(t, record.Response, result.Response)
 }
 
+// TestActivityRecord_ByteFieldsRoundTrip verifies RequestBytes/ResponseBytes survive
+// JSON round-trip and that legacy records (missing fields) decode to 0. T001 Spec 069.
+func TestActivityRecord_ByteFieldsRoundTrip(t *testing.T) {
+	record := &ActivityRecord{
+		ID:            "01HQWX1Y2Z3A4B5C6D7E8F9G0H",
+		Type:          ActivityTypeToolCall,
+		ServerName:    "test-server",
+		ToolName:      "test-tool",
+		Status:        "success",
+		Timestamp:     time.Now().UTC(),
+		RequestBytes:  1234,
+		ResponseBytes: 5678,
+	}
+
+	data, err := record.MarshalBinary()
+	require.NoError(t, err)
+
+	var got ActivityRecord
+	require.NoError(t, got.UnmarshalBinary(data))
+	assert.Equal(t, 1234, got.RequestBytes)
+	assert.Equal(t, 5678, got.ResponseBytes)
+
+	// Legacy record (no byte fields) must decode to 0.
+	legacyJSON := []byte(`{"id":"abc","type":"tool_call","status":"success","timestamp":"2024-01-01T00:00:00Z"}`)
+	var legacy ActivityRecord
+	require.NoError(t, legacy.UnmarshalBinary(legacyJSON))
+	assert.Equal(t, 0, legacy.RequestBytes, "legacy record: RequestBytes must default to 0")
+	assert.Equal(t, 0, legacy.ResponseBytes, "legacy record: ResponseBytes must default to 0")
+}
+
 func TestActivityFilter_Validate(t *testing.T) {
 	tests := []struct {
 		name       string

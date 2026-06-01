@@ -176,6 +176,8 @@ func (m *Manager) ListActivities(filter ActivityFilter) ([]*ActivityRecord, int,
 					Metadata:          record.Metadata,
 					UserID:            record.UserID,
 					UserEmail:         record.UserEmail,
+					RequestBytes:      record.RequestBytes,
+					ResponseBytes:     record.ResponseBytes,
 				})
 			}
 		}

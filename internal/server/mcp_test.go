@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
@@ -1886,4 +1887,57 @@ func TestPatchDeepMergeIsolation(t *testing.T) {
 	// Verify the diff contains isolation changes
 	assert.NotNil(t, diff)
 	assert.Contains(t, diff.Modified, "isolation", "Diff should include isolation changes")
+}
+
+// TestRawByteSize_MeasuredBeforeTruncation verifies the spec-069 A1 invariant
+// end-to-end: handleCallToolVariant (mcp.go:1816-1819) captures rawByteSize on
+// the RAW result/args BEFORE forwardContentResult truncates, and those counts
+// become ActivityRecord.RequestBytes/ResponseBytes. The existing
+// TestHandleToolCallCompleted_ByteCapture (runtime pkg) only asserts the
+// activity service stores values it is handed; it does not exercise the
+// measure-then-truncate sequence. This closes the gap flagged in MCP-786 by
+// driving an over-threshold response through the real helpers and asserting the
+// captured bytes reflect the full payload while the forwarded body is truncated.
+func TestRawByteSize_MeasuredBeforeTruncation(t *testing.T) {
+	const limit = 500
+
+	bigText := strings.Repeat("x", 8000) // well over the truncation limit
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{mcp.NewTextContent(bigText)},
+	}
+	args := map[string]interface{}{"payload": strings.Repeat("q", 4000)}
+
+	// Same call sequence as handleCallToolVariant: measure raw, then forward.
+	responseBytes := rawByteSize(result)
+	requestBytes := rawByteSize(args)
+
+	truncator := truncate.NewTruncator(limit)
+	forwarded, _, wasTruncated := forwardContentResult(result, truncator, nil, nil, "test:tool", args)
+
+	// (2) Captured byte counts reflect the FULL pre-truncation payload.
+	rawResponseJSON, err := json.Marshal(result)
+	require.NoError(t, err)
+	assert.Equal(t, len(rawResponseJSON), responseBytes,
+		"ResponseBytes must equal the full pre-truncation response size")
+	assert.Greater(t, responseBytes, limit,
+		"sanity: the test response must exceed the truncation limit")
+
+	rawArgsJSON, err := json.Marshal(args)
+	require.NoError(t, err)
+	assert.Equal(t, len(rawArgsJSON), requestBytes,
+		"RequestBytes must equal the full pre-truncation request size")
+
+	// (3) The forwarded/stored response body is actually truncated.
+	require.True(t, wasTruncated, "an over-threshold response must be truncated")
+	require.NotNil(t, forwarded)
+	require.NotEmpty(t, forwarded.Content)
+	tc, ok := forwarded.Content[0].(mcp.TextContent)
+	require.True(t, ok, "forwarded block 0 should be TextContent")
+	assert.Less(t, len(tc.Text), len(bigText),
+		"forwarded text must be shorter than the raw response")
+
+	// The captured count is strictly larger than the truncated payload — proving
+	// measurement happened before truncation, not after.
+	assert.Greater(t, responseBytes, rawByteSize(forwarded),
+		"captured ResponseBytes must exceed the post-truncation payload size")
 }
