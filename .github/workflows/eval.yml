@@ -1,0 +1,187 @@
+name: Eval (Spec 065 regression gate)
+
+# Spec 065 / C1 (FR-009, US3/P2): regression gate over the frozen Spec-065
+# datasets. Two independent jobs so a network flake in D1 (retrieval) never
+# masks or blocks the deterministic D2 (security) gate.
+#
+#   security-d2  — Go + Python only, no live upstreams. HARD gate (blocking).
+#   retrieval-d1 — needs a live mcpproxy serving 7 reference servers; network
+#                  dependent. Report-only on PRs, blocking on the nightly
+#                  schedule (promote to PR-blocking after a green soak — see the
+#                  plan on MCP-742). Reports are uploaded as artifacts, never
+#                  committed (CN-003).
+#
+# mcp-eval (smart-mcp-proxy/mcp-eval) is a separate PUBLIC repo, checked out at a
+# pinned ref — no token needed.
+
+on:
+  pull_request:
+    paths:
+      - "cmd/scan-eval/**"
+      - "internal/security/**"
+      - "specs/065-evaluation-foundation/datasets/**"
+      - "scripts/eval-ci-smoke.sh"
+      - ".github/workflows/eval.yml"
+  workflow_dispatch: {}
+  schedule:
+    # Nightly soak (02:30 UTC) — exercises D1 against live upstreams.
+    - cron: "30 2 * * *"
+
+permissions:
+  contents: read
+
+env:
+  MCP_EVAL_REF: "76df3a47e1480bfde2433b4f19df19312c985963" # SecurityScorer (B3) merge — pin for reproducibility
+  PYTHON_VERSION: "3.11.13"
+
+jobs:
+  security-d2:
+    name: Security regression gate (D2)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mcpproxy-go
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Checkout mcp-eval (public, pinned)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: smart-mcp-proxy/mcp-eval
+          ref: ${{ env.MCP_EVAL_REF }}
+          path: mcp-eval
+
+      - name: Set up uv + Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Sync mcp-eval environment
+        working-directory: mcp-eval
+        run: uv sync
+
+      - name: Run D2 security gate
+        env:
+          MCP_EVAL_DIR: ${{ github.workspace }}/mcp-eval
+          OUT_DIR: reports/security
+        run: bash scripts/eval-ci-smoke.sh
+
+      - name: Upload D2 reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-security-d2
+          path: reports/security/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Assert reports are not committed (CN-003)
+        if: always()
+        run: |
+          tracked="$(git ls-files reports/ || true)"
+          if [ -n "$tracked" ]; then
+            echo "::error::Eval reports must never be committed (CN-003). Tracked under reports/:"
+            echo "$tracked"
+            exit 1
+          fi
+          echo "OK: no eval reports are tracked by git."
+
+  retrieval-d1:
+    name: Retrieval regression gate (D1)
+    runs-on: ubuntu-latest
+    # Report-only on PRs (D1 depends on npx/uvx package fetches — a known flake
+    # source); blocking on the nightly schedule. Promote to PR-blocking after a
+    # green soak (plan on MCP-742).
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout mcpproxy-go
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Set up Node.js (npx-launched servers)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Checkout mcp-eval (public, pinned)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: smart-mcp-proxy/mcp-eval
+          ref: ${{ env.MCP_EVAL_REF }}
+          path: mcp-eval
+
+      - name: Set up uv + Python (uvx-launched servers + mcp-eval)
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Sync mcp-eval environment
+        working-directory: mcp-eval
+        run: uv sync
+
+      - name: Build mcpproxy
+        run: go build -o mcpproxy ./cmd/mcpproxy
+
+      - name: Start mcpproxy (7 reference servers)
+        run: |
+          ./mcpproxy serve \
+            --config specs/065-evaluation-foundation/datasets/snapshot-servers.config.json \
+            --data-dir "$RUNNER_TEMP/eval" \
+            --listen 127.0.0.1:8092 \
+            --log-level info > "$RUNNER_TEMP/mcpproxy.log" 2>&1 &
+          echo "MCPPROXY_PID=$!" >> "$GITHUB_ENV"
+
+      - name: Wait for index readiness
+        run: |
+          base="http://127.0.0.1:8092"; key="eval-corpus-snapshot"
+          for i in $(seq 1 60); do
+            if curl -fsS -H "X-API-Key: $key" "$base/api/v1/status" >/dev/null 2>&1; then
+              n="$(curl -fsS -H "X-API-Key: $key" "$base/api/v1/index/search?q=file&limit=5" \
+                   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("tools",d.get("results",[]))))' 2>/dev/null || echo 0)"
+              echo "attempt $i: index search returned $n result(s)"
+              [ "$n" -ge 1 ] && { echo "Index ready."; exit 0; }
+            else
+              echo "attempt $i: server not up yet"
+            fi
+            sleep 5
+          done
+          echo "::error::mcpproxy index did not become ready in time"
+          tail -50 "$RUNNER_TEMP/mcpproxy.log" || true
+          exit 1
+
+      - name: Run D1 retrieval gate
+        working-directory: mcp-eval
+        env:
+          DS: ${{ github.workspace }}/specs/065-evaluation-foundation/datasets
+        run: |
+          PYTHONPATH=src uv run python -m mcp_eval.cli retrieval \
+            --corpus "$DS/corpus_v1.tools.json" \
+            --golden "$DS/retrieval_golden_v1.json" \
+            --baseline "$DS/baseline_v1.json" \
+            --tolerance 0.05 \
+            --runs 1 \
+            --base-url http://127.0.0.1:8092 \
+            --api-key eval-corpus-snapshot \
+            --out-dir "${{ github.workspace }}/reports/retrieval"
+
+      - name: Stop mcpproxy
+        if: always()
+        run: kill "${MCPPROXY_PID}" 2>/dev/null || true
+
+      - name: Upload D1 reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: eval-retrieval-d1
+          path: reports/retrieval/
+          retention-days: 14
+          if-no-files-found: ignore

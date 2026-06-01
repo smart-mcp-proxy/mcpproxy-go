@@ -107,3 +107,36 @@ text from them is vendored into this repo:
 - **`mcp-injection-experiments`** — LICENSE unconfirmed (research.md R-A); where it
   inspired a pattern, the corresponding entry was rewritten from scratch and
   labeled `self-authored`. The corpus test rejects any entry sourced from these.
+
+## CI regression gate (Spec 065 / C1)
+
+`.github/workflows/eval.yml` runs both evaluations as a regression gate
+(FR-009). Two independent jobs keep a network flake in D1 from masking the
+deterministic D2 gate:
+
+- **`security-d2` (D2, blocking)** — Go + Python only, no live upstreams.
+  Provenance/license guard over `security_corpus_v1.json` (FR-007 / CN-005),
+  then `cmd/scan-eval` ×3 → the mcp-eval `SecurityScorer`. Gate thresholds are
+  **`--fpr-ceiling 0.10 --recall-floor 0.05`** (not the scorer defaults: the
+  `sensitive-data` detector measures recall ≈ 0.10 here because most malicious
+  entries are prompt-injection / tool-poisoning / rug-pull, out of scope for a
+  secret/path detector). These thresholds will move to a `security.gate` block
+  in `baseline_v1.json` once MCP-815 lands, so the gate and baseline never drift.
+- **`retrieval-d1` (D1)** — boots `mcpproxy serve` over
+  `snapshot-servers.config.json` (7 reference servers), waits for index
+  readiness, then runs the mcp-eval `RetrievalScorer` with
+  `--baseline baseline_v1.json --tolerance 0.05`. **Report-only on PRs**
+  (npx/uvx fetches are a known flake source), **blocking on the nightly
+  schedule**; promote to PR-blocking after a green soak.
+
+Both jobs upload HTML/JSON reports as run artifacts and the build **never
+commits** them (CN-003). The shared D2 logic lives in `scripts/eval-ci-smoke.sh`
+so the gate runs identically in CI and locally:
+
+```bash
+# Local D2 smoke (full gate needs a mcp-eval checkout):
+MCP_EVAL_DIR=/path/to/mcp-eval bash scripts/eval-ci-smoke.sh
+```
+
+mcp-eval (`smart-mcp-proxy/mcp-eval`, public) is checked out at a pinned ref for
+reproducibility.
