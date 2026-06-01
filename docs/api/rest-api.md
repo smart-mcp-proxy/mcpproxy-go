@@ -534,6 +534,40 @@ sets `partial: true` with `failed_servers` (it does not fail the whole request).
 
 List tools for a specific server.
 
+### Registries
+
+Discover MCP servers in known registries and add them as quarantined upstreams.
+The daemon re-derives the runnable config server-side — the client never sends a
+config blob. See [Adding servers from registries](../features/registry-add.md)
+for the full feature guide (CLI, REST, MCP).
+
+#### GET /api/v1/registries
+
+List configured registries.
+
+#### GET /api/v1/registries/{id}/servers
+
+Search a registry's servers (`?search=`, `?tag=`, `?limit=`).
+
+#### POST /api/v1/registries/{id}/servers/{serverId}/add
+
+Add a server from a registry as a quarantined upstream. Optional JSON body
+carries only overrides (never a config blob):
+
+```json
+{ "name": "github-mcp", "env": { "GITHUB_TOKEN": "…" }, "enabled": true }
+```
+
+Success returns `data.server` (`name`, `protocol`, `command`, `args`, `url`,
+`enabled`, `quarantined`). A missing required input returns
+`{"success": false, "code": "missing_required_input", "missing_inputs": [...]}`
+— the same cross-surface code emitted by the CLI and MCP surfaces.
+
+#### POST /api/v1/registries/{id}/refresh
+
+Drop a registry's cached server lists. Returns
+`{ "registry_id": "...", "cleared": <n> }`.
+
 ### Real-time Updates
 
 #### GET /events
