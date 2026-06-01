@@ -17,8 +17,20 @@ name: Eval (Spec 065 regression gate)
 on:
   pull_request:
     paths:
+      # D2 security gate — the scanner + detector code under test.
       - "cmd/scan-eval/**"
       - "internal/security/**"
+      # D1 retrieval gate — the discovery system under test. Spec 065 requires
+      # CI to catch recall/MRR/nDCG regressions when a maintainer changes the
+      # search index, tokenizer, tool routing/ranking, or tool descriptions
+      # (specs/065-evaluation-foundation/spec.md:22,24,61). Without these, a
+      # retrieval change would silently skip the eval gate (MCP-836).
+      - "internal/index/**"            # Bleve BM25 index + tokenizer
+      - "internal/server/mcp.go"       # retrieve_tools handler
+      - "internal/server/mcp_routing.go"      # tool routing/ranking
+      - "internal/server/mcp_annotations.go"  # tool annotations/descriptions
+      - "cmd/mcpproxy/**"              # CLI + serve wiring
+      # Shared: the frozen datasets, smoke harness, and this workflow itself.
       - "specs/065-evaluation-foundation/datasets/**"
       - "scripts/eval-ci-smoke.sh"
       - ".github/workflows/eval.yml"
