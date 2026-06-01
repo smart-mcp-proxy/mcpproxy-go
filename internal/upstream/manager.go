@@ -273,7 +273,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	// Check if existing client exists and if config has changed
 	var clientToDisconnect *managed.Client
 	if existingClient, exists := m.clients[id]; exists {
-		existingConfig := existingClient.Config
+		existingConfig := existingClient.GetConfig()
 
 		// Compare configurations to determine if reconnection is needed
 		configChanged := existingConfig.URL != serverConfig.URL ||
@@ -822,14 +822,21 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 	for id, client := range m.clients {
 		name := ""
 		quarantined := false
-		if client != nil && client.Config != nil {
-			name = client.Config.Name
-			quarantined = client.Config.Quarantined
+		enabled := false
+		// Read config through the thread-safe GetConfig() accessor — the reconcile
+		// add path (AddServerConfig) calls SetConfig (an atomic swap) off m.mu, so
+		// a direct config-field read would race with it (MCP-770).
+		if client != nil {
+			if cfg := client.GetConfig(); cfg != nil {
+				name = cfg.Name
+				quarantined = cfg.Quarantined
+				enabled = cfg.Enabled
+			}
 		}
 		snapshots = append(snapshots, clientSnapshot{
 			id:          id,
 			name:        name,
-			enabled:     client != nil && client.Config != nil && client.Config.Enabled,
+			enabled:     enabled,
 			quarantined: quarantined,
 			client:      client,
 		})
@@ -916,7 +923,7 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 	// Find the client for this server
 	var targetClient *managed.Client
 	for _, client := range m.clients {
-		if client.Config.Name == serverName {
+		if client.GetConfig().Name == serverName {
 			targetClient = client
 			break
 		}
@@ -930,11 +937,11 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 
 	m.logger.Debug("CallTool: client found",
 		zap.String("server_name", serverName),
-		zap.Bool("enabled", targetClient.Config.Enabled),
+		zap.Bool("enabled", targetClient.GetConfig().Enabled),
 		zap.Bool("connected", targetClient.IsConnected()),
 		zap.String("state", targetClient.GetState().String()))
 
-	if !targetClient.Config.Enabled {
+	if !targetClient.GetConfig().Enabled {
 		return nil, fmt.Errorf("client for server %s is disabled", serverName)
 	}
 
@@ -947,9 +954,9 @@ func (m *Manager) CallTool(ctx context.Context, toolName string, args map[string
 
 		// Attempt reconnect-on-use if enabled for this server
 		reconnected := false
-		if targetClient.Config.ReconnectOnUse &&
+		if targetClient.GetConfig().ReconnectOnUse &&
 			!targetClient.IsUserLoggedOut() &&
-			!targetClient.Config.Quarantined {
+			!targetClient.GetConfig().Quarantined {
 			m.logger.Info("reconnect_on_use: attempting reconnect for tool call",
 				zap.String("server", serverName),
 				zap.String("tool", actualToolName),
@@ -1074,29 +1081,29 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	for id, client := range clients {
 		m.logger.Debug("Evaluating client for connection",
 			zap.String("id", id),
-			zap.String("name", client.Config.Name),
-			zap.Bool("enabled", client.Config.Enabled),
+			zap.String("name", client.GetConfig().Name),
+			zap.Bool("enabled", client.GetConfig().Enabled),
 			zap.Bool("is_connected", client.IsConnected()),
 			zap.Bool("is_connecting", client.IsConnecting()),
 			zap.String("current_state", client.GetState().String()),
-			zap.Bool("quarantined", client.Config.Quarantined))
+			zap.Bool("quarantined", client.GetConfig().Quarantined))
 
-		if !client.Config.Enabled {
+		if !client.GetConfig().Enabled {
 			m.logger.Debug("Skipping disabled client",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.GetConfig().Name))
 
 			if client.IsConnected() {
-				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.Config.Name))
+				m.logger.Info("Disconnecting disabled client", zap.String("id", id), zap.String("name", client.GetConfig().Name))
 				_ = client.Disconnect()
 			}
 			continue
 		}
 
-		if client.Config.Quarantined {
+		if client.GetConfig().Quarantined {
 			m.logger.Info("Skipping quarantined client",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.GetConfig().Name))
 			continue
 		}
 
@@ -1104,7 +1111,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		if client.IsUserLoggedOut() {
 			m.logger.Debug("Skipping client - user explicitly logged out, waiting for manual login",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.GetConfig().Name))
 			continue
 		}
 
@@ -1112,14 +1119,14 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		if client.IsConnected() {
 			m.logger.Debug("Client already connected, skipping",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.GetConfig().Name))
 			continue
 		}
 
 		if client.IsConnecting() {
 			m.logger.Debug("Client already connecting, skipping",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name))
+				zap.String("name", client.GetConfig().Name))
 			continue
 		}
 
@@ -1127,7 +1134,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			info := client.GetConnectionInfo()
 			m.logger.Debug("Client backoff active, skipping connect attempt",
 				zap.String("id", id),
-				zap.String("name", client.Config.Name),
+				zap.String("name", client.GetConfig().Name),
 				zap.Int("retry_count", info.RetryCount),
 				zap.Time("last_retry_time", info.LastRetryTime))
 			continue
@@ -1135,10 +1142,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 
 		m.logger.Info("Attempting to connect client",
 			zap.String("id", id),
-			zap.String("name", client.Config.Name),
-			zap.String("url", client.Config.URL),
-			zap.String("command", client.Config.Command),
-			zap.String("protocol", client.Config.Protocol))
+			zap.String("name", client.GetConfig().Name),
+			zap.String("url", client.GetConfig().URL),
+			zap.String("command", client.GetConfig().Command),
+			zap.String("protocol", client.GetConfig().Protocol))
 
 		wg.Add(1)
 		go func(id string, c *managed.Client) {
@@ -1155,13 +1162,13 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			if err := c.Connect(connectCtx); err != nil {
 				m.logger.Error("Failed to connect to upstream server",
 					zap.String("id", id),
-					zap.String("name", c.Config.Name),
+					zap.String("name", c.GetConfig().Name),
 					zap.String("state", c.GetState().String()),
 					zap.Error(err))
 			} else {
 				m.logger.Info("Successfully initiated connection to upstream server",
 					zap.String("id", id),
-					zap.String("name", c.Config.Name))
+					zap.String("name", c.GetConfig().Name))
 			}
 		}(id, client)
 	}
@@ -1312,15 +1319,22 @@ func (m *Manager) GetStats() map[string]interface{} {
 		// Get detailed connection info from state manager
 		connectionInfo := client.GetConnectionInfo()
 
+		// Read config through the thread-safe accessor to avoid racing with
+		// SetConfig on the reconcile add path (MCP-770).
+		name, url, protocol := "", "", ""
+		if cfg := client.GetConfig(); cfg != nil {
+			name, url, protocol = cfg.Name, cfg.URL, cfg.Protocol
+		}
+
 		status := map[string]interface{}{
 			"state":        connectionInfo.State.String(),
 			"connected":    connectionInfo.State == types.StateReady,
 			"connecting":   client.IsConnecting(),
 			"retry_count":  connectionInfo.RetryCount,
 			"should_retry": client.ShouldRetry(),
-			"name":         client.Config.Name,
-			"url":          client.Config.URL,
-			"protocol":     client.Config.Protocol,
+			"name":         name,
+			"url":          url,
+			"protocol":     protocol,
 		}
 
 		if connectionInfo.State == types.StateReady {
@@ -1386,7 +1400,12 @@ func (m *Manager) GetTotalToolCount() int {
 	// Now process clients without holding lock
 	totalTools := 0
 	for _, client := range clientsCopy {
-		if client == nil || client.Config == nil || !client.Config.Enabled || !client.IsConnected() {
+		if client == nil {
+			continue
+		}
+		// Read config through the thread-safe accessor (MCP-770).
+		cfg := client.GetConfig()
+		if cfg == nil || !cfg.Enabled || !client.IsConnected() {
 			continue
 		}
 
@@ -1403,7 +1422,8 @@ func (m *Manager) ListServers() map[string]*config.ServerConfig {
 
 	servers := make(map[string]*config.ServerConfig)
 	for id, client := range m.clients {
-		servers[id] = client.Config
+		// Read config through the thread-safe accessor (MCP-770).
+		servers[id] = client.GetConfig()
 	}
 	return servers
 }
@@ -1453,7 +1473,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 	var hasToken bool
 	var tokenExpires time.Time
 	if m.storage != nil {
-		ts := oauth.NewPersistentTokenStore(client.Config.Name, client.Config.URL, m.storage)
+		ts := oauth.NewPersistentTokenStore(client.GetConfig().Name, client.GetConfig().URL, m.storage)
 		if tok, err := ts.GetToken(context.Background()); err == nil && tok != nil {
 			hasToken = true
 			tokenExpires = tok.ExpiresAt
@@ -1822,7 +1842,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
-	cfg := client.Config
+	cfg := client.GetConfig()
 	m.logger.Info("Starting in-process manual OAuth",
 		zap.String("server", cfg.Name),
 		zap.Bool("force", force))
@@ -1905,7 +1925,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
-	cfg := client.Config
+	cfg := client.GetConfig()
 	m.logger.Info("Starting quick OAuth flow (returns browser status immediately)",
 		zap.String("server", cfg.Name))
 
@@ -1988,7 +2008,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
-	cfg := client.Config
+	cfg := client.GetConfig()
 	m.logger.Info("Starting in-process manual OAuth with info tracking",
 		zap.String("server", cfg.Name),
 		zap.Bool("force", force))

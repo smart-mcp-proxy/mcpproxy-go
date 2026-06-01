@@ -75,10 +75,21 @@ type Client struct {
 	// Cached tools list from successful immediate call
 	cachedTools []mcp.Tool
 
-	// Stderr monitoring
+	// monitoringMu serializes the stderr/process monitoring lifecycle methods
+	// (Start*/Stop*Monitoring). Connect (StartStderrMonitoring) and Disconnect
+	// (StopStderrMonitoring) can run concurrently on the same client during a
+	// reconcile-vs-shutdown overlap, racing the ctx/cancel/WaitGroup fields
+	// below (notably WG.Add vs WG.Wait). This mutex makes start and stop
+	// mutually exclusive. It is never held across c.mu.
+	monitoringMu sync.Mutex
+
+	// Stderr monitoring. stderrMonitoringDone is a per-cycle channel closed by
+	// the monitor goroutine when it exits; Stop waits on it instead of a reused
+	// sync.WaitGroup, so an abandoned (timed-out) wait never races a later
+	// Start's counter. All three fields are written only under monitoringMu.
 	stderrMonitoringCtx    context.Context
 	stderrMonitoringCancel context.CancelFunc
-	stderrMonitoringWG     sync.WaitGroup
+	stderrMonitoringDone   chan struct{}
 
 	// Ring buffer of recent stderr lines from the subprocess.
 	// Populated by monitorStderr; surfaced in initialize failure messages so
@@ -92,7 +103,7 @@ type Client struct {
 	processGroupID       int // Process group ID for proper cleanup
 	processMonitorCtx    context.Context
 	processMonitorCancel context.CancelFunc
-	processMonitorWG     sync.WaitGroup
+	processMonitorDone   chan struct{}
 
 	// Docker container tracking
 	containerID     string
