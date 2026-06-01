@@ -158,8 +158,9 @@ jobs:
               break
             fi
             if curl -fsS -H "X-API-Key: $key" "$base/api/v1/status" >/dev/null 2>&1; then
+              # /api/v1/index/search wraps results as {"success":true,"data":{"results":[...]}}
               n="$(curl -fsS -H "X-API-Key: $key" "$base/api/v1/index/search?q=file&limit=5" \
-                   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("tools",d.get("results",[]))))' 2>/dev/null || echo 0)"
+                   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len((d.get("data") or {}).get("results", [])))' 2>/dev/null || echo 0)"
               echo "attempt $i: index search returned $n result(s)"
               [ "$n" -ge 1 ] && { ready=1; echo "Index ready."; break; }
             else
