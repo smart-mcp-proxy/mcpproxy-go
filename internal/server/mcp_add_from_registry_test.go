@@ -33,6 +33,12 @@ func newAddFromRegistryTestServer(t *testing.T) *MCPProxyServer {
 
 	mainSrv, err := NewServer(cfg, logger)
 	require.NoError(t, err)
+	// Close the runtime/BBolt storage when the test ends so the config.db handle
+	// is released before t.TempDir's RemoveAll runs. On Windows an open file
+	// cannot be unlinked, so without this the temp-dir cleanup fails the test
+	// ("config.db ... being used by another process"). Registered after
+	// t.TempDir() (line above) so LIFO cleanup closes the DB first.
+	t.Cleanup(func() { _ = mainSrv.Shutdown() })
 
 	proxy.mainServer = mainSrv
 	return proxy
