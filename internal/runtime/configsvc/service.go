@@ -200,8 +200,28 @@ func (s *Service) Subscribe(ctx context.Context) <-chan Update {
 	s.logger.Debug("New configuration subscriber",
 		zap.Int("total_subscribers", len(s.subscribers)))
 
-	// Send initial snapshot to new subscriber
+	// Send initial snapshot to new subscriber.
 	go func() {
+		// Best-effort early-out if the subscriber canceled before we ran.
+		select {
+		case <-ctx.Done():
+			s.Unsubscribe(ch)
+			return
+		default:
+		}
+
+		// Deliver the initial snapshot under subMu(R) so Close()/Unsubscribe()
+		// (which close ch under the subMu write lock) cannot race or panic this
+		// send — a send on a closed channel both data-races and panics. The
+		// membership check covers both teardown paths: Close() nils the slice and
+		// Unsubscribe() removes this ch. The buffer (cap 10) is empty at subscribe
+		// time, so a non-blocking send always reaches a still-live subscriber;
+		// staying non-blocking avoids holding the lock across a blocking send.
+		s.subMu.RLock()
+		defer s.subMu.RUnlock()
+		if !s.isSubscribedLocked(ch) {
+			return
+		}
 		select {
 		case ch <- Update{
 			Snapshot:  s.Current(),
@@ -209,12 +229,22 @@ func (s *Service) Subscribe(ctx context.Context) <-chan Update {
 			ChangedAt: time.Now(),
 			Source:    "subscription",
 		}:
-		case <-ctx.Done():
-			s.Unsubscribe(ch)
+		default:
 		}
 	}()
 
 	return ch
+}
+
+// isSubscribedLocked reports whether ch is still a live subscriber. Callers must
+// hold subMu (read or write).
+func (s *Service) isSubscribedLocked(ch chan Update) bool {
+	for _, sub := range s.subscribers {
+		if sub == ch {
+			return true
+		}
+	}
+	return false
 }
 
 // Unsubscribe removes a subscriber channel and closes it.
