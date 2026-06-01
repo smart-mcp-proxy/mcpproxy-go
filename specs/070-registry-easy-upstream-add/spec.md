@@ -15,6 +15,10 @@
 - Q: Add-from-registry today via MCP? → A: Works, but the agent must hand-construct the upstream config from a search result; a convenience "add from registry result" mode is desired.
 - Q: Does quarantine-by-default hold on add? → A: Yes, on every surface (they share the core add path); this MUST be preserved as an invariant.
 
+### Session 2026-06-01 (O3 — post-implementation amendment)
+
+- Amendment (O3): The US1/US2 "gaps" recorded on 2026-05-31 were partly **stale**. During implementation it was found that the Web UI already exposed an "Add to MCP" path and the CLI already *listed and searched* registries; the genuine gap was narrower — each surface re-implemented add logic (including a client-side parse on the Web UI, a CN-001 risk) instead of sharing one path, and the CLI could not add directly *from a search result*. The real work delivered was therefore **de-duplicating every surface (Web UI, CLI, MCP) onto the single `AddServerFromRegistry` keystone core op** (`internal/registries/`), so quarantine-by-default and validation live in exactly one place. This landed in PR #555 / commit `354580f4` and is guarded by a cross-surface consistency regression (`internal/server/consistency_crosssurface_test.go`, T021 / CN-004 / SC-004). The other decision artifacts are already reflected in shipped code — O1 (required-input heuristic), O2 (key-absent skip), O4 (P2 in scope); O3 (this note) was the only outstanding artifact.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 — Add a discovered server to upstream from the Web UI in one flow (Priority: P1)
