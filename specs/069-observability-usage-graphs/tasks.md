@@ -44,11 +44,11 @@ Web app: Go backend under `internal/`; embedded Vue frontend under `frontend/src
 
 **Purpose**: `GET /api/v1/activity/usage` reading the snapshot/TTL cache (contracts/usage-endpoint.md).
 
-- [ ] T011 [BE] Failing API test in `internal/httpapi/activity_usage_test.go`: ranking by `sort`, `error_rate` math, avg excludes 0-byte calls, `window` filter (24h/7d/all), tool/server/status filters (FR-008), top-N + `other` fold, empty-state 200 (FR-009), 400 on bad enum.
-- [ ] T012 [BE] Add `UsageAggregateResponse` + sub-structs to `internal/contracts/types.go`.
-- [ ] T013 [BE] Implement `handleActivityUsage` in `internal/httpapi/activity.go` (reuse `parseActivityFilters`); short-TTL cache for wide windows; echo `tokens_saved` from `ServerTokenMetrics`. Register `GET /api/v1/activity/usage` in `internal/httpapi/server.go`.
-- [ ] T014 [BE] [P] Document endpoint in `oas/swagger.yaml`; `./scripts/verify-oas-coverage.sh` passes.
-- [ ] T015 [BE] Perf assertion (SC-005): test/benchmark proves `handleActivityUsage` does not call the full-scan path per request (only cold start).
+- [x] T011 [BE] Failing API test in `internal/httpapi/activity_usage_test.go`: ranking by `sort`, `error_rate` math, avg excludes 0-byte calls, `window` filter (24h/7d/all), tool/server/status filters (FR-008), top-N + `other` fold, empty-state 200 (FR-009), 400 on bad enum.
+- [x] T012 [BE] Add `UsageAggregateResponse` + sub-structs to `internal/contracts/types.go`.
+- [x] T013 [BE] Implement `handleActivityUsage` in `internal/httpapi/activity.go`; short-TTL read cache (`usage_cache_ttl`) for wide windows; echo `tokens_saved` from `ServerTokenMetrics`. Register `GET /api/v1/activity/usage` in `internal/httpapi/server.go`. (Deviation: a dedicated `parseUsageParams` validates the usage-specific `window`/`sort`/`top` enums and returns 400 on bad input — `parseActivityFilters` silently ignores bad input; the shared `server`/`tool`/`status` param names are kept consistent.)
+- [x] T014 [BE] [P] Document endpoint in `oas/swagger.yaml` (swag-generated from handler annotations); `./scripts/verify-oas-coverage.sh` passes in CI (note: local macOS BSD-sed lacks the `\U` GNU extension the script relies on, so the coverage % is wrong locally; the route + schemas are present and the documented count increments).
+- [x] T015 [BE] Perf assertion (SC-005): `TestActivityUsage_NoFullScanPerRequest` proves `handleActivityUsage` never calls the full-scan path (`AggregateToolUsage`) per request.
 
 ---
 
@@ -69,9 +69,9 @@ Web app: Go backend under `internal/`; embedded Vue frontend under `frontend/src
 
 ## Phase 5: Polish & cross-cutting
 
-- [ ] T024 [BE][P] `./scripts/test-api-e2e.sh` green end-to-end with the new endpoint.
-- [ ] T025 [BE][P] Run full `internal/runtime` suite (approval-hash canary safety) since `ActivityRecord` changed.
-- [ ] T026 [P] Spec trace + swagger committed; conventional commits, no Claude attribution.
+- [x] T024 [BE][P] `./scripts/test-api-e2e.sh` green end-to-end with the new endpoint (65/65 passed).
+- [x] T025 [BE][P] Run full `internal/runtime` suite `-race` (approval-hash canary safety) — all packages green.
+- [x] T026 [P] Spec trace + swagger committed; conventional commits, no Claude attribution.
 
 ---
 

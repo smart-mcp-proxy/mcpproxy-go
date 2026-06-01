@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -139,6 +140,10 @@ type ServerController interface {
 	// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
 	// given time. Backs the global tools page usage columns (spec 050).
 	AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error)
+	// UsageSnapshot returns the actor-owned in-memory usage aggregate snapshot
+	// (spec 069 A2). The /api/v1/activity/usage endpoint reads it without a
+	// full-log scan (SC-005). May be nil before the activity service is ready.
+	UsageSnapshot() *internalRuntime.UsageAggregate
 
 	// Tool-level quarantine (Spec 032)
 	ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error)
@@ -180,6 +185,50 @@ type Server struct {
 	// with runtime stats attached. May be nil before SetTelemetryPayloadProvider
 	// is called.
 	telemetryPayloadProvider func() *telemetry.Service
+
+	// usageCache is the short-TTL read cache for GET /api/v1/activity/usage
+	// (Spec 069 FR-005). Keyed by the request's query params; entries expire
+	// after the configured usage_cache_ttl so wide-window reads are cheap and
+	// staleness is bounded.
+	usageCacheMu sync.Mutex
+	usageCache   map[string]usageCacheEntry
+}
+
+// usageCacheEntry is one cached usage response with its expiry.
+type usageCacheEntry struct {
+	resp    *contracts.UsageAggregateResponse
+	expires time.Time
+}
+
+// usageCacheMaxEntries bounds the usage cache; on overflow it is cleared
+// wholesale (entries are short-lived and the working set is tiny in practice).
+const usageCacheMaxEntries = 64
+
+// getUsageCache returns a non-expired cached response for key, or nil.
+func (s *Server) getUsageCache(key string, ttl time.Duration) *contracts.UsageAggregateResponse {
+	if ttl <= 0 {
+		return nil
+	}
+	s.usageCacheMu.Lock()
+	defer s.usageCacheMu.Unlock()
+	entry, ok := s.usageCache[key]
+	if !ok || time.Now().After(entry.expires) {
+		return nil
+	}
+	return entry.resp
+}
+
+// putUsageCache stores resp under key for ttl.
+func (s *Server) putUsageCache(key string, resp *contracts.UsageAggregateResponse, ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	s.usageCacheMu.Lock()
+	defer s.usageCacheMu.Unlock()
+	if s.usageCache == nil || len(s.usageCache) >= usageCacheMaxEntries {
+		s.usageCache = make(map[string]usageCacheEntry)
+	}
+	s.usageCache[key] = usageCacheEntry{resp: resp, expires: time.Now().Add(ttl)}
 }
 
 // SetTelemetryRegistry attaches the Tier 2 counter registry. Spec 042. Must
@@ -637,6 +686,7 @@ func (s *Server) setupRoutes() {
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
 		r.Get("/activity/summary", s.handleActivitySummary)
+		r.Get("/activity/usage", s.handleActivityUsage)
 		r.Get("/activity/export", s.handleExportActivity)
 		r.Get("/activity/{id}", s.handleGetActivityDetail)
 

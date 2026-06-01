@@ -2484,6 +2484,11 @@ func (s *Server) AggregateToolUsage(since time.Time) (map[string]storage.ToolUsa
 	return s.runtime.AggregateToolUsage(since)
 }
 
+// UsageSnapshot returns the actor-owned usage aggregate snapshot (spec 069 A3).
+func (s *Server) UsageSnapshot() *runtime.UsageAggregate {
+	return s.runtime.UsageSnapshot()
+}
+
 // ListToolApprovals returns tool approval records for a server (Spec 032).
 func (s *Server) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
 	return s.runtime.ListToolApprovals(serverName)
