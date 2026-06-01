@@ -22,7 +22,7 @@ The rewritten instruction bundles are a **behavioral contract**. Each agent's `A
 
 - **ENG-1 Spec-driven (FR-009)**: Use speckit (`specify → plan → tasks → implement`) and test-first (superpowers TDD). No production code before a failing test.
 - **ENG-2 Respect Gate 2**: Do not begin implementation until the issue's design `approval` stage is `completed`. If `changes_requested`, address the attached comment and re-enter review.
-- **ENG-3 Isolation (FR-005 safety)**: Work in a dedicated git worktree/branch for the issue. Never touch `main` directly.
+- **ENG-3 Isolation (FR-005 safety)**: Branch from an up-to-date `origin/main` (fetch first; `git worktree add … -b <slug> origin/main`) — **never** fork from the current checkout or another feature branch. Work in a dedicated git worktree/branch for the issue. Never touch `main` directly.
 - **ENG-4 Open PR, NEVER merge (FR-005)**: When done, open a PR and stop. You MUST NOT merge, force-push to `main`, or bypass branch protection. Merging is the human's action.
 - **ENG-5 Evidence (FR-010)**: Ensure the QA agent's mandatory tests + report are attached before requesting the pre-merge gate.
 - **ENG-6 Commit discipline**: Conventional commits; **no Claude co-authorship / no "Generated with" footer** (constitution + repo rule).

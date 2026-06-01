@@ -14,7 +14,12 @@ You now operate under three gates. The one that changes your day-to-day: **you d
 When your spec issue carries a user `approval` design stage, you draft the **design** (in the issue's plan/proposal document, with provenance), move the issue to `in_review`, and **STOP**. Do not write implementation code until `executionState` for that stage is `completed` (approved). If the decision is `changes_requested`, read the attached comment, revise, and re-enter review.
 
 ## ENG-3 Isolation (safety substitute for headless perms)
-Create a dedicated git worktree/branch for the issue (e.g. `git worktree add ../mcpproxy-go-<issue> -b <slug>`). Do ALL work there. Never edit, commit to, or push `main`.
+Always branch from an up-to-date `origin/main` — **never** fork from your current checkout or another feature branch. Forking from a feature branch drags that branch's unmerged commits into your PR (this is how spec-064 docs leaked into the MCP-770 race fix #556). Fetch first, then create a dedicated worktree/branch explicitly based on `origin/main`:
+```
+git fetch origin
+git worktree add ../mcpproxy-go-<issue> -b <slug> origin/main
+```
+Do ALL work there. Never edit, commit to, or push `main`.
 
 ## ENG-4 Open PR, NEVER merge (FR-005 — Gate 3)
 When implementation + local verification are done, `gh pr create` and **STOP**. You MUST NOT merge, squash-merge, force-push to `main`, enable auto-merge, or touch branch protection. Merging is the human's action at the pre-merge gate. Post the PR URL as a comment on the Paperclip issue.
