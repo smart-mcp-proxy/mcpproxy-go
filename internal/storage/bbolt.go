@@ -90,6 +90,7 @@ func (b *BoltDB) initBuckets() error {
 			OAuthTokenBucket,
 			MetaBucket,
 			ActivityRecordsBucket,
+			ActivityStatsBucket,
 			ScannersBucket,
 			ScanJobsBucket,
 			ScanReportsBucket,

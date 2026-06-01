@@ -45,6 +45,12 @@ TimeBucket
 
 **High cardinality (edge case)**: endpoint returns top-N tools by the requested sort key + a synthesized `"other"` aggregate folding the tail, so charts stay readable (spec Edge Cases).
 
+**A2 implementation notes** (as built — informs A3):
+- **Time buckets are hourly** (`usageBucketWidth = 1h`), matching the contract example (`start: …T11:00:00Z`). One fixed-width ring bounded to `24*90` buckets (~90d, the default activity retention); oldest evicted first. A3 selects/trims the requested window span over these hourly buckets. (Minute/5-min granularity for 24h from the §2 table above is deferred — hourly bars render cleanly and keep the aggregate bounded.)
+- **Sized averages** track **separate** counts: `SizedRespCalls` (records with `ResponseBytes>0`) and `SizedReqCalls` (`RequestBytes>0`), so `avg_resp_bytes`/`avg_req_bytes` each exclude their own 0-byte (legacy) records exactly. The contract's `sized_calls` maps to `SizedRespCalls` (the token-sink metric). `AvgRespBytes()`/`AvgReqBytes()` return `ok=false` when their sized count is 0.
+- **Latency percentiles** use a fixed histogram (`latencyBucketBoundsMs = {10,25,50,100,250,500,1000,2500,5000,10000}` + overflow). `ToolUsage.Percentile(p)` returns the upper bound of the bucket holding the p-th call (approximate; bounded memory).
+- **Persistence is byte-oriented** in storage (`SaveUsageSnapshot`/`LoadUsageSnapshot` + `ScanAllActivities`) to avoid a storage→runtime import cycle; the runtime owns JSON encode/decode and the load-or-rebuild orchestration.
+
 ## 3. Persisted snapshot (`activity_stats` bucket)
 
 New BBolt bucket `activity_stats`, single key (e.g. `usage_aggregate_v1`) → gob/JSON-encoded `UsageAggregate`. Written on a periodic flush (default 30s, configurable) and on graceful shutdown. On cold start: load if present and recent; else one full `AggregateToolUsage`-style scan to rebuild. Schema-versioned key so a future shape change forces a clean rebuild rather than mis-decoding.

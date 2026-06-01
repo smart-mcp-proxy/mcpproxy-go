@@ -149,6 +149,9 @@ type Config struct {
 	// Telemetry settings (Spec 036)
 	Telemetry *TelemetryConfig `json:"telemetry,omitempty" mapstructure:"telemetry"`
 
+	// Observability settings (Spec 069): usage aggregate cache/persistence cadence.
+	Observability *ObservabilityConfig `json:"observability,omitempty" mapstructure:"observability"`
+
 	// Routing mode (Spec 031): how MCP tools are exposed to clients
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
@@ -732,6 +735,24 @@ func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
 	return c.StrictServerValidation
 }
 
+// ObservabilityConfig controls the Spec 069 usage aggregate cadence.
+type ObservabilityConfig struct {
+	// UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
+	// wide windows (FR-005). Default 5s.
+	UsageCacheTTL Duration `json:"usage_cache_ttl,omitempty" mapstructure:"usage-cache-ttl" swaggertype:"string"`
+	// UsagePersistInterval is how often the actor-owned usage aggregate snapshot
+	// is flushed to storage. Default 30s.
+	UsagePersistInterval Duration `json:"usage_persist_interval,omitempty" mapstructure:"usage-persist-interval" swaggertype:"string"`
+}
+
+// DefaultObservabilityConfig returns the default observability configuration.
+func DefaultObservabilityConfig() *ObservabilityConfig {
+	return &ObservabilityConfig{
+		UsageCacheTTL:        Duration(5 * time.Second),
+		UsagePersistInterval: Duration(30 * time.Second),
+	}
+}
+
 // ToolRegistration represents a tool registration
 type ToolRegistration struct {
 	Name         string                 `json:"name"`
@@ -965,6 +986,9 @@ func DefaultConfig() *Config {
 
 		// Intent declaration defaults (Spec 018) - strict validation by default for security
 		IntentDeclaration: DefaultIntentDeclarationConfig(),
+
+		// Observability defaults (Spec 069)
+		Observability: DefaultObservabilityConfig(),
 	}
 }
 
@@ -1349,6 +1373,19 @@ func (c *Config) Validate() error {
 	// Ensure IntentDeclaration config is not nil
 	if c.IntentDeclaration == nil {
 		c.IntentDeclaration = DefaultIntentDeclarationConfig()
+	}
+
+	// Ensure Observability config is not nil and has sane cadence defaults
+	// (Spec 069). The hot-reload path re-runs Validate, so zeroed fields are
+	// repaired rather than disabling persistence/caching entirely.
+	if c.Observability == nil {
+		c.Observability = DefaultObservabilityConfig()
+	}
+	if c.Observability.UsageCacheTTL.Duration() <= 0 {
+		c.Observability.UsageCacheTTL = Duration(5 * time.Second)
+	}
+	if c.Observability.UsagePersistInterval.Duration() <= 0 {
+		c.Observability.UsagePersistInterval = Duration(30 * time.Second)
 	}
 
 	return nil

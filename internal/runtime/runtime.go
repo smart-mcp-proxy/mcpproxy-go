@@ -206,6 +206,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			zap.Bool("scan_responses", cfg.SensitiveDataDetection.ScanResponses))
 	}
 
+	// Wire observability usage persistence cadence from config (Spec 069 A2).
+	if cfg.Observability != nil && cfg.Observability.UsagePersistInterval.Duration() > 0 {
+		activityService.SetUsagePersistInterval(cfg.Observability.UsagePersistInterval.Duration())
+	}
+
 	// Wire activity retention config from config file
 	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 {
 		maxAge := time.Duration(cfg.ActivityRetentionDays) * 24 * time.Hour
