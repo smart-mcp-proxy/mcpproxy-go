@@ -17,8 +17,18 @@ name: Eval (Spec 065 regression gate)
 on:
   pull_request:
     paths:
-      - "cmd/scan-eval/**"
+      # D2 (security) system under test
       - "internal/security/**"
+      # D1 (retrieval) system under test — BM25 index, MCP tool-discovery
+      # routing, the REST search envelope, and server/CLI boot behavior the
+      # retrieval eval depends on. Spec 065 requires CI to catch discovery
+      # regressions when search/index/tool-discovery behavior changes.
+      - "internal/index/**"
+      - "internal/server/**"
+      - "internal/httpapi/**"
+      - "cmd/mcpproxy/**"
+      # Eval harness + frozen datasets + this workflow
+      - "cmd/scan-eval/**"
       - "specs/065-evaluation-foundation/datasets/**"
       - "scripts/eval-ci-smoke.sh"
       - ".github/workflows/eval.yml"
