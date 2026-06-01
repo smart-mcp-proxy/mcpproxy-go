@@ -27,6 +27,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
         NSApp.setActivationPolicy(.prohibited)
+
+        // Disable macOS automatic text substitutions app-wide (issue #538).
+        // Smart-dash substitution rewrites "--" as an em-dash "—", which
+        // silently corrupts CLI flags typed into server Command/Arguments/Env
+        // fields (e.g. "--flag" → "—flag"), producing broken configs. Done
+        // before any window (and thus any NSTextView field editor) is created
+        // so every text field inherits the disabled state. See
+        // TextSubstitution.disableAutomaticTextSubstitutions.
+        TextSubstitution.disableAutomaticTextSubstitutions()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

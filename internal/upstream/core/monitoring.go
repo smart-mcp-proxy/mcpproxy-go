@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -24,17 +25,32 @@ const (
 
 // StartStderrMonitoring starts monitoring stderr output and logging it
 func (c *Client) StartStderrMonitoring() {
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
+
 	if c.stderr == nil || c.transportType != transportStdio {
 		return
 	}
 
-	// Create context for stderr monitoring
-	c.stderrMonitoringCtx, c.stderrMonitoringCancel = context.WithCancel(context.Background())
+	// Capture the stderr reader as a local under monitoringMu. connectStdio
+	// reassigns c.stderr on every (re)connect (connection_stdio.go:217); passing
+	// the reader as a goroutine arg keeps monitorStderr from reading the shared
+	// field, so a later reconnect's write never races a lingering monitor's read
+	// (the connectStdio↔monitorStderr data race, MCP-816).
+	stderr := c.stderr
 
-	c.stderrMonitoringWG.Add(1)
+	// Create context for stderr monitoring. The monitor goroutine receives the
+	// context, stderr reader, and its done channel as locals so an abandoned
+	// (timed-out) goroutine never reads the shared fields a later Start may
+	// overwrite.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.stderrMonitoringCtx, c.stderrMonitoringCancel = ctx, cancel
+	c.stderrMonitoringDone = done
+
 	go func() {
-		defer c.stderrMonitoringWG.Done()
-		c.monitorStderr()
+		defer close(done)
+		c.monitorStderr(ctx, stderr)
 	}()
 
 	c.logger.Debug("Started stderr monitoring",
@@ -43,41 +59,55 @@ func (c *Client) StartStderrMonitoring() {
 
 // StopStderrMonitoring stops stderr monitoring
 func (c *Client) StopStderrMonitoring() {
-	if c.stderrMonitoringCancel != nil {
-		c.stderrMonitoringCancel()
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
 
-		// Use a timeout for the wait to prevent hanging
-		done := make(chan struct{})
-		go func() {
-			c.stderrMonitoringWG.Wait()
-			close(done)
-		}()
+	if c.stderrMonitoringCancel == nil {
+		return
+	}
 
-		select {
-		case <-done:
-			c.logger.Debug("Stopped stderr monitoring",
-				zap.String("server", c.config.Name))
-		case <-time.After(500 * time.Millisecond):
-			c.logger.Warn("Stderr monitoring stop timed out after 500ms, forcing shutdown",
-				zap.String("server", c.config.Name))
-		}
+	c.stderrMonitoringCancel()
+	done := c.stderrMonitoringDone
+	c.stderrMonitoringCancel = nil
+	c.stderrMonitoringDone = nil
+	if done == nil {
+		return
+	}
+
+	// Wait for the monitor goroutine directly under monitoringMu (no detached
+	// waiter that could outlive the lock). On timeout the goroutine is abandoned;
+	// it closes its own done channel and touches only its captured ctx, so it
+	// cannot race a subsequent Start.
+	select {
+	case <-done:
+		c.logger.Debug("Stopped stderr monitoring",
+			zap.String("server", c.config.Name))
+	case <-time.After(500 * time.Millisecond):
+		c.logger.Warn("Stderr monitoring stop timed out after 500ms, forcing shutdown",
+			zap.String("server", c.config.Name))
 	}
 }
 
 // StartProcessMonitoring starts monitoring the underlying process
 func (c *Client) StartProcessMonitoring() {
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
+
 	// Start monitoring even if processCmd is nil for Docker containers
 	if c.processCmd == nil && !c.isDockerCommand {
 		return
 	}
 
-	// Create context for process monitoring
-	c.processMonitorCtx, c.processMonitorCancel = context.WithCancel(context.Background())
+	// Create context for process monitoring (ctx + done passed as locals; see
+	// StartStderrMonitoring for the abandoned-goroutine rationale).
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.processMonitorCtx, c.processMonitorCancel = ctx, cancel
+	c.processMonitorDone = done
 
-	c.processMonitorWG.Add(1)
 	go func() {
-		defer c.processMonitorWG.Done()
-		c.monitorProcess()
+		defer close(done)
+		c.monitorProcess(ctx)
 	}()
 
 	if c.processCmd != nil {
@@ -94,29 +124,33 @@ func (c *Client) StartProcessMonitoring() {
 
 // StopProcessMonitoring stops process monitoring
 func (c *Client) StopProcessMonitoring() {
-	if c.processMonitorCancel != nil {
-		c.processMonitorCancel()
+	c.monitoringMu.Lock()
+	defer c.monitoringMu.Unlock()
 
-		// Use a timeout for the wait to prevent hanging
-		done := make(chan struct{})
-		go func() {
-			c.processMonitorWG.Wait()
-			close(done)
-		}()
+	if c.processMonitorCancel == nil {
+		return
+	}
 
-		select {
-		case <-done:
-			c.logger.Debug("Stopped process monitoring",
-				zap.String("server", c.config.Name))
-		case <-time.After(500 * time.Millisecond):
-			c.logger.Warn("Process monitoring stop timed out after 500ms, forcing shutdown",
-				zap.String("server", c.config.Name))
-		}
+	c.processMonitorCancel()
+	done := c.processMonitorDone
+	c.processMonitorCancel = nil
+	c.processMonitorDone = nil
+	if done == nil {
+		return
+	}
+
+	select {
+	case <-done:
+		c.logger.Debug("Stopped process monitoring",
+			zap.String("server", c.config.Name))
+	case <-time.After(500 * time.Millisecond):
+		c.logger.Warn("Process monitoring stop timed out after 500ms, forcing shutdown",
+			zap.String("server", c.config.Name))
 	}
 }
 
 // monitorProcess monitors the underlying process health
-func (c *Client) monitorProcess() {
+func (c *Client) monitorProcess(ctx context.Context) {
 	// Only return early if we have neither processCmd nor Docker command
 	if c.processCmd == nil && !c.isDockerCommand {
 		return
@@ -130,7 +164,7 @@ func (c *Client) monitorProcess() {
 
 	for {
 		select {
-		case <-c.processMonitorCtx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			if isDocker {
@@ -140,12 +174,15 @@ func (c *Client) monitorProcess() {
 	}
 }
 
-// monitorStderr monitors stderr output and logs it to both main and server-specific logs
-func (c *Client) monitorStderr() {
-	scanner := bufio.NewScanner(c.stderr)
+// monitorStderr monitors stderr output and logs it to both main and server-specific logs.
+// The stderr reader is passed as an argument (captured under monitoringMu by the
+// caller) rather than read from c.stderr, so a concurrent connectStdio reassigning
+// the shared field cannot race this goroutine's read (MCP-816).
+func (c *Client) monitorStderr(ctx context.Context, stderr io.Reader) {
+	scanner := bufio.NewScanner(stderr)
 	for scanner.Scan() {
 		select {
-		case <-c.stderrMonitoringCtx.Done():
+		case <-ctx.Done():
 			return
 		default:
 			line := strings.TrimSpace(scanner.Text())

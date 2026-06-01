@@ -16,9 +16,9 @@ import (
 func newTestClientForHealth(t *testing.T) *Client {
 	t.Helper()
 	mc := &Client{
-		Config: &config.ServerConfig{Name: "flap-server"},
 		logger: zap.NewNop(),
 	}
+	mc.SetConfig(&config.ServerConfig{Name: "flap-server"})
 	mc.StateManager = types.NewStateManager()
 	mc.StateManager.TransitionTo(types.StateConnecting)
 	mc.StateManager.TransitionTo(types.StateReady)

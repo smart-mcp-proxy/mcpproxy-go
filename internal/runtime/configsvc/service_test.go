@@ -2,6 +2,7 @@ package configsvc
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -326,6 +327,34 @@ func TestSnapshot_ServerNames(t *testing.T) {
 			t.Errorf("Unexpected server name: %s", name)
 		}
 	}
+}
+
+// TestService_SubscribeCloseRace reproduces the close-vs-send data race surfaced
+// by TestHandleUpstreamServers_AddFromRegistry_* under -race (MCP-816 / MCP-809
+// RV-3). Subscribe spawns a goroutine that sends the initial snapshot on the
+// subscriber channel (service.go:206) while holding no lock; Close (service.go:261)
+// closes that same channel under subMu. A send racing the close both data-races
+// and can panic ("send on closed channel"). Run under `go test -race`: trips
+// before the lock+membership-guarded send, green after. Run with high parallelism
+// so a Subscribe-init send overlaps the Close in most iterations.
+func TestService_SubscribeCloseRace(t *testing.T) {
+	const iterations = 200
+
+	var wg sync.WaitGroup
+	for i := 0; i < iterations; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc := NewService(&config.Config{Listen: "127.0.0.1:8080"}, "/tmp/config.json", zap.NewNop())
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			// Subscribe schedules the init-snapshot send goroutine; Close races it.
+			_ = svc.Subscribe(ctx)
+			svc.Close()
+		}()
+	}
+	wg.Wait()
 }
 
 func TestService_Close(t *testing.T) {

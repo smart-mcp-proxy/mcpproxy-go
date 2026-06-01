@@ -1438,33 +1438,27 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
-// ListRegistries returns the list of available MCP server registries (Phase 7)
+// ListRegistries returns the list of available MCP server registries (Phase 7).
+//
+// It routes through the SAME merged source (built-in defaults + user-configured
+// registries, keyed by ID) that search/add use via SetRegistriesFromConfig, so
+// `mcpproxy registry list` / the Web UI never omit a built-in that is still
+// searchable/addable and never show the legacy hard-coded Smithery entry instead
+// of the shipped defaults (FR-006 / MCP-800 finding 2).
 func (r *Runtime) ListRegistries() ([]interface{}, error) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	cfg := r.cfg
+	r.mu.RUnlock()
 
-	// Import registries package dynamically to avoid import cycles
-	// For now, we'll return registries from config or use defaults
-	registries := r.cfg.Registries
-	if len(registries) == 0 {
-		// Return default registry (Smithery)
-		defaultRegistry := map[string]interface{}{
-			"id":          "smithery",
-			"name":        "Smithery MCP Registry",
-			"description": "The official community registry for Model Context Protocol (MCP) servers.",
-			"url":         "https://smithery.ai/protocols",
-			"servers_url": "https://smithery.ai/api/smithery-protocol-registry",
-			"tags":        []string{"official", "community"},
-			"protocol":    "modelcontextprotocol/registry",
-			"count":       -1,
-		}
-		return []interface{}{defaultRegistry}, nil
-	}
+	// Rebuild the effective catalog (defaults merged with custom) — same call the
+	// search/add paths make — then read it back.
+	registries.SetRegistriesFromConfig(cfg)
+	merged := registries.ListRegistries()
 
-	// Convert config registries to interface slice
-	result := make([]interface{}, 0, len(registries))
-	for _, reg := range registries {
-		regMap := map[string]interface{}{
+	result := make([]interface{}, 0, len(merged))
+	for i := range merged {
+		reg := &merged[i]
+		result = append(result, map[string]interface{}{
 			"id":          reg.ID,
 			"name":        reg.Name,
 			"description": reg.Description,
@@ -1473,15 +1467,32 @@ func (r *Runtime) ListRegistries() ([]interface{}, error) {
 			"tags":        reg.Tags,
 			"protocol":    reg.Protocol,
 			"count":       reg.Count,
-		}
-		result = append(result, regMap)
+		})
 	}
 
 	return result, nil
 }
 
-// SearchRegistryServers searches for servers in a specific registry (Phase 7)
-func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, error) {
+// registryServersCachePrefix is the stable cache-key prefix for a registry's
+// cached server lists. A single RefreshRegistryCache drops every tag/query/limit
+// variant under it (FR-007).
+func registryServersCachePrefix(registryID string) string {
+	return fmt.Sprintf("registry-servers:%s:", registryID)
+}
+
+// registryServersCacheKey keys a specific (registry, tag, query, limit) search.
+func registryServersCacheKey(registryID, tag, query string, limit int) string {
+	return fmt.Sprintf("%s%s:%s:%d", registryServersCachePrefix(registryID), tag, query, limit)
+}
+
+// SearchRegistryServers searches for servers in a specific registry (Phase 7).
+// Results are cached per (registry, tag, query, limit) via the cache manager;
+// a cached list is served while flagging its freshness (FR-007), and the
+// returned *contracts.RegistryCacheInfo carries the age/stale indicator. A
+// registry that requires an unconfigured API key surfaces as a wrapped
+// registries.ErrRegistryKeyMissing so the caller can mark it unavailable
+// without failing the overall search (FR-008).
+func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int) ([]interface{}, *contracts.RegistryCacheInfo, error) {
 	r.mu.RLock()
 	cfg := r.cfg
 	r.mu.RUnlock()
@@ -1495,6 +1506,26 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 	// Initialize registries from config
 	registries.SetRegistriesFromConfig(cfg)
 
+	cacheKey := registryServersCacheKey(registryID, tag, query, limit)
+
+	// Serve a cached server list when present, flagging its age/freshness.
+	if r.cacheManager != nil {
+		if rec, ok := r.cacheManager.Peek(cacheKey); ok {
+			var cached []interface{}
+			if err := json.Unmarshal([]byte(rec.FullContent), &cached); err == nil {
+				info := &contracts.RegistryCacheInfo{
+					AgeSeconds: time.Since(rec.CreatedAt).Seconds(),
+					Stale:      rec.IsExpired(),
+				}
+				r.logger.Debug("Registry search served from cache",
+					zap.String("registry_id", registryID),
+					zap.Float64("age_seconds", info.AgeSeconds),
+					zap.Bool("stale", info.Stale))
+				return cached, info, nil
+			}
+		}
+	}
+
 	// Create a guesser for repository detection (with caching)
 	guesser := experiments.NewGuesser(r.cacheManager, r.logger)
 
@@ -1504,7 +1535,7 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 
 	servers, err := registries.SearchServers(ctx, registryID, tag, query, limit, guesser)
 	if err != nil {
-		return nil, fmt.Errorf("failed to search registry: %w", err)
+		return nil, nil, fmt.Errorf("failed to search registry: %w", err)
 	}
 
 	// Convert to interface slice
@@ -1538,11 +1569,39 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 		result[i] = serverMap
 	}
 
+	// Cache the freshly fetched list so subsequent searches surface its age.
+	var cacheInfo *contracts.RegistryCacheInfo
+	if r.cacheManager != nil {
+		if data, mErr := json.Marshal(result); mErr == nil {
+			if sErr := r.cacheManager.Store(cacheKey, "registry-servers", nil, string(data), "", len(result)); sErr != nil {
+				r.logger.Warn("Failed to cache registry search", zap.Error(sErr))
+			}
+		}
+		cacheInfo = &contracts.RegistryCacheInfo{AgeSeconds: 0, Stale: false}
+	}
+
 	r.logger.Info("Registry search completed",
 		zap.String("registry_id", registryID),
 		zap.Int("results", len(result)))
 
-	return result, nil
+	return result, cacheInfo, nil
+}
+
+// RefreshRegistryCache invalidates all cached server lists for a registry,
+// forcing the next search to re-fetch from the source (FR-007). Returns the
+// number of cache entries dropped.
+func (r *Runtime) RefreshRegistryCache(registryID string) (int, error) {
+	if r.cacheManager == nil {
+		return 0, nil
+	}
+	cleared, err := r.cacheManager.InvalidatePrefix(registryServersCachePrefix(registryID))
+	if err != nil {
+		return 0, fmt.Errorf("failed to refresh registry cache: %w", err)
+	}
+	r.logger.Info("Registry cache refreshed",
+		zap.String("registry_id", registryID),
+		zap.Int("cleared", cleared))
+	return cleared, nil
 }
 
 // GetDockerRecoveryStatus returns the current Docker recovery status from the upstream manager

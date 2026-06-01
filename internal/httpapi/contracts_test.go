@@ -305,8 +305,14 @@ func (m *MockServerController) CallTool(_ context.Context, _ string, _ map[strin
 func (m *MockServerController) ListRegistries() ([]interface{}, error) {
 	return []interface{}{}, nil
 }
-func (m *MockServerController) SearchRegistryServers(_, _, _ string, _ int) ([]interface{}, error) {
-	return []interface{}{}, nil
+func (m *MockServerController) SearchRegistryServers(_, _, _ string, _ int) ([]interface{}, *contracts.RegistryCacheInfo, error) {
+	return []interface{}{}, nil, nil
+}
+func (m *MockServerController) RefreshRegistryCache(_ string) (int, error) {
+	return 0, nil
+}
+func (m *MockServerController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
 }
 
 // Version and updates

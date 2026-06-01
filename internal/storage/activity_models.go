@@ -81,6 +81,10 @@ type ActivityRecord struct {
 	RequestID         string                 `json:"request_id,omitempty"`         // HTTP request ID for correlation
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`           // Additional context-specific data
 
+	// Byte sizes measured pre-truncation (Spec 069 A1). Zero means unknown (legacy records).
+	RequestBytes  int `json:"request_bytes,omitempty"`  // JSON-serialized request arguments size in bytes
+	ResponseBytes int `json:"response_bytes,omitempty"` // Raw upstream response size in bytes before truncation
+
 	// Multi-user identity fields (server edition). Empty/omitted for personal edition.
 	UserID    string `json:"user_id,omitempty"`    // User's unique identifier (set when server auth is active)
 	UserEmail string `json:"user_email,omitempty"` // User's email address (set when server auth is active)

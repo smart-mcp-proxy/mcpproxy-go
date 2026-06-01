@@ -420,9 +420,9 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 // arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string) {
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string, requestBytes, responseBytes int) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, requestBytes, responseBytes)
 	}
 }
 
@@ -634,11 +634,17 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch, tail_log. 'update' and 'patch' use smart merge - only specified fields change, others preserved. For quarantine operations, use the 'quarantine_security' tool."),
-				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log"),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log", "add_from_registry"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations)"),
+				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)"),
+			),
+			mcp.WithString("registry",
+				mcp.Description("Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids."),
+			),
+			mcp.WithString("id",
+				mcp.Description("Server id within the registry - required for add_from_registry."),
 			),
 			mcp.WithNumber("lines",
 				mcp.Description("Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation"),
@@ -903,6 +909,23 @@ func (p *MCPProxyServer) handleSearchServers(ctx context.Context, request mcp.Ca
 	// Search for servers
 	servers, err := registries.SearchServers(ctx, registry, tag, search, limit, guesser)
 	if err != nil {
+		// FR-008: a registry that requires an unconfigured key is reported as
+		// unavailable (not a hard error) so an agent's search still succeeds and
+		// the reason is visible.
+		if errors.Is(err, registries.ErrRegistryKeyMissing) {
+			response := map[string]interface{}{
+				"servers":     []interface{}{},
+				"registry":    registry,
+				"total":       0,
+				"query":       search,
+				"tag":         tag,
+				"unavailable": map[string]interface{}{"reason": err.Error()},
+				"message":     fmt.Sprintf("Registry '%s' is unavailable: %v", registry, err),
+			}
+			jsonResult, _ := json.Marshal(response)
+			p.emitActivityInternalToolCall("search_servers", "", "", "", sessionID, requestID, "success", "", time.Since(startTime).Milliseconds(), args, response, nil, "")
+			return mcp.NewToolResultText(string(jsonResult)), nil
+		}
 		p.logger.Error("Registry search failed",
 			zap.String("registry", registry),
 			zap.String("search", search),
@@ -1643,7 +1666,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, 0, 0)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -1668,7 +1691,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			intentMap = intent.ToMap()
 		}
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, 0, 0)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -1765,7 +1788,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, 0, 0)
 
 		// Spec 024: Emit internal tool call event for error
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -1812,6 +1835,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return blockResult, nil
 	}
 
+	// Spec 069 A1: measure raw sizes before truncation.
+	activityResponseBytes := rawByteSize(result)
+	activityRequestBytes := rawByteSize(activityArgs)
+
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
@@ -1857,7 +1884,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, activityRequestBytes, activityResponseBytes)
 
 	// Spec 024: Emit internal tool call event for success
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -2036,7 +2063,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			}
 			// Log the early failure to activity (Spec 024)
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "")
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", 0, 0)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -2045,7 +2072,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
 		// Log the early failure to activity (Spec 024)
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "")
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", 0, 0)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2167,7 +2194,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		// Emit activity completed event for error with determined source (legacy - no intent)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "")
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", 0, 0)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -2210,6 +2237,10 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		return blockResult, nil
 	}
 
+	// Spec 069 A1: measure raw sizes before truncation.
+	legacyResponseBytes := rawByteSize(result)
+	legacyRequestBytes := rawByteSize(activityArgs)
+
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
@@ -2251,7 +2282,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Emit activity completed event for success with determined source (legacy - no intent)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "")
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", legacyRequestBytes, legacyResponseBytes)
 
 	return forwarded, nil
 }
@@ -2309,6 +2340,79 @@ func (p *MCPProxyServer) handleQuarantinedToolCall(ctx context.Context, serverNa
 	return mcp.NewToolResultText(string(jsonResult))
 }
 
+// handleAddServerFromRegistry implements the upstream_servers add_from_registry
+// operation (spec 070, Phase 4 / US3). An agent supplies a registry reference
+// (registry + id) plus optional name/env_json/enabled overrides; the server
+// re-derives the runnable config from the registry entry (CN-001 / security
+// decision D1) and persists it quarantined, so agents need not hand-construct
+// command/args/url. On failure it returns a structured error (isError=true)
+// carrying the same stable Code as the REST/CLI surfaces, plus the offending
+// input names for missing_required_input (FR-003).
+func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	registryID := request.GetString("registry", "")
+	serverID := request.GetString("id", "")
+	if registryID == "" || serverID == "" {
+		return mcp.NewToolResultError("add_from_registry requires both 'registry' and 'id'"), nil
+	}
+
+	name := request.GetString("name", "")
+
+	var env map[string]string
+	if envJSON := request.GetString("env_json", ""); envJSON != "" {
+		if err := json.Unmarshal([]byte(envJSON), &env); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid env_json format: %v", err)), nil
+		}
+	}
+
+	// enabled defaults to true; an explicit false disables on add.
+	enabledVal := request.GetBool("enabled", true)
+
+	if p.mainServer == nil {
+		return mcp.NewToolResultError("Server management is not available"), nil
+	}
+
+	cfg, rerr, err := p.mainServer.AddServerFromRegistryRef(ctx, registryID, serverID, name, env, &enabledVal)
+	if err != nil {
+		// Structured cross-surface error: same Code as REST/CLI (CN-001), only
+		// the envelope differs (JSON text + isError instead of an HTTP status).
+		errPayload := map[string]interface{}{
+			"success": false,
+			"message": err.Error(),
+		}
+		if rerr != nil {
+			errPayload["code"] = rerr.Code
+			if len(rerr.MissingInputs) > 0 {
+				errPayload["missing_inputs"] = rerr.MissingInputs
+			}
+		}
+		jsonData, mErr := json.Marshal(errPayload)
+		if mErr != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultError(string(jsonData)), nil
+	}
+
+	// Slim, stable projection mirroring the REST AddedServerSummary so every
+	// surface reports the persisted server identically.
+	summary := contracts.AddedServerSummary{
+		Name:        cfg.Name,
+		Protocol:    cfg.Protocol,
+		Command:     cfg.Command,
+		Args:        cfg.Args,
+		URL:         cfg.URL,
+		Enabled:     cfg.Enabled,
+		Quarantined: cfg.Quarantined,
+	}
+	jsonData, err := json.Marshal(map[string]interface{}{
+		"success": true,
+		"server":  summary,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(jsonData)), nil
+}
+
 // handleUpstreamServers implements upstream server management
 func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
@@ -2351,7 +2455,10 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 
 	// Specific operation security checks
 	switch operation {
-	case operationAdd:
+	case operationAdd, "add_from_registry":
+		// add_from_registry persists a new upstream just like a plain add, so it
+		// must honor the same AllowServerAdd gate — otherwise the "Let agents add
+		// servers" setting is bypassable by registry reference (MCP-800 finding 1).
 		if !p.config.AllowServerAdd {
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", "Adding servers is not allowed", time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError("Adding servers is not allowed"), nil
@@ -2366,7 +2473,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		switch operation {
-		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart":
+		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "add_from_registry":
 			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -2396,6 +2503,8 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		result, opErr = p.handleEnableUpstream(ctx, request, false)
 	case "restart":
 		result, opErr = p.handleRestartUpstream(ctx, request)
+	case "add_from_registry":
+		result, opErr = p.handleAddServerFromRegistry(ctx, request)
 	default:
 		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", fmt.Sprintf("Unknown operation: %s", operation), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Unknown operation: %s", operation)), nil
@@ -5072,4 +5181,21 @@ func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, 
 	}
 	// Warn mode: forward the original payload unchanged (FR-A11).
 	return nil
+}
+
+// rawByteSize returns the JSON-serialized byte count of v, or 0 on error.
+// Used to capture pre-truncation sizes for Spec 069 A1.
+//
+// Profiling note: on the call-tool hot path the result is Marshaled here and
+// again inside forwardContentResult, so a large response is JSON-encoded twice.
+// If this shows up in profiles, capture the size from a single shared Marshal.
+func rawByteSize(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return len(b)
 }

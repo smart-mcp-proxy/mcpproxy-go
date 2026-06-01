@@ -309,7 +309,7 @@ func TestClient_Headers_Support(t *testing.T) {
 			require.NotNil(t, client)
 
 			// Test that headers are stored in config
-			assert.Equal(t, tt.headers, client.Config.Headers)
+			assert.Equal(t, tt.headers, client.GetConfig().Headers)
 
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
