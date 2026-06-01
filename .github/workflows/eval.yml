@@ -151,25 +151,29 @@ jobs:
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
 
+          # Wait for the FULL tool catalog before scoring: the retrieval index is
+          # built from the connected servers' tools, and scoring a partially
+          # indexed instance tanks recall (a ≥1-result check fires far too early).
+          # The 7 reference servers expose ~45 tools; require near-full + a short
+          # settle for the index build. /api/v1/tools wraps as
+          # {"success":true,"data":{"tools":[...]}}.
           ready=0
+          expected=44
           for i in $(seq 1 60); do
             if ! kill -0 "$server_pid" 2>/dev/null; then
               echo "::error::mcpproxy process exited during startup"
               break
             fi
-            if curl -fsS -H "X-API-Key: $key" "$base/api/v1/status" >/dev/null 2>&1; then
-              # /api/v1/index/search wraps results as {"success":true,"data":{"results":[...]}}
-              n="$(curl -fsS -H "X-API-Key: $key" "$base/api/v1/index/search?q=file&limit=5" \
-                   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len((d.get("data") or {}).get("results", [])))' 2>/dev/null || echo 0)"
-              echo "attempt $i: index search returned $n result(s)"
-              [ "$n" -ge 1 ] && { ready=1; echo "Index ready."; break; }
-            else
-              echo "attempt $i: server not up yet"
+            t="$(curl -fsS -H "X-API-Key: $key" "$base/api/v1/tools" \
+                 | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len((d.get("data") or {}).get("tools", [])))' 2>/dev/null || echo 0)"
+            echo "attempt $i: catalog has $t tool(s)"
+            if [ "$t" -ge "$expected" ]; then
+              ready=1; echo "Catalog full ($t tools); settling 8s for index build."; sleep 8; break
             fi
             sleep 5
           done
           if [ "$ready" != 1 ]; then
-            echo "::error::mcpproxy index did not become ready in time"
+            echo "::error::mcpproxy catalog did not reach ${expected} tools in time"
             echo "----- mcpproxy.log (tail) -----"; tail -80 "$RUNNER_TEMP/mcpproxy.log" || true
             exit 1
           fi
