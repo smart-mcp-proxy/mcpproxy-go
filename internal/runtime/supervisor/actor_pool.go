@@ -211,12 +211,12 @@ func (p *ActorPoolSimple) GetAllStates() map[string]*ServerState {
 
 		state := &ServerState{
 			Name:      name,
-			Config:    client.Config,
-			Enabled:   client.Config.Enabled,
+			Config:    client.GetConfig(),
+			Enabled:   client.GetConfig().Enabled,
 			Connected: connected,
 		}
 
-		if client.Config.Quarantined {
+		if client.GetConfig().Quarantined {
 			state.Quarantined = true
 		}
 
