@@ -631,6 +631,68 @@ export interface ActivitySummaryResponse {
   end_time: string
 }
 
+// Usage aggregate types (Spec 069 — GET /api/v1/activity/usage)
+
+export type UsageWindow = '24h' | '7d' | 'all'
+export type UsageSort = 'calls' | 'resp_bytes' | 'error_rate' | 'p95'
+export type UsageStatus = 'success' | 'error' | 'blocked'
+
+export interface UsageQueryParams {
+  window?: UsageWindow
+  server?: string
+  tool?: string
+  status?: UsageStatus
+  top?: number
+  sort?: UsageSort
+}
+
+// Per-(server,tool) rollup row. `avg_resp_bytes`/`avg_req_bytes` are null when
+// there are no sized (non-zero-byte) calls. `blocked` counts policy-prevented
+// attempts that never executed (excluded from `calls`, latency and bytes).
+export interface UsageToolStat {
+  server: string
+  tool: string
+  calls: number
+  errors: number
+  error_rate: number
+  blocked: number
+  total_resp_bytes: number
+  avg_resp_bytes: number | null
+  total_req_bytes: number
+  avg_req_bytes: number | null
+  sized_calls: number
+  p50_ms: number
+  p95_ms: number
+  last_used: string
+}
+
+// Present only when the tool list was truncated to `top`.
+export interface UsageOtherBucket {
+  tools_folded: number
+  calls: number
+  total_resp_bytes: number
+}
+
+// One timeline bar (executed calls only; blocked attempts excluded).
+export interface UsageTimeBucket {
+  start: string
+  calls: number
+  errors: number
+  total_resp_bytes: number
+}
+
+export interface UsageAggregateResponse {
+  window: UsageWindow
+  generated_at: string
+  freshness_ms: number
+  token_source: string
+  tokens_saved: number
+  tokens_saved_percentage: number
+  tools: UsageToolStat[]
+  other?: UsageOtherBucket
+  timeline: UsageTimeBucket[]
+}
+
 // Agent Token types (Spec 028)
 
 export interface AgentTokenInfo {
