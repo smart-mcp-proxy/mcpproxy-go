@@ -502,6 +502,8 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	server.SetMCPServerVersion(version)
 	// Spec 042: surface header for outbound CLI HTTP requests.
 	cliclient.SetClientVersion(version)
+	// Issue #566: registries (e.g. Pulse) require a versioned User-Agent.
+	registries.SetVersion(version)
 
 	// Override other settings from command line
 	cfg.DebugSearch = cmdDebugSearch

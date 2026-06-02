@@ -794,6 +794,17 @@ func TestConstructServerURL(t *testing.T) {
 			"https://api.fleurmcp.com/apps/app1/mcp",
 		},
 		{
+			// Issue #567: Fleur apps that ship a local stdio install command
+			// (InstallCmd populated by parseFleur) must NOT get a synthesised
+			// https endpoint — same class as the Docker #483 bug. A non-empty
+			// URL makes the frontend register them as "Remote". Launch info
+			// travels via InstallCmd, so the connection URL must stay empty.
+			"fleur protocol with InstallCmd returns empty (stdio not remote)",
+			ServerEntry{ID: "app1", URL: "", InstallCmd: "npx -y @fleur/app1"},
+			RegistryEntry{Protocol: "custom/fleur"},
+			"",
+		},
+		{
 			"unknown protocol",
 			ServerEntry{ID: "test", URL: ""},
 			RegistryEntry{Protocol: "unknown"},
@@ -809,6 +820,38 @@ func TestConstructServerURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestFetchServers_SendsVersionedUserAgent is a regression for issue #566:
+// Pulse's api.pulsemcp.com/v0beta/servers now returns 410 to requests with an
+// empty or bare User-Agent and only 200s a versioned one (e.g. "mcpproxy/0.35.0").
+// fetchServers previously sent no User-Agent at all. This stands up a server
+// that mirrors Pulse's behaviour (410 unless a versioned UA is present) and
+// asserts fetchServers both sends a versioned UA and succeeds.
+func TestFetchServers_SendsVersionedUserAgent(t *testing.T) {
+	var gotUserAgent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserAgent = r.Header.Get("User-Agent")
+		// Mirror Pulse: reject empty or bare (no version segment) UAs with 410.
+		if gotUserAgent == "" || !strings.Contains(gotUserAgent, "mcpproxy/") {
+			w.WriteHeader(http.StatusGone) // 410
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"servers":[]}`))
+	}))
+	defer srv.Close()
+
+	reg := &RegistryEntry{
+		ID:         "pulse",
+		Protocol:   "custom/pulse",
+		ServersURL: srv.URL,
+	}
+
+	_, err := fetchServers(context.Background(), reg, nil)
+	require.NoError(t, err, "fetchServers should not get a 410 — it must send a versioned User-Agent")
+	require.NotEmpty(t, gotUserAgent, "fetchServers must send a User-Agent header")
+	require.Contains(t, gotUserAgent, "mcpproxy/", "User-Agent must be versioned (mcpproxy/<version>)")
 }
 
 // Helper function for testing

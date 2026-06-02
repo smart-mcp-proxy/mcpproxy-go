@@ -41,6 +41,24 @@ const (
 // GitHub URL pattern for matching https://github.com/<author|org>/<repo>
 var githubURLPattern = regexp.MustCompile(`^https://github\.com/([^/]+)/([^/]+)(?:/.*)?$`)
 
+// buildVersion holds the build-time version used in the outbound User-Agent.
+// Set via SetVersion at process startup. Defaults to "dev" so tests run
+// without setup. Some registries (e.g. Pulse, issue #566) reject requests
+// with an empty or bare User-Agent and require a versioned one.
+var buildVersion = "dev"
+
+// SetVersion sets the version reported in the registry User-Agent header.
+func SetVersion(v string) {
+	if v != "" {
+		buildVersion = v
+	}
+}
+
+// registryUserAgent returns the versioned User-Agent for registry HTTP requests.
+func registryUserAgent() string {
+	return "mcpproxy/" + buildVersion
+}
+
 // SearchServers searches the given registry for servers matching optional tag and query
 // with optional repository guessing and result limiting
 func SearchServers(ctx context.Context, registryID, tag, query string, limit int, guesser *experiments.Guesser) ([]ServerEntry, error) {
@@ -134,6 +152,10 @@ func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
+
+	// Some registries (e.g. Pulse, issue #566) reject requests with an empty
+	// or bare User-Agent and require a versioned one (mirror guesser.go).
+	req.Header.Set("User-Agent", registryUserAgent())
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -628,6 +650,13 @@ func constructServerURL(server *ServerEntry, reg *RegistryEntry) string {
 		// transport (issue #483).
 		return ""
 	case protocolFleur:
+		// Issue #567 (same class as Docker #483): Fleur apps that ship a local
+		// stdio install command carry it in InstallCmd. The URL field is for
+		// HTTP/SSE remote endpoints only — synthesising one makes the frontend
+		// register the server as a remote transport. Leave it empty for stdio.
+		if server.InstallCmd != "" {
+			return ""
+		}
 		if server.ID != "" {
 			return fmt.Sprintf("https://api.fleurmcp.com/apps/%s/mcp", server.ID)
 		}
