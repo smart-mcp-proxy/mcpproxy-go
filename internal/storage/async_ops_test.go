@@ -248,6 +248,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
 		"EnabledTools":        true, // feat/config-tool-allowlist: persisted to BBolt
 		"DisabledTools":       true, // feat/config-tool-allowlist: persisted to BBolt
+		// MCP-866: persisted to BBolt so a server's registry origin/provenance
+		// (and the custom-origin skip_quarantine guard) survive a restart.
+		"SourceRegistryID":         true,
+		"SourceRegistryProvenance": true,
 	}
 
 	// Get all fields from ServerConfig
