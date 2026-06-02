@@ -56,8 +56,8 @@ Web app: Go backend under `internal/`; embedded Vue frontend under `frontend/src
 
 **Purpose**: Dashboard switcher + four chart.js visualizations + tokens-saved headline. Depends on T013 (endpoint/contract). **Owned by the Frontend/Vue engineer via a child issue.**
 
-- [ ] T016 [FE] [US4] Add Overview↔Usage switcher to `frontend/src/views/Dashboard.vue`, preserving Overview state on switch-back (SC-006); window selector (24h/7d/all); `data-test` attrs.
-- [ ] T017 [FE] Add `getActivityUsage()` to `frontend/src/services/api.ts`.
+- [X] T016 [FE] [US4] Add Overview↔Usage switcher to `frontend/src/views/Dashboard.vue`, preserving Overview state on switch-back (SC-006); window selector (24h/7d/all); `data-test` attrs.
+- [X] T017 [FE] Add `getActivityUsage()` to `frontend/src/services/api.ts`.
 - [ ] T018 [FE] [US1] `frontend/src/components/usage/CallHistogram.vue` + `ResponseSizeRanking.vue` (token-sink, labeled size-based per FR-006) using vue-chartjs.
 - [ ] T019 [FE] [US2] `frontend/src/components/usage/ErrorRateChart.vue` + per-tool latency (p50/p95).
 - [ ] T020 [FE] [US3] `frontend/src/components/usage/Timeline.vue` honoring active filters (FR-008).

@@ -1,5 +1,35 @@
 <template>
   <div class="space-y-6">
+    <!-- Overview ↔ Usage switcher (Spec 069 B1 / T016). The two panels are
+         rendered with v-show (never v-if) so the Overview subtree stays mounted
+         and its state survives a switch-back (SC-006). -->
+    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-tabs">
+      <button
+        role="tab"
+        type="button"
+        class="tab"
+        :class="{ 'tab-active': activeTab === 'overview' }"
+        :aria-selected="activeTab === 'overview'"
+        data-test="dashboard-tab-overview"
+        @click="selectTab('overview')"
+      >
+        Overview
+      </button>
+      <button
+        role="tab"
+        type="button"
+        class="tab"
+        :class="{ 'tab-active': activeTab === 'usage' }"
+        :aria-selected="activeTab === 'usage'"
+        data-test="dashboard-tab-usage"
+        @click="selectTab('usage')"
+      >
+        Usage
+      </button>
+    </div>
+
+    <!-- ===== Overview panel ===== -->
+    <div v-show="activeTab === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
     <!-- Telemetry Notice Banner -->
     <TelemetryBanner />
 
@@ -376,6 +406,117 @@
 
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="dashboardHints" />
+    </div>
+    <!-- ===== /Overview panel ===== -->
+
+    <!-- ===== Usage panel (Spec 069 B1). The aggregate is fetched lazily on
+         first activation and on window change so the Overview first paint is
+         never blocked (SC-004). The rich charts arrive in B2 (T018–T022); B1
+         establishes the switcher, window selector, API wiring and headline. -->
+    <div v-show="activeTab === 'usage'" class="space-y-6" data-test="dashboard-usage-panel">
+      <!-- Window selector (24h / 7d / all) -->
+      <div class="flex items-center gap-3 flex-wrap">
+        <div role="tablist" class="tabs tabs-boxed" data-test="usage-window-selector">
+          <button
+            v-for="w in usageWindows"
+            :key="w.value"
+            role="tab"
+            type="button"
+            class="tab"
+            :class="{ 'tab-active': usageWindow === w.value }"
+            :aria-selected="usageWindow === w.value"
+            :data-test="`usage-window-${w.value}`"
+            @click="setUsageWindow(w.value)"
+          >
+            {{ w.label }}
+          </button>
+        </div>
+        <span v-if="usageData" class="text-xs opacity-50" data-test="usage-freshness">
+          updated {{ usageData.freshness_ms < 1000 ? 'just now' : `${Math.round(usageData.freshness_ms / 1000)}s ago` }}
+        </span>
+      </div>
+
+      <!-- Tokens-saved headline (FR-007) -->
+      <div
+        v-if="usageData && usageData.tokens_saved > 0"
+        class="stats shadow bg-base-100 border border-base-300"
+        data-test="usage-tokens-saved"
+      >
+        <div class="stat">
+          <div class="stat-title">Tokens saved</div>
+          <div class="stat-value text-success">{{ formatNumber(usageData.tokens_saved) }}</div>
+          <div class="stat-desc">{{ usageData.tokens_saved_percentage.toFixed(1) }}% reduction · size-based proxy</div>
+        </div>
+      </div>
+
+      <!-- Loading state -->
+      <div v-if="usageLoading" class="flex items-center gap-2 text-sm opacity-60 py-8 justify-center" data-test="usage-loading">
+        <span class="loading loading-spinner loading-sm"></span>
+        Loading usage…
+      </div>
+
+      <!-- Error state -->
+      <div v-else-if="usageError" class="alert alert-error" data-test="usage-error">
+        <span>{{ usageError }}</span>
+        <button type="button" class="btn btn-sm" @click="loadUsage()">Retry</button>
+      </div>
+
+      <!-- Empty / low-data state (FR-009 / SC-007) -->
+      <div
+        v-else-if="usageData && usageData.tools.length === 0"
+        class="card bg-base-100 border border-base-300 shadow-sm"
+        data-test="usage-empty"
+      >
+        <div class="card-body items-center text-center py-10">
+          <svg class="w-10 h-10 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+          <h3 class="font-semibold mt-2">No tool usage yet</h3>
+          <p class="text-sm opacity-60 max-w-md">
+            Once your AI agents start calling tools through MCPProxy, per-tool call volume,
+            response sizes, error rates and latency will appear here.
+          </p>
+        </div>
+      </div>
+
+      <!-- Per-tool rollup (B1 baseline table; B2 replaces with charts) -->
+      <div
+        v-else-if="usageData"
+        class="card bg-base-100 border border-base-300 shadow-sm overflow-x-auto"
+        data-test="usage-tools-table"
+      >
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th class="text-right">Calls</th>
+              <th class="text-right">Errors</th>
+              <th class="text-right">Resp bytes</th>
+              <th class="text-right">p95 ms</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in usageData.tools" :key="`${row.server}:${row.tool}`" data-test="usage-tool-row">
+              <td class="font-mono text-xs">{{ row.server }}:{{ row.tool }}</td>
+              <td class="text-right">{{ row.calls }}</td>
+              <td class="text-right" :class="row.errors > 0 ? 'text-error' : 'opacity-50'">
+                {{ row.errors }}<span class="opacity-50"> ({{ (row.error_rate * 100).toFixed(1) }}%)</span>
+              </td>
+              <td class="text-right font-mono text-xs">{{ formatNumber(row.total_resp_bytes) }}</td>
+              <td class="text-right font-mono text-xs">{{ row.p95_ms }}</td>
+            </tr>
+            <tr v-if="usageData.other" class="opacity-60" data-test="usage-other-row">
+              <td class="italic">other ({{ usageData.other.tools_folded }} tools)</td>
+              <td class="text-right">{{ usageData.other.calls }}</td>
+              <td></td>
+              <td class="text-right font-mono text-xs">{{ formatNumber(usageData.other.total_resp_bytes) }}</td>
+              <td></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <!-- ===== /Usage panel ===== -->
 
     <!-- Modals -->
     <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
@@ -399,7 +540,7 @@ import AddServerModal from '@/components/AddServerModal.vue'
 import OnboardingWizard from '@/components/OnboardingWizard.vue'
 import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
-import type { ClientStatus } from '@/types'
+import type { ClientStatus, UsageAggregateResponse, UsageWindow } from '@/types'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -408,6 +549,53 @@ const onboardingStore = useOnboardingStore()
 // Modal state
 const showConnectModal = ref(false)
 const showAddServer = ref(false)
+
+// --- Overview ↔ Usage switcher (Spec 069 B1 / T016) ---
+const activeTab = ref<'overview' | 'usage'>('overview')
+
+const usageWindows: { value: UsageWindow; label: string }[] = [
+  { value: '24h', label: '24h' },
+  { value: '7d', label: '7d' },
+  { value: 'all', label: 'All' },
+]
+const usageWindow = ref<UsageWindow>('24h')
+const usageData = ref<UsageAggregateResponse | null>(null)
+const usageLoading = ref(false)
+const usageError = ref<string | null>(null)
+// Lazy-load guard: the aggregate is fetched on first Usage activation only, so
+// the Overview first paint (SC-004) and switch-backs never trigger a refetch.
+let usageLoadedOnce = false
+
+const loadUsage = async () => {
+  usageLoading.value = true
+  usageError.value = null
+  try {
+    const response = await api.getActivityUsage({ window: usageWindow.value })
+    if (response.success && response.data) {
+      usageData.value = response.data
+    } else {
+      usageError.value = response.error || 'Failed to load usage data'
+    }
+  } catch (error) {
+    usageError.value = error instanceof Error ? error.message : 'Failed to load usage data'
+  } finally {
+    usageLoading.value = false
+  }
+}
+
+const selectTab = (tab: 'overview' | 'usage') => {
+  activeTab.value = tab
+  if (tab === 'usage' && !usageLoadedOnce) {
+    usageLoadedOnce = true
+    void loadUsage()
+  }
+}
+
+const setUsageWindow = (w: UsageWindow) => {
+  if (w === usageWindow.value) return
+  usageWindow.value = w
+  void loadUsage()
+}
 
 // Auto-refresh interval
 let refreshInterval: ReturnType<typeof setInterval> | null = null
