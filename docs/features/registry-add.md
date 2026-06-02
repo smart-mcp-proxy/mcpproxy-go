@@ -35,7 +35,7 @@ Before adding, find the registry id and server id:
 ```bash
 mcpproxy registry list                      # list configured registries + ids
 mcpproxy registry search <query> -r <id>    # search one registry
-mcpproxy registry search sqlite -r pulse --tag database --limit 5
+mcpproxy registry search sqlite -r official --limit 5
 ```
 
 `registry search` flags: `--registry/-r <id>`, `--tag/-t <tag>`,
@@ -58,7 +58,7 @@ Flags:
 Example:
 
 ```bash
-mcpproxy registry add pulse github-mcp --env GITHUB_TOKEN=ghp_xxx
+mcpproxy registry add official io.github.example/github-mcp --env GITHUB_TOKEN=ghp_xxx
 # ✅ Added 'github-mcp' (quarantined — approve with: mcpproxy upstream approve github-mcp)
 ```
 
@@ -134,7 +134,7 @@ POST /api/v1/registries/{id}/refresh
 Response:
 
 ```json
-{ "registry_id": "pulse", "cleared": 3 }
+{ "registry_id": "official", "cleared": 3 }
 ```
 
 `cleared` is the number of cached entries dropped.
@@ -150,7 +150,7 @@ Use the built-in `upstream_servers` tool with `operation: "add_from_registry"`:
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
-| `registry` | yes | Registry id (e.g. `pulse`). Discover via the `list_registries` / `search_servers` tools |
+| `registry` | yes | Registry id (e.g. `official`). Discover via the `list_registries` / `search_servers` tools |
 | `id` | yes | Server id within the registry |
 | `name` | no | Name override |
 | `env_json` | no | JSON object of env / required-input values, e.g. `{"GITHUB_TOKEN":"…"}` |

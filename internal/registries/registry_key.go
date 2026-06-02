@@ -3,6 +3,7 @@ package registries
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 )
@@ -36,6 +37,17 @@ func RegistryKeyEnvVar(id string) string {
 // none is set.
 func registryAPIKey(reg *RegistryEntry) string {
 	return os.Getenv(RegistryKeyEnvVar(reg.ID))
+}
+
+// applyRegistryAuth attaches the configured API key for a registry to the
+// outgoing request as a Bearer token. Registries with no configured key are
+// left unauthenticated. Bearer is the scheme used by the opt-in registries we
+// ship (Smithery, Pulse) and makes the documented MCPPROXY_REGISTRY_<ID>_API_KEY
+// contract actually take effect on the wire rather than being read-but-ignored.
+func applyRegistryAuth(req *http.Request, reg *RegistryEntry) {
+	if key := registryAPIKey(reg); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
 }
 
 // checkRegistryKey enforces FR-008: when a registry requires a key and none is

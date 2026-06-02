@@ -170,35 +170,6 @@ func TestParseOpenAPIRegistry(t *testing.T) {
 	}
 }
 
-func TestParseMCPRun(t *testing.T) {
-	testData := []interface{}{
-		map[string]interface{}{
-			"slug": "weather-api",
-			"meta": map[string]interface{}{
-				"description": "Weather service",
-			},
-			"created_at": "2025-01-01T00:00:00Z",
-			"updated_at": "2025-01-01T12:00:00Z",
-		},
-		map[string]interface{}{
-			"slug": "news-feed",
-		},
-	}
-
-	servers := parseMCPRun(testData)
-
-	if len(servers) != 2 {
-		t.Errorf("expected 2 servers, got %d", len(servers))
-	}
-
-	if servers[0].ID != "weather-api" {
-		t.Errorf("expected ID 'weather-api', got '%s'", servers[0].ID)
-	}
-	if servers[0].Description != "Weather service" {
-		t.Errorf("expected description 'Weather service', got '%s'", servers[0].Description)
-	}
-}
-
 func TestParsePulse(t *testing.T) {
 	testData := map[string]interface{}{
 		"servers": []interface{}{
@@ -305,116 +276,6 @@ func TestParseDocker(t *testing.T) {
 	wantCmd := "docker run -i --rm mcp/mcp-weather"
 	if servers[0].InstallCmd != wantCmd {
 		t.Errorf("expected InstallCmd %q, got %q", wantCmd, servers[0].InstallCmd)
-	}
-}
-
-func TestParseFleur(t *testing.T) {
-	testData := []interface{}{
-		map[string]interface{}{
-			"appId":       "weather-app",
-			"name":        "Weather Application",
-			"description": "Weather forecast app",
-			"config": map[string]interface{}{
-				"mcpKey":  "github",
-				"runtime": "npx",
-				"args":    []interface{}{"-y", "@modelcontextprotocol/server-github"},
-			},
-		},
-		map[string]interface{}{
-			"appId": "news-app",
-			"name":  "News Reader",
-			"config": map[string]interface{}{
-				"mcpKey":  "news",
-				"runtime": "docker",
-				"args":    []interface{}{"news-mcp-server"},
-			},
-		},
-		map[string]interface{}{
-			"name": "non-mcp-app", // No config section, should be skipped
-		},
-		map[string]interface{}{
-			"name": "empty-mcp-app",
-			"config": map[string]interface{}{
-				"mcpKey": "", // Empty mcpKey, should be skipped
-			},
-		},
-	}
-
-	servers := parseFleur(testData)
-
-	if len(servers) != 2 {
-		t.Errorf("expected 2 servers, got %d", len(servers))
-	}
-
-	// Test first server
-	if servers[0].ID != "github" {
-		t.Errorf("expected ID 'github', got '%s'", servers[0].ID)
-	}
-	if servers[0].Name != "github" {
-		t.Errorf("expected Name 'github', got '%s'", servers[0].Name)
-	}
-	if servers[0].Description != "Weather forecast app" {
-		t.Errorf("expected Description 'Weather forecast app', got '%s'", servers[0].Description)
-	}
-	if servers[0].InstallCmd != "npx -y @modelcontextprotocol/server-github" {
-		t.Errorf("expected InstallCmd 'npx -y @modelcontextprotocol/server-github', got '%s'", servers[0].InstallCmd)
-	}
-
-	// Test second server
-	if servers[1].ID != "news" { // Should use mcpKey
-		t.Errorf("expected ID 'news', got '%s'", servers[1].ID)
-	}
-	if servers[1].InstallCmd != "docker news-mcp-server" {
-		t.Errorf("expected InstallCmd 'docker news-mcp-server', got '%s'", servers[1].InstallCmd)
-	}
-}
-
-func TestBuildFleurInstallCmd(t *testing.T) {
-	tests := []struct {
-		name     string
-		runtime  string
-		args     []string
-		expected string
-	}{
-		{
-			"npx runtime",
-			"npx",
-			[]string{"-y", "@modelcontextprotocol/server-github"},
-			"npx -y @modelcontextprotocol/server-github",
-		},
-		{
-			"docker runtime",
-			"docker",
-			[]string{"run", "-i", "mcp-server"},
-			"docker run -i mcp-server",
-		},
-		{
-			"uvx runtime",
-			"uvx",
-			[]string{"some-package"},
-			"uvx some-package",
-		},
-		{
-			"stdio runtime",
-			"stdio",
-			[]string{"python", "-m", "server"},
-			"python -m server",
-		},
-		{
-			"unknown runtime",
-			"custom-runner",
-			[]string{"arg1", "arg2"},
-			"custom-runner arg1 arg2",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := buildFleurInstallCmd(tt.runtime, tt.args)
-			if result != tt.expected {
-				t.Errorf("expected '%s', got '%s'", tt.expected, result)
-			}
-		})
 	}
 }
 
@@ -741,87 +602,6 @@ func TestSearchServersWithSearch(t *testing.T) {
 	}
 }
 
-func TestConstructServerURL(t *testing.T) {
-	tests := []struct {
-		name     string
-		server   ServerEntry
-		registry RegistryEntry
-		expected string
-	}{
-		{
-			"already has URL",
-			ServerEntry{ID: "test", URL: "https://existing.com"},
-			RegistryEntry{Protocol: "custom/mcprun"},
-			"https://existing.com",
-		},
-		{
-			"mcprun protocol",
-			ServerEntry{ID: "weather", URL: ""},
-			RegistryEntry{Protocol: "custom/mcprun"},
-			"https://weather.mcp.run/mcp/",
-		},
-		{
-			"mcprun protocol with slash in ID",
-			ServerEntry{ID: "G4Vi/weather-service", URL: ""},
-			RegistryEntry{Protocol: "custom/mcprun"},
-			"https://G4Vi-weather-service.mcp.run/mcp/",
-		},
-		{
-			"mcprun protocol with multiple slashes in ID",
-			ServerEntry{ID: "owner/namespace/server", URL: ""},
-			RegistryEntry{Protocol: "custom/mcprun"},
-			"https://owner-namespace-server.mcp.run/mcp/",
-		},
-		{
-			"mcpstore protocol",
-			ServerEntry{ID: "news", URL: ""},
-			RegistryEntry{Protocol: "custom/mcpstore"},
-			"https://api.mcpstore.co/servers/news/mcp",
-		},
-		{
-			// Issue #483: Docker catalog must NOT synthesise a docker:// URL —
-			// the URL field is reserved for HTTP/SSE remote endpoints. The launch
-			// info travels via InstallCmd populated by parseDocker.
-			"docker protocol returns empty (install via docker run)",
-			ServerEntry{ID: "scraper", URL: ""},
-			RegistryEntry{Protocol: "custom/docker"},
-			"",
-		},
-		{
-			"fleur protocol",
-			ServerEntry{ID: "app1", URL: ""},
-			RegistryEntry{Protocol: "custom/fleur"},
-			"https://api.fleurmcp.com/apps/app1/mcp",
-		},
-		{
-			// Issue #567: Fleur apps that ship a local stdio install command
-			// (InstallCmd populated by parseFleur) must NOT get a synthesised
-			// https endpoint — same class as the Docker #483 bug. A non-empty
-			// URL makes the frontend register them as "Remote". Launch info
-			// travels via InstallCmd, so the connection URL must stay empty.
-			"fleur protocol with InstallCmd returns empty (stdio not remote)",
-			ServerEntry{ID: "app1", URL: "", InstallCmd: "npx -y @fleur/app1"},
-			RegistryEntry{Protocol: "custom/fleur"},
-			"",
-		},
-		{
-			"unknown protocol",
-			ServerEntry{ID: "test", URL: ""},
-			RegistryEntry{Protocol: "unknown"},
-			"",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := constructServerURL(&tt.server, &tt.registry)
-			if result != tt.expected {
-				t.Errorf("expected '%s', got '%s'", tt.expected, result)
-			}
-		})
-	}
-}
-
 // TestFetchServers_SendsVersionedUserAgent is a regression for issue #566:
 // Pulse's api.pulsemcp.com/v0beta/servers now returns 410 to requests with an
 // empty or bare User-Agent and only 200s a versioned one (e.g. "mcpproxy/0.35.0").
@@ -848,7 +628,7 @@ func TestFetchServers_SendsVersionedUserAgent(t *testing.T) {
 		ServersURL: srv.URL,
 	}
 
-	_, err := fetchServers(context.Background(), reg, nil)
+	_, err := fetchServers(context.Background(), reg, nil, "")
 	require.NoError(t, err, "fetchServers should not get a 410 — it must send a versioned User-Agent")
 	require.NotEmpty(t, gotUserAgent, "fetchServers must send a User-Agent header")
 	require.Contains(t, gotUserAgent, "mcpproxy/", "User-Agent must be versioned (mcpproxy/<version>)")
@@ -861,11 +641,8 @@ func TestProtocolParsersWithMissingData(t *testing.T) {
 		name   string
 		parser func(interface{}) []ServerEntry
 	}{
-		{"parseMCPRun", parseMCPRun},
 		// parsePulse excluded - has different signature with context and guesser
-		{"parseMCPStore", parseMCPStore},
 		{"parseDocker", parseDocker},
-		{"parseFleur", parseFleur},
 		{"parseAPITracker", parseAPITracker},
 		{"parseApify", parseApify},
 		{"parseDefault", parseDefault},
@@ -1336,37 +1113,6 @@ func TestParsePulseWithoutGuesser(t *testing.T) {
 	assert.Equal(t, "", servers[1].InstallCmd) // No package info
 	assert.Equal(t, "", servers[1].ConnectURL)
 	assert.Equal(t, "https://github.com/user/weather-server", servers[1].SourceCodeURL)
-}
-
-func TestParseAzureMCPDemoWithoutGuesser(t *testing.T) {
-	// Test data mimicking Azure MCP Demo registry format
-	rawData := map[string]interface{}{
-		"servers": []interface{}{
-			map[string]interface{}{
-				"id":          "azure-demo-1",
-				"name":        "Azure Demo Server",
-				"description": "Demo server for Azure MCP",
-				"repository": map[string]interface{}{
-					"url": "https://github.com/microsoft/azure-mcp-demo",
-				},
-				"version_detail": map[string]interface{}{
-					"version":      "1.0.0",
-					"release_date": "2024-01-01",
-				},
-			},
-		},
-	}
-
-	servers := parseAzureMCPDemoWithoutGuesser(rawData)
-
-	assert.Len(t, servers, 1)
-
-	server := servers[0]
-	assert.Equal(t, "azure-demo-1", server.ID)
-	assert.Equal(t, "Azure Demo Server", server.Name)
-	assert.Equal(t, "Demo server for Azure MCP (v1.0.0)", server.Description)
-	assert.Equal(t, "https://github.com/microsoft/azure-mcp-demo", server.SourceCodeURL)
-	assert.Equal(t, "2024-01-01", server.UpdatedAt)
 }
 
 func TestDerivePulseServerDetailsWithoutGuesser(t *testing.T) {

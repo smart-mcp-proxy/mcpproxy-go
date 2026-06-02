@@ -22,5 +22,36 @@
     "recall_at_5": 0.05
   },
   "runs_averaged": 1,
-  "security": {}
+  "security": {
+    "__doc__": "Spec 065 D2 regression baseline for the deterministic sensitive-data detector. The CI gate (C1/MCP-742, eval.yml) runs `mcp-eval security --verdicts <scan-eval out> --corpus security_corpus_v1.json` and FAILS if a fresh run's FPR > gate.fpr_ceiling OR recall < gate.recall_floor. recall is intentionally low: sensitive-data detects secret/path-leak, NOT prompt injection; ~18/20 malicious corpus entries (prompt_injection/shadowing/rug_pull) are structurally out of scope and will be owned by future detectors. The FPR ceiling is the primary quiet-security gate; recall_floor is a total-blindness anchor. Per-detector floats are copied verbatim (full precision) from the scorer report for exact diffing. Refresh requires re-freezing the corpus + re-review (CN-002/CN-004).",
+    "corpus_version": "v1",
+    "generated_from": {
+      "scorer": "mcp-eval security @ 76df3a47",
+      "scan_eval": "cmd/scan-eval @ 33bb6e39",
+      "corpus": "datasets/security_corpus_v1.json (43 entries)",
+      "detector": "internal/security sensitive-data (deterministic, N=1)",
+      "runs": 1,
+      "note": "Reference = current deterministic detector behavior, a regression anchor (NOT a quality target). Gate thresholds approved at Gate 2 (MCP-815 plan revision, board-accepted 2026-06-02)."
+    },
+    "runs_averaged": 1,
+    "per_detector": [
+      {
+        "detector": "sensitive-data",
+        "precision": 0.6666666666666666,
+        "recall": 0.1,
+        "f1": 0.1739130434782609,
+        "fpr": 0.043478260869565216,
+        "fpr_std": 0.0,
+        "tp": 2,
+        "fp": 1,
+        "tn": 22,
+        "fn": 18,
+        "runs": 1
+      }
+    ],
+    "gate": {
+      "fpr_ceiling": 0.1,
+      "recall_floor": 0.05
+    }
+  }
 }

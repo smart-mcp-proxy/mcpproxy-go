@@ -1,0 +1,142 @@
+{
+  "servers": [
+    {
+      "server": {
+        "name": "io.github.example/local-npm",
+        "description": "A packages-only stdio server published to npm.",
+        "version": "1.2.3",
+        "repository": {
+          "url": "https://github.com/example/local-npm",
+          "source": "github"
+        },
+        "packages": [
+          {
+            "registryType": "npm",
+            "identifier": "@example/local-npm",
+            "version": "1.2.3",
+            "runtimeHint": "npx",
+            "runtimeArguments": [
+              { "type": "named", "name": "-y" }
+            ],
+            "packageArguments": [
+              { "type": "positional", "value": "--stdio" }
+            ],
+            "environmentVariables": [
+              { "name": "EXAMPLE_TOKEN", "description": "API token", "isSecret": true },
+              { "name": "EXAMPLE_REGION", "description": "Region", "isSecret": false }
+            ]
+          }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "isLatest": true,
+          "publishedAt": "2026-05-01T00:00:00Z",
+          "updatedAt": "2026-05-20T00:00:00Z"
+        }
+      }
+    },
+    {
+      "server": {
+        "name": "io.github.example/remote-http",
+        "description": "A remotes-only streamable-http server.",
+        "version": "2.0.0",
+        "remotes": [
+          {
+            "type": "streamable-http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": [
+              { "name": "Authorization", "description": "Bearer token", "isSecret": true }
+            ]
+          }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "isLatest": true
+        }
+      }
+    },
+    {
+      "server": {
+        "name": "io.github.example/hybrid",
+        "description": "A hybrid server with both a package and a remote.",
+        "version": "0.5.0",
+        "packages": [
+          {
+            "registryType": "pypi",
+            "identifier": "example-hybrid",
+            "version": "0.5.0",
+            "runtimeHint": "uvx"
+          }
+        ],
+        "remotes": [
+          {
+            "type": "sse",
+            "url": "https://hybrid.example.com/sse"
+          }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "isLatest": true
+        }
+      }
+    },
+    {
+      "server": {
+        "name": "io.github.example/deprecated",
+        "description": "Should be skipped: deprecated status.",
+        "version": "9.9.9",
+        "packages": [
+          { "registryType": "npm", "identifier": "@example/deprecated", "runtimeHint": "npx" }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "deprecated",
+          "isLatest": true
+        }
+      }
+    },
+    {
+      "server": {
+        "name": "io.github.example/old-version",
+        "description": "Should be skipped: not the latest version.",
+        "version": "0.0.1",
+        "packages": [
+          { "registryType": "npm", "identifier": "@example/old-version", "runtimeHint": "npx" }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "active",
+          "isLatest": false
+        }
+      }
+    },
+    {
+      "server": {
+        "name": "io.github.example/deleted",
+        "description": "Should be skipped: deleted status.",
+        "version": "1.0.0",
+        "packages": [
+          { "registryType": "npm", "identifier": "@example/deleted", "runtimeHint": "npx" }
+        ]
+      },
+      "_meta": {
+        "io.modelcontextprotocol.registry/official": {
+          "status": "deleted",
+          "isLatest": true
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "count": 6,
+    "nextCursor": ""
+  }
+}

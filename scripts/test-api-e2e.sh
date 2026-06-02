@@ -772,18 +772,18 @@ fi
 
 # Test 26: Search registry servers (Phase 7)
 log_test "GET /api/v1/registries/{id}/servers"
-RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?limit=5")
+RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/official/servers?limit=5")
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
-if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.registry_id == "pulse"' >/dev/null; then
+if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.registry_id == "official"' >/dev/null; then
     log_pass "GET /api/v1/registries/{id}/servers - Response has servers array and registry_id"
 else
     log_fail "GET /api/v1/registries/{id}/servers - Expected server search results" \
-        "jq -e '.success == true and .data.servers != null and .data.registry_id == \"pulse\"' < '$TEST_RESULTS_FILE' >/dev/null"
+        "jq -e '.success == true and .data.servers != null and .data.registry_id == \"official\"' < '$TEST_RESULTS_FILE' >/dev/null"
 fi
 
 # Test 27: Search registry servers with query (Phase 7)
 log_test "GET /api/v1/registries/{id}/servers with query parameter"
-RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/pulse/servers?q=github&limit=3")
+RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/official/servers?q=github&limit=3")
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
 if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.query == "github"' >/dev/null; then
     log_pass "GET /api/v1/registries/{id}/servers?q=github - Response has query field"
