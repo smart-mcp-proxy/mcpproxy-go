@@ -131,7 +131,7 @@ func TestSearchServersIntegration(t *testing.T) {
 
 // TestCompleteWorkflow demonstrates the intended usage pattern
 func TestCompleteWorkflow(t *testing.T) {
-	// Set up default registries (as per user requirements: pulse, docker-mcp-catalog, fleur)
+	// Set up default registries (official + reference, Docker, Pulse opt-in)
 	cfg := config.DefaultConfig()
 	SetRegistriesFromConfig(cfg)
 
@@ -146,8 +146,9 @@ func TestCompleteWorkflow(t *testing.T) {
 			t.Error("expected default registries, got none")
 		}
 
-		// Verify we have the expected default registries (pulse, docker-mcp-catalog, fleur)
-		expectedIDs := []string{"pulse", "docker-mcp-catalog", "fleur"}
+		// Verify we have the expected default registries (official + reference
+		// primary, Docker kept, Pulse opt-in) per MCP-865.
+		expectedIDs := []string{"official", "reference", "docker-mcp-catalog", "pulse"}
 		found := make(map[string]bool)
 
 		for _, reg := range registries {

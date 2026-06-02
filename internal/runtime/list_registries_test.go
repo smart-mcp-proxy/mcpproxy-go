@@ -42,7 +42,10 @@ func TestListRegistries_MergesDefaultsWithCustom(t *testing.T) {
 	for _, d := range defaults {
 		assert.Contains(t, idsEmpty, d.ID, "built-in default %q must be listed", d.ID)
 	}
-	assert.NotContains(t, idsEmpty, "smithery", "legacy hard-coded Smithery must not leak when defaults exist")
+	// A dropped legacy registry (Fleur, removed in MCP-865) must not leak; the
+	// list must route through the merged defaults source, not stale hard-coded
+	// entries. (Smithery is now a legitimate opt-in default, so it is present.)
+	assert.NotContains(t, idsEmpty, "fleur", "dropped legacy registry must not leak when defaults exist")
 
 	// Custom config → custom entry merges WITH the defaults (does not replace them).
 	rtCustom := &Runtime{logger: logger, cfg: &config.Config{

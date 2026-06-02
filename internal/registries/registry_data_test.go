@@ -6,15 +6,17 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
-// defaultRegistryIDs are the five built-in registries shipped in
+// defaultRegistryIDs are the built-in registries shipped in
 // config.DefaultConfig(). A user-supplied config must MERGE with these, not
-// replace them (FR-006).
+// replace them (FR-006). The set was standardized on the official MCP registry
+// protocol (MCP-865): official + built-in reference primary, Docker kept, Pulse
+// and Smithery demoted to opt-in.
 var defaultRegistryIDs = []string{
-	"pulse",
+	"official",
+	"reference",
 	"docker-mcp-catalog",
-	"fleur",
-	"azure-mcp-demo",
-	"remote-mcp-servers",
+	"pulse",
+	"smithery",
 }
 
 func registryIDSet(t *testing.T) map[string]RegistryEntry {
