@@ -16,7 +16,9 @@ available via the `search_servers` / `list_registries` MCP tools, the
 
 Key-requiring registries are **skipped** (not failed) when no key is configured, so
 a default search always succeeds. The API-key env var is
-`MCPPROXY_REGISTRY_<ID>_API_KEY` (ID upper-cased, non-alphanumerics → `_`).
+`MCPPROXY_REGISTRY_<ID>_API_KEY` (ID upper-cased, non-alphanumerics → `_`). When a
+key is configured it is sent on every request to that registry as an
+`Authorization: Bearer <key>` header.
 
 User-configured registries in `mcp_config.json` (`registries: [...]`) are **merged**
 with these defaults (keyed by ID); a custom entry never drops the shipped set.

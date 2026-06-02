@@ -54,6 +54,9 @@ func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *expe
 		req.Header.Set("Accept", "application/json")
 		// Some registries reject empty/bare User-Agents (issue #566).
 		req.Header.Set("User-Agent", registryUserAgent())
+		// Opt-in official-protocol registries (e.g. Smithery) authenticate via
+		// their configured key.
+		applyRegistryAuth(req, reg)
 
 		resp, err := client.Do(req)
 		if err != nil {

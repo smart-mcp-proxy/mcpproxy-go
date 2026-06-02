@@ -21,11 +21,6 @@ var (
 	ErrServerNotFound   = errors.New("server not found in registry")
 )
 
-// findServerByIDLimit caps how many servers FindServerByID fetches before
-// matching. Most registries return far fewer; the resilience phase (US4) can
-// refine pagination if a target sits beyond this window.
-const findServerByIDLimit = 50
-
 // Constants for repeated strings
 const (
 	protocolDocker  = "custom/docker"
@@ -114,15 +109,51 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 // every add-from-registry surface (CN-001/CN-004). Returns ErrRegistryNotFound
 // when registryID does not resolve and ErrServerNotFound when no server matches.
 func FindServerByID(ctx context.Context, registryID, serverID string, guesser *experiments.Guesser) (*ServerEntry, error) {
-	if FindRegistry(registryID) == nil {
+	reg := FindRegistry(registryID)
+	if reg == nil {
 		return nil, ErrRegistryNotFound
 	}
 
-	servers, err := SearchServers(ctx, registryID, "", "", findServerByIDLimit, guesser)
+	// Honor key-requiring registries (FR-008) on the add path too.
+	if err := checkRegistryKey(reg); err != nil {
+		return nil, err
+	}
+
+	// Match against the FULL registry listing, never the UI/search limit: a
+	// server beyond the first page of results must still be addable. Routing the
+	// add path through SearchServers truncated the listing to 50 before
+	// matching, so any entry past the first page was searchable but not addable
+	// (Codex RV #1).
+	match, err := findServerByIDFetch(ctx, reg, serverID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Enrich only the single matched entry (cheap) rather than the whole listing.
+	if guesser != nil {
+		if enriched := applyBatchRepositoryGuessing(ctx, []ServerEntry{*match}, guesser); len(enriched) > 0 {
+			match = &enriched[0]
+		}
+	}
+	match.Registry = reg.Name
+	return match, nil
+}
+
+// findServerByIDFetch resolves serverID against a registry's full listing. It
+// first forwards serverID as a server-side `search` hint (cheap for the
+// paginating official protocol) and falls back to a full unfiltered fetch when
+// the hinted search does not surface the exact entry — so the match is found
+// regardless of its position in the listing.
+func findServerByIDFetch(ctx context.Context, reg *RegistryEntry, serverID string) (*ServerEntry, error) {
+	if servers, err := fetchServers(ctx, reg, nil, serverID); err == nil {
+		if match, err := findServerByIDIn(servers, serverID); err == nil {
+			return match, nil
+		}
+	}
+	servers, err := fetchServers(ctx, reg, nil, "")
+	if err != nil {
+		return nil, err
+	}
 	return findServerByIDIn(servers, serverID)
 }
 
@@ -164,6 +195,8 @@ func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.
 	// Some registries (e.g. Pulse, issue #566) reject requests with an empty
 	// or bare User-Agent and require a versioned one (mirror guesser.go).
 	req.Header.Set("User-Agent", registryUserAgent())
+	// Opt-in registries (RequiresKey) authenticate via their configured key.
+	applyRegistryAuth(req, reg)
 
 	resp, err := client.Do(req)
 	if err != nil {
