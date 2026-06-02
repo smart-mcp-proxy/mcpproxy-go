@@ -854,6 +854,13 @@ type Registry struct {
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
 	Count       interface{} `json:"count,omitempty" swaggertype:"primitive,string"` // number or string
+	// Provenance is the trust tag (MCP-866): "official/trusted" for built-in
+	// defaults, "custom/unverified" for user-added registries.
+	Provenance string `json:"provenance,omitempty"`
+	// Trusted indicates whether this is an official, shipped-by-default
+	// registry. Trust is derived from membership in the default set, never
+	// from self-assertion in config.
+	Trusted bool `json:"trusted"`
 }
 
 // RepositoryInfo represents detected repository type information
@@ -962,6 +969,33 @@ type RegistryAddError struct {
 	Code          string   `json:"code"`
 	Message       string   `json:"message"`
 	MissingInputs []string `json:"missing_inputs,omitempty"`
+}
+
+// AddRegistrySourceRequest is the POST body for adding a user-supplied registry
+// source (MCP-866, POST /api/v1/registries). Provenance is NOT part of the
+// request — the server always tags an added source custom/unverified.
+type AddRegistrySourceRequest struct {
+	URL      string `json:"url"`                // required https registry URL
+	Protocol string `json:"protocol,omitempty"` // defaults to modelcontextprotocol/registry
+	ID       string `json:"id,omitempty"`       // derived from the host when empty
+	Name     string `json:"name,omitempty"`     // defaults to the id
+}
+
+// RegistrySummary is a slim, stable projection of a registry, including its
+// provenance/trust so surfaces can flag third-party sources (MCP-866).
+type RegistrySummary struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	URL        string `json:"url,omitempty"`
+	ServersURL string `json:"servers_url,omitempty"`
+	Protocol   string `json:"protocol,omitempty"`
+	Provenance string `json:"provenance,omitempty"`
+	Trusted    bool   `json:"trusted"`
+}
+
+// AddRegistrySourceData is the success `data` payload for add-source.
+type AddRegistrySourceData struct {
+	Registry RegistrySummary `json:"registry"`
 }
 
 // SuccessResponse is the standard success response wrapper for API endpoints.

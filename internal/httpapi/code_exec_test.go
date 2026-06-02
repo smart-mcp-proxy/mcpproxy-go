@@ -97,6 +97,9 @@ func (m *mockController) RefreshRegistryCache(registryID string) (int, error) { 
 func (m *mockController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
+func (m *mockController) AddRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 func (m *mockController) GetManagementService() interface{}                       { return nil }
 func (m *mockController) GetRuntime() interface{}                                 { return nil }
 func (m *mockController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }

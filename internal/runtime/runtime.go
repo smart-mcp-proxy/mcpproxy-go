@@ -1481,6 +1481,11 @@ func (r *Runtime) ListRegistries() ([]interface{}, error) {
 			"tags":        reg.Tags,
 			"protocol":    reg.Protocol,
 			"count":       reg.Count,
+			// MCP-866: provenance/trust so every surface can flag third-party
+			// sources. "trusted" is the convenience boolean the UI reads to decide
+			// whether to show the one-time third-party-registry warning.
+			"provenance": reg.Provenance,
+			"trusted":    reg.IsTrusted(),
 		})
 	}
 

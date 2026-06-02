@@ -315,6 +315,9 @@ func (m *MockServerController) RefreshRegistryCache(_ string) (int, error) {
 func (m *MockServerController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
+func (m *MockServerController) AddRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 
 // Version and updates
 func (m *MockServerController) GetVersionInfo() *updatecheck.VersionInfo {

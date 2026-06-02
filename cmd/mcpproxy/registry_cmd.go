@@ -21,12 +21,15 @@ import (
 
 // Registry command flags (spec 070).
 var (
-	registryConfigPath string
-	registrySearchTag  string
-	registryLimit      int
-	registryAddName    string
-	registryAddEnv     []string
-	registryAddEnabled bool
+	registryConfigPath     string
+	registrySearchTag      string
+	registryLimit          int
+	registryAddName        string
+	registryAddEnv         []string
+	registryAddEnabled     bool
+	registryAddSourceProto string // MCP-866
+	registryAddSourceID    string
+	registryAddSourceName  string
 )
 
 // GetRegistryCommand builds the `registry` command group (spec 070): a single
@@ -53,12 +56,79 @@ Typical flow:
   mcpproxy registry add pulse weather-mcp       # add it (quarantined)
   mcpproxy upstream approve weather-mcp          # approve once you trust it
 
-'registry add' talks to the running mcpproxy daemon. 'list' and 'search' use the
-daemon when available and otherwise read the registries directly.`,
+Add your own registry source (any official modelcontextprotocol/registry v0.1 endpoint):
+  mcpproxy registry add-source https://registry.example.com   # custom/unverified
+
+'registry add' and 'registry add-source' talk to the running mcpproxy daemon.
+'list' and 'search' use the daemon when available and otherwise read the
+registries directly.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
-	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd())
+	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd())
+	return cmd
+}
+
+func newRegistryAddSourceCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "add-source <https-url>",
+		Short: "Add a custom MCP registry source (quarantine-always)",
+		Long: `Add your own MCP server registry — any https endpoint implementing the
+official modelcontextprotocol/registry v0.1 protocol (the same protocol shipped
+by Copilot/VS Code/Azure).
+
+The added source is ALWAYS tagged custom/unverified: there is no allowlist you
+can add yourself into. Every server you discover and add through a custom source
+lands quarantined and can never skip quarantine — review and approve it once you
+trust it:
+  mcpproxy registry search <query> -r <id>
+  mcpproxy registry add <id> <serverId>
+  mcpproxy upstream approve <name>`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			sourceURL := args[0]
+
+			cfg, err := loadRegistryConfig()
+			if err != nil {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConfigNotFound, err.Error()).
+					WithRecoveryCommand("mcpproxy doctor"), clioutput.ErrCodeConfigNotFound)
+			}
+
+			// add-source MUST go through the daemon: the registry list lives on the
+			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
+			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
+					"adding a registry source requires a running mcpproxy daemon").
+					WithGuidance("Start the daemon, then retry").
+					WithRecoveryCommand("mcpproxy serve"), clioutput.ErrCodeConnectionFailed)
+			}
+
+			ctx, cancel := registryContext()
+			defer cancel()
+
+			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			reg, err := client.AddRegistrySource(ctx, sourceURL, registryAddSourceProto, registryAddSourceID, registryAddSourceName)
+			if err != nil {
+				return registryAddErrorOutput(err)
+			}
+
+			outputFormat := ResolveOutputFormat()
+			if outputFormat == "json" || outputFormat == "yaml" {
+				formatter, _ := GetOutputFormatter()
+				out, _ := formatter.Format(reg)
+				fmt.Println(out)
+				return nil
+			}
+
+			fmt.Printf("✅ Added registry source '%s' (%s)\n", reg.ID, reg.Provenance)
+			fmt.Printf("⚠️  This is a third-party, unverified registry — its servers are always quarantined until you approve them.\n")
+			fmt.Printf("   Search it with: mcpproxy registry search <query> -r %s\n", reg.ID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&registryAddSourceProto, "protocol", "", "Registry protocol (default: modelcontextprotocol/registry)")
+	cmd.Flags().StringVar(&registryAddSourceID, "id", "", "Override the derived registry id")
+	cmd.Flags().StringVar(&registryAddSourceName, "name", "", "Override the registry display name")
 	return cmd
 }
 
@@ -270,6 +340,18 @@ func registryAddErrorOutput(err error) error {
 	case "registry_not_found", "server_not_found":
 		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeServerNotFound, addErr.Message).
 			WithGuidance("Check the ids with 'mcpproxy registry list' and 'mcpproxy registry search'"), clioutput.ErrCodeServerNotFound)
+	case "invalid_registry_url":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("Provide an https URL, e.g. https://registry.example.com"), clioutput.ErrCodeInvalidInput)
+	case "registries_locked":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
+			WithGuidance("Registry additions are disabled by policy (registries_locked)"), clioutput.ErrCodeOperationFailed)
+	case "registry_shadows_builtin":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("Choose a different --id; built-in registry ids cannot be replaced"), clioutput.ErrCodeInvalidInput)
+	case "duplicate_registry":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
+			WithGuidance("A registry with that id already exists; pass a different --id"), clioutput.ErrCodeOperationFailed)
 	default:
 		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message), clioutput.ErrCodeOperationFailed)
 	}

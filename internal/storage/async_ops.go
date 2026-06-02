@@ -169,14 +169,14 @@ func (am *AsyncManager) quarantineServerSync(name string, quarantined bool) erro
 
 func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error {
 	record := &UpstreamRecord{
-		ID:          serverConfig.Name,
-		Name:        serverConfig.Name,
-		URL:         serverConfig.URL,
-		Protocol:    serverConfig.Protocol,
-		Command:     serverConfig.Command,
-		Args:        serverConfig.Args,
-		Env:         serverConfig.Env,
-		WorkingDir:  serverConfig.WorkingDir,
+		ID:                  serverConfig.Name,
+		Name:                serverConfig.Name,
+		URL:                 serverConfig.URL,
+		Protocol:            serverConfig.Protocol,
+		Command:             serverConfig.Command,
+		Args:                serverConfig.Args,
+		Env:                 serverConfig.Env,
+		WorkingDir:          serverConfig.WorkingDir,
 		Enabled:             serverConfig.Enabled,
 		Quarantined:         serverConfig.Quarantined,
 		Headers:             serverConfig.Headers,
@@ -189,6 +189,9 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		OAuth:         serverConfig.OAuth,
 		EnabledTools:  serverConfig.EnabledTools,
 		DisabledTools: serverConfig.DisabledTools,
+
+		SourceRegistryID:         serverConfig.SourceRegistryID,
+		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,
 	}
 	return am.db.SaveUpstream(record)
 }

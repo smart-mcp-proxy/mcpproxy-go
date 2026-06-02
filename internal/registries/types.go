@@ -17,6 +17,11 @@ type RegistryEntry struct {
 	// ErrRegistryKeyMissing so the calling surface can mark it unavailable
 	// instead of failing the whole search (FR-008).
 	RequiresKey bool `json:"requires_key,omitempty"`
+	// Provenance is the trust tag (MCP-866): config.RegistryProvenanceOfficial
+	// for built-in defaults, config.RegistryProvenanceCustom for user-added
+	// registries. Computed authoritatively by SetRegistriesFromConfig — never
+	// trusted by self-assertion.
+	Provenance string `json:"provenance,omitempty"`
 }
 
 // ServerEntry represents an MCP server discovered via a registry

@@ -109,6 +109,14 @@ components:
             $ref: '#/components/schemas/config.RegistryEntry'
           type: array
           uniqueItems: false
+        registries_locked:
+          description: |-
+            RegistriesLocked is an enterprise stub knob (MCP-866): when true, runtime
+            additions of custom registries (e.g. `registry add-source`, the REST/MCP
+            add-source surface) are rejected so an administrator can pin the discovery
+            sources. Built-in defaults are unaffected. Documented but otherwise inert
+            beyond the add-source rejection.
+          type: boolean
         require_mcp_auth:
           description: 'Require authentication on /mcp endpoint (default: false)'
           type: boolean
@@ -461,6 +469,14 @@ components:
           type: string
         protocol:
           type: string
+        provenance:
+          description: |-
+            Provenance is the trust tag for this registry (MCP-866):
+            RegistryProvenanceOfficial for built-in defaults, RegistryProvenanceCustom
+            for user-added registries. It is authoritatively (re)computed by the
+            registries merge from whether the ID is a shipped default — a user cannot
+            claim "official/trusted" by writing it into their config.
+          type: string
         requires_key:
           description: |-
             RequiresKey marks a registry that needs an API key to be queried. When
@@ -616,6 +632,19 @@ components:
         skip_quarantine:
           description: Skip tool-level quarantine for this server
           type: boolean
+        source_registry_id:
+          description: |-
+            SourceRegistryID records which registry this server was added from (empty
+            for manually-configured servers). MCP-866: surfaced in the approval /
+            quarantine view so a reviewer can see a server's origin.
+          type: string
+        source_registry_provenance:
+          description: |-
+            SourceRegistryProvenance is the trust tag of the source registry at add
+            time (RegistryProvenanceOfficial / RegistryProvenanceCustom). When it is
+            RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
+            unverified registry can never opt its servers out of quarantine.
+          type: string
         updated:
           type: string
         url:
@@ -880,6 +909,21 @@ components:
           type: object
         name:
           description: optional name override
+          type: string
+      type: object
+    contracts.AddRegistrySourceRequest:
+      properties:
+        id:
+          description: derived from the host when empty
+          type: string
+        name:
+          description: defaults to the id
+          type: string
+        protocol:
+          description: defaults to modelcontextprotocol/registry
+          type: string
+        url:
+          description: required https registry URL
           type: string
       type: object
     contracts.ConfigApplyResult:
@@ -1493,6 +1537,11 @@ components:
           type: string
         protocol:
           type: string
+        provenance:
+          description: |-
+            Provenance is the trust tag (MCP-866): "official/trusted" for built-in
+            defaults, "custom/unverified" for user-added registries.
+          type: string
         servers_url:
           type: string
         tags:
@@ -1500,6 +1549,12 @@ components:
             type: string
           type: array
           uniqueItems: false
+        trusted:
+          description: |-
+            Trusted indicates whether this is an official, shipped-by-default
+            registry. Trust is derived from membership in the default set, never
+            from self-assertion in config.
+          type: boolean
         url:
           type: string
       type: object
@@ -3500,6 +3555,49 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: List available MCP server registries
+      tags:
+      - registries
+    post:
+      description: Adds a generic modelcontextprotocol/registry v0.1 https endpoint
+        as a custom registry (MCP-866). The source is always tagged custom/unverified,
+        so every server discovered through it lands quarantined and can never skip
+        quarantine.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.AddRegistrySourceRequest'
+        description: Registry source (https url + optional protocol/id/name)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Registry source added
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: invalid_registry_url
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registries_locked
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_shadows_builtin | duplicate_registry
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Add a user-supplied registry source
       tags:
       - registries
   /api/v1/registries/{id}/refresh:
