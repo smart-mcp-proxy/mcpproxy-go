@@ -618,8 +618,11 @@ actor APIClient {
         return data
     }
 
-    /// Low-level request execution with HTTP status validation.
-    private func performRequest(
+    /// Low-level request execution WITHOUT HTTP status validation. Returns the
+    /// raw body and response for any status. Callers that need to inspect error
+    /// bodies (e.g. the registry add-source flow, which reads a stable `code`)
+    /// use this directly; most callers use `performRequest`, which validates.
+    private func rawRequest(
         path: String,
         method: String,
         body: Data? = nil
@@ -653,6 +656,17 @@ actor APIClient {
             throw APIClientError.noData
         }
 
+        return (data, httpResponse)
+    }
+
+    /// Low-level request execution with HTTP status validation.
+    private func performRequest(
+        path: String,
+        method: String,
+        body: Data? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
+        let (data, httpResponse) = try await rawRequest(path: path, method: method, body: body)
+
         // 2xx is success; for readiness we also treat the response as-is
         guard (200...299).contains(httpResponse.statusCode) else {
             // Try to extract error message from body
@@ -665,5 +679,51 @@ actor APIClient {
         }
 
         return (data, httpResponse)
+    }
+
+    // MARK: - Registries (MCP-866 / MCP-902)
+
+    /// List configured registries from `GET /api/v1/registries`, each tagged
+    /// with provenance/trust so the UI can flag official vs custom sources.
+    func registries() async throws -> [Registry] {
+        let response: GetRegistriesResponse = try await fetchWrapped(path: "/api/v1/registries")
+        return response.registries
+    }
+
+    /// Add a user-supplied registry source via `POST /api/v1/registries`. The
+    /// server always tags an added source custom/unverified (provenance is NOT
+    /// part of the request), so every server later discovered through it lands
+    /// quarantined. Returns a structured result carrying the stable error
+    /// `code` instead of throwing, mirroring the Web UI's `addRegistrySource`.
+    func addRegistrySource(
+        url: String,
+        protocol proto: String? = nil,
+        id: String? = nil,
+        name: String? = nil
+    ) async -> AddRegistrySourceResult {
+        var body: [String: Any] = ["url": url]
+        if let proto, !proto.isEmpty { body["protocol"] = proto }
+        if let id, !id.isEmpty { body["id"] = id }
+        if let name, !name.isEmpty { body["name"] = name }
+
+        do {
+            let bodyData = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await rawRequest(path: "/api/v1/registries", method: "POST", body: bodyData)
+            let decoder = JSONDecoder()
+
+            if (200...299).contains(response.statusCode),
+               let wrapper = try? decoder.decode(APIResponse<AddRegistrySourceData>.self, from: data),
+               wrapper.success {
+                return .ok(wrapper.data?.registry)
+            }
+
+            let errBody = try? decoder.decode(RegistryAddErrorBody.self, from: data)
+            return .failure(
+                code: errBody?.code,
+                error: errBody?.error ?? "HTTP \(response.statusCode): \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))"
+            )
+        } catch {
+            return .failure(code: nil, error: error.localizedDescription)
+        }
     }
 }

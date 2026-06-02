@@ -67,6 +67,9 @@ Equivalent surfaces:
 
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
 - **CLI:** `mcpproxy registry add-source <https-url>`.
+- **macOS tray:** the **Registries** sidebar tab lists every configured registry
+  with its provenance/trust badge, offers an **Add Registry** affordance,
+  and shows a one-time third-party warning before the first custom add.
 
 Errors share a stable code across surfaces: `invalid_registry_url` (400),
 `registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).

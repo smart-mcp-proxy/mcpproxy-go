@@ -6,6 +6,7 @@ import SwiftUI
 enum SidebarItem: String, CaseIterable, Identifiable {
     case dashboard = "Dashboard"
     case servers = "Servers"
+    case registries = "Registries"
     case activity = "Activity Log"
     case secrets = "Secrets"
 
@@ -15,6 +16,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: return "rectangle.3.group"
         case .servers: return "server.rack"
+        case .registries: return "books.vertical"
         case .activity: return "clock.arrow.circlepath"
         case .secrets: return "key.fill"
         }
@@ -59,6 +61,8 @@ struct MainWindow: View {
                         DashboardView(appState: appState)
                     case .servers:
                         ServersView(appState: appState)
+                    case .registries:
+                        RegistriesView(appState: appState)
                     case .activity:
                         ActivityView(appState: appState)
                     case .secrets:
