@@ -109,6 +109,14 @@ components:
             $ref: '#/components/schemas/config.RegistryEntry'
           type: array
           uniqueItems: false
+        registries_locked:
+          description: |-
+            RegistriesLocked is an enterprise stub knob (MCP-866): when true, runtime
+            additions of custom registries (e.g. `registry add-source`, the REST/MCP
+            add-source surface) are rejected so an administrator can pin the discovery
+            sources. Built-in defaults are unaffected. Documented but otherwise inert
+            beyond the add-source rejection.
+          type: boolean
         require_mcp_auth:
           description: 'Require authentication on /mcp endpoint (default: false)'
           type: boolean
@@ -461,6 +469,14 @@ components:
           type: string
         protocol:
           type: string
+        provenance:
+          description: |-
+            Provenance is the trust tag for this registry (MCP-866):
+            RegistryProvenanceOfficial for built-in defaults, RegistryProvenanceCustom
+            for user-added registries. It is authoritatively (re)computed by the
+            registries merge from whether the ID is a shipped default — a user cannot
+            claim "official/trusted" by writing it into their config.
+          type: string
         requires_key:
           description: |-
             RequiresKey marks a registry that needs an API key to be queried. When
@@ -616,6 +632,19 @@ components:
         skip_quarantine:
           description: Skip tool-level quarantine for this server
           type: boolean
+        source_registry_id:
+          description: |-
+            SourceRegistryID records which registry this server was added from (empty
+            for manually-configured servers). MCP-866: surfaced in the approval /
+            quarantine view so a reviewer can see a server's origin.
+          type: string
+        source_registry_provenance:
+          description: |-
+            SourceRegistryProvenance is the trust tag of the source registry at add
+            time (RegistryProvenanceOfficial / RegistryProvenanceCustom). When it is
+            RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
+            unverified registry can never opt its servers out of quarantine.
+          type: string
         updated:
           type: string
         url:

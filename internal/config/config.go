@@ -101,6 +101,13 @@ type Config struct {
 	// Registries configuration for MCP server discovery
 	Registries []RegistryEntry `json:"registries,omitempty" mapstructure:"registries"`
 
+	// RegistriesLocked is an enterprise stub knob (MCP-866): when true, runtime
+	// additions of custom registries (e.g. `registry add-source`, the REST/MCP
+	// add-source surface) are rejected so an administrator can pin the discovery
+	// sources. Built-in defaults are unaffected. Documented but otherwise inert
+	// beyond the add-source rejection.
+	RegistriesLocked bool `json:"registries_locked,omitempty" mapstructure:"registries-locked"`
+
 	// Deprecated: Features flags are unused and have no runtime effect. Kept for backward compatibility.
 	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
 
@@ -251,6 +258,16 @@ type ServerConfig struct {
 	LauncherWaitTimeout Duration `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
 	EnabledTools        []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools       []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
+
+	// SourceRegistryID records which registry this server was added from (empty
+	// for manually-configured servers). MCP-866: surfaced in the approval /
+	// quarantine view so a reviewer can see a server's origin.
+	SourceRegistryID string `json:"source_registry_id,omitempty" mapstructure:"source_registry_id"`
+	// SourceRegistryProvenance is the trust tag of the source registry at add
+	// time (RegistryProvenanceOfficial / RegistryProvenanceCustom). When it is
+	// RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
+	// unverified registry can never opt its servers out of quarantine.
+	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty" mapstructure:"source_registry_provenance"`
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -632,6 +649,18 @@ func (c *OutputSanitisationConfig) WouldMutate(trust string) bool {
 	return trust == "untrusted" && (c.IsStripEnabled() || c.IsSpotlightEnabled())
 }
 
+// Registry provenance tags (MCP-866). Trust is derived, not user-asserted: a
+// registry is "trusted" only when it is one of the shipped built-in defaults.
+// Anything a user adds at runtime (e.g. via `registry add-source`) is
+// "custom/unverified" and can NEVER skip quarantine — there is no allowlist a
+// user can append themselves into.
+const (
+	// RegistryProvenanceOfficial marks a built-in, shipped-by-default registry.
+	RegistryProvenanceOfficial = "official/trusted"
+	// RegistryProvenanceCustom marks a user-added registry of unknown trust.
+	RegistryProvenanceCustom = "custom/unverified"
+)
+
 // RegistryEntry represents a registry in the configuration
 type RegistryEntry struct {
 	ID          string      `json:"id"`
@@ -646,6 +675,19 @@ type RegistryEntry struct {
 	// true and no key is configured, the registry is skipped/marked unavailable
 	// rather than failing the whole search (FR-008).
 	RequiresKey bool `json:"requires_key,omitempty"`
+	// Provenance is the trust tag for this registry (MCP-866):
+	// RegistryProvenanceOfficial for built-in defaults, RegistryProvenanceCustom
+	// for user-added registries. It is authoritatively (re)computed by the
+	// registries merge from whether the ID is a shipped default — a user cannot
+	// claim "official/trusted" by writing it into their config.
+	Provenance string `json:"provenance,omitempty" mapstructure:"provenance"`
+}
+
+// IsTrusted reports whether the registry is an official, shipped-by-default
+// source. Trust is never granted by omission — an absent provenance tag is
+// untrusted.
+func (r *RegistryEntry) IsTrusted() bool {
+	return r != nil && r.Provenance == RegistryProvenanceOfficial
 }
 
 // CursorMCPConfig represents the structure for Cursor IDE MCP configuration
@@ -847,6 +889,7 @@ func DefaultRegistries() []RegistryEntry {
 			ServersURL:  "https://registry.modelcontextprotocol.io/v0.1/servers",
 			Tags:        []string{"verified", "official"},
 			Protocol:    "modelcontextprotocol/registry",
+			Provenance:  RegistryProvenanceOfficial,
 		},
 		{
 			ID:          "reference",
@@ -856,6 +899,7 @@ func DefaultRegistries() []RegistryEntry {
 			ServersURL:  "builtin://reference",
 			Tags:        []string{"verified", "official", "reference"},
 			Protocol:    "builtin/reference",
+			Provenance:  RegistryProvenanceOfficial,
 		},
 		{
 			ID:          "docker-mcp-catalog",
@@ -865,6 +909,7 @@ func DefaultRegistries() []RegistryEntry {
 			ServersURL:  "https://hub.docker.com/v2/repositories/mcp/",
 			Tags:        []string{"verified"},
 			Protocol:    "custom/docker",
+			Provenance:  RegistryProvenanceOfficial,
 		},
 		{
 			ID:          "pulse",
@@ -875,6 +920,7 @@ func DefaultRegistries() []RegistryEntry {
 			Tags:        []string{"verified"},
 			Protocol:    "custom/pulse",
 			RequiresKey: true,
+			Provenance:  RegistryProvenanceOfficial,
 		},
 		{
 			ID:          "smithery",
@@ -885,6 +931,7 @@ func DefaultRegistries() []RegistryEntry {
 			Tags:        []string{"verified"},
 			Protocol:    "modelcontextprotocol/registry",
 			RequiresKey: true,
+			Provenance:  RegistryProvenanceOfficial,
 		},
 	}
 }
@@ -1245,6 +1292,16 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, ValidationError{
 				Field:   fieldPrefix + ".enabled_tools",
 				Message: "enabled_tools and disabled_tools are mutually exclusive; use one or the other",
+			})
+		}
+
+		// MCP-866: a server sourced from a custom/unverified registry can NEVER
+		// skip quarantine. There is no allowlist a user can add themselves into,
+		// so an unverified third-party source must always be reviewed.
+		if server.SkipQuarantine && server.SourceRegistryProvenance == RegistryProvenanceCustom {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".skip_quarantine",
+				Message: "skip_quarantine is not allowed for a server added from a custom/unverified registry",
 			})
 		}
 	}

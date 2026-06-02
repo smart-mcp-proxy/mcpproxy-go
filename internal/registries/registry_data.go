@@ -16,7 +16,22 @@ func SetRegistriesFromConfig(cfg *config.Config) {
 	index := make(map[string]int) // ID -> position in merged
 	merged := make([]RegistryEntry, 0, len(config.DefaultRegistries()))
 
+	// Trust is derived from membership in the shipped default set (MCP-866), not
+	// from any provenance a user wrote into their config — so a custom registry
+	// can never claim "official/trusted", and an override of a default ID keeps
+	// its trusted status (e.g. attaching an API key to a built-in registry).
+	defaults := config.DefaultRegistries()
+	defaultIDs := make(map[string]bool, len(defaults))
+	for i := range defaults {
+		defaultIDs[defaults[i].ID] = true
+	}
+
 	upsert := func(r RegistryEntry) {
+		if defaultIDs[r.ID] {
+			r.Provenance = config.RegistryProvenanceOfficial
+		} else {
+			r.Provenance = config.RegistryProvenanceCustom
+		}
 		if pos, ok := index[r.ID]; ok {
 			merged[pos] = r
 			return
@@ -25,7 +40,6 @@ func SetRegistriesFromConfig(cfg *config.Config) {
 		merged = append(merged, r)
 	}
 
-	defaults := config.DefaultRegistries()
 	for i := range defaults {
 		upsert(fromConfigEntry(&defaults[i]))
 	}
@@ -36,6 +50,12 @@ func SetRegistriesFromConfig(cfg *config.Config) {
 	}
 
 	registryList = merged
+}
+
+// IsTrusted reports whether this is an official, shipped-by-default registry.
+// Trust is never granted by omission — an absent provenance tag is untrusted.
+func (r *RegistryEntry) IsTrusted() bool {
+	return r != nil && r.Provenance == config.RegistryProvenanceOfficial
 }
 
 // fromConfigEntry converts a config.RegistryEntry to a registries.RegistryEntry.
