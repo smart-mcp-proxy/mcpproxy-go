@@ -23,6 +23,61 @@ key is configured it is sent on every request to that registry as an
 User-configured registries in `mcp_config.json` (`registries: [...]`) are **merged**
 with these defaults (keyed by ID); a custom entry never drops the shipped set.
 
+## Trust model & user-added registries
+
+Every registry carries a **provenance** tag:
+
+| Provenance | Meaning |
+|---|---|
+| `official/trusted` | A shipped, built-in default (the five above). |
+| `custom/unverified` | Any registry the user added at runtime, or any non-default ID in `mcp_config.json`. |
+
+Trust is **derived, not asserted** — it comes solely from whether the registry ID
+is one of the shipped defaults. Writing `"provenance": "official/trusted"` into a
+custom `mcp_config.json` entry has no effect; mcpproxy recomputes provenance on
+every merge. **There is no allowlist a user can add themselves into.**
+
+Consequences for `custom/unverified` registries:
+
+- Servers discovered through them are **always quarantined** on add, regardless of
+  the global quarantine default — and they can **never** set `skip_quarantine`
+  (enforced in config validation *and* at server-add time). A server's origin is
+  recorded on its config as `source_registry_id` / `source_registry_provenance`
+  and surfaced in the approval/quarantine view.
+- The `list_registries` output (MCP, REST, CLI) includes `provenance` and a
+  `trusted` boolean so a UI can show a one-time third-party-registry warning.
+
+### Adding your own registry source
+
+`mcpproxy registry add-source` adds any https endpoint that implements the official
+`modelcontextprotocol/registry` v0.1 protocol (the same protocol Copilot / VS Code /
+Azure ship):
+
+```bash
+mcpproxy registry add-source https://registry.example.com
+mcpproxy registry add-source https://registry.example.com --id acme --name "Acme Corp"
+```
+
+The ID is derived from the host when omitted; `--protocol` defaults to
+`modelcontextprotocol/registry`. The source is always tagged `custom/unverified`.
+This requires a running daemon — the registry list is updated copy-on-write on the
+runtime config snapshot and persisted to `mcp_config.json`.
+
+Equivalent surfaces:
+
+- **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
+- **CLI:** `mcpproxy registry add-source <https-url>`.
+
+Errors share a stable code across surfaces: `invalid_registry_url` (400),
+`registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).
+
+### Enterprise: `registries_locked` (stub)
+
+Setting `"registries_locked": true` in `mcp_config.json` disables runtime registry
+additions (`registry add-source` and the REST/MCP add-source surface return
+`registries_locked`). Built-in defaults are unaffected. This is a forward-looking
+stub for enterprise policy pinning.
+
 ## Official v0.1 protocol
 
 The official registry returns a cursor-paginated list of wrapped entries:

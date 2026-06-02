@@ -987,13 +987,17 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 			"url":         reg.URL,
 			"tags":        reg.Tags,
 			"count":       reg.Count,
+			// MCP-866: provenance/trust so an agent can tell official from
+			// user-added third-party sources.
+			"provenance": reg.Provenance,
+			"trusted":    reg.IsTrusted(),
 		})
 	}
 
 	response := map[string]interface{}{
 		"registries": registriesList,
 		"total":      len(registriesList),
-		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers.",
+		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers. Servers from 'custom/unverified' registries are always quarantined.",
 	}
 
 	jsonResult, err := json.Marshal(response)

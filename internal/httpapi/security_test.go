@@ -297,6 +297,9 @@ func (m *baseController) RefreshRegistryCache(registryID string) (int, error) { 
 func (m *baseController) AddServerFromRegistryRef(_ context.Context, _, _, _ string, _ map[string]string, _ *bool) (*config.ServerConfig, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
+func (m *baseController) AddRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 func (m *baseController) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }

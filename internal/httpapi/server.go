@@ -128,6 +128,10 @@ type ServerController interface {
 	// stable cross-surface error code (*contracts.RegistryAddError) alongside
 	// the raw error so the handler can map code → HTTP status.
 	AddServerFromRegistryRef(ctx context.Context, registryID, serverID, name string, env map[string]string, enabled *bool) (*config.ServerConfig, *contracts.RegistryAddError, error)
+	// AddRegistrySourceRef adds a user-supplied generic registry source
+	// (MCP-866), always tagged custom/unverified. On failure it returns a stable
+	// cross-surface error code alongside the raw error.
+	AddRegistrySourceRef(url, protocol, id, name string) (*config.RegistryEntry, *contracts.RegistryAddError, error)
 
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
@@ -679,6 +683,7 @@ func (s *Server) setupRoutes() {
 
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
+		r.Post("/registries", s.handleAddRegistrySource) // MCP-866 user-added registry source
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)           // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
@@ -4170,6 +4175,55 @@ func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleAddRegistrySource godoc
+// @Summary      Add a user-supplied registry source
+// @Description  Adds a generic modelcontextprotocol/registry v0.1 https endpoint as a custom registry (MCP-866). The source is always tagged custom/unverified, so every server discovered through it lands quarantined and can never skip quarantine.
+// @Tags         registries
+// @Accept       json
+// @Produce      json
+// @Param        body  body      contracts.AddRegistrySourceRequest  true  "Registry source (https url + optional protocol/id/name)"
+// @Success      200   {object}  contracts.SuccessResponse           "Registry source added"
+// @Failure      400   {object}  contracts.ErrorResponse             "invalid_registry_url"
+// @Failure      403   {object}  contracts.ErrorResponse             "registries_locked"
+// @Failure      409   {object}  contracts.ErrorResponse             "registry_shadows_builtin | duplicate_registry"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries [post]
+func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request) {
+	var req contracts.AddRegistrySourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+	if req.URL == "" {
+		s.writeError(w, r, http.StatusBadRequest, "url is required")
+		return
+	}
+
+	logger := s.getRequestLogger(r)
+	entry, rerr, err := s.controller.AddRegistrySourceRef(req.URL, req.Protocol, req.ID, req.Name)
+	if err != nil {
+		status := registryAddErrorStatus(rerr.Code)
+		if status >= http.StatusInternalServerError {
+			logger.Error("Add registry source failed", "url", req.URL, "error", err)
+		}
+		s.writeRegistryAddError(w, r, status, rerr)
+		return
+	}
+
+	s.writeSuccess(w, contracts.AddRegistrySourceData{
+		Registry: contracts.RegistrySummary{
+			ID:         entry.ID,
+			Name:       entry.Name,
+			URL:        entry.URL,
+			ServersURL: entry.ServersURL,
+			Protocol:   entry.Protocol,
+			Provenance: entry.Provenance,
+			Trusted:    entry.IsTrusted(),
+		},
+	})
+}
+
 // handleRefreshRegistryCache godoc
 // @Summary      Refresh a registry's cached server list
 // @Description  Invalidates the cached server lists for a registry so the next search re-fetches fresh data from the source (spec 070 FR-007). Returns how many cache entries were dropped.
@@ -4206,8 +4260,12 @@ func registryAddErrorStatus(code string) int {
 	switch code {
 	case "registry_not_found", "server_not_found":
 		return http.StatusNotFound
-	case "no_install_info", "missing_required_input", "duplicate_name":
+	case "no_install_info", "missing_required_input", "duplicate_name", "invalid_registry_url":
 		return http.StatusBadRequest
+	case "registries_locked":
+		return http.StatusForbidden
+	case "registry_shadows_builtin", "duplicate_registry":
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}

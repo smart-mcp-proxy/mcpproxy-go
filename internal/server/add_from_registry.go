@@ -49,6 +49,14 @@ type AddFromRegistryRequest struct {
 	Name       string            // optional override; defaults to the entry's name/id
 	Env        map[string]string // optional; satisfies declared RequiredInputs
 	Enabled    *bool             // optional; defaults to true when nil
+
+	// SourceRegistryID / SourceProvenance are stamped server-side by
+	// AddServerFromRegistry from the resolved registry (MCP-866); they are NOT
+	// client-settable through the REST/MCP/CLI Ref adapter. A custom/unverified
+	// provenance forces the derived server to be quarantined and forbids
+	// skip_quarantine.
+	SourceRegistryID string
+	SourceProvenance string
 }
 
 // RegistryAddErrorCode maps an error returned by AddServerFromRegistry (or the
@@ -88,6 +96,14 @@ func (s *Server) AddServerFromRegistry(ctx context.Context, req *AddFromRegistry
 	entry, err := registries.FindServerByID(ctx, req.RegistryID, req.ServerID, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Stamp the source registry + its (authoritatively-computed) provenance so
+	// the derivation can enforce quarantine for custom/unverified sources and
+	// surfaces can show a server's origin (MCP-866).
+	req.SourceRegistryID = req.RegistryID
+	if reg := registries.FindRegistry(req.RegistryID); reg != nil {
+		req.SourceProvenance = reg.Provenance
 	}
 
 	// Quarantine default comes from global config — never from the request
@@ -177,12 +193,22 @@ func buildServerConfigFromEntry(entry *registries.ServerEntry, req *AddFromRegis
 	}
 
 	cfg := &config.ServerConfig{
-		Name:        name,
-		Quarantined: quarantineDefault, // CN-002: never overridable to false here
-		Enabled:     true,
+		Name:                     name,
+		Quarantined:              quarantineDefault, // CN-002: never overridable to false here
+		Enabled:                  true,
+		SourceRegistryID:         req.SourceRegistryID,
+		SourceRegistryProvenance: req.SourceProvenance,
 	}
 	if req.Enabled != nil {
 		cfg.Enabled = *req.Enabled
+	}
+
+	// MCP-866: a custom/unverified registry can never opt its servers out of
+	// quarantine. Force quarantine on regardless of the global default and
+	// ensure skip_quarantine stays off.
+	if req.SourceProvenance == config.RegistryProvenanceCustom {
+		cfg.Quarantined = true
+		cfg.SkipQuarantine = false
 	}
 
 	// Carry any supplied env (overrides + required-input values).

@@ -911,6 +911,21 @@ components:
           description: optional name override
           type: string
       type: object
+    contracts.AddRegistrySourceRequest:
+      properties:
+        id:
+          description: derived from the host when empty
+          type: string
+        name:
+          description: defaults to the id
+          type: string
+        protocol:
+          description: defaults to modelcontextprotocol/registry
+          type: string
+        url:
+          description: required https registry URL
+          type: string
+      type: object
     contracts.ConfigApplyResult:
       properties:
         applied_immediately:
@@ -3529,6 +3544,49 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: List available MCP server registries
+      tags:
+      - registries
+    post:
+      description: Adds a generic modelcontextprotocol/registry v0.1 https endpoint
+        as a custom registry (MCP-866). The source is always tagged custom/unverified,
+        so every server discovered through it lands quarantined and can never skip
+        quarantine.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.AddRegistrySourceRequest'
+        description: Registry source (https url + optional protocol/id/name)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Registry source added
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: invalid_registry_url
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registries_locked
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_shadows_builtin | duplicate_registry
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Add a user-supplied registry source
       tags:
       - registries
   /api/v1/registries/{id}/refresh:

@@ -1862,3 +1862,56 @@ func (c *Client) AddFromRegistry(ctx context.Context, registryID, serverID, name
 	}
 	return &apiResp.Data.Server, nil
 }
+
+// AddRegistrySource adds a user-supplied registry source via the daemon
+// (MCP-866). POST /api/v1/registries → data.registry. On failure it returns a
+// *RegistryAddError carrying the stable cross-surface code.
+func (c *Client) AddRegistrySource(ctx context.Context, sourceURL, protocol, id, name string) (*contracts.RegistrySummary, error) {
+	body := contracts.AddRegistrySourceRequest{URL: sourceURL, Protocol: protocol, ID: id, Name: name}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	u := c.baseURL + "/api/v1/registries"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call add-registry-source API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var apiResp struct {
+		Success   bool                             `json:"success"`
+		Data      *contracts.AddRegistrySourceData `json:"data"`
+		Error     string                           `json:"error"`
+		Code      string                           `json:"code"`
+		RequestID string                           `json:"request_id"`
+	}
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response (status %d): %s", resp.StatusCode, string(respBytes))
+	}
+
+	if !apiResp.Success || resp.StatusCode != http.StatusOK {
+		msg := apiResp.Error
+		if msg == "" {
+			msg = fmt.Sprintf("API returned status %d", resp.StatusCode)
+		}
+		return nil, &RegistryAddError{Code: apiResp.Code, Message: msg, RequestID: apiResp.RequestID}
+	}
+	if apiResp.Data == nil {
+		return nil, fmt.Errorf("daemon returned success with no registry data")
+	}
+	return &apiResp.Data.Registry, nil
+}
