@@ -419,6 +419,55 @@ export interface ServerTokenMetrics {
   per_server_tool_list_sizes: Record<string, number>
 }
 
+// Usage statistics aggregate — GET /api/v1/activity/usage (Spec 069).
+// Mirrors contracts.UsageAggregateResponse. Per-tool metrics are
+// lifetime-cumulative; `window` scopes the timeline + the tool-list membership.
+export interface UsageToolStat {
+  server: string
+  tool: string
+  calls: number
+  errors: number
+  error_rate: number
+  blocked: number
+  total_resp_bytes: number
+  avg_resp_bytes: number | null   // null when only legacy 0-byte calls exist
+  total_req_bytes: number
+  avg_req_bytes: number | null
+  sized_calls: number
+  p50_ms: number
+  p95_ms: number
+  last_used: string
+}
+
+export interface UsageOtherBucket {
+  tools_folded: number
+  calls: number
+  total_resp_bytes: number
+}
+
+export interface UsageTimeBucket {
+  start: string
+  calls: number
+  errors: number
+  total_resp_bytes: number
+}
+
+export interface UsageAggregateResponse {
+  window: string
+  generated_at: string
+  freshness_ms: number
+  token_source: string              // "bytes" — size-based proxy (FR-006)
+  tokens_saved: number              // echoed from ServerTokenMetrics (FR-007)
+  tokens_saved_percentage: number
+  tools: UsageToolStat[]
+  other?: UsageOtherBucket | null   // present only when list truncated to top-N
+  timeline: UsageTimeBucket[]
+}
+
+export type UsageWindow = '24h' | '7d' | 'all'
+export type UsageSort = 'calls' | 'resp_bytes' | 'error_rate' | 'p95'
+export type UsageStatus = 'success' | 'error' | 'blocked'
+
 export interface ToolCallRecord {
   id: string
   server_id: string

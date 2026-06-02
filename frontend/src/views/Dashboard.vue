@@ -3,6 +3,38 @@
     <!-- Telemetry Notice Banner -->
     <TelemetryBanner />
 
+    <!-- Overview ↔ Usage switcher (Spec 069 T016) -->
+    <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'overview' ? 'tab-active' : ''"
+        data-test="dashboard-tab-overview"
+        @click="activeView = 'overview'"
+      >Overview</a>
+      <a
+        role="tab"
+        class="tab"
+        :class="activeView === 'usage' ? 'tab-active' : ''"
+        data-test="dashboard-tab-usage"
+        @click="selectUsage"
+      >Usage</a>
+    </div>
+
+    <!-- Usage view: lazy-mounted on first switch so the chart bundle and the
+         usage fetch don't block Dashboard first paint (SC-004). Kept alive with
+         v-show after mount so re-switching is instant. -->
+    <div v-if="usageEverActive" v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
+      <Suspense>
+        <UsageView />
+        <template #fallback>
+          <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
+        </template>
+      </Suspense>
+    </div>
+
+    <!-- Overview: v-show (not v-if) so its state survives a switch to Usage and back (SC-006). -->
+    <div v-show="activeView === 'overview'" class="space-y-6" data-test="dashboard-overview-panel">
     <!-- Servers Needing Attention Banner (using unified health status) -->
     <div
       v-if="serversNeedingAttention.length > 0"
@@ -376,6 +408,8 @@
 
     <!-- Hints Panel (Bottom of Page) -->
     <CollapsibleHintsPanel :hints="dashboardHints" />
+    </div>
+    <!-- /Overview panel -->
 
     <!-- Modals -->
     <ConnectModal :show="showConnectModal" @close="showConnectModal = false" />
@@ -385,7 +419,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus, refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
@@ -401,9 +435,22 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
 
+// Usage view is code-split so chart.js + the usage fetch stay out of the
+// Dashboard's first-paint critical path (Spec 069 SC-004).
+const UsageView = defineAsyncComponent(() => import('@/views/Usage.vue'))
+
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
 const onboardingStore = useOnboardingStore()
+
+// Overview ↔ Usage switcher state (Spec 069 T016). `usageEverActive` gates the
+// first mount; `activeView` then toggles via v-show so both panels keep state.
+const activeView = ref<'overview' | 'usage'>('overview')
+const usageEverActive = ref(false)
+function selectUsage() {
+  usageEverActive.value = true
+  activeView.value = 'usage'
+}
 
 // Modal state
 const showConnectModal = ref(false)

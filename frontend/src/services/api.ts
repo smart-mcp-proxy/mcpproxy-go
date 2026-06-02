@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -756,6 +756,27 @@ class APIService {
 
   async getActivitySummary(period: string = '24h'): Promise<APIResponse<ActivitySummaryResponse>> {
     return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary?period=${period}`)
+  }
+
+  // Usage statistics aggregate for the Web UI usage graphs (Spec 069).
+  async getActivityUsage(params?: {
+    window?: UsageWindow
+    server?: string
+    tool?: string
+    status?: UsageStatus
+    top?: number
+    sort?: UsageSort
+  }): Promise<APIResponse<UsageAggregateResponse>> {
+    const searchParams = new URLSearchParams()
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== '') {
+          searchParams.append(key, String(value))
+        }
+      })
+    }
+    const qs = searchParams.toString()
+    return this.request<UsageAggregateResponse>(`/api/v1/activity/usage${qs ? '?' + qs : ''}`)
   }
 
   getActivityExportUrl(params: {
