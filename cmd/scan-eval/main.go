@@ -7,8 +7,9 @@
 //
 //	scan-eval --corpus datasets/security_corpus_v1.json [--out verdicts.json]
 //
-// The optional --scanners flag is a reserved extension point for the Docker
-// bundled scanner registry; it is not yet implemented (deferred per Gate 2).
+// The optional --scanners flag opts into Docker-isolated bundled security
+// scanners (offline by default; set MCPPROXY_SCAN_EVAL_DOCKER=1 to enable
+// container execution). Each requested scanner appends a per-entry verdict.
 package main
 
 import (
@@ -19,7 +20,10 @@ import (
 	"os"
 	"strings"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
 const (
@@ -40,7 +44,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	corpusPath := fs.String("corpus", "", "path to the D2 security corpus JSON (required)")
 	outPath := fs.String("out", "", "output path for verdict JSON (default: stdout)")
 	detectors := fs.String("detectors", detectorSensitiveData, "comma-separated detectors to run (only 'sensitive-data' is supported)")
-	scanners := fs.String("scanners", "", "opt-in Docker bundled scanner ids (reserved extension point; not yet implemented)")
+	scanners := fs.String("scanners", "", "comma-separated Docker bundled scanner ids to run (offline; set MCPPROXY_SCAN_EVAL_DOCKER=1 to enable)")
 
 	if err := fs.Parse(args); err != nil {
 		return exitConfigError
@@ -53,10 +57,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return exitConfigError
 	}
-	if *scanners != "" {
-		fmt.Fprintf(stderr, "warning: --scanners=%q is a reserved extension point and is not yet implemented; ignoring\n", *scanners)
-	}
-
 	c, err := loadCorpus(*corpusPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -64,6 +64,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	report := evaluate(c, security.NewDetector(nil))
+
+	// Optional Docker bundled scanners. An unknown id is a hard config error
+	// (exit 4); a skip under current constraints is only a warning so detector
+	// verdicts still emit. Docker is the gate — offline-by-default unless the
+	// operator opts in via MCPPROXY_SCAN_EVAL_DOCKER.
+	if *scanners != "" {
+		dockerEnv := os.Getenv("MCPPROXY_SCAN_EVAL_DOCKER")
+		dockerEnabled := dockerEnv == "1" || strings.EqualFold(dockerEnv, "true")
+		reg := scanner.NewRegistry("", zap.NewNop())
+		if err := applyScanners(report, c, reg, *scanners, dockerEnabled, os.LookupEnv, nil, stderr); err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return exitConfigError
+		}
+	}
 
 	out, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
