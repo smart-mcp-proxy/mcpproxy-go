@@ -67,9 +67,14 @@ Equivalent surfaces:
 
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
 - **CLI:** `mcpproxy registry add-source <https-url>`.
+- **Web UI:** the **Repositories** page has an **Add Registry** button (URL + optional
+  protocol/name). Each registry in the selector is flagged **Official · trusted** or
+  **Third-party · unverified** from its `provenance`, and the first custom add shows a
+  one-time third-party-registry warning (the acknowledgement is remembered locally).
 
 Errors share a stable code across surfaces: `invalid_registry_url` (400),
 `registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).
+The Web UI maps each code to an actionable message.
 
 ### Enterprise: `registries_locked` (stub)
 
