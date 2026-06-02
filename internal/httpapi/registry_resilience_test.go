@@ -112,3 +112,90 @@ func TestRefreshRegistryCache_Endpoint(t *testing.T) {
 		t.Errorf("expected registry_id=pulse, got %q", resp.RegistryID)
 	}
 }
+
+// provenanceController returns registries with provenance/trust data.
+type provenanceController struct {
+	*MockServerController
+}
+
+func (c *provenanceController) ListRegistries() ([]interface{}, error) {
+	return []interface{}{
+		map[string]interface{}{
+			"id":         "official-reg",
+			"name":       "Official Registry",
+			"url":        "https://registry.example/official",
+			"provenance": "official/trusted",
+		},
+		map[string]interface{}{
+			"id":         "custom-reg",
+			"name":       "Custom Registry",
+			"url":        "https://registry.example/custom",
+			"provenance": "custom/unverified",
+		},
+		map[string]interface{}{
+			"id":   "no-provenance-reg",
+			"name": "No Provenance Registry",
+			"url":  "https://registry.example/none",
+		},
+	}, nil
+}
+
+// MCP-866: provenance is surfaced on the REST API; custom registries show
+// provenance=custom/unverified and trusted=false.
+func TestListRegistries_SurfacesProvenanceAndTrusted(t *testing.T) {
+	srv := NewServer(&provenanceController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/registries", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp contracts.GetRegistriesResponse
+	decodeData(t, w, &resp)
+	if resp.Total != 3 {
+		t.Fatalf("expected 3 registries, got %d", resp.Total)
+	}
+
+	// Find each registry by ID and check provenance/trusted.
+	byID := make(map[string]contracts.Registry, len(resp.Registries))
+	for _, r := range resp.Registries {
+		byID[r.ID] = r
+	}
+
+	// Official registry: provenance=official/trusted, trusted=true
+	official, ok := byID["official-reg"]
+	if !ok {
+		t.Fatal("official-reg not found in response")
+	}
+	if official.Provenance != "official/trusted" {
+		t.Errorf("official-reg provenance: want official/trusted, got %q", official.Provenance)
+	}
+	if !official.Trusted {
+		t.Error("official-reg trusted: want true, got false")
+	}
+
+	// Custom registry: provenance=custom/unverified, trusted=false
+	custom, ok := byID["custom-reg"]
+	if !ok {
+		t.Fatal("custom-reg not found in response")
+	}
+	if custom.Provenance != "custom/unverified" {
+		t.Errorf("custom-reg provenance: want custom/unverified, got %q", custom.Provenance)
+	}
+	if custom.Trusted {
+		t.Error("custom-reg trusted: want false, got true")
+	}
+
+	// No-provenance registry: provenance empty, trusted=false
+	none, ok := byID["no-provenance-reg"]
+	if !ok {
+		t.Fatal("no-provenance-reg not found in response")
+	}
+	if none.Provenance != "" {
+		t.Errorf("no-provenance-reg provenance: want empty, got %q", none.Provenance)
+	}
+	if none.Trusted {
+		t.Error("no-provenance-reg trusted: want false, got true")
+	}
+}

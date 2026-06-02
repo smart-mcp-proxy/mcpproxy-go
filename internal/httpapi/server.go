@@ -3992,6 +3992,8 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 			ServersURL:  getString(regMap, "servers_url"),
 			Protocol:    getString(regMap, "protocol"),
 			Count:       regMap["count"],
+			Provenance:  getString(regMap, "provenance"),
+			Trusted:     getString(regMap, "provenance") == "official/trusted",
 		}
 
 		if tags, ok := regMap["tags"].([]interface{}); ok {

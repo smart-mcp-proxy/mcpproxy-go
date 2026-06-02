@@ -1537,6 +1537,11 @@ components:
           type: string
         protocol:
           type: string
+        provenance:
+          description: |-
+            Provenance is the trust tag (MCP-866): "official/trusted" for built-in
+            defaults, "custom/unverified" for user-added registries.
+          type: string
         servers_url:
           type: string
         tags:
@@ -1544,6 +1549,12 @@ components:
             type: string
           type: array
           uniqueItems: false
+        trusted:
+          description: |-
+            Trusted indicates whether this is an official, shipped-by-default
+            registry. Trust is derived from membership in the default set, never
+            from self-assertion in config.
+          type: boolean
         url:
           type: string
       type: object

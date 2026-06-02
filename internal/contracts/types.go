@@ -854,6 +854,13 @@ type Registry struct {
 	Tags        []string    `json:"tags,omitempty"`
 	Protocol    string      `json:"protocol,omitempty"`
 	Count       interface{} `json:"count,omitempty" swaggertype:"primitive,string"` // number or string
+	// Provenance is the trust tag (MCP-866): "official/trusted" for built-in
+	// defaults, "custom/unverified" for user-added registries.
+	Provenance string `json:"provenance,omitempty"`
+	// Trusted indicates whether this is an official, shipped-by-default
+	// registry. Trust is derived from membership in the default set, never
+	// from self-assertion in config.
+	Trusted bool `json:"trusted"`
 }
 
 // RepositoryInfo represents detected repository type information
