@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageQueryParams, UsageAggregateResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -758,17 +758,23 @@ class APIService {
     return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary?period=${period}`)
   }
 
-  // Spec 069 (T017): actor-owned usage aggregate backing the Usage panel.
-  // Only the supplied params are forwarded; unset filters are omitted so the
-  // daemon applies its documented defaults (window=24h, sort=resp_bytes, top=20).
-  async getActivityUsage(params: UsageQueryParams = {}): Promise<APIResponse<UsageAggregateResponse>> {
+  // Usage statistics aggregate for the Web UI usage graphs (Spec 069).
+  async getActivityUsage(params?: {
+    window?: UsageWindow
+    server?: string
+    tool?: string
+    status?: UsageStatus
+    top?: number
+    sort?: UsageSort
+  }): Promise<APIResponse<UsageAggregateResponse>> {
     const searchParams = new URLSearchParams()
-    if (params.window) searchParams.append('window', params.window)
-    if (params.server) searchParams.append('server', params.server)
-    if (params.tool) searchParams.append('tool', params.tool)
-    if (params.status) searchParams.append('status', params.status)
-    if (params.top !== undefined) searchParams.append('top', String(params.top))
-    if (params.sort) searchParams.append('sort', params.sort)
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== '') {
+          searchParams.append(key, String(value))
+        }
+      })
+    }
     const qs = searchParams.toString()
     return this.request<UsageAggregateResponse>(`/api/v1/activity/usage${qs ? '?' + qs : ''}`)
   }
