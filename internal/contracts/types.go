@@ -262,6 +262,66 @@ type ServerTokenMetrics struct {
 	PerServerToolListSizes  map[string]int `json:"per_server_tool_list_sizes"`  // Token size per server
 }
 
+// UsageAggregateResponse is the GET /api/v1/activity/usage payload (Spec 069 A3).
+// It is served from the actor-owned in-memory usage aggregate snapshot (never a
+// per-request full-log scan, SC-005).
+//
+// Windowing semantics (informed by the A2 aggregate shape, data-model.md §2):
+//   - The per-tool rollup (Tools) carries lifetime-cumulative metrics. `window`
+//     scopes the tool LIST to tools last used within the span (by LastUsed); the
+//     counts/bytes/latency themselves are lifetime totals over the aggregate's
+//     retention horizon. Exact per-tool windowed counts would require per-tool
+//     time buckets in the aggregate and are a deferred follow-on.
+//   - The Timeline buckets are global (not per-tool); `window` trims them to the
+//     requested span. Timeline is therefore not filtered by tool/server/status.
+//   - tool/server/status act as membership filters on the per-tool rollup.
+type UsageAggregateResponse struct {
+	Window                string            `json:"window"`
+	GeneratedAt           time.Time         `json:"generated_at"`
+	FreshnessMs           int64             `json:"freshness_ms"` // age of the underlying snapshot in ms
+	TokenSource           string            `json:"token_source"` // "bytes" (size-based proxy, FR-006)
+	TokensSaved           int               `json:"tokens_saved"` // echoed from ServerTokenMetrics (FR-007)
+	TokensSavedPercentage float64           `json:"tokens_saved_percentage"`
+	Tools                 []UsageToolStat   `json:"tools"`
+	Other                 *UsageOtherBucket `json:"other,omitempty"` // present only when the list was truncated to top-N
+	Timeline              []UsageTimeBucket `json:"timeline"`
+}
+
+// UsageToolStat is the per-(server,tool) rollup row in UsageAggregateResponse.
+type UsageToolStat struct {
+	Server         string    `json:"server"`
+	Tool           string    `json:"tool"`
+	Calls          int64     `json:"calls"`
+	Errors         int64     `json:"errors"`
+	ErrorRate      float64   `json:"error_rate"`
+	Blocked        int64     `json:"blocked"`
+	TotalRespBytes int64     `json:"total_resp_bytes"`
+	AvgRespBytes   *int64    `json:"avg_resp_bytes"` // null when sized_calls == 0 (only legacy 0-byte calls)
+	TotalReqBytes  int64     `json:"total_req_bytes"`
+	AvgReqBytes    *int64    `json:"avg_req_bytes"` // null when no sized request calls
+	SizedCalls     int64     `json:"sized_calls"`   // calls with known response size (basis for avg_resp_bytes)
+	P50Ms          int64     `json:"p50_ms"`
+	P95Ms          int64     `json:"p95_ms"`
+	LastUsed       time.Time `json:"last_used"`
+}
+
+// UsageOtherBucket folds the tail of the per-tool list beyond top-N (FR: charts
+// stay readable on high-cardinality logs).
+type UsageOtherBucket struct {
+	ToolsFolded    int   `json:"tools_folded"`
+	Calls          int64 `json:"calls"`
+	TotalRespBytes int64 `json:"total_resp_bytes"`
+}
+
+// UsageTimeBucket is one timeline bar (executed calls only; blocked attempts and
+// non-tool records are excluded by the aggregate).
+type UsageTimeBucket struct {
+	Start          time.Time `json:"start"`
+	Calls          int64     `json:"calls"`
+	Errors         int64     `json:"errors"`
+	TotalRespBytes int64     `json:"total_resp_bytes"`
+}
+
 // LogEntry represents a single log entry
 type LogEntry struct {
 	Timestamp time.Time              `json:"timestamp"`

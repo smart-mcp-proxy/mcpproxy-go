@@ -1938,6 +1938,91 @@ components:
         timestamp:
           type: string
       type: object
+    contracts.UsageAggregateResponse:
+      properties:
+        freshness_ms:
+          description: age of the underlying snapshot in ms
+          type: integer
+        generated_at:
+          type: string
+        other:
+          $ref: '#/components/schemas/contracts.UsageOtherBucket'
+        timeline:
+          items:
+            $ref: '#/components/schemas/contracts.UsageTimeBucket'
+          type: array
+          uniqueItems: false
+        token_source:
+          description: '"bytes" (size-based proxy, FR-006)'
+          type: string
+        tokens_saved:
+          description: echoed from ServerTokenMetrics (FR-007)
+          type: integer
+        tokens_saved_percentage:
+          type: number
+        tools:
+          items:
+            $ref: '#/components/schemas/contracts.UsageToolStat'
+          type: array
+          uniqueItems: false
+        window:
+          type: string
+      type: object
+    contracts.UsageOtherBucket:
+      description: present only when the list was truncated to top-N
+      properties:
+        calls:
+          type: integer
+        tools_folded:
+          type: integer
+        total_resp_bytes:
+          type: integer
+      type: object
+    contracts.UsageTimeBucket:
+      properties:
+        calls:
+          type: integer
+        errors:
+          type: integer
+        start:
+          type: string
+        total_resp_bytes:
+          type: integer
+      type: object
+    contracts.UsageToolStat:
+      properties:
+        avg_req_bytes:
+          description: null when no sized request calls
+          type: integer
+        avg_resp_bytes:
+          description: null when sized_calls == 0 (only legacy 0-byte calls)
+          type: integer
+        blocked:
+          type: integer
+        calls:
+          type: integer
+        error_rate:
+          type: number
+        errors:
+          type: integer
+        last_used:
+          type: string
+        p50_ms:
+          type: integer
+        p95_ms:
+          type: integer
+        server:
+          type: string
+        sized_calls:
+          description: calls with known response size (basis for avg_resp_bytes)
+          type: integer
+        tool:
+          type: string
+        total_req_bytes:
+          type: integer
+        total_resp_bytes:
+          type: integer
+      type: object
     contracts.ValidateConfigResponse:
       properties:
         errors:
@@ -2683,6 +2768,99 @@ paths:
       - ApiKeyHeader: []
       - ApiKeyQuery: []
       summary: Get activity summary statistics
+      tags:
+      - Activity
+  /api/v1/activity/usage:
+    get:
+      description: Returns the actor-owned usage aggregate (per-tool rollup + timeline
+        + tokens-saved headline) for the Web UI usage graphs (Spec 069). Served from
+        an in-memory snapshot — never a per-request full-log scan. Per-tool metrics
+        are lifetime-cumulative; `window` scopes the timeline and filters the tool
+        list to tools active within the span.
+      parameters:
+      - description: Time window for timeline + tool-list membership
+        in: query
+        name: window
+        schema:
+          enum:
+          - 24h
+          - 7d
+          - all
+          type: string
+      - description: Filter to one server
+        in: query
+        name: server
+        schema:
+          type: string
+      - description: Filter to one tool
+        in: query
+        name: tool
+        schema:
+          type: string
+      - description: Filter to tools with activity of this status
+        in: query
+        name: status
+        schema:
+          enum:
+          - success
+          - error
+          - blocked
+          type: string
+      - description: Top-N tools by sort key; remainder folded into 'other' (default
+          20)
+        in: query
+        name: top
+        schema:
+          type: integer
+      - description: Ranking key for the per-tool list
+        in: query
+        name: sort
+        schema:
+          enum:
+          - calls
+          - resp_bytes
+          - error_rate
+          - p95
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Bad Request
+        "401":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: Unauthorized
+      security:
+      - ApiKeyHeader: []
+      - ApiKeyQuery: []
+      summary: Get usage statistics aggregate
       tags:
       - Activity
   /api/v1/annotations/coverage:

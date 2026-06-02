@@ -2546,6 +2546,17 @@ func (r *Runtime) AggregateToolUsage(since time.Time) (map[string]storage.ToolUs
 	return r.storageManager.AggregateToolUsage(since)
 }
 
+// UsageSnapshot returns the actor-owned in-memory usage aggregate snapshot
+// (spec 069 A2/A3). Reads are lock-free; the returned value is immutable and
+// must be treated as read-only. Returns nil when the activity service is
+// unavailable.
+func (r *Runtime) UsageSnapshot() *UsageAggregate {
+	if r.activityService == nil {
+		return nil
+	}
+	return r.activityService.UsageSnapshot()
+}
+
 // StreamActivities returns a channel that yields activity records matching the filter.
 func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	if r.storageManager == nil {
