@@ -56,8 +56,9 @@ func selectScanners(reg *scanner.Registry, csv string, dockerEnabled bool, looku
 // runnabilityReason returns "" when the scanner can run under the given
 // constraints, otherwise a human-readable reason it must be skipped. Used both
 // to partition in selectScanners and to explain the skip to the operator, so
-// the gating rules live in exactly one place (DRY). Order matters: Docker is
-// the cheapest gate, then secrets, then network.
+// the gating rules live in exactly one place (DRY). Order: Docker is the
+// cheapest gate, then secrets. Network-req scanners are NOT gated here — the
+// Docker gate above subsumes that (Docker-off → everything skipped).
 func runnabilityReason(p *scanner.ScannerPlugin, dockerEnabled bool, lookupEnv func(string) (string, bool)) string {
 	if !dockerEnabled {
 		return "Docker isolation disabled (set MCPPROXY_SCAN_EVAL_DOCKER=1 to enable)"
@@ -67,9 +68,12 @@ func runnabilityReason(p *scanner.ScannerPlugin, dockerEnabled bool, lookupEnv f
 			return fmt.Sprintf("missing required secret %s", req.Key)
 		}
 	}
-	if p.NetworkReq {
-		return "requires network access (unavailable in offline corpus evaluation)"
-	}
+	// Network-req scanners are NOT skipped here: when Docker is available the
+	// operator explicitly opted in via --scanners + MCPPROXY_SCAN_EVAL_DOCKER=1,
+	// and running the scanner (even offline — the runner enforces NetworkMode=none,
+	// Security-by-Default) is preferred over silently skipping it. The Docker gate
+	// above already covers the Docker-unavailable case (everything skipped), so
+	// reaching here means Docker IS enabled.
 	return ""
 }
 

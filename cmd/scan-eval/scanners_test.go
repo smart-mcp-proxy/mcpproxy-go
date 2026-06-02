@@ -17,9 +17,10 @@ import (
 )
 
 // testRegistry builds an isolated registry (temp dataDir → no user registry
-// bleed) seeded with two controlled custom scanners: one offline+no-secret and
-// one that requires a secret env var. Metadata-driven gating is exercised
-// against these so the tests do not couple to bundled-registry churn.
+// bleed) seeded with three controlled custom scanners: one offline+no-secret,
+// one that requires a secret env var, and one that requires network access.
+// Metadata-driven gating is exercised against these so the tests do not couple
+// to bundled-registry churn.
 func testRegistry(t *testing.T) *scanner.Registry {
 	t.Helper()
 	reg := scanner.NewRegistry(t.TempDir(), zap.NewNop())
@@ -38,7 +39,15 @@ func testRegistry(t *testing.T) *scanner.Registry {
 		Command:     []string{"scan"},
 		RequiredEnv: []scanner.EnvRequirement{{Key: "ENG_TEST_TOKEN", Label: "Token", Secret: true}},
 	}
-	for _, s := range []*scanner.ScannerPlugin{offline, secret} {
+	netReq := &scanner.ScannerPlugin{
+		ID:          "eng-netreq",
+		Name:        "Eng Network Required",
+		DockerImage: "example/eng-netreq:latest",
+		Inputs:      []string{"source"},
+		Command:     []string{"scan"},
+		NetworkReq:  true,
+	}
+	for _, s := range []*scanner.ScannerPlugin{offline, secret, netReq} {
 		if err := reg.Register(s); err != nil {
 			t.Fatalf("Register(%s): %v", s.ID, err)
 		}
@@ -97,6 +106,26 @@ func TestSelectScanners_DockerDisabled(t *testing.T) {
 	}
 	if len(skipped) != 1 || skipped[0].ID != "eng-offline" {
 		t.Fatalf("skipped = %+v, want one skip for eng-offline", skipped)
+	}
+}
+
+// TestSelectScanners_NetworkReq_RunnableWhenDockerEnabled — a scanner that
+// requires network access is NOT skipped when Docker is enabled. The operator
+// explicitly opted in via --scanners + MCPPROXY_SCAN_EVAL_DOCKER=1; running the
+// scanner (even offline — the runner enforces NetworkMode=none) is preferred
+// over silently skipping it. The Docker-unavailable case is covered by
+// TestSelectScanners_DockerDisabled (everything skipped).
+func TestSelectScanners_NetworkReq_RunnableWhenDockerEnabled(t *testing.T) {
+	reg := testRegistry(t)
+	run, skipped, err := selectScanners(reg, "eng-netreq", true, env(nil))
+	if err != nil {
+		t.Fatalf("selectScanners: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %+v, want none (docker enabled, network-req scanner should be runnable)", skipped)
+	}
+	if len(run) != 1 || run[0].ID != "eng-netreq" {
+		t.Errorf("run = %v, want [eng-netreq]", ids(run))
 	}
 }
 
