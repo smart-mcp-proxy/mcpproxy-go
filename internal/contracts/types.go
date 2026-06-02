@@ -60,6 +60,15 @@ type Server struct {
 	// these fields.
 	Diagnostic *Diagnostic `json:"diagnostic,omitempty"`
 	ErrorCode  string      `json:"error_code,omitempty"`
+	// MCP-901 — registry provenance of an upstream that was added from a
+	// registry. SourceRegistryID names the source registry (empty for
+	// manually-configured servers); SourceRegistryProvenance is the trust tag
+	// recorded at add time ("official/trusted" or "custom/unverified"). Both
+	// are projected from config.ServerConfig so the approval/quarantine view
+	// can render an "added from <registry> · unverified" origin badge. Optional
+	// and omitted when empty — clients that pre-date this treat them as absent.
+	SourceRegistryID         string `json:"source_registry_id,omitempty"`
+	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty"`
 }
 
 // Diagnostic is the REST-API representation of a classified server failure.

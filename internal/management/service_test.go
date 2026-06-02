@@ -125,6 +125,44 @@ func TestListServers(t *testing.T) {
 		assert.Equal(t, 1, stats.QuarantinedServers)
 	})
 
+	// MCP-901: source registry provenance is projected onto contracts.Server so
+	// the approval/quarantine view (and the SSE servers.changed embed, which
+	// shares this projection) can show a server's origin.
+	t.Run("source registry provenance projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":                         "everything",
+				"name":                       "everything",
+				"enabled":                    true,
+				"source_registry_id":         "modelcontextprotocol",
+				"source_registry_provenance": "custom/unverified",
+			},
+			{
+				"id":      "manual",
+				"name":    "manual",
+				"enabled": true,
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 2)
+
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "everything")
+		assert.Equal(t, "modelcontextprotocol", byName["everything"].SourceRegistryID)
+		assert.Equal(t, "custom/unverified", byName["everything"].SourceRegistryProvenance)
+
+		require.Contains(t, byName, "manual")
+		assert.Empty(t, byName["manual"].SourceRegistryID)
+		assert.Empty(t, byName["manual"].SourceRegistryProvenance)
+	})
+
 	// T094: Test that TotalTools only counts enabled servers' tools (Issue #285 fix)
 	t.Run("TotalTools excludes disabled servers", func(t *testing.T) {
 		runtime := newMockRuntime()

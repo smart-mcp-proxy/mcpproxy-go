@@ -29,6 +29,10 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		Updated:        cfg.Updated,
 		ReconnectCount: 0, // TODO: Get from runtime status
 		Authenticated:  authenticated,
+		// MCP-901: carry registry provenance so the approval/quarantine view
+		// can show a server's origin. Empty for manually-configured servers.
+		SourceRegistryID:         cfg.SourceRegistryID,
+		SourceRegistryProvenance: cfg.SourceRegistryProvenance,
 	}
 
 	// Convert OAuth config if present
@@ -320,6 +324,15 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 				_ = json.Unmarshal(raw, d)
 			}
 			server.Diagnostic = d
+		}
+
+		// MCP-901 — registry provenance, carried through the legacy fallback
+		// projection in parity with the management.ListServers happy path.
+		if regID, ok := generic["source_registry_id"].(string); ok && regID != "" {
+			server.SourceRegistryID = regID
+		}
+		if prov, ok := generic["source_registry_provenance"].(string); ok && prov != "" {
+			server.SourceRegistryProvenance = prov
 		}
 
 		servers = append(servers, server)

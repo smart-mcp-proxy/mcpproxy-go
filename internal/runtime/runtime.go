@@ -1888,6 +1888,18 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["reconnect_on_use"] = true
 		}
 
+		// MCP-901: carry registry provenance through to the REST/SSE projection
+		// so the approval/quarantine view can show a server's origin. Empty for
+		// manually-configured servers.
+		if serverStatus.Config != nil {
+			if serverStatus.Config.SourceRegistryID != "" {
+				serverMap["source_registry_id"] = serverStatus.Config.SourceRegistryID
+			}
+			if serverStatus.Config.SourceRegistryProvenance != "" {
+				serverMap["source_registry_provenance"] = serverStatus.Config.SourceRegistryProvenance
+			}
+		}
+
 		// Spec 044: include structured diagnostic error when available.
 		if serverStatus.Diagnostic != nil {
 			d := serverStatus.Diagnostic
@@ -2019,6 +2031,14 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 			"connecting":  false,
 			"tool_count":  0,
 			"status":      "unknown",
+		}
+
+		// MCP-901: registry provenance in parity with the StateView path.
+		if srv.SourceRegistryID != "" {
+			serverInfo["source_registry_id"] = srv.SourceRegistryID
+		}
+		if srv.SourceRegistryProvenance != "" {
+			serverInfo["source_registry_provenance"] = srv.SourceRegistryProvenance
 		}
 
 		// Try to get connection status
