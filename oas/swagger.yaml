@@ -1761,6 +1761,18 @@ components:
           $ref: '#/components/schemas/contracts.SecurityScanSummary'
         should_retry:
           type: boolean
+        source_registry_id:
+          description: |-
+            MCP-901 — registry provenance of an upstream that was added from a
+            registry. SourceRegistryID names the source registry (empty for
+            manually-configured servers); SourceRegistryProvenance is the trust tag
+            recorded at add time ("official/trusted" or "custom/unverified"). Both
+            are projected from config.ServerConfig so the approval/quarantine view
+            can render an "added from <registry> · unverified" origin badge. Optional
+            and omitted when empty — clients that pre-date this treat them as absent.
+          type: string
+        source_registry_provenance:
+          type: string
         status:
           type: string
         token_expires_at:
