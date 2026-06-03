@@ -58,6 +58,13 @@ vi.mock('@/composables/useSecurityScannerStatus', () => ({
 }))
 
 import Dashboard from '@/views/Dashboard.vue'
+// Dashboard imports Usage.vue lazily via defineAsyncComponent so the chart
+// bundle stays out of first paint (SC-004). A dynamic import() never settles
+// inside flushPromises (microtask-only) + Suspense, so the lazy panel would be
+// stuck on its fallback spinner under test. Import the real Usage.vue eagerly
+// here and swap it in as a synchronous stub for the async wrapper — this
+// exercises the genuine Usage.vue switcher/fetch logic without the async race.
+import UsageView from '@/views/Usage.vue'
 
 // jsdom has no EventSource; the system store opens one on mount.
 class FakeEventSource {
@@ -71,7 +78,17 @@ function mountDashboard() {
   return shallowMount(Dashboard, {
     global: {
       plugins: [createPinia()],
-      stubs: { RouterLink: { template: '<a><slot /></a>' } },
+      stubs: {
+        RouterLink: { template: '<a><slot /></a>' },
+        // Un-stub the <Suspense> wrapper that shallowMount would otherwise
+        // replace with a stub (which swallows its children), and swap the lazy
+        // async UsageView for the eagerly-imported real Usage.vue so the
+        // switcher's fetch-on-activation + window-re-fetch logic actually runs.
+        // Usage.vue's heavy chart grandchildren (CallHistogram/Bar etc.) stay
+        // shallow-stubbed and never reach jsdom's missing canvas.
+        Suspense: false,
+        UsageView,
+      },
     },
   })
 }

@@ -521,6 +521,17 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.Diagnostic = d
 		}
 
+		// MCP-901 — project registry provenance so the approval/quarantine
+		// view can show a server's origin. The SSE servers.changed embed
+		// shares this projection (buildServersChangedPayload → ListServers),
+		// so it stays in parity automatically.
+		if regID, ok := srvRaw["source_registry_id"].(string); ok && regID != "" {
+			srv.SourceRegistryID = regID
+		}
+		if prov, ok := srvRaw["source_registry_provenance"].(string); ok && prov != "" {
+			srv.SourceRegistryProvenance = prov
+		}
+
 		servers = append(servers, srv)
 
 		// Update stats

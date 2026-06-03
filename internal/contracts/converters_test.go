@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -82,6 +83,58 @@ func TestConvertGenericServersToTyped_EmptyOAuth(t *testing.T) {
 	require.NotNil(t, servers[0].OAuth, "Even empty oauth map should create non-nil OAuth config")
 	assert.Empty(t, servers[0].OAuth.AuthURL)
 	assert.Empty(t, servers[0].OAuth.ClientID)
+}
+
+// TestConvertGenericServersToTyped_SourceRegistry verifies registry provenance
+// (MCP-901) is carried through the generic-map fallback projection so the
+// approval/quarantine view can show a server's origin.
+func TestConvertGenericServersToTyped_SourceRegistry(t *testing.T) {
+	genericServers := []map[string]interface{}{
+		{
+			"id":                         "everything",
+			"name":                       "everything",
+			"enabled":                    true,
+			"source_registry_id":         "modelcontextprotocol",
+			"source_registry_provenance": "custom/unverified",
+		},
+		{
+			// Manually-configured server: both fields absent → empty.
+			"id":      "manual",
+			"name":    "manual",
+			"enabled": true,
+		},
+	}
+
+	servers := ConvertGenericServersToTyped(genericServers)
+	require.Len(t, servers, 2)
+
+	assert.Equal(t, "modelcontextprotocol", servers[0].SourceRegistryID)
+	assert.Equal(t, "custom/unverified", servers[0].SourceRegistryProvenance)
+
+	assert.Empty(t, servers[1].SourceRegistryID, "manual server carries no registry id")
+	assert.Empty(t, servers[1].SourceRegistryProvenance)
+}
+
+// TestConvertServerConfig_SourceRegistry verifies the direct config→contracts
+// mapper populates registry provenance (MCP-901).
+func TestConvertServerConfig_SourceRegistry(t *testing.T) {
+	cfg := &config.ServerConfig{
+		Name:                     "everything",
+		Protocol:                 "stdio",
+		Enabled:                  true,
+		SourceRegistryID:         "modelcontextprotocol",
+		SourceRegistryProvenance: config.RegistryProvenanceCustom,
+	}
+
+	server := ConvertServerConfig(cfg, "ready", true, 3, false)
+	require.NotNil(t, server)
+	assert.Equal(t, "modelcontextprotocol", server.SourceRegistryID)
+	assert.Equal(t, config.RegistryProvenanceCustom, server.SourceRegistryProvenance)
+
+	// Manual server (no source registry) leaves both empty.
+	manual := ConvertServerConfig(&config.ServerConfig{Name: "manual", Enabled: true}, "ready", true, 0, false)
+	assert.Empty(t, manual.SourceRegistryID)
+	assert.Empty(t, manual.SourceRegistryProvenance)
 }
 
 // TestConvertGenericServersToTyped_NoOAuth verifies servers without OAuth have nil OAuth field

@@ -138,6 +138,7 @@
             </label>
             <select v-model="filterApproval" class="select select-bordered select-sm" data-test="filter-approval">
               <option value="">All</option>
+              <option value="awaiting">Awaiting approval</option>
               <option value="approved">Approved</option>
               <option value="pending">Pending</option>
               <option value="changed">Changed</option>
@@ -582,7 +583,7 @@ const hasActiveFilters = computed(() =>
 type StatCard = 'total' | 'enabled' | 'disabled' | 'pending'
 
 const activeStatCard = computed<StatCard>(() => {
-  if (filterApproval.value === 'pending') return 'pending'
+  if (filterApproval.value === 'awaiting' || filterApproval.value === 'pending') return 'pending'
   if (filterStatus.value === 'enabled') return 'enabled'
   if (filterStatus.value === 'disabled') return 'disabled'
   if (!filterStatus.value && !filterApproval.value) return 'total'
@@ -598,7 +599,7 @@ function selectStatCard(card: StatCard) {
   }
   if (card === 'pending') {
     filterStatus.value = ''
-    filterApproval.value = 'pending'
+    filterApproval.value = 'awaiting'
   } else {
     filterApproval.value = ''
     filterStatus.value = card // 'enabled' | 'disabled'
@@ -659,7 +660,11 @@ const filteredTools = computed(() => {
     tools = tools.filter(t => getRisk(t) === filterRisk.value)
   }
 
-  if (filterApproval.value) {
+  if (filterApproval.value === 'awaiting') {
+    // "Awaiting approval" mirrors the Pending Approval stat, which counts both
+    // brand-new (pending) and rug-pull (changed) tools.
+    tools = tools.filter(t => t.approval_status === 'pending' || t.approval_status === 'changed')
+  } else if (filterApproval.value) {
     tools = tools.filter(t => t.approval_status === filterApproval.value)
   }
 

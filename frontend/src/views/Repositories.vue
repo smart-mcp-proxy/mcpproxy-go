@@ -6,6 +6,16 @@
         <h1 class="text-3xl font-bold">Repositories</h1>
         <p class="text-base-content/70 mt-1">Browse and discover MCP server repositories</p>
       </div>
+      <button
+        @click="openAddRegistry"
+        class="btn btn-outline btn-sm"
+        data-test="registry-add-source-button"
+      >
+        <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+        </svg>
+        Add Registry
+      </button>
     </div>
 
     <!-- Registry Selector & Search -->
@@ -26,7 +36,7 @@
             >
               <option disabled value="">Choose a registry...</option>
               <option v-for="registry in registries" :key="registry.id" :value="registry.id">
-                {{ registry.name }}
+                {{ registry.name }}{{ isCustomRegistry(registry) ? ' — unverified' : '' }}
               </option>
             </select>
           </div>
@@ -47,6 +57,22 @@
             />
           </div>
 
+          <!-- Transport Filter (R3) -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">Transport</span>
+            </label>
+            <select
+              v-model="transportFilter"
+              class="select select-bordered"
+              data-test="registry-transport-filter"
+            >
+              <option value="all">All</option>
+              <option value="remote">Remote</option>
+              <option value="stdio">Stdio</option>
+            </select>
+          </div>
+
           <!-- Search Button -->
           <div class="form-control sm:self-end">
             <button
@@ -58,17 +84,6 @@
               <span v-if="loadingServers" class="loading loading-spinner loading-sm"></span>
               <span v-else>Search</span>
             </button>
-          </div>
-        </div>
-
-        <!-- Registry Info -->
-        <div v-if="selectedRegistryInfo" class="alert alert-info mt-4">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <div>
-            <p class="font-semibold">{{ selectedRegistryInfo.name }}</p>
-            <p class="text-sm">{{ selectedRegistryInfo.description }}</p>
           </div>
         </div>
       </div>
@@ -95,7 +110,9 @@
     <!-- Server Results -->
     <div v-else-if="servers.length > 0" class="space-y-4">
       <div class="flex justify-between items-center">
-        <p class="text-sm text-base-content/70">Found {{ servers.length }} server(s)</p>
+        <p class="text-sm text-base-content/70" data-test="registry-results-count">
+          Found {{ filteredServers.length }} server(s)<span v-if="transportFilter !== 'all'"> of {{ servers.length }}</span>
+        </p>
       </div>
 
       <!-- Server Cards with Smooth Transitions -->
@@ -104,40 +121,39 @@
         tag="div"
         class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
       >
-        <div v-for="server in servers" :key="server.id" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
+        <div v-for="server in filteredServers" :key="server.id" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
           <div class="card-body">
-            <div class="flex justify-between items-start">
-              <h3 class="card-title text-lg">{{ server.name }}</h3>
-              <div class="badge badge-outline badge-sm">{{ server.registry }}</div>
+            <div class="flex justify-between items-start gap-2">
+              <h3 class="card-title text-lg min-w-0 [overflow-wrap:anywhere]">{{ server.name }}</h3>
+              <div
+                v-if="server.registry"
+                class="badge badge-ghost badge-sm shrink-0 whitespace-nowrap font-normal"
+                :data-test="`registry-source-${server.id}`"
+                :title="`From registry: ${server.registry}`"
+              >
+                {{ server.registry }}
+              </div>
             </div>
 
             <p class="text-sm text-base-content/70 line-clamp-3">
               {{ server.description }}
             </p>
 
-            <!-- Repository Info Badges -->
+            <!-- Transport + requirements (neutral, non-colorful tags — R2) -->
             <div class="flex flex-wrap gap-2 mt-2">
-              <div v-if="server.repository_info?.npm?.exists" class="badge badge-success badge-sm">
-                <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M0 0h24v24H0z" fill="none"/>
-                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-                </svg>
-                NPM
-              </div>
-              <div v-if="server.url" class="badge badge-info badge-sm">
-                <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M0 0h24v24H0z" fill="none"/>
-                  <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
-                </svg>
-                Remote
+              <div
+                class="badge badge-outline badge-sm font-mono"
+                :data-test="`registry-transport-${server.id}`"
+              >
+                {{ serverTransport(server) }}
               </div>
               <div
                 v-if="server.required_inputs && server.required_inputs.length > 0"
-                class="badge badge-warning badge-sm"
+                class="badge badge-outline badge-sm"
                 :data-test="`registry-requires-input-${server.id}`"
                 :title="`Requires: ${server.required_inputs.map(i => i.name).join(', ')}`"
               >
-                Requires input
+                requires input
               </div>
             </div>
 
@@ -262,6 +278,130 @@
       </form>
     </dialog>
 
+    <!-- Add Registry Source dialog (MCP-866/MCP-867) -->
+    <dialog :open="showAddRegistry" class="modal" data-test="registry-add-source-dialog">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg">Add a registry</h3>
+        <p class="text-sm text-base-content/70 mt-1">
+          Add a custom <code>modelcontextprotocol/registry</code> v0.1 source by its HTTPS URL.
+          Added registries are marked
+          <span class="badge badge-warning badge-xs align-middle">third-party · unverified</span>;
+          their servers are always quarantined.
+        </p>
+
+        <form @submit.prevent="submitAddRegistry" class="mt-4 space-y-3" data-test="registry-add-form">
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">Registry URL</span>
+            </label>
+            <input
+              v-model="addRegistryUrl"
+              type="url"
+              placeholder="https://registry.example.com/"
+              data-test="registry-add-url-input"
+              class="input input-bordered w-full"
+              autocomplete="off"
+              required
+            />
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">Protocol</span>
+            </label>
+            <select
+              v-model="addRegistryProtocol"
+              class="select select-bordered w-full"
+              data-test="registry-add-protocol-select"
+            >
+              <option value="modelcontextprotocol/registry">modelcontextprotocol/registry (default)</option>
+            </select>
+          </div>
+
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">Name <span class="font-normal opacity-60">(optional)</span></span>
+            </label>
+            <input
+              v-model="addRegistryName"
+              type="text"
+              placeholder="Derived from the URL host when empty"
+              data-test="registry-add-name-input"
+              class="input input-bordered w-full"
+              autocomplete="off"
+            />
+          </div>
+
+          <div v-if="addRegistryError" class="alert alert-error text-sm" data-test="registry-add-error">
+            <span>{{ addRegistryError }}</span>
+          </div>
+
+          <div class="modal-action">
+            <button type="button" class="btn btn-ghost" data-test="registry-add-cancel" @click="closeAddRegistry">
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="btn btn-primary"
+              data-test="registry-add-submit"
+              :disabled="!addRegistryUrl.trim() || addingRegistry"
+            >
+              <span v-if="addingRegistry" class="loading loading-spinner loading-xs"></span>
+              <span v-else>Add Registry</span>
+            </button>
+          </div>
+        </form>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button @click="closeAddRegistry">close</button>
+      </form>
+    </dialog>
+
+    <!-- One-time third-party registry warning (MCP-867) -->
+    <dialog :open="showThirdPartyWarning" class="modal" data-test="registry-third-party-warning">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg text-warning flex items-center gap-2">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          Adding a third-party registry
+        </h3>
+        <div class="text-sm py-3 space-y-2">
+          <p>
+            You're about to add a registry that is <strong>not</strong> shipped with MCPProxy.
+            Custom registries are <strong>unverified</strong> — MCPProxy cannot vouch for the
+            servers they list.
+          </p>
+          <p>
+            For your safety, every server you add from a custom registry is
+            <strong>always quarantined</strong> and can never skip security review.
+            Only add registries operated by parties you trust.
+          </p>
+        </div>
+        <div class="modal-action">
+          <button
+            type="button"
+            class="btn btn-ghost"
+            data-test="registry-third-party-cancel"
+            @click="cancelThirdPartyWarning"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn btn-warning"
+            data-test="registry-third-party-acknowledge"
+            @click="acknowledgeThirdPartyWarning"
+          >
+            I understand, continue
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button @click="cancelThirdPartyWarning">close</button>
+      </form>
+    </dialog>
+
     <!-- Success Toast -->
     <div v-if="showSuccessToast" class="toast toast-end" data-test="registry-add-success">
       <div class="alert alert-success">
@@ -283,6 +423,12 @@ import api from '@/services/api'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Registry, RepositoryServer, RequiredInput } from '@/types'
+import { REGISTRY_PROVENANCE_CUSTOM } from '@/types'
+
+// localStorage key recording that the user has acknowledged the one-time
+// third-party registry warning (MCP-867). Once acknowledged, subsequent custom
+// adds skip the warning.
+const THIRD_PARTY_ACK_KEY = 'mcpproxy-thirdparty-registry-ack'
 
 // State
 const registries = ref<Registry[]>([])
@@ -301,11 +447,52 @@ const promptServer = ref<RepositoryServer | null>(null)
 const promptInputs = ref<RequiredInput[]>([])
 const promptValues = ref<Record<string, string>>({})
 
+// Add-registry-source state (MCP-866/MCP-867)
+const showAddRegistry = ref(false)
+const addRegistryUrl = ref('')
+const addRegistryProtocol = ref('modelcontextprotocol/registry')
+const addRegistryName = ref('')
+const addRegistryError = ref<string | null>(null)
+const addingRegistry = ref(false)
+const showThirdPartyWarning = ref(false)
+
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
-// Computed
-const selectedRegistryInfo = computed(() => {
-  return registries.value.find(r => r.id === selectedRegistry.value)
+// A registry is "custom/unverified" (third-party) when its provenance says so,
+// or — defensively — when trusted is explicitly false. Anything else (including
+// older payloads without the field) is treated as official/trusted.
+function isCustomRegistry(registry?: Registry | null): boolean {
+  if (!registry) return false
+  return registry.provenance === REGISTRY_PROVENANCE_CUSTOM || registry.trusted === false
+}
+
+// Transport classification (R2) + filter (R3). Derived purely from the
+// install command / url already returned by the registry search API:
+//   url set, no install cmd        -> remote
+//   npx / npm / node               -> stdio:npm
+//   uvx / uv / pip / python        -> stdio:python
+//   docker                         -> stdio:docker
+//   anything else with install cmd -> stdio
+const transportFilter = ref<'all' | 'remote' | 'stdio'>('all')
+
+function serverTransport(server: RepositoryServer): string {
+  const cmd = (server.install_cmd || '').trim().toLowerCase()
+  if (cmd) {
+    if (cmd.startsWith('docker')) return 'stdio:docker'
+    if (cmd.startsWith('npx') || /(^|\s)(npm|node)(\s|$)/.test(cmd)) return 'stdio:npm'
+    if (cmd.startsWith('uvx') || cmd.startsWith('uv ') || /(^|\s)(pipx?|python3?)(\s|$)/.test(cmd)) return 'stdio:python'
+    return 'stdio'
+  }
+  if (server.url) return 'remote'
+  return 'stdio'
+}
+
+const filteredServers = computed(() => {
+  if (transportFilter.value === 'all') return servers.value
+  return servers.value.filter(s => {
+    const t = serverTransport(s)
+    return transportFilter.value === 'remote' ? t === 'remote' : t.startsWith('stdio')
+  })
 })
 
 const showPrompt = computed(() => promptServer.value !== null)
@@ -498,6 +685,107 @@ function closePrompt() {
   promptServer.value = null
   promptInputs.value = []
   promptValues.value = {}
+}
+
+// --- Add registry source (MCP-866/MCP-867) ---
+
+function openAddRegistry() {
+  addRegistryUrl.value = ''
+  addRegistryProtocol.value = 'modelcontextprotocol/registry'
+  addRegistryName.value = ''
+  addRegistryError.value = null
+  showThirdPartyWarning.value = false
+  showAddRegistry.value = true
+}
+
+function closeAddRegistry() {
+  if (addingRegistry.value) return
+  showAddRegistry.value = false
+  showThirdPartyWarning.value = false
+}
+
+function hasAcknowledgedThirdParty(): boolean {
+  try {
+    return localStorage.getItem(THIRD_PARTY_ACK_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+// Form submit: gate the first-ever custom add behind the one-time third-party
+// warning. Every user-added source is custom/unverified server-side, so the
+// warning applies to all adds — but only until the user acknowledges it once.
+function submitAddRegistry() {
+  if (!addRegistryUrl.value.trim() || addingRegistry.value) return
+  addRegistryError.value = null
+
+  if (!hasAcknowledgedThirdParty()) {
+    showThirdPartyWarning.value = true
+    return
+  }
+  doAddRegistry()
+}
+
+function cancelThirdPartyWarning() {
+  showThirdPartyWarning.value = false
+}
+
+function acknowledgeThirdPartyWarning() {
+  try {
+    localStorage.setItem(THIRD_PARTY_ACK_KEY, 'true')
+  } catch {
+    // Non-fatal: if storage is unavailable the warning simply re-appears next time.
+  }
+  showThirdPartyWarning.value = false
+  doAddRegistry()
+}
+
+// Map the backend's stable error codes to actionable messages.
+function addRegistryErrorMessage(code: string | undefined, fallback: string | undefined): string {
+  switch (code) {
+    case 'invalid_registry_url':
+      return fallback || 'That URL is not a valid HTTPS registry endpoint.'
+    case 'registries_locked':
+      return 'Adding registries is locked by an administrator on this instance.'
+    case 'registry_shadows_builtin':
+      return 'That id/host collides with a built-in registry. Try a different id.'
+    case 'duplicate_registry':
+      return 'A registry with that id is already configured.'
+    default:
+      return fallback || 'Failed to add registry.'
+  }
+}
+
+async function doAddRegistry() {
+  addingRegistry.value = true
+  addRegistryError.value = null
+
+  try {
+    const result = await api.addRegistrySource(addRegistryUrl.value.trim(), {
+      protocol: addRegistryProtocol.value || undefined,
+      name: addRegistryName.value.trim() || undefined
+    })
+
+    if (result.success) {
+      const added = result.registry
+      showAddRegistry.value = false
+      // Refresh the list so the new (custom/unverified) entry appears with its
+      // provenance, then select it for immediate browsing.
+      await loadRegistries()
+      if (added?.id) {
+        selectedRegistry.value = added.id
+        servers.value = []
+      }
+      showToast(`Added registry "${added?.name || added?.id || addRegistryUrl.value}" — third-party · unverified.`)
+      return
+    }
+
+    addRegistryError.value = addRegistryErrorMessage(result.code, result.error)
+  } catch (err) {
+    addRegistryError.value = 'Failed to add registry: ' + (err as Error).message
+  } finally {
+    addingRegistry.value = false
+  }
 }
 
 function copyToClipboard(text: string) {

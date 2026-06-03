@@ -21,11 +21,13 @@
       >Usage</a>
     </div>
 
-    <!-- Usage view: lazy-mounted on first switch so the chart bundle and the
-         usage fetch don't block Dashboard first paint (SC-004). Kept alive with
-         v-show after mount so re-switching is instant. -->
-    <div v-if="usageEverActive" v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
-      <Suspense>
+    <!-- Usage view: the panel wrapper is always in the DOM (kept hidden with
+         v-show so switching back is instant and the Overview subtree is never
+         torn down, SC-006). The heavy chart bundle + the usage fetch inside
+         UsageView are lazy-mounted only on first switch (v-if="usageEverActive")
+         so they never block Dashboard first paint (SC-004). -->
+    <div v-show="activeView === 'usage'" data-test="dashboard-usage-panel">
+      <Suspense v-if="usageEverActive">
         <UsageView />
         <template #fallback>
           <div class="flex justify-center py-16"><span class="loading loading-spinner loading-lg"></span></div>
