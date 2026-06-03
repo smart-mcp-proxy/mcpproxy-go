@@ -68,20 +68,23 @@ describe('Repositories — add registry + provenance + third-party warning', () 
     expect(wrapper.find('[data-test="registry-add-source-button"]').exists()).toBe(true)
   })
 
-  it('flags a custom registry as third-party/unverified and an official one as trusted', async () => {
+  it('flags a custom registry as unverified in the selector and an official one without that suffix', async () => {
+    // R4 (v0.36.0 feedback): the prominent provenance banner was removed in
+    // favour of surfacing trust inline. The selector option text carries the
+    // "— unverified" suffix for third-party registries; server cards carry the
+    // registry name. No big alert block any more.
     const wrapper = mountView()
     await flushPromises()
 
-    const select = wrapper.find('[data-test="registry-select"]')
-    await select.setValue('acme')
-    await flushPromises()
-    expect(wrapper.find('[data-test="registry-provenance-badge-custom"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="registry-custom-quarantine-note"]').exists()).toBe(true)
+    const options = wrapper.findAll('[data-test="registry-select"] option')
+    const acme = options.find(o => o.attributes('value') === 'acme')
+    const official = options.find(o => o.attributes('value') === 'official')
+    expect(acme?.text()).toContain('unverified')
+    expect(official?.text()).not.toContain('unverified')
 
-    await select.setValue('official')
-    await flushPromises()
-    expect(wrapper.find('[data-test="registry-provenance-badge-official"]').exists()).toBe(true)
+    // The old prominent banner / quarantine-note block is gone.
     expect(wrapper.find('[data-test="registry-provenance-badge-custom"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="registry-custom-quarantine-note"]').exists()).toBe(false)
   })
 
   it('shows the one-time third-party warning before the first add and does NOT call the API yet', async () => {
