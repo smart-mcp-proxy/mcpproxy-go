@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -31,6 +31,17 @@ export interface AddFromRegistryResult {
   code?: string
   // Names of unmet required inputs; present when code === 'missing_required_input'.
   missingInputs?: string[]
+}
+
+// MCP-866 / MCP-867: result of adding a *registry source* (POST /registries).
+// Carries the stable error `code` (invalid_registry_url | registries_locked |
+// registry_shadows_builtin | duplicate_registry) so the UI can render an
+// actionable message instead of a generic string.
+export interface AddRegistrySourceResult {
+  success: boolean
+  registry?: RegistrySummary
+  error?: string
+  code?: string
 }
 
 class APIService {
@@ -665,6 +676,58 @@ class APIService {
 
     const url = `/api/v1/registries/${encodeURIComponent(registryId)}/servers${params.toString() ? '?' + params.toString() : ''}`
     return this.request<SearchRegistryServersResponse>(url)
+  }
+
+  // MCP-866 / MCP-867: add a user-supplied registry source. The server always
+  // tags an added source custom/unverified (provenance is NOT part of the
+  // request), so every server later discovered through it lands quarantined and
+  // can never skip quarantine. We mirror the structured-error pattern of
+  // addServerFromRegistry so the UI can branch on the stable `code`
+  // (invalid_registry_url | registries_locked | registry_shadows_builtin |
+  // duplicate_registry).
+  async addRegistrySource(
+    url: string,
+    opts?: { protocol?: string; id?: string; name?: string }
+  ): Promise<AddRegistrySourceResult> {
+    const body: Record<string, unknown> = { url }
+    if (opts?.protocol) body.protocol = opts.protocol
+    if (opts?.id) body.id = opts.id
+    if (opts?.name) body.name = opts.name
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/registries`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      })
+
+      const payload: any = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          // registries_locked is a 403 but is a policy decision, not an auth
+          // failure — only emit the auth-error path for a missing/invalid key.
+          if (payload?.code !== 'registries_locked') {
+            this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
+          }
+        }
+        return {
+          success: false,
+          error: payload?.error || `HTTP ${response.status}: ${response.statusText}`,
+          code: payload?.code
+        }
+      }
+
+      return { success: true, registry: payload?.data?.registry }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
   }
 
   // Spec 070 (CN-001): add a server to upstream by *reference* — the server

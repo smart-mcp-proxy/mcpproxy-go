@@ -562,6 +562,28 @@ export interface Registry {
   tags?: string[]
   protocol?: string
   count?: number | string
+  // MCP-866: trust tag — "official/trusted" for built-in defaults,
+  // "custom/unverified" for user-added sources. Derived server-side from
+  // membership in the default set, never from self-assertion in config.
+  provenance?: string
+  // Convenience boolean mirror of provenance === "official/trusted".
+  trusted?: boolean
+}
+
+// MCP-866 trust-tag constants (mirror config.RegistryProvenance*).
+export const REGISTRY_PROVENANCE_OFFICIAL = 'official/trusted'
+export const REGISTRY_PROVENANCE_CUSTOM = 'custom/unverified'
+
+// RegistrySummary is the slim projection returned by POST /api/v1/registries
+// (add-source). Mirrors contracts.RegistrySummary.
+export interface RegistrySummary {
+  id: string
+  name: string
+  url?: string
+  servers_url?: string
+  protocol?: string
+  provenance?: string
+  trusted?: boolean
 }
 
 export interface NPMPackageInfo {
