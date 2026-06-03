@@ -22,23 +22,44 @@
     <div class="card bg-base-100 shadow-md">
       <div class="card-body">
         <div class="flex flex-col sm:flex-row gap-4">
-          <!-- Registry Selector -->
+          <!-- Registry multiselect filter (R1): search across one or more registries at once -->
           <div class="form-control flex-1">
             <label class="label">
-              <span class="label-text font-semibold">Select Registry</span>
+              <span class="label-text font-semibold">Registries</span>
             </label>
-            <select
-              v-model="selectedRegistry"
-              class="select select-bordered w-full"
-              data-test="registry-select"
-              @change="handleRegistryChange"
-              :disabled="loadingRegistries"
-            >
-              <option disabled value="">Choose a registry...</option>
-              <option v-for="registry in registries" :key="registry.id" :value="registry.id">
-                {{ registry.name }}{{ isCustomRegistry(registry) ? ' — unverified' : '' }}
-              </option>
-            </select>
+            <div class="dropdown" data-test="registry-multiselect">
+              <div
+                tabindex="0"
+                role="button"
+                class="select select-bordered w-full flex items-center"
+                :class="{ 'opacity-60 pointer-events-none': loadingRegistries }"
+                data-test="registry-multiselect-trigger"
+              >
+                <span class="truncate">{{ registrySelectLabel }}</span>
+              </div>
+              <ul
+                tabindex="0"
+                class="dropdown-content menu bg-base-100 rounded-box z-10 w-full p-2 shadow-lg max-h-80 overflow-y-auto flex-nowrap mt-1 border border-base-300"
+                data-test="registry-multiselect-menu"
+              >
+                <li v-if="registries.length > 1" class="menu-title px-2 pb-1 flex flex-row gap-3">
+                  <button type="button" class="link link-primary text-xs" data-test="registry-select-all" @click="selectAllRegistries">All</button>
+                  <button type="button" class="link text-xs" data-test="registry-clear-all" @click="clearRegistries">Clear</button>
+                </li>
+                <li v-for="registry in registries" :key="registry.id">
+                  <label class="label cursor-pointer justify-start gap-3 py-2">
+                    <input
+                      type="checkbox"
+                      class="checkbox checkbox-sm"
+                      :checked="selectedRegistries.includes(registry.id)"
+                      @change="toggleRegistry(registry.id)"
+                      :data-test="`registry-option-${registry.id}`"
+                    />
+                    <span class="text-sm">{{ registry.name }}<span v-if="isCustomRegistry(registry)" class="opacity-60"> — unverified</span></span>
+                  </label>
+                </li>
+              </ul>
+            </div>
           </div>
 
           <!-- Search Input -->
@@ -53,7 +74,7 @@
               class="input input-bordered w-full"
               data-test="registry-search-input"
               @input="handleSearchInput"
-              :disabled="!selectedRegistry || loadingServers"
+              :disabled="selectedRegistries.length === 0 || loadingServers"
             />
           </div>
 
@@ -79,7 +100,7 @@
               @click="searchServers"
               class="btn btn-primary"
               data-test="registry-search-button"
-              :disabled="!selectedRegistry || loadingServers"
+              :disabled="selectedRegistries.length === 0 || loadingServers"
             >
               <span v-if="loadingServers" class="loading loading-spinner loading-sm"></span>
               <span v-else>Search</span>
@@ -109,9 +130,22 @@
 
     <!-- Server Results -->
     <div v-else-if="servers.length > 0" class="space-y-4">
+      <!-- Non-fatal: some selected registries returned nothing (e.g. need a key) -->
+      <div
+        v-if="unavailableRegistries.length > 0"
+        class="alert alert-warning py-2 text-sm"
+        data-test="registry-unavailable-notice"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <span>Some registries returned no results: {{ unavailableRegistries.join('; ') }}</span>
+      </div>
+
       <div class="flex justify-between items-center">
         <p class="text-sm text-base-content/70" data-test="registry-results-count">
           Found {{ filteredServers.length }} server(s)<span v-if="transportFilter !== 'all'"> of {{ servers.length }}</span>
+          <span v-if="selectedRegistries.length > 1"> across {{ selectedRegistries.length }} registries</span>
         </p>
       </div>
 
@@ -121,7 +155,7 @@
         tag="div"
         class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
       >
-        <div v-for="server in filteredServers" :key="server.id" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
+        <div v-for="server in filteredServers" :key="`${server.registry}-${server.id}`" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
           <div class="card-body">
             <div class="flex justify-between items-start gap-2">
               <h3 class="card-title text-lg min-w-0 [overflow-wrap:anywhere]">{{ server.name }}</h3>
@@ -201,7 +235,7 @@
     </div>
 
     <!-- Empty State (no search yet) -->
-    <div v-else-if="!selectedRegistry" class="card bg-base-100 shadow-md">
+    <div v-else-if="selectedRegistries.length === 0" class="card bg-base-100 shadow-md">
       <div class="card-body">
         <div class="text-center py-12">
           <svg class="w-16 h-16 mx-auto mb-4 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -432,7 +466,11 @@ const THIRD_PARTY_ACK_KEY = 'mcpproxy-thirdparty-registry-ack'
 
 // State
 const registries = ref<Registry[]>([])
-const selectedRegistry = ref<string>('')
+const selectedRegistries = ref<string[]>([])
+// Registries that returned no data this search (e.g. require an API key, or
+// errored) — surfaced as a non-fatal notice so partial cross-registry results
+// still render.
+const unavailableRegistries = ref<string[]>([])
 const searchQuery = ref<string>('')
 const servers = ref<RepositoryServer[]>([])
 const loadingRegistries = ref(false)
@@ -494,6 +532,36 @@ const filteredServers = computed(() => {
     return transportFilter.value === 'remote' ? t === 'remote' : t.startsWith('stdio')
   })
 })
+
+// Registry multiselect (R1) -------------------------------------------------
+function registryName(id: string): string {
+  return registries.value.find(r => r.id === id)?.name || id
+}
+
+const registrySelectLabel = computed(() => {
+  const n = selectedRegistries.value.length
+  if (n === 0) return 'Choose registries…'
+  if (n === 1) return registryName(selectedRegistries.value[0])
+  if (n === registries.value.length) return `All registries (${n})`
+  return `${n} registries`
+})
+
+function toggleRegistry(id: string) {
+  const i = selectedRegistries.value.indexOf(id)
+  if (i === -1) selectedRegistries.value.push(id)
+  else selectedRegistries.value.splice(i, 1)
+  handleRegistryChange()
+}
+
+function selectAllRegistries() {
+  selectedRegistries.value = registries.value.map(r => r.id)
+  handleRegistryChange()
+}
+
+function clearRegistries() {
+  selectedRegistries.value = []
+  handleRegistryChange()
+}
 
 const showPrompt = computed(() => promptServer.value !== null)
 
@@ -574,37 +642,68 @@ async function loadRegistries() {
   }
 }
 
+// Cross-registry search (R1): fan out to every selected registry in parallel
+// and merge the results. Each result already carries its own `registry` for
+// per-card attribution. Per-registry failures (e.g. key-required, unreachable)
+// are collected into a non-fatal notice so the registries that DID return keep
+// rendering; we only raise a hard error when every selected registry failed.
 async function searchServers() {
-  if (!selectedRegistry.value) return
+  const ids = selectedRegistries.value
+  if (ids.length === 0) {
+    servers.value = []
+    return
+  }
 
   loadingServers.value = true
   error.value = null
+  unavailableRegistries.value = []
 
   try {
-    const response = await api.searchRegistryServers(selectedRegistry.value, {
-      query: searchQuery.value,
-      limit: 20
-    })
+    const results = await Promise.all(
+      ids.map(id =>
+        api
+          .searchRegistryServers(id, { query: searchQuery.value, limit: 20 })
+          .then(r => ({ id, r }))
+          .catch(err => ({ id, r: { success: false, error: (err as Error).message } as any }))
+      )
+    )
 
-    if (response.success && response.data) {
-      servers.value = response.data.servers
-    } else {
-      error.value = response.error || 'Failed to search servers'
-      servers.value = []
+    const merged: RepositoryServer[] = []
+    const seen = new Set<string>()
+    const failures: string[] = []
+
+    for (const { id, r } of results) {
+      if (r.success && r.data) {
+        if (r.data.unavailable) {
+          failures.push(`${registryName(id)}: ${r.data.unavailable.reason || 'unavailable'}`)
+        }
+        for (const s of r.data.servers || []) {
+          const key = `${s.registry || id}::${s.id}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          merged.push(s)
+        }
+      } else {
+        failures.push(`${registryName(id)}: ${r.error || 'failed'}`)
+      }
     }
-  } catch (err) {
-    error.value = 'Failed to search servers: ' + (err as Error).message
-    servers.value = []
+
+    servers.value = merged
+    unavailableRegistries.value = failures
+    // Only a hard error when nothing came back AND every registry failed.
+    if (merged.length === 0 && failures.length > 0 && failures.length === ids.length) {
+      error.value = 'No results — ' + failures.join('; ')
+    }
   } finally {
     loadingServers.value = false
   }
 }
 
 function handleRegistryChange() {
-  searchQuery.value = ''
   servers.value = []
   error.value = null
-  if (selectedRegistry.value) {
+  unavailableRegistries.value = []
+  if (selectedRegistries.value.length > 0) {
     searchServers()
   }
 }
@@ -615,7 +714,7 @@ function handleSearchInput() {
   }
 
   searchDebounceTimer = setTimeout(() => {
-    if (selectedRegistry.value) {
+    if (selectedRegistries.value.length > 0) {
       searchServers()
     }
   }, 500)
@@ -773,8 +872,10 @@ async function doAddRegistry() {
       // provenance, then select it for immediate browsing.
       await loadRegistries()
       if (added?.id) {
-        selectedRegistry.value = added.id
-        servers.value = []
+        // Add the new registry to the multiselect (don't clobber existing picks)
+        // and browse it immediately.
+        if (!selectedRegistries.value.includes(added.id)) selectedRegistries.value.push(added.id)
+        handleRegistryChange()
       }
       showToast(`Added registry "${added?.name || added?.id || addRegistryUrl.value}" — third-party · unverified.`)
       return
