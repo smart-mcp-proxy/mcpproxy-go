@@ -57,6 +57,22 @@
             />
           </div>
 
+          <!-- Transport Filter (R3) -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">Transport</span>
+            </label>
+            <select
+              v-model="transportFilter"
+              class="select select-bordered"
+              data-test="registry-transport-filter"
+            >
+              <option value="all">All</option>
+              <option value="remote">Remote</option>
+              <option value="stdio">Stdio</option>
+            </select>
+          </div>
+
           <!-- Search Button -->
           <div class="form-control sm:self-end">
             <button
@@ -68,45 +84,6 @@
               <span v-if="loadingServers" class="loading loading-spinner loading-sm"></span>
               <span v-else>Search</span>
             </button>
-          </div>
-        </div>
-
-        <!-- Registry Info + provenance/trust (MCP-866/MCP-867) -->
-        <div
-          v-if="selectedRegistryInfo"
-          class="alert mt-4"
-          :class="isCustomRegistry(selectedRegistryInfo) ? 'alert-warning' : 'alert-info'"
-          :data-test="`registry-info-${selectedRegistryInfo.id}`"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <div>
-            <p class="font-semibold flex items-center gap-2 flex-wrap">
-              {{ selectedRegistryInfo.name }}
-              <span
-                v-if="isCustomRegistry(selectedRegistryInfo)"
-                class="badge badge-warning badge-sm gap-1"
-                data-test="registry-provenance-badge-custom"
-              >
-                Third-party · unverified
-              </span>
-              <span
-                v-else
-                class="badge badge-success badge-sm gap-1"
-                data-test="registry-provenance-badge-official"
-              >
-                Official · trusted
-              </span>
-            </p>
-            <p class="text-sm">{{ selectedRegistryInfo.description }}</p>
-            <p
-              v-if="isCustomRegistry(selectedRegistryInfo)"
-              class="text-xs mt-1 opacity-90"
-              data-test="registry-custom-quarantine-note"
-            >
-              Servers added from this third-party registry are always quarantined and cannot skip security review.
-            </p>
           </div>
         </div>
       </div>
@@ -133,7 +110,9 @@
     <!-- Server Results -->
     <div v-else-if="servers.length > 0" class="space-y-4">
       <div class="flex justify-between items-center">
-        <p class="text-sm text-base-content/70">Found {{ servers.length }} server(s)</p>
+        <p class="text-sm text-base-content/70" data-test="registry-results-count">
+          Found {{ filteredServers.length }} server(s)<span v-if="transportFilter !== 'all'"> of {{ servers.length }}</span>
+        </p>
       </div>
 
       <!-- Server Cards with Smooth Transitions -->
@@ -142,40 +121,39 @@
         tag="div"
         class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
       >
-        <div v-for="server in servers" :key="server.id" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
+        <div v-for="server in filteredServers" :key="server.id" :data-test="`registry-server-${server.id}`" class="card bg-base-100 shadow-md hover:shadow-lg transition-shadow">
           <div class="card-body">
-            <div class="flex justify-between items-start">
-              <h3 class="card-title text-lg">{{ server.name }}</h3>
-              <div class="badge badge-outline badge-sm">{{ server.registry }}</div>
+            <div class="flex justify-between items-start gap-2">
+              <h3 class="card-title text-lg min-w-0 [overflow-wrap:anywhere]">{{ server.name }}</h3>
+              <div
+                v-if="server.registry"
+                class="badge badge-ghost badge-sm shrink-0 whitespace-nowrap font-normal"
+                :data-test="`registry-source-${server.id}`"
+                :title="`From registry: ${server.registry}`"
+              >
+                {{ server.registry }}
+              </div>
             </div>
 
             <p class="text-sm text-base-content/70 line-clamp-3">
               {{ server.description }}
             </p>
 
-            <!-- Repository Info Badges -->
+            <!-- Transport + requirements (neutral, non-colorful tags — R2) -->
             <div class="flex flex-wrap gap-2 mt-2">
-              <div v-if="server.repository_info?.npm?.exists" class="badge badge-success badge-sm">
-                <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M0 0h24v24H0z" fill="none"/>
-                  <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-                </svg>
-                NPM
-              </div>
-              <div v-if="server.url" class="badge badge-info badge-sm">
-                <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M0 0h24v24H0z" fill="none"/>
-                  <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
-                </svg>
-                Remote
+              <div
+                class="badge badge-outline badge-sm font-mono"
+                :data-test="`registry-transport-${server.id}`"
+              >
+                {{ serverTransport(server) }}
               </div>
               <div
                 v-if="server.required_inputs && server.required_inputs.length > 0"
-                class="badge badge-warning badge-sm"
+                class="badge badge-outline badge-sm"
                 :data-test="`registry-requires-input-${server.id}`"
                 :title="`Requires: ${server.required_inputs.map(i => i.name).join(', ')}`"
               >
-                Requires input
+                requires input
               </div>
             </div>
 
@@ -480,11 +458,6 @@ const showThirdPartyWarning = ref(false)
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
-// Computed
-const selectedRegistryInfo = computed(() => {
-  return registries.value.find(r => r.id === selectedRegistry.value)
-})
-
 // A registry is "custom/unverified" (third-party) when its provenance says so,
 // or — defensively — when trusted is explicitly false. Anything else (including
 // older payloads without the field) is treated as official/trusted.
@@ -492,6 +465,35 @@ function isCustomRegistry(registry?: Registry | null): boolean {
   if (!registry) return false
   return registry.provenance === REGISTRY_PROVENANCE_CUSTOM || registry.trusted === false
 }
+
+// Transport classification (R2) + filter (R3). Derived purely from the
+// install command / url already returned by the registry search API:
+//   url set, no install cmd        -> remote
+//   npx / npm / node               -> stdio:npm
+//   uvx / uv / pip / python        -> stdio:python
+//   docker                         -> stdio:docker
+//   anything else with install cmd -> stdio
+const transportFilter = ref<'all' | 'remote' | 'stdio'>('all')
+
+function serverTransport(server: RepositoryServer): string {
+  const cmd = (server.install_cmd || '').trim().toLowerCase()
+  if (cmd) {
+    if (cmd.startsWith('docker')) return 'stdio:docker'
+    if (cmd.startsWith('npx') || /(^|\s)(npm|node)(\s|$)/.test(cmd)) return 'stdio:npm'
+    if (cmd.startsWith('uvx') || cmd.startsWith('uv ') || /(^|\s)(pipx?|python3?)(\s|$)/.test(cmd)) return 'stdio:python'
+    return 'stdio'
+  }
+  if (server.url) return 'remote'
+  return 'stdio'
+}
+
+const filteredServers = computed(() => {
+  if (transportFilter.value === 'all') return servers.value
+  return servers.value.filter(s => {
+    const t = serverTransport(s)
+    return transportFilter.value === 'remote' ? t === 'remote' : t.startsWith('stdio')
+  })
+})
 
 const showPrompt = computed(() => promptServer.value !== null)
 

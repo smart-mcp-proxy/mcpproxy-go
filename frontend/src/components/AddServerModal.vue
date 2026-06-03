@@ -1,6 +1,6 @@
 <template>
-  <dialog :open="show" class="modal">
-    <div class="modal-box max-w-3xl">
+  <dialog :open="show" class="modal" data-test="add-server-modal">
+    <div class="modal-box max-w-3xl" data-test="add-server-modal-box">
       <h3 class="font-bold text-lg mb-4">Add New Server</h3>
 
       <!-- Tab Selection -->
@@ -166,17 +166,17 @@
           <!-- Toggles Section -->
           <div class="divider mt-6">Options</div>
 
-          <div class="space-y-3">
+          <div class="space-y-3" data-test="addserver-options">
             <!-- Enabled -->
             <div class="form-control">
-              <label class="label cursor-pointer justify-start space-x-3">
+              <label class="flex items-center gap-3 cursor-pointer py-1">
                 <input
                   type="checkbox"
                   v-model="formData.enabled"
                   class="toggle toggle-primary"
                 />
                 <span class="label-text font-semibold">Enabled</span>
-                <div class="tooltip tooltip-right" data-tip="Start this server immediately after adding">
+                <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Start this server immediately after adding">
                   <svg class="w-4 h-4 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -186,14 +186,14 @@
 
             <!-- Quarantined -->
             <div class="form-control">
-              <label class="label cursor-pointer justify-start space-x-3">
+              <label class="flex items-center gap-3 cursor-pointer py-1">
                 <input
                   type="checkbox"
                   v-model="formData.quarantined"
                   class="toggle toggle-warning"
                 />
                 <span class="label-text font-semibold">Quarantined</span>
-                <div class="tooltip tooltip-right" data-tip="Prevent tool execution until security review is complete. Recommended for new servers.">
+                <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Prevent tool execution until security review is complete. Recommended for new servers.">
                   <svg class="w-4 h-4 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -203,7 +203,7 @@
 
             <!-- Isolated (Docker) -->
             <div class="form-control">
-              <label class="label cursor-pointer justify-start space-x-3">
+              <label class="flex items-center gap-3 cursor-pointer py-1">
                 <input
                   type="checkbox"
                   v-model="formData.isolated"
@@ -211,7 +211,7 @@
                   :disabled="formData.type !== 'stdio'"
                 />
                 <span class="label-text font-semibold">Docker Isolation</span>
-                <div class="tooltip tooltip-right" data-tip="Run stdio server in isolated Docker container for enhanced security (stdio only)">
+                <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Run stdio server in isolated Docker container for enhanced security (stdio only)">
                   <svg class="w-4 h-4 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -221,7 +221,7 @@
 
             <!-- Idle on Inactivity -->
             <div class="form-control">
-              <label class="label cursor-pointer justify-start space-x-3">
+              <label class="flex items-center gap-3 cursor-pointer py-1">
                 <input
                   type="checkbox"
                   v-model="formData.idleOnInactivity"
@@ -229,7 +229,7 @@
                   disabled
                 />
                 <span class="label-text font-semibold opacity-50">Idle on Inactivity</span>
-                <div class="tooltip tooltip-right" data-tip="Future feature: Automatically stop server after period of inactivity to save resources">
+                <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Future feature: Automatically stop server after period of inactivity to save resources">
                   <svg class="w-4 h-4 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
