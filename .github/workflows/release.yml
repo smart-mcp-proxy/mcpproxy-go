@@ -16,7 +16,7 @@ jobs:
   # Generate AI-powered release notes using Claude API
   generate-notes:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     outputs:
       notes: ${{ steps.generate.outputs.notes }}
       notes_file: ${{ steps.generate.outputs.notes_file }}
@@ -187,8 +187,8 @@ jobs:
 
   build:
     environment: production
-    # Only run on version tags
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Only run on stable version tags (skip prerelease tags like v*-rc.* / v*-next.*)
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     strategy:
       fail-fast: false
       matrix:
@@ -961,7 +961,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: production
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -1057,6 +1057,8 @@ jobs:
     needs: [build, sign-windows, generate-notes]  # add build-docker when server MVP is ready
     runs-on: ubuntu-latest
     environment: production
+    # Stable channel only: skip prerelease tags (handled by prerelease.yml)
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     outputs:
       # base64-encoded checksums.txt — consumed by the SLSA provenance job (WP-C3)
       hashes: ${{ steps.checksums.outputs.hashes }}
@@ -1598,7 +1600,7 @@ jobs:
   deploy-docs:
     needs: release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
     # Non-blocking: docs failure doesn't block release
     continue-on-error: true
 
@@ -1643,7 +1645,7 @@ jobs:
   trigger-marketing-update:
     needs: release
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
     # Non-blocking: marketing update failure doesn't block release
     continue-on-error: true
 

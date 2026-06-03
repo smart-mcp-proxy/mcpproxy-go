@@ -33,16 +33,16 @@ jobs:
             cgo: "0"
             name: mcpproxy-linux-arm64
             archive_format: tar.gz
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: amd64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-amd64.exe
             archive_format: zip
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: arm64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-arm64.exe
             archive_format: zip
           - os: macos-15
@@ -97,10 +97,14 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Copy frontend dist to embed location
+        shell: bash
         run: |
           rm -rf web/frontend
-          mkdir -p web/frontend
-          cp -r frontend/dist web/frontend/
+          mkdir -p web/frontend/dist
+          cp -r frontend/dist/. web/frontend/dist/
+          # Recreate the tracked .gitkeep so //go:embed all:frontend/dist
+          # always has something to embed (matches the Makefile frontend-build target).
+          touch web/frontend/dist/.gitkeep
 
       - name: Import Code-Signing Certificates (macOS)
         if: matrix.goos == 'darwin'
@@ -182,6 +186,7 @@ jobs:
 
 
       - name: Build binary and create archives
+        shell: bash
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
@@ -215,10 +220,15 @@ jobs:
           # Create clean core binary for archive
           go build -ldflags "${LDFLAGS}" -o ${CLEAN_BINARY} ./cmd/mcpproxy
 
-          # Build tray binary for macOS
-          if [ "${{ matrix.goos }}" = "darwin" ]; then
-            echo "Building mcpproxy-tray for macOS..."
-            go build -ldflags "${LDFLAGS}" -o mcpproxy-tray ./cmd/mcpproxy-tray
+          # Build tray binary for platforms with GUI support (macOS and Windows)
+          if [ "${{ matrix.goos }}" = "darwin" ] || [ "${{ matrix.goos }}" = "windows" ]; then
+            echo "Building mcpproxy-tray for ${{ matrix.goos }}..."
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              TRAY_BINARY="mcpproxy-tray.exe"
+            else
+              TRAY_BINARY="mcpproxy-tray"
+            fi
+            go build -ldflags "${LDFLAGS}" -o ${TRAY_BINARY} ./cmd/mcpproxy-tray
           fi
 
           # Build Swift tray app (macOS only — replaces Go tray in .app bundle for DMG/PKG)
@@ -404,12 +414,30 @@ jobs:
           # Create archive with version info - DO NOT create "latest" archives for prereleases
           ARCHIVE_BASE="mcpproxy-${VERSION#v}-${{ matrix.goos }}-${{ matrix.goarch }}"
 
+          # Determine files to include in archive
+          FILES_TO_ARCHIVE="${CLEAN_BINARY}"
+
+          # Add tray binary if it exists (Windows and macOS)
+          if [ "${{ matrix.goos }}" = "windows" ] && [ -f "mcpproxy-tray.exe" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray.exe"
+            echo "Including mcpproxy-tray.exe in archive"
+          elif [ "${{ matrix.goos }}" = "darwin" ] && [ -f "mcpproxy-tray" ]; then
+            FILES_TO_ARCHIVE="${FILES_TO_ARCHIVE} mcpproxy-tray"
+            echo "Including mcpproxy-tray in archive"
+          fi
+
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
             # Create only versioned archive (no latest for prereleases)
-            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+            # Use PowerShell Compress-Archive on Windows since zip command isn't available
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              PS_FILES=$(echo ${FILES_TO_ARCHIVE} | sed 's/ /,/g')
+              powershell -Command "Compress-Archive -Path ${PS_FILES} -DestinationPath '${ARCHIVE_BASE}.zip'"
+            else
+              zip "${ARCHIVE_BASE}.zip" ${FILES_TO_ARCHIVE}
+            fi
           else
             # Create only versioned archive (no latest for prereleases)
-            tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
+            tar -czf "${ARCHIVE_BASE}.tar.gz" ${FILES_TO_ARCHIVE}
           fi
 
       - name: Build Linux .deb and .rpm packages
