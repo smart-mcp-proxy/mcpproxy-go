@@ -71,6 +71,9 @@ Equivalent surfaces:
   protocol/name). Each registry in the selector is flagged **Official · trusted** or
   **Third-party · unverified** from its `provenance`, and the first custom add shows a
   one-time third-party-registry warning (the acknowledgement is remembered locally).
+- **macOS tray:** the **Registries** sidebar tab lists every configured registry
+  with its provenance/trust badge, offers an **Add Registry** affordance,
+  and shows a one-time third-party warning before the first custom add.
 
 Errors share a stable code across surfaces: `invalid_registry_url` (400),
 `registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).
