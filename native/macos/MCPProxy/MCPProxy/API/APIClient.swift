@@ -726,4 +726,37 @@ actor APIClient {
             return .failure(code: nil, error: error.localizedDescription)
         }
     }
+
+    /// Search a single registry's servers via
+    /// `GET /api/v1/registries/{id}/servers?q=&limit=`. Throws on transport/HTTP
+    /// errors; a 200 with an `unavailable` marker (e.g. key required) is a
+    /// normal, non-throwing result that the browse view surfaces per-registry.
+    func searchRegistryServers(registryID: String, query: String, limit: Int = 20) async throws -> SearchRegistryServersResponse {
+        var params: [String] = ["limit=\(limit)"]
+        if !query.isEmpty { params.insert("q=\(query.uriComponentEncoded)", at: 0) }
+        let path = "/api/v1/registries/\(registryID.uriComponentEncoded)/servers?\(params.joined(separator: "&"))"
+        return try await fetchWrapped(path: path)
+    }
+
+    /// Add a server discovered through a registry via
+    /// `POST /api/v1/registries/{id}/servers/{serverId}/add`. Returns a
+    /// structured result (does not throw) carrying `missingInputs` when the
+    /// server needs env values the caller hasn't supplied yet.
+    func addServerFromRegistry(registryID: String, serverID: String, env: [String: String]? = nil) async -> AddServerResult {
+        var body: [String: Any] = [:]
+        if let env, !env.isEmpty { body["env"] = env }
+        let path = "/api/v1/registries/\(registryID.uriComponentEncoded)/servers/\(serverID.uriComponentEncoded)/add"
+        do {
+            let bodyData = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await rawRequest(path: path, method: "POST", body: bodyData)
+            if (200...299).contains(response.statusCode) { return .ok() }
+            let err = try? JSONDecoder().decode(RegistryAddServerErrorBody.self, from: data)
+            return .failure(
+                message: err?.message ?? "HTTP \(response.statusCode): \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))",
+                missingInputs: err?.missingInputs
+            )
+        } catch {
+            return .failure(message: error.localizedDescription)
+        }
+    }
 }

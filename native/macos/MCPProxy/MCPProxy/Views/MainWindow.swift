@@ -75,12 +75,31 @@ struct MainWindow: View {
             .accessibilityIdentifier("detail-view")
         }
         .frame(minWidth: 800, minHeight: 500)
+        .background(sidebarShortcuts)
         .onReceive(NotificationCenter.default.publisher(for: .switchToActivity)) { _ in
             selectedItem = .activity
         }
         .onReceive(NotificationCenter.default.publisher(for: .switchToServers)) { _ in
             selectedItem = .servers
         }
+    }
+
+    /// Hidden ⌘1…⌘5 shortcuts to jump straight to each sidebar section. Keeps
+    /// keyboard navigation fast for users and lets UI-test automation reach a
+    /// section (the sidebar List rows aren't directly clickable via the
+    /// accessibility menu API).
+    @ViewBuilder
+    private var sidebarShortcuts: some View {
+        VStack {
+            ForEach(Array(SidebarItem.allCases.enumerated()), id: \.element) { index, item in
+                Button("") { selectedItem = item }
+                    .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                    .accessibilityIdentifier("sidebar-shortcut-\(item.rawValue)")
+            }
+        }
+        .opacity(0)
+        .frame(width: 0, height: 0)
+        .accessibilityHidden(true)
     }
 
     // MARK: - Core Status Banner

@@ -49,6 +49,19 @@ struct RegistriesView: View {
                 banner(icon: "checkmark.circle.fill", tint: .green, text: success)
             }
 
+            // Browse + add servers across one or more registries (R1 parity).
+            ServerBrowseView(appState: appState, registries: registries)
+
+            HStack {
+                Text("Configured registries")
+                    .font(.scaled(.caption, scale: fontScale).bold())
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.top, 4)
+            Divider()
+
             content
         }
         .sheet(isPresented: $showAddRegistry) {
