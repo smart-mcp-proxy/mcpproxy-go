@@ -272,7 +272,7 @@ The proxy provides a web interface where users log in via their identity provide
 - Agent token maximum per user follows the same limit as the personal edition (10 tokens per user).
 - Admin designation is static per configuration (email list or IdP claim) — there is no in-app role assignment UI in v1.
 - Server template definitions are static (shipped with the binary + admin-defined in config) — there is no template marketplace or community sharing.
-- Both editions are built from the same repository (`mcpproxy-go`) using Go build tags. Teams-only code lives in `internal/teams/` with `//go:build teams` guards. No `pkg/` migration is needed.
+- Both editions are built from the same repository (`mcpproxy-go`) using Go build tags. Teams-only code lives in `internal/serveredition/` with `//go:build teams` guards. No `pkg/` migration is needed.
 - Data retention for activity logs follows the same policy as the personal edition — configurable, with no default auto-purge.
 
 ## Scope Boundaries

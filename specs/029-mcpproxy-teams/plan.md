@@ -37,7 +37,7 @@ Restructure the MCPProxy repository to support two editions (Personal and Teams)
 |------------|--------|-------|
 | Core + Tray Split | PASS | Tray split preserved; native/ skeleton added |
 | Event-Driven Updates | PASS | No event changes |
-| DDD Layering | PASS | internal/teams/ follows existing layer patterns |
+| DDD Layering | PASS | internal/serveredition/ follows existing layer patterns |
 | Upstream Client Modularity | PASS | No upstream changes |
 
 ## Project Structure
@@ -89,7 +89,7 @@ Makefile                         # Modify: add build-teams, build-docker, build-
 .github/workflows/release.yml   # Modify: add teams build matrix entries
 ```
 
-**Structure Decision**: Existing Go project structure preserved. Teams code isolated in `internal/teams/` with build tags. No `pkg/` migration. Native tray apps in `native/` at repo root.
+**Structure Decision**: Existing Go project structure preserved. Teams code isolated in `internal/serveredition/` with build tags. No `pkg/` migration. Native tray apps in `native/` at repo root.
 
 ## Complexity Tracking
 

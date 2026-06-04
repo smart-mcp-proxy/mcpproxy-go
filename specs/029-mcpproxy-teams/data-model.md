@@ -28,7 +28,7 @@ The `/api/v1/status` response gains one field:
 The teams edition uses a registration pattern for feature modules:
 
 ```go
-// internal/teams/registry.go
+// internal/serveredition/registry.go
 type Feature struct {
     Name    string
     Setup   func(deps Dependencies) error

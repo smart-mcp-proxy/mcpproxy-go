@@ -260,8 +260,10 @@ type Config struct {
 	// downstream tool genuinely needs raw values in the response.
 	RevealSecretHeaders bool `json:"reveal_secret_headers,omitempty" mapstructure:"reveal-secret-headers"`
 
-	// Server edition multi-user configuration (only meaningful with -tags server)
-	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
+	// Server edition multi-user configuration (only meaningful with -tags server).
+	// Renamed from the legacy "teams" key (MCP-1086); an existing config that
+	// still uses "teams" is normalized onto this field on load (see loader.go).
+	ServerEdition *ServerEditionConfig `json:"server_edition,omitempty" mapstructure:"server_edition" swaggerignore:"true"`
 }
 
 // TLSConfig represents TLS configuration
@@ -348,7 +350,7 @@ type ServerConfig struct {
 	// subject token for an upstream-scoped credential and injects it into the
 	// outbound request. The concrete type is build-tagged: a full struct in the
 	// server edition, an empty stub in the personal edition (which ignores it),
-	// so personal-edition behavior is unaffected. swaggerignore mirrors Teams.
+	// so personal-edition behavior is unaffected. swaggerignore mirrors ServerEdition.
 	AuthBroker *AuthBrokerConfig `json:"auth_broker,omitempty" mapstructure:"auth_broker" swaggerignore:"true"`
 }
 

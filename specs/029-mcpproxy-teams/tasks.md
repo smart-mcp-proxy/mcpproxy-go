@@ -25,17 +25,17 @@
 
 ---
 
-## Phase 2: Teams Skeleton (internal/teams/)
+## Phase 2: Teams Skeleton (internal/serveredition/)
 
 **Purpose**: Create the teams feature registry and package skeleton with build tags
 
-- [x] T006 Create `internal/teams/doc.go` with `//go:build teams` tag and package documentation
-- [x] T007 Create `internal/teams/registry.go` with Feature struct, Register(), SetupAll() functions (build-tagged)
-- [x] T008 Create `internal/teams/registry_test.go` with tests verifying registration and setup (build-tagged)
-- [x] T009 Create teams registration entry point `cmd/mcpproxy/teams_register.go` with `//go:build teams` that imports `internal/teams` and calls `SetupAll()` during init
+- [x] T006 Create `internal/serveredition/doc.go` with `//go:build teams` tag and package documentation
+- [x] T007 Create `internal/serveredition/registry.go` with Feature struct, Register(), SetupAll() functions (build-tagged)
+- [x] T008 Create `internal/serveredition/registry_test.go` with tests verifying registration and setup (build-tagged)
+- [x] T009 Create teams registration entry point `cmd/mcpproxy/teams_register.go` with `//go:build teams` that imports `internal/serveredition` and calls `SetupAll()` during init
 - [x] T010 Verify both builds compile: `go build ./cmd/mcpproxy` (no teams code) and `go build -tags teams ./cmd/mcpproxy` (with teams skeleton)
 
-**Checkpoint**: `go test -tags teams ./internal/teams/...` passes; personal build has zero teams code compiled in
+**Checkpoint**: `go test -tags teams ./internal/serveredition/...` passes; personal build has zero teams code compiled in
 
 ---
 
@@ -92,10 +92,10 @@
 
 **Purpose**: Update project documentation to reflect dual-edition architecture
 
-- [x] T024 Update `CLAUDE.md` — add Build & Distribution section documenting `build-teams`, `build-docker`, edition detection, `internal/teams/` structure
+- [x] T024 Update `CLAUDE.md` — add Build & Distribution section documenting `build-teams`, `build-docker`, edition detection, `internal/serveredition/` structure
 - [x] T025 Update `Makefile` help target to include new build-teams, build-docker, build-deb targets
 - [x] T026 Verify all existing tests pass: `go test ./internal/... -v` (personal build) — all pass except pre-existing `internal/server` timeout
-- [x] T027 Verify teams build tests pass: `go test -tags teams ./internal/teams/... -v`
+- [x] T027 Verify teams build tests pass: `go test -tags teams ./internal/serveredition/... -v`
 - [x] T028 Verify E2E tests pass: `./scripts/test-api-e2e.sh` — 61/71 pass, 10 failures are pre-existing (same on clean branch)
 - [x] T029 Verify linter passes: `./scripts/run-linter.sh`
 
