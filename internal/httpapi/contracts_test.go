@@ -321,6 +321,9 @@ func (m *MockServerController) AddRegistrySourceRef(_, _, _, _ string) (*config.
 func (m *MockServerController) RemoveRegistrySourceRef(_ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
+func (m *MockServerController) EditRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 
 // Version and updates
 func (m *MockServerController) GetVersionInfo() *updatecheck.VersionInfo {

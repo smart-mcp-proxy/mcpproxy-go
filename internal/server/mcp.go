@@ -997,7 +997,7 @@ func (p *MCPProxyServer) handleListRegistries(ctx context.Context, _ mcp.CallToo
 	response := map[string]interface{}{
 		"registries": registriesList,
 		"total":      len(registriesList),
-		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers. Servers from 'custom/unverified' registries are always quarantined.",
+		"message":    "Available MCP registries. Use 'search_servers' tool with a registry ID to find servers. Newly added servers are quarantined by default until you approve them.",
 	}
 
 	jsonResult, err := json.Marshal(response)

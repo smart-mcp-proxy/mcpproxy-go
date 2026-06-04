@@ -264,10 +264,10 @@ type ServerConfig struct {
 	// for manually-configured servers). MCP-866: surfaced in the approval /
 	// quarantine view so a reviewer can see a server's origin.
 	SourceRegistryID string `json:"source_registry_id,omitempty" mapstructure:"source_registry_id"`
-	// SourceRegistryProvenance is the trust tag of the source registry at add
-	// time (RegistryProvenanceOfficial / RegistryProvenanceCustom). When it is
-	// RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
-	// unverified registry can never opt its servers out of quarantine.
+	// SourceRegistryProvenance records the source registry's provenance at add
+	// time (RegistryProvenanceOfficial / RegistryProvenanceCustom). It is purely
+	// informational (MCP-1072) — surfaced so a reviewer can see a server's origin
+	// — and no longer gates quarantine or skip_quarantine.
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty" mapstructure:"source_registry_provenance"`
 }
 
@@ -652,15 +652,50 @@ func (c *OutputSanitisationConfig) WouldMutate(trust string) bool {
 
 // Registry provenance tags (MCP-866). Trust is derived, not user-asserted: a
 // registry is "trusted" only when it is one of the shipped built-in defaults.
-// Anything a user adds at runtime (e.g. via `registry add-source`) is
-// "custom/unverified" and can NEVER skip quarantine — there is no allowlist a
-// user can append themselves into.
+// Anything a user adds at runtime (e.g. via `registry add-source`) is "custom".
+// Provenance is purely informational now (MCP-1072): it no longer forces
+// quarantine — servers added from any registry follow the global quarantine
+// default. It still drives the derived "trusted" flag a few surfaces show.
 const (
 	// RegistryProvenanceOfficial marks a built-in, shipped-by-default registry.
-	RegistryProvenanceOfficial = "official/trusted"
-	// RegistryProvenanceCustom marks a user-added registry of unknown trust.
-	RegistryProvenanceCustom = "custom/unverified"
+	RegistryProvenanceOfficial = "official"
+	// RegistryProvenanceCustom marks a user-added registry.
+	RegistryProvenanceCustom = "custom"
 )
+
+// NormalizeRegistryProvenance maps legacy provenance strings persisted by
+// earlier builds (MCP-866's "official/trusted" / "custom/unverified") onto the
+// current two-value vocabulary ("official" / "custom"). Already-current and
+// empty values pass through unchanged, so the mapping is idempotent. This lets
+// an existing config.db converge without breaking on read (MCP-1072).
+func NormalizeRegistryProvenance(p string) string {
+	switch p {
+	case "official/trusted", RegistryProvenanceOfficial:
+		return RegistryProvenanceOfficial
+	case "custom/unverified", RegistryProvenanceCustom:
+		return RegistryProvenanceCustom
+	default:
+		return p
+	}
+}
+
+// normalizeRegistryProvenanceValues rewrites legacy provenance strings on a
+// loaded config in place — both registry entries and the per-server source
+// provenance tag — so existing installs converge to the two-value vocabulary
+// (MCP-1072). Idempotent and nil-safe.
+func normalizeRegistryProvenanceValues(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for i := range cfg.Registries {
+		cfg.Registries[i].Provenance = NormalizeRegistryProvenance(cfg.Registries[i].Provenance)
+	}
+	for _, s := range cfg.Servers {
+		if s != nil {
+			s.SourceRegistryProvenance = NormalizeRegistryProvenance(s.SourceRegistryProvenance)
+		}
+	}
+}
 
 // RegistryEntry represents a registry in the configuration
 type RegistryEntry struct {
@@ -680,7 +715,7 @@ type RegistryEntry struct {
 	// RegistryProvenanceOfficial for built-in defaults, RegistryProvenanceCustom
 	// for user-added registries. It is authoritatively (re)computed by the
 	// registries merge from whether the ID is a shipped default — a user cannot
-	// claim "official/trusted" by writing it into their config.
+	// claim "official" by writing it into their config.
 	Provenance string `json:"provenance,omitempty" mapstructure:"provenance"`
 }
 
@@ -1317,16 +1352,6 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, ValidationError{
 				Field:   fieldPrefix + ".enabled_tools",
 				Message: "enabled_tools and disabled_tools are mutually exclusive; use one or the other",
-			})
-		}
-
-		// MCP-866: a server sourced from a custom/unverified registry can NEVER
-		// skip quarantine. There is no allowlist a user can add themselves into,
-		// so an unverified third-party source must always be reviewed.
-		if server.SkipQuarantine && server.SourceRegistryProvenance == RegistryProvenanceCustom {
-			errors = append(errors, ValidationError{
-				Field:   fieldPrefix + ".skip_quarantine",
-				Message: "skip_quarantine is not allowed for a server added from a custom/unverified registry",
 			})
 		}
 	}

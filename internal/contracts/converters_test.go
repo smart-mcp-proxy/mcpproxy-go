@@ -95,7 +95,7 @@ func TestConvertGenericServersToTyped_SourceRegistry(t *testing.T) {
 			"name":                       "everything",
 			"enabled":                    true,
 			"source_registry_id":         "modelcontextprotocol",
-			"source_registry_provenance": "custom/unverified",
+			"source_registry_provenance": "custom",
 		},
 		{
 			// Manually-configured server: both fields absent → empty.
@@ -109,7 +109,7 @@ func TestConvertGenericServersToTyped_SourceRegistry(t *testing.T) {
 	require.Len(t, servers, 2)
 
 	assert.Equal(t, "modelcontextprotocol", servers[0].SourceRegistryID)
-	assert.Equal(t, "custom/unverified", servers[0].SourceRegistryProvenance)
+	assert.Equal(t, "custom", servers[0].SourceRegistryProvenance)
 
 	assert.Empty(t, servers[1].SourceRegistryID, "manual server carries no registry id")
 	assert.Empty(t, servers[1].SourceRegistryProvenance)

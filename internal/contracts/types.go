@@ -982,12 +982,21 @@ type RegistryAddError struct {
 
 // AddRegistrySourceRequest is the POST body for adding a user-supplied registry
 // source (MCP-866, POST /api/v1/registries). Provenance is NOT part of the
-// request — the server always tags an added source custom/unverified.
+// request — the server always tags an added source "custom".
 type AddRegistrySourceRequest struct {
 	URL      string `json:"url"`                // required https registry URL
 	Protocol string `json:"protocol,omitempty"` // defaults to modelcontextprotocol/registry
 	ID       string `json:"id,omitempty"`       // derived from the host when empty
 	Name     string `json:"name,omitempty"`     // defaults to the id
+}
+
+// EditRegistrySourceRequest is the PUT body for editing a user-added custom
+// registry (MCP-1072, PUT /api/v1/registries/{id}). All fields are optional;
+// an empty field leaves the existing value unchanged.
+type EditRegistrySourceRequest struct {
+	Name       string `json:"name,omitempty"`        // new display name
+	URL        string `json:"url,omitempty"`         // new base/servers https URL
+	ServersURL string `json:"servers_url,omitempty"` // explicit servers-collection URL
 }
 
 // RegistrySummary is a slim, stable projection of a registry, including its
@@ -1010,6 +1019,12 @@ type AddRegistrySourceData struct {
 // RemoveRegistrySourceData is the success `data` payload for remove-source
 // (MCP-1057, DELETE /api/v1/registries/{id}). It echoes the removed registry.
 type RemoveRegistrySourceData struct {
+	Registry RegistrySummary `json:"registry"`
+}
+
+// EditRegistrySourceData is the success `data` payload for edit-source
+// (MCP-1072, PUT /api/v1/registries/{id}). It echoes the updated registry.
+type EditRegistrySourceData struct {
 	Registry RegistrySummary `json:"registry"`
 }
 

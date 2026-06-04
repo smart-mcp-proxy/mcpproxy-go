@@ -15,11 +15,10 @@ import (
 
 // MCP-866: `registry add-source` adds a user-supplied generic MCP registry
 // (any https endpoint implementing the official modelcontextprotocol/registry
-// v0.1 protocol). The added source is ALWAYS tagged custom/unverified — there
-// is no allowlist a user can append themselves into — so every server it yields
-// lands quarantined (see buildServerConfigFromEntry). Like the keystone add op,
-// the derivation lives server-side so every surface (CLI, REST, MCP) produces
-// an identical persisted config entry.
+// v0.1 protocol). The added source is tagged "custom" (informational only since
+// MCP-1072 — servers it yields follow the global quarantine default like any
+// other). Like the keystone add op, the derivation lives server-side so every
+// surface (CLI, REST, MCP) produces an identical persisted config entry.
 
 const defaultRegistryProtocol = "modelcontextprotocol/registry"
 
@@ -36,7 +35,7 @@ var (
 )
 
 // AddRegistrySourceRequest is the input to the add-source op. Provenance is NOT
-// part of the request — it is always custom/unverified.
+// part of the request — it is always "custom".
 type AddRegistrySourceRequest struct {
 	URL      string // required https URL of the registry (base or /v0.1/servers endpoint)
 	Protocol string // optional; defaults to modelcontextprotocol/registry
@@ -139,7 +138,7 @@ func buildRegistrySourceEntry(rawURL, protocol, id, name string) (config.Registr
 	return config.RegistryEntry{
 		ID:          id,
 		Name:        name,
-		Description: "User-added registry (custom/unverified)",
+		Description: "User-added registry (custom)",
 		URL:         rawURL,
 		ServersURL:  deriveServersURL(rawURL),
 		Protocol:    protocol,
