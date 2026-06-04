@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -4136,9 +4137,25 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id}/servers/{serverId}/add [post]
+// decodePathParam percent-decodes a chi path parameter. chi matches routes on
+// the raw (encoded) path, so parameters that legitimately contain reserved
+// characters such as "/" (encoded as %2F) arrive encoded. On a malformed escape
+// sequence it returns the original value unchanged so the downstream lookup can
+// surface a normal not-found rather than a decode panic.
+func decodePathParam(raw string) string {
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return decoded
+	}
+	return raw
+}
+
 func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
-	serverID := chi.URLParam(r, "serverId")
+	// chi routes on RawPath, so path params arrive percent-encoded. Official
+	// modelcontextprotocol/registry v0.1 ids are namespace/name, so the slash
+	// reaches us as %2F and must be decoded before the exact-match registry
+	// lookup, otherwise every namespaced server is un-addable (MCP-1056).
+	registryID := decodePathParam(chi.URLParam(r, "id"))
+	serverID := decodePathParam(chi.URLParam(r, "serverId"))
 	if registryID == "" || serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "registry id and server id are required")
 		return
