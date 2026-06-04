@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"go.uber.org/zap/zaptest"
@@ -197,5 +199,74 @@ func TestListRegistries_SurfacesProvenanceAndTrusted(t *testing.T) {
 	}
 	if none.Trusted {
 		t.Error("no-provenance-reg trusted: want false, got true")
+	}
+}
+
+// removeController simulates the server-side remove-source op: it removes the
+// custom "acme" registry, refuses the built-in "official", and reports
+// registry_not_found for anything else (MCP-1057).
+type removeController struct {
+	*MockServerController
+}
+
+func (c *removeController) RemoveRegistrySourceRef(id string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	switch id {
+	case "acme":
+		return &config.RegistryEntry{
+			ID:         "acme",
+			Name:       "Acme",
+			URL:        "https://acme.example/",
+			Provenance: config.RegistryProvenanceCustom,
+		}, nil, nil
+	case "official":
+		rerr := &contracts.RegistryAddError{Code: "registry_shadows_builtin", Message: `"official" is a built-in registry and cannot be removed`}
+		return nil, rerr, errors.New(rerr.Message)
+	default:
+		rerr := &contracts.RegistryAddError{Code: "registry_not_found", Message: "no custom registry with id " + id}
+		return nil, rerr, errors.New(rerr.Message)
+	}
+}
+
+// MCP-1057: DELETE removes a custom registry and echoes it with trusted=false.
+func TestRemoveRegistrySource_RemovesCustom(t *testing.T) {
+	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/acme", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp contracts.RemoveRegistrySourceData
+	decodeData(t, w, &resp)
+	if resp.Registry.ID != "acme" {
+		t.Errorf("expected removed id=acme, got %q", resp.Registry.ID)
+	}
+	if resp.Registry.Trusted {
+		t.Error("a custom registry must report trusted=false")
+	}
+}
+
+// MCP-1057: removing a built-in is refused with 409 registry_shadows_builtin.
+func TestRemoveRegistrySource_RefusesBuiltin(t *testing.T) {
+	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/official", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// MCP-1057: removing an unknown registry yields 404 registry_not_found.
+func TestRemoveRegistrySource_NotFound(t *testing.T) {
+	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/ghost", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d (body=%s)", w.Code, w.Body.String())
 	}
 }

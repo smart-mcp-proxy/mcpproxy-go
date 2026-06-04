@@ -1007,6 +1007,12 @@ type AddRegistrySourceData struct {
 	Registry RegistrySummary `json:"registry"`
 }
 
+// RemoveRegistrySourceData is the success `data` payload for remove-source
+// (MCP-1057, DELETE /api/v1/registries/{id}). It echoes the removed registry.
+type RemoveRegistrySourceData struct {
+	Registry RegistrySummary `json:"registry"`
+}
+
 // SuccessResponse is the standard success response wrapper for API endpoints.
 type SuccessResponse struct {
 	Success bool        `json:"success"`

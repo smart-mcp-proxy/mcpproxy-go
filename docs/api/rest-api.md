@@ -545,6 +545,21 @@ for the full feature guide (CLI, REST, MCP).
 
 List configured registries.
 
+#### POST /api/v1/registries
+
+Add a user-supplied custom registry source. JSON body:
+`{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }` (only `url`
+required). The source is always tagged `custom/unverified`. Errors share a stable
+code: `invalid_registry_url` (400), `registries_locked` (403),
+`registry_shadows_builtin` / `duplicate_registry` (409).
+
+#### DELETE /api/v1/registries/{id}
+
+Remove a user-added custom registry source. Returns `data.registry` echoing the
+removed entry. Built-in registries are refused with `registry_shadows_builtin`
+(409); an unknown id returns `registry_not_found` (404); a `registries_locked`
+policy returns 403.
+
 #### GET /api/v1/registries/{id}/servers
 
 Search a registry's servers (`?search=`, `?tag=`, `?limit=`).
