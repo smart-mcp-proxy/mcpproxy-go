@@ -18,6 +18,80 @@
       </button>
     </div>
 
+    <!-- Configured registries (manage sources) — MCP-1073 -->
+    <div class="card bg-base-100 shadow-md" data-test="registries-manage-section">
+      <div class="card-body">
+        <div>
+          <h2 class="card-title text-lg">Registries</h2>
+          <p class="text-sm text-base-content/70">Sources MCPProxy browses for MCP servers. Custom sources you add can be edited or removed.</p>
+        </div>
+
+        <!-- Loading -->
+        <div v-if="loadingRegistries" class="flex items-center gap-2 py-4 text-base-content/70" data-test="registries-loading">
+          <span class="loading loading-spinner loading-sm"></span>
+          <span>Loading registries…</span>
+        </div>
+
+        <!-- Empty (rare — defaults are always present) -->
+        <div v-else-if="registries.length === 0" class="text-sm text-base-content/60 py-4" data-test="registries-empty">
+          No registries configured.
+        </div>
+
+        <!-- Cards grid -->
+        <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-2">
+          <div
+            v-for="registry in registries"
+            :key="registry.id"
+            class="border border-base-300 rounded-lg p-3 flex flex-col gap-2"
+            :data-test="`registry-card-${registry.id}`"
+          >
+            <div class="flex items-start justify-between gap-2">
+              <div class="font-semibold min-w-0 [overflow-wrap:anywhere]">{{ registry.name }}</div>
+
+              <!-- Kebab (⋮) menu — custom registries only; official is read-only -->
+              <div v-if="isCustomRegistry(registry)" class="dropdown dropdown-end shrink-0">
+                <div
+                  tabindex="0"
+                  role="button"
+                  class="btn btn-ghost btn-xs btn-square"
+                  :data-test="`registry-kebab-${registry.id}`"
+                  :aria-label="`Manage ${registry.name}`"
+                >
+                  <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 8a2 2 0 100-4 2 2 0 000 4zm0 2a2 2 0 100 4 2 2 0 000-4zm0 6a2 2 0 100 4 2 2 0 000-4z" />
+                  </svg>
+                </div>
+                <ul tabindex="0" class="dropdown-content menu bg-base-100 rounded-box z-10 w-32 p-1 shadow-lg border border-base-300">
+                  <li>
+                    <button type="button" :data-test="`registry-edit-${registry.id}`" @click="openEditRegistry(registry)">Edit</button>
+                  </li>
+                  <li>
+                    <button type="button" class="text-error" :data-test="`registry-delete-${registry.id}`" @click="openDeleteRegistry(registry)">Delete</button>
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            <!-- Neutral provenance badge (Official / Custom) + Built-in tag -->
+            <div class="flex flex-wrap gap-1 items-center">
+              <span
+                class="badge badge-sm"
+                :class="isCustomRegistry(registry) ? 'badge-ghost' : 'badge-outline'"
+                :data-test="`registry-provenance-${registry.id}`"
+              >{{ isCustomRegistry(registry) ? 'Custom' : 'Official' }}</span>
+              <span
+                v-if="!isCustomRegistry(registry)"
+                class="badge badge-sm badge-ghost"
+                :data-test="`registry-builtin-${registry.id}`"
+              >Built-in</span>
+            </div>
+
+            <div v-if="registry.url" class="text-xs text-base-content/60 truncate" :title="registry.url">{{ registry.url }}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Registry Selector & Search -->
     <div class="card bg-base-100 shadow-md">
       <div class="card-body">
@@ -55,7 +129,7 @@
                       @change="toggleRegistry(registry.id)"
                       :data-test="`registry-option-${registry.id}`"
                     />
-                    <span class="text-sm">{{ registry.name }}<span v-if="isCustomRegistry(registry)" class="opacity-60"> — unverified</span></span>
+                    <span class="text-sm">{{ registry.name }}<span v-if="isCustomRegistry(registry)" class="opacity-60"> — custom</span></span>
                   </label>
                 </li>
               </ul>
@@ -312,18 +386,35 @@
       </form>
     </dialog>
 
-    <!-- Add Registry Source dialog (MCP-866/MCP-867) -->
+    <!-- Add / Edit Registry Source dialog (MCP-866 add, MCP-1073 edit) -->
     <dialog :open="showAddRegistry" class="modal" data-test="registry-add-source-dialog">
       <div class="modal-box">
-        <h3 class="font-bold text-lg">Add a registry</h3>
+        <h3 class="font-bold text-lg">{{ isEditMode ? 'Edit registry' : 'Add a registry' }}</h3>
         <p class="text-sm text-base-content/70 mt-1">
-          Add a custom <code>modelcontextprotocol/registry</code> v0.1 source by its HTTPS URL.
-          Added registries are marked
-          <span class="badge badge-warning badge-xs align-middle">third-party · unverified</span>;
-          their servers are always quarantined.
+          <template v-if="isEditMode">
+            Update this custom <code>modelcontextprotocol/registry</code> source. Its id is fixed.
+          </template>
+          <template v-else>
+            Add a custom <code>modelcontextprotocol/registry</code> v0.1 source by its HTTPS URL.
+            It is shown as a <span class="badge badge-ghost badge-xs align-middle">Custom</span> source.
+          </template>
         </p>
 
-        <form @submit.prevent="submitAddRegistry" class="mt-4 space-y-3" data-test="registry-add-form">
+        <form @submit.prevent="submitRegistryDialog" class="mt-4 space-y-3" data-test="registry-add-form">
+          <!-- Read-only id (edit mode only) -->
+          <div v-if="isEditMode" class="form-control">
+            <label class="label">
+              <span class="label-text font-semibold">Registry ID</span>
+            </label>
+            <input
+              :value="editRegistryId"
+              type="text"
+              data-test="registry-edit-id"
+              class="input input-bordered w-full opacity-70"
+              readonly
+            />
+          </div>
+
           <div class="form-control">
             <label class="label">
               <span class="label-text font-semibold">Registry URL</span>
@@ -339,7 +430,7 @@
             />
           </div>
 
-          <div class="form-control">
+          <div v-if="!isEditMode" class="form-control">
             <label class="label">
               <span class="label-text font-semibold">Protocol</span>
             </label>
@@ -381,7 +472,7 @@
               :disabled="!addRegistryUrl.trim() || addingRegistry"
             >
               <span v-if="addingRegistry" class="loading loading-spinner loading-xs"></span>
-              <span v-else>Add Registry</span>
+              <span v-else>{{ isEditMode ? 'Save changes' : 'Add Registry' }}</span>
             </button>
           </div>
         </form>
@@ -391,48 +482,36 @@
       </form>
     </dialog>
 
-    <!-- One-time third-party registry warning (MCP-867) -->
-    <dialog :open="showThirdPartyWarning" class="modal" data-test="registry-third-party-warning">
+    <!-- Delete custom registry confirmation (MCP-1073, destructive) -->
+    <dialog :open="showDeleteRegistry" class="modal" data-test="registry-delete-dialog">
       <div class="modal-box">
-        <h3 class="font-bold text-lg text-warning flex items-center gap-2">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-          Adding a third-party registry
-        </h3>
-        <div class="text-sm py-3 space-y-2">
-          <p>
-            You're about to add a registry that is <strong>not</strong> shipped with MCPProxy.
-            Custom registries are <strong>unverified</strong> — MCPProxy cannot vouch for the
-            servers they list.
-          </p>
-          <p>
-            For your safety, every server you add from a custom registry is
-            <strong>always quarantined</strong> and can never skip security review.
-            Only add registries operated by parties you trust.
-          </p>
+        <h3 class="font-bold text-lg">Remove "{{ deleteRegistryTarget?.name }}"?</h3>
+        <p class="text-sm py-2 text-base-content/80">
+          Servers you already added stay; only the source is removed.
+        </p>
+
+        <div v-if="deleteRegistryError" class="alert alert-error text-sm" data-test="registry-delete-error">
+          <span>{{ deleteRegistryError }}</span>
         </div>
+
         <div class="modal-action">
-          <button
-            type="button"
-            class="btn btn-ghost"
-            data-test="registry-third-party-cancel"
-            @click="cancelThirdPartyWarning"
-          >
+          <button type="button" class="btn btn-ghost" data-test="registry-delete-cancel" @click="closeDeleteRegistry">
             Cancel
           </button>
           <button
             type="button"
-            class="btn btn-warning"
-            data-test="registry-third-party-acknowledge"
-            @click="acknowledgeThirdPartyWarning"
+            class="btn btn-error"
+            data-test="registry-delete-confirm"
+            :disabled="deletingRegistry"
+            @click="confirmDeleteRegistry"
           >
-            I understand, continue
+            <span v-if="deletingRegistry" class="loading loading-spinner loading-xs"></span>
+            <span v-else>Remove</span>
           </button>
         </div>
       </div>
       <form method="dialog" class="modal-backdrop">
-        <button @click="cancelThirdPartyWarning">close</button>
+        <button @click="closeDeleteRegistry">close</button>
       </form>
     </dialog>
 
@@ -459,11 +538,6 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Registry, RepositoryServer, RequiredInput } from '@/types'
 import { REGISTRY_PROVENANCE_CUSTOM } from '@/types'
 
-// localStorage key recording that the user has acknowledged the one-time
-// third-party registry warning (MCP-867). Once acknowledged, subsequent custom
-// adds skip the warning.
-const THIRD_PARTY_ACK_KEY = 'mcpproxy-thirdparty-registry-ack'
-
 // State
 const registries = ref<Registry[]>([])
 const selectedRegistries = ref<string[]>([])
@@ -485,14 +559,22 @@ const promptServer = ref<RepositoryServer | null>(null)
 const promptInputs = ref<RequiredInput[]>([])
 const promptValues = ref<Record<string, string>>({})
 
-// Add-registry-source state (MCP-866/MCP-867)
+// Add / edit registry-source dialog state (MCP-866 add, MCP-1073 edit).
+// editRegistryId is empty in add mode and the registry id in edit mode.
 const showAddRegistry = ref(false)
+const editRegistryId = ref<string | null>(null)
 const addRegistryUrl = ref('')
 const addRegistryProtocol = ref('modelcontextprotocol/registry')
 const addRegistryName = ref('')
 const addRegistryError = ref<string | null>(null)
 const addingRegistry = ref(false)
-const showThirdPartyWarning = ref(false)
+const isEditMode = computed(() => editRegistryId.value !== null)
+
+// Delete-custom-registry confirmation state (MCP-1073)
+const showDeleteRegistry = ref(false)
+const deleteRegistryTarget = ref<Registry | null>(null)
+const deleteRegistryError = ref<string | null>(null)
+const deletingRegistry = ref(false)
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -786,73 +868,58 @@ function closePrompt() {
   promptValues.value = {}
 }
 
-// --- Add registry source (MCP-866/MCP-867) ---
+// --- Add / edit / delete registry source (MCP-866 add, MCP-1073 edit+delete) ---
 
+// Open the dialog in add mode (blank, editRegistryId = null).
 function openAddRegistry() {
+  editRegistryId.value = null
   addRegistryUrl.value = ''
   addRegistryProtocol.value = 'modelcontextprotocol/registry'
   addRegistryName.value = ''
   addRegistryError.value = null
-  showThirdPartyWarning.value = false
+  showAddRegistry.value = true
+}
+
+// Open the dialog in edit mode, pre-filled from a custom registry (MCP-1073).
+// The id is fixed and shown read-only; only name/url are editable.
+function openEditRegistry(registry: Registry) {
+  editRegistryId.value = registry.id
+  addRegistryUrl.value = registry.url || registry.servers_url || ''
+  addRegistryName.value = registry.name || ''
+  addRegistryError.value = null
   showAddRegistry.value = true
 }
 
 function closeAddRegistry() {
   if (addingRegistry.value) return
   showAddRegistry.value = false
-  showThirdPartyWarning.value = false
+  editRegistryId.value = null
 }
 
-function hasAcknowledgedThirdParty(): boolean {
-  try {
-    return localStorage.getItem(THIRD_PARTY_ACK_KEY) === 'true'
-  } catch {
-    return false
-  }
-}
-
-// Form submit: gate the first-ever custom add behind the one-time third-party
-// warning. Every user-added source is custom/unverified server-side, so the
-// warning applies to all adds — but only until the user acknowledges it once.
-function submitAddRegistry() {
-  if (!addRegistryUrl.value.trim() || addingRegistry.value) return
-  addRegistryError.value = null
-
-  if (!hasAcknowledgedThirdParty()) {
-    showThirdPartyWarning.value = true
-    return
-  }
-  doAddRegistry()
-}
-
-function cancelThirdPartyWarning() {
-  showThirdPartyWarning.value = false
-}
-
-function acknowledgeThirdPartyWarning() {
-  try {
-    localStorage.setItem(THIRD_PARTY_ACK_KEY, 'true')
-  } catch {
-    // Non-fatal: if storage is unavailable the warning simply re-appears next time.
-  }
-  showThirdPartyWarning.value = false
-  doAddRegistry()
-}
-
-// Map the backend's stable error codes to actionable messages.
-function addRegistryErrorMessage(code: string | undefined, fallback: string | undefined): string {
+// Map the backend's stable error codes to actionable messages. Shared across
+// add / edit / delete since all three surface the same code set.
+function registryErrorMessage(code: string | undefined, fallback: string | undefined, verb: string): string {
   switch (code) {
     case 'invalid_registry_url':
       return fallback || 'That URL is not a valid HTTPS registry endpoint.'
     case 'registries_locked':
-      return 'Adding registries is locked by an administrator on this instance.'
+      return `${verb} registries is locked by an administrator on this instance.`
     case 'registry_shadows_builtin':
-      return 'That id/host collides with a built-in registry. Try a different id.'
+      return 'That id/host collides with a built-in registry.'
+    case 'registry_not_found':
+      return 'That registry no longer exists. It may have already been removed.'
     case 'duplicate_registry':
       return 'A registry with that id is already configured.'
     default:
-      return fallback || 'Failed to add registry.'
+      return fallback || `Failed to ${verb.toLowerCase()} registry.`
   }
+}
+
+// Single submit path for both add and edit modes.
+function submitRegistryDialog() {
+  if (!addRegistryUrl.value.trim() || addingRegistry.value) return
+  if (isEditMode.value) doEditRegistry()
+  else doAddRegistry()
 }
 
 async function doAddRegistry() {
@@ -868,24 +935,95 @@ async function doAddRegistry() {
     if (result.success) {
       const added = result.registry
       showAddRegistry.value = false
-      // Refresh the list so the new (custom/unverified) entry appears with its
-      // provenance, then select it for immediate browsing.
+      // Refresh the list so the new custom entry appears, then select it for
+      // immediate browsing.
       await loadRegistries()
       if (added?.id) {
-        // Add the new registry to the multiselect (don't clobber existing picks)
-        // and browse it immediately.
         if (!selectedRegistries.value.includes(added.id)) selectedRegistries.value.push(added.id)
         handleRegistryChange()
       }
-      showToast(`Added registry "${added?.name || added?.id || addRegistryUrl.value}" — third-party · unverified.`)
+      showToast(`Added registry "${added?.name || added?.id || addRegistryUrl.value}".`)
       return
     }
 
-    addRegistryError.value = addRegistryErrorMessage(result.code, result.error)
+    addRegistryError.value = registryErrorMessage(result.code, result.error, 'Adding')
   } catch (err) {
     addRegistryError.value = 'Failed to add registry: ' + (err as Error).message
   } finally {
     addingRegistry.value = false
+  }
+}
+
+async function doEditRegistry() {
+  const id = editRegistryId.value
+  if (!id) return
+  addingRegistry.value = true
+  addRegistryError.value = null
+
+  try {
+    const result = await api.editRegistrySource(id, {
+      name: addRegistryName.value.trim() || undefined,
+      url: addRegistryUrl.value.trim() || undefined
+    })
+
+    if (result.success) {
+      showAddRegistry.value = false
+      editRegistryId.value = null
+      await loadRegistries()
+      const updated = result.registry
+      showToast(`Updated registry "${updated?.name || updated?.id || id}".`)
+      return
+    }
+
+    addRegistryError.value = registryErrorMessage(result.code, result.error, 'Editing')
+  } catch (err) {
+    addRegistryError.value = 'Failed to edit registry: ' + (err as Error).message
+  } finally {
+    addingRegistry.value = false
+  }
+}
+
+// Delete-custom-registry confirmation flow (MCP-1073). The kebab Delete only
+// opens the modal; the API call happens on explicit confirm.
+function openDeleteRegistry(registry: Registry) {
+  deleteRegistryTarget.value = registry
+  deleteRegistryError.value = null
+  showDeleteRegistry.value = true
+}
+
+function closeDeleteRegistry() {
+  if (deletingRegistry.value) return
+  showDeleteRegistry.value = false
+  deleteRegistryTarget.value = null
+}
+
+async function confirmDeleteRegistry() {
+  const target = deleteRegistryTarget.value
+  if (!target) return
+  deletingRegistry.value = true
+  deleteRegistryError.value = null
+
+  try {
+    const result = await api.removeRegistrySource(target.id)
+    if (result.success) {
+      // Drop it from any active selection so the search filter stays consistent.
+      const i = selectedRegistries.value.indexOf(target.id)
+      if (i !== -1) {
+        selectedRegistries.value.splice(i, 1)
+        handleRegistryChange()
+      }
+      showDeleteRegistry.value = false
+      deleteRegistryTarget.value = null
+      await loadRegistries()
+      showToast(`Removed registry "${target.name || target.id}".`)
+      return
+    }
+
+    deleteRegistryError.value = registryErrorMessage(result.code, result.error, 'Removing')
+  } catch (err) {
+    deleteRegistryError.value = 'Failed to remove registry: ' + (err as Error).message
+  } finally {
+    deletingRegistry.value = false
   }
 }
 

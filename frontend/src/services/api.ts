@@ -678,10 +678,10 @@ class APIService {
     return this.request<SearchRegistryServersResponse>(url)
   }
 
-  // MCP-866 / MCP-867: add a user-supplied registry source. The server always
-  // tags an added source custom/unverified (provenance is NOT part of the
-  // request), so every server later discovered through it lands quarantined and
-  // can never skip quarantine. We mirror the structured-error pattern of
+  // MCP-866 / MCP-867: add a user-supplied registry source. The server tags an
+  // added source as custom provenance (provenance is NOT part of the request) —
+  // informational only (MCP-1072); servers added from it follow the global
+  // quarantine default like any other. We mirror the structured-error pattern of
   // addServerFromRegistry so the UI can branch on the stable `code`
   // (invalid_registry_url | registries_locked | registry_shadows_builtin |
   // duplicate_registry).
@@ -710,6 +710,92 @@ class APIService {
         if (response.status === 401 || response.status === 403) {
           // registries_locked is a 403 but is a policy decision, not an auth
           // failure — only emit the auth-error path for a missing/invalid key.
+          if (payload?.code !== 'registries_locked') {
+            this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
+          }
+        }
+        return {
+          success: false,
+          error: payload?.error || `HTTP ${response.status}: ${response.statusText}`,
+          code: payload?.code
+        }
+      }
+
+      return { success: true, registry: payload?.data?.registry }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
+  }
+
+  // MCP-1073: edit a user-added custom registry source via
+  // PUT /api/v1/registries/{id}. Only the fields supplied are sent; empty fields
+  // are left unchanged server-side. Built-in registries are read-only and the
+  // backend refuses them with registry_shadows_builtin. Mirrors
+  // addRegistrySource's structured-error contract (registry_not_found |
+  // registry_shadows_builtin | invalid_registry_url | registries_locked).
+  async editRegistrySource(
+    id: string,
+    opts: { name?: string; url?: string; serversUrl?: string }
+  ): Promise<AddRegistrySourceResult> {
+    const body: Record<string, unknown> = {}
+    if (opts.name) body.name = opts.name
+    if (opts.url) body.url = opts.url
+    if (opts.serversUrl) body.servers_url = opts.serversUrl
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/registries/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(body)
+      })
+
+      const payload: any = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          if (payload?.code !== 'registries_locked') {
+            this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
+          }
+        }
+        return {
+          success: false,
+          error: payload?.error || `HTTP ${response.status}: ${response.statusText}`,
+          code: payload?.code
+        }
+      }
+
+      return { success: true, registry: payload?.data?.registry }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
+  }
+
+  // MCP-1073: remove a user-added custom registry source via
+  // DELETE /api/v1/registries/{id}. Servers already added from it stay; only the
+  // source is removed. Built-in registries are read-only (registry_shadows_builtin).
+  async removeRegistrySource(id: string): Promise<AddRegistrySourceResult> {
+    const headers: Record<string, string> = {}
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/registries/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers
+      })
+
+      const payload: any = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
           if (payload?.code !== 'registries_locked') {
             this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
           }
