@@ -8,15 +8,13 @@ import (
 
 // defaultRegistryIDs are the built-in registries shipped in
 // config.DefaultConfig(). A user-supplied config must MERGE with these, not
-// replace them (FR-006). The set was standardized on the official MCP registry
-// protocol (MCP-865): official + built-in reference primary, Docker kept, Pulse
-// and Smithery demoted to opt-in.
+// replace them (FR-006). The shipped set was trimmed to exactly three
+// official/trusted entries (MCP-1049): the official MCP registry, the built-in
+// reference servers, and the Docker MCP catalog. Pulse and Smithery were removed.
 var defaultRegistryIDs = []string{
 	"official",
 	"reference",
 	"docker-mcp-catalog",
-	"pulse",
-	"smithery",
 }
 
 func registryIDSet(t *testing.T) map[string]RegistryEntry {
@@ -57,7 +55,7 @@ func TestSetRegistriesFromConfig_MergesCustomWithDefaults(t *testing.T) {
 func TestSetRegistriesFromConfig_CustomOverridesDefaultByID(t *testing.T) {
 	cfg := &config.Config{
 		Registries: []config.RegistryEntry{
-			{ID: "pulse", Name: "Pulse OVERRIDDEN", ServersURL: "https://override.example/servers"},
+			{ID: "official", Name: "Official OVERRIDDEN", ServersURL: "https://override.example/servers"},
 		},
 	}
 
@@ -67,8 +65,38 @@ func TestSetRegistriesFromConfig_CustomOverridesDefaultByID(t *testing.T) {
 	if len(got) != len(defaultRegistryIDs) {
 		t.Errorf("override should not change registry count: want %d got %d", len(defaultRegistryIDs), len(got))
 	}
-	if got["pulse"].Name != "Pulse OVERRIDDEN" {
-		t.Errorf("colliding-ID config entry did not override default: got name %q", got["pulse"].Name)
+	if got["official"].Name != "Official OVERRIDDEN" {
+		t.Errorf("colliding-ID config entry did not override default: got name %q", got["official"].Name)
+	}
+}
+
+// MCP-1049: a deprecated former-default registry still persisted in config must
+// NOT resurface in the merged list, while a genuine custom registry is kept.
+func TestSetRegistriesFromConfig_SkipsDeprecatedFormerDefaults(t *testing.T) {
+	cfg := &config.Config{
+		Registries: []config.RegistryEntry{
+			{ID: "pulse", Name: "Pulse MCP"},
+			{ID: "smithery", Name: "Smithery"},
+			{ID: "fleur", Name: "Fleur"},
+			{ID: "azure-mcp-demo", Name: "Azure MCP Registry Demo"},
+			{ID: "remote-mcp-servers", Name: "Remote MCP Servers"},
+			{ID: "mycorp", Name: "My Corp Registry", ServersURL: "https://reg.mycorp.example/servers"},
+		},
+	}
+
+	SetRegistriesFromConfig(cfg)
+
+	got := registryIDSet(t)
+	for _, gone := range []string{"pulse", "smithery", "fleur", "azure-mcp-demo", "remote-mcp-servers"} {
+		if _, ok := got[gone]; ok {
+			t.Errorf("deprecated former-default %q must not resurface in the merged list", gone)
+		}
+	}
+	if _, ok := got["mycorp"]; !ok {
+		t.Errorf("genuine custom registry %q must be preserved", "mycorp")
+	}
+	if len(got) != len(defaultRegistryIDs)+1 {
+		t.Errorf("expected %d registries (3 defaults + 1 custom), got %d", len(defaultRegistryIDs)+1, len(got))
 	}
 }
 

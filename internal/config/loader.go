@@ -485,6 +485,12 @@ func createDefaultConfigFile(path string, cfg *Config) error {
 
 // initializeRegistries initializes the registries package with config data
 func initializeRegistries(cfg *Config) {
+	// One-time migration (MCP-1049): drop former-default registries that were
+	// trimmed from the shipped set so an existing config converges to the current
+	// defaults instead of resurrecting them on every load. Idempotent and only
+	// touches the known former-default id set, never user-added customs.
+	PruneDeprecatedRegistries(cfg)
+
 	// This function will be implemented to avoid circular imports
 	// For now, we'll create a callback mechanism
 	if registriesInitCallback != nil {

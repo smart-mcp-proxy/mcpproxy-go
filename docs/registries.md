@@ -11,8 +11,14 @@ available via the `search_servers` / `list_registries` MCP tools, the
 | `official` | Official MCP Registry | `modelcontextprotocol/registry` | no | Primary, zero-config aggregator (`registry.modelcontextprotocol.io/v0.1/servers`). |
 | `reference` | Reference Servers | `builtin/reference` | no | Curated `@modelcontextprotocol` servers, **shipped in-binary** so the basics work offline. |
 | `docker-mcp-catalog` | Docker MCP Catalog | `custom/docker` | no | Signed-container MCP server inventory. |
-| `pulse` | Pulse MCP | `custom/pulse` | **yes** | Opt-in; set `MCPPROXY_REGISTRY_PULSE_API_KEY`. |
-| `smithery` | Smithery | `modelcontextprotocol/registry` | **yes** | Opt-in; set `MCPPROXY_REGISTRY_SMITHERY_API_KEY`. |
+
+The shipped default set is exactly these **three** official/trusted entries. Earlier
+versions also shipped `pulse`, `smithery`, `fleur`, `azure-mcp-demo`, and
+`remote-mcp-servers` as defaults; these were removed. They are pruned from an
+existing `mcp_config.json` on load (genuinely user-added custom registries are never
+touched), so upgrading installs converge to the three above. `pulse` and `smithery`
+can still be **added back** as custom sources (see *Adding your own registry source*);
+when added they read `MCPPROXY_REGISTRY_PULSE_API_KEY` / `MCPPROXY_REGISTRY_SMITHERY_API_KEY`.
 
 Key-requiring registries are **skipped** (not failed) when no key is configured, so
 a default search always succeeds. The API-key env var is
@@ -29,7 +35,7 @@ Every registry carries a **provenance** tag:
 
 | Provenance | Meaning |
 |---|---|
-| `official/trusted` | A shipped, built-in default (the five above). |
+| `official/trusted` | A shipped, built-in default (the three above). |
 | `custom/unverified` | Any registry the user added at runtime, or any non-default ID in `mcp_config.json`. |
 
 Trust is **derived, not asserted** — it comes solely from whether the registry ID

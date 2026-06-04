@@ -912,29 +912,52 @@ func DefaultRegistries() []RegistryEntry {
 			Protocol:    "custom/docker",
 			Provenance:  RegistryProvenanceOfficial,
 		},
-		{
-			ID:          "pulse",
-			Name:        "Pulse MCP",
-			Description: "Browse and discover MCP use-cases, servers, clients, and news (opt-in: requires an API key)",
-			URL:         "https://www.pulsemcp.com/",
-			ServersURL:  "https://api.pulsemcp.com/v0.1/servers",
-			Tags:        []string{"verified"},
-			Protocol:    "custom/pulse",
-			RequiresKey: true,
-			Provenance:  RegistryProvenanceOfficial,
-		},
-		{
-			ID:          "smithery",
-			Name:        "Smithery",
-			Description: "Smithery MCP server registry (opt-in: requires an API key)",
-			URL:         "https://smithery.ai/",
-			ServersURL:  "https://api.smithery.ai/servers",
-			Tags:        []string{"verified"},
-			Protocol:    "modelcontextprotocol/registry",
-			RequiresKey: true,
-			Provenance:  RegistryProvenanceOfficial,
-		},
 	}
+}
+
+// deprecatedDefaultRegistryIDs are registry ids that were SHIPPED as built-in
+// defaults in earlier versions and have since been removed from
+// DefaultRegistries(). Because the registries merge (registry_data.go) keys by id
+// and never prunes, a former default persisted in a user's config would otherwise
+// resurface forever. They are pruned from the persisted config on load
+// (PruneDeprecatedRegistries) and skipped by the merge so the running app
+// converges to the trimmed default set (MCP-1049). Genuinely user-added custom
+// registries are never in this set, so they are always preserved.
+var deprecatedDefaultRegistryIDs = map[string]bool{
+	"pulse":              true,
+	"smithery":           true,
+	"fleur":              true,
+	"azure-mcp-demo":     true,
+	"remote-mcp-servers": true,
+}
+
+// IsDeprecatedDefaultRegistry reports whether id is a known former-default
+// registry that was removed from the shipped set and must not be resurrected.
+func IsDeprecatedDefaultRegistry(id string) bool {
+	return deprecatedDefaultRegistryIDs[id]
+}
+
+// PruneDeprecatedRegistries removes deprecated former-default registries
+// (IsDeprecatedDefaultRegistry) from cfg.Registries in place and returns the
+// number removed. It is idempotent and matches by the known former-default id set
+// ONLY, so a genuinely user-added custom registry is never dropped.
+func PruneDeprecatedRegistries(cfg *Config) int {
+	if cfg == nil || len(cfg.Registries) == 0 {
+		return 0
+	}
+	kept := make([]RegistryEntry, 0, len(cfg.Registries))
+	removed := 0
+	for _, r := range cfg.Registries {
+		if IsDeprecatedDefaultRegistry(r.ID) {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if removed > 0 {
+		cfg.Registries = kept
+	}
+	return removed
 }
 
 // DefaultConfig returns a default configuration
