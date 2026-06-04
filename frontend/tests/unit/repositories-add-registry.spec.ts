@@ -4,16 +4,19 @@ import { createPinia, setActivePinia } from 'pinia'
 import Repositories from '@/views/Repositories.vue'
 import api from '@/services/api'
 
-// MCP-867: the Repositories view gains an add-registry affordance, provenance
-// surfacing, and a one-time third-party warning. These tests lock the gating
-// (warning shown before the first custom add; skipped after acknowledgement)
-// and the provenance badge selection.
+// MCP-867 + MCP-1073: the Repositories view exposes an add-registry affordance
+// and surfaces provenance neutrally. MCP-1073 removed the alarming one-time
+// third-party warning gate and the "always quarantined" copy — adding a custom
+// source now goes straight through, and trust is surfaced as a neutral
+// Official/Custom badge.
 
 vi.mock('@/services/api', () => ({
   default: {
     listRegistries: vi.fn(),
     searchRegistryServers: vi.fn(),
     addRegistrySource: vi.fn(),
+    editRegistrySource: vi.fn(),
+    removeRegistrySource: vi.fn(),
     addServerFromRegistry: vi.fn(),
   },
 }))
@@ -34,7 +37,7 @@ const officialRegistry = {
   name: 'Official MCP Registry',
   description: 'The official registry',
   url: 'https://registry.modelcontextprotocol.io/',
-  provenance: 'official/trusted',
+  provenance: 'official',
   trusted: true,
 }
 
@@ -43,11 +46,11 @@ const customRegistry = {
   name: 'Acme Registry',
   description: 'A custom source',
   url: 'https://acme.example/registry',
-  provenance: 'custom/unverified',
+  provenance: 'custom',
   trusted: false,
 }
 
-describe('Repositories — add registry + provenance + third-party warning', () => {
+describe('Repositories — add registry + neutral provenance (MCP-867/MCP-1073)', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     localStorage.clear()
@@ -68,11 +71,7 @@ describe('Repositories — add registry + provenance + third-party warning', () 
     expect(wrapper.find('[data-test="registry-add-source-button"]').exists()).toBe(true)
   })
 
-  it('flags a custom registry as unverified in the multiselect and an official one without that suffix', async () => {
-    // R4: provenance banner removed; trust surfaced inline in the registry
-    // multiselect (R1) — the option label carries "— unverified" for
-    // third-party registries. R1: it is a multiselect (checkboxes), not a
-    // single <select>.
+  it('surfaces trust neutrally: custom flagged "custom" in the multiselect, official without it; no alarming banner', async () => {
     const wrapper = mountView()
     await flushPromises()
 
@@ -80,12 +79,13 @@ describe('Repositories — add registry + provenance + third-party warning', () 
     const officialOpt = wrapper.find('[data-test="registry-option-official"]')
     expect(acmeOpt.exists()).toBe(true)
     expect(officialOpt.exists()).toBe(true)
-    expect((acmeOpt.element as HTMLElement).closest('label')?.textContent).toContain('unverified')
-    expect((officialOpt.element as HTMLElement).closest('label')?.textContent).not.toContain('unverified')
+    expect((acmeOpt.element as HTMLElement).closest('label')?.textContent).toContain('custom')
+    expect((officialOpt.element as HTMLElement).closest('label')?.textContent).not.toContain('custom')
 
-    // The old prominent banner / quarantine-note block is gone.
-    expect(wrapper.find('[data-test="registry-provenance-badge-custom"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="registry-custom-quarantine-note"]').exists()).toBe(false)
+    // No alarming copy anywhere, and the old warning gate is gone.
+    expect(wrapper.find('[data-test="registry-third-party-warning"]').exists()).toBe(false)
+    expect(wrapper.html().toLowerCase()).not.toContain('unverified')
+    expect(wrapper.html().toLowerCase()).not.toContain('always quarantined')
   })
 
   it('multiselect: toggling a registry searches it; selecting a second searches across both (R1)', async () => {
@@ -103,56 +103,31 @@ describe('Repositories — add registry + provenance + third-party warning', () 
     expect(searched).toContain('acme')
   })
 
-  it('shows the one-time third-party warning before the first add and does NOT call the API yet', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-
-    await wrapper.find('[data-test="registry-add-source-button"]').trigger('click')
-    await wrapper.find('[data-test="registry-add-url-input"]').setValue('https://acme.example/registry')
-    await wrapper.find('[data-test="registry-add-form"]').trigger('submit')
-    await flushPromises()
-
-    // Warning is shown; the add request has not gone out.
-    expect((wrapper.find('[data-test="registry-third-party-warning"]').element as HTMLDialogElement).hasAttribute('open')).toBe(true)
-    expect(api.addRegistrySource).not.toHaveBeenCalled()
-  })
-
-  it('proceeds with the add after acknowledging, and persists acknowledgement so the warning is skipped next time', async () => {
+  it('adds a custom source directly — no warning gate, no acknowledgement persisted', async () => {
     ;(api.addRegistrySource as any).mockResolvedValue({
       success: true,
-      registry: { id: 'acme', name: 'Acme Registry', provenance: 'custom/unverified', trusted: false },
+      registry: { id: 'acme', name: 'Acme Registry', provenance: 'custom', trusted: false },
     })
 
     const wrapper = mountView()
     await flushPromises()
 
-    // First add → warning → acknowledge → API called once.
     await wrapper.find('[data-test="registry-add-source-button"]').trigger('click')
     await wrapper.find('[data-test="registry-add-url-input"]').setValue('https://acme.example/registry')
     await wrapper.find('[data-test="registry-add-form"]').trigger('submit')
     await flushPromises()
-    await wrapper.find('[data-test="registry-third-party-acknowledge"]').trigger('click')
-    await flushPromises()
 
+    // The add goes straight through; no warning dialog, no localStorage ack.
     expect(api.addRegistrySource).toHaveBeenCalledTimes(1)
     expect(api.addRegistrySource).toHaveBeenCalledWith('https://acme.example/registry', {
       protocol: 'modelcontextprotocol/registry',
       name: undefined,
     })
-    expect(localStorage.getItem('mcpproxy-thirdparty-registry-ack')).toBe('true')
-
-    // Second add → no warning, API called directly.
-    await wrapper.find('[data-test="registry-add-source-button"]').trigger('click')
-    await wrapper.find('[data-test="registry-add-url-input"]').setValue('https://other.example/registry')
-    await wrapper.find('[data-test="registry-add-form"]').trigger('submit')
-    await flushPromises()
-
-    expect((wrapper.find('[data-test="registry-third-party-warning"]').element as HTMLDialogElement).hasAttribute('open')).toBe(false)
-    expect(api.addRegistrySource).toHaveBeenCalledTimes(2)
+    expect(localStorage.getItem('mcpproxy-thirdparty-registry-ack')).toBe(null)
+    expect(wrapper.find('[data-test="registry-third-party-warning"]').exists()).toBe(false)
   })
 
   it('surfaces a friendly message for a locked-registries error', async () => {
-    localStorage.setItem('mcpproxy-thirdparty-registry-ack', 'true')
     ;(api.addRegistrySource as any).mockResolvedValue({
       success: false,
       code: 'registries_locked',

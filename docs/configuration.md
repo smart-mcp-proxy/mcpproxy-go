@@ -791,17 +791,20 @@ See [Code Execution Documentation](code_execution/overview.md) for complete deta
 
 ## Registries
 
+The three default registries ship built-in and require no configuration. Use
+the `registries` array only to **add your own** custom source:
+
 ```json
 {
   "registries": [
     {
-      "id": "pulse",
-      "name": "Pulse MCP",
-      "description": "Browse and discover MCP use-cases, servers, clients, and news",
-      "url": "https://www.pulsemcp.com/",
-      "servers_url": "https://api.pulsemcp.com/v0beta/servers",
-      "tags": ["verified"],
-      "protocol": "custom/pulse"
+      "id": "mycorp",
+      "name": "My Corp Registry",
+      "description": "Internal MCP server catalog",
+      "url": "https://registry.mycorp.example/",
+      "servers_url": "https://registry.mycorp.example/v0.1/servers",
+      "tags": ["internal"],
+      "protocol": "modelcontextprotocol/registry"
     }
   ]
 }
@@ -818,14 +821,14 @@ See [Code Execution Documentation](code_execution/overview.md) for complete deta
 | `protocol` | string | Registry protocol type |
 | `count` | number/string | Number of servers in registry (auto-populated) |
 
-**Default Registries:**
-- Pulse MCP
-- Docker MCP Catalog
-- Fleur
-- Azure MCP Registry Demo
-- Remote MCP Servers
+**Default Registries** (shipped built-in, no configuration required):
+- `official` — Official MCP Registry (`modelcontextprotocol/registry`): primary, zero-config aggregator
+- `reference` — Reference Servers (`builtin/reference`): curated `@modelcontextprotocol` servers, shipped in-binary so the basics work offline
+- `docker-mcp-catalog` — Docker MCP Catalog (`custom/docker`): signed-container MCP server inventory
 
-See [Search Servers Documentation](search_servers.md) for complete details.
+> **Deprecated former-defaults:** earlier versions also shipped `pulse`, `smithery`, `fleur`, `azure-mcp-demo`, and `remote-mcp-servers` as defaults. These were removed and are pruned from an existing `mcp_config.json` on load, so upgrades converge to the three defaults above. Genuinely user-added custom registries are never touched; `pulse`/`smithery` can be added back as custom sources.
+
+See [Registries Documentation](registries.md) and [Search Servers Documentation](search_servers.md) for complete details.
 
 ---
 

@@ -15,23 +15,45 @@ final class RegistryModelsTests: XCTestCase {
     // MARK: - Provenance / trust derivation (mirrors Web UI isCustomRegistry)
 
     func testRegistryProvenanceConstants() {
-        XCTAssertEqual(RegistryProvenance.official, "official/trusted")
-        XCTAssertEqual(RegistryProvenance.custom, "custom/unverified")
+        // MCP-1074: provenance simplified to the 2-value model.
+        XCTAssertEqual(RegistryProvenance.official, "official")
+        XCTAssertEqual(RegistryProvenance.custom, "custom")
     }
 
     func testOfficialRegistryIsNotCustom() throws {
+        // New 2-value model: provenance "official".
         let json = """
         {"id": "official", "name": "Official MCP Registry",
-         "provenance": "official/trusted", "trusted": true}
+         "provenance": "official", "trusted": true}
         """
         let reg = try decode(Registry.self, from: json)
         XCTAssertFalse(reg.isCustom)
     }
 
     func testCustomProvenanceIsCustom() throws {
+        // New 2-value model: provenance "custom".
         let json = """
         {"id": "acme", "name": "Acme Corp",
-         "provenance": "custom/unverified", "trusted": false}
+         "provenance": "custom", "trusted": false}
+        """
+        let reg = try decode(Registry.self, from: json)
+        XCTAssertTrue(reg.isCustom)
+    }
+
+    func testCustomProvenanceAloneIsCustom() throws {
+        // Defensive: provenance "custom" with no trusted flag still reads custom.
+        let json = """
+        {"id": "acme", "name": "Acme Corp", "provenance": "custom"}
+        """
+        let reg = try decode(Registry.self, from: json)
+        XCTAssertTrue(reg.isCustom)
+    }
+
+    func testLegacyCustomProvenanceStillReadsCustom() throws {
+        // Backward-compat: a legacy "custom/unverified" payload (pre-MCP-1072)
+        // must still read as custom.
+        let json = """
+        {"id": "acme", "name": "Acme Corp", "provenance": "custom/unverified"}
         """
         let reg = try decode(Registry.self, from: json)
         XCTAssertTrue(reg.isCustom)
@@ -128,6 +150,14 @@ final class RegistryModelsTests: XCTestCase {
         )
     }
 
+    func testErrorMessageRegistryNotFound() {
+        // MCP-1074: edit/remove can fail with registry_not_found.
+        XCTAssertEqual(
+            AddRegistrySourceResult.message(code: "registry_not_found", fallback: nil),
+            "That registry no longer exists — it may have already been removed."
+        )
+    }
+
     func testErrorMessageUnknownFallsBack() {
         XCTAssertEqual(
             AddRegistrySourceResult.message(code: nil, fallback: "boom"),
@@ -139,21 +169,39 @@ final class RegistryModelsTests: XCTestCase {
         )
     }
 
-    // MARK: - One-time third-party warning ack persistence (mirrors localStorage)
+    // MARK: - Registry lookup by name-or-id (MCP-1050 badge → info popup)
 
-    func testThirdPartyAckPersistence() throws {
-        let suiteName = "test-thirdparty-ack-\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+    private func sampleRegistries() throws -> [Registry] {
+        let json = """
+        {"registries":[
+          {"id":"official","name":"Official MCP Registry",
+           "description":"Primary aggregator","url":"https://registry.modelcontextprotocol.io",
+           "provenance":"official/trusted","trusted":true},
+          {"id":"acme","name":"Acme","provenance":"custom/unverified","trusted":false}
+        ],"total":2}
+        """
+        return try decode(GetRegistriesResponse.self, from: json).registries
+    }
 
-        let ack = ThirdPartyRegistryAck(defaults: defaults)
-        XCTAssertFalse(ack.hasAcknowledged, "fresh defaults should not be acknowledged")
+    func testLookupMatchesByID() throws {
+        let regs = try sampleRegistries()
+        XCTAssertEqual(Registry.lookup("official", in: regs)?.id, "official")
+    }
 
-        ack.acknowledge()
-        XCTAssertTrue(ack.hasAcknowledged, "acknowledge() must persist")
+    func testLookupFallsBackToName() throws {
+        // A search result's `registry` field carries the registry *name*, so a
+        // name match must resolve when no id matches.
+        let regs = try sampleRegistries()
+        XCTAssertEqual(Registry.lookup("Acme", in: regs)?.id, "acme")
+    }
 
-        // A new instance over the same defaults sees the persisted ack.
-        let ack2 = ThirdPartyRegistryAck(defaults: defaults)
-        XCTAssertTrue(ack2.hasAcknowledged)
+    func testLookupNameIsCaseInsensitive() throws {
+        let regs = try sampleRegistries()
+        XCTAssertEqual(Registry.lookup("ACME", in: regs)?.id, "acme")
+    }
+
+    func testLookupReturnsNilWhenNotFound() throws {
+        let regs = try sampleRegistries()
+        XCTAssertNil(Registry.lookup("nonexistent", in: regs))
     }
 }

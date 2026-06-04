@@ -10,28 +10,39 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 )
 
-// MCP-866: a server derived from a custom/unverified registry is ALWAYS
-// quarantined and never skips quarantine, even when the global quarantine
-// default is off. Its source registry id + provenance are stamped onto the
+// MCP-1072: a server derived from a custom registry now follows the GLOBAL
+// quarantine default like everything else — provenance no longer forces
+// quarantine. Its source registry id + provenance are still stamped onto the
 // config so the approval/quarantine view can surface the origin.
-func TestAddFromRegistry_CustomOriginAlwaysQuarantined(t *testing.T) {
+func TestAddFromRegistry_CustomOriginFollowsGlobalDefault(t *testing.T) {
 	entry := &registries.ServerEntry{ID: "x", Name: "x", InstallCmd: "npx x"}
 
-	cfg, err := buildServerConfigFromEntry(entry, &AddFromRegistryRequest{
-		RegistryID:       "acme",
-		ServerID:         "x",
-		SourceRegistryID: "acme",
-		SourceProvenance: config.RegistryProvenanceCustom,
-	}, false) // global default OFF — custom origin must still quarantine.
+	build := func(quarantineDefault bool) *config.ServerConfig {
+		cfg, err := buildServerConfigFromEntry(entry, &AddFromRegistryRequest{
+			RegistryID:       "acme",
+			ServerID:         "x",
+			SourceRegistryID: "acme",
+			SourceProvenance: config.RegistryProvenanceCustom,
+		}, quarantineDefault)
+		require.NoError(t, err)
+		return cfg
+	}
 
-	require.NoError(t, err)
-	assert.True(t, cfg.Quarantined, "custom/unverified origin must always quarantine")
-	assert.False(t, cfg.SkipQuarantine, "custom/unverified origin must never skip quarantine")
-	assert.Equal(t, "acme", cfg.SourceRegistryID)
-	assert.Equal(t, config.RegistryProvenanceCustom, cfg.SourceRegistryProvenance)
-	// The derived config must itself pass validation (no skip_quarantine clash).
+	// Global default ON → quarantined.
+	on := build(true)
+	assert.True(t, on.Quarantined, "custom origin quarantines when the global default is on")
+	assert.Equal(t, "acme", on.SourceRegistryID)
+	assert.Equal(t, config.RegistryProvenanceCustom, on.SourceRegistryProvenance)
+
+	// Global default OFF → NOT quarantined (no more special-casing).
+	off := build(false)
+	assert.False(t, off.Quarantined, "custom origin must NOT be force-quarantined when the global default is off")
+	assert.False(t, off.SkipQuarantine, "skip_quarantine is not forced either way")
+	assert.Equal(t, config.RegistryProvenanceCustom, off.SourceRegistryProvenance)
+
+	// The derived config still passes validation.
 	full := config.DefaultConfig()
-	full.Servers = []*config.ServerConfig{cfg}
+	full.Servers = []*config.ServerConfig{off}
 	assert.NoError(t, full.Validate())
 }
 

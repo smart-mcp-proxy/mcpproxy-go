@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"go.uber.org/zap/zaptest"
@@ -140,8 +143,10 @@ func (c *provenanceController) ListRegistries() ([]interface{}, error) {
 	}, nil
 }
 
-// MCP-866: provenance is surfaced on the REST API; custom registries show
-// provenance=custom/unverified and trusted=false.
+// MCP-866 / MCP-1072: provenance is surfaced on the REST API and normalized on
+// read — legacy "official/trusted"/"custom/unverified" strings persisted by
+// earlier builds are emitted as the two-value "official"/"custom" form. Custom
+// registries show provenance=custom and trusted=false.
 func TestListRegistries_SurfacesProvenanceAndTrusted(t *testing.T) {
 	srv := NewServer(&provenanceController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/registries", http.NoBody)
@@ -163,25 +168,25 @@ func TestListRegistries_SurfacesProvenanceAndTrusted(t *testing.T) {
 		byID[r.ID] = r
 	}
 
-	// Official registry: provenance=official/trusted, trusted=true
+	// Official registry: legacy "official/trusted" normalizes to "official", trusted=true
 	official, ok := byID["official-reg"]
 	if !ok {
 		t.Fatal("official-reg not found in response")
 	}
-	if official.Provenance != "official/trusted" {
-		t.Errorf("official-reg provenance: want official/trusted, got %q", official.Provenance)
+	if official.Provenance != "official" {
+		t.Errorf("official-reg provenance: want official, got %q", official.Provenance)
 	}
 	if !official.Trusted {
 		t.Error("official-reg trusted: want true, got false")
 	}
 
-	// Custom registry: provenance=custom/unverified, trusted=false
+	// Custom registry: legacy "custom/unverified" normalizes to "custom", trusted=false
 	custom, ok := byID["custom-reg"]
 	if !ok {
 		t.Fatal("custom-reg not found in response")
 	}
-	if custom.Provenance != "custom/unverified" {
-		t.Errorf("custom-reg provenance: want custom/unverified, got %q", custom.Provenance)
+	if custom.Provenance != "custom" {
+		t.Errorf("custom-reg provenance: want custom, got %q", custom.Provenance)
 	}
 	if custom.Trusted {
 		t.Error("custom-reg trusted: want false, got true")
@@ -197,5 +202,151 @@ func TestListRegistries_SurfacesProvenanceAndTrusted(t *testing.T) {
 	}
 	if none.Trusted {
 		t.Error("no-provenance-reg trusted: want false, got true")
+	}
+}
+
+// removeController simulates the server-side remove-source op: it removes the
+// custom "acme" registry, refuses the built-in "official", and reports
+// registry_not_found for anything else (MCP-1057).
+type removeController struct {
+	*MockServerController
+}
+
+func (c *removeController) RemoveRegistrySourceRef(id string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	switch id {
+	case "acme":
+		return &config.RegistryEntry{
+			ID:         "acme",
+			Name:       "Acme",
+			URL:        "https://acme.example/",
+			Provenance: config.RegistryProvenanceCustom,
+		}, nil, nil
+	case "official":
+		rerr := &contracts.RegistryAddError{Code: "registry_shadows_builtin", Message: `"official" is a built-in registry and cannot be removed`}
+		return nil, rerr, errors.New(rerr.Message)
+	default:
+		rerr := &contracts.RegistryAddError{Code: "registry_not_found", Message: "no custom registry with id " + id}
+		return nil, rerr, errors.New(rerr.Message)
+	}
+}
+
+// MCP-1057: DELETE removes a custom registry and echoes it with trusted=false.
+func TestRemoveRegistrySource_RemovesCustom(t *testing.T) {
+	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/acme", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp contracts.RemoveRegistrySourceData
+	decodeData(t, w, &resp)
+	if resp.Registry.ID != "acme" {
+		t.Errorf("expected removed id=acme, got %q", resp.Registry.ID)
+	}
+	if resp.Registry.Trusted {
+		t.Error("a custom registry must report trusted=false")
+	}
+}
+
+// MCP-1057: removing a built-in is refused with 409 registry_shadows_builtin.
+func TestRemoveRegistrySource_RefusesBuiltin(t *testing.T) {
+	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/official", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// MCP-1057: removing an unknown registry yields 404 registry_not_found.
+func TestRemoveRegistrySource_NotFound(t *testing.T) {
+	srv := NewServer(&removeController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/registries/ghost", http.NoBody)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// editController exercises PUT /api/v1/registries/{id}: updates the custom
+// "acme" registry, refuses the built-in "official", and reports
+// registry_not_found for anything else (MCP-1072).
+type editController struct {
+	*MockServerController
+}
+
+func (c *editController) EditRegistrySourceRef(id, name, rawURL, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	switch id {
+	case "acme":
+		entry := &config.RegistryEntry{ID: "acme", Name: "Acme", URL: "https://acme.example/", Provenance: config.RegistryProvenanceCustom}
+		if name != "" {
+			entry.Name = name
+		}
+		if rawURL != "" {
+			entry.URL = rawURL
+		}
+		return entry, nil, nil
+	case "official":
+		rerr := &contracts.RegistryAddError{Code: "registry_shadows_builtin", Message: `"official" is a built-in registry and cannot be edited`}
+		return nil, rerr, errors.New(rerr.Message)
+	default:
+		rerr := &contracts.RegistryAddError{Code: "registry_not_found", Message: "no custom registry with id " + id}
+		return nil, rerr, errors.New(rerr.Message)
+	}
+}
+
+// MCP-1072: PUT updates a custom registry and echoes it with trusted=false.
+func TestEditRegistrySource_UpdatesCustom(t *testing.T) {
+	srv := NewServer(&editController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/registries/acme", strings.NewReader(`{"name":"Acme Prod","url":"https://acme.example/api"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var resp contracts.EditRegistrySourceData
+	decodeData(t, w, &resp)
+	if resp.Registry.Name != "Acme Prod" {
+		t.Errorf("expected updated name=Acme Prod, got %q", resp.Registry.Name)
+	}
+	if resp.Registry.URL != "https://acme.example/api" {
+		t.Errorf("expected updated url, got %q", resp.Registry.URL)
+	}
+	if resp.Registry.Trusted {
+		t.Error("a custom registry must report trusted=false")
+	}
+}
+
+// MCP-1072: editing a built-in is refused with 409 registry_shadows_builtin.
+func TestEditRegistrySource_RefusesBuiltin(t *testing.T) {
+	srv := NewServer(&editController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/registries/official", strings.NewReader(`{"name":"hijack"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d (body=%s)", w.Code, w.Body.String())
+	}
+}
+
+// MCP-1072: editing an unknown registry yields 404 registry_not_found.
+func TestEditRegistrySource_NotFound(t *testing.T) {
+	srv := NewServer(&editController{&MockServerController{}}, zaptest.NewLogger(t).Sugar(), nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/registries/ghost", strings.NewReader(`{"name":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d (body=%s)", w.Code, w.Body.String())
 	}
 }

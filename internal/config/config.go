@@ -264,10 +264,10 @@ type ServerConfig struct {
 	// for manually-configured servers). MCP-866: surfaced in the approval /
 	// quarantine view so a reviewer can see a server's origin.
 	SourceRegistryID string `json:"source_registry_id,omitempty" mapstructure:"source_registry_id"`
-	// SourceRegistryProvenance is the trust tag of the source registry at add
-	// time (RegistryProvenanceOfficial / RegistryProvenanceCustom). When it is
-	// RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
-	// unverified registry can never opt its servers out of quarantine.
+	// SourceRegistryProvenance records the source registry's provenance at add
+	// time (RegistryProvenanceOfficial / RegistryProvenanceCustom). It is purely
+	// informational (MCP-1072) — surfaced so a reviewer can see a server's origin
+	// — and no longer gates quarantine or skip_quarantine.
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty" mapstructure:"source_registry_provenance"`
 
 	// AuthBroker holds per-upstream token-brokering configuration (spec 074,
@@ -660,15 +660,50 @@ func (c *OutputSanitisationConfig) WouldMutate(trust string) bool {
 
 // Registry provenance tags (MCP-866). Trust is derived, not user-asserted: a
 // registry is "trusted" only when it is one of the shipped built-in defaults.
-// Anything a user adds at runtime (e.g. via `registry add-source`) is
-// "custom/unverified" and can NEVER skip quarantine — there is no allowlist a
-// user can append themselves into.
+// Anything a user adds at runtime (e.g. via `registry add-source`) is "custom".
+// Provenance is purely informational now (MCP-1072): it no longer forces
+// quarantine — servers added from any registry follow the global quarantine
+// default. It still drives the derived "trusted" flag a few surfaces show.
 const (
 	// RegistryProvenanceOfficial marks a built-in, shipped-by-default registry.
-	RegistryProvenanceOfficial = "official/trusted"
-	// RegistryProvenanceCustom marks a user-added registry of unknown trust.
-	RegistryProvenanceCustom = "custom/unverified"
+	RegistryProvenanceOfficial = "official"
+	// RegistryProvenanceCustom marks a user-added registry.
+	RegistryProvenanceCustom = "custom"
 )
+
+// NormalizeRegistryProvenance maps legacy provenance strings persisted by
+// earlier builds (MCP-866's "official/trusted" / "custom/unverified") onto the
+// current two-value vocabulary ("official" / "custom"). Already-current and
+// empty values pass through unchanged, so the mapping is idempotent. This lets
+// an existing config.db converge without breaking on read (MCP-1072).
+func NormalizeRegistryProvenance(p string) string {
+	switch p {
+	case "official/trusted", RegistryProvenanceOfficial:
+		return RegistryProvenanceOfficial
+	case "custom/unverified", RegistryProvenanceCustom:
+		return RegistryProvenanceCustom
+	default:
+		return p
+	}
+}
+
+// normalizeRegistryProvenanceValues rewrites legacy provenance strings on a
+// loaded config in place — both registry entries and the per-server source
+// provenance tag — so existing installs converge to the two-value vocabulary
+// (MCP-1072). Idempotent and nil-safe.
+func normalizeRegistryProvenanceValues(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for i := range cfg.Registries {
+		cfg.Registries[i].Provenance = NormalizeRegistryProvenance(cfg.Registries[i].Provenance)
+	}
+	for _, s := range cfg.Servers {
+		if s != nil {
+			s.SourceRegistryProvenance = NormalizeRegistryProvenance(s.SourceRegistryProvenance)
+		}
+	}
+}
 
 // RegistryEntry represents a registry in the configuration
 type RegistryEntry struct {
@@ -688,7 +723,7 @@ type RegistryEntry struct {
 	// RegistryProvenanceOfficial for built-in defaults, RegistryProvenanceCustom
 	// for user-added registries. It is authoritatively (re)computed by the
 	// registries merge from whether the ID is a shipped default — a user cannot
-	// claim "official/trusted" by writing it into their config.
+	// claim "official" by writing it into their config.
 	Provenance string `json:"provenance,omitempty" mapstructure:"provenance"`
 }
 
@@ -920,29 +955,52 @@ func DefaultRegistries() []RegistryEntry {
 			Protocol:    "custom/docker",
 			Provenance:  RegistryProvenanceOfficial,
 		},
-		{
-			ID:          "pulse",
-			Name:        "Pulse MCP",
-			Description: "Browse and discover MCP use-cases, servers, clients, and news (opt-in: requires an API key)",
-			URL:         "https://www.pulsemcp.com/",
-			ServersURL:  "https://api.pulsemcp.com/v0.1/servers",
-			Tags:        []string{"verified"},
-			Protocol:    "custom/pulse",
-			RequiresKey: true,
-			Provenance:  RegistryProvenanceOfficial,
-		},
-		{
-			ID:          "smithery",
-			Name:        "Smithery",
-			Description: "Smithery MCP server registry (opt-in: requires an API key)",
-			URL:         "https://smithery.ai/",
-			ServersURL:  "https://api.smithery.ai/servers",
-			Tags:        []string{"verified"},
-			Protocol:    "modelcontextprotocol/registry",
-			RequiresKey: true,
-			Provenance:  RegistryProvenanceOfficial,
-		},
 	}
+}
+
+// deprecatedDefaultRegistryIDs are registry ids that were SHIPPED as built-in
+// defaults in earlier versions and have since been removed from
+// DefaultRegistries(). Because the registries merge (registry_data.go) keys by id
+// and never prunes, a former default persisted in a user's config would otherwise
+// resurface forever. They are pruned from the persisted config on load
+// (PruneDeprecatedRegistries) and skipped by the merge so the running app
+// converges to the trimmed default set (MCP-1049). Genuinely user-added custom
+// registries are never in this set, so they are always preserved.
+var deprecatedDefaultRegistryIDs = map[string]bool{
+	"pulse":              true,
+	"smithery":           true,
+	"fleur":              true,
+	"azure-mcp-demo":     true,
+	"remote-mcp-servers": true,
+}
+
+// IsDeprecatedDefaultRegistry reports whether id is a known former-default
+// registry that was removed from the shipped set and must not be resurrected.
+func IsDeprecatedDefaultRegistry(id string) bool {
+	return deprecatedDefaultRegistryIDs[id]
+}
+
+// PruneDeprecatedRegistries removes deprecated former-default registries
+// (IsDeprecatedDefaultRegistry) from cfg.Registries in place and returns the
+// number removed. It is idempotent and matches by the known former-default id set
+// ONLY, so a genuinely user-added custom registry is never dropped.
+func PruneDeprecatedRegistries(cfg *Config) int {
+	if cfg == nil || len(cfg.Registries) == 0 {
+		return 0
+	}
+	kept := make([]RegistryEntry, 0, len(cfg.Registries))
+	removed := 0
+	for _, r := range cfg.Registries {
+		if IsDeprecatedDefaultRegistry(r.ID) {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if removed > 0 {
+		cfg.Registries = kept
+	}
+	return removed
 }
 
 // DefaultConfig returns a default configuration
@@ -1304,17 +1362,6 @@ func (c *Config) ValidateDetailed() []ValidationError {
 				Message: "enabled_tools and disabled_tools are mutually exclusive; use one or the other",
 			})
 		}
-
-		// MCP-866: a server sourced from a custom/unverified registry can NEVER
-		// skip quarantine. There is no allowlist a user can add themselves into,
-		// so an unverified third-party source must always be reviewed.
-		if server.SkipQuarantine && server.SourceRegistryProvenance == RegistryProvenanceCustom {
-			errors = append(errors, ValidationError{
-				Field:   fieldPrefix + ".skip_quarantine",
-				Message: "skip_quarantine is not allowed for a server added from a custom/unverified registry",
-			})
-		}
-
 		// Spec 074: per-upstream auth_broker validation + default application.
 		// No-op in the personal edition (stub); enforced in the server edition.
 		errors = append(errors, validateServerAuthBroker(server, fieldPrefix)...)

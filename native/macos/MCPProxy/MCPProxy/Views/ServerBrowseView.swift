@@ -6,7 +6,7 @@
 // searches, and sees a merged, registry-attributed result list. Registries
 // that need an API key / are unreachable are surfaced as a non-fatal notice so
 // the registries that DID return still render. Each result can be added
-// (servers from custom registries land quarantined server-side).
+// (new servers follow the global quarantine default — MCP-1072).
 
 import SwiftUI
 
@@ -25,8 +25,18 @@ struct ServerBrowseView: View {
     @State private var searchError: String?
     @State private var addingID: String?
     @State private var addNote: String?
+    @State private var registryInfo: RegistryInfoContext?
 
     private var apiClient: APIClient? { appState.apiClient }
+
+    /// Identifiable context for the registry-info popup (`.sheet(item:)`). Holds
+    /// the looked-up `Registry` (nil when the result's label matched nothing in
+    /// the loaded list) plus the raw `label` so the popup always has a title.
+    struct RegistryInfoContext: Identifiable {
+        let id = UUID()
+        let registry: Registry?
+        let label: String
+    }
 
     private func registryName(_ id: String) -> String {
         registries.first { $0.id == id }?.name ?? id
@@ -63,7 +73,75 @@ struct ServerBrowseView: View {
 
             resultsArea
         }
+        // Results fill all remaining vertical space so discovery is the
+        // dominant region of the pane (MCP-1078).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("server-browse")
+        .sheet(item: $registryInfo) { ctx in
+            registryInfoSheet(ctx)
+        }
+    }
+
+    // MARK: Registry-info popup (MCP-1050)
+
+    @ViewBuilder
+    private func registryInfoSheet(_ ctx: RegistryInfoContext) -> some View {
+        let displayName = ctx.registry.map { $0.name.isEmpty ? $0.id : $0.name } ?? ctx.label
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text(displayName)
+                    .font(.scaled(.title3, scale: fontScale).bold())
+                if let reg = ctx.registry { RegistryProvenanceBadge(isCustom: reg.isCustom) }
+                Spacer()
+                Button {
+                    registryInfo = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("registry-info-close")
+            }
+
+            if let reg = ctx.registry {
+                if let desc = reg.description, !desc.isEmpty {
+                    Text(desc)
+                        .font(.scaled(.subheadline, scale: fontScale))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let url = reg.serversURL ?? reg.url, !url.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("URL")
+                            .font(.scaled(.caption2, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                        Text(url)
+                            .font(.scaledMonospaced(.caption, scale: fontScale))
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                Text(reg.isCustom
+                     ? "A custom registry you added. Servers you install follow your global security settings."
+                     : "A built-in registry shipped with MCPProxy.")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("registry-info-provenance-note")
+            } else {
+                Text("No additional details are available for this registry.")
+                    .font(.scaled(.subheadline, scale: fontScale))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .frame(width: 420, height: 220)
+        .accessibilityIdentifier("registry-info-popup")
     }
 
     // MARK: Filter bar (multiselect + search)
@@ -82,7 +160,7 @@ struct ServerBrowseView: View {
                         toggle(registry.id)
                     } label: {
                         Label(
-                            registry.name + (registry.isCustom ? " — unverified" : ""),
+                            registry.name,
                             systemImage: selectedIDs.contains(registry.id) ? "checkmark.square.fill" : "square"
                         )
                     }
@@ -122,12 +200,13 @@ struct ServerBrowseView: View {
     private var resultsArea: some View {
         if isSearching {
             VStack { Spacer(); ProgressView("Searching…"); Spacer() }
-                .frame(maxWidth: .infinity, minHeight: 120)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let err = searchError {
             Label(err, systemImage: "xmark.octagon.fill")
                 .foregroundStyle(.red)
                 .font(.scaled(.callout, scale: fontScale))
                 .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .accessibilityIdentifier("browse-error")
         } else if results.isEmpty {
             Text(selectedIDs.isEmpty ? "Pick one or more registries, then search."
@@ -135,6 +214,7 @@ struct ServerBrowseView: View {
                 .foregroundStyle(.secondary)
                 .font(.scaled(.callout, scale: fontScale))
                 .padding(.horizontal)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .accessibilityIdentifier("browse-empty")
         } else {
             HStack {
@@ -155,6 +235,7 @@ struct ServerBrowseView: View {
                 .padding(.horizontal)
                 .padding(.bottom, 8)
             }
+            .frame(maxHeight: .infinity)
         }
     }
 
@@ -167,12 +248,25 @@ struct ServerBrowseView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if let reg = server.registry, !reg.isEmpty {
-                    Text(reg)
+                    // Tappable: opens an info popup for the originating registry
+                    // (name/url/description/provenance) — MCP-1050.
+                    Button {
+                        registryInfo = RegistryInfoContext(
+                            registry: Registry.lookup(reg, in: registries), label: reg)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(reg)
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 9 * fontScale))
+                        }
                         .font(.scaled(.caption2, scale: fontScale))
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.15))
                         .clipShape(Capsule())
-                        .accessibilityIdentifier("browse-source-\(server.id)")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show registry info")
+                    .accessibilityIdentifier("browse-source-\(server.id)")
                 }
             }
             if let desc = server.description, !desc.isEmpty {

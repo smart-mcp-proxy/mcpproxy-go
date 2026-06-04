@@ -42,10 +42,13 @@ func TestListRegistries_MergesDefaultsWithCustom(t *testing.T) {
 	for _, d := range defaults {
 		assert.Contains(t, idsEmpty, d.ID, "built-in default %q must be listed", d.ID)
 	}
-	// A dropped legacy registry (Fleur, removed in MCP-865) must not leak; the
-	// list must route through the merged defaults source, not stale hard-coded
-	// entries. (Smithery is now a legitimate opt-in default, so it is present.)
-	assert.NotContains(t, idsEmpty, "fleur", "dropped legacy registry must not leak when defaults exist")
+	// Dropped former-default registries must not leak; the list must route
+	// through the merged defaults source, not stale hard-coded entries. The
+	// shipped set is now exactly official/reference/docker-mcp-catalog (MCP-1049),
+	// so pulse, smithery, fleur, azure and remote-mcp-servers are all gone.
+	for _, gone := range []string{"fleur", "pulse", "smithery", "azure-mcp-demo", "remote-mcp-servers"} {
+		assert.NotContainsf(t, idsEmpty, gone, "deprecated former-default %q must not leak when defaults exist", gone)
+	}
 
 	// Custom config → custom entry merges WITH the defaults (does not replace them).
 	rtCustom := &Runtime{logger: logger, cfg: &config.Config{
@@ -61,4 +64,37 @@ func TestListRegistries_MergesDefaultsWithCustom(t *testing.T) {
 		assert.Contains(t, idsCustom, d.ID, "built-in default %q must still appear alongside custom", d.ID)
 	}
 	assert.Len(t, idsCustom, len(defaults)+1, "custom registry must be additive to defaults")
+}
+
+// MCP-1049: the app is config-authoritative — deprecated former-default
+// registries (pulse/smithery/fleur/azure/remote) persisted in an existing
+// install must NOT resurface in the listing. The merge skips them, so the
+// running app converges to the 3 trusted defaults (+ any genuine custom entry)
+// regardless of what stale ids are still on disk.
+func TestListRegistries_DeprecatedPersistedEntriesDoNotResurface(t *testing.T) {
+	logger := zap.NewNop()
+	defaults := config.DefaultRegistries()
+
+	rt := &Runtime{logger: logger, cfg: &config.Config{
+		Registries: []config.RegistryEntry{
+			{ID: "pulse", Name: "Pulse MCP"},
+			{ID: "smithery", Name: "Smithery"},
+			{ID: "fleur", Name: "Fleur"},
+			{ID: "azure-mcp-demo", Name: "Azure MCP Registry Demo"},
+			{ID: "remote-mcp-servers", Name: "Remote MCP Servers"},
+			{ID: "team-internal", Name: "Team Internal", ServersURL: "http://example.test/x", Protocol: "modelcontextprotocol/registry"},
+		},
+	}}
+	got, err := rt.ListRegistries()
+	require.NoError(t, err)
+	ids := registryIDsFromList(t, got)
+
+	for _, gone := range []string{"pulse", "smithery", "fleur", "azure-mcp-demo", "remote-mcp-servers"} {
+		assert.NotContainsf(t, ids, gone, "deprecated former-default %q must not resurface from persisted config", gone)
+	}
+	assert.Contains(t, ids, "team-internal", "a genuine user-added custom registry must be preserved")
+	for _, d := range defaults {
+		assert.Contains(t, ids, d.ID, "built-in default %q must be present", d.ID)
+	}
+	assert.Len(t, ids, len(defaults)+1, "list must be exactly the 3 defaults plus the custom registry")
 }

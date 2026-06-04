@@ -30,6 +30,9 @@ var (
 	registryAddSourceProto string // MCP-866
 	registryAddSourceID    string
 	registryAddSourceName  string
+	registryEditName       string // MCP-1072
+	registryEditURL        string
+	registryEditServersURL string
 )
 
 // GetRegistryCommand builds the `registry` command group (spec 070): a single
@@ -57,30 +60,108 @@ Typical flow:
   mcpproxy upstream approve weather-mcp          # approve once you trust it
 
 Add your own registry source (any official modelcontextprotocol/registry v0.1 endpoint):
-  mcpproxy registry add-source https://registry.example.com   # custom/unverified
+  mcpproxy registry add-source https://registry.example.com   # tagged "custom"
+  mcpproxy registry edit my-reg --url https://new.example.com  # update a custom source
 
-'registry add' and 'registry add-source' talk to the running mcpproxy daemon.
-'list' and 'search' use the daemon when available and otherwise read the
+'registry add', 'add-source', 'edit' and 'remove' talk to the running mcpproxy
+daemon. 'list' and 'search' use the daemon when available and otherwise read the
 registries directly.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
-	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd())
+	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd(), newRegistryEditCmd(), newRegistryRemoveCmd())
 	return cmd
+}
+
+func newRegistryRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove <id>",
+		Aliases: []string{"remove-source", "rm"},
+		Short:   "Remove a user-added custom registry source",
+		Long: `Remove a custom MCP registry source you previously added with
+'registry add-source'. Use 'registry list' to see the ids.
+
+Only custom/unverified registries can be removed — the shipped built-in
+registries (official, reference, docker-mcp-catalog, pulse, smithery) cannot be
+removed. Removing a source does not touch any upstream servers you already added
+from it.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			registryID := args[0]
+
+			cfg, err := loadRegistryConfig()
+			if err != nil {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConfigNotFound, err.Error()).
+					WithRecoveryCommand("mcpproxy doctor"), clioutput.ErrCodeConfigNotFound)
+			}
+
+			// remove MUST go through the daemon: the registry list lives on the
+			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
+			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
+					"removing a registry source requires a running mcpproxy daemon").
+					WithGuidance("Start the daemon, then retry").
+					WithRecoveryCommand("mcpproxy serve"), clioutput.ErrCodeConnectionFailed)
+			}
+
+			ctx, cancel := registryContext()
+			defer cancel()
+
+			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			reg, err := client.RemoveRegistrySource(ctx, registryID)
+			if err != nil {
+				return registryRemoveErrorOutput(err)
+			}
+
+			outputFormat := ResolveOutputFormat()
+			if outputFormat == "json" || outputFormat == "yaml" {
+				formatter, _ := GetOutputFormatter()
+				out, _ := formatter.Format(reg)
+				fmt.Println(out)
+				return nil
+			}
+
+			fmt.Printf("✅ Removed registry source '%s'\n", reg.ID)
+			return nil
+		},
+	}
+	return cmd
+}
+
+// registryRemoveErrorOutput maps a *cliclient.RegistryAddError from a remove op
+// to a structured CLI error with remove-specific guidance (MCP-1057).
+func registryRemoveErrorOutput(err error) error {
+	var addErr *cliclient.RegistryAddError
+	if !errors.As(err, &addErr) {
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, err.Error()), clioutput.ErrCodeOperationFailed)
+	}
+
+	switch addErr.Code {
+	case "registry_not_found":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeServerNotFound, addErr.Message).
+			WithGuidance("Check the ids with 'mcpproxy registry list' — only custom/unverified registries can be removed"), clioutput.ErrCodeServerNotFound)
+	case "registry_shadows_builtin":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("Built-in registries cannot be removed"), clioutput.ErrCodeInvalidInput)
+	case "registries_locked":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
+			WithGuidance("Registry changes are disabled by policy (registries_locked)"), clioutput.ErrCodeOperationFailed)
+	default:
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message), clioutput.ErrCodeOperationFailed)
+	}
 }
 
 func newRegistryAddSourceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add-source <https-url>",
-		Short: "Add a custom MCP registry source (quarantine-always)",
+		Short: "Add a custom MCP registry source",
 		Long: `Add your own MCP server registry — any https endpoint implementing the
 official modelcontextprotocol/registry v0.1 protocol (the same protocol shipped
 by Copilot/VS Code/Azure).
 
-The added source is ALWAYS tagged custom/unverified: there is no allowlist you
-can add yourself into. Every server you discover and add through a custom source
-lands quarantined and can never skip quarantine — review and approve it once you
-trust it:
+The added source is tagged "custom" (informational). Servers you discover and
+add through it follow the global quarantine default like any other server, so
+with quarantine enabled (the default) they land quarantined for review:
   mcpproxy registry search <query> -r <id>
   mcpproxy registry add <id> <serverId>
   mcpproxy upstream approve <name>`,
@@ -121,7 +202,7 @@ trust it:
 			}
 
 			fmt.Printf("✅ Added registry source '%s' (%s)\n", reg.ID, reg.Provenance)
-			fmt.Printf("⚠️  This is a third-party, unverified registry — its servers are always quarantined until you approve them.\n")
+			fmt.Printf("⚠️  This is a third-party registry — with quarantine enabled, servers you add from it are quarantined until you approve them.\n")
 			fmt.Printf("   Search it with: mcpproxy registry search <query> -r %s\n", reg.ID)
 			return nil
 		},
@@ -130,6 +211,92 @@ trust it:
 	cmd.Flags().StringVar(&registryAddSourceID, "id", "", "Override the derived registry id")
 	cmd.Flags().StringVar(&registryAddSourceName, "name", "", "Override the registry display name")
 	return cmd
+}
+
+func newRegistryEditCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "edit <id>",
+		Short: "Edit a user-added custom registry source",
+		Long: `Update a custom MCP registry source you previously added with
+'registry add-source'. Use 'registry list' to see the ids.
+
+Only custom registries can be edited — the shipped built-in registries cannot.
+Provide one or more of --name, --url, --servers-url; omitted fields are left
+unchanged. Changing --url re-derives the servers URL unless --servers-url is
+also given.
+
+  mcpproxy registry edit my-reg --url https://new.example.com
+  mcpproxy registry edit my-reg --name "My Registry"`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			registryID := args[0]
+
+			cfg, err := loadRegistryConfig()
+			if err != nil {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConfigNotFound, err.Error()).
+					WithRecoveryCommand("mcpproxy doctor"), clioutput.ErrCodeConfigNotFound)
+			}
+
+			// edit MUST go through the daemon: the registry list lives on the
+			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
+			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
+					"editing a registry source requires a running mcpproxy daemon").
+					WithGuidance("Start the daemon, then retry").
+					WithRecoveryCommand("mcpproxy serve"), clioutput.ErrCodeConnectionFailed)
+			}
+
+			ctx, cancel := registryContext()
+			defer cancel()
+
+			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			reg, err := client.EditRegistrySource(ctx, registryID, registryEditName, registryEditURL, registryEditServersURL)
+			if err != nil {
+				return registryEditErrorOutput(err)
+			}
+
+			outputFormat := ResolveOutputFormat()
+			if outputFormat == "json" || outputFormat == "yaml" {
+				formatter, _ := GetOutputFormatter()
+				out, _ := formatter.Format(reg)
+				fmt.Println(out)
+				return nil
+			}
+
+			fmt.Printf("✅ Updated registry source '%s'\n", reg.ID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&registryEditName, "name", "", "New registry display name")
+	cmd.Flags().StringVar(&registryEditURL, "url", "", "New base/servers https URL")
+	cmd.Flags().StringVar(&registryEditServersURL, "servers-url", "", "New servers-collection URL (overrides the derived one)")
+	return cmd
+}
+
+// registryEditErrorOutput maps a *cliclient.RegistryAddError from an edit op to
+// a structured CLI error with edit-specific guidance (MCP-1072).
+func registryEditErrorOutput(err error) error {
+	var addErr *cliclient.RegistryAddError
+	if !errors.As(err, &addErr) {
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, err.Error()), clioutput.ErrCodeOperationFailed)
+	}
+
+	switch addErr.Code {
+	case "registry_not_found":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeServerNotFound, addErr.Message).
+			WithGuidance("Check the ids with 'mcpproxy registry list' — only custom registries can be edited"), clioutput.ErrCodeServerNotFound)
+	case "registry_shadows_builtin":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("Built-in registries cannot be edited"), clioutput.ErrCodeInvalidInput)
+	case "invalid_registry_url":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("Provide a valid https URL"), clioutput.ErrCodeInvalidInput)
+	case "registries_locked":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
+			WithGuidance("Registry changes are disabled by policy (registries_locked)"), clioutput.ErrCodeOperationFailed)
+	default:
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message), clioutput.ErrCodeOperationFailed)
+	}
 }
 
 func newRegistryListCmd() *cobra.Command {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,6 +133,17 @@ type ServerController interface {
 	// (MCP-866), always tagged custom/unverified. On failure it returns a stable
 	// cross-surface error code alongside the raw error.
 	AddRegistrySourceRef(url, protocol, id, name string) (*config.RegistryEntry, *contracts.RegistryAddError, error)
+	// RemoveRegistrySourceRef removes a user-added custom registry source
+	// (MCP-1057). Built-ins are refused (registry_shadows_builtin) and an unknown
+	// id yields registry_not_found. On failure it returns a stable cross-surface
+	// error code alongside the raw error.
+	RemoveRegistrySourceRef(id string) (*config.RegistryEntry, *contracts.RegistryAddError, error)
+	// EditRegistrySourceRef updates a user-added custom registry source
+	// (MCP-1072): name, url, servers-url. Built-ins are refused
+	// (registry_shadows_builtin), an unknown id yields registry_not_found, and a
+	// non-https url yields invalid_registry_url. On failure it returns a stable
+	// cross-surface error code alongside the raw error.
+	EditRegistrySourceRef(id, name, url, serversURL string) (*config.RegistryEntry, *contracts.RegistryAddError, error)
 
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
@@ -683,7 +695,9 @@ func (s *Server) setupRoutes() {
 
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
-		r.Post("/registries", s.handleAddRegistrySource) // MCP-866 user-added registry source
+		r.Post("/registries", s.handleAddRegistrySource)           // MCP-866 user-added registry source
+		r.Put("/registries/{id}", s.handleEditRegistrySource)      // MCP-1072 edit user-added source
+		r.Delete("/registries/{id}", s.handleRemoveRegistrySource) // MCP-1057 remove user-added source
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)           // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
@@ -3992,8 +4006,11 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 			ServersURL:  getString(regMap, "servers_url"),
 			Protocol:    getString(regMap, "protocol"),
 			Count:       regMap["count"],
-			Provenance:  getString(regMap, "provenance"),
-			Trusted:     getString(regMap, "provenance") == "official/trusted",
+			// MCP-1072: normalize legacy provenance strings on read so the REST
+			// surface always emits the two-value vocabulary and trusted is derived
+			// from it.
+			Provenance: config.NormalizeRegistryProvenance(getString(regMap, "provenance")),
+			Trusted:    config.NormalizeRegistryProvenance(getString(regMap, "provenance")) == config.RegistryProvenanceOfficial,
 		}
 
 		if tags, ok := regMap["tags"].([]interface{}); ok {
@@ -4136,9 +4153,25 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id}/servers/{serverId}/add [post]
+// decodePathParam percent-decodes a chi path parameter. chi matches routes on
+// the raw (encoded) path, so parameters that legitimately contain reserved
+// characters such as "/" (encoded as %2F) arrive encoded. On a malformed escape
+// sequence it returns the original value unchanged so the downstream lookup can
+// surface a normal not-found rather than a decode panic.
+func decodePathParam(raw string) string {
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return decoded
+	}
+	return raw
+}
+
 func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
-	serverID := chi.URLParam(r, "serverId")
+	// chi routes on RawPath, so path params arrive percent-encoded. Official
+	// modelcontextprotocol/registry v0.1 ids are namespace/name, so the slash
+	// reaches us as %2F and must be decoded before the exact-match registry
+	// lookup, otherwise every namespaced server is un-addable (MCP-1056).
+	registryID := decodePathParam(chi.URLParam(r, "id"))
+	serverID := decodePathParam(chi.URLParam(r, "serverId"))
 	if registryID == "" || serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "registry id and server id are required")
 		return
@@ -4214,6 +4247,104 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccess(w, contracts.AddRegistrySourceData{
+		Registry: contracts.RegistrySummary{
+			ID:         entry.ID,
+			Name:       entry.Name,
+			URL:        entry.URL,
+			ServersURL: entry.ServersURL,
+			Protocol:   entry.Protocol,
+			Provenance: entry.Provenance,
+			Trusted:    entry.IsTrusted(),
+		},
+	})
+}
+
+// handleRemoveRegistrySource godoc
+// @Summary      Remove a user-added custom registry source
+// @Description  Removes a custom/unverified registry previously added via add-source (MCP-1057). Built-in registries are refused with registry_shadows_builtin; an unknown id yields registry_not_found. The change is persisted copy-on-write.
+// @Tags         registries
+// @Produce      json
+// @Param        id   path      string  true  "Registry ID"
+// @Success      200  {object}  contracts.SuccessResponse  "Registry source removed"
+// @Failure      400  {object}  contracts.ErrorResponse    "Registry ID is required"
+// @Failure      403  {object}  contracts.ErrorResponse    "registries_locked"
+// @Failure      404  {object}  contracts.ErrorResponse    "registry_not_found"
+// @Failure      409  {object}  contracts.ErrorResponse    "registry_shadows_builtin"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries/{id} [delete]
+func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	if registryID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
+		return
+	}
+
+	logger := s.getRequestLogger(r)
+	entry, rerr, err := s.controller.RemoveRegistrySourceRef(registryID)
+	if err != nil {
+		status := registryAddErrorStatus(rerr.Code)
+		if status >= http.StatusInternalServerError {
+			logger.Error("Remove registry source failed", "id", registryID, "error", err)
+		}
+		s.writeRegistryAddError(w, r, status, rerr)
+		return
+	}
+
+	s.writeSuccess(w, contracts.RemoveRegistrySourceData{
+		Registry: contracts.RegistrySummary{
+			ID:         entry.ID,
+			Name:       entry.Name,
+			URL:        entry.URL,
+			ServersURL: entry.ServersURL,
+			Protocol:   entry.Protocol,
+			Provenance: entry.Provenance,
+			Trusted:    entry.IsTrusted(),
+		},
+	})
+}
+
+// handleEditRegistrySource godoc
+// @Summary      Edit a user-added custom registry source
+// @Description  Updates a custom registry previously added via add-source (MCP-1072): name, url, servers-url. Empty fields are left unchanged. Built-in registries are refused with registry_shadows_builtin; an unknown id yields registry_not_found; a non-https url yields invalid_registry_url. The change is persisted copy-on-write.
+// @Tags         registries
+// @Accept       json
+// @Produce      json
+// @Param        id    path      string                               true  "Registry ID"
+// @Param        body  body      contracts.EditRegistrySourceRequest  true  "Fields to update (name/url/servers_url; empty = unchanged)"
+// @Success      200   {object}  contracts.SuccessResponse            "Registry source updated"
+// @Failure      400   {object}  contracts.ErrorResponse              "Registry ID is required | invalid_registry_url"
+// @Failure      403   {object}  contracts.ErrorResponse              "registries_locked"
+// @Failure      404   {object}  contracts.ErrorResponse              "registry_not_found"
+// @Failure      409   {object}  contracts.ErrorResponse              "registry_shadows_builtin"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries/{id} [put]
+func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	if registryID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
+		return
+	}
+
+	var req contracts.EditRegistrySourceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	logger := s.getRequestLogger(r)
+	entry, rerr, err := s.controller.EditRegistrySourceRef(registryID, req.Name, req.URL, req.ServersURL)
+	if err != nil {
+		status := registryAddErrorStatus(rerr.Code)
+		if status >= http.StatusInternalServerError {
+			logger.Error("Edit registry source failed", "id", registryID, "error", err)
+		}
+		s.writeRegistryAddError(w, r, status, rerr)
+		return
+	}
+
+	s.writeSuccess(w, contracts.EditRegistrySourceData{
 		Registry: contracts.RegistrySummary{
 			ID:         entry.ID,
 			Name:       entry.Name,

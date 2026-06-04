@@ -146,9 +146,9 @@ func TestCompleteWorkflow(t *testing.T) {
 			t.Error("expected default registries, got none")
 		}
 
-		// Verify we have the expected default registries (official + reference
-		// primary, Docker kept, Pulse opt-in) per MCP-865.
-		expectedIDs := []string{"official", "reference", "docker-mcp-catalog", "pulse"}
+		// Verify we have the trimmed default registry set (MCP-1049): exactly the
+		// three official/trusted entries.
+		expectedIDs := []string{"official", "reference", "docker-mcp-catalog"}
 		found := make(map[string]bool)
 
 		for _, reg := range registries {
@@ -163,11 +163,11 @@ func TestCompleteWorkflow(t *testing.T) {
 	})
 
 	t.Run("find registry by name", func(t *testing.T) {
-		reg := FindRegistry("Pulse MCP")
+		reg := FindRegistry("Docker MCP Catalog")
 		if reg == nil {
-			t.Error("expected to find Pulse MCP registry")
-		} else if reg.ID != "pulse" {
-			t.Errorf("expected ID 'pulse', got '%s'", reg.ID)
+			t.Error("expected to find Docker MCP Catalog registry")
+		} else if reg.ID != "docker-mcp-catalog" {
+			t.Errorf("expected ID 'docker-mcp-catalog', got '%s'", reg.ID)
 		}
 	})
 

@@ -300,6 +300,12 @@ func (m *baseController) AddServerFromRegistryRef(_ context.Context, _, _, _ str
 func (m *baseController) AddRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
+func (m *baseController) RemoveRegistrySourceRef(_ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
+func (m *baseController) EditRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 func (m *baseController) CallTool(ctx context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }
