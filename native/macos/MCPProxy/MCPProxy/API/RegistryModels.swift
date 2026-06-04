@@ -146,3 +146,109 @@ struct ThirdPartyRegistryAck {
         defaults.set(true, forKey: Self.key)
     }
 }
+
+// MARK: - Server discovery / browse (macOS mirror of Web UI R1)
+//
+// Models `GET /api/v1/registries/{id}/servers` (per-registry search) and
+// `POST /api/v1/registries/{id}/servers/{serverId}/add`. The browse view fans
+// these out across several selected registries and merges the results.
+
+/// A server returned by a registry search. Mirrors `contracts.RepositoryServer`
+/// (only the fields the tray browse UI needs are decoded).
+struct RepositoryServer: Codable, Identifiable, Equatable {
+    let id: String
+    let name: String
+    let description: String?
+    let url: String?
+    let sourceCodeURL: String?
+    let installCmd: String?
+    let connectURL: String?
+    /// Which registry this result came from (used for per-card attribution and
+    /// as the registry id passed to the add endpoint).
+    let registry: String?
+    let requiredInputs: [RequiredInput]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, description, url, registry
+        case sourceCodeURL = "source_code_url"
+        case installCmd = "install_cmd"
+        case connectURL = "connect_url"
+        case requiredInputs = "required_inputs"
+    }
+
+    struct RequiredInput: Codable, Equatable {
+        let name: String
+        let description: String?
+        let secret: Bool?
+    }
+
+    /// Neutral transport label mirroring the Web UI's `serverTransport` (R2):
+    /// remote / stdio:npm / stdio:python / stdio:docker / stdio.
+    var transport: String {
+        let cmd = (installCmd ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+        if !cmd.isEmpty {
+            if cmd.hasPrefix("docker") { return "stdio:docker" }
+            if cmd.hasPrefix("npx") || cmd.range(of: #"(^|\s)(npm|node)(\s|$)"#, options: .regularExpression) != nil { return "stdio:npm" }
+            if cmd.hasPrefix("uvx") || cmd.hasPrefix("uv ") || cmd.range(of: #"(^|\s)(pipx?|python3?)(\s|$)"#, options: .regularExpression) != nil { return "stdio:python" }
+            return "stdio"
+        }
+        if let url, !url.isEmpty { return "remote" }
+        return "stdio"
+    }
+}
+
+/// Per-registry "unavailable" marker (e.g. key required). Mirrors
+/// `contracts.RegistryUnavailable`.
+struct RegistryUnavailable: Codable, Equatable {
+    let reason: String?
+}
+
+/// Response of `GET /api/v1/registries/{id}/servers`. Mirrors
+/// `contracts.SearchRegistryServersResponse`.
+struct SearchRegistryServersResponse: Codable {
+    let registryID: String?
+    let servers: [RepositoryServer]?
+    let total: Int?
+    let unavailable: RegistryUnavailable?
+
+    enum CodingKeys: String, CodingKey {
+        case registryID = "registry_id"
+        case servers, total, unavailable
+    }
+}
+
+/// Result of adding a server from a registry. Carries `missingInputs` when the
+/// backend rejects with `missing_required_input` so the UI can tell the user
+/// which env vars are needed (the full prompt flow is a follow-up).
+struct AddServerResult: Equatable {
+    let success: Bool
+    let message: String?
+    let missingInputs: [String]?
+
+    static func ok() -> AddServerResult { AddServerResult(success: true, message: nil, missingInputs: nil) }
+    static func failure(message: String?, missingInputs: [String]? = nil) -> AddServerResult {
+        AddServerResult(success: false, message: message, missingInputs: missingInputs)
+    }
+}
+
+/// Structured error body of a failed add-from-registry. Mirrors
+/// `contracts.RegistryAddError`.
+struct RegistryAddServerErrorBody: Decodable {
+    let code: String?
+    let message: String?
+    let missingInputs: [String]?
+    enum CodingKeys: String, CodingKey {
+        case code, message
+        case missingInputs = "missing_inputs"
+    }
+}
+
+/// JS `encodeURIComponent` equivalent for safe path-segment encoding (the Web
+/// UI uses encodeURIComponent on the registry id and server id).
+extension String {
+    var uriComponentEncoded: String {
+        let allowed = CharacterSet(charactersIn:
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()")
+        return addingPercentEncoding(withAllowedCharacters: allowed) ?? self
+    }
+}
