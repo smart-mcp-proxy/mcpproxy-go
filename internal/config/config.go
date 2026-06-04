@@ -269,6 +269,14 @@ type ServerConfig struct {
 	// RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
 	// unverified registry can never opt its servers out of quarantine.
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty" mapstructure:"source_registry_provenance"`
+
+	// AuthBroker holds per-upstream token-brokering configuration (spec 074,
+	// server edition only). When set, the gateway exchanges the caller's IdP
+	// subject token for an upstream-scoped credential and injects it into the
+	// outbound request. The concrete type is build-tagged: a full struct in the
+	// server edition, an empty stub in the personal edition (which ignores it),
+	// so personal-edition behavior is unaffected. swaggerignore mirrors Teams.
+	AuthBroker *AuthBrokerConfig `json:"auth_broker,omitempty" mapstructure:"auth_broker" swaggerignore:"true"`
 }
 
 // OAuthConfig represents OAuth configuration for a server
@@ -1306,6 +1314,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 				Message: "skip_quarantine is not allowed for a server added from a custom/unverified registry",
 			})
 		}
+
+		// Spec 074: per-upstream auth_broker validation + default application.
+		// No-op in the personal edition (stub); enforced in the server edition.
+		errors = append(errors, validateServerAuthBroker(server, fieldPrefix)...)
 	}
 
 	// Validate DataDir exists (if specified and not empty).
