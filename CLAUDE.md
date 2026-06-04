@@ -723,8 +723,7 @@ See `docs/github-actions-windows-wix-research.md` for CI setup.
 ## Prerelease Builds
 
 - **`main` branch**: Stable releases
-- **`next` branch**: Prerelease builds with latest features
-- macOS DMG installers are signed and notarized
+- **`next` branch** + `v*-rc.*` tags: GitHub pre-releases, opt-in, NOT on stable channels; RC tags skip `release.yml` (brew/linux/registry)
 
 See `docs/prerelease-builds.md` for download instructions.
 
