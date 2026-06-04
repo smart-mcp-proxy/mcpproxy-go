@@ -174,6 +174,53 @@ func (p *OAuthProvider) ExchangeCode(ctx context.Context, code, redirectURI, cli
 	return &tokenResp, nil
 }
 
+// RefreshAccessToken exchanges a refresh token for a fresh access token via the
+// refresh_token grant (RFC 6749 §6). Providers may or may not rotate the refresh
+// token; callers should preserve the previous refresh token when the response
+// omits one.
+func (p *OAuthProvider) RefreshAccessToken(ctx context.Context, refreshToken, clientID, clientSecret string) (*TokenResponse, error) {
+	if refreshToken == "" {
+		return nil, fmt.Errorf("refresh token is empty")
+	}
+
+	data := url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+		"client_id":     {clientID},
+	}
+	if clientSecret != "" {
+		data.Set("client_secret", clientSecret)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.TokenURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating refresh request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("refresh token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading refresh response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("refresh token failed (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp TokenResponse
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return nil, fmt.Errorf("parsing refresh response: %w", err)
+	}
+	return &tokenResp, nil
+}
+
 // FetchUserInfo retrieves user profile information from the provider.
 // For OIDC providers (Google, Microsoft), it first tries to extract info from the ID token,
 // falling back to the UserInfo endpoint. For GitHub, it calls /user and /user/emails.

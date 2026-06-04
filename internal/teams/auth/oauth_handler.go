@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/broker"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/users"
 )
 
@@ -28,9 +29,20 @@ type OAuthHandler struct {
 	hmacKey        []byte
 	logger         *zap.SugaredLogger
 
+	// credStore persists IdP subject tokens at login when teams.store_idp_tokens
+	// is enabled (spec 074, FR-004/FR-006). It may be nil or disabled, in which
+	// case token capture is silently skipped and login behaves exactly as before.
+	credStore broker.CredentialStore
+
 	// CSRF state storage (in-memory, keyed by state string)
 	pendingStates map[string]*oauthState
 	statesMu      sync.Mutex
+}
+
+// SetCredentialStore wires the credential store used to persist and refresh IdP
+// subject tokens. Passing nil disables token capture (default-off behaviour).
+func (h *OAuthHandler) SetCredentialStore(store broker.CredentialStore) {
+	h.credStore = store
 }
 
 type oauthState struct {
@@ -230,6 +242,10 @@ func (h *OAuthHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create user account", http.StatusInternalServerError)
 		return
 	}
+
+	// Persist the IdP subject token (encrypted) when capture is enabled. This is
+	// best-effort: a storage failure must never break login (FR-004/FR-006).
+	h.persistIDPSubjectToken(user.ID, tokenResp)
 
 	// Determine role
 	role := "user"

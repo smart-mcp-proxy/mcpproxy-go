@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	teamsapi "github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/api"
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/broker"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/teams/users"
 )
 
@@ -56,6 +57,16 @@ func setupMultiUserOAuth(deps Dependencies) error {
 
 	// Create OAuth handler
 	oauthHandler := teamsauth.NewOAuthHandler(userStore, sessionManager, cfg, hmacKey, deps.Logger)
+
+	// Wire the per-user credential store so IdP subject tokens can be captured at
+	// login when teams.store_idp_tokens is enabled (spec 074). The store derives
+	// its key from MCPPROXY_CRED_KEY or teams.credential_encryption_key; with no
+	// key it is constructed disabled and token capture is silently skipped.
+	credStore, err := broker.NewBBoltAESStore(deps.DB, broker.ResolveMasterKey(cfg.CredentialEncryptionKey), deps.Logger.Desugar())
+	if err != nil {
+		return fmt.Errorf("creating credential store: %w", err)
+	}
+	oauthHandler.SetCredentialStore(credStore)
 
 	// Create auth middleware
 	authMiddleware := teamsauth.NewTeamsAuthMiddleware(sessionManager, userStore, cfg, hmacKey, deps.Logger)
