@@ -52,8 +52,8 @@ Provenance is **informational only** (it no longer changes quarantine behavior):
   recorded on its config as `source_registry_id` / `source_registry_provenance`
   and surfaced in the approval/quarantine view.
 - The `list_registries` output (MCP, REST, CLI) includes `provenance` and a
-  `trusted` boolean (derived `official == trusted`) so a UI can show a one-time
-  third-party-registry warning.
+  `trusted` boolean (derived `official == trusted`) so a UI can show a neutral
+  **Official / Custom** badge.
 - **Migration:** earlier builds persisted the two-word tags `official/trusted` /
   `custom/unverified`; these are normalized to `official` / `custom` on read, so
   an existing `config.db` / `mcp_config.json` keeps working unchanged.
@@ -79,9 +79,12 @@ Equivalent surfaces:
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
 - **CLI:** `mcpproxy registry add-source <https-url>`.
 - **Web UI:** the **Repositories** page has an **Add Registry** button (URL + optional
-  protocol/name). Each registry in the selector is flagged **Official · trusted** or
-  **Third-party · unverified** from its `provenance`, and the first custom add shows a
-  one-time third-party-registry warning (the acknowledgement is remembered locally).
+  protocol/name) and a **Registries** section listing every configured source as a
+  card with a neutral **Official / Custom** badge (official cards also carry a
+  **Built-in** tag). There is no warning gate — adding a custom source goes straight
+  through. Custom cards expose a **kebab (⋮) menu** with **Edit** (reuses the
+  add dialog, pre-filled, id read-only) and **Delete** (destructive confirmation);
+  official cards are read-only.
 - **macOS tray:** the **Registries** sidebar tab lists every configured registry
   with its provenance/trust badge, offers an **Add Registry** affordance,
   and shows a one-time third-party warning before the first custom add.
@@ -109,6 +112,7 @@ Equivalent surfaces:
 
 - **REST:** `DELETE /api/v1/registries/{id}` → `{ "registry": { … } }` echoing the removed entry.
 - **CLI:** `mcpproxy registry remove <id>`.
+- **Web UI:** the custom registry card's kebab (⋮) → **Delete**, behind a destructive confirmation modal.
 
 Errors share a stable code across surfaces: `registry_not_found` (404),
 `registry_shadows_builtin` (409, built-in cannot be removed),
@@ -134,6 +138,7 @@ Equivalent surfaces:
 
 - **REST:** `PUT /api/v1/registries/{id}` with `{ "name": "…", "url": "https://…", "servers_url": "https://…" }` (all optional) → `{ "registry": { … } }` echoing the updated entry.
 - **CLI:** `mcpproxy registry edit <id> [--name … --url … --servers-url …]`.
+- **Web UI:** the custom registry card's kebab (⋮) → **Edit**, which reuses the add dialog pre-filled with the current name/URL (id shown read-only).
 
 Errors share a stable code across surfaces: `registry_not_found` (404),
 `registry_shadows_builtin` (409, built-in cannot be edited),
