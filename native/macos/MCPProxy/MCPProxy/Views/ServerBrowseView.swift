@@ -73,6 +73,9 @@ struct ServerBrowseView: View {
 
             resultsArea
         }
+        // Results fill all remaining vertical space so discovery is the
+        // dominant region of the pane (MCP-1078).
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .accessibilityIdentifier("server-browse")
         .sheet(item: $registryInfo) { ctx in
             registryInfoSheet(ctx)
@@ -197,12 +200,13 @@ struct ServerBrowseView: View {
     private var resultsArea: some View {
         if isSearching {
             VStack { Spacer(); ProgressView("Searching…"); Spacer() }
-                .frame(maxWidth: .infinity, minHeight: 120)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let err = searchError {
             Label(err, systemImage: "xmark.octagon.fill")
                 .foregroundStyle(.red)
                 .font(.scaled(.callout, scale: fontScale))
                 .padding()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .accessibilityIdentifier("browse-error")
         } else if results.isEmpty {
             Text(selectedIDs.isEmpty ? "Pick one or more registries, then search."
@@ -210,6 +214,7 @@ struct ServerBrowseView: View {
                 .foregroundStyle(.secondary)
                 .font(.scaled(.callout, scale: fontScale))
                 .padding(.horizontal)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 .accessibilityIdentifier("browse-empty")
         } else {
             HStack {
@@ -230,6 +235,7 @@ struct ServerBrowseView: View {
                 .padding(.horizontal)
                 .padding(.bottom, 8)
             }
+            .frame(maxHeight: .infinity)
         }
     }
 

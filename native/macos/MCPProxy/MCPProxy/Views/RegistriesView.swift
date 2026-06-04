@@ -52,6 +52,12 @@ struct RegistriesView: View {
     /// The custom registry awaiting a Remove confirmation, if any.
     @State private var pendingRemoval: Registry?
 
+    /// Discovery-first layout (MCP-1078): a segmented control splits server
+    /// discovery (default) from registry management so search controls sit on
+    /// top and the results region is the dominant area, while the configured-
+    /// registries management list no longer competes with results for space.
+    @State private var tab: RegistryTab = .discover
+
     private var apiClient: APIClient? { appState.apiClient }
 
     private var customRegistries: [Registry] { registries.filter(\.isCustom) }
@@ -66,22 +72,22 @@ struct RegistriesView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            // Prominent "Add Registry" button bar (mirrors ServersView).
-            HStack {
-                Button {
-                    activeSheet = RegistrySheet(editing: nil)
-                } label: {
-                    Label("Add Registry", systemImage: "plus.circle.fill")
+            // Discovery-first segmented control (MCP-1078): "Discover servers"
+            // is the default; "Manage registries" holds the add/edit/remove UI.
+            Picker("", selection: $tab) {
+                ForEach(RegistryTab.allCases) { t in
+                    Text(t.title).tag(t)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .accessibilityIdentifier("registry-add-source-button")
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
             .padding(.horizontal)
-            .padding(.vertical, 8)
+            .padding(.bottom, 8)
+            .accessibilityIdentifier("registries-tab-picker")
 
-            Divider()
-
+            // Banners apply to both tabs: load errors affect discovery (no
+            // registries to search) and management; add/edit/remove successes
+            // surface here too.
             if let success = successMessage {
                 banner(icon: "checkmark.circle.fill", tint: .green, text: success)
             }
@@ -89,12 +95,16 @@ struct RegistriesView: View {
                 banner(icon: "exclamationmark.triangle.fill", tint: .orange, text: err)
             }
 
-            configuredList
-
             Divider()
 
-            // Browse + add servers across one or more registries (R1 parity).
-            ServerBrowseView(appState: appState, registries: registries)
+            switch tab {
+            case .discover:
+                // Search controls on top, results fill all remaining space.
+                ServerBrowseView(appState: appState, registries: registries)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            case .manage:
+                manageTab
+            }
         }
         .sheet(item: $activeSheet) { sheet in
             AddRegistryView(appState: appState, editing: sheet.editing) { result in
@@ -124,6 +134,34 @@ struct RegistriesView: View {
             Text("This removes the registry source from MCPProxy. Servers you have already added stay installed.")
         }
         .task { await load() }
+    }
+
+    // MARK: Manage tab
+
+    /// Registry management: the prominent "Add Registry" affordance plus the
+    /// configured-registries list with per-custom-registry edit/remove. Lives
+    /// only on this tab so it no longer competes with search results (MCP-1078).
+    @ViewBuilder
+    private var manageTab: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Prominent "Add Registry" button bar (mirrors ServersView).
+            HStack {
+                Button {
+                    activeSheet = RegistrySheet(editing: nil)
+                } label: {
+                    Label("Add Registry", systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .accessibilityIdentifier("registry-add-source-button")
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+
+            configuredList
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: Header
@@ -184,7 +222,7 @@ struct RegistriesView: View {
                         }
                     }
                 }
-                .frame(maxHeight: 360)
+                .frame(maxHeight: .infinity)
                 .accessibilityIdentifier("registries-list")
             }
         }
@@ -305,6 +343,22 @@ struct RegistriesView: View {
             await load()
         } else {
             loadError = result.userMessage
+        }
+    }
+}
+
+/// The two faces of the Registries pane (MCP-1078): discovery-first server
+/// browse (default) and registry management.
+enum RegistryTab: String, CaseIterable, Identifiable {
+    case discover
+    case manage
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .discover: return "Discover servers"
+        case .manage: return "Manage registries"
         }
     }
 }
