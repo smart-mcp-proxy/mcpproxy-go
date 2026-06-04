@@ -79,12 +79,36 @@ Errors share a stable code across surfaces: `invalid_registry_url` (400),
 `registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).
 The Web UI maps each code to an actionable message.
 
+### Removing a registry source
+
+`mcpproxy registry remove <id>` deletes a custom registry you added earlier. Only
+`custom/unverified` registries can be removed — the shipped built-in defaults are
+refused via the same shadow guard as add-source. Removing a source does not touch
+any upstream servers you already added from it.
+
+```bash
+mcpproxy registry list             # find the id
+mcpproxy registry remove acme      # delete the custom source (aliases: rm, remove-source)
+```
+
+Like add-source, this requires a running daemon — the change is applied
+copy-on-write on the runtime config snapshot and persisted to `mcp_config.json`.
+
+Equivalent surfaces:
+
+- **REST:** `DELETE /api/v1/registries/{id}` → `{ "registry": { … } }` echoing the removed entry.
+- **CLI:** `mcpproxy registry remove <id>`.
+
+Errors share a stable code across surfaces: `registry_not_found` (404),
+`registry_shadows_builtin` (409, built-in cannot be removed),
+`registries_locked` (403).
+
 ### Enterprise: `registries_locked` (stub)
 
 Setting `"registries_locked": true` in `mcp_config.json` disables runtime registry
-additions (`registry add-source` and the REST/MCP add-source surface return
-`registries_locked`). Built-in defaults are unaffected. This is a forward-looking
-stub for enterprise policy pinning.
+changes (`registry add-source` / `registry remove` and the REST add-source and
+remove surfaces return `registries_locked`). Built-in defaults are unaffected.
+This is a forward-looking stub for enterprise policy pinning.
 
 ## Official v0.1 protocol
 

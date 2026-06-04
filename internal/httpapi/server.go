@@ -132,6 +132,11 @@ type ServerController interface {
 	// (MCP-866), always tagged custom/unverified. On failure it returns a stable
 	// cross-surface error code alongside the raw error.
 	AddRegistrySourceRef(url, protocol, id, name string) (*config.RegistryEntry, *contracts.RegistryAddError, error)
+	// RemoveRegistrySourceRef removes a user-added custom registry source
+	// (MCP-1057). Built-ins are refused (registry_shadows_builtin) and an unknown
+	// id yields registry_not_found. On failure it returns a stable cross-surface
+	// error code alongside the raw error.
+	RemoveRegistrySourceRef(id string) (*config.RegistryEntry, *contracts.RegistryAddError, error)
 
 	// Version and updates
 	GetVersionInfo() *updatecheck.VersionInfo
@@ -683,7 +688,8 @@ func (s *Server) setupRoutes() {
 
 		// Registry browsing (Phase 7)
 		r.Get("/registries", s.handleListRegistries)
-		r.Post("/registries", s.handleAddRegistrySource) // MCP-866 user-added registry source
+		r.Post("/registries", s.handleAddRegistrySource)           // MCP-866 user-added registry source
+		r.Delete("/registries/{id}", s.handleRemoveRegistrySource) // MCP-1057 remove user-added source
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
 		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)           // spec 070 FR-007
 		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
@@ -4214,6 +4220,51 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccess(w, contracts.AddRegistrySourceData{
+		Registry: contracts.RegistrySummary{
+			ID:         entry.ID,
+			Name:       entry.Name,
+			URL:        entry.URL,
+			ServersURL: entry.ServersURL,
+			Protocol:   entry.Protocol,
+			Provenance: entry.Provenance,
+			Trusted:    entry.IsTrusted(),
+		},
+	})
+}
+
+// handleRemoveRegistrySource godoc
+// @Summary      Remove a user-added custom registry source
+// @Description  Removes a custom/unverified registry previously added via add-source (MCP-1057). Built-in registries are refused with registry_shadows_builtin; an unknown id yields registry_not_found. The change is persisted copy-on-write.
+// @Tags         registries
+// @Produce      json
+// @Param        id   path      string  true  "Registry ID"
+// @Success      200  {object}  contracts.SuccessResponse  "Registry source removed"
+// @Failure      400  {object}  contracts.ErrorResponse    "Registry ID is required"
+// @Failure      403  {object}  contracts.ErrorResponse    "registries_locked"
+// @Failure      404  {object}  contracts.ErrorResponse    "registry_not_found"
+// @Failure      409  {object}  contracts.ErrorResponse    "registry_shadows_builtin"
+// @Security     ApiKeyAuth
+// @Security     ApiKeyQuery
+// @Router       /api/v1/registries/{id} [delete]
+func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Request) {
+	registryID := chi.URLParam(r, "id")
+	if registryID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
+		return
+	}
+
+	logger := s.getRequestLogger(r)
+	entry, rerr, err := s.controller.RemoveRegistrySourceRef(registryID)
+	if err != nil {
+		status := registryAddErrorStatus(rerr.Code)
+		if status >= http.StatusInternalServerError {
+			logger.Error("Remove registry source failed", "id", registryID, "error", err)
+		}
+		s.writeRegistryAddError(w, r, status, rerr)
+		return
+	}
+
+	s.writeSuccess(w, contracts.RemoveRegistrySourceData{
 		Registry: contracts.RegistrySummary{
 			ID:         entry.ID,
 			Name:       entry.Name,

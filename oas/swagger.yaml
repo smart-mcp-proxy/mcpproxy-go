@@ -3616,6 +3616,55 @@ paths:
       summary: Add a user-supplied registry source
       tags:
       - registries
+  /api/v1/registries/{id}:
+    delete:
+      description: Removes a custom/unverified registry previously added via add-source
+        (MCP-1057). Built-in registries are refused with registry_shadows_builtin;
+        an unknown id yields registry_not_found. The change is persisted copy-on-write.
+      parameters:
+      - description: Registry ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Registry source removed
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Registry ID is required
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registries_locked
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_not_found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_shadows_builtin
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Remove a user-added custom registry source
+      tags:
+      - registries
   /api/v1/registries/{id}/refresh:
     post:
       description: Invalidates the cached server lists for a registry so the next

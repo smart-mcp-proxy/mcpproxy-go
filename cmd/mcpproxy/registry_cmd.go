@@ -65,8 +65,86 @@ registries directly.`,
 	}
 
 	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
-	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd())
+	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd(), newRegistryRemoveCmd())
 	return cmd
+}
+
+func newRegistryRemoveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "remove <id>",
+		Aliases: []string{"remove-source", "rm"},
+		Short:   "Remove a user-added custom registry source",
+		Long: `Remove a custom MCP registry source you previously added with
+'registry add-source'. Use 'registry list' to see the ids.
+
+Only custom/unverified registries can be removed — the shipped built-in
+registries (official, reference, docker-mcp-catalog, pulse, smithery) cannot be
+removed. Removing a source does not touch any upstream servers you already added
+from it.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			registryID := args[0]
+
+			cfg, err := loadRegistryConfig()
+			if err != nil {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConfigNotFound, err.Error()).
+					WithRecoveryCommand("mcpproxy doctor"), clioutput.ErrCodeConfigNotFound)
+			}
+
+			// remove MUST go through the daemon: the registry list lives on the
+			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
+			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
+					"removing a registry source requires a running mcpproxy daemon").
+					WithGuidance("Start the daemon, then retry").
+					WithRecoveryCommand("mcpproxy serve"), clioutput.ErrCodeConnectionFailed)
+			}
+
+			ctx, cancel := registryContext()
+			defer cancel()
+
+			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			reg, err := client.RemoveRegistrySource(ctx, registryID)
+			if err != nil {
+				return registryRemoveErrorOutput(err)
+			}
+
+			outputFormat := ResolveOutputFormat()
+			if outputFormat == "json" || outputFormat == "yaml" {
+				formatter, _ := GetOutputFormatter()
+				out, _ := formatter.Format(reg)
+				fmt.Println(out)
+				return nil
+			}
+
+			fmt.Printf("✅ Removed registry source '%s'\n", reg.ID)
+			return nil
+		},
+	}
+	return cmd
+}
+
+// registryRemoveErrorOutput maps a *cliclient.RegistryAddError from a remove op
+// to a structured CLI error with remove-specific guidance (MCP-1057).
+func registryRemoveErrorOutput(err error) error {
+	var addErr *cliclient.RegistryAddError
+	if !errors.As(err, &addErr) {
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, err.Error()), clioutput.ErrCodeOperationFailed)
+	}
+
+	switch addErr.Code {
+	case "registry_not_found":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeServerNotFound, addErr.Message).
+			WithGuidance("Check the ids with 'mcpproxy registry list' — only custom/unverified registries can be removed"), clioutput.ErrCodeServerNotFound)
+	case "registry_shadows_builtin":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("Built-in registries cannot be removed"), clioutput.ErrCodeInvalidInput)
+	case "registries_locked":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
+			WithGuidance("Registry changes are disabled by policy (registries_locked)"), clioutput.ErrCodeOperationFailed)
+	default:
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message), clioutput.ErrCodeOperationFailed)
+	}
 }
 
 func newRegistryAddSourceCmd() *cobra.Command {
