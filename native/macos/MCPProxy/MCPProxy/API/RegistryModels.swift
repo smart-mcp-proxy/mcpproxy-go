@@ -4,15 +4,19 @@ import Foundation
 //
 // macOS-tray mirror of the MCP-867 Web UI registry surface. Models the
 // `GET /api/v1/registries` list (with provenance/trust) and the
-// `POST /api/v1/registries` add-source flow (with stable error codes), plus the
-// one-time third-party-registry warning acknowledgement.
+// add/edit/remove-source flows (`POST`/`PUT`/`DELETE /api/v1/registries[/{id}]`,
+// with stable error codes). Provenance is informational only (MCP-1072).
 
-/// Trust-tag constants mirroring `config.RegistryProvenance*` on the Go side
-/// (and `REGISTRY_PROVENANCE_*` in the Web UI). Trust is derived server-side
-/// from membership in the shipped default set — never self-asserted.
+/// Provenance constants mirroring `config.RegistryProvenance*` on the Go side
+/// (MCP-1072 simplified these to two plain values). Provenance is informational
+/// only — it no longer forces quarantine — and is derived server-side from
+/// membership in the shipped default set, never self-asserted.
 enum RegistryProvenance {
-    static let official = "official/trusted"
-    static let custom = "custom/unverified"
+    static let official = "official"
+    static let custom = "custom"
+    /// Legacy strings persisted before MCP-1072; still accepted on read.
+    static let legacyOfficial = "official/trusted"
+    static let legacyCustom = "custom/unverified"
 }
 
 /// A registry as listed by `GET /api/v1/registries`. Mirrors `contracts.Registry`.
@@ -25,10 +29,10 @@ struct Registry: Codable, Identifiable, Equatable {
     let url: String?
     let serversURL: String?
     let `protocol`: String?
-    /// "official/trusted" for built-in defaults, "custom/unverified" for
-    /// user-added sources.
+    /// "official" for built-in defaults, "custom" for user-added sources
+    /// (legacy "official/trusted" / "custom/unverified" still accepted on read).
     let provenance: String?
-    /// Convenience boolean mirror of `provenance == "official/trusted"`.
+    /// Convenience boolean mirror of "is this an official, shipped registry".
     let trusted: Bool?
 
     enum CodingKeys: String, CodingKey {
@@ -38,12 +42,19 @@ struct Registry: Codable, Identifiable, Equatable {
         case provenance, trusted
     }
 
-    /// A registry is "custom/unverified" (third-party) when its provenance says
-    /// so, or — defensively — when `trusted` is explicitly false. Anything else
-    /// (including older payloads without the field) is treated as
-    /// official/trusted. Mirrors the Web UI's `isCustomRegistry`.
+    /// A registry is "custom" (user-added) when its provenance says so — for
+    /// both the new 2-value model and the legacy string — or, defensively, when
+    /// `trusted` is explicitly false. Anything else (including older payloads
+    /// without the field) is treated as official. Mirrors the Web UI's
+    /// `isCustomRegistry`.
     var isCustom: Bool {
-        provenance == RegistryProvenance.custom || trusted == false
+        if trusted == false { return true }
+        switch provenance {
+        case RegistryProvenance.custom, RegistryProvenance.legacyCustom:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Resolve the full `Registry` that a search result's `registry` field
@@ -130,31 +141,11 @@ struct AddRegistrySourceResult: Equatable {
             return "That id/host collides with a built-in registry. Try a different id."
         case "duplicate_registry":
             return "A registry with that id is already configured."
+        case "registry_not_found":
+            return "That registry no longer exists — it may have already been removed."
         default:
             return fallback ?? "Failed to add registry."
         }
-    }
-}
-
-/// Persists the one-time acknowledgement of the third-party-registry warning
-/// (MCP-867 parity). Backed by UserDefaults so the warning only shows until the
-/// user acknowledges it once. `defaults` is injectable for testing.
-struct ThirdPartyRegistryAck {
-    /// Key mirrors the Web UI's localStorage key for cross-surface consistency.
-    static let key = "mcpproxy-thirdparty-registry-ack"
-
-    let defaults: UserDefaults
-
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-    }
-
-    var hasAcknowledged: Bool {
-        defaults.bool(forKey: Self.key)
-    }
-
-    func acknowledge() {
-        defaults.set(true, forKey: Self.key)
     }
 }
 

@@ -6,7 +6,7 @@
 // searches, and sees a merged, registry-attributed result list. Registries
 // that need an API key / are unreachable are surfaced as a non-fatal notice so
 // the registries that DID return still render. Each result can be added
-// (servers from custom registries land quarantined server-side).
+// (new servers follow the global quarantine default — MCP-1072).
 
 import SwiftUI
 
@@ -88,7 +88,7 @@ struct ServerBrowseView: View {
             HStack(spacing: 8) {
                 Text(displayName)
                     .font(.scaled(.title3, scale: fontScale).bold())
-                if let reg = ctx.registry { provenanceBadge(reg) }
+                if let reg = ctx.registry { RegistryProvenanceBadge(isCustom: reg.isCustom) }
                 Spacer()
                 Button {
                     registryInfo = nil
@@ -121,13 +121,13 @@ struct ServerBrowseView: View {
                     }
                 }
 
-                if reg.isCustom {
-                    Text("Servers added from this third-party registry are always quarantined and cannot skip security review.")
-                        .font(.scaled(.caption, scale: fontScale))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("registry-info-quarantine-note")
-                }
+                Text(reg.isCustom
+                     ? "A custom registry you added. Servers you install follow your global security settings."
+                     : "A built-in registry shipped with MCPProxy.")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("registry-info-provenance-note")
             } else {
                 Text("No additional details are available for this registry.")
                     .font(.scaled(.subheadline, scale: fontScale))
@@ -139,28 +139,6 @@ struct ServerBrowseView: View {
         .padding()
         .frame(width: 420, height: 220)
         .accessibilityIdentifier("registry-info-popup")
-    }
-
-    @ViewBuilder
-    private func provenanceBadge(_ registry: Registry) -> some View {
-        if registry.isCustom {
-            badge(text: "Third-party \u{00B7} unverified", tint: .orange)
-                .accessibilityIdentifier("registry-info-badge-custom")
-        } else {
-            badge(text: "Official \u{00B7} trusted", tint: .green)
-                .accessibilityIdentifier("registry-info-badge-official")
-        }
-    }
-
-    @ViewBuilder
-    private func badge(text: String, tint: Color) -> some View {
-        Text(text)
-            .font(.scaled(.caption2, scale: fontScale).weight(.medium))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(tint.opacity(0.18))
-            .foregroundStyle(tint)
-            .clipShape(Capsule())
     }
 
     // MARK: Filter bar (multiselect + search)
@@ -179,7 +157,7 @@ struct ServerBrowseView: View {
                         toggle(registry.id)
                     } label: {
                         Label(
-                            registry.name + (registry.isCustom ? " — unverified" : ""),
+                            registry.name,
                             systemImage: selectedIDs.contains(registry.id) ? "checkmark.square.fill" : "square"
                         )
                     }
