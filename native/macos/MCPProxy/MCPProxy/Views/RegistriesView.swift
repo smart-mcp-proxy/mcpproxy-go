@@ -48,21 +48,15 @@ struct RegistriesView: View {
             if let success = successMessage {
                 banner(icon: "checkmark.circle.fill", tint: .green, text: success)
             }
+            if let err = loadError {
+                banner(icon: "exclamationmark.triangle.fill", tint: .orange, text: err)
+            }
 
             // Browse + add servers across one or more registries (R1 parity).
+            // The configured-registries list lives in the browse multiselect and
+            // the per-result registry badge → info popup (MCP-1050); there is no
+            // longer a bottom "Configured registries" description panel.
             ServerBrowseView(appState: appState, registries: registries)
-
-            HStack {
-                Text("Configured registries")
-                    .font(.scaled(.caption, scale: fontScale).bold())
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal)
-            .padding(.top, 4)
-            Divider()
-
-            content
         }
         .sheet(isPresented: $showAddRegistry) {
             AddRegistryView(appState: appState, isPresented: $showAddRegistry) { added in
@@ -101,109 +95,6 @@ struct RegistriesView: View {
     }
 
     // MARK: Content
-
-    @ViewBuilder
-    private var content: some View {
-        if let err = loadError, registries.isEmpty {
-            VStack(spacing: 12) {
-                Spacer()
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 40 * fontScale))
-                    .foregroundStyle(.orange)
-                Text("Couldn't load registries")
-                    .font(.scaled(.title3, scale: fontScale))
-                    .foregroundStyle(.secondary)
-                Text(err)
-                    .font(.scaled(.caption, scale: fontScale))
-                    .foregroundStyle(.tertiary)
-                    .multilineTextAlignment(.center)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding()
-        } else if registries.isEmpty && !isLoading {
-            VStack(spacing: 12) {
-                Spacer()
-                Image(systemName: "books.vertical")
-                    .font(.system(size: 40 * fontScale))
-                    .foregroundStyle(.tertiary)
-                Text("No registries")
-                    .font(.scaled(.title3, scale: fontScale))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(registries) { registry in
-                        registryRow(registry)
-                    }
-                }
-                .padding()
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func registryRow(_ registry: Registry) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(registry.name.isEmpty ? registry.id : registry.name)
-                    .font(.scaled(.headline, scale: fontScale))
-                provenanceBadge(registry)
-                Spacer()
-            }
-
-            if let desc = registry.description, !desc.isEmpty {
-                Text(desc)
-                    .font(.scaled(.caption, scale: fontScale))
-                    .foregroundStyle(.secondary)
-            }
-
-            if let url = registry.serversURL ?? registry.url, !url.isEmpty {
-                Text(url)
-                    .font(.scaledMonospaced(.caption, scale: fontScale))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-
-            if registry.isCustom {
-                Text("Servers added from this third-party registry are always quarantined and cannot skip security review.")
-                    .font(.scaled(.caption2, scale: fontScale))
-                    .foregroundStyle(.orange)
-                    .accessibilityIdentifier("registry-custom-quarantine-note")
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(8)
-        .accessibilityIdentifier("registry-row-\(registry.id)")
-    }
-
-    @ViewBuilder
-    private func provenanceBadge(_ registry: Registry) -> some View {
-        if registry.isCustom {
-            badge(text: "Third-party \u{00B7} unverified", tint: .orange)
-                .accessibilityIdentifier("registry-provenance-badge-custom")
-        } else {
-            badge(text: "Official \u{00B7} trusted", tint: .green)
-                .accessibilityIdentifier("registry-provenance-badge-official")
-        }
-    }
-
-    @ViewBuilder
-    private func badge(text: String, tint: Color) -> some View {
-        Text(text)
-            .font(.scaled(.caption2, scale: fontScale).weight(.medium))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(tint.opacity(0.18))
-            .foregroundStyle(tint)
-            .clipShape(Capsule())
-    }
 
     @ViewBuilder
     private func banner(icon: String, tint: Color, text: String) -> some View {
