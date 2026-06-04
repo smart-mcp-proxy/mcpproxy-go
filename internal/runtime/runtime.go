@@ -212,13 +212,17 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	// Wire activity retention config from config file
-	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 {
+	if cfg.ActivityRetentionDays > 0 || cfg.ActivityMaxRecords > 0 || cfg.ActivityCleanupIntervalMin > 0 || cfg.ActivityMaxSizeMB >= 0 {
 		maxAge := time.Duration(cfg.ActivityRetentionDays) * 24 * time.Hour
 		checkInterval := time.Duration(cfg.ActivityCleanupIntervalMin) * time.Minute
-		activityService.SetRetentionConfig(maxAge, cfg.ActivityMaxRecords, checkInterval)
+		// ActivityMaxSizeMB: 0 disables the size cap, so pass the explicit byte
+		// value (>= 0 is applied; -1 would mean "unchanged").
+		maxSizeBytes := int64(cfg.ActivityMaxSizeMB) * 1024 * 1024
+		activityService.SetRetentionConfig(maxAge, cfg.ActivityMaxRecords, checkInterval, maxSizeBytes)
 		logger.Info("Activity retention config applied",
 			zap.Int("retention_days", cfg.ActivityRetentionDays),
 			zap.Int("max_records", cfg.ActivityMaxRecords),
+			zap.Int("max_size_mb", cfg.ActivityMaxSizeMB),
 			zap.Int("cleanup_interval_min", cfg.ActivityCleanupIntervalMin))
 	}
 

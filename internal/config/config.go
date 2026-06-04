@@ -138,6 +138,7 @@ type Config struct {
 	// Activity logging settings (RFC-003)
 	ActivityRetentionDays      int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"`             // Max age before pruning (default: 90)
 	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
+	ActivityMaxSizeMB          int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`                   // Max total activity-log size in MB before pruning oldest (default: 256, 0=disabled)
 	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
 	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
 
@@ -1030,6 +1031,7 @@ func DefaultConfig() *Config {
 		// Activity logging defaults (RFC-003)
 		ActivityRetentionDays:      90,     // 90 days retention
 		ActivityMaxRecords:         100000, // 100K records max
+		ActivityMaxSizeMB:          256,    // 256MB total activity-log size cap (0 = disabled)
 		ActivityMaxResponseSize:    65536,  // 64KB response truncation
 		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
 

@@ -454,6 +454,76 @@ func (m *Manager) PruneExcessActivities(maxRecords int, targetPercent float64) (
 	return deleted, nil
 }
 
+// PruneActivitiesToSize deletes the oldest activity records until the activity
+// log's stored data (sum of key+value bytes) is at or below maxBytes. Activity
+// keys are timestamp-ordered, so a single forward cursor pass removes
+// oldest-first. The newest record is ALWAYS retained — the log is never emptied
+// while any record exists, even if that newest record alone exceeds the budget.
+// maxBytes <= 0 disables size pruning (no-op). Returns the number deleted.
+func (m *Manager) PruneActivitiesToSize(maxBytes int64) (int, error) {
+	if maxBytes <= 0 {
+		return 0, nil
+	}
+
+	var deleted int
+
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ActivityRecordsBucket))
+		if bucket == nil {
+			return nil
+		}
+
+		keyCount := bucket.Stats().KeyN
+		if keyCount <= 1 {
+			return nil // never empty the log (always keep the newest record)
+		}
+
+		// Total stored bytes for the bucket.
+		var total int64
+		_ = bucket.ForEach(func(k, v []byte) error {
+			total += int64(len(k) + len(v))
+			return nil
+		})
+		if total <= maxBytes {
+			return nil
+		}
+
+		// Delete oldest-first (smallest keys) until within budget, but NEVER the
+		// last (newest) record — stop before processing it.
+		var keysToDelete [][]byte
+		cursor := bucket.Cursor()
+		processed := 0
+		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
+			if total <= maxBytes || processed == keyCount-1 {
+				break
+			}
+			keysToDelete = append(keysToDelete, append([]byte{}, k...))
+			total -= int64(len(k) + len(v))
+			processed++
+		}
+
+		for _, key := range keysToDelete {
+			if err := bucket.Delete(key); err != nil {
+				return fmt.Errorf("failed to delete activity for size cap: %w", err)
+			}
+			deleted++
+		}
+		return nil
+	})
+
+	if err != nil {
+		return deleted, err
+	}
+
+	if deleted > 0 {
+		m.logger.Infow("Pruned activity records to size budget",
+			"deleted", deleted,
+			"max_bytes", maxBytes)
+	}
+
+	return deleted, nil
+}
+
 // SaveActivityAsync saves an activity record asynchronously.
 // This is non-blocking and suitable for recording tool calls without impacting latency.
 func (m *Manager) SaveActivityAsync(record *ActivityRecord) {
