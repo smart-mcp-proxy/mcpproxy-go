@@ -104,10 +104,14 @@ Equivalent surfaces:
 
 - **REST:** `DELETE /api/v1/registries/{id}` → `{ "registry": { … } }` echoing the removed entry.
 - **CLI:** `mcpproxy registry remove <id>`.
+- **Web UI:** the **Repositories** page registry selector shows a **Remove** (trash)
+  action on each **Third-party · unverified** registry only — built-in defaults
+  offer no removal. It confirms first (noting that upstream servers already added
+  from the source are unaffected), then refreshes the list on success.
 
 Errors share a stable code across surfaces: `registry_not_found` (404),
 `registry_shadows_builtin` (409, built-in cannot be removed),
-`registries_locked` (403).
+`registries_locked` (403). The Web UI maps each code to an actionable message.
 
 ### Enterprise: `registries_locked` (stub)
 

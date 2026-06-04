@@ -46,8 +46,8 @@
                   <button type="button" class="link link-primary text-xs" data-test="registry-select-all" @click="selectAllRegistries">All</button>
                   <button type="button" class="link text-xs" data-test="registry-clear-all" @click="clearRegistries">Clear</button>
                 </li>
-                <li v-for="registry in registries" :key="registry.id">
-                  <label class="label cursor-pointer justify-start gap-3 py-2">
+                <li v-for="registry in registries" :key="registry.id" class="flex flex-row items-center">
+                  <label class="label cursor-pointer justify-start gap-3 py-2 flex-1">
                     <input
                       type="checkbox"
                       class="checkbox checkbox-sm"
@@ -57,6 +57,20 @@
                     />
                     <span class="text-sm">{{ registry.name }}<span v-if="isCustomRegistry(registry)" class="opacity-60"> — unverified</span></span>
                   </label>
+                  <!-- MCP-1064: only custom/unverified (user-added) registries can be removed. -->
+                  <button
+                    v-if="isCustomRegistry(registry)"
+                    type="button"
+                    class="btn btn-ghost btn-xs text-error shrink-0"
+                    :data-test="`registry-remove-${registry.id}`"
+                    :title="`Remove ${registry.name}`"
+                    :aria-label="`Remove ${registry.name}`"
+                    @click.stop.prevent="openRemoveRegistry(registry)"
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                  </button>
                 </li>
               </ul>
             </div>
@@ -436,6 +450,52 @@
       </form>
     </dialog>
 
+    <!-- Remove custom registry confirmation (MCP-1064) -->
+    <dialog :open="removeTarget !== null" class="modal" data-test="registry-remove-dialog">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg">Remove registry</h3>
+        <div class="text-sm py-3 space-y-2">
+          <p>
+            Remove the custom registry
+            <strong>{{ removeTarget?.name || removeTarget?.id }}</strong>
+            from your discovery sources?
+          </p>
+          <p class="text-base-content/70">
+            This only removes the source. Upstream servers you already added from it
+            stay configured and are not affected.
+          </p>
+        </div>
+
+        <div v-if="removeError" class="alert alert-error text-sm" data-test="registry-remove-error">
+          <span>{{ removeError }}</span>
+        </div>
+
+        <div class="modal-action">
+          <button
+            type="button"
+            class="btn btn-ghost"
+            data-test="registry-remove-cancel"
+            @click="cancelRemoveRegistry"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn btn-error"
+            data-test="registry-remove-confirm"
+            :disabled="removingRegistry"
+            @click="confirmRemoveRegistry"
+          >
+            <span v-if="removingRegistry" class="loading loading-spinner loading-xs"></span>
+            <span v-else>Remove</span>
+          </button>
+        </div>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button @click="cancelRemoveRegistry">close</button>
+      </form>
+    </dialog>
+
     <!-- Success Toast -->
     <div v-if="showSuccessToast" class="toast toast-end" data-test="registry-add-success">
       <div class="alert alert-success">
@@ -493,6 +553,12 @@ const addRegistryName = ref('')
 const addRegistryError = ref<string | null>(null)
 const addingRegistry = ref(false)
 const showThirdPartyWarning = ref(false)
+
+// Remove-custom-registry state (MCP-1064). removeTarget !== null drives the
+// confirmation dialog; only custom/unverified registries are ever offered here.
+const removeTarget = ref<Registry | null>(null)
+const removingRegistry = ref(false)
+const removeError = ref<string | null>(null)
 
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -886,6 +952,66 @@ async function doAddRegistry() {
     addRegistryError.value = 'Failed to add registry: ' + (err as Error).message
   } finally {
     addingRegistry.value = false
+  }
+}
+
+// --- Remove custom registry source (MCP-1064 / backend MCP-1057) ---
+
+function openRemoveRegistry(registry: Registry) {
+  removeTarget.value = registry
+  removeError.value = null
+}
+
+function cancelRemoveRegistry() {
+  if (removingRegistry.value) return
+  removeTarget.value = null
+  removeError.value = null
+}
+
+// Map the backend's stable remove error codes to actionable messages.
+function removeRegistryErrorMessage(code: string | undefined, fallback: string | undefined): string {
+  switch (code) {
+    case 'registry_not_found':
+      return 'That registry no longer exists — it may have already been removed.'
+    case 'registry_shadows_builtin':
+      return 'Built-in registries cannot be removed.'
+    case 'registries_locked':
+      return 'Removing registries is locked by an administrator on this instance.'
+    default:
+      return fallback || 'Failed to remove registry.'
+  }
+}
+
+async function confirmRemoveRegistry() {
+  const target = removeTarget.value
+  if (!target || removingRegistry.value) return
+
+  removingRegistry.value = true
+  removeError.value = null
+
+  try {
+    const result = await api.removeRegistrySource(target.id)
+
+    if (result.success) {
+      // Drop it from the active selection so we stop searching a now-gone
+      // source, then refresh the list so the entry disappears. Re-search only
+      // when it had been selected, to avoid clobbering current results.
+      const wasSelected = selectedRegistries.value.includes(target.id)
+      if (wasSelected) {
+        selectedRegistries.value = selectedRegistries.value.filter(id => id !== target.id)
+      }
+      removeTarget.value = null
+      await loadRegistries()
+      if (wasSelected) handleRegistryChange()
+      showToast(`Removed registry "${target.name || target.id}". Servers already added from it are unaffected.`)
+      return
+    }
+
+    removeError.value = removeRegistryErrorMessage(result.code, result.error)
+  } catch (err) {
+    removeError.value = 'Failed to remove registry: ' + (err as Error).message
+  } finally {
+    removingRegistry.value = false
   }
 }
 

@@ -44,6 +44,18 @@ export interface AddRegistrySourceResult {
   code?: string
 }
 
+// MCP-1064 / MCP-1057: result of removing a *custom/unverified registry source*
+// (DELETE /registries/{id}). Carries the stable error `code`
+// (registry_not_found | registry_shadows_builtin | registries_locked) so the UI
+// can render an actionable message. Removing a source does not touch upstream
+// servers already added from it.
+export interface RemoveRegistrySourceResult {
+  success: boolean
+  registry?: RegistrySummary
+  error?: string
+  code?: string
+}
+
 class APIService {
   private baseUrl = ''
   private apiKey = ''
@@ -710,6 +722,49 @@ class APIService {
         if (response.status === 401 || response.status === 403) {
           // registries_locked is a 403 but is a policy decision, not an auth
           // failure — only emit the auth-error path for a missing/invalid key.
+          if (payload?.code !== 'registries_locked') {
+            this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
+          }
+        }
+        return {
+          success: false,
+          error: payload?.error || `HTTP ${response.status}: ${response.statusText}`,
+          code: payload?.code
+        }
+      }
+
+      return { success: true, registry: payload?.data?.registry }
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      }
+    }
+  }
+
+  // MCP-1064 / MCP-1057: remove a user-added custom/unverified registry source.
+  // Mirrors the structured-error pattern of addRegistrySource so the UI can
+  // branch on the stable `code` (registry_not_found | registry_shadows_builtin
+  // | registries_locked). Built-in official/trusted registries cannot be
+  // removed (the backend refuses them with registry_shadows_builtin), so the UI
+  // only offers this on custom sources. Removing a source leaves any upstream
+  // servers already added from it untouched.
+  async removeRegistrySource(registryId: string): Promise<RemoveRegistrySourceResult> {
+    const headers: Record<string, string> = {}
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    try {
+      const response = await fetch(`${this.baseUrl}/api/v1/registries/${encodeURIComponent(registryId)}`, {
+        method: 'DELETE',
+        headers
+      })
+
+      const payload: any = await response.json().catch(() => ({}))
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          // registries_locked is a 403 policy decision, not an auth failure —
+          // only emit the auth-error path for a missing/invalid key.
           if (payload?.code !== 'registries_locked') {
             this.emitAuthError(payload?.error || `HTTP ${response.status}`, response.status)
           }
