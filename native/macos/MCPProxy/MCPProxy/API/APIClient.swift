@@ -691,10 +691,10 @@ actor APIClient {
     }
 
     /// Add a user-supplied registry source via `POST /api/v1/registries`. The
-    /// server always tags an added source custom/unverified (provenance is NOT
-    /// part of the request), so every server later discovered through it lands
-    /// quarantined. Returns a structured result carrying the stable error
-    /// `code` instead of throwing, mirroring the Web UI's `addRegistrySource`.
+    /// server always tags an added source "custom" (provenance is NOT part of
+    /// the request); provenance is informational only (MCP-1072) and servers
+    /// follow the global quarantine default. Returns a structured result carrying
+    /// the stable error `code` instead of throwing, mirroring the Web UI.
     func addRegistrySource(
         url: String,
         protocol proto: String? = nil,
@@ -709,6 +709,70 @@ actor APIClient {
         do {
             let bodyData = try JSONSerialization.data(withJSONObject: body)
             let (data, response) = try await rawRequest(path: "/api/v1/registries", method: "POST", body: bodyData)
+            let decoder = JSONDecoder()
+
+            if (200...299).contains(response.statusCode),
+               let wrapper = try? decoder.decode(APIResponse<AddRegistrySourceData>.self, from: data),
+               wrapper.success {
+                return .ok(wrapper.data?.registry)
+            }
+
+            let errBody = try? decoder.decode(RegistryAddErrorBody.self, from: data)
+            return .failure(
+                code: errBody?.code,
+                error: errBody?.error ?? "HTTP \(response.statusCode): \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))"
+            )
+        } catch {
+            return .failure(code: nil, error: error.localizedDescription)
+        }
+    }
+
+    /// Edit a user-added custom registry via `PUT /api/v1/registries/{id}`
+    /// (MCP-1072). All fields are optional — an empty field leaves the existing
+    /// value unchanged; the id is immutable. Returns a structured result carrying
+    /// the stable error `code` (e.g. `registry_not_found`, `invalid_registry_url`,
+    /// `registry_shadows_builtin`, `registries_locked`) instead of throwing.
+    func editRegistrySource(
+        id: String,
+        url: String? = nil,
+        name: String? = nil,
+        serversURL: String? = nil
+    ) async -> AddRegistrySourceResult {
+        var body: [String: Any] = [:]
+        if let url, !url.isEmpty { body["url"] = url }
+        if let name, !name.isEmpty { body["name"] = name }
+        if let serversURL, !serversURL.isEmpty { body["servers_url"] = serversURL }
+
+        do {
+            let bodyData = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await rawRequest(
+                path: "/api/v1/registries/\(id.uriComponentEncoded)", method: "PUT", body: bodyData)
+            let decoder = JSONDecoder()
+
+            if (200...299).contains(response.statusCode),
+               let wrapper = try? decoder.decode(APIResponse<AddRegistrySourceData>.self, from: data),
+               wrapper.success {
+                return .ok(wrapper.data?.registry)
+            }
+
+            let errBody = try? decoder.decode(RegistryAddErrorBody.self, from: data)
+            return .failure(
+                code: errBody?.code,
+                error: errBody?.error ?? "HTTP \(response.statusCode): \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))"
+            )
+        } catch {
+            return .failure(code: nil, error: error.localizedDescription)
+        }
+    }
+
+    /// Remove a user-added custom registry via `DELETE /api/v1/registries/{id}`
+    /// (MCP-1057). Built-in registries cannot be removed (the backend returns
+    /// `registry_not_found` / a locked error). Returns a structured result
+    /// carrying the stable error `code` instead of throwing.
+    func removeRegistrySource(id: String) async -> AddRegistrySourceResult {
+        do {
+            let (data, response) = try await rawRequest(
+                path: "/api/v1/registries/\(id.uriComponentEncoded)", method: "DELETE")
             let decoder = JSONDecoder()
 
             if (200...299).contains(response.statusCode),
