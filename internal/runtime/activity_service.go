@@ -20,6 +20,8 @@ const (
 	DefaultRetentionMaxRecords = 10000
 	// DefaultRetentionCheckInterval is the default interval between retention checks (1 hour)
 	DefaultRetentionCheckInterval = 1 * time.Hour
+	// DefaultRetentionMaxSizeBytes is the default total activity-log size cap (256MB)
+	DefaultRetentionMaxSizeBytes int64 = 256 * 1024 * 1024
 )
 
 // SensitiveDataEventEmitter provides the ability to emit sensitive data detection events.
@@ -43,6 +45,7 @@ type ActivityService struct {
 	// Retention configuration
 	maxAge        time.Duration
 	maxRecords    int
+	maxSizeBytes  int64 // total activity-log size cap in bytes (0 = disabled)
 	checkInterval time.Duration
 
 	// Sensitive data detector (Spec 026)
@@ -68,6 +71,7 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 		done:          make(chan struct{}),
 		maxAge:        DefaultRetentionMaxAge,
 		maxRecords:    DefaultRetentionMaxRecords,
+		maxSizeBytes:  DefaultRetentionMaxSizeBytes,
 		checkInterval: DefaultRetentionCheckInterval,
 		detector:      nil, // Detector is optional, set via SetDetector
 		usage:         newUsageStore(),
@@ -92,7 +96,7 @@ func (s *ActivityService) SetEventEmitter(emitter SensitiveDataEventEmitter) {
 // maxAge: maximum age for records (0 = no age limit)
 // maxRecords: maximum number of records (0 = no count limit)
 // checkInterval: how often to run retention cleanup
-func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords int, checkInterval time.Duration) {
+func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords int, checkInterval time.Duration, maxSizeBytes int64) {
 	if maxAge > 0 {
 		s.maxAge = maxAge
 	}
@@ -101,6 +105,11 @@ func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords in
 	}
 	if checkInterval > 0 {
 		s.checkInterval = checkInterval
+	}
+	// maxSizeBytes may be explicitly set to 0 to DISABLE the size cap, so a
+	// negative sentinel (-1) means "leave unchanged"; >= 0 is applied verbatim.
+	if maxSizeBytes >= 0 {
+		s.maxSizeBytes = maxSizeBytes
 	}
 }
 
@@ -187,6 +196,19 @@ func (s *ActivityService) runRetentionCleanup() {
 			s.logger.Info("Pruned excess activity records",
 				zap.Int("deleted", deleted),
 				zap.Int("max_records", s.maxRecords))
+		}
+	}
+
+	// Prune by total size (runs after age+count; 0 disables). Bounds config.db
+	// growth from large per-record payloads that stay under the count/age caps.
+	if s.maxSizeBytes > 0 {
+		deleted, err := s.storage.PruneActivitiesToSize(s.maxSizeBytes)
+		if err != nil {
+			s.logger.Error("Failed to prune activities to size budget", zap.Error(err))
+		} else if deleted > 0 {
+			s.logger.Info("Pruned activity records to size budget",
+				zap.Int("deleted", deleted),
+				zap.Int64("max_size_mb", s.maxSizeBytes/(1024*1024)))
 		}
 	}
 }

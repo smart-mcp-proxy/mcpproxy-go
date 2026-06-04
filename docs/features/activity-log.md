@@ -405,6 +405,7 @@ Activity logging is enabled by default. Configure via `mcp_config.json`:
 {
   "activity_retention_days": 90,
   "activity_max_records": 100000,
+  "activity_max_size_mb": 256,
   "activity_max_response_size": 65536,
   "activity_cleanup_interval_min": 60
 }
@@ -414,8 +415,11 @@ Activity logging is enabled by default. Configure via `mcp_config.json`:
 |---------|---------|-------------|
 | `activity_retention_days` | 90 | Days to retain activity records |
 | `activity_max_records` | 100000 | Maximum records before pruning oldest |
+| `activity_max_size_mb` | 256 | Maximum total activity-log size in MB before pruning oldest (`0` disables). Runs alongside the age and count caps to bound `config.db` growth when records carry large payloads. |
 | `activity_max_response_size` | 65536 | Max response size stored (bytes) |
 | `activity_cleanup_interval_min` | 60 | Background cleanup interval (minutes) |
+
+> **Why the size cap?** The age and count caps alone do not bound disk: with large per-record payloads the log can reach hundreds of MB while still under 100k records / 90 days. `activity_max_size_mb` removes the oldest records (always keeping the newest) until the log is within the byte budget. Note: pruning frees pages for reuse but does not shrink the database file on disk (BBolt does not return freed pages to the OS).
 
 ## Use Cases
 
