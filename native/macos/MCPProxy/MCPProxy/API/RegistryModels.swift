@@ -45,6 +45,17 @@ struct Registry: Codable, Identifiable, Equatable {
     var isCustom: Bool {
         provenance == RegistryProvenance.custom || trusted == false
     }
+
+    /// Resolve the full `Registry` that a search result's `registry` field
+    /// refers to. That field may carry the registry id OR its display name (the
+    /// backend search response uses the name — see `RepositoryServer.registry`),
+    /// so match on id first, then fall back to a case-insensitive name match.
+    /// Returns nil when nothing matches; the badge popup then shows the raw
+    /// label only. Used by the macOS browse view (MCP-1050).
+    static func lookup(_ nameOrID: String, in registries: [Registry]) -> Registry? {
+        if let byID = registries.first(where: { $0.id == nameOrID }) { return byID }
+        return registries.first { $0.name.caseInsensitiveCompare(nameOrID) == .orderedSame }
+    }
 }
 
 /// Slim projection returned by `POST /api/v1/registries` (add-source).

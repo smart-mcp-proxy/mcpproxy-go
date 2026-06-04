@@ -139,6 +139,42 @@ final class RegistryModelsTests: XCTestCase {
         )
     }
 
+    // MARK: - Registry lookup by name-or-id (MCP-1050 badge → info popup)
+
+    private func sampleRegistries() throws -> [Registry] {
+        let json = """
+        {"registries":[
+          {"id":"official","name":"Official MCP Registry",
+           "description":"Primary aggregator","url":"https://registry.modelcontextprotocol.io",
+           "provenance":"official/trusted","trusted":true},
+          {"id":"acme","name":"Acme","provenance":"custom/unverified","trusted":false}
+        ],"total":2}
+        """
+        return try decode(GetRegistriesResponse.self, from: json).registries
+    }
+
+    func testLookupMatchesByID() throws {
+        let regs = try sampleRegistries()
+        XCTAssertEqual(Registry.lookup("official", in: regs)?.id, "official")
+    }
+
+    func testLookupFallsBackToName() throws {
+        // A search result's `registry` field carries the registry *name*, so a
+        // name match must resolve when no id matches.
+        let regs = try sampleRegistries()
+        XCTAssertEqual(Registry.lookup("Acme", in: regs)?.id, "acme")
+    }
+
+    func testLookupNameIsCaseInsensitive() throws {
+        let regs = try sampleRegistries()
+        XCTAssertEqual(Registry.lookup("ACME", in: regs)?.id, "acme")
+    }
+
+    func testLookupReturnsNilWhenNotFound() throws {
+        let regs = try sampleRegistries()
+        XCTAssertNil(Registry.lookup("nonexistent", in: regs))
+    }
+
     // MARK: - One-time third-party warning ack persistence (mirrors localStorage)
 
     func testThirdPartyAckPersistence() throws {

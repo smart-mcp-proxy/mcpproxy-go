@@ -25,8 +25,18 @@ struct ServerBrowseView: View {
     @State private var searchError: String?
     @State private var addingID: String?
     @State private var addNote: String?
+    @State private var registryInfo: RegistryInfoContext?
 
     private var apiClient: APIClient? { appState.apiClient }
+
+    /// Identifiable context for the registry-info popup (`.sheet(item:)`). Holds
+    /// the looked-up `Registry` (nil when the result's label matched nothing in
+    /// the loaded list) plus the raw `label` so the popup always has a title.
+    struct RegistryInfoContext: Identifiable {
+        let id = UUID()
+        let registry: Registry?
+        let label: String
+    }
 
     private func registryName(_ id: String) -> String {
         registries.first { $0.id == id }?.name ?? id
@@ -64,6 +74,93 @@ struct ServerBrowseView: View {
             resultsArea
         }
         .accessibilityIdentifier("server-browse")
+        .sheet(item: $registryInfo) { ctx in
+            registryInfoSheet(ctx)
+        }
+    }
+
+    // MARK: Registry-info popup (MCP-1050)
+
+    @ViewBuilder
+    private func registryInfoSheet(_ ctx: RegistryInfoContext) -> some View {
+        let displayName = ctx.registry.map { $0.name.isEmpty ? $0.id : $0.name } ?? ctx.label
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text(displayName)
+                    .font(.scaled(.title3, scale: fontScale).bold())
+                if let reg = ctx.registry { provenanceBadge(reg) }
+                Spacer()
+                Button {
+                    registryInfo = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("registry-info-close")
+            }
+
+            if let reg = ctx.registry {
+                if let desc = reg.description, !desc.isEmpty {
+                    Text(desc)
+                        .font(.scaled(.subheadline, scale: fontScale))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if let url = reg.serversURL ?? reg.url, !url.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("URL")
+                            .font(.scaled(.caption2, scale: fontScale))
+                            .foregroundStyle(.secondary)
+                        Text(url)
+                            .font(.scaledMonospaced(.caption, scale: fontScale))
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                if reg.isCustom {
+                    Text("Servers added from this third-party registry are always quarantined and cannot skip security review.")
+                        .font(.scaled(.caption, scale: fontScale))
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("registry-info-quarantine-note")
+                }
+            } else {
+                Text("No additional details are available for this registry.")
+                    .font(.scaled(.subheadline, scale: fontScale))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding()
+        .frame(width: 420, height: 220)
+        .accessibilityIdentifier("registry-info-popup")
+    }
+
+    @ViewBuilder
+    private func provenanceBadge(_ registry: Registry) -> some View {
+        if registry.isCustom {
+            badge(text: "Third-party \u{00B7} unverified", tint: .orange)
+                .accessibilityIdentifier("registry-info-badge-custom")
+        } else {
+            badge(text: "Official \u{00B7} trusted", tint: .green)
+                .accessibilityIdentifier("registry-info-badge-official")
+        }
+    }
+
+    @ViewBuilder
+    private func badge(text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.scaled(.caption2, scale: fontScale).weight(.medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(tint.opacity(0.18))
+            .foregroundStyle(tint)
+            .clipShape(Capsule())
     }
 
     // MARK: Filter bar (multiselect + search)
@@ -167,12 +264,25 @@ struct ServerBrowseView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 if let reg = server.registry, !reg.isEmpty {
-                    Text(reg)
+                    // Tappable: opens an info popup for the originating registry
+                    // (name/url/description/provenance) — MCP-1050.
+                    Button {
+                        registryInfo = RegistryInfoContext(
+                            registry: Registry.lookup(reg, in: registries), label: reg)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(reg)
+                            Image(systemName: "info.circle")
+                                .font(.system(size: 9 * fontScale))
+                        }
                         .font(.scaled(.caption2, scale: fontScale))
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Color.secondary.opacity(0.15))
                         .clipShape(Capsule())
-                        .accessibilityIdentifier("browse-source-\(server.id)")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Show registry info")
+                    .accessibilityIdentifier("browse-source-\(server.id)")
                 }
             }
             if let desc = server.description, !desc.isEmpty {
