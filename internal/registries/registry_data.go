@@ -45,6 +45,15 @@ func SetRegistriesFromConfig(cfg *config.Config) {
 	}
 	if cfg != nil {
 		for i := range cfg.Registries {
+			// MCP-1049: never resurface a deprecated former-default registry that
+			// is still persisted in an existing config. The load-time prune
+			// (config.PruneDeprecatedRegistries) cleans the persisted slice, and
+			// this skip guarantees convergence even for a stale in-memory config
+			// (hot-reload, direct construction). A genuine custom registry is never
+			// in the deprecated set, so it is always merged.
+			if config.IsDeprecatedDefaultRegistry(cfg.Registries[i].ID) {
+				continue
+			}
 			upsert(fromConfigEntry(&cfg.Registries[i]))
 		}
 	}
