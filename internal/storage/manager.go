@@ -453,6 +453,21 @@ func (m *Manager) DeleteServerToolApprovals(serverName string) error {
 	return m.db.DeleteServerToolApprovals(serverName)
 }
 
+// PruneOrphanToolApprovals removes tool-approval records for servers that are
+// no longer in the configured set, returning the number removed. Configured
+// servers (even disabled ones) are preserved so re-enabling never re-quarantines
+// previously-approved tools (MCP-1002).
+func (m *Manager) PruneOrphanToolApprovals(configuredServers []string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	keep := make(map[string]bool, len(configuredServers))
+	for _, name := range configuredServers {
+		keep[name] = true
+	}
+	return m.db.PruneToolApprovalsNotIn(keep)
+}
+
 // Security Scanner methods (Spec 039)
 
 // SaveScanner saves a scanner plugin record

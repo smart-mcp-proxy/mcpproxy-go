@@ -715,6 +715,23 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 		storedServerMap[storedServer.Name] = storedServer
 	}
 
+	// GC orphaned tool-approval records (MCP-1002): drop approvals whose server
+	// is no longer configured. Configured-but-disabled servers are preserved so
+	// a later re-enable doesn't re-quarantine their previously-approved tools.
+	// Guard against a transient empty config nuking every approval — explicit
+	// server deletion already cleans up via DeleteServerToolApprovals.
+	if len(configuredServers) > 0 {
+		configuredNames := make([]string, 0, len(configuredServers))
+		for name := range configuredServers {
+			configuredNames = append(configuredNames, name)
+		}
+		if pruned, perr := r.storageManager.PruneOrphanToolApprovals(configuredNames); perr != nil {
+			r.logger.Warn("Failed to prune orphan tool approvals", zap.Error(perr))
+		} else if pruned > 0 {
+			r.logger.Info("Pruned orphan tool-approval records", zap.Int("removed", pruned))
+		}
+	}
+
 	// Add/remove servers asynchronously to prevent blocking on slow connections
 	// All server operations now happen in background goroutines with timeouts
 
