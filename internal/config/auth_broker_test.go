@@ -43,6 +43,35 @@ func TestAuthBrokerConfig_ApplyDefaults(t *testing.T) {
 	})
 }
 
+func TestAuthBroker_OAuthConnectRequiresAuthorizationEndpoint(t *testing.T) {
+	t.Run("missing authorization_endpoint is rejected", func(t *testing.T) {
+		b := &AuthBrokerConfig{
+			Mode:          AuthBrokerModeOAuthConnect,
+			TokenEndpoint: "https://idp/token",
+		}
+		err := b.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "authorization_endpoint")
+	})
+
+	t.Run("authorization_endpoint present is accepted", func(t *testing.T) {
+		b := &AuthBrokerConfig{
+			Mode:                  AuthBrokerModeOAuthConnect,
+			AuthorizationEndpoint: "https://idp/authorize",
+			TokenEndpoint:         "https://idp/token",
+		}
+		require.NoError(t, b.Validate())
+	})
+
+	t.Run("authorization_endpoint is not required for token_exchange", func(t *testing.T) {
+		b := &AuthBrokerConfig{
+			Mode:          AuthBrokerModeTokenExchange,
+			TokenEndpoint: "https://idp/token",
+		}
+		require.NoError(t, b.Validate())
+	})
+}
+
 func TestAuthBroker_ValidHTTPBroker(t *testing.T) {
 	server := &ServerConfig{
 		Name:     "github",
@@ -134,9 +163,14 @@ func TestAuthBroker_MissingRequiredFields(t *testing.T) {
 func TestAuthBroker_AllValidModes(t *testing.T) {
 	for _, mode := range []string{AuthBrokerModeTokenExchange, AuthBrokerModeEntraOBO, AuthBrokerModeOAuthConnect} {
 		t.Run(mode, func(t *testing.T) {
+			broker := &AuthBrokerConfig{Mode: mode, TokenEndpoint: "https://idp/token"}
+			// The connect flow additionally requires the authorize endpoint.
+			if mode == AuthBrokerModeOAuthConnect {
+				broker.AuthorizationEndpoint = "https://idp/authorize"
+			}
 			cfg := baseValidConfig(&ServerConfig{
 				Name: "s", Protocol: "streamable-http", URL: "https://x/mcp",
-				AuthBroker: &AuthBrokerConfig{Mode: mode, TokenEndpoint: "https://idp/token"},
+				AuthBroker: broker,
 			})
 			require.NoError(t, cfg.Validate())
 		})
