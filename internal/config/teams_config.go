@@ -17,6 +17,13 @@ type TeamsConfig struct {
 	BearerTokenTTL       Duration          `json:"bearer_token_ttl,omitempty" mapstructure:"bearer-token-ttl"`
 	WorkspaceIdleTimeout Duration          `json:"workspace_idle_timeout,omitempty" mapstructure:"workspace-idle-timeout"`
 	MaxUserServers       int               `json:"max_user_servers,omitempty" mapstructure:"max-user-servers"`
+
+	// CredentialEncryptionKey is the base64-encoded 32-byte AES-256 master key
+	// used by the upstream token broker (spec 074) to encrypt stored
+	// credentials at rest. The MCPPROXY_CRED_KEY environment variable takes
+	// precedence over this value. When neither is set, the broker is disabled
+	// gracefully (the rest of the gateway is unaffected).
+	CredentialEncryptionKey string `json:"credential_encryption_key,omitempty" mapstructure:"credential-encryption-key"`
 }
 
 // TeamsOAuthConfig holds OAuth identity provider configuration for the server edition.
