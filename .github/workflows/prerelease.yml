@@ -33,16 +33,16 @@ jobs:
             cgo: "0"
             name: mcpproxy-linux-arm64
             archive_format: tar.gz
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: amd64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-amd64.exe
             archive_format: zip
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: arm64
-            cgo: "0"
+            cgo: "1"
             name: mcpproxy-windows-arm64.exe
             archive_format: zip
           - os: macos-15
@@ -97,6 +97,7 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Copy frontend dist to embed location
+        shell: bash
         run: |
           rm -rf web/frontend
           mkdir -p web/frontend
@@ -182,6 +183,7 @@ jobs:
 
 
       - name: Build binary and create archives
+        shell: bash
         env:
           CGO_ENABLED: ${{ matrix.cgo }}
           GOOS: ${{ matrix.goos }}
@@ -406,7 +408,12 @@ jobs:
 
           if [ "${{ matrix.archive_format }}" = "zip" ]; then
             # Create only versioned archive (no latest for prereleases)
-            zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+            if [ "${{ matrix.goos }}" = "windows" ]; then
+              # Use PowerShell Compress-Archive on Windows since zip command isn't available
+              powershell -Command "Compress-Archive -Path '${CLEAN_BINARY}' -DestinationPath '${ARCHIVE_BASE}.zip'"
+            else
+              zip "${ARCHIVE_BASE}.zip" ${CLEAN_BINARY}
+            fi
           else
             # Create only versioned archive (no latest for prereleases)
             tar -czf "${ARCHIVE_BASE}.tar.gz" ${CLEAN_BINARY}
