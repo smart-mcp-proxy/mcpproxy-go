@@ -68,23 +68,39 @@ describe('Repositories — add registry + provenance + third-party warning', () 
     expect(wrapper.find('[data-test="registry-add-source-button"]').exists()).toBe(true)
   })
 
-  it('flags a custom registry as unverified in the selector and an official one without that suffix', async () => {
-    // R4 (v0.36.0 feedback): the prominent provenance banner was removed in
-    // favour of surfacing trust inline. The selector option text carries the
-    // "— unverified" suffix for third-party registries; server cards carry the
-    // registry name. No big alert block any more.
+  it('flags a custom registry as unverified in the multiselect and an official one without that suffix', async () => {
+    // R4: provenance banner removed; trust surfaced inline in the registry
+    // multiselect (R1) — the option label carries "— unverified" for
+    // third-party registries. R1: it is a multiselect (checkboxes), not a
+    // single <select>.
     const wrapper = mountView()
     await flushPromises()
 
-    const options = wrapper.findAll('[data-test="registry-select"] option')
-    const acme = options.find(o => o.attributes('value') === 'acme')
-    const official = options.find(o => o.attributes('value') === 'official')
-    expect(acme?.text()).toContain('unverified')
-    expect(official?.text()).not.toContain('unverified')
+    const acmeOpt = wrapper.find('[data-test="registry-option-acme"]')
+    const officialOpt = wrapper.find('[data-test="registry-option-official"]')
+    expect(acmeOpt.exists()).toBe(true)
+    expect(officialOpt.exists()).toBe(true)
+    expect((acmeOpt.element as HTMLElement).closest('label')?.textContent).toContain('unverified')
+    expect((officialOpt.element as HTMLElement).closest('label')?.textContent).not.toContain('unverified')
 
     // The old prominent banner / quarantine-note block is gone.
     expect(wrapper.find('[data-test="registry-provenance-badge-custom"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="registry-custom-quarantine-note"]').exists()).toBe(false)
+  })
+
+  it('multiselect: toggling a registry searches it; selecting a second searches across both (R1)', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(api.searchRegistryServers as any).mockClear()
+
+    await wrapper.find('[data-test="registry-option-official"]').setValue(true)
+    await flushPromises()
+    await wrapper.find('[data-test="registry-option-acme"]').setValue(true)
+    await flushPromises()
+
+    const searched = (api.searchRegistryServers as any).mock.calls.map((c: any[]) => c[0])
+    expect(searched).toContain('official')
+    expect(searched).toContain('acme')
   })
 
   it('shows the one-time third-party warning before the first add and does NOT call the API yet', async () => {
