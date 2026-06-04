@@ -549,9 +549,18 @@ List configured registries.
 
 Add a user-supplied custom registry source. JSON body:
 `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }` (only `url`
-required). The source is always tagged `custom/unverified`. Errors share a stable
+required). The source is always tagged `custom`. Errors share a stable
 code: `invalid_registry_url` (400), `registries_locked` (403),
 `registry_shadows_builtin` / `duplicate_registry` (409).
+
+#### PUT /api/v1/registries/{id}
+
+Edit a user-added custom registry source. JSON body:
+`{ "name": "…", "url": "https://…", "servers_url": "https://…" }` (all optional;
+an omitted/empty field is left unchanged). Returns `data.registry` echoing the
+updated entry. Built-in registries are refused with `registry_shadows_builtin`
+(409); an unknown id returns `registry_not_found` (404); a non-https url returns
+`invalid_registry_url` (400); a `registries_locked` policy returns 403.
 
 #### DELETE /api/v1/registries/{id}
 
@@ -566,8 +575,8 @@ Search a registry's servers (`?search=`, `?tag=`, `?limit=`).
 
 #### POST /api/v1/registries/{id}/servers/{serverId}/add
 
-Add a server from a registry as a quarantined upstream. Optional JSON body
-carries only overrides (never a config blob):
+Add a server from a registry as an upstream (quarantined per the global default).
+Optional JSON body carries only overrides (never a config blob):
 
 ```json
 { "name": "github-mcp", "env": { "GITHUB_TOKEN": "…" }, "enabled": true }

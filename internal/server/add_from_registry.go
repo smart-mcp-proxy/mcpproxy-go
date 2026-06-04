@@ -52,9 +52,9 @@ type AddFromRegistryRequest struct {
 
 	// SourceRegistryID / SourceProvenance are stamped server-side by
 	// AddServerFromRegistry from the resolved registry (MCP-866); they are NOT
-	// client-settable through the REST/MCP/CLI Ref adapter. A custom/unverified
-	// provenance forces the derived server to be quarantined and forbids
-	// skip_quarantine.
+	// client-settable through the REST/MCP/CLI Ref adapter. They are purely
+	// informational (MCP-1072) — the derived server follows the global
+	// quarantine default regardless of provenance.
 	SourceRegistryID string
 	SourceProvenance string
 }
@@ -99,8 +99,8 @@ func (s *Server) AddServerFromRegistry(ctx context.Context, req *AddFromRegistry
 	}
 
 	// Stamp the source registry + its (authoritatively-computed) provenance so
-	// the derivation can enforce quarantine for custom/unverified sources and
-	// surfaces can show a server's origin (MCP-866).
+	// surfaces can show a server's origin (MCP-866). Provenance is informational
+	// only (MCP-1072) — it no longer changes the quarantine decision.
 	req.SourceRegistryID = req.RegistryID
 	if reg := registries.FindRegistry(req.RegistryID); reg != nil {
 		req.SourceProvenance = reg.Provenance
@@ -194,21 +194,13 @@ func buildServerConfigFromEntry(entry *registries.ServerEntry, req *AddFromRegis
 
 	cfg := &config.ServerConfig{
 		Name:                     name,
-		Quarantined:              quarantineDefault, // CN-002: never overridable to false here
+		Quarantined:              quarantineDefault, // follows the global default for every origin (MCP-1072)
 		Enabled:                  true,
 		SourceRegistryID:         req.SourceRegistryID,
 		SourceRegistryProvenance: req.SourceProvenance,
 	}
 	if req.Enabled != nil {
 		cfg.Enabled = *req.Enabled
-	}
-
-	// MCP-866: a custom/unverified registry can never opt its servers out of
-	// quarantine. Force quarantine on regardless of the global default and
-	// ensure skip_quarantine stays off.
-	if req.SourceProvenance == config.RegistryProvenanceCustom {
-		cfg.Quarantined = true
-		cfg.SkipQuarantine = false
 	}
 
 	// Carry any supplied env (overrides + required-input values).

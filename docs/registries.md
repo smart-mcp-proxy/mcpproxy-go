@@ -12,7 +12,7 @@ available via the `search_servers` / `list_registries` MCP tools, the
 | `reference` | Reference Servers | `builtin/reference` | no | Curated `@modelcontextprotocol` servers, **shipped in-binary** so the basics work offline. |
 | `docker-mcp-catalog` | Docker MCP Catalog | `custom/docker` | no | Signed-container MCP server inventory. |
 
-The shipped default set is exactly these **three** official/trusted entries. Earlier
+The shipped default set is exactly these **three** official, built-in entries. Earlier
 versions also shipped `pulse`, `smithery`, `fleur`, `azure-mcp-demo`, and
 `remote-mcp-servers` as defaults; these were removed. They are pruned from an
 existing `mcp_config.json` on load (genuinely user-added custom registries are never
@@ -35,23 +35,28 @@ Every registry carries a **provenance** tag:
 
 | Provenance | Meaning |
 |---|---|
-| `official/trusted` | A shipped, built-in default (the three above). |
-| `custom/unverified` | Any registry the user added at runtime, or any non-default ID in `mcp_config.json`. |
+| `official` | A shipped, built-in default (the three above). |
+| `custom` | Any registry the user added at runtime, or any non-default ID in `mcp_config.json`. |
 
 Trust is **derived, not asserted** — it comes solely from whether the registry ID
-is one of the shipped defaults. Writing `"provenance": "official/trusted"` into a
+is one of the shipped defaults. Writing `"provenance": "official"` into a
 custom `mcp_config.json` entry has no effect; mcpproxy recomputes provenance on
 every merge. **There is no allowlist a user can add themselves into.**
 
-Consequences for `custom/unverified` registries:
+Provenance is **informational only** (it no longer changes quarantine behavior):
 
-- Servers discovered through them are **always quarantined** on add, regardless of
-  the global quarantine default — and they can **never** set `skip_quarantine`
-  (enforced in config validation *and* at server-add time). A server's origin is
+- Servers discovered through **any** registry — official or custom — follow the
+  **global quarantine default** like everything else. With quarantine enabled (the
+  secure default) a newly added server lands quarantined for review; provenance no
+  longer force-quarantines or forbids `skip_quarantine`. A server's origin is still
   recorded on its config as `source_registry_id` / `source_registry_provenance`
   and surfaced in the approval/quarantine view.
 - The `list_registries` output (MCP, REST, CLI) includes `provenance` and a
-  `trusted` boolean so a UI can show a one-time third-party-registry warning.
+  `trusted` boolean (derived `official == trusted`) so a UI can show a one-time
+  third-party-registry warning.
+- **Migration:** earlier builds persisted the two-word tags `official/trusted` /
+  `custom/unverified`; these are normalized to `official` / `custom` on read, so
+  an existing `config.db` / `mcp_config.json` keeps working unchanged.
 
 ### Adding your own registry source
 
@@ -65,7 +70,7 @@ mcpproxy registry add-source https://registry.example.com --id acme --name "Acme
 ```
 
 The ID is derived from the host when omitted; `--protocol` defaults to
-`modelcontextprotocol/registry`. The source is always tagged `custom/unverified`.
+`modelcontextprotocol/registry`. The source is always tagged `custom`.
 This requires a running daemon — the registry list is updated copy-on-write on the
 runtime config snapshot and persisted to `mcp_config.json`.
 
@@ -88,7 +93,7 @@ The Web UI maps each code to an actionable message.
 ### Removing a registry source
 
 `mcpproxy registry remove <id>` deletes a custom registry you added earlier. Only
-`custom/unverified` registries can be removed — the shipped built-in defaults are
+`custom` registries can be removed — the shipped built-in defaults are
 refused via the same shadow guard as add-source. Removing a source does not touch
 any upstream servers you already added from it.
 
@@ -108,6 +113,31 @@ Equivalent surfaces:
 Errors share a stable code across surfaces: `registry_not_found` (404),
 `registry_shadows_builtin` (409, built-in cannot be removed),
 `registries_locked` (403).
+
+### Editing a registry source
+
+`mcpproxy registry edit <id>` updates a custom registry you added earlier — its
+display name, base URL, or servers-collection URL. Only `custom` registries can be
+edited; the shipped built-in defaults are refused via the same shadow guard as
+add/remove-source. Omitted flags leave the existing value unchanged. Changing
+`--url` re-derives the servers URL unless `--servers-url` is also given.
+
+```bash
+mcpproxy registry edit acme --url https://new.acme.example.com   # change the URL
+mcpproxy registry edit acme --name "Acme Corp"                   # change the display name
+```
+
+Like add/remove-source, this requires a running daemon — the change is applied
+copy-on-write on the runtime config snapshot and persisted to `mcp_config.json`.
+
+Equivalent surfaces:
+
+- **REST:** `PUT /api/v1/registries/{id}` with `{ "name": "…", "url": "https://…", "servers_url": "https://…" }` (all optional) → `{ "registry": { … } }` echoing the updated entry.
+- **CLI:** `mcpproxy registry edit <id> [--name … --url … --servers-url …]`.
+
+Errors share a stable code across surfaces: `registry_not_found` (404),
+`registry_shadows_builtin` (409, built-in cannot be edited),
+`invalid_registry_url` (400), `registries_locked` (403).
 
 ### Enterprise: `registries_locked` (stub)
 

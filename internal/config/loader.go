@@ -491,6 +491,11 @@ func initializeRegistries(cfg *Config) {
 	// touches the known former-default id set, never user-added customs.
 	PruneDeprecatedRegistries(cfg)
 
+	// One-time migration (MCP-1072): map legacy provenance strings
+	// ("official/trusted" / "custom/unverified") persisted by earlier builds onto
+	// the current two-value vocabulary so existing installs don't break on read.
+	normalizeRegistryProvenanceValues(cfg)
+
 	// This function will be implemented to avoid circular imports
 	// For now, we'll create a callback mechanism
 	if registriesInitCallback != nil {

@@ -479,7 +479,7 @@ components:
             RegistryProvenanceOfficial for built-in defaults, RegistryProvenanceCustom
             for user-added registries. It is authoritatively (re)computed by the
             registries merge from whether the ID is a shipped default — a user cannot
-            claim "official/trusted" by writing it into their config.
+            claim "official" by writing it into their config.
           type: string
         requires_key:
           description: |-
@@ -644,10 +644,10 @@ components:
           type: string
         source_registry_provenance:
           description: |-
-            SourceRegistryProvenance is the trust tag of the source registry at add
-            time (RegistryProvenanceOfficial / RegistryProvenanceCustom). When it is
-            RegistryProvenanceCustom, skip_quarantine is forbidden — a custom,
-            unverified registry can never opt its servers out of quarantine.
+            SourceRegistryProvenance records the source registry's provenance at add
+            time (RegistryProvenanceOfficial / RegistryProvenanceCustom). It is purely
+            informational (MCP-1072) — surfaced so a reviewer can see a server's origin
+            — and no longer gates quarantine or skip_quarantine.
           type: string
         updated:
           type: string
@@ -1060,6 +1060,18 @@ components:
         error:
           type: string
         version:
+          type: string
+      type: object
+    contracts.EditRegistrySourceRequest:
+      properties:
+        name:
+          description: new display name
+          type: string
+        servers_url:
+          description: explicit servers-collection URL
+          type: string
+        url:
+          description: new base/servers https URL
           type: string
       type: object
     contracts.ErrorResponse:
@@ -3663,6 +3675,62 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Remove a user-added custom registry source
+      tags:
+      - registries
+    put:
+      description: 'Updates a custom registry previously added via add-source (MCP-1072):
+        name, url, servers-url. Empty fields are left unchanged. Built-in registries
+        are refused with registry_shadows_builtin; an unknown id yields registry_not_found;
+        a non-https url yields invalid_registry_url. The change is persisted copy-on-write.'
+      parameters:
+      - description: Registry ID
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/contracts.EditRegistrySourceRequest'
+        description: Fields to update (name/url/servers_url; empty = unchanged)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Registry source updated
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Registry ID is required | invalid_registry_url
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registries_locked
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_not_found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: registry_shadows_builtin
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Edit a user-added custom registry source
       tags:
       - registries
   /api/v1/registries/{id}/refresh:

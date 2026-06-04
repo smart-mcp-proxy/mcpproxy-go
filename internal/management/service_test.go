@@ -136,7 +136,7 @@ func TestListServers(t *testing.T) {
 				"name":                       "everything",
 				"enabled":                    true,
 				"source_registry_id":         "modelcontextprotocol",
-				"source_registry_provenance": "custom/unverified",
+				"source_registry_provenance": "custom",
 			},
 			{
 				"id":      "manual",
@@ -156,7 +156,7 @@ func TestListServers(t *testing.T) {
 		}
 		require.Contains(t, byName, "everything")
 		assert.Equal(t, "modelcontextprotocol", byName["everything"].SourceRegistryID)
-		assert.Equal(t, "custom/unverified", byName["everything"].SourceRegistryProvenance)
+		assert.Equal(t, "custom", byName["everything"].SourceRegistryProvenance)
 
 		require.Contains(t, byName, "manual")
 		assert.Empty(t, byName["manual"].SourceRegistryID)

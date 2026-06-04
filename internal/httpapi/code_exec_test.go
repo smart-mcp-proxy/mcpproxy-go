@@ -103,6 +103,9 @@ func (m *mockController) AddRegistrySourceRef(_, _, _, _ string) (*config.Regist
 func (m *mockController) RemoveRegistrySourceRef(_ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
+func (m *mockController) EditRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
+	return nil, nil, nil
+}
 func (m *mockController) GetManagementService() interface{}                       { return nil }
 func (m *mockController) GetRuntime() interface{}                                 { return nil }
 func (m *mockController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
