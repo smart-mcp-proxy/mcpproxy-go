@@ -252,6 +252,9 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// (and the custom-origin skip_quarantine guard) survive a restart.
 		"SourceRegistryID":         true,
 		"SourceRegistryProvenance": true,
+		// Spec 074: server-edition per-upstream broker config; lives in the JSON
+		// config (like Shared), not persisted to the BBolt UpstreamRecord.
+		"AuthBroker": true,
 	}
 
 	// Get all fields from ServerConfig
@@ -285,6 +288,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		}
 		if fieldName == "SkipQuarantine" {
 			// Spec 032: runtime-only field, not persisted to BBolt
+			continue
+		}
+		if fieldName == "AuthBroker" {
+			// Spec 074: server-edition JSON-config field, not persisted to BBolt
 			continue
 		}
 		if !upstreamFields[fieldName] {

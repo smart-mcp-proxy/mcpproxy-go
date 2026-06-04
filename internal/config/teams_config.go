@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -18,12 +19,12 @@ type TeamsConfig struct {
 	WorkspaceIdleTimeout Duration          `json:"workspace_idle_timeout,omitempty" mapstructure:"workspace-idle-timeout"`
 	MaxUserServers       int               `json:"max_user_servers,omitempty" mapstructure:"max-user-servers"`
 
-	// CredentialEncryptionKey is the base64-encoded 32-byte AES-256 master key
-	// used by the upstream token broker (spec 074) to encrypt stored
-	// credentials at rest. The MCPPROXY_CRED_KEY environment variable takes
-	// precedence over this value. When neither is set, the broker is disabled
-	// gracefully (the rest of the gateway is unaffected).
+	// CredentialEncryptionKey encrypts per-user upstream credentials at rest
+	// (spec 074). When empty, it falls back to the MCPPROXY_CRED_KEY env var.
 	CredentialEncryptionKey string `json:"credential_encryption_key,omitempty" mapstructure:"credential-encryption-key"`
+	// StoreIDPTokens controls whether caller IdP subject tokens are persisted.
+	// Privacy-preserving default: false (FR-006).
+	StoreIDPTokens bool `json:"store_idp_tokens" mapstructure:"store-idp-tokens"`
 }
 
 // TeamsOAuthConfig holds OAuth identity provider configuration for the server edition.
@@ -60,6 +61,11 @@ func (c *TeamsConfig) IsAdminEmail(email string) bool {
 func (c *TeamsConfig) Validate() error {
 	if !c.Enabled {
 		return nil // disabled, no validation needed
+	}
+	// Spec 074: fall back to MCPPROXY_CRED_KEY when no explicit key is set.
+	// An explicit config value always wins over the environment.
+	if c.CredentialEncryptionKey == "" {
+		c.CredentialEncryptionKey = os.Getenv("MCPPROXY_CRED_KEY")
 	}
 	if len(c.AdminEmails) == 0 {
 		return fmt.Errorf("teams.admin_emails must contain at least one admin email")
