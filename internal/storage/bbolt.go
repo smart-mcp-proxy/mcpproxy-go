@@ -431,6 +431,45 @@ func (b *BoltDB) DeleteServerToolApprovals(serverName string) error {
 	})
 }
 
+// PruneToolApprovalsNotIn deletes tool-approval records whose ServerName is not
+// present in keep, returning the number removed. This GCs orphaned approvals
+// for servers that left the config without an explicit delete (e.g. the config
+// file was hand-edited, or an old migration). Records for configured servers —
+// including disabled ones — are kept so re-enabling a server doesn't re-trigger
+// quarantine of its previously-approved tools (MCP-1002).
+func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
+	removed := 0
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		if bucket == nil {
+			return nil
+		}
+		var keysToDelete [][]byte
+		scanErr := bucket.ForEach(func(k, v []byte) error {
+			var record ToolApprovalRecord
+			if err := json.Unmarshal(v, &record); err != nil {
+				// Unparseable record: leave it alone rather than risk dropping data.
+				return nil
+			}
+			if !keep[record.ServerName] {
+				keysToDelete = append(keysToDelete, append([]byte(nil), k...))
+			}
+			return nil
+		})
+		if scanErr != nil {
+			return scanErr
+		}
+		for _, key := range keysToDelete {
+			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+			removed++
+		}
+		return nil
+	})
+	return removed, err
+}
+
 // Generic operations
 
 // Backup creates a backup of the database
