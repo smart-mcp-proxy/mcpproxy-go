@@ -69,12 +69,7 @@ func (c *Client) initialize(ctx context.Context) error {
 		// "transport closed" that the diagnostics layer marks UNKNOWN.
 		// (MCP-1093 / #599)
 		if isTransportClosedErr(err) {
-			stderrBlock := c.formatRecentStderr()
-			exitInfo := c.childExitInfo()
-			if stderrBlock != "" {
-				return fmt.Errorf("server process exited before completing the MCP initialize handshake%s; recent stderr:\n%s: %w", exitInfo, stderrBlock, err)
-			}
-			return fmt.Errorf("server process exited before completing the MCP initialize handshake%s and produced no stderr output (transport closed before the handshake): %w", exitInfo, err)
+			return enrichTransportClosedError(c.childExitInfo(), c.formatRecentStderr(), err)
 		}
 
 		return err
@@ -101,6 +96,20 @@ func (c *Client) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// enrichTransportClosedError builds the actionable error for a stdio subprocess
+// that exited before completing the MCP initialize handshake, folding in the
+// child exit info and the captured stderr tail so the UI banner and per-server
+// logs show the real, often self-serviceable cause (e.g. a missing API key)
+// instead of a bare "transport closed". It wraps the original cause with %w so
+// callers can still errors.Is/As it. Pure (no receiver state) so the production
+// enrichment path is unit-testable. (MCP-1093 / #599)
+func enrichTransportClosedError(exitInfo, stderrBlock string, cause error) error {
+	if stderrBlock != "" {
+		return fmt.Errorf("server process exited before completing the MCP initialize handshake%s; recent stderr:\n%s: %w", exitInfo, stderrBlock, cause)
+	}
+	return fmt.Errorf("server process exited before completing the MCP initialize handshake%s and produced no stderr output (transport closed before the handshake): %w", exitInfo, cause)
 }
 
 // isTransportClosedErr reports whether an initialize() failure indicates the

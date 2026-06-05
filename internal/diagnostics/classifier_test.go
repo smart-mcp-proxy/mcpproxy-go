@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
-	"strings"
 	"syscall"
 	"testing"
 )
@@ -45,13 +44,11 @@ func TestClassify_STDIO_ExitBeforeInitialize(t *testing.T) {
 		})
 	}
 
-	// The enriched error the backend produces must carry the exit code and the
-	// actionable stderr line so the UI banner and per-server logs show the real
-	// cause instead of telling the user to file a bug.
-	enriched := "server process exited before completing the MCP initialize handshake (exit code 127); recent stderr:\n  | Error: --brave-api-key is required"
-	if !strings.Contains(enriched, "exit code 127") || !strings.Contains(enriched, "brave-api-key is required") {
-		t.Fatalf("enriched error must carry exit code + stderr tail, got: %q", enriched)
-	}
+	// The production enrichment that folds the child exit code + stderr tail into
+	// the initialize-failure error is covered by TestEnrichTransportClosedError_*
+	// in internal/upstream/core — a real test of the helper the production path
+	// calls, instead of asserting against a hard-coded string here.
+	// (Codex review on PR #606)
 }
 
 // TestClassify_STDIO_ExitBeforeInitialize_NotForHTTP guards against over-match:
