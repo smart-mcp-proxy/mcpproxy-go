@@ -42,7 +42,32 @@ TDD: write the failing test first for each behavioural sub-task, then implement.
 ## Phase 7 — Verification gate
 
 - [ ] **T017** `go test -race ./internal/...` + full suite + `./scripts/test-api-e2e.sh` green.
-- [ ] **T018** QA: idle proxy against a test upstream, confirm `ping` traffic and **no** health-loop `tools/list`; confirm settings persist + validate in Web UI; confirm `0s` disables. Keep QA artifacts local (do not commit reports).
+- [ ] **T018** QA on the built binary (`make build`; kill existing instances first — DB lock; throwaway data-dir). Keep all capture artifacts local (do **not** commit QA reports/screenshots).
+
+  **Why wire/upstream-level capture is required**: the health-check ping and the discovery sweep are *internal* calls — they do NOT appear in `mcpproxy activity` or the REST activity log. Prove `ping` vs `tools/list` at the wire or the upstream's view; mcpproxy's `--log-level=debug` log corroborates *cadence* and the Docker skip but not the raw method.
+
+  **Observability method per transport**:
+  - **Remote HTTP/SSE** → **mitmproxy** in reverse mode in front of the upstream; point the upstream URL at it; log each JSON-RPC `method`+timestamp. For HTTPS use regular mode + `HTTPS_PROXY` + trust the mitmproxy CA; reverse mode avoids that for a single target.
+    ```bash
+    mitmdump -p 8888 --mode reverse:https://real-upstream/mcp -s /tmp/mcp-methods.py
+    # addon: def request(flow): print(time.time(), json.loads(flow.request.content).get("method"))
+    # then set upstream url -> http://127.0.0.1:8888/mcp
+    ```
+  - **Local HTTP** (server you control) → a tiny MCP server that logs `method`+time on receipt (simplest, no TLS).
+  - **stdio** (mitmproxy can't see it — no network) → wrap `command` in a tee shim: `exec tee -a /tmp/up-in.jsonl | "$@" | tee -a /tmp/up-out.jsonl`, then `grep -c '"method":"ping"'` vs `'"method":"tools/list"'` with timestamps.
+  - **Docker** → mcpproxy debug log only (verify the *skip*; no ping expected).
+
+  **Scenarios (map to Success Criteria)**:
+  1. **Default (keys unset)** → `ping` ≈ every 30s; `tools/list` ≈ every 5m; zero health-loop `tools/list`. (SC-001 + no regression / SC-005)
+  2. **Configured** `health_check_interval:"5s"`, `tool_discovery_interval:"30s"` → cadence matches in the capture. (SC-002)
+  3. **Disabled** `"0s"` each → no pings / no periodic `tools/list` (the one connect-time list still appears). (SC-003)
+  4. **Per-server override** on one of two servers → only that one changes cadence. (SC-006)
+  5. **Validation** → boot with `"2s"`/`"2h"` rejected with a clear error; `curl -X PATCH /api/v1/config` with bad values → 400 + message. (SC-004)
+  6. **Docker no-op (FR-014)** → Docker upstream + `health_check_interval:"5s"` → debug log shows "Skipping health check for Docker server", no ping to it; `tool_discovery_interval` still lists it.
+
+  **Corroborating logs**: `grep -E "Health check|Skipping health check|Discovering and indexing" ~/.mcpproxy/logs/main.log`; per-server via `mcpproxy upstream logs <name> --tail 200 --follow`.
+
+  **Also**: confirm both global interval settings appear, validate, and persist in the Web UI (Settings → Advanced → "Tool discovery & health checks") and the macOS app.
 
 ## Definition of done
 
