@@ -4,7 +4,7 @@
       <!-- Header -->
       <div class="flex justify-between items-start mb-4">
         <div class="flex-1 min-w-0 mr-2">
-          <h3 class="card-title text-lg truncate">{{ server.name }}</h3>
+          <h3 class="card-title text-lg truncate" :title="server.name" data-test="server-card-title">{{ displayName }}</h3>
           <p class="text-sm text-base-content/70 truncate">
             {{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}
           </p>
@@ -128,7 +128,7 @@
         </svg>
         <span class="text-xs flex-1">{{ toolQuarantineSummary }}</span>
         <router-link
-          :to="`/servers/${server.name}?tab=tools`"
+          :to="serverDetailPath(server.name, 'tools')"
           class="btn btn-xs btn-warning"
         >
           Review
@@ -180,7 +180,7 @@
 
         <router-link
           v-if="healthAction === 'view_logs'"
-          :to="`/servers/${server.name}?tab=logs`"
+          :to="serverDetailPath(server.name, 'logs')"
           class="btn btn-sm btn-primary"
         >
           View Logs
@@ -196,7 +196,7 @@
 
         <router-link
           v-if="healthAction === 'configure'"
-          :to="`/servers/${server.name}?tab=config`"
+          :to="serverDetailPath(server.name, 'config')"
           class="btn btn-sm btn-primary"
         >
           Configure
@@ -231,7 +231,7 @@
           </div>
           <router-link
             v-else
-            :to="`/servers/${server.name}?tab=security`"
+            :to="serverDetailPath(server.name, 'security')"
             class="btn btn-sm btn-outline btn-ghost"
             title="Security Scan"
           >
@@ -243,8 +243,9 @@
         </template>
 
         <router-link
-          :to="`/servers/${server.name}`"
+          :to="serverDetailPath(server.name)"
           class="btn btn-sm btn-outline"
+          data-test="server-detail-link"
         >
           Details
         </router-link>
@@ -286,7 +287,7 @@
           </button>
           <router-link
             v-if="approveDialogMode === 'no_scan'"
-            :to="`/servers/${server.name}?tab=security`"
+            :to="serverDetailPath(server.name, 'security')"
             class="btn btn-primary"
             @click="showApproveConfirmation = false"
           >
@@ -342,12 +343,17 @@ import type { Server } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
 
 interface Props {
   server: Server
 }
 
 const props = defineProps<Props>()
+
+// MCP-1112: title-preferring display label. The '/'-safe detail links call
+// serverDetailPath() directly in the template.
+const displayName = computed(() => serverDisplayName(props.server))
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()

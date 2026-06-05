@@ -42,10 +42,10 @@
           <div class="breadcrumbs text-sm mb-2">
             <ul>
               <li><router-link to="/servers">Servers</router-link></li>
-              <li>{{ server.name }}</li>
+              <li>{{ displayName }}</li>
             </ul>
           </div>
-          <h1 class="text-3xl font-bold">{{ server.name }}</h1>
+          <h1 class="text-3xl font-bold" :title="server.name">{{ displayName }}</h1>
           <p class="text-base-content/70 mt-1">{{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}</p>
         </div>
 
@@ -1195,8 +1195,12 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import { serverDisplayName } from '@/utils/serverRoute'
 
 interface Props {
+  // MCP-1112: vue-router decodes the percent-encoded ':serverName' param, so
+  // this is the plain server name (which may contain '/', e.g.
+  // "io.github.owner/repo") and matches the stored config `name` directly.
   serverName: string
 }
 
@@ -1235,6 +1239,13 @@ const error = ref<string | null>(null)
 const server = computed<Server | null>(() => {
   return serversStore.servers.find(s => s.name === props.serverName) || null
 })
+
+// MCP-1112: prefer the registry-provided human-friendly title over the raw
+// reverse-DNS `name` identifier for display. Falls back to the name (or the
+// route param before the server loads).
+const displayName = computed(() =>
+  server.value ? serverDisplayName(server.value) : props.serverName
+)
 
 // mutateStoreServer applies fn to the live store object for this view's
 // server. Lets optimistic updates land where the rest of the app will
