@@ -44,14 +44,14 @@ MCPProxy is built in two editions from the same codebase using Go build tags:
 | Directory | Purpose |
 |-----------|---------|
 | `cmd/mcpproxy/edition.go` | Default edition = "personal" |
-| `cmd/mcpproxy/edition_teams.go` | Build-tagged override for server edition |
-| `cmd/mcpproxy/teams_register.go` | Server feature registration entry point |
-| `internal/teams/` | Server-only code (all files have `//go:build server`) |
-| `internal/teams/auth/` | OAuth authentication, session management, JWT tokens, middleware |
-| `internal/teams/users/` | User/session models, BBolt store, user server management |
-| `internal/teams/workspace/` | Per-user workspace manager for personal upstream servers |
-| `internal/teams/multiuser/` | Multi-user router, tool filtering, activity isolation |
-| `internal/teams/api/` | Server REST API endpoints (user, admin, auth) |
+| `cmd/mcpproxy/edition_server.go` | Build-tagged override for server edition |
+| `cmd/mcpproxy/server_edition_register.go` | Server feature registration entry point |
+| `internal/serveredition/` | Server-only code (all files have `//go:build server`) |
+| `internal/serveredition/auth/` | OAuth authentication, session management, JWT tokens, middleware |
+| `internal/serveredition/users/` | User/session models, BBolt store, user server management |
+| `internal/serveredition/workspace/` | Per-user workspace manager for personal upstream servers |
+| `internal/serveredition/multiuser/` | Multi-user router, tool filtering, activity isolation |
+| `internal/serveredition/api/` | Server REST API endpoints (user, admin, auth) |
 | `native/macos/MCPProxy/` | Swift macOS tray app (SwiftUI, macOS 13+) |
 | `native/macos/MCPProxyUITest/` | Swift MCP server for UI testing (accessibility + screenshots) |
 | `native/windows/` | Future C# tray app (placeholder) |
@@ -68,9 +68,11 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 
 ### Server Configuration
 
+The config key is `server_edition` (the legacy `teams` key is still accepted on read and auto-migrated to `server_edition` on next save).
+
 ```json
 {
-  "teams": {
+  "server_edition": {
     "enabled": true,
     "admin_emails": ["admin@company.com"],
     "oauth": {
@@ -117,7 +119,7 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 ### Server Testing
 
 ```bash
-go test -tags server ./internal/teams/... -v -race  # All server unit + integration tests
+go test -tags server ./internal/serveredition/... -v -race  # All server unit + integration tests
 go build -tags server ./cmd/mcpproxy                # Build server edition
 go build ./cmd/mcpproxy                            # Verify personal edition unaffected
 ```
@@ -731,15 +733,12 @@ See `docs/prerelease-builds.md` for download instructions.
 - Go 1.24 (toolchain go1.24.10) (001-update-version-display)
 - In-memory only for version cache (no persistence per clarification) (001-update-version-display)
 - Go 1.24 (toolchain go1.24.10) + Cobra CLI framework, encoding/json, gopkg.in/yaml.v3 (014-cli-output-formatting)
-- N/A (CLI output only) (014-cli-output-formatting)
 - Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), existing event bus (016-activity-log-backend)
 - BBolt database (existing `~/.mcpproxy/config.db`) (016-activity-log-backend)
 - Go 1.24 (toolchain go1.24.10) + Cobra CLI framework, encoding/json, internal/cli/output (spec 014), internal/cliclien (017-activity-cli-commands)
-- N/A (CLI layer only - uses REST API from spec 016) (017-activity-cli-commands)
 - Go 1.24 (toolchain go1.24.10) + Cobra CLI, Chi router, BBolt (storage), Zap (logging), mark3labs/mcp-go (MCP protocol) (018-intent-declaration)
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord extended with intent metadata (018-intent-declaration)
 - TypeScript 5.9, Vue 3.5, Go 1.24 (backend already exists) + Vue 3, Vue Router 4, Pinia 2, Tailwind CSS 3, DaisyUI 4, Vite 5 (019-activity-webui)
-- N/A (frontend consumes REST API from backend) (019-activity-webui)
 - Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), mark3labs/mcp-go (MCP protocol) (020-oauth-login-feedback)
 - Go 1.24 (toolchain go1.24.10) + Cobra (CLI), Chi router (HTTP), Zap (logging), google/uuid (ID generation) (021-request-id-logging)
 - BBolt database (`~/.mcpproxy/config.db`) - activity log extended with request_id field (021-request-id-logging)
@@ -756,7 +755,6 @@ See `docs/prerelease-builds.md` for download instructions.
 - Go 1.24 (toolchain go1.24.10) + TypeScript 5.9 / Vue 3.5 + Chi router, BBolt, Zap logging, mcp-go, golang-jwt/jwt/v5, Vue 3, Pinia, DaisyUI (024-teams-multiuser-oauth)
 - BBolt database (`~/.mcpproxy/config.db`) - new buckets for users, sessions, user servers (024-teams-multiuser-oauth)
 - Go 1.24 (toolchain go1.24.10) + `github.com/dop251/goja` (existing JS sandbox), `github.com/evanw/esbuild` (new - TypeScript transpilation), `github.com/mark3labs/mcp-go` (MCP protocol), `github.com/spf13/cobra` (CLI) (033-typescript-code-execution)
-- N/A (no new storage requirements) (033-typescript-code-execution)
 - Swift 5.9+ / Xcode 15+ + SwiftUI, AppKit (escape hatches), Sparkle 2.x (SPM), Foundation (URLSession, Process, UNUserNotificationCenter) (037-macos-swift-tray)
 - N/A (tray reads all state from core via REST API — no local persistence per Constitution III) (037-macos-swift-tray)
 - Go 1.24 (toolchain go1.24.10) — primary; Swift 5.9 — macOS tray header change only + `github.com/google/uuid` (existing), `github.com/go-chi/chi/v5` (existing, for `RoutePattern()`), `github.com/spf13/cobra` (existing, new subcommand), `go.uber.org/zap` (existing), stdlib `sync/atomic`, `sync`, `os` (042-telemetry-tier2)

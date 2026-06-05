@@ -1070,7 +1070,7 @@ func (s *Server) buildWebUIURLWithAPIKey(listenAddr string, r *http.Request) str
 // buildVersion is set during build using -ldflags
 var buildVersion = "development"
 
-// editionValue identifies the MCPProxy edition (personal or teams).
+// editionValue identifies the MCPProxy edition (personal or server).
 var editionValue = "personal"
 
 // GetBuildVersion returns the build version from build-time variables.

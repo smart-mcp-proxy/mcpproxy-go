@@ -322,7 +322,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		ResponseBytes:     responseBytes,
 	}
 
-	// Extract user identity from auth metadata injected into arguments (teams edition)
+	// Extract user identity from auth metadata injected into arguments (server edition)
 	if arguments != nil {
 		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
 			record.UserID = userID
@@ -562,7 +562,7 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 		RequestID:    requestID,
 	}
 
-	// Extract user identity from auth metadata injected into arguments (teams edition)
+	// Extract user identity from auth metadata injected into arguments (server edition)
 	if arguments != nil {
 		if userID, ok := arguments["_auth_user_id"].(string); ok && userID != "" {
 			record.UserID = userID

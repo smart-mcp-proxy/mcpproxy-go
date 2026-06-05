@@ -199,7 +199,7 @@ type Config struct {
 	RevealSecretHeaders bool `json:"reveal_secret_headers,omitempty" mapstructure:"reveal-secret-headers"`
 
 	// Server edition multi-user configuration (only meaningful with -tags server)
-	Teams *TeamsConfig `json:"teams,omitempty" mapstructure:"teams" swaggerignore:"true"`
+	ServerEdition *ServerEditionConfig `json:"server_edition,omitempty" mapstructure:"server_edition" swaggerignore:"true"`
 }
 
 // TLSConfig represents TLS configuration
@@ -275,7 +275,7 @@ type ServerConfig struct {
 	// subject token for an upstream-scoped credential and injects it into the
 	// outbound request. The concrete type is build-tagged: a full struct in the
 	// server edition, an empty stub in the personal edition (which ignores it),
-	// so personal-edition behavior is unaffected. swaggerignore mirrors Teams.
+	// so personal-edition behavior is unaffected. swaggerignore mirrors ServerEdition.
 	AuthBroker *AuthBrokerConfig `json:"auth_broker,omitempty" mapstructure:"auth_broker" swaggerignore:"true"`
 }
 
@@ -1519,6 +1519,16 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON implements json.Unmarshaler interface
 func (c *Config) UnmarshalJSON(data []byte) error {
+	// Backward-compat (MCP-1085): accept the legacy top-level "teams" key as an
+	// alias for the canonical "server_edition" key. Normalize on read — mirroring
+	// the provenance normalize-on-read in #594 — so existing deployments keep
+	// working. SaveConfig always writes the new key, so this only ever runs once
+	// per legacy config until it is rewritten.
+	data, err := normalizeLegacyServerEditionKey(data)
+	if err != nil {
+		return err
+	}
+
 	type Alias Config
 	aux := &struct {
 		*Alias
@@ -1526,6 +1536,30 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 		Alias: (*Alias)(c),
 	}
 	return json.Unmarshal(data, aux)
+}
+
+// normalizeLegacyServerEditionKey rewrites a config payload that still uses the
+// legacy top-level "teams" key onto the canonical "server_edition" key
+// (MCP-1085). It is a no-op when "teams" is absent — the common case pays no
+// cost. When both keys are present, "server_edition" is authoritative and the
+// legacy key is dropped. A payload that is not a JSON object is returned
+// unchanged so the caller's normal unmarshal surfaces the real error.
+func normalizeLegacyServerEditionKey(data []byte) ([]byte, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		// Not a JSON object (or otherwise invalid): return the input untouched and
+		// let the caller's typed unmarshal report the real error.
+		return data, nil
+	}
+	legacy, hasLegacy := raw["teams"]
+	if !hasLegacy {
+		return data, nil
+	}
+	if _, hasNew := raw["server_edition"]; !hasNew {
+		raw["server_edition"] = legacy
+	}
+	delete(raw, "teams")
+	return json.Marshal(raw)
 }
 
 // OAuthConfigChanged checks if OAuth configuration has changed between two configs.

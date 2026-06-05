@@ -21,24 +21,24 @@ import (
 
 // StatusInfo holds the collected status data for display.
 type StatusInfo struct {
-	State         string            `json:"state"`
-	Edition       string            `json:"edition"`
-	ListenAddr    string            `json:"listen_addr"`
-	Uptime        string            `json:"uptime,omitempty"`
-	UptimeSeconds float64           `json:"uptime_seconds,omitempty"`
-	APIKey        string            `json:"api_key"`
-	WebUIURL      string            `json:"web_ui_url"`
-	RoutingMode   string            `json:"routing_mode"`
-	Endpoints     map[string]string `json:"endpoints"`
-	Servers       *ServerCounts     `json:"servers,omitempty"`
-	SocketPath    string            `json:"socket_path,omitempty"`
-	ConfigPath    string            `json:"config_path,omitempty"`
-	Version       string            `json:"version,omitempty"`
-	TeamsInfo     *TeamsStatusInfo  `json:"teams,omitempty"`
+	State             string                   `json:"state"`
+	Edition           string                   `json:"edition"`
+	ListenAddr        string                   `json:"listen_addr"`
+	Uptime            string                   `json:"uptime,omitempty"`
+	UptimeSeconds     float64                  `json:"uptime_seconds,omitempty"`
+	APIKey            string                   `json:"api_key"`
+	WebUIURL          string                   `json:"web_ui_url"`
+	RoutingMode       string                   `json:"routing_mode"`
+	Endpoints         map[string]string        `json:"endpoints"`
+	Servers           *ServerCounts            `json:"servers,omitempty"`
+	SocketPath        string                   `json:"socket_path,omitempty"`
+	ConfigPath        string                   `json:"config_path,omitempty"`
+	Version           string                   `json:"version,omitempty"`
+	ServerEditionInfo *ServerEditionStatusInfo `json:"server_edition,omitempty"`
 }
 
-// TeamsStatusInfo holds teams-specific status information.
-type TeamsStatusInfo struct {
+// ServerEditionStatusInfo holds server-edition-specific status information.
+type ServerEditionStatusInfo struct {
 	OAuthProvider string   `json:"oauth_provider"`
 	AdminEmails   []string `json:"admin_emails"`
 }
@@ -173,8 +173,8 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 		info.RoutingMode = config.RoutingModeRetrieveTools
 	}
 
-	// Add teams info if available
-	info.TeamsInfo = collectTeamsInfo(cfg)
+	// Add server-edition info if available
+	info.ServerEditionInfo = collectServerEditionInfo(cfg)
 
 	// Get status data (running, listen_addr, upstream_stats)
 	statusData, err := client.GetStatus(ctx)
@@ -247,7 +247,7 @@ func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) 
 		ConfigPath:  configPath,
 	}
 
-	info.TeamsInfo = collectTeamsInfo(cfg)
+	info.ServerEditionInfo = collectServerEditionInfo(cfg)
 
 	return info
 }
@@ -416,11 +416,11 @@ func printStatusTable(info *StatusInfo) {
 		}
 	}
 
-	if info.TeamsInfo != nil {
+	if info.ServerEditionInfo != nil {
 		fmt.Println()
 		fmt.Println("Server Edition")
-		fmt.Printf("  %-12s %s\n", "OAuth:", info.TeamsInfo.OAuthProvider)
-		fmt.Printf("  %-12s %s\n", "Admins:", strings.Join(info.TeamsInfo.AdminEmails, ", "))
+		fmt.Printf("  %-12s %s\n", "OAuth:", info.ServerEditionInfo.OAuthProvider)
+		fmt.Printf("  %-12s %s\n", "Admins:", strings.Join(info.ServerEditionInfo.AdminEmails, ", "))
 	}
 }
 

@@ -242,7 +242,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		"Created":             true,
 		"Updated":             true, // Updated is set by saveServerSync, not copied
 		"Isolation":           true,
-		"Shared":              true, // Teams-only: persisted in JSON config, not in BBolt
+		"Shared":              true, // ServerEdition-only: persisted in JSON config, not in BBolt
 		"SkipQuarantine":      true, // Spec 032: runtime-only field, not persisted to BBolt
 		"ReconnectOnUse":      true, // Spec 354: persisted to BBolt for on-demand reconnection
 		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
@@ -283,7 +283,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 			continue
 		}
 		if fieldName == "Shared" {
-			// Teams-only field, persisted in JSON config not BBolt
+			// ServerEdition-only field, persisted in JSON config not BBolt
 			continue
 		}
 		if fieldName == "SkipQuarantine" {
