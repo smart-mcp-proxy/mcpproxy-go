@@ -1251,6 +1251,15 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.cfgPath = cfgPath
 	}
 
+	// Propagate the new global config to the upstream manager and every running
+	// managed client so their background health-check loops re-resolve the new
+	// global health_check_interval (and Docker/discovery decisions) without a
+	// restart (spec 074, FR-012/SC-002). The loops re-read the interval each
+	// cycle, so this atomic swap is all that's needed.
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetGlobalConfig(newCfg)
+	}
+
 	// Apply configuration changes to components
 	r.logger.Info("Applying configuration hot-reload",
 		zap.Strings("changed_fields", result.ChangedFields))

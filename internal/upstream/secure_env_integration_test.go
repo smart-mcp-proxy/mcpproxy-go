@@ -156,7 +156,7 @@ func TestConfigurationIntegration(t *testing.T) {
 
 		manager := NewManager(logger, cfg, nil, secret.NewResolver(), nil)
 		require.NotNil(t, manager)
-		assert.Equal(t, cfg, manager.globalConfig)
+		assert.Equal(t, cfg, manager.globalConfig.Load())
 	})
 }
 

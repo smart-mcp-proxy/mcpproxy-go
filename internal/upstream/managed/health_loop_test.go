@@ -36,7 +36,7 @@ func TestBackgroundHealthCheck_DisabledSkipsProbe(t *testing.T) {
 	mc.stopMonitoring = make(chan struct{})
 	fake := &fakeProber{}
 	mc.healthProbe = fake
-	mc.globalConfig = &config.Config{}
+	mc.SetGlobalConfig(&config.Config{})
 
 	cfg := mc.GetConfig()
 	zero := config.Duration(0)
@@ -59,7 +59,7 @@ func TestBackgroundHealthCheck_EnabledProbesOnInterval(t *testing.T) {
 	mc.stopMonitoring = make(chan struct{})
 	fake := &fakeProber{}
 	mc.healthProbe = fake
-	mc.globalConfig = &config.Config{}
+	mc.SetGlobalConfig(&config.Config{})
 
 	cfg := mc.GetConfig()
 	d := config.Duration(40 * time.Millisecond) // sub-validation value is fine for the loop mechanics

@@ -35,8 +35,13 @@ type Client struct {
 	StateManager *types.StateManager // Public field for callback access
 
 	// Configuration for creating fresh connections
-	logConfig    *config.LogConfig
-	globalConfig *config.Config
+	logConfig *config.LogConfig
+	// globalConfig holds the proxy-wide config as an atomic pointer so a config
+	// hot-reload can swap it under the running background loops (health-check
+	// interval re-resolution, spec 074 FR-012) without a lock and without racing
+	// the readers. Mirrors the cfg atomic-pointer rationale above. Access via
+	// GetGlobalConfig() / SetGlobalConfig() only — never touch the field directly.
+	globalConfig atomic.Pointer[config.Config]
 	storage      *storage.BoltDB
 
 	// Connection state protection
@@ -116,12 +121,12 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		logger:         logger.With(zap.String("component", "managed_client")),
 		StateManager:   types.NewStateManager(),
 		logConfig:      logConfig,
-		globalConfig:   globalConfig,
 		storage:        storage,
 		stopMonitoring: make(chan struct{}),
 		healthProbe:    coreClient,
 	}
 	mc.cfg.Store(serverConfig)
+	mc.globalConfig.Store(globalConfig)
 
 	// Set up state change callback
 	mc.StateManager.SetStateChangeCallback(mc.onStateChange)
@@ -431,7 +436,8 @@ func (mc *Client) ShouldRetry() bool {
 // IsDockerIsolated returns true if this server will use Docker isolation.
 // Used to select appropriate connect timeouts (Docker containers need more time for package installation).
 func (mc *Client) IsDockerIsolated() bool {
-	if mc.globalConfig == nil || mc.globalConfig.DockerIsolation == nil || !mc.globalConfig.DockerIsolation.Enabled {
+	gc := mc.globalConfig.Load()
+	if gc == nil || gc.DockerIsolation == nil || !gc.DockerIsolation.Enabled {
 		return false
 	}
 	// Check if server has isolation explicitly disabled
@@ -781,11 +787,26 @@ func (mc *Client) stopBackgroundMonitoring() {
 // restart (spec 074, FR-012).
 const healthCheckDisabledRecheckInterval = 30 * time.Second
 
+// GetGlobalConfig returns the current proxy-wide config snapshot (may be nil for
+// hand-constructed test clients). Lock-free; safe to call whether or not mc.mu
+// is held.
+func (mc *Client) GetGlobalConfig() *config.Config {
+	return mc.globalConfig.Load()
+}
+
+// SetGlobalConfig swaps the proxy-wide config the background loops re-resolve
+// against. Called on a config hot-reload (via Manager.SetGlobalConfig) so the
+// resettable health-check timer picks up a new global interval without a restart
+// (spec 074, FR-012). Lock-free atomic swap.
+func (mc *Client) SetGlobalConfig(cfg *config.Config) {
+	mc.globalConfig.Store(cfg)
+}
+
 // resolveHealthCheckInterval resolves this server's effective health-check
 // interval (per-server override → global → built-in default). A nil
 // globalConfig (hand-constructed clients) falls back to the built-in default.
 func (mc *Client) resolveHealthCheckInterval() time.Duration {
-	cfg := mc.globalConfig
+	cfg := mc.globalConfig.Load()
 	if cfg == nil {
 		cfg = &config.Config{}
 	}

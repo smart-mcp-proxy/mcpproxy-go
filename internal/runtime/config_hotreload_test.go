@@ -35,6 +35,54 @@ func TestDetectConfigChanges_Observability(t *testing.T) {
 	assert.False(t, result.RequiresRestart, "cadence change is hot-reloadable")
 }
 
+// TestDetectConfigChanges_DiscoveryHealthIntervals (MCP-1189 / Codex finding #2):
+// a global health_check_interval / tool_discovery_interval edit must be detected
+// as a hot-reloadable change so ApplyConfig propagates the new cadence to the
+// running upstream manager + managed clients. Without this, a lone interval edit
+// would be reported as "no changes detected" (FR-012/SC-002).
+func TestDetectConfigChanges_DiscoveryHealthIntervals(t *testing.T) {
+	mk := func(health, discovery *config.Duration) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			HealthCheckInterval:   health,
+			ToolDiscoveryInterval: discovery,
+		}
+	}
+
+	t.Run("health_check_interval change detected", func(t *testing.T) {
+		old45 := config.Duration(45 * time.Second)
+		new10 := config.Duration(10 * time.Second)
+		result := DetectConfigChanges(mk(&old45, nil), mk(&new10, nil))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "health_check_interval")
+		assert.False(t, result.RequiresRestart, "interval change is hot-reloadable")
+	})
+
+	t.Run("tool_discovery_interval change detected", func(t *testing.T) {
+		old5m := config.Duration(5 * time.Minute)
+		new1m := config.Duration(1 * time.Minute)
+		result := DetectConfigChanges(mk(nil, &old5m), mk(nil, &new1m))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "tool_discovery_interval")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("setting from unset (nil -> value) detected", func(t *testing.T) {
+		val := config.Duration(0) // disabling the loop
+		result := DetectConfigChanges(mk(nil, nil), mk(&val, nil))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "health_check_interval")
+	})
+
+	t.Run("unchanged intervals not reported", func(t *testing.T) {
+		same := config.Duration(45 * time.Second)
+		other := config.Duration(45 * time.Second)
+		result := DetectConfigChanges(mk(&same, nil), mk(&other, nil))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "health_check_interval")
+	})
+}
+
 func TestDetectConfigChanges(t *testing.T) {
 	baseConfig := &config.Config{
 		Listen:            "127.0.0.1:8080",
