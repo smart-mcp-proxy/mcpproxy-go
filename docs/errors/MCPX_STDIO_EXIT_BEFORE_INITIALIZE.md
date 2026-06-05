@@ -16,8 +16,8 @@ mcpproxy spawned the stdio server, but the process exited before completing the
 MCP `initialize` handshake. The underlying transport reports a closed pipe / EOF
 rather than a typed exit error, which previously surfaced as a generic
 `MCPX_UNKNOWN_UNCLASSIFIED`. This code makes the cause explicit, and mcpproxy now
-folds the child's **exit code** and the last lines of its **stderr** into the
-error so you can see the real, usually self-serviceable problem.
+folds the last lines of the child's **stderr** into the error so you can see the
+real, usually self-serviceable problem.
 
 This almost always means a **missing or invalid configuration** — a required API
 key or environment variable, a bad argument, or a missing dependency — that makes
@@ -35,8 +35,8 @@ the server print an error and exit immediately on startup.
 
 ### 1. Read the captured stderr
 
-The error banner and the per-server log already include the last stderr lines and
-the exit code. To see more:
+The error banner and the per-server log already include the last stderr lines.
+To see more:
 
 ```bash
 mcpproxy upstream logs <server-name> --tail 100

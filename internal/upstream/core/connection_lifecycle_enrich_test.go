@@ -9,18 +9,15 @@ import (
 
 // Covers the production enrichment path the stdio premature-exit branch in
 // connectAndInitialize() calls (MCP-1093 / #599): the error a subprocess that
-// exits before the MCP initialize handshake produces must carry the child exit
-// info + captured stderr tail, and must still wrap the original cause.
+// exits before the MCP initialize handshake produces must carry the captured
+// stderr tail (the actionable cause) and must still wrap the original cause.
 func TestEnrichTransportClosedError_WithStderr(t *testing.T) {
 	cause := io.EOF
-	got := enrichTransportClosedError(" (exit code 127)", "  | Error: --brave-api-key is required", cause)
+	got := enrichTransportClosedError("  | Error: --brave-api-key is required", cause)
 	msg := got.Error()
 
 	if !strings.Contains(msg, "exited before completing the MCP initialize handshake") {
 		t.Errorf("missing handshake phrase: %q", msg)
-	}
-	if !strings.Contains(msg, "exit code 127") {
-		t.Errorf("enriched error must carry the child exit info: %q", msg)
 	}
 	if !strings.Contains(msg, "recent stderr") || !strings.Contains(msg, "brave-api-key is required") {
 		t.Errorf("enriched error must carry the captured stderr tail: %q", msg)
@@ -32,7 +29,7 @@ func TestEnrichTransportClosedError_WithStderr(t *testing.T) {
 
 func TestEnrichTransportClosedError_NoStderr(t *testing.T) {
 	cause := errors.New("transport closed")
-	got := enrichTransportClosedError("", "", cause)
+	got := enrichTransportClosedError("", cause)
 	msg := got.Error()
 
 	if !strings.Contains(msg, "produced no stderr output") {

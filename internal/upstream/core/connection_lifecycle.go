@@ -69,7 +69,7 @@ func (c *Client) initialize(ctx context.Context) error {
 		// "transport closed" that the diagnostics layer marks UNKNOWN.
 		// (MCP-1093 / #599)
 		if isTransportClosedErr(err) {
-			return enrichTransportClosedError(c.childExitInfo(), c.formatRecentStderr(), err)
+			return enrichTransportClosedError(c.formatRecentStderr(), err)
 		}
 
 		return err
@@ -100,16 +100,21 @@ func (c *Client) initialize(ctx context.Context) error {
 
 // enrichTransportClosedError builds the actionable error for a stdio subprocess
 // that exited before completing the MCP initialize handshake, folding in the
-// child exit info and the captured stderr tail so the UI banner and per-server
-// logs show the real, often self-serviceable cause (e.g. a missing API key)
-// instead of a bare "transport closed". It wraps the original cause with %w so
-// callers can still errors.Is/As it. Pure (no receiver state) so the production
-// enrichment path is unit-testable. (MCP-1093 / #599)
-func enrichTransportClosedError(exitInfo, stderrBlock string, cause error) error {
+// captured stderr tail so the UI banner and per-server logs show the real,
+// often self-serviceable cause (e.g. a missing API key) instead of a bare
+// "transport closed". It wraps the original cause with %w so callers can still
+// errors.Is/As it. Pure (no receiver state) so the production enrichment path is
+// unit-testable. (MCP-1093 / #599)
+//
+// Note: the child exit code is intentionally NOT surfaced here. On this failure
+// path mcp-go has not reaped the process (no Wait), so ProcessState is unset and
+// any exit code would be unreliable; the captured stderr is the actionable
+// signal. Surfacing the exit code is a separate follow-up.
+func enrichTransportClosedError(stderrBlock string, cause error) error {
 	if stderrBlock != "" {
-		return fmt.Errorf("server process exited before completing the MCP initialize handshake%s; recent stderr:\n%s: %w", exitInfo, stderrBlock, cause)
+		return fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %w", stderrBlock, cause)
 	}
-	return fmt.Errorf("server process exited before completing the MCP initialize handshake%s and produced no stderr output (transport closed before the handshake): %w", exitInfo, cause)
+	return fmt.Errorf("server process exited before completing the MCP initialize handshake and produced no stderr output (transport closed before the handshake): %w", cause)
 }
 
 // isTransportClosedErr reports whether an initialize() failure indicates the
@@ -126,18 +131,6 @@ func isTransportClosedErr(err error) bool {
 		strings.Contains(lmsg, "broken pipe") ||
 		strings.Contains(lmsg, "file already closed") ||
 		strings.Contains(lmsg, "use of closed")
-}
-
-// childExitInfo returns " (exit code N)" when the child process handle has
-// already been reaped, otherwise "". Best-effort: on the stdio transport the
-// process is only extracted after a successful initialize, so on the failure
-// path the handle is usually nil and this returns "" — the captured stderr
-// tail is the primary signal in that case.
-func (c *Client) childExitInfo() string {
-	if c.processCmd != nil && c.processCmd.ProcessState != nil {
-		return fmt.Sprintf(" (exit code %d)", c.processCmd.ProcessState.ExitCode())
-	}
-	return ""
 }
 
 // registerNotificationHandler registers a handler for MCP notifications.
