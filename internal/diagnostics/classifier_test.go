@@ -18,8 +18,9 @@ func TestClassify_Nil(t *testing.T) {
 
 // TestClassify_STDIO_ExitBeforeInitialize covers GitHub #599 / MCP-1093: a
 // subprocess that exits before completing the MCP initialize handshake must
-// classify to MCPX_STDIO_EXIT_BEFORE_INITIALIZE (not MCPX_UNKNOWN_UNCLASSIFIED),
-// and the surfaced error must carry the child's exit code + stderr tail.
+// classify to MCPX_STDIO_EXIT_BEFORE_INITIALIZE (not MCPX_UNKNOWN_UNCLASSIFIED).
+// The surfaced error carries the captured stderr tail (the exit code is not
+// reliably available on this path and is intentionally not surfaced).
 func TestClassify_STDIO_ExitBeforeInitialize(t *testing.T) {
 	cases := []struct {
 		name string
@@ -30,8 +31,8 @@ func TestClassify_STDIO_ExitBeforeInitialize(t *testing.T) {
 			err:  errors.New(`stdio transport (command="docker", docker_isolation=true): transport error: transport closed`),
 		},
 		{
-			name: "enriched message carrying exit code and stderr tail",
-			err: errors.New("server process exited before completing the MCP initialize handshake (exit code 127); recent stderr:\n" +
+			name: "enriched message carrying stderr tail",
+			err: errors.New("server process exited before completing the MCP initialize handshake; recent stderr:\n" +
 				"  | Error: --brave-api-key is required: transport closed"),
 		},
 	}
