@@ -42,7 +42,14 @@ func TestServerLogFilename_SanitizesPathSeparators(t *testing.T) {
 // must produce a single flat log file, not a nested directory, and the tail
 // reader must round-trip the same raw name back to that file.
 func TestCreateUpstreamServerLogger_NamespacedNameFlatFile(t *testing.T) {
-	logDir := t.TempDir()
+	// Use os.MkdirTemp (not t.TempDir) with a best-effort cleanup: the lumberjack
+	// writer keeps the log file handle open for the lifetime of the logger, and
+	// Windows cannot remove an open file. t.TempDir's cleanup asserts RemoveAll
+	// succeeds and would fail the test on Windows; a non-asserting cleanup mirrors
+	// the existing TestE2E_LogRotation pattern.
+	logDir, err := os.MkdirTemp("", "mcpproxy-logtest-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(logDir) })
 	const serverName = "io.github.evidai/polymarket-guard"
 
 	cfg := DefaultLogConfig()
@@ -53,7 +60,7 @@ func TestCreateUpstreamServerLogger_NamespacedNameFlatFile(t *testing.T) {
 	logger, err := CreateUpstreamServerLogger(cfg, serverName)
 	require.NoError(t, err)
 	logger.Info("hello from polymarket-guard")
-	require.NoError(t, logger.Sync())
+	_ = logger.Sync()
 
 	// The flat file exists directly in logDir.
 	flatPath := filepath.Join(logDir, "server-io.github.evidai_polymarket-guard.log")
