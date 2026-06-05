@@ -491,7 +491,7 @@ See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
 - **macOS:** `~/Library/Logs/mcpproxy/main.log`
 - **Linux:** `~/.local/state/mcpproxy/logs/main.log` (or `/var/log/mcpproxy` when running as root)
 - **Windows:** `%LOCALAPPDATA%\mcpproxy\logs\main.log`
-- **Per-server logs:** same directory, `server-{name}.log`
+- **Per-server logs:** same directory, `server-{name}.log` (characters in the server name that aren't letters, digits, `.`, `-`, or `_` — such as the `/` in registry names like `io.github.evidai/polymarket-guard` — are sanitized to `_`, so the log is always a single flat file)
 - **Custom:** set `log_dir` to override (supports `~` expansion)
 
 **Behavior notes:**

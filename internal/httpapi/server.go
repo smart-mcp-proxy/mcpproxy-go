@@ -2678,7 +2678,10 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/logs [get]
 func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
-	serverID := chi.URLParam(r, "id")
+	// chi routes on RawPath, so a namespace/name server id (e.g.
+	// io.github.evidai/polymarket-guard) arrives percent-encoded. Decode it
+	// before lookup, matching handleAddFromRegistry (MCP-1111 / #598).
+	serverID := decodePathParam(chi.URLParam(r, "id"))
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return

@@ -2282,7 +2282,14 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 		}
 	}
 
-	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+	logFile := filepath.Join(logDir, logs.ServerLogFilename(serverName))
+
+	// Defense-in-depth: logs.ServerLogFilename already sanitizes the (user-controlled)
+	// server name to a single path element, but verify the resolved path stays inside
+	// logDir so a crafted name can never escape the log directory (path-injection barrier).
+	if !strings.HasPrefix(filepath.Clean(logFile), filepath.Clean(logDir)+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("invalid server name: %s", serverName)
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {
