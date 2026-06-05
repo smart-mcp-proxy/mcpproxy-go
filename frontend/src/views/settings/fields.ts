@@ -336,7 +336,7 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
     title: 'Tool discovery & health checks',
     description: 'How often mcpproxy probes upstream servers for liveness and re-discovers their tools. Lower these to reduce background traffic to chatty servers.',
     fields: [
-      { key: 'health_check_interval', label: 'Health-check interval', help: 'How often to send a lightweight liveness ping to each connected server. "0s" disables the periodic probe (a dead server is then detected lazily on the next tool call). Range: 5s–1h. Default 30s.', control: 'duration', placeholder: '30s', optional: true },
+      { key: 'health_check_interval', label: 'Health-check interval', help: 'How often to send a lightweight liveness ping to each connected server. "0s" disables the periodic probe (a dead server is then detected lazily on the next tool call). Range: 5s–1h. Default 30s. Does not apply to Docker-isolated servers — their liveness is monitored at the container level.', control: 'duration', placeholder: '30s', optional: true },
       { key: 'tool_discovery_interval', label: 'Tool-discovery interval', help: 'How often to re-list every server’s tools to rebuild the search index. "0s" disables the periodic sweep — tool changes are then picked up only at connect time and via tools/list_changed push notifications. Range: 30s–24h. Default 5m.', control: 'duration', placeholder: '5m', optional: true },
     ],
   },

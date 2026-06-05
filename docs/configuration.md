@@ -111,8 +111,16 @@ quiet a chatty upstream that returns a large tool catalog.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `health_check_interval` | duration | `"30s"` | How often to probe each connected server for liveness with a lightweight MCP `ping`. `"0s"` disables the periodic probe. Range: `5s`–`1h`. |
-| `tool_discovery_interval` | duration | `"5m"` | How often to re-list every server's tools to rebuild the search index. `"0s"` disables the periodic sweep. Range: `30s`–`24h`. |
+| `health_check_interval` | duration | `"30s"` | How often to probe each connected server for liveness with a lightweight MCP `ping`. `"0s"` disables the periodic probe. Range: `5s`–`1h`. **Does not apply to Docker-isolated servers** (see note below). |
+| `tool_discovery_interval` | duration | `"5m"` | How often to re-list every server's tools to rebuild the search index. `"0s"` disables the periodic sweep. Range: `30s`–`24h`. Applies to all server types, including Docker. |
+
+> **Docker-isolated servers.** `health_check_interval` has **no effect** on
+> Docker-isolated servers. Their liveness is monitored separately at the
+> container level on a fixed internal cadence (not an MCP `ping`), so the
+> periodic ping probe is intentionally skipped for them. `tool_discovery_interval`
+> still applies to Docker servers. Remote (HTTP/SSE) servers benefit most from
+> the `ping` switch, since both the probe and the former `tools/list` crossed
+> the network.
 
 **Liveness uses `ping`, not `tools/list`.** The health-check loop issues the
 MCP-standard `ping` request rather than re-listing every tool, so an idle proxy
