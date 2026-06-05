@@ -2,10 +2,11 @@
 
 **Feature Branch**: `057-in-proxy-profiles`
 **Created**: 2026-05-26
-**Status**: Draft. Awaiting maintainer review on direction. Implementation tracked separately.
+**Status**: Draft. Direction settled per maintainer review; awaiting implementation.
+**Revision**: Incorporated review feedback from @Dumbris (2026-06-04): fixed `/mcp/all` factual error, added Implementation Design section, converted Open Questions to Resolved Design Decisions, tightened FR-011 metadata storage.
 **Input**: Issue #55. Reporter @technicalpickles asked for two related capabilities: per-server `working_dir` (already shipped via `ServerConfig.WorkingDir`, related issue #333), and a way for different MCP clients to see different subsets of upstream servers from the same proxy instance. @Dumbris responded with the design "In-Proxy Profiles + Permanent URLs". @Melodeiro suggested an extension that mixes `server` and `server:tool` entries in profile lists.
 
-> Scope note: this spec covers the **MVP** of profiles only. The MVP is a stateless URL-based selector. Active-profile switching, a tray selector, a `set_profile` MCP tool, and an indexable `profile` field are explicitly deferred (see [Out of Scope](#out-of-scope)). The deferred items depend on resolving an open question about where active-profile state lives (per-process, per-session, or per-token), which is parked under [Open Questions](#open-questions) for the maintainer to direct.
+> Scope note: this spec covers the **MVP** of profiles only. The MVP is a stateless URL-based selector. Active-profile switching, a tray selector, a `set_profile` MCP tool, and an indexable `profile` field are explicitly deferred (see [Out of Scope](#out-of-scope)). The deferred items depend on resolving where active-profile state lives (per-process, per-session, or per-token); that question is parked as out-of-scope for the MVP.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -61,8 +62,8 @@ An operator wants finer-than-server granularity inside a profile. They already h
 
 ### Edge Cases
 
-- **Profile references an unknown server**: handled at config load. The MVP treats this as a validation **warning** (loaded, logged, server omitted from the profile's effective set), not a hard error, to match how unknown server references are handled in Spec 028 agent tokens. See [Open Questions](#open-questions); the maintainer may prefer hard error.
-- **Reserved or malformed slug**: a profile name that fails slug validation (see FR-007) is rejected at config load with a precise diagnostic. Reserved values: `all`, `code`, `call`, `p`. Reasoning: `code` and `call` are already routing-mode subpaths under `/mcp/` (Spec 031), `p` is the profile prefix itself, and `all` is reserved for a possible future "explicit-all" profile name without committing to its semantics now.
+- **Profile references an unknown server**: handled at config load as a validation **warning** (loaded, logged, server omitted from the profile's effective set), not a hard error, for parity with how unknown server references are handled in Spec 028 agent tokens. A config that stays loadable after a server rename is preferable to a hard break; the warning is visible enough to catch typos in practice.
+- **Reserved or malformed slug**: a profile name that fails slug validation (see FR-007) is rejected at config load with a precise diagnostic. Reserved values: `all`, `code`, `call`, `p`. Reasoning: `all`, `code`, and `call` are already bound routing-mode subpaths under `/mcp/` (Spec 031, `internal/server/server.go:1670`); `p` is the profile prefix itself. These slugs are reserved to avoid operator confusion — note there is no actual path collision, since profiles live under the distinct `/mcp/p/` prefix.
 - **Two profiles with the same name**: rejected at config load. Names are unique; the URL slug is derived directly from the name.
 - **Profile referencing a quarantined server**: the server is excluded from the profile's effective set while it is quarantined, mirroring how agent tokens treat quarantined servers. Once unquarantined, it appears in the profile without re-reading the file.
 - **Profile referencing a disabled server**: the server is excluded from the profile's effective set while disabled. This matches `/mcp` behaviour today and means a profile cannot "force-enable" a disabled server.
@@ -84,17 +85,77 @@ An operator wants finer-than-server granularity inside a profile. They already h
 - **FR-008**: When `profiles` is empty or absent, requests to any `/mcp/p/<anything>` MUST return HTTP 404 with a JSON body indicating no profiles are configured. This is to surface misconfiguration rather than silently fall back to `/mcp`.
 - **FR-009**: When `profiles` is non-empty but a request targets a slug that does not match any profile, the response MUST be HTTP 404 with a JSON body listing the available profile names.
 - **FR-010**: `/mcp` (no profile) MUST continue to expose the full union of configured servers, exactly as today, regardless of whether profiles are configured. Profiles do not implicitly redefine `/mcp`.
-- **FR-011**: System MUST log, in the existing activity log, the effective profile slug on tool-call activity records originating from a `/mcp/p/<slug>` URL, so operators can correlate activity to a profile. Records from `/mcp` MUST continue to omit the field.
+- **FR-011**: System MUST log, in the existing activity log, the effective profile slug on tool-call activity records originating from a `/mcp/p/<slug>` URL, so operators can correlate activity to a profile. The slug lands in the existing `ActivityRecord.Metadata` map as `metadata["profile"]`, not a new top-level field — no schema change needed, matching how Specs 018/026 attach context. Records from `/mcp` MUST continue to omit the field.
 - **FR-012**: Errors caused by profile filtering MUST distinguish themselves from errors caused by agent-token scoping, so an operator can tell which scoping primitive blocked the call.
 - **FR-013**: Behaviour MUST be identical across personal and server editions (no build-tag-specific code paths). In the server edition's multi-user mode, profiles compose with the per-user shared/personal server visibility (Spec 029) by intersection: a user only sees profile entries for servers they are entitled to.
 - **FR-014**: Config validation MUST reject duplicate profile names with a clear diagnostic that points at both occurrences.
-- **FR-015**: Config validation MUST emit a non-fatal warning when a profile references a server name that does not exist in the current `mcpServers` list, and MUST omit that server from the profile's effective set. (Hard-error variant deferred to [Open Questions](#open-questions).)
+- **FR-015**: Config validation MUST emit a non-fatal warning when a profile references a server name that does not exist in the current `mcpServers` list, and MUST omit that server from the profile's effective set. Warn-and-skip is the settled decision (parity with Spec 028; config stays loadable after a server rename).
 
 ### Key Entities
 
 - **Profile**: A named, stateless, server-scoped view of upstream MCP servers, addressable at `/mcp/p/<name>`. Fields: `name` (URL slug), `servers` (list of `mcpServers[].name` references). No tool-level fields in the MVP.
 - **Effective Server Set**: At request time, the intersection of (a) the profile's `servers`, (b) the agent token's `allowed_servers` if a token is present, (c) servers that are not disabled and not quarantined, (d) the per-user visible server set in the server edition.
 - **Profile-scoped MCP endpoint**: An HTTP route `/mcp/p/<slug>` that serves the existing MCP protocol, with the request's allowed-server filter pre-bound to the matched profile.
+
+### Implementation Design
+
+The spec says profiles are "wired into the existing scope hooks" but does not say *how*. This section closes that gap so an implementer does not pick a wrong seam.
+
+#### Routing mechanism — middleware + context, not per-profile server instances
+
+Routing modes (`/mcp/all`, `/mcp/code`, `/mcp/call`) register a *separate MCP server instance per path at startup* via `GetMCPServerForMode`. That pattern cannot be mirrored for N hot-reloadable profile slugs because `http.ServeMux` cannot de-register routes at runtime.
+
+The framework-friendly fit is a single `/mcp/p/` prefix handler that:
+
+1. Strips the slug from the URL path.
+2. Looks up the profile in the current config.
+3. Injects the resolved server set into the request context.
+
+This mirrors how `mcpAuthMiddleware` injects `AuthContext` today. The existing MCP server instance is reused — no per-profile server construction. Middleware order: **auth → profile** (profile filtering runs after authentication so it can compose with agent-token scope via intersection).
+
+#### Profile filtering MUST run independently of auth type (correctness-critical)
+
+The existing server-scope filter in `retrieve_tools` (`mcp.go` ~1108) and `call_tool_*` (`mcp.go` ~1491) is gated on:
+
+```go
+enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
+```
+
+A default `/mcp/p/...` connection with **no token** is assigned `AdminContext()`, for which `enforceAgentScope` is `false` and `CanAccessServer` returns `true` unconditionally. Therefore profile filtering **cannot** ride the agent-scope gate or be implemented by stuffing the profile's servers into `AuthContext.AllowedServers`. It must be a *parallel* check that runs for every auth type:
+
+```go
+if profileScope != nil && !profileScope.Allows(serverName) {
+    // hide from retrieve_tools / reject with profile error
+}
+if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
+    // existing token gate
+}
+```
+
+Two independent checks yield the intersection (FR-005) and the two distinct error messages (FR-012) for free, with **no change to `AuthContext`, the `agent_tokens` bucket, or token validation**.
+
+> **Regression test (mandatory)**: "An unauthenticated connection at `/mcp/p/<slug>` is still filtered to the profile's servers." This test MUST pass before the implementation PR merges.
+
+#### Config store + reload
+
+Top-level `profiles` array in the config file, hot-reloaded alongside `mcpServers`:
+
+```go
+Profiles []ProfileConfig `json:"profiles,omitempty"`
+```
+
+When the field is absent, byte-identical round-trip is preserved (SC-004 for free). Hot-reload updates the in-memory profile map atomically; existing connections keep their resolved snapshot until reconnect (consistent with how the project handles config hot-reload for active connections today).
+
+#### Files touched (scope guard)
+
+| Layer | File | Change |
+|-------|------|--------|
+| Config + validation | `internal/config/` (+ new `profiles.go`) | `ProfileConfig` struct, slug validation, duplicate detection, unknown-server warning |
+| Request context | new `internal/profile/context.go` (~30 lines) | Mirrors `auth/context.go`; `ProfileScope` with `Allows(serverName)` predicate |
+| Routing | `internal/server/server.go` | One route (`/mcp/p/`) + `profileMiddleware` (auth → profile order) |
+| Filtering | `internal/server/mcp.go` | Two filter conditions in `retrieve_tools` and `call_tool_*` + metadata write |
+
+Explicitly **no** storage, index, or token-model changes. Per-server `enabled_tools` / `disabled_tools` need zero changes — they already apply downstream of the server gate, so FR-006 / US3 works automatically.
 
 ## Success Criteria *(mandatory)*
 
@@ -112,17 +173,17 @@ An operator wants finer-than-server granularity inside a profile. They already h
 - **Stateless first**. The MVP is intentionally stateless (URL-bound). This avoids deciding where "active profile" state lives (per-process, per-session, per-token) which is the open question that has stalled #55 for several months. URL-bound profiles let the feature ship without that decision.
 - **Filter at the call site, do not partition the index**. With server cardinality typically in the dozens, a per-request server-set filter on `retrieve_tools` results is cheap. Adding a `profile` field to the BM25 documents and reshaping queries was considered and rejected for the MVP because it complicates indexing, hot reload, and migration without a measurable benefit at current scale (Constitution III: read state from the source of truth, do not duplicate it).
 - **Reuse existing tool-level controls**. `enabled_tools` / `disabled_tools` on each `ServerConfig` already give per-tool granularity. Re-implementing it on `Profile` (e.g. accepting `["server:tool"]` strings as @Melodeiro proposed) would create a second mechanism with different precedence rules; this MVP keeps profiles purely server-level.
-- **`/mcp` semantics stay**. Today `/mcp` is the union of all configured servers. This spec keeps that. A future "all-profiles-explicit" variant ("`/mcp` only when no profiles configured, otherwise require `/mcp/p/<slug>`") is left to [Open Questions](#open-questions).
+- **`/mcp` semantics stay**. Today `/mcp` is the union of all configured servers. This spec keeps that as a settled invariant — profiles are purely additive. `/mcp` always exposes the full union regardless of whether profiles exist.
 - **`working_dir` is a separate concern.** Per-server `working_dir` (the other half of #55, related to #333) is already implemented and out of scope here.
 - **Personal edition reads the file directly**, server edition resolves profiles after layering shared + personal server visibility (Spec 029). Both editions share one filter implementation; only the input "visible servers for this caller" differs.
 
-## Open Questions
+## Resolved Design Decisions
 
-The following points are deliberately left open for the maintainer (@Dumbris) to direct before implementation begins. The MVP picks a defensible default for each so the spec is reviewable end-to-end, but the implementation PR may flip these based on the maintainer's call.
+The following points were initially left open for maintainer direction. Review feedback from @Dumbris settled all three.
 
-1. **Hard-error vs warn on unknown server reference (FR-015).** The MVP warns and omits, mirroring agent-token behaviour. A hard error would catch typos earlier but breaks the "config loads even if a server was renamed" property. Recommendation: keep warn for parity with Spec 028.
-2. **Should `/mcp` change semantics once `profiles` is non-empty?** The MVP keeps `/mcp` as "full union" always. An alternative is to make `/mcp` mean "no profile = no servers" once `profiles` exists, forcing every client to opt into a profile. That is a sharper invariant for security-conscious operators but a breaking change for existing clients that connect to `/mcp` and expect the union.
-3. **Reserve a profile name for "all servers"?** Useful to have a default-named profile-shaped URL (e.g. `/mcp/p/all`) that explicitly resolves to every server. The MVP leaves `all` reserved precisely so this can be added later without a migration. Decision now: do NOT bind `all` to any semantics in this spec; revisit if Q2 above is answered "yes".
+1. **Unknown server reference → warn and skip (FR-015).** Promoted from "recommendation" to settled decision. Rationale: parity with Spec 028 agent tokens, and config must stay loadable after a server rename. Hard-error variant is not needed.
+2. **`/mcp` semantics → always full union, purely additive.** Stated as a settled invariant: `/mcp` continues to expose all configured servers regardless of whether `profiles` is configured. Profiles are opt-in narrowing via the new `/mcp/p/<slug>` URL only. No breaking change for existing `/mcp` clients. A `strict` mode (requiring a profile) can be a later spec if anyone asks.
+3. **Reserve `all` → yes**, for the corrected reason: `/mcp/all` is **already a live, bound endpoint** serving direct routing mode (Spec 031). The `all` slug is reserved to avoid operator confusion, not for a hypothetical future profile. There is no actual path collision since profiles live under the distinct `/mcp/p/` prefix.
 
 ## Out of Scope
 
@@ -217,7 +278,7 @@ There is no migration. The `profiles` field is optional and additive.
 ## Testing Strategy
 
 - **Unit tests** (`internal/config`): slug validation (`^[a-z0-9][a-z0-9_-]{0,62}$` + reserved set), duplicate names, unknown server references warn-not-fail (FR-015), empty `servers` list warns, `profiles` round-trips through the writer with no diff.
-- **Unit tests** (filter layer): given an effective server-set computed from (profile, agent token, quarantined, disabled), the policy decision matches table-driven expectations for every cell. Specifically asserts the two distinct error messages from FR-012 (token-blocked vs profile-blocked).
+- **Unit tests** (filter layer): given an effective server-set computed from (profile, agent token, quarantined, disabled), the policy decision matches table-driven expectations for every cell. Specifically asserts the two distinct error messages from FR-012 (token-blocked vs profile-blocked). **Named regression test**: "an unauthenticated connection at `/mcp/p/<slug>` is still filtered to the profile's servers" — this validates that profile filtering does not depend on the `enforceAgentScope` gate (see Implementation Design).
 - **Integration tests** (`internal/server`): two profiles configured, an HTTP server stood up, and `retrieve_tools` / `call_tool_*` exercised against `/mcp`, `/mcp/p/research`, `/mcp/p/deploy`, `/mcp/p/unknown`, `/mcp/p/all` (reserved → 404 even if defined), `/mcp/p/Bad-Slug` (uppercase → not loaded).
 - **E2E test** (`internal/server/e2e_test.go` style): a real proxy with two stub upstream servers, two profiles, and two MCP clients; verifies isolation in both directions plus activity-log records carrying the profile slug per FR-011.
 - **Backward-compat E2E**: existing E2E suite passes unchanged when `profiles` is absent (SC-002).
@@ -228,7 +289,7 @@ There is no migration. The `profiles` field is optional and additive.
 - Issue #333: `working_dir` per server (related half of #55, already shipped via `ServerConfig.WorkingDir`).
 - Spec 028 (`specs/028-agent-tokens/`): agent tokens; profile scope composes with `AgentToken.AllowedServers` by intersection (FR-005).
 - Spec 029 (`specs/029-mcpproxy-teams/`): server edition multi-user; profiles compose with per-user visibility by intersection (FR-013).
-- Spec 031 (`031-routing-modes` branch, merged in PR #327): `/mcp/{mode}` routing established `/mcp/code` and `/mcp/call`. This spec adds the orthogonal `/mcp/p/<slug>` axis. The reserved-slug list (`code`, `call`, `p`) is anchored on Spec 031's existing route prefixes.
+- Spec 031 (`031-routing-modes` branch, merged in PR #327): `/mcp/{mode}` routing established `/mcp/all`, `/mcp/code`, and `/mcp/call` as live bound endpoints (`internal/server/server.go:1670`). This spec adds the orthogonal `/mcp/p/<slug>` axis. The reserved-slug list (`all`, `code`, `call`, `p`) is anchored on Spec 031's existing route prefixes and the profile prefix.
 - Spec 049 (`specs/049-agent-discoverable-disabled-tools/`): established that per-server `enabled_tools` / `disabled_tools` are the canonical tool-level scoping mechanism. FR-006 reuses it rather than introducing a profile-level equivalent.
 - PR #525 / Spec 056 (`specs/056-output-schema-validation/`): recent example of the project's spec-first pattern (spec PR merged separately from implementation PR). This spec follows the same pattern.
 
