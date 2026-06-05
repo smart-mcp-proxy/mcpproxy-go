@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -59,6 +61,18 @@ func (c *Client) initialize(ctx context.Context) error {
 			return fmt.Errorf("server did not respond to MCP initialize within %s and produced no stderr output (check that the command starts an MCP server and not a help banner)", waited)
 		}
 
+		// STDIO subprocess exited before completing the handshake: mcp-go reports
+		// a closed transport / EOF on the pipe (not a typed exit error). Surface
+		// the captured stderr so the user sees the real, often self-serviceable
+		// cause (e.g. "Error: --brave-api-key is required") instead of a bare
+		// "transport closed" that the diagnostics layer marks UNKNOWN. Gated to
+		// stdio: initialize() is shared by HTTP/SSE transports, which have no
+		// local subprocess and must keep their generic diagnostics. (MCP-1093 /
+		// #599; stdio gate per Codex review on PR #606)
+		if shouldEnrichStdioPrematureExit(c.transportType, err) {
+			return enrichTransportClosedError(c.formatRecentStderr(), err)
+		}
+
 		return err
 	}
 
@@ -83,6 +97,50 @@ func (c *Client) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// enrichTransportClosedError builds the actionable error for a stdio subprocess
+// that exited before completing the MCP initialize handshake, folding in the
+// captured stderr tail so the UI banner and per-server logs show the real,
+// often self-serviceable cause (e.g. a missing API key) instead of a bare
+// "transport closed". It wraps the original cause with %w so callers can still
+// errors.Is/As it. Pure (no receiver state) so the production enrichment path is
+// unit-testable. (MCP-1093 / #599)
+//
+// Note: the child exit code is intentionally NOT surfaced here. On this failure
+// path mcp-go has not reaped the process (no Wait), so ProcessState is unset and
+// any exit code would be unreliable; the captured stderr is the actionable
+// signal. Surfacing the exit code is a separate follow-up.
+// shouldEnrichStdioPrematureExit reports whether an initialize() failure should
+// be enriched as a stdio subprocess premature exit. The enrichment is stdio-
+// specific (it describes a local "server process" and its stderr); HTTP/SSE
+// transports share initialize() but have no subprocess, so a closed-transport
+// error there must keep its generic diagnostics. (Codex review on PR #606)
+func shouldEnrichStdioPrematureExit(transportType string, err error) bool {
+	return transportType == transportStdio && isTransportClosedErr(err)
+}
+
+func enrichTransportClosedError(stderrBlock string, cause error) error {
+	if stderrBlock != "" {
+		return fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %w", stderrBlock, cause)
+	}
+	return fmt.Errorf("server process exited before completing the MCP initialize handshake and produced no stderr output (transport closed before the handshake): %w", cause)
+}
+
+// isTransportClosedErr reports whether an initialize() failure indicates the
+// child process went away mid-handshake. mcp-go surfaces a premature stdio
+// exit as a closed transport / EOF on the pipe rather than a typed exit error,
+// so we match those shapes to distinguish "the process died" from a genuine
+// malformed-handshake response. (MCP-1093 / #599)
+func isTransportClosedErr(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	lmsg := strings.ToLower(err.Error())
+	return strings.Contains(lmsg, "transport closed") ||
+		strings.Contains(lmsg, "broken pipe") ||
+		strings.Contains(lmsg, "file already closed") ||
+		strings.Contains(lmsg, "use of closed")
 }
 
 // registerNotificationHandler registers a handler for MCP notifications.

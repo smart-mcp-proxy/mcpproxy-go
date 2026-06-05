@@ -62,6 +62,16 @@ func seedSTDIO() {
 		DocsURL: docsURL(STDIOExitNonzero),
 	})
 	register(CatalogEntry{
+		Code:        STDIOExitBeforeInitialize,
+		Severity:    SeverityError,
+		UserMessage: "The stdio server process exited before completing the MCP initialize handshake. This usually means a missing/invalid configuration (e.g. a required API key or environment variable) — check the captured stderr for the exact cause.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Show last server log lines", FixerKey: "stdio_show_last_logs"},
+			{Type: FixStepLink, Label: "Troubleshooting early exit", URL: docsURL(STDIOExitBeforeInitialize)},
+		},
+		DocsURL: docsURL(STDIOExitBeforeInitialize),
+	})
+	register(CatalogEntry{
 		Code:        STDIOHandshakeTimeout,
 		Severity:    SeverityError,
 		UserMessage: "The stdio server did not complete the MCP handshake within the expected time.",

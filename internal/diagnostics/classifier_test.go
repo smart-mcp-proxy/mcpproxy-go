@@ -16,6 +16,52 @@ func TestClassify_Nil(t *testing.T) {
 	}
 }
 
+// TestClassify_STDIO_ExitBeforeInitialize covers GitHub #599 / MCP-1093: a
+// subprocess that exits before completing the MCP initialize handshake must
+// classify to MCPX_STDIO_EXIT_BEFORE_INITIALIZE (not MCPX_UNKNOWN_UNCLASSIFIED).
+// The surfaced error carries the captured stderr tail (the exit code is not
+// reliably available on this path and is intentionally not surfaced).
+func TestClassify_STDIO_ExitBeforeInitialize(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "raw transport-closed under stdio hint",
+			err:  errors.New(`stdio transport (command="docker", docker_isolation=true): transport error: transport closed`),
+		},
+		{
+			name: "enriched message carrying stderr tail",
+			err: errors.New("server process exited before completing the MCP initialize handshake; recent stderr:\n" +
+				"  | Error: --brave-api-key is required: transport closed"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(tc.err, ClassifierHints{Transport: "stdio"})
+			if got != STDIOExitBeforeInitialize {
+				t.Fatalf("Classify(%q) = %q, want %q", tc.err, got, STDIOExitBeforeInitialize)
+			}
+		})
+	}
+
+	// The production enrichment that folds the child exit code + stderr tail into
+	// the initialize-failure error is covered by TestEnrichTransportClosedError_*
+	// in internal/upstream/core — a real test of the helper the production path
+	// calls, instead of asserting against a hard-coded string here.
+	// (Codex review on PR #606)
+}
+
+// TestClassify_STDIO_ExitBeforeInitialize_NotForHTTP guards against over-match:
+// the same "transport closed" wording on a non-stdio transport must not be
+// captured by the stdio rule.
+func TestClassify_STDIO_ExitBeforeInitialize_NotForHTTP(t *testing.T) {
+	err := errors.New("transport error: transport closed")
+	if got := Classify(err, ClassifierHints{Transport: "http"}); got == STDIOExitBeforeInitialize {
+		t.Fatalf("HTTP transport must not classify as %q", STDIOExitBeforeInitialize)
+	}
+}
+
 func TestClassify_STDIO_SpawnENOENT(t *testing.T) {
 	// os/exec wraps ENOENT into *exec.Error when the binary is missing.
 	wrapped := &exec.Error{
