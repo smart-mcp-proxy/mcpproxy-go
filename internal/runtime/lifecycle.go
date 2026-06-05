@@ -221,6 +221,24 @@ func (r *Runtime) connectAllWithRetry(ctx context.Context) {
 	}
 }
 
+// toolDiscoveryDisabledRecheckInterval is how long the indexing loop sleeps
+// between re-checks when the periodic sweep is disabled (resolved interval
+// <= 0). It is NOT a sweep — connect-time discovery and reactive
+// notifications/tools/list_changed still keep the index fresh; this only lets a
+// later config hot-reload re-enable the sweep without a restart (spec 074).
+const toolDiscoveryDisabledRecheckInterval = 5 * time.Minute
+
+// planToolDiscoveryCycle decides one iteration of the indexing loop: whether to
+// run a periodic sweep and how long to wait first. A positive interval sweeps
+// on that cadence; a non-positive interval disables the sweep and waits the
+// re-check window.
+func planToolDiscoveryCycle(interval, disabledRecheck time.Duration) (sweep bool, wait time.Duration) {
+	if interval <= 0 {
+		return false, disabledRecheck
+	}
+	return true, interval
+}
+
 func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 	r.cleanupOrphanedIndexEntries()
 
@@ -232,14 +250,20 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
+	// Re-resolve the global tool-discovery interval every cycle so a config
+	// hot-reload changes the sweep cadence (or disables it) without a restart
+	// (spec 074, FR-012). A resolved value <= 0 disables the periodic sweep.
 	for {
+		interval := r.Config().ResolveToolDiscoveryInterval(nil)
+		sweep, wait := planToolDiscoveryCycle(interval, toolDiscoveryDisabledRecheckInterval)
+		timer := time.NewTimer(wait)
 		select {
-		case <-ticker.C:
-			_ = r.DiscoverAndIndexTools(ctx)
+		case <-timer.C:
+			if sweep {
+				_ = r.DiscoverAndIndexTools(ctx)
+			}
 		case <-ctx.Done():
+			timer.Stop()
 			r.logger.Info("Background tool indexing stopped due to context cancellation")
 			return
 		}

@@ -239,6 +239,23 @@ func (c *Client) IsConnected() bool {
 	return c.connected
 }
 
+// Ping issues the MCP-standard lightweight liveness check (`ping`) to the
+// upstream server. It is used by the managed client's health loop as a cheap
+// replacement for re-listing every tool just to confirm the connection is
+// alive (spec 074, FR-001). Returns an error if the client is not connected or
+// the request fails so the caller can classify and drive reconnection.
+func (c *Client) Ping(ctx context.Context) error {
+	c.mu.RLock()
+	client := c.client
+	c.mu.RUnlock()
+
+	if !c.IsConnected() || client == nil {
+		return fmt.Errorf("client not connected")
+	}
+
+	return client.Ping(ctx)
+}
+
 // ListTools retrieves available tools from the upstream server
 func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
 	c.mu.RLock()
