@@ -772,7 +772,7 @@ func runUpstreamLogsFromFile(globalConfig *config.Config, serverName string) err
 		}
 	}
 
-	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+	logFile := filepath.Join(logDir, logs.ServerLogFilename(serverName))
 
 	// Check if file exists
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {

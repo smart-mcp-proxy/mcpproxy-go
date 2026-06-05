@@ -2282,7 +2282,7 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 		}
 	}
 
-	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+	logFile := filepath.Join(logDir, logs.ServerLogFilename(serverName))
 
 	// Check if file exists
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {

@@ -280,6 +280,16 @@ func serverLogFilename(serverName string) string {
 	return fmt.Sprintf("server-%s.log", sanitizeServerLogName(serverName))
 }
 
+// ServerLogFilename is the exported accessor for the per-server log filename.
+// Read sites outside this package (the REST/daemon log reader in internal/server
+// and the no-daemon CLI file reader in cmd/mcpproxy) MUST derive the path through
+// this helper so reads resolve to the same sanitized flat file the writers create
+// for namespace/name registry servers (MCP-1111). Do not re-derive "server-%s.log"
+// by hand at a call site.
+func ServerLogFilename(serverName string) string {
+	return serverLogFilename(serverName)
+}
+
 // sanitizeServerLogName replaces every character that is not safe in a single
 // filename element with "_", keeping ASCII letters, digits, ".", "-" and "_".
 // The result is always a single path element (no "/" or "\\"), so it can never

@@ -77,4 +77,11 @@ func TestCreateUpstreamServerLogger_NamespacedNameFlatFile(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, lines, "tail reader must round-trip the namespaced server name to its flat log file")
 	assert.Contains(t, lines[len(lines)-1], "hello from polymarket-guard")
+
+	// The exported helper (used by the out-of-package read sites in internal/server
+	// and cmd/mcpproxy) MUST resolve a namespaced name to the same flat file the
+	// writer created — otherwise daemon/CLI log reads 404 for slash-bearing names
+	// (the read-site divergence Codex flagged on PR #604).
+	assert.Equal(t, flatPath, filepath.Join(logDir, ServerLogFilename(serverName)),
+		"ServerLogFilename must resolve to the writer's flat file for a namespaced name")
 }
