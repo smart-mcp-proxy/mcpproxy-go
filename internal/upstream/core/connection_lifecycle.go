@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -59,6 +61,22 @@ func (c *Client) initialize(ctx context.Context) error {
 			return fmt.Errorf("server did not respond to MCP initialize within %s and produced no stderr output (check that the command starts an MCP server and not a help banner)", waited)
 		}
 
+		// Subprocess exited before completing the handshake: mcp-go reports a
+		// closed transport / EOF on the pipe (not a typed exit error). Surface
+		// the captured stderr — and the exit code when the process handle is
+		// available — so the user sees the real, often self-serviceable cause
+		// (e.g. "Error: --brave-api-key is required") instead of a bare
+		// "transport closed" that the diagnostics layer marks UNKNOWN.
+		// (MCP-1093 / #599)
+		if isTransportClosedErr(err) {
+			stderrBlock := c.formatRecentStderr()
+			exitInfo := c.childExitInfo()
+			if stderrBlock != "" {
+				return fmt.Errorf("server process exited before completing the MCP initialize handshake%s; recent stderr:\n%s: %w", exitInfo, stderrBlock, err)
+			}
+			return fmt.Errorf("server process exited before completing the MCP initialize handshake%s and produced no stderr output (transport closed before the handshake): %w", exitInfo, err)
+		}
+
 		return err
 	}
 
@@ -83,6 +101,34 @@ func (c *Client) initialize(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// isTransportClosedErr reports whether an initialize() failure indicates the
+// child process went away mid-handshake. mcp-go surfaces a premature stdio
+// exit as a closed transport / EOF on the pipe rather than a typed exit error,
+// so we match those shapes to distinguish "the process died" from a genuine
+// malformed-handshake response. (MCP-1093 / #599)
+func isTransportClosedErr(err error) bool {
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	lmsg := strings.ToLower(err.Error())
+	return strings.Contains(lmsg, "transport closed") ||
+		strings.Contains(lmsg, "broken pipe") ||
+		strings.Contains(lmsg, "file already closed") ||
+		strings.Contains(lmsg, "use of closed")
+}
+
+// childExitInfo returns " (exit code N)" when the child process handle has
+// already been reaped, otherwise "". Best-effort: on the stdio transport the
+// process is only extracted after a successful initialize, so on the failure
+// path the handle is usually nil and this returns "" — the captured stderr
+// tail is the primary signal in that case.
+func (c *Client) childExitInfo() string {
+	if c.processCmd != nil && c.processCmd.ProcessState != nil {
+		return fmt.Sprintf(" (exit code %d)", c.processCmd.ProcessState.ExitCode())
+	}
+	return ""
 }
 
 // registerNotificationHandler registers a handler for MCP notifications.

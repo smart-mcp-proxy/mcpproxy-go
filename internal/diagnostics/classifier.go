@@ -186,6 +186,17 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 			return STDIOSpawnENOENT
 		case strings.Contains(lmsg, "permission denied"):
 			return STDIOSpawnEACCES
+		// Subprocess started but the transport closed before the MCP initialize
+		// handshake completed — the child exited early (e.g. printed a fatal
+		// config error to stderr and died). mcp-go surfaces this as a closed
+		// transport, which otherwise falls through to MCPX_UNKNOWN_UNCLASSIFIED
+		// even though the real cause is on the child's stderr (MCP-1093 / #599).
+		// Gated on the stdio hint so a "transport closed" from another transport
+		// is not misattributed.
+		case strings.Contains(lmsg, "transport closed"),
+			strings.Contains(lmsg, "exited before completing the mcp initialize"),
+			strings.Contains(lmsg, "exited before the mcp initialize"):
+			return STDIOExitBeforeInitialize
 		case strings.Contains(lmsg, "did not respond to mcp initialize"),
 			strings.Contains(lmsg, "handshake timeout"):
 			return STDIOHandshakeTimeout

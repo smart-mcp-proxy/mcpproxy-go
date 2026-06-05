@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -13,6 +14,53 @@ import (
 func TestClassify_Nil(t *testing.T) {
 	if got := Classify(nil, ClassifierHints{}); got != "" {
 		t.Errorf("Classify(nil) = %q, want empty", got)
+	}
+}
+
+// TestClassify_STDIO_ExitBeforeInitialize covers GitHub #599 / MCP-1093: a
+// subprocess that exits before completing the MCP initialize handshake must
+// classify to MCPX_STDIO_EXIT_BEFORE_INITIALIZE (not MCPX_UNKNOWN_UNCLASSIFIED),
+// and the surfaced error must carry the child's exit code + stderr tail.
+func TestClassify_STDIO_ExitBeforeInitialize(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "raw transport-closed under stdio hint",
+			err:  errors.New(`stdio transport (command="docker", docker_isolation=true): transport error: transport closed`),
+		},
+		{
+			name: "enriched message carrying exit code and stderr tail",
+			err: errors.New("server process exited before completing the MCP initialize handshake (exit code 127); recent stderr:\n" +
+				"  | Error: --brave-api-key is required: transport closed"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Classify(tc.err, ClassifierHints{Transport: "stdio"})
+			if got != STDIOExitBeforeInitialize {
+				t.Fatalf("Classify(%q) = %q, want %q", tc.err, got, STDIOExitBeforeInitialize)
+			}
+		})
+	}
+
+	// The enriched error the backend produces must carry the exit code and the
+	// actionable stderr line so the UI banner and per-server logs show the real
+	// cause instead of telling the user to file a bug.
+	enriched := "server process exited before completing the MCP initialize handshake (exit code 127); recent stderr:\n  | Error: --brave-api-key is required"
+	if !strings.Contains(enriched, "exit code 127") || !strings.Contains(enriched, "brave-api-key is required") {
+		t.Fatalf("enriched error must carry exit code + stderr tail, got: %q", enriched)
+	}
+}
+
+// TestClassify_STDIO_ExitBeforeInitialize_NotForHTTP guards against over-match:
+// the same "transport closed" wording on a non-stdio transport must not be
+// captured by the stdio rule.
+func TestClassify_STDIO_ExitBeforeInitialize_NotForHTTP(t *testing.T) {
+	err := errors.New("transport error: transport closed")
+	if got := Classify(err, ClassifierHints{Transport: "http"}); got == STDIOExitBeforeInitialize {
+		t.Fatalf("HTTP transport must not classify as %q", STDIOExitBeforeInitialize)
 	}
 }
 

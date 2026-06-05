@@ -8,11 +8,12 @@ package diagnostics
 
 // STDIO domain — stdio-transport MCP server failures.
 const (
-	STDIOSpawnENOENT      Code = "MCPX_STDIO_SPAWN_ENOENT"
-	STDIOSpawnEACCES      Code = "MCPX_STDIO_SPAWN_EACCES"
-	STDIOExitNonzero      Code = "MCPX_STDIO_EXIT_NONZERO"
-	STDIOHandshakeTimeout Code = "MCPX_STDIO_HANDSHAKE_TIMEOUT"
-	STDIOHandshakeInvalid Code = "MCPX_STDIO_HANDSHAKE_INVALID"
+	STDIOSpawnENOENT          Code = "MCPX_STDIO_SPAWN_ENOENT"
+	STDIOSpawnEACCES          Code = "MCPX_STDIO_SPAWN_EACCES"
+	STDIOExitNonzero          Code = "MCPX_STDIO_EXIT_NONZERO"
+	STDIOExitBeforeInitialize Code = "MCPX_STDIO_EXIT_BEFORE_INITIALIZE"
+	STDIOHandshakeTimeout     Code = "MCPX_STDIO_HANDSHAKE_TIMEOUT"
+	STDIOHandshakeInvalid     Code = "MCPX_STDIO_HANDSHAKE_INVALID"
 )
 
 // OAUTH domain — OAuth 2.1 / PKCE flow failures.
