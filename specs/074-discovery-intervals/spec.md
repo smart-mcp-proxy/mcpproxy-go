@@ -69,6 +69,7 @@ An operator has one chatty upstream they want probed rarely (or never) while kee
 
 ### Edge Cases
 
+- **Docker-isolated servers — `health_check_interval` is a no-op**: the periodic liveness probe is intentionally skipped for Docker-isolated servers (`performHealthCheck` early-returns when the server command runs the container). Their liveness is monitored separately at the **container level** on a fixed internal cadence (`monitorProcess` → `checkDockerContainerHealth`), which is **not** an MCP `ping` and is **not** governed by `health_check_interval`. Therefore `health_check_interval` (global or per-server) has **no effect** on Docker-isolated servers; only `tool_discovery_interval` affects them. The discovery sweep (`DiscoverTools`) does **not** skip Docker, so `tool_discovery_interval` applies uniformly to stdio, Docker, and remote servers. Remote (HTTP/SSE) servers benefit most from the `ping` switch (probe + former `tools/list` crossed the network). This no-op MUST be documented in settings help text and `docs/configuration.md`; no change to the Docker health-check skip behaviour is requested.
 - **Disabling discovery with a non-`listChanged` server**: if periodic discovery is disabled (`0s`) and a server does not support `listChanged`, tool changes are picked up only at connect time or on manual refresh. The settings help text MUST warn about this trade-off; the configuration is still permitted.
 - **Hot reload**: changing an interval at runtime should take effect on the next cycle without requiring the operator to restart the whole proxy, where feasible.
 - **Defaults unchanged on upgrade**: an existing config that does not mention the new keys MUST behave exactly as before the change.
@@ -91,6 +92,7 @@ An operator has one chatty upstream they want probed rarely (or never) while kee
 - **FR-011**: Per-server overrides MUST be expressible in configuration and via the API in this iteration; a dedicated per-server form control MAY be deferred to a follow-up.
 - **FR-012**: A runtime interval change SHOULD take effect on the next cycle without a full restart where feasible; otherwise the UI MUST indicate a restart is required.
 - **FR-013**: User-facing documentation MUST describe both keys, their defaults, ranges, the `0s = disabled` semantics, and the per-server override.
+- **FR-014**: The settings help text and `docs/configuration.md` MUST state that `health_check_interval` does **not** apply to Docker-isolated servers (their liveness is monitored at the container level), and that `tool_discovery_interval` applies to all server types. No change to the existing Docker health-check skip behaviour is in scope.
 
 ### Key Entities
 

@@ -36,6 +36,7 @@ TDD: write the failing test first for each behavioural sub-task, then implement.
 ## Phase 6 — Docs + builds
 
 - [ ] **T015** Update `docs/configuration.md` (both keys, defaults, ranges, `0s=disabled`, per-server override, ping change). Let the swagger pre-push hook regenerate `oas/swagger.yaml`.
+- [ ] **T015a** Document the **Docker no-op** (FR-014): `health_check_interval` does not apply to Docker-isolated servers (container-level liveness); `tool_discovery_interval` does. Add to `docs/configuration.md` **and** the `health_check_interval` help string in both `frontend/src/views/settings/fields.ts` and `native/macos/.../SettingsCatalog.swift`.
 - [ ] **T016** Verify both editions build: `go build ./cmd/mcpproxy` and `go build -tags server ./cmd/mcpproxy`.
 
 ## Phase 7 — Verification gate
