@@ -27,6 +27,29 @@ func TestEnrichTransportClosedError_WithStderr(t *testing.T) {
 	}
 }
 
+// The stdio premature-exit enrichment must apply ONLY to the stdio transport —
+// HTTP/SSE share initialize() but have no subprocess, so a closed-transport error
+// there must keep generic diagnostics. (Codex review on PR #606)
+func TestShouldEnrichStdioPrematureExit_GatedToStdio(t *testing.T) {
+	closed := errors.New("transport error: transport closed")
+	cases := []struct {
+		transport string
+		err       error
+		want      bool
+	}{
+		{transportStdio, closed, true},
+		{transportStdio, io.EOF, true},
+		{transportHTTP, closed, false},
+		{transportSSE, closed, false},
+		{transportStdio, errors.New("some unrelated error"), false},
+	}
+	for _, tc := range cases {
+		if got := shouldEnrichStdioPrematureExit(tc.transport, tc.err); got != tc.want {
+			t.Errorf("shouldEnrichStdioPrematureExit(%q, %v) = %v, want %v", tc.transport, tc.err, got, tc.want)
+		}
+	}
+}
+
 func TestEnrichTransportClosedError_NoStderr(t *testing.T) {
 	cause := errors.New("transport closed")
 	got := enrichTransportClosedError("", cause)

@@ -61,14 +61,15 @@ func (c *Client) initialize(ctx context.Context) error {
 			return fmt.Errorf("server did not respond to MCP initialize within %s and produced no stderr output (check that the command starts an MCP server and not a help banner)", waited)
 		}
 
-		// Subprocess exited before completing the handshake: mcp-go reports a
-		// closed transport / EOF on the pipe (not a typed exit error). Surface
-		// the captured stderr — and the exit code when the process handle is
-		// available — so the user sees the real, often self-serviceable cause
-		// (e.g. "Error: --brave-api-key is required") instead of a bare
-		// "transport closed" that the diagnostics layer marks UNKNOWN.
-		// (MCP-1093 / #599)
-		if isTransportClosedErr(err) {
+		// STDIO subprocess exited before completing the handshake: mcp-go reports
+		// a closed transport / EOF on the pipe (not a typed exit error). Surface
+		// the captured stderr so the user sees the real, often self-serviceable
+		// cause (e.g. "Error: --brave-api-key is required") instead of a bare
+		// "transport closed" that the diagnostics layer marks UNKNOWN. Gated to
+		// stdio: initialize() is shared by HTTP/SSE transports, which have no
+		// local subprocess and must keep their generic diagnostics. (MCP-1093 /
+		// #599; stdio gate per Codex review on PR #606)
+		if shouldEnrichStdioPrematureExit(c.transportType, err) {
 			return enrichTransportClosedError(c.formatRecentStderr(), err)
 		}
 
@@ -110,6 +111,15 @@ func (c *Client) initialize(ctx context.Context) error {
 // path mcp-go has not reaped the process (no Wait), so ProcessState is unset and
 // any exit code would be unreliable; the captured stderr is the actionable
 // signal. Surfacing the exit code is a separate follow-up.
+// shouldEnrichStdioPrematureExit reports whether an initialize() failure should
+// be enriched as a stdio subprocess premature exit. The enrichment is stdio-
+// specific (it describes a local "server process" and its stderr); HTTP/SSE
+// transports share initialize() but have no subprocess, so a closed-transport
+// error there must keep its generic diagnostics. (Codex review on PR #606)
+func shouldEnrichStdioPrematureExit(transportType string, err error) bool {
+	return transportType == transportStdio && isTransportClosedErr(err)
+}
+
 func enrichTransportClosedError(stderrBlock string, cause error) error {
 	if stderrBlock != "" {
 		return fmt.Errorf("server process exited before completing the MCP initialize handshake; recent stderr:\n%s: %w", stderrBlock, cause)
