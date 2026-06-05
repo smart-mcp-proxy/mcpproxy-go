@@ -50,7 +50,7 @@
         <div class="text-sm space-y-1 mt-1">
           <div v-for="server in serversNeedingAttention.slice(0, 3)" :key="server.name" class="flex items-center gap-2">
             <span :class="server.health?.level === 'unhealthy' ? 'text-error' : 'text-warning'">●</span>
-            <router-link :to="`/servers/${server.name}`" class="font-medium link link-hover">{{ server.name }}</router-link>
+            <router-link :to="serverDetailPath(server.name)" class="font-medium link link-hover">{{ server.name }}</router-link>
             <span class="opacity-70">{{ server.health?.summary }}</span>
             <button
               v-if="server.health?.action === 'login'"
@@ -82,7 +82,7 @@
             </router-link>
             <router-link
               v-if="server.health?.action === 'configure'"
-              :to="`/servers/${server.name}?tab=config`"
+              :to="serverDetailPath(server.name, 'config')"
               class="btn btn-xs btn-primary"
             >
               Configure
@@ -111,7 +111,7 @@
         <div class="text-sm space-y-1 mt-1">
           <div v-for="entry in serversWithPendingTools.slice(0, 5)" :key="entry.serverName" class="flex items-center gap-2">
             <span class="text-warning">&#9679;</span>
-            <router-link :to="`/servers/${entry.serverName}`" class="font-medium link link-hover">{{ entry.serverName }}</router-link>
+            <router-link :to="serverDetailPath(entry.serverName)" class="font-medium link link-hover">{{ entry.serverName }}</router-link>
             <span class="opacity-70">{{ entry.count }} tool{{ entry.count !== 1 ? 's' : '' }} pending</span>
           </div>
           <div v-if="serversWithPendingTools.length > 5" class="text-xs opacity-60">
@@ -421,6 +421,7 @@
 </template>
 
 <script setup lang="ts">
+import { serverDetailPath } from '@/utils/serverRoute'
 import { computed, ref, watch, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'

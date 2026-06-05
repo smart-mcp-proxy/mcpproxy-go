@@ -364,7 +364,7 @@
                 <td>
                   <router-link
                     v-if="activity.server_name"
-                    :to="`/servers/${activity.server_name}`"
+                    :to="serverDetailPath(activity.server_name)"
                     class="link link-hover font-medium"
                     @click.stop
                   >
@@ -526,7 +526,7 @@
               </div>
               <div v-if="selectedActivity.server_name" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Server:</span>
-                <router-link :to="`/servers/${selectedActivity.server_name}`" class="link link-primary text-sm">
+                <router-link :to="serverDetailPath(selectedActivity.server_name)" class="link link-primary text-sm">
                   {{ selectedActivity.server_name }}
                 </router-link>
               </div>
@@ -688,6 +688,7 @@
 </template>
 
 <script setup lang="ts">
+import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'

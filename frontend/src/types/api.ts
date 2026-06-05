@@ -142,6 +142,11 @@ export interface ServerIsolationDefaults {
 
 export interface Server {
   name: string
+  // Human-friendly display label from the source registry (MCP-1112). When
+  // present it is preferred over `name` for display; `name` stays the stable
+  // identifier used for routing and API calls (it may be a reverse-DNS id such
+  // as "io.github.owner/repo").
+  title?: string
   url?: string
   command?: string
   args?: string[]
