@@ -109,7 +109,9 @@ export function validateField(field: SettingField, value: unknown): string | nul
   }
   if (field.control === 'duration') {
     const s = String(value ?? '').trim()
-    if (s === '') return 'Enter a duration, e.g. 2m'
+    // An optional duration left blank means "inherit the default" (tri-state
+    // nil) and is valid; only a required duration must be non-empty.
+    if (s === '') return field.optional ? null : 'Enter a duration, e.g. 2m'
     if (!DURATION_RE.test(s)) return 'Use a duration like 2m, 90s, or 1h30m'
   }
   if (field.valueKind && (field.control === 'text' || field.control === 'secret')) {

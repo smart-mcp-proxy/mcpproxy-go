@@ -26,6 +26,10 @@ struct ConfigField: Identifiable {
     var docs: String? = nil         // doc path on docs.mcpproxy.app
     var valueKind: ConfigValueKind? = nil
     var optional: Bool = false
+    // Greyed hint shown when the field is empty. For optional duration fields
+    // this is the real default (e.g. "30s"), so a blank field reads as
+    // "inherit the default" rather than a generic example.
+    var placeholder: String? = nil
     // Danger confirm: present a confirm dialog before saving. For toggles,
     // only when the new value == dangerConfirmValue (nil = always confirm).
     var dangerMessage: String? = nil
@@ -158,7 +162,8 @@ enum SettingsCatalog {
             key: "call_tool_timeout",
             label: "Tool call timeout",
             help: "How long to wait for a single tool call before giving up. e.g. 2m, 90s, 30s.",
-            control: .duration
+            control: .duration,
+            placeholder: "2m"
         ),
         ConfigField(
             key: "logging.level",
@@ -262,8 +267,8 @@ enum SettingsCatalog {
             title: "Tool discovery & health checks",
             help: "How often mcpproxy probes upstream servers for liveness and re-discovers their tools. Lower these to reduce background traffic to chatty servers.",
             fields: [
-                ConfigField(key: "health_check_interval", label: "Health-check interval", help: "How often to send a lightweight liveness ping to each connected server. \"0s\" disables the periodic probe (a dead server is then detected lazily on the next tool call). Range: 5s\u{2013}1h. Default 30s. Does not apply to Docker-isolated servers \u{2014} their liveness is monitored at the container level.", control: .duration, optional: true),
-                ConfigField(key: "tool_discovery_interval", label: "Tool-discovery interval", help: "How often to re-list every server\u{2019}s tools to rebuild the search index. \"0s\" disables the periodic sweep \u{2014} tool changes are then picked up only at connect time and via tools/list_changed push notifications. Range: 30s\u{2013}24h. Default 5m.", control: .duration, optional: true),
+                ConfigField(key: "health_check_interval", label: "Health-check interval", help: "How often to send a lightweight liveness ping to each connected server. \"0s\" disables the periodic probe (a dead server is then detected lazily on the next tool call). Range: 5s\u{2013}1h. Default 30s. Does not apply to Docker-isolated servers \u{2014} their liveness is monitored at the container level.", control: .duration, optional: true, placeholder: "30s"),
+                ConfigField(key: "tool_discovery_interval", label: "Tool-discovery interval", help: "How often to re-list every server\u{2019}s tools to rebuild the search index. \"0s\" disables the periodic sweep \u{2014} tool changes are then picked up only at connect time and via tools/list_changed push notifications. Range: 30s\u{2013}24h. Default 5m.", control: .duration, optional: true, placeholder: "5m"),
             ]
         ),
         ConfigSection(
@@ -335,6 +340,17 @@ func configSet(_ obj: inout [String: Any], _ path: String, _ value: Any?) {
         dict[key] = child
     }
     assign(&obj, keys[...])
+}
+
+/// Maps a text-field string for an *optional* scalar field (e.g. a tri-state
+/// duration) to its stored value: a blank string means "unset" — returned as
+/// nil so `configSet` writes NSNull → the PATCH body carries a literal JSON
+/// `null`, which resets the field to its built-in default. Any other string is
+/// stored verbatim. This keeps a blank optional field from being sent as ""
+/// (which the backend can't parse as a duration) and from reading as dirty
+/// against an absent key.
+func optionalScalarStored(_ s: String) -> Any? {
+    s.trimmingCharacters(in: .whitespaces).isEmpty ? nil : s
 }
 
 /// Assembles a nested object containing ONLY the given dot-path keys, read from
@@ -432,7 +448,10 @@ func validateConfigField(_ field: ConfigField, _ value: Any?) -> String? {
 
     if field.control == .duration {
         let s = stringValue(value)
-        if s.isEmpty { return "Enter a duration, e.g. 2m" }
+        // An optional duration left blank means "inherit the default"
+        // (tri-state nil): valid, and saved as JSON null. Only a required
+        // duration must be non-empty.
+        if s.isEmpty { return field.optional ? nil : "Enter a duration, e.g. 2m" }
         if !matches(durationRegex, s) { return "Use a duration like 2m, 90s, or 1h30m" }
         return nil
     }
