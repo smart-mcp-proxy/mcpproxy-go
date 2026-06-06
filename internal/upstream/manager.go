@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -84,14 +85,26 @@ func getDockerRetryInterval(attempt int) time.Duration {
 
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
-	clients         map[string]*managed.Client
-	mu              sync.RWMutex
-	logger          *zap.Logger
-	logConfig       *config.LogConfig
-	globalConfig    *config.Config
+	clients   map[string]*managed.Client
+	mu        sync.RWMutex
+	logger    *zap.Logger
+	logConfig *config.LogConfig
+	// globalConfig holds the proxy-wide config as an atomic pointer so a config
+	// hot-reload (SetGlobalConfig) can swap it lock-free while the construction
+	// paths and the Docker-recovery goroutine read it concurrently (spec 074:
+	// the new global health/discovery intervals must reach running clients).
+	globalConfig    atomic.Pointer[config.Config]
 	storage         *storage.BoltDB
 	notificationMgr *NotificationManager
 	secretResolver  *secret.Resolver
+
+	// lastSweptAt tracks, per server name, the last time the periodic
+	// tool-discovery sweep listed that server's tools. Used to honor per-server
+	// tool_discovery_interval overrides (spec 074 US3/SC-006/FR-005): the
+	// periodic sweep only re-lists a server once its own resolved interval has
+	// elapsed. Guarded by sweepMu.
+	sweepMu     sync.Mutex
+	lastSweptAt map[string]time.Time
 
 	// tokenReconnect keeps last reconnect trigger time per server when detecting
 	// newly available OAuth tokens without explicit DB events (e.g., when CLI
@@ -159,15 +172,16 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 	manager := &Manager{
 		clients:         make(map[string]*managed.Client),
 		logger:          logger,
-		globalConfig:    globalConfig,
 		storage:         boltStorage,
 		notificationMgr: NewNotificationManager(),
 		secretResolver:  secretResolver,
 		tokenReconnect:  make(map[string]time.Time),
+		lastSweptAt:     make(map[string]time.Time),
 		shutdownCtx:     shutdownCtx,
 		shutdownCancel:  shutdownCancel,
 		storageMgr:      storageMgr,
 	}
+	manager.globalConfig.Store(globalConfig)
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
 	tokenManager := oauth.GetTokenStoreManager()
@@ -202,22 +216,26 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 // It respects docker_recovery.enabled=false and only enables monitoring when Docker
 // isolation is turned on or any server is explicitly using Docker commands.
 func (m *Manager) shouldEnableDockerRecovery() bool {
-	if m == nil || m.globalConfig == nil {
+	if m == nil {
+		return false
+	}
+	gc := m.globalConfig.Load()
+	if gc == nil {
 		return false
 	}
 
 	// Allow explicit opt-out via docker_recovery.enabled=false (defaults to enabled)
-	if m.globalConfig.DockerRecovery != nil && !m.globalConfig.DockerRecovery.IsEnabled() {
+	if gc.DockerRecovery != nil && !gc.DockerRecovery.IsEnabled() {
 		return false
 	}
 
 	// Global Docker isolation enabled
-	if m.globalConfig.DockerIsolation != nil && m.globalConfig.DockerIsolation.Enabled {
+	if gc.DockerIsolation != nil && gc.DockerIsolation.Enabled {
 		return true
 	}
 
 	// Detect servers that explicitly use Docker (e.g., docker run/exec commands)
-	for _, srv := range m.globalConfig.Servers {
+	for _, srv := range gc.Servers {
 		if srv == nil {
 			continue
 		}
@@ -249,6 +267,30 @@ func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.logConfig = logConfig
+}
+
+// SetGlobalConfig swaps the proxy-wide config the manager uses for newly created
+// clients and Docker-recovery decisions, and propagates it to every existing
+// managed client so their background health-check loops re-resolve the new
+// global interval on the next cycle (spec 074, FR-012/SC-002). Called from the
+// runtime on a config hot-reload (ApplyConfig). The atomic swap is lock-free;
+// the client fan-out snapshots under mu.RLock to avoid holding the lock while
+// touching each client.
+func (m *Manager) SetGlobalConfig(globalConfig *config.Config) {
+	m.globalConfig.Store(globalConfig)
+
+	m.mu.RLock()
+	clients := make([]*managed.Client, 0, len(m.clients))
+	for _, client := range m.clients {
+		if client != nil {
+			clients = append(clients, client)
+		}
+	}
+	m.mu.RUnlock()
+
+	for _, client := range clients {
+		client.SetGlobalConfig(globalConfig)
+	}
 }
 
 // AddNotificationHandler adds a notification handler to receive state change notifications
@@ -311,7 +353,7 @@ func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) 
 	}
 
 	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig, m.storage, m.secretResolver)
+	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
 	if err != nil {
 		m.mu.Unlock()
 		// Disconnect old client if we failed to create new one
@@ -805,15 +847,132 @@ func (m *Manager) GetAllServerNames() []string {
 	return names
 }
 
+// minEnabledInterval returns the smallest strictly-positive duration in vals and
+// whether any positive value existed. Used to pick the periodic tool-discovery
+// sweep tick from the global + per-server resolved intervals (spec 074): the
+// loop must tick at the fastest enabled cadence so a server with a short
+// override is re-listed on time; anyEnabled=false means every cadence is
+// disabled and the loop should idle.
+func minEnabledInterval(vals ...time.Duration) (tick time.Duration, anyEnabled bool) {
+	for _, d := range vals {
+		if d <= 0 {
+			continue
+		}
+		if !anyEnabled || d < tick {
+			tick = d
+			anyEnabled = true
+		}
+	}
+	return tick, anyEnabled
+}
+
+// ResolveToolDiscoverySweepTick computes how long the periodic indexing loop
+// should wait between sweeps: the smallest positive resolved tool-discovery
+// interval across the global default and every managed server. Per-server
+// configs are read through each client's thread-safe GetConfig() snapshot —
+// deliberately NOT by iterating globalCfg.Servers, which would race in-place
+// mutation of the shared (copy-on-write) config snapshot from the background
+// loop (the original cause of the MCP-1189 -race failure). anyEnabled is false
+// when every resolved interval is disabled (<=0), in which case the loop idles.
+func (m *Manager) ResolveToolDiscoverySweepTick(globalCfg *config.Config) (time.Duration, bool) {
+	if globalCfg == nil {
+		globalCfg = &config.Config{}
+	}
+	// Global default (server == nil) governs servers without an override.
+	vals := []time.Duration{globalCfg.ResolveToolDiscoveryInterval(nil)}
+
+	if m != nil {
+		m.mu.RLock()
+		for _, client := range m.clients {
+			if client == nil {
+				continue
+			}
+			// GetConfig() is a lock-free atomic read; safe to call under m.mu.RLock.
+			if sc := client.GetConfig(); sc != nil {
+				vals = append(vals, globalCfg.ResolveToolDiscoveryInterval(sc))
+			}
+		}
+		m.mu.RUnlock()
+	}
+
+	return minEnabledInterval(vals...)
+}
+
+// shouldSweepServer decides whether the periodic spec-074 tool-discovery sweep
+// should re-list a given server this cycle. A resolved interval <= 0 means the
+// per-server (or global) override disabled the periodic sweep for that server,
+// so it is skipped (connect-time + reactive list_changed discovery still keep it
+// fresh). Otherwise the server is swept only once its own interval has elapsed
+// since it was last listed; a server never listed before (no lastSwept) is due.
+// This is what makes a per-server tool_discovery_interval override actually take
+// effect at runtime (US3/SC-006/FR-005).
+func shouldSweepServer(interval time.Duration, lastSwept time.Time, hasSwept bool, now time.Time) bool {
+	if interval <= 0 {
+		return false
+	}
+	if !hasSwept {
+		return true
+	}
+	return now.Sub(lastSwept) >= interval
+}
+
+// markSwept records that the periodic sweep just listed serverName's tools, so
+// the per-server cadence gate (shouldSweepServer) can wait the server's own
+// interval before listing it again.
+func (m *Manager) markSwept(serverName string, now time.Time) {
+	m.sweepMu.Lock()
+	defer m.sweepMu.Unlock()
+	if m.lastSweptAt == nil {
+		m.lastSweptAt = make(map[string]time.Time)
+	}
+	m.lastSweptAt[serverName] = now
+}
+
+// lastSweptFor returns the last periodic-sweep time for serverName.
+func (m *Manager) lastSweptFor(serverName string) (time.Time, bool) {
+	m.sweepMu.Lock()
+	defer m.sweepMu.Unlock()
+	last, ok := m.lastSweptAt[serverName]
+	return last, ok
+}
+
+// pruneSweptState drops last-swept entries for servers no longer present so the
+// map can't grow unbounded as servers are added/removed (mirrors the lastGoodTools
+// pruning in the runtime indexing path).
+func (m *Manager) pruneSweptState(known map[string]struct{}) {
+	m.sweepMu.Lock()
+	defer m.sweepMu.Unlock()
+	for name := range m.lastSweptAt {
+		if _, ok := known[name]; !ok {
+			delete(m.lastSweptAt, name)
+		}
+	}
+}
+
 // DiscoverTools discovers all tools from all connected upstream servers.
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
+	return m.discoverTools(ctx, false)
+}
+
+// DiscoverToolsDue is the periodic-sweep variant of DiscoverTools: it lists only
+// servers whose per-server tool_discovery_interval has elapsed and skips those
+// whose resolved interval disables the sweep (<=0). The background indexing loop
+// uses this so a per-server override changes how often that server is re-listed;
+// event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
+// full sweep (spec 074, US3/SC-006/FR-005).
+func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
+	return m.discoverTools(ctx, true)
+}
+
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
 		enabled     bool
 		quarantined bool
+		cfg         *config.ServerConfig
 		client      *managed.Client
 	}
 
@@ -823,11 +982,12 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 		name := ""
 		quarantined := false
 		enabled := false
+		var cfg *config.ServerConfig
 		// Read config through the thread-safe GetConfig() accessor — the reconcile
 		// add path (AddServerConfig) calls SetConfig (an atomic swap) off m.mu, so
 		// a direct config-field read would race with it (MCP-770).
 		if client != nil {
-			if cfg := client.GetConfig(); cfg != nil {
+			if cfg = client.GetConfig(); cfg != nil {
 				name = cfg.Name
 				quarantined = cfg.Quarantined
 				enabled = cfg.Enabled
@@ -838,18 +998,31 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 			name:        name,
 			enabled:     enabled,
 			quarantined: quarantined,
+			cfg:         cfg,
 			client:      client,
 		})
 	}
 	m.mu.RUnlock()
 
+	// Resolve per-server discovery cadence against the current global config.
+	gc := m.globalConfig.Load()
+	if gc == nil {
+		gc = &config.Config{}
+	}
+	now := time.Now()
+
 	var allTools []*config.ToolMetadata
 	connectedCount := 0
+	skippedNotDue := 0
+	known := make(map[string]struct{}, len(snapshots))
 
 	for _, snapshot := range snapshots {
 		client := snapshot.client
 		if client == nil {
 			continue
+		}
+		if snapshot.name != "" {
+			known[snapshot.name] = struct{}{}
 		}
 
 		if !snapshot.enabled {
@@ -871,6 +1044,22 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 				zap.String("state", client.GetState().String()))
 			continue
 		}
+
+		// Honor per-server tool_discovery_interval on the periodic sweep: skip
+		// servers that are disabled (<=0) or not yet due for a re-list.
+		if dueOnly {
+			interval := gc.ResolveToolDiscoveryInterval(snapshot.cfg)
+			last, hasSwept := m.lastSweptFor(snapshot.name)
+			if !shouldSweepServer(interval, last, hasSwept, now) {
+				m.logger.Debug("Skipping client not due for periodic tool sweep",
+					zap.String("id", snapshot.id),
+					zap.String("server", snapshot.name),
+					zap.Duration("interval", interval))
+				skippedNotDue++
+				continue
+			}
+		}
+
 		connectedCount++
 
 		tools, err := client.ListTools(ctx)
@@ -882,14 +1071,23 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 			continue
 		}
 
+		// Record the sweep only after a successful list so a transient failure
+		// retries on the next cycle rather than waiting a full interval.
+		m.markSwept(snapshot.name, now)
+
 		if tools != nil {
 			allTools = append(allTools, tools...)
 		}
 	}
 
+	// Keep the per-server sweep-time map bounded as servers come and go.
+	m.pruneSweptState(known)
+
 	m.logger.Info("Discovered tools from upstream servers",
 		zap.Int("total_tools", len(allTools)),
-		zap.Int("connected_servers", connectedCount))
+		zap.Int("connected_servers", connectedCount),
+		zap.Bool("due_only", dueOnly),
+		zap.Int("skipped_not_due", skippedNotDue))
 
 	return allTools, nil
 }
@@ -1856,7 +2054,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -1879,7 +2077,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 			noAuthTransport := transport.DetermineTransportType(&cpy)
 			if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
-				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 				if err2 == nil {
 					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 					_ = testClient.Connect(tctx)
@@ -1936,7 +2134,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -2020,7 +2218,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 	}
 
 	// Create a transient core client that uses the daemon's storage
-	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -2038,7 +2236,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		noAuthTransport := transport.DetermineTransportType(&cpy)
 		if noAuthTransport == "http" || noAuthTransport == "streamable-http" || noAuthTransport == "sse" {
 			m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
-			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig, m.storage, false, m.secretResolver)
+			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 			if err2 == nil {
 				tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 				_ = testClient.Connect(tctx)

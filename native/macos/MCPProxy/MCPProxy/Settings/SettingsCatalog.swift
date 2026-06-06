@@ -258,6 +258,15 @@ enum SettingsCatalog {
             ]
         ),
         ConfigSection(
+            id: "discovery",
+            title: "Tool discovery & health checks",
+            help: "How often mcpproxy probes upstream servers for liveness and re-discovers their tools. Lower these to reduce background traffic to chatty servers.",
+            fields: [
+                ConfigField(key: "health_check_interval", label: "Health-check interval", help: "How often to send a lightweight liveness ping to each connected server. \"0s\" disables the periodic probe (a dead server is then detected lazily on the next tool call). Range: 5s\u{2013}1h. Default 30s. Does not apply to Docker-isolated servers \u{2014} their liveness is monitored at the container level.", control: .duration, optional: true),
+                ConfigField(key: "tool_discovery_interval", label: "Tool-discovery interval", help: "How often to re-list every server\u{2019}s tools to rebuild the search index. \"0s\" disables the periodic sweep \u{2014} tool changes are then picked up only at connect time and via tools/list_changed push notifications. Range: 30s\u{2013}24h. Default 5m.", control: .duration, optional: true),
+            ]
+        ),
+        ConfigSection(
             id: "logging",
             title: "Logging",
             fields: [

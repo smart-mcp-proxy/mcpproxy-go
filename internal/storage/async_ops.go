@@ -192,6 +192,8 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 
 		SourceRegistryID:         serverConfig.SourceRegistryID,
 		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,
+		HealthCheckInterval:      serverConfig.HealthCheckInterval,
+		ToolDiscoveryInterval:    serverConfig.ToolDiscoveryInterval,
 	}
 	return am.db.SaveUpstream(record)
 }

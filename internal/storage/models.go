@@ -106,6 +106,11 @@ type UpstreamRecord struct {
 	// survive a restart.
 	SourceRegistryID         string `json:"source_registry_id,omitempty"`
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty"`
+	// Spec 074: per-server discovery/health-check interval overrides, persisted
+	// so REST-API/UI-set overrides survive a restart. *Duration tri-state:
+	// nil = inherit, pointer-to-0s = disabled, positive = interval.
+	HealthCheckInterval   *config.Duration `json:"health_check_interval,omitempty"`
+	ToolDiscoveryInterval *config.Duration `json:"tool_discovery_interval,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

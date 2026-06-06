@@ -66,6 +66,15 @@ components:
           $ref: '#/components/schemas/secureenv.EnvConfig'
         features:
           $ref: '#/components/schemas/config.FeatureFlags'
+        health_check_interval:
+          description: |-
+            Discovery & health-check cadence (spec 074, #608). Both are *Duration
+            tri-state pointers: nil = inherit the built-in default; a pointer to 0s =
+            the loop is disabled; a positive value = that interval. Defaults live only
+            in the resolvers (ResolveHealthCheckInterval / ResolveToolDiscoveryInterval)
+            so an unset key behaves exactly as before this feature (SC-005). Validated
+            in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
+          type: string
         intent_declaration:
           $ref: '#/components/schemas/config.IntentDeclarationConfig'
         listen:
@@ -158,6 +167,8 @@ components:
           $ref: '#/components/schemas/config.TLSConfig'
         tokenizer:
           $ref: '#/components/schemas/config.TokenizerConfig'
+        tool_discovery_interval:
+          type: string
         tool_response_limit:
           type: integer
         tool_response_session_risk_warning:
@@ -606,6 +617,16 @@ components:
             type: string
           description: For HTTP servers
           type: object
+        health_check_interval:
+          description: |-
+            Per-server discovery & health-check overrides (spec 074). Same *Duration
+            tri-state as the global keys: nil = inherit the global value (or default),
+            pointer to 0s = disabled for this server, positive = that interval.
+            HealthCheckInterval is fully wired into the per-server health loop;
+            ToolDiscoveryInterval is accepted/validated and round-trips for
+            forward-compat, but the periodic index sweep is governed by the global
+            cadence in this iteration (see spec 074 plan §C).
+          type: string
         isolation:
           $ref: '#/components/schemas/config.IsolationConfig'
         launcher_wait_timeout:
@@ -648,6 +669,8 @@ components:
             time (RegistryProvenanceOfficial / RegistryProvenanceCustom). It is purely
             informational (MCP-1072) — surfaced so a reviewer can see a server's origin
             — and no longer gates quarantine or skip_quarantine.
+          type: string
+        tool_discovery_interval:
           type: string
         updated:
           type: string

@@ -221,6 +221,26 @@ func (r *Runtime) connectAllWithRetry(ctx context.Context) {
 	}
 }
 
+// toolDiscoveryDisabledRecheckInterval is how long the indexing loop sleeps
+// between re-checks when the periodic sweep is disabled (resolved interval
+// <= 0). It is NOT a sweep — connect-time discovery and reactive
+// notifications/tools/list_changed still keep the index fresh; this only lets a
+// later config hot-reload re-enable the sweep without a restart (spec 074).
+const toolDiscoveryDisabledRecheckInterval = 5 * time.Minute
+
+// planToolDiscoveryCycle decides one iteration of the indexing loop: whether to
+// run a periodic sweep and how long to wait first. When at least one server (or
+// the global default) has a positive resolved interval the loop ticks at the
+// smallest such cadence (tick) and sweeps; when every interval is disabled
+// (anyEnabled=false) the loop waits the re-check window without sweeping so a
+// later hot-reload can re-enable it.
+func planToolDiscoveryCycle(tick time.Duration, anyEnabled bool, disabledRecheck time.Duration) (sweep bool, wait time.Duration) {
+	if !anyEnabled || tick <= 0 {
+		return false, disabledRecheck
+	}
+	return true, tick
+}
+
 func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 	r.cleanupOrphanedIndexEntries()
 
@@ -232,14 +252,25 @@ func (r *Runtime) backgroundToolIndexing(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
+	// Re-resolve the tool-discovery cadence every cycle so a config hot-reload
+	// changes the sweep interval (or disables it) without a restart (spec 074,
+	// FR-012). The loop ticks at the smallest per-server cadence and the sweep
+	// itself (DiscoverToolsDue) only re-lists servers whose own interval has
+	// elapsed, so per-server overrides take effect (US3/SC-006/FR-005). The tick
+	// is resolved from the upstream manager's thread-safe per-client config
+	// snapshots — iterating r.Config().Servers here would race in-place config
+	// mutation (the shared snapshot is copy-on-write; see runtime.Config()).
 	for {
+		tick, anyEnabled := r.upstreamManager.ResolveToolDiscoverySweepTick(r.Config())
+		sweep, wait := planToolDiscoveryCycle(tick, anyEnabled, toolDiscoveryDisabledRecheckInterval)
+		timer := time.NewTimer(wait)
 		select {
-		case <-ticker.C:
-			_ = r.DiscoverAndIndexTools(ctx)
+		case <-timer.C:
+			if sweep {
+				_ = r.discoverAndIndexTools(ctx, true)
+			}
 		case <-ctx.Done():
+			timer.Stop()
 			r.logger.Info("Background tool indexing stopped due to context cancellation")
 			return
 		}
@@ -278,15 +309,31 @@ func (r *Runtime) backgroundSessionCleanup(ctx context.Context) {
 	}
 }
 
-// DiscoverAndIndexTools discovers tools from upstream servers and indexes them.
+// DiscoverAndIndexTools discovers tools from ALL connected upstream servers and
+// indexes them. Used by event-driven callers (boot, server reload, manual
+// refresh) that want a full sweep regardless of per-server cadence.
 func (r *Runtime) DiscoverAndIndexTools(ctx context.Context) error {
+	return r.discoverAndIndexTools(ctx, false)
+}
+
+// discoverAndIndexTools discovers tools and updates the index. When dueOnly is
+// true (the periodic spec-074 sweep) only servers whose per-server
+// tool_discovery_interval has elapsed are re-listed; servers omitted from the
+// sweep keep their last-good index snapshot, so the index does not shrink.
+func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error {
 	if r.upstreamManager == nil || r.indexManager == nil {
 		return fmt.Errorf("runtime managers not initialized")
 	}
 
-	r.logger.Info("Discovering and indexing tools...")
+	r.logger.Info("Discovering and indexing tools...", zap.Bool("due_only", dueOnly))
 
-	tools, err := r.upstreamManager.DiscoverTools(ctx)
+	var tools []*config.ToolMetadata
+	var err error
+	if dueOnly {
+		tools, err = r.upstreamManager.DiscoverToolsDue(ctx)
+	} else {
+		tools, err = r.upstreamManager.DiscoverTools(ctx)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}

@@ -107,6 +107,8 @@ func (m *Manager) SaveUpstreamServer(serverConfig *config.ServerConfig) error {
 
 		SourceRegistryID:         serverConfig.SourceRegistryID,
 		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,
+		HealthCheckInterval:      serverConfig.HealthCheckInterval,
+		ToolDiscoveryInterval:    serverConfig.ToolDiscoveryInterval,
 	}
 
 	return m.db.SaveUpstream(record)
@@ -144,6 +146,8 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 
 		SourceRegistryID:         record.SourceRegistryID,
 		SourceRegistryProvenance: record.SourceRegistryProvenance,
+		HealthCheckInterval:      record.HealthCheckInterval,
+		ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
 	}, nil
 }
 
@@ -181,6 +185,8 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 
 			SourceRegistryID:         record.SourceRegistryID,
 			SourceRegistryProvenance: record.SourceRegistryProvenance,
+			HealthCheckInterval:      record.HealthCheckInterval,
+			ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
 		})
 	}
 
