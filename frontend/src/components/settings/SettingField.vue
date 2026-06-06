@@ -130,7 +130,7 @@
           :value="modelValue ?? ''"
           :placeholder="field.placeholder"
           :data-test="`setting-text-${field.key}`"
-          @input="emitVal(($event.target as HTMLInputElement).value)"
+          @input="emitText(($event.target as HTMLInputElement).value)"
         />
         <span v-if="validationError" class="text-error text-xs mt-1" :data-test="`setting-error-${field.key}`">{{ validationError }}</span>
       </div>
@@ -200,6 +200,17 @@ const validationError = computed(() => (props.dirty ? validateField(props.field,
 
 function emitVal(v: any) {
   emit('update:modelValue', v)
+}
+
+// Text/duration input. A blank optional duration is "unset" — emit null
+// (reset to the default) rather than "" which the backend can't parse as a
+// duration. This mirrors the tri-state contract (nil = default).
+function emitText(raw: string) {
+  if (props.field.control === 'duration' && props.field.optional && raw.trim() === '') {
+    emitVal(null)
+    return
+  }
+  emitVal(raw)
 }
 
 function onNumber(raw: string) {
