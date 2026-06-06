@@ -56,7 +56,7 @@ Add the three new contexts (keeps `enforce_admins: false`):
 
 ```bash
 gh api -X PATCH repos/:owner/:repo/branches/main/protection/required_status_checks \
-  -f strict=false \
+  -F strict=false \
   -f 'contexts[]=Lint' \
   -f 'contexts[]=Unit Tests (ubuntu-latest, 1.25)' \
   -f 'contexts[]=Build (ubuntu-latest)' \
