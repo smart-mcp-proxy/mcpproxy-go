@@ -94,3 +94,5 @@ requires QATester to:
 failures (AutoStart UserDefaults first-run, SSE-parser edge cases, a
 JSONEncoder behavior canary) so the gate is green today. Green those and remove
 the `--skip` flags to widen coverage.
+
+<!-- qa-gate required-safe verification: non-native PR check (MCP-1219). -->
