@@ -16,8 +16,17 @@ green.
 | `settings-parity` | `.github/workflows/native-tests.yml` (Linux) | Web (`fields.ts`) ↔ native (`SettingsCatalog.swift`) duration-field drift (placeholder / optional). |
 | `qa-gate` | Paperclip QATester → `scripts/post-qa-gate-status.sh` | Full feature QA. `success` only when QATester PASSes at the PR's **current head SHA**. |
 
-`swift-test` and `settings-parity` are ordinary GitHub Actions jobs — they
-appear automatically once `native-tests.yml` is on `main`.
+`swift-test` and `settings-parity` are ordinary GitHub Actions jobs, but
+`native-tests.yml` is deliberately **required-safe**: the workflow has no
+top-level `paths:` filter, so it runs on *every* PR. A `changes` job
+(`dorny/paths-filter`) detects whether native / settings files were touched,
+and the two real jobs are gated with a job-level `if:`. On a PR that touches
+none of those paths the jobs are **skipped**, and a skipped job reports its
+required context as satisfied (green). This matters because GitHub produces
+**no status at all** for a workflow skipped by a top-level `paths:` filter — a
+required context that never reports stays "Expected — Waiting" and blocks every
+non-native PR forever. See the `REQUIRED-SAFE DESIGN` header in
+`native-tests.yml`.
 
 `qa-gate` is a **commit status** the QATester posts at the end of its run
 (keyed to the head SHA). Because it is SHA-keyed, any new push lands on a SHA
@@ -29,8 +38,11 @@ qa_head_sha") in the merge button itself.
 
 > Order matters: a required check that has **never produced a status** shows as
 > pending on every open PR and blocks normal merges immediately. Land
-> `native-tests.yml` and the scripts on `main` first, confirm the jobs run, then
-> add the contexts to branch protection.
+> `native-tests.yml` and the scripts on `main` first, then **verify on a
+> non-native PR** (e.g. a dependency bump that touches none of the filtered
+> paths) that `swift-test` and `settings-parity` both report green (skipped) and
+> do **not** block it. Only after that confirmation, add the contexts to branch
+> protection.
 
 Current required checks (do not drop them — the API call **replaces** the set):
 
@@ -60,7 +72,8 @@ gh api -X PATCH repos/:owner/:repo/branches/main/protection/required_status_chec
 
 Stage `qa-gate` last — only after the QATester is posting it — so open PRs are
 not blocked on a status that nobody emits yet. Until then, add just `swift-test`
-and `settings-parity` (they are deterministic and self-producing).
+and `settings-parity` — they report on every PR (green/skipped on non-native
+PRs) thanks to the required-safe design above, so they will not strand open PRs.
 
 ## QATester contract
 
