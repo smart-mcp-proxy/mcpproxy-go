@@ -107,6 +107,10 @@ type Config struct {
 	EnableTray  bool            `json:"enable_tray,omitempty" mapstructure:"tray"`
 	DebugSearch bool            `json:"debug_search" mapstructure:"debug-search"`
 	Servers     []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
+	// Profiles are optional named, server-scoped views exposed at /mcp/p/<name>
+	// (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
+	// without this key serialize byte-identically (SC-004).
+	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
 	TopK               int      `json:"top_k,omitempty" mapstructure:"top-k"`
 	ToolsLimit         int      `json:"tools_limit" mapstructure:"tools-limit"`
@@ -139,6 +143,10 @@ type Config struct {
 
 	// Internal field to track if API key was explicitly set in config
 	apiKeyExplicitlySet bool `json:"-"`
+
+	// profileWarnings holds non-fatal Spec 057 profile diagnostics (unknown /
+	// empty servers) captured during Validate(), for the boot path to log.
+	profileWarnings []string `json:"-"`
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
@@ -1552,6 +1560,15 @@ func (c *Config) Validate() error {
 		// Return first error for backward compatibility
 		return fmt.Errorf("%s", errors[0].Error())
 	}
+
+	// Validate profiles (Spec 057): fatal rules (invalid/reserved/duplicate slug)
+	// fail the load; soft rules (unknown/empty servers) are stashed as warnings
+	// for the boot path to log via its logger (see ProfileWarnings).
+	profileWarnings, profileErr := ValidateProfiles(c)
+	if profileErr != nil {
+		return profileErr
+	}
+	c.profileWarnings = profileWarnings
 
 	// Handle API key generation if not configured
 	// Empty string means authentication disabled, nil means auto-generate
