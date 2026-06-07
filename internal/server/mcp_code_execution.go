@@ -195,6 +195,11 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 	// The jsruntime treats an empty AllowedServers as "allow all"; at a profile URL
 	// we must restrict to profile servers regardless of what the caller supplied.
 	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil {
+		// A profile is active: enforce its effective server set even when empty.
+		// A deny-all profile (servers: []) or a non-overlapping token∩profile
+		// yields an EMPTY allow-list, which the jsruntime would otherwise treat
+		// as "allow all" — leaking every server. RestrictToAllowed closes that.
+		options.RestrictToAllowed = true
 		// Build the effective allowed-servers list: profile servers only.
 		// If the caller also supplied allowed_servers, intersect the two sets.
 		profileServers := profileScope.AllowedServerNames()

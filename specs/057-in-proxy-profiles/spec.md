@@ -68,7 +68,7 @@ An operator wants finer-than-server granularity inside a profile. They already h
 - **Profile referencing a quarantined server**: the server is excluded from the profile's effective set while it is quarantined, mirroring how agent tokens treat quarantined servers. Once unquarantined, it appears in the profile without re-reading the file.
 - **Profile referencing a disabled server**: the server is excluded from the profile's effective set while disabled. This matches `/mcp` behaviour today and means a profile cannot "force-enable" a disabled server.
 - **Empty `servers` list on a profile**: legal config (the URL exists but exposes zero tools) and useful as a "deny everything" placeholder, but emits a warning so the operator notices.
-- **Config hot-reload changes a profile mid-connection**: existing client sessions keep their resolved profile snapshot until they reconnect (no live mutation of an in-flight session's allowed-server list), consistent with how the project already handles config hot-reload for active connections. New connections pick up the new profile.
+- **Config hot-reload changes a profile mid-connection**: the profile scope is resolved **per request** against the current config snapshot, so a hot-reload takes effect immediately on the next request — including in-flight client sessions. A `ProfileScope` is immutable for the lifetime of a single request, but the next request on the same session re-resolves against the latest config. This is the safer choice: a profile narrowed or revoked by the operator stops applying without waiting for a reconnect. (Decision: PR #622 review round 1 — Codex flagged the original "snapshot-until-reconnect" wording as not matching the implementation; per-request re-resolution was kept and the spec amended to match.)
 - **Tool indexing**: BM25 search index is **not** partitioned per profile in the MVP. Filtering happens at `retrieve_tools` and `call_tool_*` time by intersecting the active profile's server set with the result. With server cardinality typically ≤ a few dozen, this filter is cheap and avoids an index-shape change.
 
 ## Requirements *(mandatory)*
@@ -144,7 +144,7 @@ Top-level `profiles` array in the config file, hot-reloaded alongside `mcpServer
 Profiles []ProfileConfig `json:"profiles,omitempty"`
 ```
 
-When the field is absent, byte-identical round-trip is preserved (SC-004 for free). Hot-reload updates the in-memory profile map atomically; existing connections keep their resolved snapshot until reconnect (consistent with how the project handles config hot-reload for active connections today).
+When the field is absent, byte-identical round-trip is preserved (SC-004 for free). Hot-reload updates the in-memory config snapshot atomically; the profile middleware re-resolves the scope **per request** against that snapshot, so a hot-reloaded profile applies immediately on the next request (including in-flight sessions). Each request's `ProfileScope` is still immutable for that request's lifetime.
 
 #### Files touched (scope guard)
 
@@ -273,7 +273,7 @@ There is no migration. The `profiles` field is optional and additive.
 
 - A config without `profiles`: loaded identically to today. `/mcp`, `/mcp/code`, `/mcp/call` behave identically. `/mcp/p/<anything>` returns 404 with "no profiles configured".
 - A config with `profiles`: `/mcp`, `/mcp/code`, `/mcp/call` behave identically (still full union). `/mcp/p/<slug>` is added.
-- Removing a profile from the config while a client is connected to its URL: the client's in-flight session is allowed to drain (no abrupt disconnect); reconnect attempts return 404 listing the now-current profile names.
+- Removing a profile from the config while a client is connected to its URL: because the scope is resolved per request, the next request on that session re-resolves against the new config and returns 404 listing the now-current profile names (the connection is not abruptly torn down at the transport level, but subsequent profile requests no longer resolve).
 
 ## Testing Strategy
 

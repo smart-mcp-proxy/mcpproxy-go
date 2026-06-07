@@ -565,6 +565,87 @@ func TestHandleToolCallCompleted_NoUserIdentity(t *testing.T) {
 	assert.Empty(t, record.UserEmail, "UserEmail should be empty when no _auth_user_email is present")
 }
 
+// TestHandleToolCallCompleted_ProfileMetadata verifies Spec 057 FR-011: the
+// profile slug from a /mcp/p/<slug> tool call lands at the TOP-LEVEL
+// metadata["profile"], NOT smuggled under metadata.intent.profile. Covers both
+// success and error paths (Codex PR #622 finding #2).
+func TestHandleToolCallCompleted_ProfileMetadata(t *testing.T) {
+	for _, status := range []string{"success", "error"} {
+		t.Run(status, func(t *testing.T) {
+			store, cleanup := setupTestStorage(t)
+			defer cleanup()
+
+			svc := NewActivityService(store, zap.NewNop())
+
+			evt := Event{
+				Type:      EventTypeActivityToolCallCompleted,
+				Timestamp: time.Now().UTC(),
+				Payload: map[string]any{
+					"server_name":  "research-srv",
+					"tool_name":    "search_papers",
+					"status":       status,
+					"duration_ms":  int64(10),
+					"tool_variant": "read",
+					"profile":      "research",
+					// An intent map is also present; profile must NOT live inside it.
+					"intent": map[string]interface{}{
+						"operation_type": "read",
+					},
+				},
+			}
+
+			svc.handleEvent(evt)
+
+			records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+
+			md := records[0].Metadata
+			require.NotNil(t, md)
+			assert.Equal(t, "research", md["profile"],
+				"FR-011: profile slug must be at top-level metadata[\"profile\"]")
+
+			// Must NOT be nested inside the intent submap.
+			if intent, ok := md["intent"].(map[string]interface{}); ok {
+				_, nested := intent["profile"]
+				assert.False(t, nested, "profile must not be nested under metadata.intent.profile")
+			}
+		})
+	}
+}
+
+// TestHandleToolCallCompleted_NoProfileMetadata verifies that a tool call from
+// /mcp (no profile) omits metadata["profile"] entirely (FR-011 backward compat).
+func TestHandleToolCallCompleted_NoProfileMetadata(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+
+	evt := Event{
+		Type:      EventTypeActivityToolCallCompleted,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name":  "github",
+			"tool_name":    "list_repos",
+			"status":       "success",
+			"duration_ms":  int64(10),
+			"tool_variant": "read",
+		},
+	}
+
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	if md := records[0].Metadata; md != nil {
+		_, ok := md["profile"]
+		assert.False(t, ok, "records from /mcp must omit metadata[\"profile\"]")
+	}
+}
+
 // TestHandleToolCallCompleted_NilArguments verifies no panic when arguments is nil.
 func TestHandleToolCallCompleted_NilArguments(t *testing.T) {
 	store, cleanup := setupTestStorage(t)

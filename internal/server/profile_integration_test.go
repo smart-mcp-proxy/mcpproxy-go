@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // profileTestEnv is a lightweight helper that wraps TestEnvironment and sets up
@@ -464,11 +465,9 @@ func TestProfile_PerServerDisabledToolsRespected(t *testing.T) {
 // T019: Activity metadata — metadata["profile"] set on tool calls from profile URLs
 // ---------------------------------------------------------------------------
 
-// TestProfile_ActivityMetadata verifies that tool-call activity records from profile
-// URLs carry metadata["profile"] = "<slug>".
-// This test is primarily a smoke-test (it confirms the metadata *path* exists);
-// for a thorough assertion the activity log storage would need to be queried,
-// but that adds a large dependency. Instead we verify no panic / error path.
+// TestProfile_ActivityMetadata verifies FR-011: tool-call activity records from a
+// /mcp/p/<slug> URL carry the profile slug at the TOP-LEVEL metadata["profile"]
+// (not nested under metadata.intent). Regression for Codex PR #622 finding #2.
 func TestProfile_ActivityMetadata(t *testing.T) {
 	env := newProfileTestEnv(t)
 	ctx := context.Background()
@@ -484,15 +483,42 @@ func TestProfile_ActivityMetadata(t *testing.T) {
 		"name": "research-srv:search_papers",
 		"args": map[string]interface{}{},
 	}
-	// Just confirm no panic occurs. The actual metadata is emitted via the runtime
-	// activity service; its format is validated in runtime unit tests.
 	result, err := researchClient.CallTool(ctx, req)
 	require.NoError(t, err)
-	// If result is an error it should NOT be a profile error (the tool exists in profile).
+	// research-srv IS in the research profile; must not get a profile rejection.
 	if result.IsError {
 		text := extractText(result)
 		assert.NotContains(t, text, "is not in profile",
 			"research-srv IS in the research profile; must not get a profile error: %s", text)
+	}
+
+	// Activity is persisted asynchronously via the event bus — poll briefly for the
+	// tool_call record and assert metadata["profile"] == "research".
+	var rec *storage.ActivityRecord
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		records, _, listErr := env.proxyServer.runtime.ListActivities(storage.DefaultActivityFilter())
+		require.NoError(t, listErr)
+		for _, r := range records {
+			if r.Type == storage.ActivityTypeToolCall && r.ServerName == "research-srv" && r.ToolName == "search_papers" {
+				rec = r
+				break
+			}
+		}
+		if rec != nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	require.NotNil(t, rec, "expected a tool_call activity record for research-srv:search_papers")
+	require.NotNil(t, rec.Metadata, "activity record must carry metadata")
+	assert.Equal(t, "research", rec.Metadata["profile"],
+		"FR-011: profile slug must be at top-level metadata[\"profile\"]")
+	// Must NOT be smuggled under metadata.intent.profile.
+	if intent, ok := rec.Metadata["intent"].(map[string]interface{}); ok {
+		_, nested := intent["profile"]
+		assert.False(t, nested, "profile must not be nested under metadata.intent.profile")
 	}
 }
 
