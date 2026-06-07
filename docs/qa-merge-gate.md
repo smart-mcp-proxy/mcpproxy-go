@@ -4,9 +4,10 @@ Makes feature verification a **required, mechanical** check before a PR can
 merge to `main` — closing the class of gap that let MCP-1214 ship (a native
 macOS tray bug that Web-UI-only QA never exercised).
 
-The `gh pr merge --admin` escape hatch is intentionally retained
-(`enforce_admins` stays `false`) for genuine emergencies; normal merges must be
-green.
+Normal merges land **without** `gh pr merge --admin` — through GitHub
+auto-merge once every required check is green (see "Merging without --admin"
+below). The `--admin` escape hatch is retained (`enforce_admins` stays `false`)
+for **genuine emergencies only**; routine use is a smell.
 
 ## Required checks
 
@@ -74,6 +75,46 @@ Stage `qa-gate` last — only after the QATester is posting it — so open PRs a
 not blocked on a status that nobody emits yet. Until then, add just `swift-test`
 and `settings-parity` — they report on every PR (green/skipped on non-native
 PRs) thanks to the required-safe design above, so they will not strand open PRs.
+
+## Merging without `--admin` (Model B — MCP-1248)
+
+Goal: land PRs (owner + Paperclip agents) **without** `gh pr merge --admin`,
+while keeping the gate meaningful. The mechanical merge always uses GitHub
+auto-merge — agents **arm** the merge, they never bypass a required check.
+`enforce_admins` stays `false` purely as an emergency hatch.
+
+> Do **not** use `bypass_pull_request_allowances` for agents — that is a renamed
+> `--admin` and breaks the spec-075 head-SHA invariant.
+
+Three load-bearing facts make this work:
+
+- A PR author cannot approve their own PR, and there is no second human. So the
+  one required approval comes from a **bot/App identity** — a bot approval
+  **does** count toward `required_approving_review_count`.
+- `require_last_push_approval=false` and `dismiss_stale_reviews=false` (no
+  CODEOWNERS) → a bot approval survives later pushes; no code-owner friction.
+- `allow_auto_merge=true` is enabled on the repo, so `gh pr merge --auto` works.
+
+The moving parts (all without `--admin`):
+
+| Path | Mechanism | File |
+|---|---|---|
+| Trivial / docs / CI-metadata PRs | Auto-post `qa-gate=success` when the diff touches **no** code-bearing path (`**/*.go`, `go.mod/sum`, `cmd/**`, `internal/**`, `frontend/src/**`, `native/**`); code PRs are left to the real QATester. | `.github/workflows/qa-gate-trivial.yml` |
+| Dependabot patch + minor | `dependabot/fetch-metadata` → `github-actions[bot]` approving review (counts) → `gh pr merge --auto --squash`. Majors still need a human. | `.github/workflows/dependabot-auto-merge.yml` |
+| Code PRs (owner + Paperclip) | After Paperclip verdicts = ACCEPT **and** `qa-gate=success` at head SHA, a bot identity posts a GitHub approving review (reflecting the verdict) and arms auto-merge. Gate 3 stays a human **Approve** button; merge fires only when all 11 checks are green. | `scripts/arm-auto-merge.sh` |
+
+`scripts/arm-auto-merge.sh` re-checks the live PR head against the SHA it was
+blessed at (refuses on drift) and that `qa-gate` is `success` at that SHA before
+approving — so the spec-075 rule is enforced in the merge path, not just the
+status. It needs a **repo-scoped fine-grained PAT or GitHub App token**
+(Contents RW, Pull requests RW, Commit statuses RW) injected as `GH_TOKEN`,
+stored with the agent secrets (`searcher/agents/.env` pattern, gitignored) —
+**not** the owner's `--admin`-capable login.
+
+**Gate-3 doctrine** (supersedes "agents never merge PRs; a human merges"):
+agents may post their review (reflecting the Paperclip verdict) and **arm**
+auto-merge; Gate 3 stays a human Approve button; merge fires only when the full
+gate is green; **agents never bypass required checks**.
 
 ## QATester contract
 

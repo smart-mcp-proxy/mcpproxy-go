@@ -1,0 +1,82 @@
+# qa-gate auto-pass for non-code PRs (MCP-1248, Model B "merge without --admin").
+#
+# `qa-gate` is a required branch-protection check, but it is a free-form commit
+# status that only the Paperclip QATester posts — and QATester only runs for
+# code PRs. So trivial PRs (docs, CI metadata, dependabot config, etc.) never
+# get a `qa-gate` status and stay blocked forever unless someone uses
+# `gh pr merge --admin`. This workflow closes that gap WITHOUT any bypass:
+#
+#   - If a PR touches NO code-bearing path, post `qa-gate=success` for the PR's
+#     CURRENT head SHA (using the built-in GITHUB_TOKEN, `statuses: write`).
+#   - If a PR touches ANY code-bearing path, do nothing — `qa-gate` stays
+#     pending for the real QATester. This preserves the spec-075 invariant
+#     (a real PASS is valid only while PR head == qa_head_sha) for code PRs.
+#
+# REQUIRED-SAFE: this workflow is NOT itself a required check, so its skipped
+# `auto-pass` job on a code PR does not block anything. The status it posts
+# feeds the existing required `qa-gate` context. The companion required checks
+# `swift-test` / `settings-parity` self-satisfy on non-native PRs via the
+# required-safe design in native-tests.yml.
+#
+# Because the status is keyed to `head.sha`, a new push to a trivial PR re-runs
+# this workflow (on `synchronize`) and re-blesses the new head — so qa-gate
+# stays green across pushes, exactly like QATester's re-bless for code PRs.
+#
+# See docs/qa-merge-gate.md ("Merging without --admin").
+name: QA Gate (trivial auto-pass)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    name: classify-trivial
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # ANY match here => treat the PR as a code PR and leave qa-gate to the
+          # real QATester. Keep this list BROAD: a false "trivial" classification
+          # would auto-pass QA for changed product code (the MCP-1214 risk class).
+          filters: |
+            code:
+              - '**/*.go'
+              - 'go.mod'
+              - 'go.sum'
+              - 'cmd/**'
+              - 'internal/**'
+              - 'frontend/src/**'
+              - 'native/**'
+
+  auto-pass:
+    name: auto-pass-qa-gate
+    needs: classify
+    # Only when the diff is provably non-code.
+    if: needs.classify.outputs.code == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Post qa-gate=success (no code-bearing files changed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh api --method POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state=success \
+            -f context=qa-gate \
+            -f description="Auto-passed: no code-bearing files changed (qa-gate-trivial)" \
+            -f target_url="${RUN_URL}"
+          echo "qa-gate=success posted for ${HEAD_SHA} (trivial PR)"
