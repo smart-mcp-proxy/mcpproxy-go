@@ -49,25 +49,25 @@ func newProfileTestEnv(t *testing.T) *profileTestEnv {
 	// Extract the base URL (without /mcp suffix)
 	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
 
-	// Update runtime config to include both servers + profiles
-	cfg := env.proxyServer.runtime.Config()
-	researchEnabled := true
-	deployEnabled := true
-	quarFalse := false
-	cfg.Servers = append(cfg.Servers,
+	// Build a new config to avoid mutating the live pointer (prevents data races).
+	old := env.proxyServer.runtime.Config()
+	cfgCopy := *old // shallow copy of the struct
+	cfg := &cfgCopy
+	// Append new servers to a fresh slice (don't alias the original).
+	cfg.Servers = append(append([]*config.ServerConfig{}, old.Servers...),
 		&config.ServerConfig{
 			Name:        "research-srv",
 			URL:         researchMS.addr,
 			Protocol:    "streamable-http",
-			Enabled:     researchEnabled,
-			Quarantined: quarFalse,
+			Enabled:     true,
+			Quarantined: false,
 		},
 		&config.ServerConfig{
 			Name:        "deploy-srv",
 			URL:         deployMS.addr,
 			Protocol:    "streamable-http",
-			Enabled:     deployEnabled,
-			Quarantined: quarFalse,
+			Enabled:     true,
+			Quarantined: false,
 		},
 	)
 	cfg.Profiles = []config.ProfileConfig{
@@ -344,25 +344,25 @@ func TestProfile_PolicyIntersection(t *testing.T) {
 	ctx := context.Background()
 
 	// Add a third server and a third profile that includes it.
-	cfg := env.proxyServer.runtime.Config()
 	sharedMS := env.CreateMockUpstreamServer("shared-srv", []mcp.Tool{
 		{Name: "shared_action", Description: "Shared tool"},
 	})
-	sharedEnabled := true
-	sharedQuar := false
-	cfg.Servers = append(cfg.Servers, &config.ServerConfig{
+	old2 := env.proxyServer.runtime.Config()
+	cfgCopy2 := *old2
+	cfg2 := &cfgCopy2
+	cfg2.Servers = append(append([]*config.ServerConfig{}, old2.Servers...), &config.ServerConfig{
 		Name:        "shared-srv",
 		URL:         sharedMS.addr,
 		Protocol:    "streamable-http",
-		Enabled:     sharedEnabled,
-		Quarantined: sharedQuar,
+		Enabled:     true,
+		Quarantined: false,
 	})
-	cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{
+	cfg2.Profiles = append(append([]config.ProfileConfig{}, old2.Profiles...), config.ProfileConfig{
 		Name:    "shared",
 		Servers: []string{"shared-srv", "research-srv"},
 	})
-	env.proxyServer.runtime.UpdateConfig(cfg, "")
-	_ = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	env.proxyServer.runtime.UpdateConfig(cfg2, "")
+	_ = env.proxyServer.runtime.LoadConfiguredServers(cfg2)
 	time.Sleep(2 * time.Second)
 
 	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
@@ -414,16 +414,21 @@ func TestProfile_PerServerDisabledToolsRespected(t *testing.T) {
 	env := newProfileTestEnv(t)
 	ctx := context.Background()
 
-	// Disable "rollback" on deploy-srv.
-	cfg := env.proxyServer.runtime.Config()
-	for _, s := range cfg.Servers {
+	// Disable "rollback" on deploy-srv (copy config first to avoid data race).
+	old3 := env.proxyServer.runtime.Config()
+	cfgCopy3 := *old3
+	cfg3 := &cfgCopy3
+	newServers := make([]*config.ServerConfig, len(old3.Servers))
+	for i, s := range old3.Servers {
+		sc := *s
 		if s.Name == "deploy-srv" {
-			s.DisabledTools = []string{"rollback"}
-			break
+			sc.DisabledTools = []string{"rollback"}
 		}
+		newServers[i] = &sc
 	}
-	env.proxyServer.runtime.UpdateConfig(cfg, "")
-	_ = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	cfg3.Servers = newServers
+	env.proxyServer.runtime.UpdateConfig(cfg3, "")
+	_ = env.proxyServer.runtime.LoadConfiguredServers(cfg3)
 	time.Sleep(1 * time.Second)
 	_ = env.proxyServer.runtime.DiscoverAndIndexTools(context.Background())
 	time.Sleep(2 * time.Second)
