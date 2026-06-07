@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mcpproxy.app/schemas/057-profiles-config.json",
+  "title": "MCPProxy profiles config (Spec 057)",
+  "description": "Optional top-level `profiles` array. Absent/empty is fully supported (zero migration; /mcp unchanged).",
+  "type": "object",
+  "properties": {
+    "profiles": {
+      "type": "array",
+      "description": "Named, stateless, server-scoped views addressable at /mcp/p/<name>.",
+      "items": { "$ref": "#/definitions/profile" }
+    }
+  },
+  "definitions": {
+    "profile": {
+      "type": "object",
+      "required": ["name", "servers"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "URL slug. Used verbatim as /mcp/p/<name>. Must be unique. Reserved slugs are rejected.",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "not": { "enum": ["all", "code", "call", "p"] }
+        },
+        "servers": {
+          "type": "array",
+          "description": "References to mcpServers[].name. Unknown names warn-and-skip (FR-015). Empty list is legal (warns; exposes zero tools).",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "profiles": [
+        { "name": "research", "servers": ["fs", "web"] },
+        { "name": "deploy", "servers": ["github", "k8s"] }
+      ]
+    }
+  ]
+}
