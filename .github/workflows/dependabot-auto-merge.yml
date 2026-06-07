@@ -1,0 +1,61 @@
+# Dependabot hands-free merge for patch + minor bumps (MCP-1248, Model B).
+#
+# Lands dependabot PRs WITHOUT `gh pr merge --admin`:
+#   1. fetch-metadata reads the (grouped) update-type — for a grouped PR this is
+#      the HIGHEST semver bump across the group.
+#   2. For patch/minor only, github-actions[bot] posts an approving review. That
+#      approval is by a *different* identity than the PR author (dependabot[bot])
+#      and DOES count toward `required_approving_review_count`.
+#   3. Auto-merge is armed (squash). GitHub merges only once ALL required checks
+#      are green — including `qa-gate` (auto-passed for dep PRs that touch no
+#      code, or QATester-blessed if a dep change does touch code) and the build/
+#      lint/test matrix. This ARMS the merge; it never bypasses a check.
+#
+# Major bumps are intentionally excluded — they still require a human review.
+#
+# NOTE on permissions: workflows triggered by Dependabot get a GITHUB_TOKEN
+# whose scope is set by the `permissions:` block below (GitHub grants the
+# elevated scope for Dependabot `pull_request` runs only when declared here).
+#
+# See docs/qa-merge-gate.md ("Merging without --admin").
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: dependabot-auto-merge
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Approve and arm auto-merge (patch + minor only)
+        if: >-
+          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+          steps.meta.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL" \
+            --body "Auto-approved by dependabot-auto-merge: ${{ steps.meta.outputs.update-type }} (${{ steps.meta.outputs.dependency-names }}). Merge fires only when all required checks are green."
+          gh pr merge --auto --squash "$PR_URL"
+
+      - name: Note major bumps require a human
+        if: steps.meta.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr comment "$PR_URL" \
+            --body "⚠️ Major version bump (${{ steps.meta.outputs.dependency-names }}) — auto-merge is gated to patch/minor only. A human must review and merge."
