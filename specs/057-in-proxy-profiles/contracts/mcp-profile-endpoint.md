@@ -17,6 +17,8 @@ Stateless, pinned selector. Same MCP protocol surface as `/mcp`; the only differ
 
 - `retrieve_tools` returns only tools from servers in the **effective set** (profile ∩ token ∩ enabled ∩ not-quarantined ∩ user-visible). Tools the profile excludes MUST NOT appear (FR-004).
 - `call_tool_read` / `call_tool_write` / `call_tool_destructive` into an excluded server are rejected (FR-004).
+- `upstream_servers` introspection (e.g. `list`/`get`) MUST exclude servers outside the profile from its result — a profile URL cannot enumerate out-of-profile servers (FR-004). *(Codex #621 finding 1.)*
+- `code_execution` (when enabled on the reused retrieve-tools server) MUST run with the profile-intersected effective server set: `call_tool()` invoked from inside a code-execution sandbox at a profile URL is rejected for any server outside the active profile. An empty caller-supplied `allowed_servers` MUST NOT be interpreted as "all servers" at a profile URL. *(Codex #621 finding 2.)*
 - Per-server `enabled_tools`/`disabled_tools` continue to apply inside the profile (FR-006); no profile-level tool list.
 
 ## Scope composition & error attribution

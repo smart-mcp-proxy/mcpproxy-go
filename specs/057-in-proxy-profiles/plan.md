@@ -9,7 +9,8 @@ Add an optional top-level `profiles` array to the config. Each profile `{name, s
 
 **Technical approach** (verified against current code, 2026-06-07):
 - A single `/mcp/p/` prefix handler + `profileMiddleware` (registered after `mcpAuthMiddleware`) strips the slug, resolves the profile from the **current** config snapshot (`runtime.Config()`, lock-free atomic read → hot-reload for free), and injects a `ProfileScope` into the request context. The existing retrieve_tools-mode MCP server instance (`p.server`) is reused — **no per-profile server instances** (http.ServeMux can't deregister routes at runtime).
-- Profile filtering runs as a **parallel, auth-type-independent** check at the two existing scope sites (`mcp.go:1113` retrieve_tools, `mcp.go:1529` call_tool_*). It MUST NOT ride the `enforceAgentScope` gate, because an unauthenticated `/mcp/p/...` connection gets `AdminContext()` (where `enforceAgentScope == false`). Two independent checks yield the FR-005 intersection and FR-012 distinct errors for free.
+- Profile filtering runs as a **parallel, auth-type-independent** check at **every server-boundary surface** the profile must cover (FR-004), not just two: `mcp.go:1113` retrieve_tools, `mcp.go:1529` call_tool_*, **`upstream_servers` introspection (`mcp.go:2763` list path)**, and **`code_execution`** (the `/mcp/p/` route reuses the retrieve-tools server, which registers `code_execution` when enabled — the JS runtime must receive the profile-intersected server set, not be allowed to treat an empty `allowed_servers` as "all"). It MUST NOT ride the `enforceAgentScope` gate, because an unauthenticated `/mcp/p/...` connection gets `AdminContext()` (where `enforceAgentScope == false`). Independent checks yield the FR-005 intersection and FR-012 distinct errors for free.
+  > Both extra surfaces were flagged by Codex review of PR #621 (verdict `request_changes`): `upstream_servers list` currently applies only the agent-token filter, and `handleCodeExecution`→`jsruntime` treats an empty caller `allowed_servers` as all servers — each is a profile-boundary escape if not closed.
 - `metadata["profile"]` is attached to tool-call activity records originating from a profile URL via the existing `Metadata map[string]interface{}` field (no schema change).
 
 ## Technical Context
@@ -69,7 +70,8 @@ internal/
 │   └── context.go             # NEW (~30 LOC) — ProfileScope{Allows(server) bool}, WithProfileScope/FromContext (mirrors auth/context.go)
 └── server/
     ├── server.go              # Register `/mcp/p/` prefix handler + profileMiddleware after mcpAuthMiddleware (near L1690)
-    └── mcp.go                 # Two parallel filter conditions: retrieve_tools (~L1113) + call_tool_* (~L1529); profile metadata write at emitActivity* call sites
+    ├── mcp.go                 # Parallel filter conditions: retrieve_tools (~L1113), call_tool_* (~L1529), upstream_servers list (~L2763); profile metadata write at emitActivity* call sites
+    └── mcp_code_execution.go  # Pass profile-intersected server set into the JS runtime (~L181/L190) so call_tool() inside code_execution cannot reach out-of-profile servers
 ```
 
 **Structure Decision**: Single Go project, existing `internal/` layout. One new sub-package `internal/profile` (request-scoped scope type, peer of `internal/auth`) and one new file `internal/config/profiles.go`. No new top-level dirs, no frontend changes in the MVP (web-UI profile affordances are out of scope), no storage/index packages touched.
@@ -92,7 +94,7 @@ The spec's *Resolved Design Decisions*, *Assumptions*, and *Implementation Desig
 1. Config: `ProfileConfig` + validation (slug/reserved/dup/unknown-server) — unit tests first.
 2. `internal/profile` context + `ProfileScope.Allows`.
 3. Routing: `/mcp/p/` handler + `profileMiddleware` (auth→profile order).
-4. Filter wiring: parallel checks at both `mcp.go` sites + the mandated unauth-at-profile-URL regression test.
+4. Filter wiring: parallel checks at **all** profile-boundary surfaces — `retrieve_tools`, `call_tool_*`, `upstream_servers` introspection, and `code_execution` (intersect `ProfileScope` into the JS runtime's server set) + the mandated unauth-at-profile-URL regression test.
 5. Activity `metadata["profile"]`.
 6. Integration + E2E (two-profile isolation, intersection, 404 paths, reserved slug) + backward-compat E2E (SC-002).
 7. Docs (CLAUDE.md, README, docs/).
