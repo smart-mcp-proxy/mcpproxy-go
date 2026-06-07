@@ -23,6 +23,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
@@ -441,6 +442,19 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust)
 	}
+}
+
+// withProfileMeta injects metadata["profile"] = slug into m when the context
+// carries an active ProfileScope (Spec 057 FR-011). It returns m (or a new map
+// when m is nil) so callers can use it inline. Records from /mcp omit the field.
+func withProfileMeta(ctx context.Context, m map[string]interface{}) map[string]interface{} {
+	if scope := profile.ProfileScopeFromContext(ctx); scope != nil {
+		if m == nil {
+			m = make(map[string]interface{})
+		}
+		m["profile"] = scope.Name
+	}
+	return m
 }
 
 // buildCallToolVariantTool constructs the mcp.Tool definition for a single
@@ -1111,6 +1125,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// want to repeat per result.
 	authCtx := auth.AuthContextFromContext(ctx)
 	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
+	// Spec 057: profile scope filter — independent of agent-scope (nil = allow all).
+	profileScope := profile.ProfileScopeFromContext(ctx)
 
 	// Spec 049: opt-in discovery of locked tools. When false (default) the
 	// behavior below is byte-for-byte identical to before — disabled tools are
@@ -1140,6 +1156,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// so an agent never learns a locked tool exists on a server it cannot
 		// access.
 		if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
+			continue
+		}
+		// Spec 057: profile filter — runs independently of agent-scope so that
+		// unauthenticated /mcp/p/<slug> connections (AdminContext) are still filtered.
+		if !profileScope.Allows(serverName) {
 			continue
 		}
 
@@ -1525,6 +1546,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
 	}
 
+	// Spec 057: profile filter — runs independently of agent-scope so that
+	// unauthenticated /mcp/p/<slug> connections (AdminContext) are still filtered.
+	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
 	// Spec 028: Enforce agent token scope restrictions
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		// Check server scope
@@ -1888,6 +1917,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
+	intentMap = withProfileMeta(ctx, intentMap) // Spec 057 FR-011
 	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, activityRequestBytes, activityResponseBytes)
 
 	// Spec 024: Emit internal tool call event for success
@@ -2771,6 +2801,18 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		var filtered []*config.ServerConfig
 		for _, s := range servers {
 			if authCtx.CanAccessServer(s.Name) {
+				filtered = append(filtered, s)
+			}
+		}
+		servers = filtered
+	}
+
+	// Spec 057 (FR-004): Filter servers to only those visible in the active profile.
+	// Independent of agent-scope so unauthenticated /mcp/p/<slug> connections are filtered.
+	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil {
+		var filtered []*config.ServerConfig
+		for _, s := range servers {
+			if profileScope.Allows(s.Name) {
 				filtered = append(filtered, s)
 			}
 		}

@@ -10,6 +10,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
@@ -188,6 +189,32 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 		}
 		// Provide tool annotation lookup function for permission tier resolution
 		options.ToolAnnotationFunc = p.lookupToolPermission
+	}
+
+	// Spec 057 (Codex #621 finding 2): Intersect profile scope into code_execution.
+	// The jsruntime treats an empty AllowedServers as "allow all"; at a profile URL
+	// we must restrict to profile servers regardless of what the caller supplied.
+	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil {
+		// Build the effective allowed-servers list: profile servers only.
+		// If the caller also supplied allowed_servers, intersect the two sets.
+		profileServers := profileScope.AllowedServerNames()
+		if len(options.AllowedServers) == 0 {
+			// No caller-supplied restriction: use profile servers as the restriction.
+			options.AllowedServers = profileServers
+		} else {
+			// Intersect caller-supplied list with profile servers.
+			profileSet := make(map[string]struct{}, len(profileServers))
+			for _, s := range profileServers {
+				profileSet[s] = struct{}{}
+			}
+			var intersected []string
+			for _, s := range options.AllowedServers {
+				if _, ok := profileSet[s]; ok {
+					intersected = append(intersected, s)
+				}
+			}
+			options.AllowedServers = intersected
+		}
 	}
 
 	// Execute code

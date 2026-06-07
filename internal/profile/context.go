@@ -51,6 +51,20 @@ func (p *ProfileScope) Allows(serverName string) bool {
 	return ok
 }
 
+// AllowedServerNames returns the list of server names in this profile scope.
+// Returns nil for a nil receiver (allow-all — no restriction list).
+// Returns an empty slice for a non-nil scope with no servers (deny-all).
+func (p *ProfileScope) AllowedServerNames() []string {
+	if p == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.servers))
+	for s := range p.servers {
+		out = append(out, s)
+	}
+	return out
+}
+
 // profileScopeKey is an unexported context key avoiding cross-package collisions.
 type profileScopeKey struct{}
 
