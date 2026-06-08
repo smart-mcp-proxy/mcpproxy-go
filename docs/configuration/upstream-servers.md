@@ -72,6 +72,10 @@ Servers requiring OAuth 2.1 authentication:
 | `working_dir` | string | No | Working directory for stdio servers |
 | `env` | object | No | Environment variables to pass |
 | `oauth` | object | No | OAuth configuration |
+| `health_check_interval` | duration | No | Per-server override for the liveness `ping` cadence (`0s` disables; falls back to the global value, then the `30s` default). No-op for Docker-isolated servers. |
+| `tool_discovery_interval` | duration | No | Per-server override for the `tools/list` re-index sweep (`0s` disables; falls back to the global value, then the `5m` default). |
+
+See [Tool Discovery & Health Check Intervals](/configuration/config-file#tool-discovery--health-check-intervals) for the global defaults, accepted ranges, and trade-offs.
 
 ## Headers, Environment Variables, and Secrets
 
