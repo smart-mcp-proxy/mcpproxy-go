@@ -32,8 +32,12 @@
 #   --verdict <v>   override the Paperclip verdict lookup (testing).
 #   --dry-run       do everything except POST the review (and print the plan).
 #
-# Exit codes: 0 ok/approved/dry-run; 2 not configured; 3 verdict not accept
-#   (no-op); 4 author==approver guard; 5 GitHub/API error.
+# Safe to run repeatedly (idempotent): no-ops if the PR is closed/merged, if the
+# verdict isn't ACCEPT, if the Gatekeeper already approved the current head, or
+# if Codex's reviewed SHA != the current head (stale → needs re-review).
+#
+# Exit codes: 0 ok/approved/dry-run/no-op; 2 not configured; 3 verdict not accept;
+#   5 GitHub/API error; 6 stale verdict (head moved past reviewed SHA).
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -59,23 +63,24 @@ done
 
 log() { echo "[gatekeeper] $*" >&2; }
 
-# ── 1. Resolve the Codex review verdict for this PR from Paperclip ───────────
+# ── 1. Resolve the Codex review verdict (+reviewed SHA) from Paperclip ───────
+# Emits "<verdict> <reviewed_sha_or_empty>".
 resolve_verdict() {
-  if [[ -n "$VERDICT_OVERRIDE" ]]; then echo "$VERDICT_OVERRIDE"; return; fi
+  if [[ -n "$VERDICT_OVERRIDE" ]]; then echo "$VERDICT_OVERRIDE "; return; fi
   # Reads are fine unauthenticated against the local instance.
   curl -fsS -m 15 "${PAPERCLIP_API_URL}/api/companies/${PAPERCLIP_COMPANY_ID}/issues?q=Review%20PR%20%23${PR}" 2>/dev/null \
   | PR="$PR" CODEX="$CODEX_REVIEWER_AGENT_ID" BASE="$PAPERCLIP_API_URL" python3 -c '
-import sys, json, os, urllib.request
+import sys, json, os, re, urllib.request
 pr, codex, base = os.environ["PR"], os.environ["CODEX"], os.environ["BASE"]
 iss = json.load(sys.stdin)
 iss = iss if isinstance(iss, list) else iss.get("issues", iss.get("data", []))
-# Codex review tasks for this PR (any title that references "PR #<n>"),
-# assigned to the Codex reviewer, newest first (round-2 supersedes round-1).
+# Codex review tasks for this PR (title references "PR #<n>"), assigned to the
+# Codex reviewer, newest first (round-2 supersedes round-1).
 needle = "PR #%s" % pr
 revs = [i for i in iss
         if needle in (i.get("title") or "") and i.get("assigneeAgentId") == codex]
 revs.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
-verdict = "unknown"
+verdict, sha = "unknown", ""
 for i in revs:
     url = "%s/api/issues/%s/comments" % (base, i.get("id"))
     try:
@@ -84,17 +89,20 @@ for i in revs:
         continue
     c = c if isinstance(c, list) else c.get("comments", c.get("data", []))
     for cm in reversed(c):
-        b = (cm.get("body") or "").lower()
+        body = cm.get("body") or ""
+        b = body.lower()
         if "verdict:" not in b:
             continue
         tail = b.split("verdict:", 1)[1][:40]
+        shas = re.findall(r"\b[0-9a-f]{40}\b", body)  # SHA the reviewer pinned
+        sha = shas[-1] if shas else ""
         if "accept" in tail:
             verdict = "accept"; break
         if "request_changes" in tail or "request changes" in tail:
             verdict = "request_changes"; break
     if verdict != "unknown":
         break
-print(verdict)
+print(verdict, sha)
 '
 }
 
@@ -117,18 +125,49 @@ mint_installation_token() {
 }
 
 # ── main ────────────────────────────────────────────────────────────────────
-VERDICT="$(resolve_verdict || echo unknown)"
-log "PR #${PR} Codex verdict = ${VERDICT}"
+read -r VERDICT REVIEWED_SHA <<<"$(resolve_verdict || echo 'unknown ')"
+log "PR #${PR} Codex verdict = ${VERDICT}${REVIEWED_SHA:+ (reviewed ${REVIEWED_SHA:0:9})}"
 
 if [[ "$VERDICT" != "accept" ]]; then
   log "verdict is not 'accept' — NOT approving (no-op). request_changes/unknown must not auto-approve."
   exit 3
 fi
 
-# Author != approver guard. The App identity is inherently != the PR author,
-# but verify the PR author is not somehow the bot (defense in depth).
-AUTHOR="$(gh pr view "$PR" --repo "$REPO" --json author -q .author.login 2>/dev/null || echo '?')"
-log "PR #${PR} author = ${AUTHOR} (App approves as a distinct identity)"
+# Current PR head + author (one API read).
+read -r HEAD AUTHOR PR_STATE <<<"$(gh pr view "$PR" --repo "$REPO" --json headRefOid,author,state \
+  -q '"\(.headRefOid) \(.author.login) \(.state)"' 2>/dev/null || echo '? ? ?')"
+log "PR #${PR} state=${PR_STATE} head=${HEAD:0:9} author=${AUTHOR} (App approves as a distinct identity)"
+
+# Don't act on already-closed/merged PRs.
+if [[ "$PR_STATE" != "OPEN" ]]; then
+  log "PR is ${PR_STATE} — nothing to do."
+  exit 0
+fi
+
+# Stale-verdict guard: only approve the exact SHA Codex reviewed. If the head
+# moved past the reviewed commit, the verdict is stale → needs re-review.
+if [[ -n "$REVIEWED_SHA" && -n "$HEAD" && "$REVIEWED_SHA" != "$HEAD" ]]; then
+  log "STALE: Codex reviewed ${REVIEWED_SHA:0:9} but head is ${HEAD:0:9} — NOT approving (re-review needed)."
+  exit 6
+fi
+
+# Idempotency: skip if the Gatekeeper already has an APPROVED review at this head.
+ALREADY="$(gh api "repos/${REPO}/pulls/${PR}/reviews" 2>/dev/null \
+  | HEAD="$HEAD" python3 -c '
+import sys, json, os
+head = os.environ.get("HEAD","")
+try: revs = json.load(sys.stdin)
+except Exception: revs = []
+for r in revs:
+    u = (r.get("user") or {})
+    if u.get("type") == "Bot" and "gatekeeper" in (u.get("login","").lower()) \
+       and r.get("state") == "APPROVED" and (not head or r.get("commit_id") == head):
+        print("yes"); break
+' 2>/dev/null)"
+if [[ "$ALREADY" == "yes" ]]; then
+  log "already approved by Gatekeeper at head ${HEAD:0:9} — no-op (idempotent)."
+  exit 0
+fi
 
 if [[ -z "${GATEKEEPER_APP_ID:-}" || -z "${GATEKEEPER_INSTALLATION_ID:-}" || -z "${GATEKEEPER_PRIVATE_KEY:-}" ]]; then
   log "NOT CONFIGURED: set GATEKEEPER_APP_ID, GATEKEEPER_INSTALLATION_ID, GATEKEEPER_PRIVATE_KEY"
