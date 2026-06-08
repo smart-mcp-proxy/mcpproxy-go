@@ -100,6 +100,15 @@ components:
           $ref: '#/components/schemas/config.OutputSanitisationConfig'
         output_validation:
           $ref: '#/components/schemas/config.OutputValidationConfig'
+        profiles:
+          description: |-
+            Profiles are optional named, server-scoped views exposed at /mcp/p/<name>
+            (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
+            without this key serialize byte-identically (SC-004).
+          items:
+            $ref: '#/components/schemas/config.ProfileConfig'
+          type: array
+          uniqueItems: false
         quarantine_enabled:
           description: |-
             QuarantineEnabled controls whether quarantine is active. It gates two
@@ -470,6 +479,18 @@ components:
         mode:
           description: '"off" | "warn" | "strict"; default "warn"'
           type: string
+      type: object
+    config.ProfileConfig:
+      properties:
+        name:
+          description: URL slug, validated
+          type: string
+        servers:
+          description: references to mcpServers[].name
+          items:
+            type: string
+          type: array
+          uniqueItems: false
       type: object
     config.RegistryEntry:
       properties:

@@ -63,4 +63,6 @@ The two new conditions are the `ProfileScope.Allows` checks; the rest already ex
 
 ## State transitions
 
-`ProfileScope` is immutable for a request's lifetime. Profiles change only via config hot-reload (`configsvc.Update`): in-flight sessions keep their resolved snapshot; new connections resolve against the new config. There is no runtime "active profile" mutation in the MVP (deferred — see spec Out of Scope).
+`ProfileScope` is immutable for a single request's lifetime. It is resolved **per request** by the profile middleware against the current config snapshot, so a config hot-reload (`configsvc.Update`) takes effect immediately on the next request — including requests on an already-open session. There is no longer-lived "resolved snapshot" pinned to a connection. There is no runtime "active profile" mutation in the MVP (deferred — see spec Out of Scope).
+
+> Per-request resolution (rather than snapshot-until-reconnect) is the deliberate design: it lets an operator narrow or revoke a profile and have it apply at once, which is the safer failure mode. Decision recorded in PR #622 review round 1 (Codex finding #3).

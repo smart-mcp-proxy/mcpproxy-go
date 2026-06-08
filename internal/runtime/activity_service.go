@@ -277,6 +277,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	intent := getMapPayload(evt.Payload, "intent")
 	// Extract content trust metadata if present (Spec 035)
 	contentTrust := getStringPayload(evt.Payload, "content_trust")
+	// Spec 057 FR-011: profile slug for tool calls from a /mcp/p/<slug> URL.
+	profileSlug := getStringPayload(evt.Payload, "profile")
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
@@ -285,7 +287,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 
 	// Build metadata with intent information if present
 	var metadata map[string]interface{}
-	if toolVariant != "" || intent != nil || contentTrust != "" {
+	if toolVariant != "" || intent != nil || contentTrust != "" || profileSlug != "" {
 		metadata = make(map[string]interface{})
 		if toolVariant != "" {
 			metadata["tool_variant"] = toolVariant
@@ -296,6 +298,11 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		// Spec 035: Tag activity with content trust level based on openWorldHint
 		if contentTrust != "" {
 			metadata["content_trust"] = contentTrust
+		}
+		// Spec 057 FR-011: top-level profile slug (NOT nested under intent), so
+		// operators can correlate activity to the profile it came from.
+		if profileSlug != "" {
+			metadata["profile"] = profileSlug
 		}
 	}
 

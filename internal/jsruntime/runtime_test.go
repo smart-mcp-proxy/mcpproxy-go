@@ -308,6 +308,92 @@ func TestExecuteAllowedServers(t *testing.T) {
 	}
 }
 
+// TestExecuteRestrictToAllowedEmptyDeniesAll verifies that when RestrictToAllowed
+// is set — i.e. an active Spec 057 profile whose effective server set is empty
+// (deny-all profile, or a non-overlapping token∩profile intersection) — an empty
+// AllowedServers list denies ALL call_tool() invocations. Without this flag an
+// empty allow-list is treated as "allow all", which let the most locked-down
+// profiles leak every server through code_execution (Codex PR #622 finding #1).
+func TestExecuteRestrictToAllowedEmptyDeniesAll(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		var res = call_tool("anything", "tool", {});
+		({ ok: res.ok, code: res.error ? res.error.code : null })
+	`
+	opts := ExecutionOptions{
+		RestrictToAllowed: true,
+		AllowedServers:    nil, // active profile with empty effective set
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true (script itself ran), got error: %v", result.Error)
+	}
+
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ok"] != false {
+		t.Errorf("expected call_tool ok=false (deny-all profile), got %v", resultMap["ok"])
+	}
+	if resultMap["code"] != string(ErrorCodeServerNotAllowed) {
+		t.Errorf("expected code=SERVER_NOT_ALLOWED, got %v", resultMap["code"])
+	}
+	if len(caller.calls) != 0 {
+		t.Errorf("expected upstream CallTool to never be reached, got %d calls", len(caller.calls))
+	}
+}
+
+// TestExecuteNoRestrictEmptyAllowsAll guards the backward-compatible path: with no
+// RestrictToAllowed flag and an empty AllowedServers list, call_tool() is allowed
+// (empty = no restriction). This must stay true for /mcp, /mcp/call, and
+// unrestricted code_execution after the finding-#1 fix.
+func TestExecuteNoRestrictEmptyAllowsAll(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `var res = call_tool("anything", "tool", {}); ({ ok: res.ok })`
+	opts := ExecutionOptions{} // no restriction, empty allow-list
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ok"] != true {
+		t.Errorf("expected call_tool ok=true (no restriction), got %v", resultMap["ok"])
+	}
+}
+
+// TestExecuteRestrictToAllowedEnforcesNonEmpty verifies RestrictToAllowed with a
+// non-empty list still allows listed servers and blocks unlisted ones.
+func TestExecuteRestrictToAllowedEnforcesNonEmpty(t *testing.T) {
+	caller := newMockToolCaller()
+
+	code := `
+		var a = call_tool("allowed", "tool", {});
+		var b = call_tool("blocked", "tool", {});
+		({ a_ok: a.ok, b_ok: b.ok, b_code: b.error ? b.error.code : null })
+	`
+	opts := ExecutionOptions{
+		RestrictToAllowed: true,
+		AllowedServers:    []string{"allowed"},
+	}
+
+	result := Execute(context.Background(), caller, code, opts)
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["a_ok"] != true {
+		t.Errorf("expected a_ok=true (allowed server), got %v", resultMap["a_ok"])
+	}
+	if resultMap["b_ok"] != false {
+		t.Errorf("expected b_ok=false (blocked server), got %v", resultMap["b_ok"])
+	}
+	if resultMap["b_code"] != string(ErrorCodeServerNotAllowed) {
+		t.Errorf("expected b_code=SERVER_NOT_ALLOWED, got %v", resultMap["b_code"])
+	}
+}
+
 // TestExecuteNonSerializableResult tests rejection of non-JSON-serializable results
 func TestExecuteNonSerializableResult(t *testing.T) {
 	caller := newMockToolCaller()
