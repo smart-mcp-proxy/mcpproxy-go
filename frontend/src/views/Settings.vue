@@ -119,11 +119,11 @@
         </div>
       </div>
 
-      <!-- Teams (server edition only) -->
+      <!-- Server edition / multi-user settings (server edition only) -->
       <div v-if="hasTeams" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
         <div class="card-body">
-          <h2 class="card-title text-lg">👥 Teams / Server</h2>
-          <SettingsSection section-id="teams" :fields="teamsFields" :working="state.working" :original="state.original" />
+          <h2 class="card-title text-lg" data-test="settings-server-edition-title">{{ serverEditionTitle }}</h2>
+          <SettingsSection section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" />
         </div>
       </div>
 
@@ -187,6 +187,9 @@ import {
   SECURITY_FIELDS,
   GENERAL_FIELDS,
   ADVANCED_ACCORDIONS,
+  SERVER_EDITION_FIELDS,
+  SERVER_EDITION_TAB_LABEL,
+  SERVER_EDITION_SECTION_TITLE,
   DOCS_BASE,
   docsUrl,
   type SettingField,
@@ -199,11 +202,8 @@ const systemStore = useSystemStore()
 const securityFields = SECURITY_FIELDS
 const generalFields = GENERAL_FIELDS
 const advancedAccordions = ADVANCED_ACCORDIONS
-const teamsFields: SettingField[] = [
-  { key: 'teams.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
-  { key: 'teams.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
-  { key: 'teams.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
-]
+const serverEditionFields = SERVER_EDITION_FIELDS
+const serverEditionTitle = SERVER_EDITION_SECTION_TITLE
 
 // ---- form state ----
 const loading = ref(false)
@@ -220,7 +220,7 @@ const allFields = computed<SettingField[]>(() => [
   ...securityFields,
   ...generalFields,
   ...advancedAccordions.flatMap((a) => a.fields),
-  ...(hasTeams.value ? teamsFields : []),
+  ...(hasTeams.value ? serverEditionFields : []),
 ])
 const filteredFields = computed<SettingField[]>(() => {
   const q = search.value.trim().toLowerCase()
@@ -255,7 +255,7 @@ const tabs = computed(() => {
     { id: 'general', label: 'General', icon: '⚙️' },
     { id: 'advanced', label: 'Advanced', icon: '🧰' },
   ] as Array<{ id: string; label: string; icon: string }>
-  if (hasTeams.value) base.push({ id: 'teams', label: 'Teams', icon: '👥' })
+  if (hasTeams.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: '👥' })
   base.push({ id: 'raw', label: 'Raw JSON', icon: '{ }' })
   return base
 })
