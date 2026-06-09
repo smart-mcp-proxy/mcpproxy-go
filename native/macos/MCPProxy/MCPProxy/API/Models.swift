@@ -112,7 +112,7 @@ enum HealthAction: String, Codable, CaseIterable {
     /// Human-readable button label.
     var label: String {
         switch self {
-        case .login:      return "Log In"
+        case .login:      return "Sign In"
         case .restart:    return "Restart"
         case .enable:     return "Enable"
         case .approve:    return "Approve"
@@ -358,10 +358,21 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         quarantine?.totalPending ?? 0
     }
 
+    /// True when this server is in the OAuth login-required state — an actionable,
+    /// calm "sign in" condition, not a hard error. Driven by the stable
+    /// `health.action == "login"` contract (MCP-1819 T3) so it stays correct
+    /// regardless of how the backend classifies `health.level` for this state.
+    var isLoginRequired: Bool {
+        health?.action == HealthAction.login.rawValue
+    }
+
     /// Centralized SwiftUI health color for this server, used across all views.
     var statusColor: Color {
         if !enabled { return .gray }
         if quarantined { return .orange }
+        // OAuth login-required reads as a calm, actionable sign-in state (accent),
+        // never a red error — even while the backend still reports level=unhealthy.
+        if isLoginRequired { return .accentColor }
         switch health?.level {
         case "healthy": return .green
         case "degraded": return .yellow
@@ -374,6 +385,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     var statusNSColor: NSColor {
         if !enabled { return .systemGray }
         if quarantined { return .systemOrange }
+        if isLoginRequired { return .controlAccentColor }
         switch health?.level {
         case "healthy": return .systemGreen
         case "degraded": return .systemYellow

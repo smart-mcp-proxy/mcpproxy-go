@@ -244,9 +244,9 @@ struct TrayMenu: View {
             }
         }
 
-        // OAuth Login (shown when action is "login")
-        if server.health?.action == "login" {
-            Button("Log In") {
+        // OAuth Sign-in (shown when action is "login")
+        if server.isLoginRequired {
+            Button("Sign In") {
                 Task {
                     try? await apiClient?.loginServer(server.id)
                 }
@@ -352,6 +352,10 @@ struct TrayMenu: View {
     private func serverStatusColor(for server: ServerStatus) -> Color {
         if server.quarantined {
             return .orange
+        }
+        // OAuth login-required is a calm, actionable sign-in state, not a red error.
+        if server.isLoginRequired {
+            return .accentColor
         }
         if let health = server.health {
             switch health.level {

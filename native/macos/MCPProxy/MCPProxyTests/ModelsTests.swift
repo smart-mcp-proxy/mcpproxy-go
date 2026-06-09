@@ -1,4 +1,6 @@
 import XCTest
+import SwiftUI
+import AppKit
 @testable import MCPProxy
 
 final class ModelsTests: XCTestCase {
@@ -8,6 +10,59 @@ final class ModelsTests: XCTestCase {
     private func decode<T: Decodable>(_ type: T.Type, from jsonString: String) throws -> T {
         let data = jsonString.data(using: .utf8)!
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    /// Build a minimal ServerStatus with a given health.action/level and admin flags,
+    /// for exercising the OAuth sign-in presentation logic (MCP-1822).
+    private func makeServer(
+        action: String?,
+        level: String = "unhealthy",
+        enabled: Bool = true,
+        quarantined: Bool = false,
+        connected: Bool = false
+    ) throws -> ServerStatus {
+        let actionField = action.map { "\"action\": \"\($0)\"," } ?? ""
+        let json = """
+        {
+            "id": "s", "name": "s", "protocol": "http",
+            "enabled": \(enabled), "connected": \(connected), "quarantined": \(quarantined),
+            "tool_count": 0,
+            "health": { "level": "\(level)", "admin_state": "enabled", "summary": "x", \(actionField) "detail": null }
+        }
+        """
+        return try decode(ServerStatus.self, from: json)
+    }
+
+    // MARK: - OAuth Sign-in State (MCP-1822)
+
+    func testIsLoginRequiredTrueForLoginAction() throws {
+        XCTAssertTrue(try makeServer(action: "login").isLoginRequired)
+    }
+
+    func testIsLoginRequiredFalseForOtherOrMissingAction() throws {
+        XCTAssertFalse(try makeServer(action: "restart").isLoginRequired)
+        XCTAssertFalse(try makeServer(action: nil).isLoginRequired)
+    }
+
+    func testLoginRequiredRendersCalmAccentNotRed() throws {
+        // Even while the backend still reports level=unhealthy, the sign-in state
+        // must read calmly (accent), never as a red error.
+        let s = try makeServer(action: "login", level: "unhealthy")
+        XCTAssertEqual(s.statusColor, Color.accentColor)
+        XCTAssertNotEqual(s.statusColor, Color.red)
+        XCTAssertNotEqual(s.statusNSColor, NSColor.systemRed)
+    }
+
+    func testUnhealthyWithoutLoginStaysRed() throws {
+        XCTAssertEqual(try makeServer(action: nil, level: "unhealthy").statusColor, Color.red)
+    }
+
+    func testDisabledTakesPrecedenceOverLogin() throws {
+        XCTAssertEqual(try makeServer(action: "login", enabled: false).statusColor, Color.gray)
+    }
+
+    func testQuarantineTakesPrecedenceOverLogin() throws {
+        XCTAssertEqual(try makeServer(action: "login", quarantined: true).statusColor, Color.orange)
     }
 
     // MARK: - HealthStatus
@@ -145,7 +200,7 @@ final class ModelsTests: XCTestCase {
     // MARK: - HealthAction Enum
 
     func testHealthActionLabels() {
-        XCTAssertEqual(HealthAction.login.label, "Log In")
+        XCTAssertEqual(HealthAction.login.label, "Sign In")
         XCTAssertEqual(HealthAction.restart.label, "Restart")
         XCTAssertEqual(HealthAction.enable.label, "Enable")
         XCTAssertEqual(HealthAction.approve.label, "Approve")

@@ -93,6 +93,11 @@ struct ServerDetailView: View {
         VStack(alignment: .leading, spacing: 0) {
             serverHeader
             Divider()
+
+            if server.isLoginRequired {
+                signInBanner
+            }
+
             tabBar
             Divider()
 
@@ -142,14 +147,17 @@ struct ServerDetailView: View {
             Spacer()
 
             // Action buttons
-            if server.health?.action == "login" {
-                Button("Log In") {
+            if server.isLoginRequired {
+                Button {
                     Task { await performAction { try await apiClient?.loginServer(server.id) }
-                        actionMessage = "Login initiated for \(server.name)"
+                        actionMessage = "Sign-in started for \(server.name)"
                     }
+                } label: {
+                    Label("Sign In", systemImage: "person.badge.key")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                .help("Sign in to this server with OAuth")
             }
 
             if server.quarantined {
@@ -225,6 +233,41 @@ struct ServerDetailView: View {
             .help("Restart server")
         }
         .padding()
+    }
+
+    // MARK: - Sign-in Banner
+
+    /// Calm, prominent OAuth sign-in callout shown when `health.action == "login"`.
+    /// Mirrors the Web UI's tone: this is an expected, actionable state — not an error.
+    @ViewBuilder
+    private var signInBanner: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "person.badge.key")
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sign-in required")
+                    .font(.scaled(.subheadline, scale: fontScale).bold())
+                Text("This server uses OAuth. Sign in to connect — this is expected, not an error.")
+                    .font(.scaled(.caption, scale: fontScale))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button {
+                Task { await performAction { try await apiClient?.loginServer(server.id) }
+                    actionMessage = "Sign-in started for \(server.name)"
+                }
+            } label: {
+                Label("Sign In", systemImage: "person.badge.key")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.10))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Sign-in required for \(server.name). This server uses OAuth.")
     }
 
     // MARK: - Tab Bar
