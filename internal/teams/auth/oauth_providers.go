@@ -25,6 +25,17 @@ type OAuthProvider struct {
 	Scopes       []string
 	SupportsOIDC bool // If true, ID token contains user info
 	SupportsPKCE bool
+
+	// OfflineAccessScopes are extra scopes appended to the authorization request
+	// when offline access (a durable refresh token) is required — e.g.
+	// Microsoft's "offline_access". Empty when the provider asks for offline
+	// access via query parameters instead (see OfflineAuthParams).
+	OfflineAccessScopes []string
+
+	// OfflineAuthParams are extra authorization-URL query parameters that ask the
+	// provider to issue a refresh token — e.g. Google's access_type=offline and
+	// prompt=consent. Google returns a refresh token only when these are present.
+	OfflineAuthParams map[string]string
 }
 
 // TokenResponse represents the OAuth token exchange response.
@@ -61,6 +72,10 @@ func newGoogleProvider(_ string) *OAuthProvider {
 		Scopes:       []string{"openid", "email", "profile"},
 		SupportsOIDC: true,
 		SupportsPKCE: true,
+		// Google issues a refresh token only when the authorization request sets
+		// access_type=offline; prompt=consent forces re-issuance on repeat logins.
+		// https://developers.google.com/identity/protocols/oauth2/web-server
+		OfflineAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
 	}
 }
 
@@ -89,6 +104,10 @@ func newMicrosoftProvider(tenantID string) *OAuthProvider {
 		Scopes:       []string{"openid", "email", "profile", "User.Read"},
 		SupportsOIDC: true,
 		SupportsPKCE: true,
+		// Microsoft's v2.0 endpoint returns a refresh token only when the request
+		// explicitly includes the offline_access scope.
+		// https://learn.microsoft.com/en-us/entra/identity-platform/scopes-oidc
+		OfflineAccessScopes: []string{"offline_access"},
 	}
 }
 
@@ -103,13 +122,29 @@ func GetProvider(name string, tenantID string) (*OAuthProvider, error) {
 }
 
 // BuildAuthURL constructs the authorization URL with the required query parameters.
-func (p *OAuthProvider) BuildAuthURL(clientID, redirectURI, state, codeChallenge string) string {
+// When offlineAccess is true, the request also asks the provider to issue a
+// durable refresh token (extra scopes and/or query parameters per provider), so
+// that the persisted IdP subject token can later be refreshed instead of forcing
+// re-authentication. offlineAccess is driven by teams.store_idp_tokens; when the
+// feature is off, the URL is identical to before (FR-006).
+func (p *OAuthProvider) BuildAuthURL(clientID, redirectURI, state, codeChallenge string, offlineAccess bool) string {
+	scopes := p.Scopes
+	if offlineAccess && len(p.OfflineAccessScopes) > 0 {
+		scopes = append(append([]string{}, p.Scopes...), p.OfflineAccessScopes...)
+	}
+
 	params := url.Values{
 		"client_id":     {clientID},
 		"redirect_uri":  {redirectURI},
 		"response_type": {"code"},
-		"scope":         {strings.Join(p.Scopes, " ")},
+		"scope":         {strings.Join(scopes, " ")},
 		"state":         {state},
+	}
+
+	if offlineAccess {
+		for k, v := range p.OfflineAuthParams {
+			params.Set(k, v)
+		}
 	}
 
 	if p.SupportsPKCE && codeChallenge != "" {

@@ -136,8 +136,12 @@ func (h *OAuthHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	// Build the callback URL from the request
 	callbackURL := buildCallbackURL(r)
 
+	// Request offline access (a durable refresh token) only when the operator
+	// opted into persisting IdP subject tokens; otherwise login is unchanged.
+	offlineAccess := h.config != nil && h.config.StoreIDPTokens
+
 	// Build the authorization URL
-	authURL := provider.BuildAuthURL(h.config.OAuth.ClientID, callbackURL, state, codeChallenge)
+	authURL := provider.BuildAuthURL(h.config.OAuth.ClientID, callbackURL, state, codeChallenge, offlineAccess)
 
 	h.logger.Infow("initiating OAuth login", "provider", h.config.OAuth.Provider)
 	http.Redirect(w, r, authURL, http.StatusFound)
