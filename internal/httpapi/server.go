@@ -602,6 +602,15 @@ func (s *Server) setupRoutes() {
 		r.Post("/servers/enable_all", s.handleEnableAll)
 		r.Post("/servers/disable_all", s.handleDisableAll)
 		r.Route("/servers/{id}", func(r chi.Router) {
+			// chi routes on RawPath, so the {id} param arrives percent-encoded.
+			// Official modelcontextprotocol/registry v0.1 ids are namespace/name,
+			// so the slash reaches handlers as %2F. Decode it once here so every
+			// /servers/{id}/* sub-resource handler (tools, logs, restart, approve,
+			// scan, …) does its exact-match server lookup against the real name
+			// rather than 404ing on the encoded literal (MCP-1118, same class as
+			// MCP-1056). Centralising the decode also prevents new sub-resource
+			// routes from silently reintroducing the gap.
+			r.Use(decodeServerIDParam)
 			r.Patch("/", s.handlePatchServer)                          // Partial update server config
 			r.Delete("/", s.handleRemoveServer)                        // T002: Remove server
 			r.Post("/config-to-secret", s.handleConvertConfigToSecret) // Move a header / env value into OS keyring
@@ -2678,10 +2687,10 @@ func (s *Server) handleGetGlobalTools(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
 // @Router /api/v1/servers/{id}/logs [get]
 func (s *Server) handleGetServerLogs(w http.ResponseWriter, r *http.Request) {
-	// chi routes on RawPath, so a namespace/name server id (e.g.
-	// io.github.evidai/polymarket-guard) arrives percent-encoded. Decode it
-	// before lookup, matching handleAddFromRegistry (MCP-1111 / #598).
-	serverID := decodePathParam(chi.URLParam(r, "id"))
+	// The {id} param is percent-decoded by decodeServerIDParam middleware on the
+	// /servers/{id} subtree (MCP-1118), so a namespace/name server id such as
+	// io.github.evidai/polymarket-guard reaches us already unescaped.
+	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
 		return
@@ -4166,6 +4175,26 @@ func decodePathParam(raw string) string {
 		return decoded
 	}
 	return raw
+}
+
+// decodeServerIDParam percent-decodes the {id} path param of the /servers/{id}
+// route subtree in place. chi matches the parent /servers/{id} segment (and thus
+// populates "id") before mounting this subrouter, so the value is available to
+// this middleware. Slash-name servers (io.github.owner/repo) arrive as
+// io.github.owner%2Frepo; decoding here makes every sub-resource handler's
+// exact-match server lookup work without each one having to call
+// decodePathParam (MCP-1118).
+func decodeServerIDParam(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rctx := chi.RouteContext(r.Context()); rctx != nil {
+			for i, k := range rctx.URLParams.Keys {
+				if k == "id" {
+					rctx.URLParams.Values[i] = decodePathParam(rctx.URLParams.Values[i])
+				}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
