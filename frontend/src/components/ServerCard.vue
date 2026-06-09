@@ -344,6 +344,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
+import { oauthSignInState } from '@/utils/health'
 
 interface Props {
   server: Server
@@ -367,6 +368,12 @@ const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
 })
 
+// MCP-1821 — OAuth sign-in state (null when no sign-in is required). When set,
+// the status chip reads a calm amber "Sign-in required" instead of red
+// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA. The
+// existing health.action==='login' Login button (below) drives the action.
+const signInState = computed(() => oauthSignInState(props.server))
+
 // Unified health status computed properties
 const statusBadgeClass = computed(() => {
   const health = props.server.health
@@ -378,6 +385,8 @@ const statusBadgeClass = computed(() => {
       case 'quarantined':
         return 'badge-secondary' // purple-ish
       default:
+        // MCP-1821 — sign-in required reads amber, not red.
+        if (signInState.value) return 'badge-warning'
         // Use health level
         switch (health.level) {
           case 'healthy':
@@ -400,6 +409,8 @@ const statusBadgeClass = computed(() => {
 const statusText = computed(() => {
   const health = props.server.health
   if (health) {
+    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states.
+    if (health.admin_state === 'enabled' && signInState.value) return 'Sign-in required'
     return health.summary || health.level
   }
   // Fallback to legacy logic
