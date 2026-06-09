@@ -72,6 +72,7 @@ Servers requiring OAuth 2.1 authentication:
 | `working_dir` | string | No | Working directory for stdio servers |
 | `env` | object | No | Environment variables to pass |
 | `oauth` | object | No | OAuth configuration |
+| `auth_broker` | object | No | Server-edition per-user token brokering. See [Auth Broker](../features/auth-broker.md). The `authorization_endpoint` key is required when `auth_broker.mode` is `oauth_connect`. |
 
 ## Headers, Environment Variables, and Secrets
 
