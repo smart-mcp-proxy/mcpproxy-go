@@ -128,7 +128,7 @@ build_prompt() {
     cat << EOF
 Generate concise release notes for version ${version} of MCPProxy (Smart MCP Proxy).
 
-MCPProxy is built in two editions from the same codebase: a default Personal edition (desktop app, distributed as DMG / Windows installer / Linux tar.gz / .deb / .rpm) and a Server edition built with the \`server\` Go build tag (Docker image + multi-user OAuth, code under \`internal/teams/\`). Most changes ship in BOTH editions because shared code (\`internal/runtime/\`, \`internal/server/\`, \`internal/upstream/\`, \`frontend/\`, etc.) is compiled into both binaries.
+MCPProxy is built in two editions from the same codebase: a default Personal edition (desktop app, distributed as DMG / Windows installer / Linux tar.gz / .deb / .rpm) and a Server edition built with the \`server\` Go build tag (Docker image + multi-user OAuth, code under \`internal/serveredition/\`). Most changes ship in BOTH editions because shared code (\`internal/runtime/\`, \`internal/server/\`, \`internal/upstream/\`, \`frontend/\`, etc.) is compiled into both binaries.
 
 Commits since last release:
 ${commits}

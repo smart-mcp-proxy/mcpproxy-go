@@ -16,12 +16,12 @@
 **Purpose**: Establish the build tag architecture that separates personal and teams editions
 
 - [x] T001 [P] Create edition detection file `cmd/mcpproxy/edition.go` with `var Edition = "personal"` and `GetEdition()` function
-- [x] T002 [P] Create teams edition override file `cmd/mcpproxy/edition_teams.go` with `//go:build teams` tag that sets `Edition = "teams"`
+- [x] T002 [P] Create teams edition override file `cmd/mcpproxy/edition_teams.go` with `//go:build server` tag that sets `Edition = "teams"`
 - [x] T003 Update `cmd/mcpproxy/main.go` to log edition on startup and pass edition to server initialization
 - [x] T004 Add edition field to `/api/v1/status` response in `internal/httpapi/server.go`
 - [x] T005 Add edition to `mcpproxy version` CLI output in `cmd/mcpproxy/main.go`
 
-**Checkpoint**: `go build ./cmd/mcpproxy && ./mcpproxy version` shows "personal"; `go build -tags teams ./cmd/mcpproxy && ./mcpproxy version` shows "teams"
+**Checkpoint**: `go build ./cmd/mcpproxy && ./mcpproxy version` shows "personal"; `go build -tags server ./cmd/mcpproxy && ./mcpproxy version` shows "teams"
 
 ---
 
@@ -29,13 +29,13 @@
 
 **Purpose**: Create the teams feature registry and package skeleton with build tags
 
-- [x] T006 Create `internal/serveredition/doc.go` with `//go:build teams` tag and package documentation
+- [x] T006 Create `internal/serveredition/doc.go` with `//go:build server` tag and package documentation
 - [x] T007 Create `internal/serveredition/registry.go` with Feature struct, Register(), SetupAll() functions (build-tagged)
 - [x] T008 Create `internal/serveredition/registry_test.go` with tests verifying registration and setup (build-tagged)
-- [x] T009 Create teams registration entry point `cmd/mcpproxy/teams_register.go` with `//go:build teams` that imports `internal/serveredition` and calls `SetupAll()` during init
-- [x] T010 Verify both builds compile: `go build ./cmd/mcpproxy` (no teams code) and `go build -tags teams ./cmd/mcpproxy` (with teams skeleton)
+- [x] T009 Create teams registration entry point `cmd/mcpproxy/teams_register.go` with `//go:build server` that imports `internal/serveredition` and calls `SetupAll()` during init
+- [x] T010 Verify both builds compile: `go build ./cmd/mcpproxy` (no teams code) and `go build -tags server ./cmd/mcpproxy` (with teams skeleton)
 
-**Checkpoint**: `go test -tags teams ./internal/serveredition/...` passes; personal build has zero teams code compiled in
+**Checkpoint**: `go test -tags server ./internal/serveredition/...` passes; personal build has zero teams code compiled in
 
 ---
 
@@ -43,7 +43,7 @@
 
 **Purpose**: Create Docker distribution for teams edition and extend Makefile
 
-- [x] T011 [P] Create `Dockerfile` at repo root — multi-stage build with `golang:1.24` builder, `gcr.io/distroless/base` runtime, builds with `-tags teams`, embeds frontend, exposes 8080, entrypoint `mcpproxy serve --listen 0.0.0.0:8080`
+- [x] T011 [P] Create `Dockerfile` at repo root — multi-stage build with `golang:1.24` builder, `gcr.io/distroless/base` runtime, builds with `-tags server`, embeds frontend, exposes 8080, entrypoint `mcpproxy serve --listen 0.0.0.0:8080`
 - [x] T012 [P] Create `.dockerignore` excluding `.git`, `node_modules`, `native/`, `*.md`, test files
 - [x] T013 Add Makefile targets: `build-teams` (Go binary with teams tag), `build-docker` (Docker image), `build-deb` (placeholder echoing "TODO")
 - [x] T014 Verify `make build` still produces personal edition (no regression)
@@ -79,7 +79,7 @@
 
 **Purpose**: Extend GitHub Actions release workflow to build teams assets alongside personal
 
-- [x] T020 Add teams Linux matrix entries (amd64, arm64) to `.github/workflows/release.yml` build job — uses `-tags teams` flag, produces `mcpproxy-teams-*` archives
+- [x] T020 Add teams Linux matrix entries (amd64, arm64) to `.github/workflows/release.yml` build job — uses `-tags server` flag, produces `mcpproxy-teams-*` archives
 - [x] T021 Add `build-docker` job to `.github/workflows/release.yml` — builds and pushes `ghcr.io/smart-mcp-proxy/mcpproxy-teams:$VERSION` on tag push
 - [x] T022 Update release notes prompt in `.github/workflows/release.yml` to mention both editions
 - [x] T023 Update release asset upload to include teams archives with `mcpproxy-teams-` prefix
@@ -95,7 +95,7 @@
 - [x] T024 Update `CLAUDE.md` — add Build & Distribution section documenting `build-teams`, `build-docker`, edition detection, `internal/serveredition/` structure
 - [x] T025 Update `Makefile` help target to include new build-teams, build-docker, build-deb targets
 - [x] T026 Verify all existing tests pass: `go test ./internal/... -v` (personal build) — all pass except pre-existing `internal/server` timeout
-- [x] T027 Verify teams build tests pass: `go test -tags teams ./internal/serveredition/... -v`
+- [x] T027 Verify teams build tests pass: `go test -tags server ./internal/serveredition/... -v`
 - [x] T028 Verify E2E tests pass: `./scripts/test-api-e2e.sh` — 61/71 pass, 10 failures are pre-existing (same on clean branch)
 - [x] T029 Verify linter passes: `./scripts/run-linter.sh`
 
