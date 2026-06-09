@@ -505,7 +505,7 @@ struct ServerTableView: NSViewRepresentable {
             menu.addItem(restart)
 
             // Sign in (if auth needed) — calm, actionable affordance (MCP-1819/T3)
-            if server.health?.action == "login" {
+            if server.isOAuthLoginRequired {
                 menu.addItem(.separator())
                 let login = NSMenuItem(title: "Sign in", action: #selector(ctxLoginServer(_:)), keyEquivalent: "")
                 login.target = self

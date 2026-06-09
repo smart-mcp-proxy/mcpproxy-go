@@ -143,7 +143,7 @@ struct ServerDetailView: View {
 
             // Action buttons — OAuth login-required surfaces a calm, prominent
             // "Sign in" affordance, consistent with the Web UI (MCP-1819/T3).
-            if server.health?.action == "login" {
+            if server.isOAuthLoginRequired {
                 Button("Sign in") {
                     Task { await performAction { try await apiClient?.loginServer(server.id) }
                         actionMessage = "Sign-in started for \(server.name)"
