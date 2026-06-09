@@ -112,7 +112,7 @@ enum HealthAction: String, Codable, CaseIterable {
     /// Human-readable button label.
     var label: String {
         switch self {
-        case .login:      return "Log In"
+        case .login:      return "Sign in"
         case .restart:    return "Restart"
         case .enable:     return "Enable"
         case .approve:    return "Approve"
@@ -351,6 +351,15 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     var hasAttentionDiagnostic: Bool {
         guard let d = diagnostic, !(d.code).isEmpty else { return false }
         return d.severity == "warn" || d.severity == "error"
+    }
+
+    /// True when the server is in the OAuth login-required state (MCP-1819/T3).
+    /// `health.action == "login"` is the stable, cross-surface contract that
+    /// CLI/REST/Web-UI/tray all key off. In this state the server needs a calm,
+    /// actionable "Sign in" affordance — NOT hard-error framing — even when the
+    /// backend also attaches an error-severity diagnostic for the failed connect.
+    var isOAuthLoginRequired: Bool {
+        health?.action == "login"
     }
 
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.

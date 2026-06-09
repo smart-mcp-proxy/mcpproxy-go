@@ -504,13 +504,13 @@ struct ServerTableView: NSViewRepresentable {
             restart.representedObject = server
             menu.addItem(restart)
 
-            // Log In (if auth needed)
+            // Sign in (if auth needed) — calm, actionable affordance (MCP-1819/T3)
             if server.health?.action == "login" {
                 menu.addItem(.separator())
-                let login = NSMenuItem(title: "Log In", action: #selector(ctxLoginServer(_:)), keyEquivalent: "")
+                let login = NSMenuItem(title: "Sign in", action: #selector(ctxLoginServer(_:)), keyEquivalent: "")
                 login.target = self
                 login.representedObject = server
-                login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "login")
+                login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
                 menu.addItem(login)
             }
 

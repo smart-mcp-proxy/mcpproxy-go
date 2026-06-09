@@ -153,6 +153,14 @@ struct TrayMenu: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    // MCP-1819/T3 — surface the remediation verb (e.g. "Sign in")
+                    // explicitly so the actionable affordance is clear, not buried.
+                    if let label = server.health?.healthAction?.label {
+                        Spacer()
+                        Text(label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -244,9 +252,10 @@ struct TrayMenu: View {
             }
         }
 
-        // OAuth Login (shown when action is "login")
+        // OAuth Sign in (shown when action is "login") — calm, actionable
+        // affordance, not error framing (MCP-1819/T3).
         if server.health?.action == "login" {
-            Button("Log In") {
+            Button("Sign in") {
                 Task {
                     try? await apiClient?.loginServer(server.id)
                 }

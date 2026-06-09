@@ -117,15 +117,25 @@ final class AppState: ObservableObject {
     /// Spec 044 — servers that have an attached, classified diagnostic with
     /// warn/error severity. These drive the "Fix issues" menu group and the
     /// tray badge tint.
+    ///
+    /// MCP-1819/T3: OAuth login-required servers are excluded. Pre-T1 the
+    /// backend classifies that state as an error-severity
+    /// MCPX_UNKNOWN_UNCLASSIFIED diagnostic, which would otherwise read as a
+    /// "file a bug" hard error. A server that just needs sign-in is surfaced
+    /// calmly via `serversNeedingAttention` (the "Sign in" affordance) instead.
     var serversWithDiagnostic: [ServerStatus] {
-        servers.filter { $0.hasAttentionDiagnostic }
+        servers.filter { $0.hasAttentionDiagnostic && !$0.isOAuthLoginRequired }
     }
 
     /// Highest-severity diagnostic across enabled servers. Returns nil when
     /// no diagnostics are attached. Used by TrayIcon to colour the badge.
+    ///
+    /// MCP-1819/T3: OAuth login-required servers are skipped so a server that
+    /// merely needs sign-in does not tint the tray icon badge red/orange — the
+    /// calm "Needs Attention / Sign in" path owns that state instead.
     var worstDiagnosticSeverity: String? {
         var sawWarn = false
-        for srv in servers where srv.enabled {
+        for srv in servers where srv.enabled && !srv.isOAuthLoginRequired {
             guard let d = srv.diagnostic else { continue }
             if d.severity == "error" { return "error" }
             if d.severity == "warn" { sawWarn = true }
