@@ -46,6 +46,8 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 
 ## OAuth
 
+- [`MCPX_OAUTH_LOGIN_REQUIRED`](MCPX_OAUTH_LOGIN_REQUIRED.md) — first-time sign-in needed (amber)
+- [`MCPX_OAUTH_REAUTH_REQUIRED`](MCPX_OAUTH_REAUTH_REQUIRED.md) — stored token broke, sign in again (red)
 - [`MCPX_OAUTH_REFRESH_EXPIRED`](MCPX_OAUTH_REFRESH_EXPIRED.md) — refresh token expired
 - [`MCPX_OAUTH_REFRESH_403`](MCPX_OAUTH_REFRESH_403.md) — provider rejected refresh
 - [`MCPX_OAUTH_DISCOVERY_FAILED`](MCPX_OAUTH_DISCOVERY_FAILED.md) — `.well-known` discovery failed

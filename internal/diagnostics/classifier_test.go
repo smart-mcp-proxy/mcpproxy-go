@@ -170,6 +170,56 @@ func TestClassify_NetworkOffline(t *testing.T) {
 	}
 }
 
+// codedStub is a minimal typed error carrying an explicit Code, used to verify
+// the classifier's typed fast-path for the new OAuth login/re-auth states.
+type codedStub struct {
+	msg  string
+	code Code
+}
+
+func (e codedStub) Error() string { return e.msg }
+func (e codedStub) Code() Code    { return e.code }
+
+func TestClassify_OAuth_LoginRequired_Typed(t *testing.T) {
+	err := codedStub{msg: "OAuth authentication required for slack", code: OAuthLoginRequired}
+	got := Classify(err, ClassifierHints{Transport: "http"})
+	if got != OAuthLoginRequired {
+		t.Errorf("Classify(login typed) = %q, want %q", got, OAuthLoginRequired)
+	}
+}
+
+func TestClassify_OAuth_LoginRequired_String(t *testing.T) {
+	cases := []string{
+		"OAuth authentication required for slack - use 'mcpproxy auth login --server=slack' or tray menu",
+		"OAuth authentication required for github: login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+	}
+	for _, msg := range cases {
+		err := errors.New(msg)
+		got := Classify(err, ClassifierHints{Transport: "http"})
+		if got != OAuthLoginRequired {
+			t.Errorf("Classify(%q) = %q, want %q", msg, got, OAuthLoginRequired)
+		}
+	}
+}
+
+func TestClassify_OAuth_ReauthRequired_Typed(t *testing.T) {
+	err := codedStub{msg: "stored token broke", code: OAuthReauthRequired}
+	got := Classify(err, ClassifierHints{Transport: "http"})
+	if got != OAuthReauthRequired {
+		t.Errorf("Classify(reauth typed) = %q, want %q", got, OAuthReauthRequired)
+	}
+}
+
+func TestClassify_OAuth_ReauthRequired_String(t *testing.T) {
+	// The re-auth message contains "login available" as a substring of
+	// "re-login available"; the classifier must prefer the re-auth code.
+	err := errors.New("OAuth authentication required for slack: server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command")
+	got := Classify(err, ClassifierHints{Transport: "http"})
+	if got != OAuthReauthRequired {
+		t.Errorf("Classify(reauth string) = %q, want %q", got, OAuthReauthRequired)
+	}
+}
+
 func TestClassify_Fallback(t *testing.T) {
 	err := errors.New("something we don't know about")
 	got := Classify(err, ClassifierHints{})

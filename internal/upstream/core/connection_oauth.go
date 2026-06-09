@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 
@@ -50,6 +51,22 @@ func (e *ErrOAuthPending) Error() string {
 		return fmt.Sprintf("OAuth authentication required for %s: %s", e.ServerName, e.Message)
 	}
 	return fmt.Sprintf("OAuth authentication required for %s - use 'mcpproxy auth login --server=%s' or tray menu", e.ServerName, e.ServerName)
+}
+
+// Code attributes a stable diagnostic code so diagnostics.Classify's typed
+// fast-path resolves this to an actionable OAuth user-state instead of
+// MCPX_UNKNOWN_UNCLASSIFIED. A first-time sign-in maps to OAuthLoginRequired;
+// the "stored token broke" variant (connection_oauth.go server-5xx path) maps
+// to OAuthReauthRequired. The distinction is carried in the message text so the
+// stringified error classifies the same way downstream (e.g. health). MCP-1820.
+func (e *ErrOAuthPending) Code() diagnostics.Code {
+	lower := strings.ToLower(e.Error())
+	if strings.Contains(lower, "re-login available") ||
+		strings.Contains(lower, "re-authentication required") ||
+		strings.Contains(lower, "server error with stored token") {
+		return diagnostics.OAuthReauthRequired
+	}
+	return diagnostics.OAuthLoginRequired
 }
 
 // IsOAuthPending checks if an error is an ErrOAuthPending
@@ -873,8 +890,8 @@ func (c *Client) isOAuthError(err error) bool {
 		"OAuth authentication failed",
 		"oauth timeout",
 		"oauth error",
-		"no valid token available",  // Transport layer token check
-		"authorization required",     // Generic authorization needed
+		"no valid token available", // Transport layer token check
+		"authorization required",   // Generic authorization needed
 	}
 
 	for _, oauthErr := range oauthErrors {

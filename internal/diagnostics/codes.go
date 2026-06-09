@@ -17,7 +17,15 @@ const (
 )
 
 // OAUTH domain — OAuth 2.1 / PKCE flow failures.
+//
+// OAuthLoginRequired and OAuthReauthRequired are actionable user-states, NOT
+// faults: they describe a server waiting for the user to sign in, so they must
+// never drive a "file a bug" CTA. Login-required is the first-time sign-in
+// (amber/degraded); re-auth-required is a previously-working token that broke
+// (red/unhealthy). See MCP-1820.
 const (
+	OAuthLoginRequired    Code = "MCPX_OAUTH_LOGIN_REQUIRED"
+	OAuthReauthRequired   Code = "MCPX_OAUTH_REAUTH_REQUIRED"
 	OAuthRefreshExpired   Code = "MCPX_OAUTH_REFRESH_EXPIRED"
 	OAuthRefresh403       Code = "MCPX_OAUTH_REFRESH_403"
 	OAuthDiscoveryFailed  Code = "MCPX_OAUTH_DISCOVERY_FAILED"

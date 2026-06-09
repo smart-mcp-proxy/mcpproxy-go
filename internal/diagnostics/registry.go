@@ -97,6 +97,26 @@ func seedSTDIO() {
 
 func seedOAUTH() {
 	register(CatalogEntry{
+		Code:        OAuthLoginRequired,
+		Severity:    SeverityWarn, // amber: an expected setup step, not a fault
+		UserMessage: "This server needs you to sign in before it can connect.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Sign in", FixerKey: "oauth_reauth"},
+			{Type: FixStepLink, Label: "How OAuth sign-in works", URL: docsURL(OAuthLoginRequired)},
+		},
+		DocsURL: docsURL(OAuthLoginRequired),
+	})
+	register(CatalogEntry{
+		Code:        OAuthReauthRequired,
+		Severity:    SeverityError, // red: a previously-working token broke
+		UserMessage: "Your stored sign-in for this server is no longer valid; please sign in again.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Sign in again", FixerKey: "oauth_reauth", Destructive: true},
+			{Type: FixStepLink, Label: "Why re-authentication is needed", URL: docsURL(OAuthReauthRequired)},
+		},
+		DocsURL: docsURL(OAuthReauthRequired),
+	})
+	register(CatalogEntry{
 		Code:        OAuthRefreshExpired,
 		Severity:    SeverityError,
 		UserMessage: "The OAuth refresh token has expired; you need to log in again.",
