@@ -196,6 +196,50 @@ func TestCalculateHealth_OAuthNone(t *testing.T) {
 	assert.Equal(t, ActionLogin, result.Action)
 }
 
+// TestCalculateHealth_OAuthLoginRequired verifies that a server awaiting a
+// first-time OAuth sign-in (ErrOAuthPending deferred for tray/CLI) is reported
+// as degraded/amber with a login action — NOT unhealthy/red (MCP-1820).
+func TestCalculateHealth_OAuthLoginRequired(t *testing.T) {
+	loginErrors := []string{
+		"OAuth authentication required for slack - use 'mcpproxy auth login --server=slack' or tray menu",
+		"OAuth authentication required for github: login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command",
+	}
+	for _, state := range []string{"error", "disconnected"} {
+		for _, lastErr := range loginErrors {
+			input := HealthCalculatorInput{
+				Name:          "test-server",
+				Enabled:       true,
+				State:         state,
+				OAuthRequired: true,
+				LastError:     lastErr,
+			}
+			result := CalculateHealth(input, nil)
+			assert.Equal(t, LevelDegraded, result.Level, "state=%s err=%q", state, lastErr)
+			assert.Equal(t, "Sign-in required", result.Summary, "state=%s err=%q", state, lastErr)
+			assert.Equal(t, ActionLogin, result.Action, "state=%s err=%q", state, lastErr)
+		}
+	}
+}
+
+// TestCalculateHealth_OAuthReauthRequired verifies that a server whose stored
+// token broke (re-auth needed) stays unhealthy/red with a login action — it was
+// working before, so this is a regression the user should treat as red (MCP-1820).
+func TestCalculateHealth_OAuthReauthRequired(t *testing.T) {
+	reauthErr := "OAuth authentication required for slack: server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"
+	for _, state := range []string{"error", "disconnected"} {
+		input := HealthCalculatorInput{
+			Name:          "test-server",
+			Enabled:       true,
+			State:         state,
+			OAuthRequired: true,
+			LastError:     reauthErr,
+		}
+		result := CalculateHealth(input, nil)
+		assert.Equal(t, LevelUnhealthy, result.Level, "state=%s", state)
+		assert.Equal(t, ActionLogin, result.Action, "state=%s", state)
+	}
+}
+
 func TestCalculateHealth_UserLoggedOut(t *testing.T) {
 	input := HealthCalculatorInput{
 		Name:          "test-server",

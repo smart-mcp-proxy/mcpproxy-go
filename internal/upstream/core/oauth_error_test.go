@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -151,6 +152,41 @@ func TestErrOAuthPending_Error(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.err.Error()
 			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+// TestErrOAuthPending_Code verifies the typed diagnostic code attribution so
+// diagnostics.Classify's fast-path resolves these to actionable OAuth states
+// instead of MCPX_UNKNOWN_UNCLASSIFIED (MCP-1820).
+func TestErrOAuthPending_Code(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      *ErrOAuthPending
+		expected diagnostics.Code
+	}{
+		{
+			name:     "default message → login required",
+			err:      &ErrOAuthPending{ServerName: "github"},
+			expected: diagnostics.OAuthLoginRequired,
+		},
+		{
+			name:     "login-available message → login required",
+			err:      &ErrOAuthPending{ServerName: "slack", Message: "login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"},
+			expected: diagnostics.OAuthLoginRequired,
+		},
+		{
+			name:     "stored-token-broke message → re-auth required",
+			err:      &ErrOAuthPending{ServerName: "slack", Message: "server error with stored token - re-login available via Web UI, system tray menu, or 'mcpproxy auth login' CLI command"},
+			expected: diagnostics.OAuthReauthRequired,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.err.Code())
+			// Must also resolve through the public classifier fast-path.
+			assert.Equal(t, tt.expected, diagnostics.Classify(tt.err, diagnostics.ClassifierHints{}))
 		})
 	}
 }

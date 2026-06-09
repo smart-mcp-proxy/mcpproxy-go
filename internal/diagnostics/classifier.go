@@ -63,6 +63,19 @@ func Classify(err error, hints ClassifierHints) Code {
 func classifyOAuth(err error, _ ClassifierHints) Code {
 	msg := strings.ToLower(err.Error())
 	switch {
+	// Re-auth (a previously-working stored token broke) is matched BEFORE the
+	// login-required backstop because "re-login available" contains the
+	// "login available" substring; the order of these two cases is load-bearing.
+	case strings.Contains(msg, "re-login available"),
+		strings.Contains(msg, "re-authentication required"),
+		strings.Contains(msg, "server error with stored token"):
+		return OAuthReauthRequired
+	// First-time sign-in deferred to the user (ErrOAuthPending text). These are
+	// actionable user-states, not faults — keep them out of UNKNOWN.
+	case strings.Contains(msg, "oauth authentication required"),
+		strings.Contains(msg, "login available"),
+		strings.Contains(msg, "mcpproxy auth login"):
+		return OAuthLoginRequired
 	case strings.Contains(msg, "refresh_token") && strings.Contains(msg, "expired"),
 		strings.Contains(msg, "refresh token has expired"),
 		strings.Contains(msg, "refresh token is expired"):
