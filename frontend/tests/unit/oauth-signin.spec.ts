@@ -170,4 +170,18 @@ describe('ServerCard status chip — OAuth sign-in (MCP-1857)', () => {
     expect(chip.text()).toBe('Disconnected')
     expect(chip.classes()).toContain('badge-error')
   })
+
+  it('reads amber "Sign-in required" for a quarantined AND login-required server (chip precedence)', () => {
+    // Real backend shape: a quarantined server can still require OAuth sign-in
+    // (AdminState=Quarantined + MCPX_OAUTH_LOGIN_REQUIRED). The actionable amber
+    // sign-in chip must win over the purple quarantine chip.
+    const card = mountCard(makeServer({
+      quarantined: true,
+      health: { level: 'unhealthy', admin_state: 'quarantined', summary: 'login required', action: 'login' },
+    }))
+    const chip = card.find('[data-test="server-status-chip"]')
+    expect(chip.text()).toBe('Sign-in required')
+    expect(chip.classes()).toContain('badge-warning')
+    expect(chip.classes()).not.toContain('badge-secondary')
+  })
 })

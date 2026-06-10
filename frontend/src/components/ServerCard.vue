@@ -384,6 +384,10 @@ const statusBadgeClass = computed(() => {
       case 'disabled':
         return 'badge-neutral' // gray
       case 'quarantined':
+        // MCP-1821 — a quarantined server can ALSO be login-required; the
+        // actionable amber "Sign-in required" chip takes precedence over the
+        // purple quarantine chip so the user sees the next action.
+        if (signInState.value) return 'badge-warning'
         return 'badge-secondary' // purple-ish
       default:
         // MCP-1821 — sign-in required reads amber, not red.
@@ -413,8 +417,9 @@ const statusBadgeClass = computed(() => {
 const statusText = computed(() => {
   const health = props.server.health
   if (health) {
-    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states.
-    if (health.admin_state === 'enabled' && signInState.value) return 'Sign-in required'
+    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states,
+    // including a quarantined-and-login-required server (quarantine + sign-in coexist).
+    if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
     return health.summary || health.level
   }
   // Fallback to legacy logic
