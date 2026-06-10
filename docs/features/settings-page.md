@@ -12,7 +12,7 @@ friendly, prioritized form sections instead of raw JSON:
   isolation, sensitive-data detection, output validation, output sanitisation,
   activity retention, logging, TLS, …).
 - **Raw JSON** — the full Monaco editor, kept as an escape hatch.
-- **Server edition** — server build only.
+- **Server Edition** — server edition only.
 
 ## How saving works
 

@@ -5,7 +5,7 @@
 
 ## Summary
 
-Restructure the MCPProxy repository to support two editions (Personal and Teams) built from the same codebase using Go build tags. Personal is the default build; Teams requires `-tags teams`. Add Dockerfile for teams, `native/` directory skeleton for future Swift/C# tray apps, extended Makefile, and edition self-identification.
+Restructure the MCPProxy repository to support two editions (Personal and Teams) built from the same codebase using Go build tags. Personal is the default build; Teams requires `-tags server`. Add Dockerfile for teams, `native/` directory skeleton for future Swift/C# tray apps, extended Makefile, and edition self-identification.
 
 ## Technical Context
 
@@ -60,13 +60,13 @@ specs/029-mcpproxy-teams/
 ```text
 cmd/mcpproxy/
 ├── main.go                      # Shared entry point (modify: add edition variable)
-├── teams_register.go            # NEW: //go:build teams — registers teams features
+├── teams_register.go            # NEW: //go:build server — registers teams features
 └── edition.go                   # NEW: default edition = "personal"
-    edition_teams.go             # NEW: //go:build teams — overrides to "teams"
+    edition_teams.go             # NEW: //go:build server — overrides to "teams"
 
 internal/
 ├── teams/                       # NEW: teams-only skeleton
-│   ├── doc.go                   # Package doc, //go:build teams
+│   ├── doc.go                   # Package doc, //go:build server
 │   ├── registry.go              # Feature registry (init pattern)
 │   └── registry_test.go         # Verify registration works
 ├── httpapi/

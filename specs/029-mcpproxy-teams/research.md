@@ -2,7 +2,7 @@
 
 ## Go Build Tags Pattern
 
-**Decision**: Use `//go:build teams` file-level tags to isolate teams-only code.
+**Decision**: Use `//go:build server` file-level tags to isolate teams-only code.
 
 **Rationale**: Go build tags are the idiomatic way to compile different feature sets from the same codebase. The `init()` registration pattern allows teams packages to self-register without modifying shared code paths.
 
