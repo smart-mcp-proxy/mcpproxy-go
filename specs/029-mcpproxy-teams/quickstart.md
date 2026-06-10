@@ -15,7 +15,7 @@ go build -ldflags "..." -o mcpproxy ./cmd/mcpproxy
 ```bash
 make build-teams
 # or directly:
-go build -tags teams -ldflags "..." -o mcpproxy-teams ./cmd/mcpproxy
+go build -tags server -ldflags "..." -o mcpproxy-teams ./cmd/mcpproxy
 ./mcpproxy-teams version
 # MCPProxy v0.21.0 (teams) linux/amd64
 ```
@@ -45,7 +45,7 @@ curl http://localhost:8080/api/v1/status | jq .edition
 ```bash
 # Run tests (both editions)
 go test ./internal/... -v                    # personal (default)
-go test -tags teams ./internal/... -v        # teams (includes teams tests)
+go test -tags server ./internal/... -v        # teams (includes teams tests)
 
 # Lint
 ./scripts/run-linter.sh

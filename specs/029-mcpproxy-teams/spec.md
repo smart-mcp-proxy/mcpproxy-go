@@ -224,11 +224,11 @@ The proxy provides a web interface where users log in via their identity provide
 **Backward Compatibility**
 
 - **FR-037**: When operating in personal mode (default), the system MUST behave identically to the current single-user version with no team features active.
-- **FR-038**: The system MUST be built as a separate binary from the personal edition using Go build tags (`-tags teams`), from the same repository and `cmd/mcpproxy` entry point.
+- **FR-038**: The system MUST be built as a separate binary from the personal edition using Go build tags (`-tags server`), from the same repository and `cmd/mcpproxy` entry point.
 
 **Build & Distribution**
 
-- **FR-039**: The personal edition MUST be the default build output (`go build ./cmd/mcpproxy`). The teams edition MUST require an explicit build tag (`go build -tags teams ./cmd/mcpproxy`).
+- **FR-039**: The personal edition MUST be the default build output (`go build ./cmd/mcpproxy`). The teams edition MUST require an explicit build tag (`go build -tags server ./cmd/mcpproxy`).
 - **FR-040**: The teams edition MUST be distributed as a Docker image (`ghcr.io/smart-mcp-proxy/mcpproxy-teams`), a `.deb` package for Ubuntu/Debian, and a Linux binary tarball.
 - **FR-041**: The personal edition MUST be distributed as macOS DMG installer (with native Swift tray app), Windows MSI/EXE installer (with native C# tray app), Linux binary tarball, and via Homebrew.
 - **FR-042**: Both editions MUST be released under a single GitHub release tag (e.g., `v0.21.0`) with assets clearly named by edition (`mcpproxy-*` for personal, `mcpproxy-teams-*` for teams).
@@ -272,7 +272,7 @@ The proxy provides a web interface where users log in via their identity provide
 - Agent token maximum per user follows the same limit as the personal edition (10 tokens per user).
 - Admin designation is static per configuration (email list or IdP claim) — there is no in-app role assignment UI in v1.
 - Server template definitions are static (shipped with the binary + admin-defined in config) — there is no template marketplace or community sharing.
-- Both editions are built from the same repository (`mcpproxy-go`) using Go build tags. Teams-only code lives in `internal/teams/` with `//go:build teams` guards. No `pkg/` migration is needed.
+- Both editions are built from the same repository (`mcpproxy-go`) using Go build tags. Teams-only code lives in `internal/serveredition/` with `//go:build server` guards. No `pkg/` migration is needed.
 - Data retention for activity logs follows the same policy as the personal edition — configurable, with no default auto-purge.
 
 ## Scope Boundaries
@@ -291,7 +291,7 @@ The proxy provides a web interface where users log in via their identity provide
 - Activity log with user identity and filtering
 - Web UI: login, dashboard, admin panel
 - Backward-compatible personal mode
-- Same-repo build tag architecture (`-tags teams`)
+- Same-repo build tag architecture (`-tags server`)
 - Single GitHub release with labeled assets per edition
 - Docker image and deb package for teams distribution
 - Native tray apps: Swift (macOS), C# (Windows) for personal distribution

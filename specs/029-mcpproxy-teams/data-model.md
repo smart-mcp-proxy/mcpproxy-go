@@ -6,7 +6,7 @@ This restructure introduces no new data entities. It adds build-time metadata on
 
 | Field | Type | Source | Description |
 |-------|------|--------|-------------|
-| `Edition` | `string` | Build tag | `"personal"` (default) or `"teams"` (with `-tags teams`) |
+| `Edition` | `string` | Build tag | `"personal"` (default) or `"teams"` (with `-tags server`) |
 | `Version` | `string` | ldflags | Semantic version from git tag |
 | `Commit` | `string` | ldflags | Short git commit hash |
 | `BuildDate` | `string` | ldflags | ISO 8601 UTC build timestamp |
