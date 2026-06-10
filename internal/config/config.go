@@ -52,6 +52,51 @@ func (d Duration) Duration() time.Duration {
 	return time.Duration(d)
 }
 
+// Built-in defaults for the discovery/health-check loops (spec 074). They live
+// here (not in DefaultConfig) so an unset key resolves to the historical
+// behaviour and existing configs are unchanged (SC-005).
+const (
+	defaultHealthCheckInterval   = 30 * time.Second
+	defaultToolDiscoveryInterval = 5 * time.Minute
+)
+
+// resolveInterval applies the per-server → global → default precedence for an
+// optional *Duration. A non-nil pointer wins at each level, including a pointer
+// to 0 ("disabled"). Returns the resolved duration; a value <= 0 means the
+// caller should disable the corresponding loop.
+func resolveInterval(server, global *Duration, def time.Duration) time.Duration {
+	if server != nil {
+		return server.Duration()
+	}
+	if global != nil {
+		return global.Duration()
+	}
+	return def
+}
+
+// ResolveHealthCheckInterval resolves the effective health-check probe interval
+// for a server: per-server override → global → 30s default. A resolved value
+// <= 0 disables the periodic probe for that server (spec 074, FR-006).
+func (c *Config) ResolveHealthCheckInterval(sc *ServerConfig) time.Duration {
+	var server *Duration
+	if sc != nil {
+		server = sc.HealthCheckInterval
+	}
+	return resolveInterval(server, c.HealthCheckInterval, defaultHealthCheckInterval)
+}
+
+// ResolveToolDiscoveryInterval resolves the effective tool-discovery sweep
+// interval: per-server override → global → 5m default. A resolved value <= 0
+// disables the periodic sweep (connect-time + reactive list_changed discovery
+// still run). The periodic index rebuild is global; pass nil for the sweep.
+func (c *Config) ResolveToolDiscoveryInterval(sc *ServerConfig) time.Duration {
+	var server *Duration
+	if sc != nil {
+		server = sc.ToolDiscoveryInterval
+	}
+	return resolveInterval(server, c.ToolDiscoveryInterval, defaultToolDiscoveryInterval)
+}
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen       string `json:"listen" mapstructure:"listen"`
@@ -62,12 +107,25 @@ type Config struct {
 	EnableTray  bool            `json:"enable_tray,omitempty" mapstructure:"tray"`
 	DebugSearch bool            `json:"debug_search" mapstructure:"debug-search"`
 	Servers     []*ServerConfig `json:"mcpServers" mapstructure:"servers"`
+	// Profiles are optional named, server-scoped views exposed at /mcp/p/<name>
+	// (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
+	// without this key serialize byte-identically (SC-004).
+	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
 	TopK               int      `json:"top_k,omitempty" mapstructure:"top-k"`
 	ToolsLimit         int      `json:"tools_limit" mapstructure:"tools-limit"`
 	ToolResponseLimit  int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
 	CallToolTimeout    Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
 	MaxResultSizeChars int      `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"` // Advertised on every tool as `_meta.anthropic/maxResultSizeChars`; raises Claude Code's inline-response ceiling from 50k to up to 500k chars. Set to 0 to disable.
+
+	// Discovery & health-check cadence (spec 074, #608). Both are *Duration
+	// tri-state pointers: nil = inherit the built-in default; a pointer to 0s =
+	// the loop is disabled; a positive value = that interval. Defaults live only
+	// in the resolvers (ResolveHealthCheckInterval / ResolveToolDiscoveryInterval)
+	// so an unset key behaves exactly as before this feature (SC-005). Validated
+	// in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
+	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health-check-interval" swaggertype:"string"`
+	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool-discovery-interval" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -85,6 +143,10 @@ type Config struct {
 
 	// Internal field to track if API key was explicitly set in config
 	apiKeyExplicitlySet bool `json:"-"`
+
+	// profileWarnings holds non-fatal Spec 057 profile diagnostics (unknown /
+	// empty servers) captured during Validate(), for the boot path to log.
+	profileWarnings []string `json:"-"`
 
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
@@ -257,8 +319,19 @@ type ServerConfig struct {
 	// mcpproxy starts the process AND connects via network. Stdio servers ignore
 	// this field. Zero or unset → 30s default.
 	LauncherWaitTimeout Duration `json:"launcher_wait_timeout,omitempty" mapstructure:"launcher_wait_timeout" swaggertype:"string"`
-	EnabledTools        []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
-	DisabledTools       []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
+
+	// Per-server discovery & health-check overrides (spec 074). Same *Duration
+	// tri-state as the global keys: nil = inherit the global value (or default),
+	// pointer to 0s = disabled for this server, positive = that interval.
+	// HealthCheckInterval is fully wired into the per-server health loop;
+	// ToolDiscoveryInterval is accepted/validated and round-trips for
+	// forward-compat, but the periodic index sweep is governed by the global
+	// cadence in this iteration (see spec 074 plan §C).
+	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health_check_interval" swaggertype:"string"`
+	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool_discovery_interval" swaggertype:"string"`
+
+	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
+	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
 	// SourceRegistryID records which registry this server was added from (empty
 	// for manually-configured servers). MCP-866: surfaced in the approval /
@@ -1257,6 +1330,14 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		})
 	}
 
+	// Validate global discovery/health-check intervals (spec 074, FR-008).
+	if e := validateIntervalBound("health_check_interval", c.HealthCheckInterval, 5*time.Second, time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+	if e := validateIntervalBound("tool_discovery_interval", c.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+
 	// Validate code execution configuration (0 means use default)
 	if c.CodeExecutionTimeoutMs != 0 && (c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000) {
 		errors = append(errors, ValidationError{
@@ -1365,6 +1446,14 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		// Spec 074: per-upstream auth_broker validation + default application.
 		// No-op in the personal edition (stub); enforced in the server edition.
 		errors = append(errors, validateServerAuthBroker(server, fieldPrefix)...)
+
+		// Spec 074: per-server discovery/health-check interval overrides.
+		if e := validateIntervalBound(fieldPrefix+".health_check_interval", server.HealthCheckInterval, 5*time.Second, time.Hour); e != nil {
+			errors = append(errors, *e)
+		}
+		if e := validateIntervalBound(fieldPrefix+".tool_discovery_interval", server.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+			errors = append(errors, *e)
+		}
 	}
 
 	// Validate DataDir exists (if specified and not empty).
@@ -1403,6 +1492,27 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	}
 
 	return errors
+}
+
+// validateIntervalBound enforces the tri-state interval contract (spec 074,
+// FR-008): nil is fine (inherit), 0s is fine (disabled), and any other value
+// must fall within [min, max]. Returns nil when valid, or a ValidationError
+// with a human-readable, actionable message.
+func validateIntervalBound(field string, d *Duration, minVal, maxVal time.Duration) *ValidationError {
+	if d == nil {
+		return nil
+	}
+	v := d.Duration()
+	if v == 0 {
+		return nil // explicit "disabled"
+	}
+	if v < minVal || v > maxVal {
+		return &ValidationError{
+			Field:   field,
+			Message: fmt.Sprintf("must be 0s (disabled) or between %s and %s, got %s", minVal, maxVal, v),
+		}
+	}
+	return nil
 }
 
 // isValidListenAddr checks if the listen address format is valid
@@ -1450,6 +1560,15 @@ func (c *Config) Validate() error {
 		// Return first error for backward compatibility
 		return fmt.Errorf("%s", errors[0].Error())
 	}
+
+	// Validate profiles (Spec 057): fatal rules (invalid/reserved/duplicate slug)
+	// fail the load; soft rules (unknown/empty servers) are stashed as warnings
+	// for the boot path to log via its logger (see ProfileWarnings).
+	profileWarnings, profileErr := ValidateProfiles(c)
+	if profileErr != nil {
+		return profileErr
+	}
+	c.profileWarnings = profileWarnings
 
 	// Handle API key generation if not configured
 	// Empty string means authentication disabled, nil means auto-generate

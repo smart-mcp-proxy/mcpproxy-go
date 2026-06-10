@@ -165,4 +165,4 @@ CLI commands automatically detect and use Unix socket/named pipe communication w
 
 Files:
 - `main.log` - Main application log
-- `server-{name}.log` - Per-server logs
+- `server-{name}.log` - Per-server logs (reserved characters in `{name}`, e.g. the `/` in registry names, are sanitized to `_`)

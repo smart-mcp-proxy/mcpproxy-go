@@ -23,6 +23,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
@@ -420,9 +421,10 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 // arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust string, requestBytes, responseBytes int) {
+// profile is the Spec 057 profile slug for /mcp/p/<slug> calls - optional (FR-011)
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, requestBytes, responseBytes)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes)
 	}
 }
 
@@ -441,6 +443,17 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.EmitActivityInternalToolCall(internalToolName, targetServer, targetTool, toolVariant, sessionID, requestID, status, errorMsg, durationMs, arguments, response, intent, contentTrust)
 	}
+}
+
+// profileSlugFromContext returns the active profile slug for a /mcp/p/<slug>
+// request, or "" when the request did not enter via a profile URL (Spec 057
+// FR-011). The slug is threaded into the activity emitter so it lands at the
+// top-level metadata["profile"], not nested under metadata.intent.
+func profileSlugFromContext(ctx context.Context) string {
+	if scope := profile.ProfileScopeFromContext(ctx); scope != nil {
+		return scope.Name
+	}
+	return ""
 }
 
 // buildCallToolVariantTool constructs the mcp.Tool definition for a single
@@ -1111,6 +1124,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// want to repeat per result.
 	authCtx := auth.AuthContextFromContext(ctx)
 	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
+	// Spec 057: profile scope filter — independent of agent-scope (nil = allow all).
+	profileScope := profile.ProfileScopeFromContext(ctx)
 
 	// Spec 049: opt-in discovery of locked tools. When false (default) the
 	// behavior below is byte-for-byte identical to before — disabled tools are
@@ -1140,6 +1155,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// so an agent never learns a locked tool exists on a server it cannot
 		// access.
 		if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
+			continue
+		}
+		// Spec 057: profile filter — runs independently of agent-scope so that
+		// unauthenticated /mcp/p/<slug> connections (AdminContext) are still filtered.
+		if !profileScope.Allows(serverName) {
 			continue
 		}
 
@@ -1525,6 +1545,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
 	}
 
+	// Spec 057: profile filter — runs independently of agent-scope so that
+	// unauthenticated /mcp/p/<slug> connections (AdminContext) are still filtered.
+	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
+		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
+		return mcp.NewToolResultError(errMsg), nil
+	}
+
 	// Spec 028: Enforce agent token scope restrictions
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		// Check server scope
@@ -1602,6 +1630,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
 
+	// Spec 057 FR-011: profile slug for /mcp/p/<slug> calls, tagged on every
+	// activity record (success AND error paths) at top-level metadata["profile"].
+	profileSlug := profileSlugFromContext(ctx)
+
 	// Spec 028: Inject auth identity into a separate copy for activity logging only.
 	// The original args must not be mutated — upstream servers reject unknown fields
 	// (e.g. FastMCP's Pydantic validate_call). See #322.
@@ -1670,7 +1702,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, 0, 0)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -1695,7 +1727,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			intentMap = intent.ToMap()
 		}
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -1792,7 +1824,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0)
 
 		// Spec 024: Emit internal tool call event for error
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -1888,7 +1920,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, activityRequestBytes, activityResponseBytes)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes)
 
 	// Spec 024: Emit internal tool call event for success
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -2067,7 +2099,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			}
 			// Log the early failure to activity (Spec 024)
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", 0, 0)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -2076,7 +2108,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
 		// Log the early failure to activity (Spec 024)
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2198,7 +2230,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		// Emit activity completed event for error with determined source (legacy - no intent)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -2286,7 +2318,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Emit activity completed event for success with determined source (legacy - no intent)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", legacyRequestBytes, legacyResponseBytes)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes)
 
 	return forwarded, nil
 }
@@ -2771,6 +2803,18 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		var filtered []*config.ServerConfig
 		for _, s := range servers {
 			if authCtx.CanAccessServer(s.Name) {
+				filtered = append(filtered, s)
+			}
+		}
+		servers = filtered
+	}
+
+	// Spec 057 (FR-004): Filter servers to only those visible in the active profile.
+	// Independent of agent-scope so unauthenticated /mcp/p/<slug> connections are filtered.
+	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil {
+		var filtered []*config.ServerConfig
+		for _, s := range servers {
+			if profileScope.Allows(s.Name) {
 				filtered = append(filtered, s)
 			}
 		}

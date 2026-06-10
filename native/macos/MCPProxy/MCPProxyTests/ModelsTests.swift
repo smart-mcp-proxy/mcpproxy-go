@@ -145,7 +145,7 @@ final class ModelsTests: XCTestCase {
     // MARK: - HealthAction Enum
 
     func testHealthActionLabels() {
-        XCTAssertEqual(HealthAction.login.label, "Log In")
+        XCTAssertEqual(HealthAction.login.label, "Sign in")
         XCTAssertEqual(HealthAction.restart.label, "Restart")
         XCTAssertEqual(HealthAction.enable.label, "Enable")
         XCTAssertEqual(HealthAction.approve.label, "Approve")

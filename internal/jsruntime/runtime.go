@@ -15,9 +15,16 @@ type ExecutionOptions struct {
 	Input          map[string]interface{} // Input data accessible as global `input` variable
 	TimeoutMs      int                    // Execution timeout in milliseconds
 	MaxToolCalls   int                    // Maximum number of call_tool() invocations (0 = unlimited)
-	AllowedServers []string               // Whitelist of allowed server names (empty = all allowed)
+	AllowedServers []string               // Whitelist of allowed server names (empty = all allowed, unless RestrictToAllowed)
 	ExecutionID    string                 // Unique execution ID for logging (auto-generated if empty)
 	Language       string                 // Source language: "javascript" (default) or "typescript"
+
+	// RestrictToAllowed enforces AllowedServers even when it is empty. Set by the
+	// Spec 057 profile path: an active profile with an empty effective server set
+	// (deny-all profile, or a non-overlapping token∩profile) must deny ALL
+	// call_tool() invocations rather than fall back to the "empty = allow all"
+	// default. Leave false for unrestricted code_execution and agent-token scopes.
+	RestrictToAllowed bool
 
 	// Auth enforcement (Spec 031)
 	AuthContext        *AuthInfo            // Auth context for permission enforcement (nil = no restrictions)
@@ -73,16 +80,17 @@ type ToolCaller interface {
 
 // ExecutionContext tracks the state of a single JavaScript execution
 type ExecutionContext struct {
-	ExecutionID      string
-	StartTime        time.Time
-	EndTime          *time.Time
-	Status           string // "running", "success", "error", "timeout"
-	ToolCalls        []ToolCallRecord
-	ResultValue      interface{}
-	ErrorDetails     *JsError
-	toolCaller       ToolCaller
-	maxToolCalls     int
-	allowedServerMap map[string]bool
+	ExecutionID       string
+	StartTime         time.Time
+	EndTime           *time.Time
+	Status            string // "running", "success", "error", "timeout"
+	ToolCalls         []ToolCallRecord
+	ResultValue       interface{}
+	ErrorDetails      *JsError
+	toolCaller        ToolCaller
+	maxToolCalls      int
+	allowedServerMap  map[string]bool
+	restrictToAllowed bool // enforce allowedServerMap even when empty (Spec 057 deny-all profile)
 
 	// Auth enforcement (Spec 031)
 	authInfo           *AuthInfo
@@ -133,6 +141,7 @@ func Execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 		toolCaller:         caller,
 		maxToolCalls:       opts.MaxToolCalls,
 		allowedServerMap:   make(map[string]bool),
+		restrictToAllowed:  opts.RestrictToAllowed,
 		authInfo:           opts.AuthContext,
 		toolAnnotationFunc: opts.ToolAnnotationFunc,
 		maxPermissionLevel: "",
@@ -300,8 +309,10 @@ func (ec *ExecutionContext) makeCallToolFunction(vm *goja.Runtime) func(goja.Fun
 			})
 		}
 
-		// Check allowed servers
-		if len(ec.allowedServerMap) > 0 && !ec.allowedServerMap[serverName] {
+		// Check allowed servers. When restrictToAllowed is set (active Spec 057
+		// profile), the map is enforced even when empty — an empty effective set
+		// means "deny everything". Otherwise an empty map means "no restriction".
+		if (ec.restrictToAllowed || len(ec.allowedServerMap) > 0) && !ec.allowedServerMap[serverName] {
 			return vm.ToValue(map[string]interface{}{
 				"ok": false,
 				"error": map[string]interface{}{

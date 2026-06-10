@@ -772,7 +772,15 @@ func runUpstreamLogsFromFile(globalConfig *config.Config, serverName string) err
 		}
 	}
 
-	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+	logFile := filepath.Join(logDir, logs.ServerLogFilename(serverName))
+
+	// Defense-in-depth: logs.ServerLogFilename already sanitizes the (user-controlled)
+	// server name to a single path element, but verify the resolved path stays inside
+	// logDir before it reaches os.Stat/tail so a crafted name can never escape the log
+	// directory (path-injection barrier).
+	if !strings.HasPrefix(filepath.Clean(logFile), filepath.Clean(logDir)+string(os.PathSeparator)) {
+		return fmt.Errorf("invalid server name: %s", serverName)
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {

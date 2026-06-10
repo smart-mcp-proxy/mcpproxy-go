@@ -4,7 +4,7 @@
       <!-- Header -->
       <div class="flex justify-between items-start mb-4">
         <div class="flex-1 min-w-0 mr-2">
-          <h3 class="card-title text-lg truncate">{{ server.name }}</h3>
+          <h3 class="card-title text-lg truncate" :title="server.name" data-test="server-card-title">{{ displayName }}</h3>
           <p class="text-sm text-base-content/70 truncate">
             {{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}
           </p>
@@ -19,6 +19,7 @@
             statusTooltip ? 'tooltip tooltip-left' : ''
           ]"
           :data-tip="statusTooltip"
+          data-test="server-status-chip"
         >
           {{ statusText }}
         </div>
@@ -128,7 +129,7 @@
         </svg>
         <span class="text-xs flex-1">{{ toolQuarantineSummary }}</span>
         <router-link
-          :to="`/servers/${server.name}?tab=tools`"
+          :to="serverDetailPath(server.name, 'tools')"
           class="btn btn-xs btn-warning"
         >
           Review
@@ -180,7 +181,7 @@
 
         <router-link
           v-if="healthAction === 'view_logs'"
-          :to="`/servers/${server.name}?tab=logs`"
+          :to="serverDetailPath(server.name, 'logs')"
           class="btn btn-sm btn-primary"
         >
           View Logs
@@ -196,7 +197,7 @@
 
         <router-link
           v-if="healthAction === 'configure'"
-          :to="`/servers/${server.name}?tab=config`"
+          :to="serverDetailPath(server.name, 'config')"
           class="btn btn-sm btn-primary"
         >
           Configure
@@ -231,7 +232,7 @@
           </div>
           <router-link
             v-else
-            :to="`/servers/${server.name}?tab=security`"
+            :to="serverDetailPath(server.name, 'security')"
             class="btn btn-sm btn-outline btn-ghost"
             title="Security Scan"
           >
@@ -243,8 +244,9 @@
         </template>
 
         <router-link
-          :to="`/servers/${server.name}`"
+          :to="serverDetailPath(server.name)"
           class="btn btn-sm btn-outline"
+          data-test="server-detail-link"
         >
           Details
         </router-link>
@@ -286,7 +288,7 @@
           </button>
           <router-link
             v-if="approveDialogMode === 'no_scan'"
-            :to="`/servers/${server.name}?tab=security`"
+            :to="serverDetailPath(server.name, 'security')"
             class="btn btn-primary"
             @click="showApproveConfirmation = false"
           >
@@ -342,12 +344,18 @@ import type { Server } from '@/types'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
+import { oauthSignInState } from '@/utils/health'
 
 interface Props {
   server: Server
 }
 
 const props = defineProps<Props>()
+
+// MCP-1112: title-preferring display label. The '/'-safe detail links call
+// serverDetailPath() directly in the template.
+const displayName = computed(() => serverDisplayName(props.server))
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -361,6 +369,12 @@ const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
 })
 
+// MCP-1821 — OAuth sign-in state (null when no sign-in is required). When set,
+// the status chip reads a calm amber "Sign-in required" instead of red
+// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA. The
+// existing health.action==='login' Login button (below) drives the action.
+const signInState = computed(() => oauthSignInState(props.server))
+
 // Unified health status computed properties
 const statusBadgeClass = computed(() => {
   const health = props.server.health
@@ -370,8 +384,14 @@ const statusBadgeClass = computed(() => {
       case 'disabled':
         return 'badge-neutral' // gray
       case 'quarantined':
+        // MCP-1821 — a quarantined server can ALSO be login-required; the
+        // actionable amber "Sign-in required" chip takes precedence over the
+        // purple quarantine chip so the user sees the next action.
+        if (signInState.value) return 'badge-warning'
         return 'badge-secondary' // purple-ish
       default:
+        // MCP-1821 — sign-in required reads amber, not red.
+        if (signInState.value) return 'badge-warning'
         // Use health level
         switch (health.level) {
           case 'healthy':
@@ -386,6 +406,9 @@ const statusBadgeClass = computed(() => {
     }
   }
   // Fallback to legacy logic
+  // MCP-1857 — a diagnostic-only OAuth login state (no health object) still
+  // reads calm amber, not red, mirroring the in-health branch above.
+  if (signInState.value) return 'badge-warning'
   if (props.server.connected) return 'badge-success'
   if (props.server.connecting) return 'badge-warning'
   return 'badge-error'
@@ -394,9 +417,15 @@ const statusBadgeClass = computed(() => {
 const statusText = computed(() => {
   const health = props.server.health
   if (health) {
+    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states,
+    // including a quarantined-and-login-required server (quarantine + sign-in coexist).
+    if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
     return health.summary || health.level
   }
   // Fallback to legacy logic
+  // MCP-1857 — surface the actionable "Sign-in required" for a diagnostic-only
+  // OAuth login state even when the record carries no health object.
+  if (signInState.value) return 'Sign-in required'
   if (props.server.connected) return 'Connected'
   if (props.server.connecting) return 'Connecting'
   return 'Disconnected'

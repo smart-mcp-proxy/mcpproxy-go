@@ -96,6 +96,62 @@ MCPProxy looks for configuration in these locations (in order):
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited) |
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 
+### Discovery & Health Checks
+
+mcpproxy keeps each upstream connection alive and its tool index fresh with two
+background loops. Both intervals are tunable globally and per server, so you can
+quiet a chatty upstream that returns a large tool catalog.
+
+```json
+{
+  "health_check_interval": "30s",
+  "tool_discovery_interval": "5m"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `health_check_interval` | duration | `"30s"` | How often to probe each connected server for liveness with a lightweight MCP `ping`. `"0s"` disables the periodic probe. Range: `5s`–`1h`. **Does not apply to Docker-isolated servers** (see note below). |
+| `tool_discovery_interval` | duration | `"5m"` | How often to re-list every server's tools to rebuild the search index. `"0s"` disables the periodic sweep. Range: `30s`–`24h`. Applies to all server types, including Docker. |
+
+> **Docker-isolated servers.** `health_check_interval` has **no effect** on
+> Docker-isolated servers. Their liveness is monitored separately at the
+> container level on a fixed internal cadence (not an MCP `ping`), so the
+> periodic ping probe is intentionally skipped for them. `tool_discovery_interval`
+> still applies to Docker servers. Remote (HTTP/SSE) servers benefit most from
+> the `ping` switch, since both the probe and the former `tools/list` crossed
+> the network.
+
+**Liveness uses `ping`, not `tools/list`.** The health-check loop issues the
+MCP-standard `ping` request rather than re-listing every tool, so an idle proxy
+no longer generates large recurring `tools/list` traffic to upstream servers
+(GitHub [#608](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/608)). Tool
+changes are still picked up reactively whenever a server pushes
+`notifications/tools/list_changed`.
+
+**Disabling a loop (`"0s"`).** Set either key to `"0s"` to turn the
+corresponding loop off:
+
+- `health_check_interval: "0s"` — no periodic liveness probe. A dead transport
+  is then detected lazily, on the next real tool call or discovery sweep, rather
+  than proactively.
+- `tool_discovery_interval: "0s"` — no periodic index rebuild. Tools are still
+  discovered at connect time and whenever a server pushes
+  `notifications/tools/list_changed`. **Trade-off:** a server that does *not*
+  support `list_changed` will not have new/removed tools reflected until it
+  reconnects or you trigger a manual refresh.
+
+An unset key behaves exactly as before this feature (the built-in default), and
+a change to either interval takes effect on the next cycle without restarting
+the proxy.
+
+> **Per-server override.** Both keys can also be set on an individual server
+> entry under `mcpServers[]` (see [Server Fields](#server-fields)) to override
+> the global value for just that server; the per-server value wins, and `"0s"`
+> disables the loop for that server only. A dedicated per-server form control in
+> the Web UI / macOS app is planned; for now set per-server overrides via the
+> Raw JSON editor or the REST API.
+
 ### Debug & Development
 
 ```json
@@ -150,6 +206,8 @@ MCPProxy looks for configuration in these locations (in order):
 | `working_dir` | string | No | Working directory for stdio servers, or for the locally-launched child of an HTTP/SSE server (default: current directory) |
 | `env` | object | No | Environment variables for stdio servers, or for the locally-launched child of an HTTP/SSE server |
 | `launcher_wait_timeout` | duration | No | When `command` is set together with an HTTP/SSE `url`, how long mcpproxy waits for that URL to become reachable after spawning the child (e.g. `"15s"`, default `"30s"`) |
+| `health_check_interval` | duration | No | Per-server override for the global [`health_check_interval`](#discovery--health-checks). `"0s"` disables the liveness probe for this server only. Range: `5s`–`1h`. Omit to inherit the global value. |
+| `tool_discovery_interval` | duration | No | Per-server override for the global [`tool_discovery_interval`](#discovery--health-checks). Overrides the global/default cadence for this server only; `"0s"` disables the periodic tool-discovery sweep for this server (connect-time and reactive `list_changed` discovery still run). Range: `30s`–`24h`. Omit to inherit the global value. |
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
@@ -491,7 +549,7 @@ See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
 - **macOS:** `~/Library/Logs/mcpproxy/main.log`
 - **Linux:** `~/.local/state/mcpproxy/logs/main.log` (or `/var/log/mcpproxy` when running as root)
 - **Windows:** `%LOCALAPPDATA%\mcpproxy\logs\main.log`
-- **Per-server logs:** same directory, `server-{name}.log`
+- **Per-server logs:** same directory, `server-{name}.log` (characters in the server name that aren't letters, digits, `.`, `-`, or `_` — such as the `/` in registry names like `io.github.evidai/polymarket-guard` — are sanitized to `_`, so the log is always a single flat file)
 - **Custom:** set `log_dir` to override (supports `~` expansion)
 
 **Behavior notes:**

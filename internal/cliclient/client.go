@@ -415,8 +415,11 @@ func (c *Client) GetServers(ctx context.Context) ([]map[string]interface{}, erro
 
 // GetServerLogs retrieves logs for a specific server.
 func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int) ([]contracts.LogEntry, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/logs?tail=%d", c.baseURL, serverName, tail)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// PathEscape the server name: official-registry names are namespace/name and
+	// contain "/", which would otherwise inject extra path segments and miss the
+	// chi /servers/{id}/logs route (MCP-1111 / #598).
+	reqURL := fmt.Sprintf("%s/api/v1/servers/%s/logs?tail=%d", c.baseURL, url.PathEscape(serverName), tail)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

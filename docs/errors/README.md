@@ -40,11 +40,14 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_STDIO_SPAWN_ENOENT`](MCPX_STDIO_SPAWN_ENOENT.md) — command not found on PATH
 - [`MCPX_STDIO_SPAWN_EACCES`](MCPX_STDIO_SPAWN_EACCES.md) — permission denied executing command
 - [`MCPX_STDIO_EXIT_NONZERO`](MCPX_STDIO_EXIT_NONZERO.md) — server exited before handshake
+- [`MCPX_STDIO_EXIT_BEFORE_INITIALIZE`](MCPX_STDIO_EXIT_BEFORE_INITIALIZE.md) — process exited before `initialize` (captured stderr surfaced)
 - [`MCPX_STDIO_HANDSHAKE_TIMEOUT`](MCPX_STDIO_HANDSHAKE_TIMEOUT.md) — no `initialize` reply within 30s
 - [`MCPX_STDIO_HANDSHAKE_INVALID`](MCPX_STDIO_HANDSHAKE_INVALID.md) — malformed MCP frame
 
 ## OAuth
 
+- [`MCPX_OAUTH_LOGIN_REQUIRED`](MCPX_OAUTH_LOGIN_REQUIRED.md) — first-time sign-in needed (amber)
+- [`MCPX_OAUTH_REAUTH_REQUIRED`](MCPX_OAUTH_REAUTH_REQUIRED.md) — stored token broke, sign in again (red)
 - [`MCPX_OAUTH_REFRESH_EXPIRED`](MCPX_OAUTH_REFRESH_EXPIRED.md) — refresh token expired
 - [`MCPX_OAUTH_REFRESH_403`](MCPX_OAUTH_REFRESH_403.md) — provider rejected refresh
 - [`MCPX_OAUTH_DISCOVERY_FAILED`](MCPX_OAUTH_DISCOVERY_FAILED.md) — `.well-known` discovery failed

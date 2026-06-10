@@ -99,6 +99,19 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "call_tool_timeout")
 	}
 
+	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
+	// loop (managed client) and indexing loop (runtime) re-resolve their interval
+	// each cycle, and ApplyConfig propagates the new global config to the upstream
+	// manager + managed clients, so a global edit takes effect without a restart
+	// (FR-012/SC-002). Tracking these keeps a lone interval edit from being
+	// reported as "no changes detected".
+	if !reflect.DeepEqual(oldCfg.HealthCheckInterval, newCfg.HealthCheckInterval) {
+		result.ChangedFields = append(result.ChangedFields, "health_check_interval")
+	}
+	if !reflect.DeepEqual(oldCfg.ToolDiscoveryInterval, newCfg.ToolDiscoveryInterval) {
+		result.ChangedFields = append(result.ChangedFields, "tool_discovery_interval")
+	}
+
 	// Logging configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
 		result.ChangedFields = append(result.ChangedFields, "logging")

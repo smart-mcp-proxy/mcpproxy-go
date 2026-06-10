@@ -255,6 +255,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// Spec 074: server-edition per-upstream broker config; lives in the JSON
 		// config (like Shared), not persisted to the BBolt UpstreamRecord.
 		"AuthBroker": true,
+		// Spec 074: per-server discovery/health-check overrides; round-tripped
+		// through UpstreamRecord so REST/UI-set overrides survive a restart.
+		"HealthCheckInterval":   true,
+		"ToolDiscoveryInterval": true,
 	}
 
 	// Get all fields from ServerConfig

@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	transportpkg "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -696,9 +697,12 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				status.LastError = errorStr
 
 				// Spec 044: classify raw error into stable diagnostic code.
+				// Use the RESOLVED transport, not the raw Config.Protocol: an
+				// auto-detected stdio server has Protocol=="" + Command!="" and
+				// would otherwise miss the stdio-gated classifier rules (#599).
 				transport := ""
 				if state.Config != nil {
-					transport = string(state.Config.Protocol)
+					transport = transportpkg.DetermineTransportType(state.Config)
 				}
 				classifyAndAttach(status, state.ConnectionInfo.LastError, transport)
 				// Spec 044 Phase H: notify telemetry counter store.
@@ -969,9 +973,12 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						status.LastError = errorStr
 
 						// Spec 044: classify raw error into stable diagnostic code.
+						// Resolved transport (not raw Config.Protocol) so auto-detected
+						// stdio servers (Protocol=="" + Command!="") hit the stdio
+						// classifier rules (#599).
 						transport := ""
 						if status.Config != nil {
-							transport = string(status.Config.Protocol)
+							transport = transportpkg.DetermineTransportType(status.Config)
 						}
 						classifyAndAttach(status, connInfo.LastError, transport)
 						// Spec 044 Phase H: notify telemetry counter store.

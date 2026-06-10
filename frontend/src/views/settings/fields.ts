@@ -109,7 +109,9 @@ export function validateField(field: SettingField, value: unknown): string | nul
   }
   if (field.control === 'duration') {
     const s = String(value ?? '').trim()
-    if (s === '') return 'Enter a duration, e.g. 2m'
+    // An optional duration left blank means "inherit the default" (tri-state
+    // nil) and is valid; only a required duration must be non-empty.
+    if (s === '') return field.optional ? null : 'Enter a duration, e.g. 2m'
     if (!DURATION_RE.test(s)) return 'Use a duration like 2m, 90s, or 1h30m'
   }
   if (field.valueKind && (field.control === 'text' || field.control === 'secret')) {
@@ -259,6 +261,20 @@ export const GENERAL_FIELDS: SettingField[] = [
   { key: 'enable_prompts', label: 'Expose MCP prompts to clients', help: 'Advertises mcpproxy’s built-in guided prompts to connected AI clients: “setup-new-mcp-server” (add a server) and “troubleshoot-mcp-server” (diagnose connection issues).', control: 'toggle' },
 ]
 
+// ---- Server edition (multi-user) section ----
+// User-facing wording is "Server Edition" (MCP-1087). The config dot-paths
+// deliberately stay on the legacy `teams.*` key: the backend rename of the
+// top-level config key (`teams` -> `server_edition`, MCP-1085 / PR #607) is
+// not merged, so a live config is still `teams`-keyed. Flip these to
+// `server_edition.*` in the follow-up only once that backend change lands.
+export const SERVER_EDITION_TAB_LABEL = 'Server Edition'
+export const SERVER_EDITION_SECTION_TITLE = '👥 Server Edition'
+export const SERVER_EDITION_FIELDS: SettingField[] = [
+  { key: 'teams.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
+  { key: 'teams.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
+  { key: 'teams.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
+]
+
 // ---- Section 3: Advanced (subsystem accordions) ----
 export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
   {
@@ -329,6 +345,15 @@ export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
       { key: 'activity_retention_days', label: 'Keep records for (days)', help: '0 = keep until the record cap is hit.', control: 'number', min: 0 },
       { key: 'activity_max_records', label: 'Maximum records kept', control: 'number', min: 0 },
       { key: 'activity_cleanup_interval_min', label: 'Cleanup runs every (minutes)', control: 'number', min: 1 },
+    ],
+  },
+  {
+    id: 'discovery',
+    title: 'Tool discovery & health checks',
+    description: 'How often mcpproxy probes upstream servers for liveness and re-discovers their tools. Lower these to reduce background traffic to chatty servers.',
+    fields: [
+      { key: 'health_check_interval', label: 'Health-check interval', help: 'How often to send a lightweight liveness ping to each connected server. "0s" disables the periodic probe (a dead server is then detected lazily on the next tool call). Range: 5s–1h. Default 30s. Does not apply to Docker-isolated servers — their liveness is monitored at the container level.', control: 'duration', placeholder: '30s', optional: true },
+      { key: 'tool_discovery_interval', label: 'Tool-discovery interval', help: 'How often to re-list every server’s tools to rebuild the search index. "0s" disables the periodic sweep — tool changes are then picked up only at connect time and via tools/list_changed push notifications. Range: 30s–24h. Default 5m.', control: 'duration', placeholder: '5m', optional: true },
     ],
   },
   {

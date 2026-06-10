@@ -300,7 +300,7 @@
                 </td>
                 <td>
                   <router-link
-                    :to="`/servers/${tool.server_name}`"
+                    :to="serverDetailPath(tool.server_name)"
                     class="link link-primary text-sm font-medium"
                     @click.stop
                   >
@@ -372,7 +372,7 @@
               <code class="text-base bg-base-200 px-2 py-1 rounded">{{ selectedTool.name }}</code>
             </h3>
             <div class="flex items-center gap-2 mt-2">
-              <router-link :to="`/servers/${selectedTool.server_name}`" class="link link-primary text-sm">
+              <router-link :to="serverDetailPath(selectedTool.server_name)" class="link link-primary text-sm">
                 {{ selectedTool.server_name }}
               </router-link>
               <span class="badge badge-sm" :class="getRiskBadgeClass(selectedTool)">{{ getRiskLabel(selectedTool) }}</span>
@@ -444,6 +444,7 @@
 </template>
 
 <script setup lang="ts">
+import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, watch } from 'vue'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'

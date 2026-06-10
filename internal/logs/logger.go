@@ -6,6 +6,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -268,6 +269,44 @@ func CleanupTestWriter(file *os.File) error {
 	return nil
 }
 
+// serverLogFilename builds the per-server log filename from a server name,
+// sanitizing characters that would otherwise be interpreted as path separators.
+// Official modelcontextprotocol/registry server names are namespace/name (e.g.
+// "io.github.evidai/polymarket-guard"); without sanitizing the "/" the filename
+// would resolve to a nested directory instead of a single flat log file
+// (MCP-1111). All derivation sites (file writers + tail reader) must call this
+// so writes and reads agree on the same path.
+func serverLogFilename(serverName string) string {
+	return fmt.Sprintf("server-%s.log", sanitizeServerLogName(serverName))
+}
+
+// ServerLogFilename is the exported accessor for the per-server log filename.
+// Read sites outside this package (the REST/daemon log reader in internal/server
+// and the no-daemon CLI file reader in cmd/mcpproxy) MUST derive the path through
+// this helper so reads resolve to the same sanitized flat file the writers create
+// for namespace/name registry servers (MCP-1111). Do not re-derive "server-%s.log"
+// by hand at a call site.
+func ServerLogFilename(serverName string) string {
+	return serverLogFilename(serverName)
+}
+
+// sanitizeServerLogName replaces every character that is not safe in a single
+// filename element with "_", keeping ASCII letters, digits, ".", "-" and "_".
+// The result is always a single path element (no "/" or "\\"), so it can never
+// escape the log directory or create nested directories.
+func sanitizeServerLogName(serverName string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '-', r == '_':
+			return r
+		default:
+			return '_'
+		}
+	}, serverName)
+}
+
 // CreateUpstreamServerLogger creates a logger for a specific upstream server
 func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*zap.Logger, error) {
 	if config == nil {
@@ -276,7 +315,7 @@ func CreateUpstreamServerLogger(config *config.LogConfig, serverName string) (*z
 
 	// Create a copy of the config for the upstream server
 	serverConfig := *config
-	serverConfig.Filename = fmt.Sprintf("server-%s.log", serverName)
+	serverConfig.Filename = serverLogFilename(serverName)
 	serverConfig.EnableConsole = false // Upstream servers only log to file
 
 	// Parse log level
@@ -320,7 +359,7 @@ func CreateCLIUpstreamServerLogger(config *config.LogConfig, serverName string) 
 
 	// Create a copy of the config for CLI debugging
 	serverConfig := *config
-	serverConfig.Filename = fmt.Sprintf("server-%s.log", serverName)
+	serverConfig.Filename = serverLogFilename(serverName)
 	serverConfig.EnableConsole = true // CLI debugging: enable console output
 	serverConfig.EnableFile = false   // CLI debugging: disable file output for simplicity
 
@@ -435,7 +474,7 @@ func ReadUpstreamServerLogTail(config *config.LogConfig, serverName string, line
 	}
 
 	// Get log file path
-	filename := fmt.Sprintf("server-%s.log", serverName)
+	filename := serverLogFilename(serverName)
 	logFilePath, err := GetLogFilePathWithDir(config.LogDir, filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get log file path for server %s: %w", serverName, err)

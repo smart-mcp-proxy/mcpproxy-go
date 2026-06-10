@@ -42,23 +42,19 @@
           <div class="breadcrumbs text-sm mb-2">
             <ul>
               <li><router-link to="/servers">Servers</router-link></li>
-              <li>{{ server.name }}</li>
+              <li>{{ displayName }}</li>
             </ul>
           </div>
-          <h1 class="text-3xl font-bold">{{ server.name }}</h1>
+          <h1 class="text-3xl font-bold" :title="server.name">{{ displayName }}</h1>
           <p class="text-base-content/70 mt-1">{{ server.protocol }} • {{ server.url || server.command || 'No endpoint' }}</p>
         </div>
 
         <div class="flex items-center space-x-2">
           <div
-            :class="[
-              'badge badge-lg',
-              server.connected ? 'badge-success' :
-              server.connecting ? 'badge-warning' :
-              'badge-error'
-            ]"
+            :class="['badge badge-lg', statusBadgeClass]"
+            data-test="server-status-badge"
           >
-            {{ server.connected ? 'Connected' : server.connecting ? 'Connecting' : 'Disconnected' }}
+            {{ statusBadgeText }}
           </div>
           <div class="dropdown dropdown-end">
             <div tabindex="0" role="button" class="btn btn-outline">
@@ -173,11 +169,24 @@
 
       <!-- Alerts -->
       <div class="space-y-4">
+        <!-- MCP-1821 — calm OAuth Sign-in CTA. Takes precedence over the red
+             ErrorPanel whenever the server simply needs the user to sign in
+             (health.action==='login' or an MCPX_OAUTH_* code). -->
+        <SignInPanel
+          v-if="signInState"
+          :server-name="server.name"
+          :state="signInState"
+          :docs-url="server.diagnostic?.docs_url"
+          :quarantined="server.quarantined"
+          :loading="actionLoading"
+          @login="triggerOAuth"
+        />
+
         <!-- Spec 044 — structured diagnostic panel (shown when a diagnostic
              with warn/error severity is attached). Replaces the generic
              last_error alert for those cases. -->
         <ErrorPanel
-          v-if="showDiagnosticPanel"
+          v-else-if="showDiagnosticPanel"
           :diagnostic="server.diagnostic"
           :server-name="server.name"
           @fixed="handleDiagnosticFixed"
@@ -1190,13 +1199,19 @@ import { useSystemStore } from '@/stores/system'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
+import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
 import KVValueCell from '@/components/KVValueCell.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import { serverDisplayName } from '@/utils/serverRoute'
+import { oauthSignInState } from '@/utils/health'
 
 interface Props {
+  // MCP-1112: vue-router decodes the percent-encoded ':serverName' param, so
+  // this is the plain server name (which may contain '/', e.g.
+  // "io.github.owner/repo") and matches the stored config `name` directly.
   serverName: string
 }
 
@@ -1235,6 +1250,13 @@ const error = ref<string | null>(null)
 const server = computed<Server | null>(() => {
   return serversStore.servers.find(s => s.name === props.serverName) || null
 })
+
+// MCP-1112: prefer the registry-provided human-friendly title over the raw
+// reverse-DNS `name` identifier for display. Falls back to the name (or the
+// route param before the server loads).
+const displayName = computed(() =>
+  server.value ? serverDisplayName(server.value) : props.serverName
+)
 
 // mutateStoreServer applies fn to the live store object for this view's
 // server. Lets optimistic updates land where the rest of the app will
@@ -1316,6 +1338,26 @@ const isHttpProtocol = computed(() => {
 // Suggested action from unified health status
 const healthAction = computed(() => {
   return server.value?.health?.action || ''
+})
+
+// MCP-1821 — OAuth sign-in state (null when no sign-in is required). Drives the
+// calm SignInPanel and the amber "Sign-in required" status badge.
+const signInState = computed(() => {
+  return server.value ? oauthSignInState(server.value) : null
+})
+
+const statusBadgeClass = computed(() => {
+  if (signInState.value) return 'badge-warning'
+  if (server.value?.connected) return 'badge-success'
+  if (server.value?.connecting) return 'badge-warning'
+  return 'badge-error'
+})
+
+const statusBadgeText = computed(() => {
+  if (signInState.value) return 'Sign-in required'
+  if (server.value?.connected) return 'Connected'
+  if (server.value?.connecting) return 'Connecting'
+  return 'Disconnected'
 })
 
 // Spec 044 — render the structured diagnostic panel whenever a warn/error

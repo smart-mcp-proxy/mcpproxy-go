@@ -30,6 +30,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
@@ -1562,6 +1563,66 @@ func withHSTS(next http.Handler) http.Handler {
 	})
 }
 
+// profileMiddleware is an http.Handler middleware registered at /mcp/p/.
+// It resolves the profile slug from the URL path, looks up the profile in the
+// current config snapshot (lock-free, hot-reload safe), builds a ProfileScope,
+// injects it into the request context, then delegates to the retrieve_tools-mode
+// MCP handler (next). Auth has already run at this point via mcpAuthMiddleware.
+//
+// 404 responses:
+//   - No profiles configured at all → {"error":"no profiles configured"}
+//   - Slug not found               → {"error":"unknown profile '<slug>'","available":[...]}
+func (s *Server) profileMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cfg := s.runtime.Config()
+
+		// FR-008: no profiles configured.
+		if cfg == nil || len(cfg.Profiles) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "no profiles configured",
+			})
+			return
+		}
+
+		// Strip the /mcp/p/ prefix to obtain the slug.
+		slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
+		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
+		slug = strings.Trim(slug, "/")
+
+		// Look up profile by slug (lock-free snapshot).
+		var found *config.ProfileConfig
+		for i := range cfg.Profiles {
+			if cfg.Profiles[i].Name == slug {
+				found = &cfg.Profiles[i]
+				break
+			}
+		}
+
+		// FR-009: slug not found.
+		if found == nil {
+			available := make([]string, 0, len(cfg.Profiles))
+			for _, p := range cfg.Profiles {
+				available = append(available, p.Name)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":     fmt.Sprintf("unknown profile '%s'", slug),
+				"available": available,
+			})
+			return
+		}
+
+		// Build scope from the effective server set (unknown-server warn-skip applied).
+		effectiveServers := found.EffectiveServers(cfg)
+		scope := profile.NewProfileScope(found.Name, effectiveServers)
+		ctx := profile.WithProfileScope(r.Context(), scope)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
 // It supports both TCP (for browsers) and Unix socket/named pipe (for tray) listeners
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
@@ -1689,9 +1750,17 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
 
+	// /mcp/p/<slug> → profile-scoped retrieve_tools mode (Spec 057)
+	// Profile resolution is done by profileMiddleware which runs AFTER mcpAuthMiddleware
+	// so that agent-token scope can compose downstream with the profile scope.
+	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools))
+	profileHandler := s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable)))
+	mux.Handle("/mcp/p/", profileHandler)
+	mux.Handle("/mcp/p", profileHandler)
+
 	s.logger.Info("Registered routing mode MCP endpoints",
 		zap.String("default_mode", cfg.RoutingMode),
-		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call"}))
+		zap.Strings("endpoints", []string{"/mcp/all", "/mcp/code", "/mcp/call", "/mcp/p/<slug>"}))
 
 	// Legacy endpoints for backward compatibility
 	mux.Handle("/v1/tool_code", mcpHandler)
@@ -2282,7 +2351,14 @@ func (s *Server) GetServerLogs(serverName string, tail int) ([]contracts.LogEntr
 		}
 	}
 
-	logFile := filepath.Join(logDir, fmt.Sprintf("server-%s.log", serverName))
+	logFile := filepath.Join(logDir, logs.ServerLogFilename(serverName))
+
+	// Defense-in-depth: logs.ServerLogFilename already sanitizes the (user-controlled)
+	// server name to a single path element, but verify the resolved path stays inside
+	// logDir so a crafted name can never escape the log directory (path-injection barrier).
+	if !strings.HasPrefix(filepath.Clean(logFile), filepath.Clean(logDir)+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("invalid server name: %s", serverName)
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {

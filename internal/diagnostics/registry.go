@@ -62,6 +62,16 @@ func seedSTDIO() {
 		DocsURL: docsURL(STDIOExitNonzero),
 	})
 	register(CatalogEntry{
+		Code:        STDIOExitBeforeInitialize,
+		Severity:    SeverityError,
+		UserMessage: "The stdio server process exited before completing the MCP initialize handshake. This usually means a missing/invalid configuration (e.g. a required API key or environment variable) — check the captured stderr for the exact cause.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Show last server log lines", FixerKey: "stdio_show_last_logs"},
+			{Type: FixStepLink, Label: "Troubleshooting early exit", URL: docsURL(STDIOExitBeforeInitialize)},
+		},
+		DocsURL: docsURL(STDIOExitBeforeInitialize),
+	})
+	register(CatalogEntry{
 		Code:        STDIOHandshakeTimeout,
 		Severity:    SeverityError,
 		UserMessage: "The stdio server did not complete the MCP handshake within the expected time.",
@@ -86,6 +96,26 @@ func seedSTDIO() {
 // --- OAUTH ---------------------------------------------------------------
 
 func seedOAUTH() {
+	register(CatalogEntry{
+		Code:        OAuthLoginRequired,
+		Severity:    SeverityWarn, // amber: an expected setup step, not a fault
+		UserMessage: "This server needs you to sign in before it can connect.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Sign in", FixerKey: "oauth_reauth"},
+			{Type: FixStepLink, Label: "How OAuth sign-in works", URL: docsURL(OAuthLoginRequired)},
+		},
+		DocsURL: docsURL(OAuthLoginRequired),
+	})
+	register(CatalogEntry{
+		Code:        OAuthReauthRequired,
+		Severity:    SeverityError, // red: a previously-working token broke
+		UserMessage: "Your stored sign-in for this server is no longer valid; please sign in again.",
+		FixSteps: []FixStep{
+			{Type: FixStepButton, Label: "Sign in again", FixerKey: "oauth_reauth", Destructive: true},
+			{Type: FixStepLink, Label: "Why re-authentication is needed", URL: docsURL(OAuthReauthRequired)},
+		},
+		DocsURL: docsURL(OAuthReauthRequired),
+	})
 	register(CatalogEntry{
 		Code:        OAuthRefreshExpired,
 		Severity:    SeverityError,

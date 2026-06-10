@@ -45,7 +45,7 @@
       <div v-if="expanded" class="mt-3 space-y-2" data-testid="error-panel-fix-steps">
         <ol class="list-decimal list-inside space-y-2 text-sm">
           <li
-            v-for="(step, idx) in (diagnostic.fix_steps || [])"
+            v-for="(step, idx) in visibleFixSteps"
             :key="idx"
             class="flex flex-col gap-1"
           >
@@ -140,6 +140,7 @@ import { computed, ref } from 'vue'
 import type { Diagnostic, DiagnosticFixStep } from '@/types'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
+import { isOAuthDiagnosticCode } from '@/utils/health'
 
 interface Props {
   diagnostic: Diagnostic | null | undefined
@@ -175,6 +176,17 @@ const headerTitle = computed(() => {
   if (sev === 'error') return 'Server Error'
   if (sev === 'warn') return 'Server Warning'
   return 'Diagnostic'
+})
+
+// MCP-1821 — the generic "Report a bug" / issues/new link is only appropriate
+// for a genuinely unclassified fault. For OAuth codes the actionable path is to
+// sign in (surfaced by SignInPanel), so suppress any bug-report fix step here.
+const visibleFixSteps = computed<DiagnosticFixStep[]>(() => {
+  const steps = props.diagnostic?.fix_steps || []
+  if (!isOAuthDiagnosticCode(props.diagnostic?.code)) return steps
+  return steps.filter(
+    (step) => !(step.type === 'link' && (step.url || '').includes('issues/new')),
+  )
 })
 
 function isFixing(key: string | undefined) {

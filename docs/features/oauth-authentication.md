@@ -90,6 +90,25 @@ MCPProxy automatically refreshes tokens before expiration:
 2. Uses refresh token to get new access token
 3. Falls back to browser re-authentication if refresh fails
 
+### Signing in from the Web UI
+
+When an OAuth-protected server has no usable token, the Web UI does **not**
+render it as a generic red "Server Error". Instead it surfaces a calm,
+actionable **Sign-in** state:
+
+- The server's status chip reads an amber **"Sign-in required"** (rather than a
+  red "Disconnected"/"Unhealthy"), on both the Servers list and the server
+  detail page.
+- The server detail page shows a calm amber **"🔑 Sign in to {server}"** panel
+  with a primary **Log in** button (it triggers the same browser OAuth flow as
+  `mcpproxy auth login`) and a link to this page. No "file a bug" prompt is
+  shown for OAuth states — signing in is the fix.
+- If a prior session **expired or was revoked**, the panel keeps an error tone
+  and leads with a **Re-login** button.
+- A server can be both quarantined and login-required: you may sign in while it
+  is quarantined, but its tools stay blocked until you **Approve** the server.
+  The panel makes both gates explicit.
+
 ## CLI Commands
 
 ### Start Authentication

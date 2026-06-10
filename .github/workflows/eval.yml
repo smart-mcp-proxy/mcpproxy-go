@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout mcpproxy-go
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -59,7 +59,7 @@ jobs:
           cache: true
 
       - name: Checkout mcp-eval (public, pinned)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: smart-mcp-proxy/mcp-eval
           ref: ${{ env.MCP_EVAL_REF }}
@@ -109,7 +109,7 @@ jobs:
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     steps:
       - name: Checkout mcpproxy-go
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -123,7 +123,7 @@ jobs:
           node-version: "22"
 
       - name: Checkout mcp-eval (public, pinned)
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: smart-mcp-proxy/mcp-eval
           ref: ${{ env.MCP_EVAL_REF }}

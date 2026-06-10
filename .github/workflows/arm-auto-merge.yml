@@ -1,0 +1,130 @@
+# Arm auto-merge for a code PR — Model B "missing wire" (MCP-1249, follow-up to
+# MCP-1248). This is the no-human-credential half of `scripts/arm-auto-merge.sh`.
+#
+# WHY THIS EXISTS
+#   `scripts/arm-auto-merge.sh` (Option A) needs a repo-scoped bot PAT / GitHub
+#   App token minted by a GitHub human/org identity and stored with the agent
+#   secrets. This workflow (Option B) needs NO new secret: the cockpit fires a
+#   `repository_dispatch` on Gate-3 Approve using the gh login it already has,
+#   and the approve+arm happens *inside Actions* under the built-in
+#   `GITHUB_TOKEN` (the `github-actions[bot]` identity). A `github-actions[bot]`
+#   approval counts toward `required_approving_review_count` (same identity
+#   qa-gate-trivial / dependabot-auto-merge already rely on), so this closes the
+#   "GitHub sees 0 approvals" gap with no PAT and no `gh pr merge --admin`.
+#
+# INVARIANTS (identical to scripts/arm-auto-merge.sh — keep them in sync)
+#   - Agents ARM auto-merge; they NEVER bypass a required check. No `--admin`,
+#     no `bypass_pull_request_allowances`.
+#   - spec-075: a PASS is valid only while PR head == the blessed SHA. We
+#     re-verify the live PR head still equals `head_sha` before approving, and
+#     refuse on drift.
+#   - `qa-gate` must be `success` at that exact SHA before we approve.
+#
+# DISPATCH CONTRACT (how the cockpit Gate-3 Approve fires this)
+#   repository_dispatch:
+#     event_type: arm-auto-merge
+#     client_payload: { "pr": <number>, "head_sha": "<40-hex>", "body": "<optional>" }
+#   e.g. from the cockpit's existing gh login (no new credential):
+#     gh api repos/${REPO}/dispatches -f event_type=arm-auto-merge \
+#       -F 'client_payload[pr]=607' -F 'client_payload[head_sha]=fe9fb8e...'
+#   `workflow_dispatch` below is the manual equivalent for owner/debug use.
+#
+# See docs/qa-merge-gate.md ("Merging without --admin").
+name: Arm auto-merge (Model B)
+
+on:
+  repository_dispatch:
+    types: [arm-auto-merge]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number to arm
+        required: true
+      head_sha:
+        description: Expected PR head SHA (spec-075 drift guard)
+        required: true
+      body:
+        description: Approval body (optional)
+        required: false
+
+# contents: write + pull-requests: write are needed to post the approving review
+# and arm `gh pr merge --auto`. statuses is read implicitly (commit status read
+# needs no extra scope). No `--admin` path is ever taken.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    name: arm-auto-merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve inputs (repository_dispatch | workflow_dispatch)
+        id: in
+        env:
+          # repository_dispatch carries client_payload.*; workflow_dispatch
+          # carries inputs.*. Exactly one set is populated per run.
+          RD_PR: ${{ github.event.client_payload.pr }}
+          RD_SHA: ${{ github.event.client_payload.head_sha }}
+          RD_BODY: ${{ github.event.client_payload.body }}
+          WD_PR: ${{ github.event.inputs.pr }}
+          WD_SHA: ${{ github.event.inputs.head_sha }}
+          WD_BODY: ${{ github.event.inputs.body }}
+        run: |
+          PR="${RD_PR:-$WD_PR}"
+          SHA="${RD_SHA:-$WD_SHA}"
+          BODY="${RD_BODY:-$WD_BODY}"
+          if [[ -z "$PR" || -z "$SHA" ]]; then
+            echo "::error::missing pr and/or head_sha (got pr='$PR' head_sha='$SHA')"
+            exit 2
+          fi
+          if [[ ! "$SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "::error::head_sha is not a hex SHA: '$SHA'"
+            exit 2
+          fi
+          {
+            echo "pr=$PR"
+            echo "sha=$SHA"
+            echo "body=${BODY:-Approved (Model B): Paperclip review verdicts = ACCEPT and qa-gate green at this head SHA. Arming auto-merge; GitHub merges when all required checks pass.}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify head SHA + qa-gate, then approve & arm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ steps.in.outputs.pr }}
+          EXPECTED_SHA: ${{ steps.in.outputs.sha }}
+          BODY: ${{ steps.in.outputs.body }}
+        run: |
+          set -euo pipefail
+
+          # 1. spec-075: live PR head must still equal the blessed SHA.
+          LIVE_SHA="$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)"
+          # Allow a short (>=7) prefix from the dispatcher to match the full OID.
+          if [[ "$LIVE_SHA" != "$EXPECTED_SHA" && "${LIVE_SHA#"$EXPECTED_SHA"}" == "$LIVE_SHA" ]]; then
+            echo "::error::head SHA drifted: blessed=$EXPECTED_SHA live=$LIVE_SHA — re-run QA/review on the new head; refusing to approve."
+            exit 3
+          fi
+
+          # 2. qa-gate must be success at this exact SHA.
+          QA_STATE="$(gh api "repos/${REPO}/commits/${LIVE_SHA}/status" \
+            -q '.statuses[] | select(.context=="qa-gate") | .state' 2>/dev/null | head -1 || true)"
+          if [[ "$QA_STATE" != "success" ]]; then
+            echo "::error::qa-gate is '${QA_STATE:-missing}' at ${LIVE_SHA} (need success) — refusing to approve."
+            exit 4
+          fi
+
+          # 3. Never approve a PR authored by our own bot identity (GitHub would
+          #    reject it anyway; fail loudly so a misroute is visible).
+          AUTHOR="$(gh pr view "$PR" --repo "$REPO" --json author -q .author.login)"
+          if [[ "$AUTHOR" == "github-actions[bot]" ]]; then
+            echo "::error::PR #$PR is authored by github-actions[bot]; cannot self-approve."
+            exit 5
+          fi
+
+          # 4. Post the approving review (reflects the Paperclip ACCEPT verdict;
+          #    counts toward required_approving_review_count) and arm auto-merge.
+          gh pr review --approve "$PR" --repo "$REPO" --body "$BODY"
+          gh pr merge --auto --squash "$PR" --repo "$REPO"
+          echo "armed auto-merge for PR #$PR at $LIVE_SHA (merges when all required checks are green)"

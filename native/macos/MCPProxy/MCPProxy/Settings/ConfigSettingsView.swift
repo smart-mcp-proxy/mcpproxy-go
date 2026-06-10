@@ -118,6 +118,18 @@ final class ConfigStore: ObservableObject {
         )
     }
 
+    /// Binding for an *optional* scalar field (tri-state durations). Reads
+    /// nil/NSNull as an empty field; writes a blank value back as "unset"
+    /// (nil → NSNull → JSON null = reset to default) instead of an empty
+    /// string, so the field neither reads as dirty when absent nor sends an
+    /// unparseable "" to the backend.
+    func optionalStringBinding(_ key: String) -> Binding<String> {
+        Binding(
+            get: { coerceString(self.value(key)) },
+            set: { self.setValue(key, optionalScalarStored($0)) }
+        )
+    }
+
     func doubleBinding(_ key: String) -> Binding<Double> {
         Binding(
             get: { coerceDouble(self.value(key)) ?? 0 },
@@ -154,8 +166,18 @@ func coerceDouble(_ v: Any?) -> Double? {
     default: return nil
     }
 }
+/// True for the values that all mean "no value": nil (absent key), NSNull
+/// (explicit null) and an empty/whitespace-only string (the text-binding
+/// round-trip of a blank field). Treating these as one class keeps an
+/// untouched optional field from reading as an unsaved change.
+func isBlankValue(_ v: Any?) -> Bool {
+    if v == nil || v is NSNull { return true }
+    if let s = v as? String { return s.trimmingCharacters(in: .whitespaces).isEmpty }
+    return false
+}
+
 func valuesEqual(_ a: Any?, _ b: Any?) -> Bool {
-    if a == nil && b == nil { return true }
+    if isBlankValue(a) && isBlankValue(b) { return true }
     guard let a = a as? NSObject, let b = b as? NSObject else { return false }
     return a.isEqual(b)
 }
@@ -322,7 +344,13 @@ struct ConfigFieldRow: View {
                 .multilineTextAlignment(.trailing).frame(width: 100)
                 .textFieldStyle(.roundedBorder)
         case .text, .duration:
-            TextField(field.control == .duration ? "2m" : "", text: store.stringBinding(field.key))
+            // Duration fields are tri-state: an optional one stores a blank
+            // value as "unset" (reset to default) via optionalStringBinding.
+            // The placeholder is the field's real default (e.g. 30s / 5m).
+            TextField(field.placeholder ?? "",
+                      text: (field.control == .duration && field.optional)
+                          ? store.optionalStringBinding(field.key)
+                          : store.stringBinding(field.key))
                 .frame(width: 200).textFieldStyle(.roundedBorder).font(.system(.body, design: .monospaced))
         case .secret:
             HStack(spacing: 4) {

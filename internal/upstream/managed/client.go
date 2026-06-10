@@ -35,8 +35,13 @@ type Client struct {
 	StateManager *types.StateManager // Public field for callback access
 
 	// Configuration for creating fresh connections
-	logConfig    *config.LogConfig
-	globalConfig *config.Config
+	logConfig *config.LogConfig
+	// globalConfig holds the proxy-wide config as an atomic pointer so a config
+	// hot-reload can swap it under the running background loops (health-check
+	// interval re-resolution, spec 074 FR-012) without a lock and without racing
+	// the readers. Mirrors the cfg atomic-pointer rationale above. Access via
+	// GetGlobalConfig() / SetGlobalConfig() only — never touch the field directly.
+	globalConfig atomic.Pointer[config.Config]
 	storage      *storage.BoltDB
 
 	// Connection state protection
@@ -79,6 +84,19 @@ type Client struct {
 	// (connection refused, no such host, unreachable) bypass the counter
 	// and trigger Error immediately. See recordHealthCheckFailure().
 	consecutiveHealthFailures int
+
+	// healthProbe is the liveness surface the background health loop uses. In
+	// production it is the coreClient (a lightweight MCP `ping`, spec 074); the
+	// narrow interface means the health path provably cannot fall back to a
+	// heavyweight tools/list, and tests can inject a fake. When nil the loop
+	// falls back to coreClient (hand-constructed clients in tests).
+	healthProbe livenessProber
+}
+
+// livenessProber is the minimal core-client surface the health loop needs: a
+// lightweight MCP `ping` to confirm the connection is alive (spec 074, FR-001).
+type livenessProber interface {
+	Ping(ctx context.Context) error
 }
 
 // healthCheckFailureThreshold is the number of consecutive transient
@@ -103,11 +121,12 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		logger:         logger.With(zap.String("component", "managed_client")),
 		StateManager:   types.NewStateManager(),
 		logConfig:      logConfig,
-		globalConfig:   globalConfig,
 		storage:        storage,
 		stopMonitoring: make(chan struct{}),
+		healthProbe:    coreClient,
 	}
 	mc.cfg.Store(serverConfig)
+	mc.globalConfig.Store(globalConfig)
 
 	// Set up state change callback
 	mc.StateManager.SetStateChangeCallback(mc.onStateChange)
@@ -417,7 +436,8 @@ func (mc *Client) ShouldRetry() bool {
 // IsDockerIsolated returns true if this server will use Docker isolation.
 // Used to select appropriate connect timeouts (Docker containers need more time for package installation).
 func (mc *Client) IsDockerIsolated() bool {
-	if mc.globalConfig == nil || mc.globalConfig.DockerIsolation == nil || !mc.globalConfig.DockerIsolation.Enabled {
+	gc := mc.globalConfig.Load()
+	if gc == nil || gc.DockerIsolation == nil || !gc.DockerIsolation.Enabled {
 		return false
 	}
 	// Check if server has isolation explicitly disabled
@@ -761,16 +781,62 @@ func (mc *Client) stopBackgroundMonitoring() {
 	mc.stopMonitoring = make(chan struct{})
 }
 
-// backgroundHealthCheck performs periodic health checks
-func (mc *Client) backgroundHealthCheck() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
+// healthCheckDisabledRecheckInterval is how long the health loop sleeps between
+// re-checks when probing is disabled (resolved interval <= 0). It is NOT a
+// probe — it just lets a later config hot-reload re-enable the loop without a
+// restart (spec 074, FR-012).
+const healthCheckDisabledRecheckInterval = 30 * time.Second
 
+// GetGlobalConfig returns the current proxy-wide config snapshot (may be nil for
+// hand-constructed test clients). Lock-free; safe to call whether or not mc.mu
+// is held.
+func (mc *Client) GetGlobalConfig() *config.Config {
+	return mc.globalConfig.Load()
+}
+
+// SetGlobalConfig swaps the proxy-wide config the background loops re-resolve
+// against. Called on a config hot-reload (via Manager.SetGlobalConfig) so the
+// resettable health-check timer picks up a new global interval without a restart
+// (spec 074, FR-012). Lock-free atomic swap.
+func (mc *Client) SetGlobalConfig(cfg *config.Config) {
+	mc.globalConfig.Store(cfg)
+}
+
+// resolveHealthCheckInterval resolves this server's effective health-check
+// interval (per-server override → global → built-in default). A nil
+// globalConfig (hand-constructed clients) falls back to the built-in default.
+func (mc *Client) resolveHealthCheckInterval() time.Duration {
+	cfg := mc.globalConfig.Load()
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	return cfg.ResolveHealthCheckInterval(mc.GetConfig())
+}
+
+// planHealthCheckCycle decides one iteration of the health loop: whether to
+// probe and how long to wait first. A positive interval probes on that cadence;
+// a non-positive interval disables probing and waits the re-check window.
+func planHealthCheckCycle(interval, disabledRecheck time.Duration) (probe bool, wait time.Duration) {
+	if interval <= 0 {
+		return false, disabledRecheck
+	}
+	return true, interval
+}
+
+// backgroundHealthCheck performs periodic health checks. The interval is
+// re-resolved every cycle from config, so a hot-reload changes the cadence (or
+// disables the loop entirely) without restarting the server (spec 074).
+func (mc *Client) backgroundHealthCheck() {
 	for {
+		probe, wait := planHealthCheckCycle(mc.resolveHealthCheckInterval(), healthCheckDisabledRecheckInterval)
+		timer := time.NewTimer(wait)
 		select {
-		case <-ticker.C:
-			mc.performHealthCheck()
+		case <-timer.C:
+			if probe {
+				mc.performHealthCheck()
+			}
 		case <-mc.stopMonitoring:
+			timer.Stop()
 			mc.logger.Debug("Background health monitoring stopped",
 				zap.String("server", mc.GetConfig().Name))
 			return
@@ -845,19 +911,17 @@ func (mc *Client) performHealthCheck() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	listCtx, release, ok := mc.acquireListToolsContext(ctx, 5*time.Second)
-	if !ok {
-		mc.logger.Debug("Health check skipped - ListTools already in progress",
-			zap.String("server", mc.GetConfig().Name))
-		return
+	// Probe liveness with the MCP-standard lightweight `ping` rather than
+	// re-listing every tool (spec 074, FR-001). This removes the dominant
+	// source of recurring background `tools/list` traffic (#608) while still
+	// detecting a dead transport. The heavyweight ListTools coalescing
+	// machinery (acquireListToolsContext/publishListToolsResult) remains for
+	// real discovery callers; the health path no longer participates.
+	prober := mc.healthProbe
+	if prober == nil {
+		prober = mc.coreClient
 	}
-
-	defer release()
-
-	// Capture and publish the full result so any concurrent ListTools waiter
-	// (coalesced via the wait channel) receives a real list rather than nil.
-	tools, err := mc.coreClient.ListTools(listCtx)
-	mc.publishListToolsResult(tools, err)
+	err := prober.Ping(ctx)
 
 	if err != nil {
 		// Only mark as error if it's a real connection issue, not timeout during high activity

@@ -620,23 +620,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             for server in appState.servers {
                 let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
 
-                // Status icon: colored dot + auth indicator
-                let needsAuth = server.health?.action == "login"
-                let dotColor = server.statusNSColor
+                // Status icon: colored dot. The OAuth login-required state is a
+                // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
+                // gives it the system accent tint instead of the red error dot +
+                // red lock badge that previously framed sign-in as a hard failure.
+                let needsAuth = server.isOAuthLoginRequired
+                let dotColor = server.menuStatusNSColor
 
                 let iconSize = NSSize(width: 16, height: 16)
-                let icon = NSImage(size: iconSize, flipped: false) { rect in
+                let icon = NSImage(size: iconSize, flipped: false) { _ in
                     // Draw health dot
                     let dotRect = NSRect(x: 2, y: 4, width: 8, height: 8)
                     dotColor.setFill()
                     NSBezierPath(ovalIn: dotRect).fill()
-
-                    // Draw auth lock icon overlay if needed
-                    if needsAuth {
-                        let lockRect = NSRect(x: 9, y: 0, width: 7, height: 7)
-                        NSColor.systemRed.setFill()
-                        NSBezierPath(ovalIn: lockRect).fill()
-                    }
                     return true
                 }
                 item.image = icon
@@ -655,12 +651,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
                 sub.addItem(.separator())
 
-                // Auth login button — prominently first if needed
+                // OAuth sign-in — calm, actionable affordance shown first when
+                // login is required (MCP-1822), not error framing.
                 if needsAuth {
-                    let login = NSMenuItem(title: "Log In (Opens Browser)", action: #selector(loginServer(_:)), keyEquivalent: "")
+                    let login = NSMenuItem(title: "Sign in", action: #selector(loginServer(_:)), keyEquivalent: "")
                     login.target = self
                     login.representedObject = server.name
-                    login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "login")
+                    login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
                     sub.addItem(login)
                     sub.addItem(.separator())
                 }
@@ -982,7 +979,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     private func actionDisplayName(for action: String) -> String {
         switch action {
-        case "login": return "Login Required"
+        case "login": return "Sign in"
         case "restart": return "Restart Needed"
         case "enable": return "Disabled"
         case "approve": return "Approval Needed"
