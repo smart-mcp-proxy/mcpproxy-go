@@ -1,8 +1,18 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import type { Server } from '@/types'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
+import ServerCard from '@/components/ServerCard.vue'
 import { oauthSignInState, isOAuthDiagnosticCode } from '@/utils/health'
+
+// ServerCard pulls in stores + the security-scanner composable (which fetches
+// the security overview). Stub the API so mounting stays offline.
+vi.mock('@/services/api', () => ({
+  default: {
+    getSecurityOverview: vi.fn().mockResolvedValue({ data: {} }),
+  },
+}))
 
 // Build a minimal Server object; only the fields the helper reads matter.
 function makeServer(overrides: Partial<Server> = {}): Server {
@@ -116,5 +126,48 @@ describe('SignInPanel component (MCP-1821)', () => {
     const note = wrapper.find('[data-test="oauth-signin-quarantine-note"]')
     expect(note.exists()).toBe(true)
     expect(note.text().toLowerCase()).toContain('approve')
+  })
+})
+
+describe('ServerCard status chip — OAuth sign-in (MCP-1857)', () => {
+  function mountCard(server: Server) {
+    setActivePinia(createPinia())
+    return mount(ServerCard, {
+      props: { server },
+      global: {
+        plugins: [createPinia()],
+        stubs: { 'router-link': { template: '<a><slot /></a>' } },
+      },
+    })
+  }
+
+  it('reads calm amber "Sign-in required" for a no-health diagnostic-only login code', () => {
+    // The exact shape the bug regressed on: no health object, only a
+    // diagnostic-code OAuth login state. Pre-fix this fell through to the
+    // legacy fallback and rendered a red "Disconnected" chip.
+    const card = mountCard(makeServer({
+      diagnostic: { code: 'MCPX_OAUTH_LOGIN_REQUIRED', severity: 'warn' },
+    }))
+    const chip = card.find('[data-test="server-status-chip"]')
+    expect(chip.exists()).toBe(true)
+    expect(chip.text()).toBe('Sign-in required')
+    expect(chip.classes()).toContain('badge-warning')
+    expect(chip.classes()).not.toContain('badge-error')
+  })
+
+  it('still reads amber "Sign-in required" when health.action === "login"', () => {
+    const card = mountCard(makeServer({
+      health: { level: 'unhealthy', admin_state: 'enabled', summary: 'login required', action: 'login' },
+    }))
+    const chip = card.find('[data-test="server-status-chip"]')
+    expect(chip.text()).toBe('Sign-in required')
+    expect(chip.classes()).toContain('badge-warning')
+  })
+
+  it('reads red "Disconnected" for a genuinely disconnected server (no sign-in)', () => {
+    const card = mountCard(makeServer({ connected: false }))
+    const chip = card.find('[data-test="server-status-chip"]')
+    expect(chip.text()).toBe('Disconnected')
+    expect(chip.classes()).toContain('badge-error')
   })
 })

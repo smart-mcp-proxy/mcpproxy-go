@@ -19,6 +19,7 @@
             statusTooltip ? 'tooltip tooltip-left' : ''
           ]"
           :data-tip="statusTooltip"
+          data-test="server-status-chip"
         >
           {{ statusText }}
         </div>
@@ -401,6 +402,9 @@ const statusBadgeClass = computed(() => {
     }
   }
   // Fallback to legacy logic
+  // MCP-1857 — a diagnostic-only OAuth login state (no health object) still
+  // reads calm amber, not red, mirroring the in-health branch above.
+  if (signInState.value) return 'badge-warning'
   if (props.server.connected) return 'badge-success'
   if (props.server.connecting) return 'badge-warning'
   return 'badge-error'
@@ -414,6 +418,9 @@ const statusText = computed(() => {
     return health.summary || health.level
   }
   // Fallback to legacy logic
+  // MCP-1857 — surface the actionable "Sign-in required" for a diagnostic-only
+  // OAuth login state even when the record carries no health object.
+  if (signInState.value) return 'Sign-in required'
   if (props.server.connected) return 'Connected'
   if (props.server.connecting) return 'Connecting'
   return 'Disconnected'
