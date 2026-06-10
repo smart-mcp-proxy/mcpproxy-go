@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import MCPProxy
 
 /// Tests for MCP-1822 (T3): a server in the OAuth login-required state
@@ -130,6 +131,38 @@ final class AppStateOAuthSignInTests: XCTestCase {
         XCTAssertEqual(
             state.serversNeedingAttention.map(\.name), ["github"],
             "A sign-in-required server must remain in the calm 'Needs Attention' group"
+        )
+    }
+
+    // MARK: - menuStatusNSColor (active AppKit tray dot, MCP-1856)
+
+    /// The active AppKit tray (`MCPProxyApp.swift`) draws its server dot from
+    /// `menuStatusNSColor`. A login-required server must get the calm accent
+    /// tint, never the red `statusNSColor` error treatment, so the shipping
+    /// menu no longer renders a red error dot for the pure sign-in state.
+    func testLoginRequiredServerUsesCalmAccentDot() throws {
+        let server = try loginRequiredServer()
+        XCTAssertEqual(
+            server.menuStatusNSColor, NSColor.controlAccentColor,
+            "A login-required server's tray dot must use the calm accent tint, not statusNSColor"
+        )
+        XCTAssertNotEqual(
+            server.menuStatusNSColor, NSColor.systemRed,
+            "A login-required server's tray dot must never be the red error color"
+        )
+    }
+
+    /// A genuine (non-login) failure must keep the red `statusNSColor` tint in
+    /// the tray menu — only the sign-in state is calmed.
+    func testGenuineErrorKeepsRedDot() throws {
+        let server = try brokenServer()
+        XCTAssertEqual(
+            server.statusNSColor, NSColor.systemRed,
+            "Precondition: a broken server's health color is red"
+        )
+        XCTAssertEqual(
+            server.menuStatusNSColor, server.statusNSColor,
+            "A genuine error must keep its statusNSColor tint in the tray menu"
         )
     }
 }

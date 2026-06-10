@@ -390,6 +390,14 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         default: return connected ? .systemGreen : .systemGray
         }
     }
+
+    /// AppKit tray-menu dot color (MCP-1822). The OAuth login-required state is
+    /// calm and actionable, not a failure: it gets the system accent tint rather
+    /// than the red/error `statusNSColor` that previously read as a hard error.
+    /// Genuine errors (any non-login state) keep `statusNSColor`.
+    var menuStatusNSColor: NSColor {
+        isOAuthLoginRequired ? .controlAccentColor : statusNSColor
+    }
 }
 
 // MARK: - SSE Event Envelopes
