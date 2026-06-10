@@ -89,7 +89,7 @@ func TestGetProvider_CaseInsensitive(t *testing.T) {
 func TestBuildAuthURL_Google(t *testing.T) {
 	p, _ := GetProvider("google", "")
 
-	authURL := p.BuildAuthURL("client123", "http://localhost:8080/callback", "state-abc", "challenge-xyz")
+	authURL := p.BuildAuthURL("client123", "http://localhost:8080/callback", "state-abc", "challenge-xyz", false)
 
 	parsed, err := url.Parse(authURL)
 	require.NoError(t, err)
@@ -106,12 +106,57 @@ func TestBuildAuthURL_Google(t *testing.T) {
 	// Google supports PKCE
 	assert.Equal(t, "challenge-xyz", params.Get("code_challenge"))
 	assert.Equal(t, "S256", params.Get("code_challenge_method"))
+
+	// Default-off (FR-006): without offline access requested, no Google
+	// offline-consent parameters are sent, so login is unchanged.
+	assert.Empty(t, params.Get("access_type"))
+	assert.Empty(t, params.Get("prompt"))
+}
+
+// TestBuildAuthURL_OfflineAccess_Google verifies that when offline access is
+// requested (teams.store_idp_tokens), Google's authorization request carries
+// access_type=offline and prompt=consent — the documented contract for Google
+// to return a refresh token (Codex review on PR #601 / MCP-1036).
+func TestBuildAuthURL_OfflineAccess_Google(t *testing.T) {
+	p, _ := GetProvider("google", "")
+
+	authURL := p.BuildAuthURL("client123", "http://localhost:8080/callback", "state-abc", "challenge-xyz", true)
+
+	parsed, err := url.Parse(authURL)
+	require.NoError(t, err)
+	params := parsed.Query()
+
+	// Google asks for offline access via query params, not an extra scope.
+	assert.Equal(t, "offline", params.Get("access_type"))
+	assert.Equal(t, "consent", params.Get("prompt"))
+	assert.Equal(t, "openid email profile", params.Get("scope"),
+		"Google offline access must not alter the scope list")
+}
+
+// TestBuildAuthURL_OfflineAccess_Microsoft verifies that when offline access is
+// requested, Microsoft's scope list gains offline_access — the documented
+// contract for the v2.0 endpoint to return a refresh token.
+func TestBuildAuthURL_OfflineAccess_Microsoft(t *testing.T) {
+	p, _ := GetProvider("microsoft", "contoso")
+
+	withOffline := p.BuildAuthURL("ms-client", "http://localhost:8080/callback", "state-ms", "challenge-ms", true)
+	parsed, err := url.Parse(withOffline)
+	require.NoError(t, err)
+	scope := parsed.Query().Get("scope")
+	assert.Contains(t, strings.Fields(scope), "offline_access",
+		"Microsoft must request offline_access to receive a refresh token")
+
+	// Without offline access requested, the scope is unchanged (default-off).
+	noOffline := p.BuildAuthURL("ms-client", "http://localhost:8080/callback", "state-ms", "challenge-ms", false)
+	parsedNo, err := url.Parse(noOffline)
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Fields(parsedNo.Query().Get("scope")), "offline_access")
 }
 
 func TestBuildAuthURL_GitHub(t *testing.T) {
 	p, _ := GetProvider("github", "")
 
-	authURL := p.BuildAuthURL("gh-client", "http://localhost:8080/callback", "state-123", "challenge-456")
+	authURL := p.BuildAuthURL("gh-client", "http://localhost:8080/callback", "state-123", "challenge-456", false)
 
 	parsed, err := url.Parse(authURL)
 	require.NoError(t, err)
@@ -133,7 +178,7 @@ func TestBuildAuthURL_GitHub(t *testing.T) {
 func TestBuildAuthURL_Microsoft(t *testing.T) {
 	p, _ := GetProvider("microsoft", "contoso")
 
-	authURL := p.BuildAuthURL("ms-client", "http://localhost:8080/callback", "state-ms", "challenge-ms")
+	authURL := p.BuildAuthURL("ms-client", "http://localhost:8080/callback", "state-ms", "challenge-ms", false)
 
 	parsed, err := url.Parse(authURL)
 	require.NoError(t, err)
@@ -150,7 +195,7 @@ func TestBuildAuthURL_Microsoft(t *testing.T) {
 func TestBuildAuthURL_NoPKCE_WhenEmptyChallenge(t *testing.T) {
 	p, _ := GetProvider("google", "")
 
-	authURL := p.BuildAuthURL("client", "http://localhost/cb", "state", "")
+	authURL := p.BuildAuthURL("client", "http://localhost/cb", "state", "", false)
 
 	parsed, err := url.Parse(authURL)
 	require.NoError(t, err)

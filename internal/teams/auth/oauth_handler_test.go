@@ -101,13 +101,14 @@ func registerMockProvider(t *testing.T, mockServer *httptest.Server) {
 
 	providerRegistry["google"] = func(_ string) *OAuthProvider {
 		return &OAuthProvider{
-			Name:         "google",
-			AuthURL:      mockServer.URL + "/authorize",
-			TokenURL:     mockServer.URL + "/token",
-			UserInfoURL:  mockServer.URL + "/userinfo",
-			Scopes:       []string{"openid", "email", "profile"},
-			SupportsOIDC: true,
-			SupportsPKCE: true,
+			Name:              "google",
+			AuthURL:           mockServer.URL + "/authorize",
+			TokenURL:          mockServer.URL + "/token",
+			UserInfoURL:       mockServer.URL + "/userinfo",
+			Scopes:            []string{"openid", "email", "profile"},
+			OfflineAuthParams: map[string]string{"access_type": "offline", "prompt": "consent"},
+			SupportsOIDC:      true,
+			SupportsPKCE:      true,
 		}
 	}
 
@@ -149,6 +150,45 @@ func TestHandleLogin_Redirects(t *testing.T) {
 	assert.Equal(t, "test-client-id", params.Get("client_id"))
 	assert.Equal(t, "code", params.Get("response_type"))
 	assert.Contains(t, params.Get("scope"), "openid")
+
+	// Default-off (FR-006): store_idp_tokens unset → no offline-access request,
+	// so login behaves exactly as before.
+	assert.Empty(t, params.Get("access_type"), "offline access must not be requested by default")
+	assert.Empty(t, params.Get("prompt"))
+}
+
+// TestHandleLogin_RequestsOfflineAccess verifies that when teams.store_idp_tokens
+// is enabled, the login redirect asks the provider for offline access so the
+// persisted IdP subject token actually carries a refresh token (Codex review on
+// PR #601 / MCP-1036). Without this, the refresh path in GetValidIDPSubjectToken
+// would have no refresh token and always return ErrReauthRequired after expiry.
+func TestHandleLogin_RequestsOfflineAccess(t *testing.T) {
+	mockServer := mockOAuthProviderServer(t, "user@example.com", "Test User", "sub-123")
+	registerMockProvider(t, mockServer)
+
+	handler, _ := setupTestOAuthHandler(t, &config.TeamsOAuthConfig{
+		Provider:     "google",
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+	})
+	// Operator opted into persisting IdP subject tokens.
+	handler.config.StoreIDPTokens = true
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/login", nil)
+	w := httptest.NewRecorder()
+	handler.HandleLogin(w, req)
+
+	resp := w.Result()
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	redirectURL, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	params := redirectURL.Query()
+
+	assert.Equal(t, "offline", params.Get("access_type"),
+		"login must request offline access when store_idp_tokens is enabled")
+	assert.Equal(t, "consent", params.Get("prompt"))
 }
 
 func TestHandleLogin_StateInURL(t *testing.T) {
