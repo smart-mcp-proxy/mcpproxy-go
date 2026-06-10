@@ -112,7 +112,7 @@ enum HealthAction: String, Codable, CaseIterable {
     /// Human-readable button label.
     var label: String {
         switch self {
-        case .login:      return "Log In"
+        case .login:      return "Sign in"
         case .restart:    return "Restart"
         case .enable:     return "Enable"
         case .approve:    return "Approve"
@@ -353,6 +353,15 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         return d.severity == "warn" || d.severity == "error"
     }
 
+    /// True when the server is in the OAuth login-required state (MCP-1819/T3).
+    /// `health.action == "login"` is the stable, cross-surface contract that
+    /// CLI/REST/Web-UI/tray all key off. In this state the server needs a calm,
+    /// actionable "Sign in" affordance — NOT hard-error framing — even when the
+    /// backend also attaches an error-severity diagnostic for the failed connect.
+    var isOAuthLoginRequired: Bool {
+        health?.action == "login"
+    }
+
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.
     var pendingApprovalCount: Int {
         quarantine?.totalPending ?? 0
@@ -380,6 +389,14 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         case "unhealthy": return .systemRed
         default: return connected ? .systemGreen : .systemGray
         }
+    }
+
+    /// AppKit tray-menu dot color (MCP-1822). The OAuth login-required state is
+    /// calm and actionable, not a failure: it gets the system accent tint rather
+    /// than the red/error `statusNSColor` that previously read as a hard error.
+    /// Genuine errors (any non-login state) keep `statusNSColor`.
+    var menuStatusNSColor: NSColor {
+        isOAuthLoginRequired ? .controlAccentColor : statusNSColor
     }
 }
 

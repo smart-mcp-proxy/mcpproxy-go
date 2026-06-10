@@ -153,6 +153,16 @@ struct TrayMenu: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    // MCP-1819/T3 — surface the "Sign in" verb explicitly for the
+                    // OAuth login-required state so the actionable affordance is
+                    // clear, not buried. Scoped to login (this issue's concern);
+                    // other attention actions keep their prior icon-only row.
+                    if server.isOAuthLoginRequired, let label = server.health?.healthAction?.label {
+                        Spacer()
+                        Text(label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -244,9 +254,10 @@ struct TrayMenu: View {
             }
         }
 
-        // OAuth Login (shown when action is "login")
-        if server.health?.action == "login" {
-            Button("Log In") {
+        // OAuth Sign in (shown when login is required) — calm, actionable
+        // affordance, not error framing (MCP-1819/T3).
+        if server.isOAuthLoginRequired {
+            Button("Sign in") {
                 Task {
                     try? await apiClient?.loginServer(server.id)
                 }
