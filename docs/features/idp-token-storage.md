@@ -80,7 +80,7 @@ Secret, etc.) and inject it as `MCPPROXY_CRED_KEY` at runtime.
 ## Operational notes
 
 - **Key rotation** is not yet supported. Rotating the key requires clearing the
-  `upstream_credentials` BBolt bucket and asking all users to sign in again.
+  `user_upstream_credentials` BBolt bucket and asking all users to sign in again.
 - If `store_idp_tokens` is disabled after tokens have been stored, the stored data
   remains encrypted in the database but is never read. A future cleanup command
   will be added to purge it.
