@@ -86,6 +86,58 @@ export function getHealthBadgeClass(level: string): string {
 }
 
 /**
+ * MCP-1821 — OAuth sign-in CTA helpers.
+ *
+ * An OAuth-protected upstream that has no usable token surfaces as
+ * health.action==="login". Rather than render it as a red "Server Error"
+ * with a file-a-bug CTA, the UI renders a calm "Sign in" panel.
+ *
+ * Two flavours:
+ *   - 'login'  — first-time / no-session-yet. Calm amber tone, "Log in".
+ *   - 'reauth' — a prior session expired or was revoked. Error tone, "Re-login".
+ */
+
+/**
+ * Diagnostic codes that mean an existing OAuth session expired / was revoked
+ * and the user must re-authenticate. These keep an error tone (vs. the calm
+ * amber of a first-time login).
+ */
+export const OAuthReauthCodes = [
+  'MCPX_OAUTH_REAUTH_REQUIRED',
+  'MCPX_OAUTH_REFRESH_EXPIRED',
+  'MCPX_OAUTH_REFRESH_403',
+] as const
+
+/**
+ * True for any diagnostic code in the OAuth domain (MCPX_OAUTH_*). Used to
+ * suppress the generic "file a bug" CTA — OAuth faults are actionable via
+ * sign-in, not a bug report.
+ */
+export function isOAuthDiagnosticCode(code: string | undefined | null): boolean {
+  if (!code) return false
+  return code.toUpperCase().includes('OAUTH')
+}
+
+export type OAuthSignInState = 'login' | 'reauth'
+
+/**
+ * Classify a server's OAuth sign-in state for the calm Sign-in CTA.
+ *
+ * @returns 'reauth' when a prior session expired (error tone, "Re-login"),
+ *          'login' for a first-time login-required state (calm amber, "Log in"),
+ *          or null when no sign-in is required.
+ */
+export function oauthSignInState(server: Server): OAuthSignInState | null {
+  const code = server.diagnostic?.code
+  if (code && (OAuthReauthCodes as readonly string[]).includes(code)) {
+    return 'reauth'
+  }
+  if (server.health?.action === HealthAction.Login) return 'login'
+  if (code === 'MCPX_OAUTH_LOGIN_REQUIRED') return 'login'
+  return null
+}
+
+/**
  * Get the appropriate badge class for an admin state
  *
  * @param state - The admin state

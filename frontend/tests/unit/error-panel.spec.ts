@@ -163,4 +163,40 @@ describe('ErrorPanel (spec 044)', () => {
     })
     expect(wrapper.find('.alert').exists()).toBe(false)
   })
+
+  // MCP-1821 — the "Report a bug" / issues/new link is appropriate only for a
+  // genuinely unclassified fault. For OAuth codes the actionable path is to
+  // sign in, so the bug-report CTA must never render.
+  it('suppresses the issues/new "file a bug" link for OAUTH_* codes', () => {
+    const oauthDiag = makeDiag({
+      code: 'MCPX_OAUTH_LOGIN_REQUIRED',
+      severity: 'warn',
+      fix_steps: [
+        { type: 'link', label: 'Report a bug', url: 'https://github.com/smart-mcp-proxy/mcpproxy-go/issues/new' },
+        { type: 'link', label: 'Docs', url: 'https://docs.mcpproxy.app/oauth' },
+      ],
+    })
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: oauthDiag, serverName: 's' },
+      global: { plugins: [pinia] },
+    })
+    expect(wrapper.html()).not.toContain('issues/new')
+    // Non-bug-report fix steps still render.
+    expect(wrapper.html()).toContain('docs.mcpproxy.app/oauth')
+  })
+
+  it('still renders the issues/new link for a genuinely unclassified fault', () => {
+    const unknownDiag = makeDiag({
+      code: 'MCPX_UNKNOWN_UNCLASSIFIED',
+      severity: 'error',
+      fix_steps: [
+        { type: 'link', label: 'Report a bug', url: 'https://github.com/smart-mcp-proxy/mcpproxy-go/issues/new' },
+      ],
+    })
+    const wrapper = mount(ErrorPanel, {
+      props: { diagnostic: unknownDiag, serverName: 's' },
+      global: { plugins: [pinia] },
+    })
+    expect(wrapper.html()).toContain('issues/new')
+  })
 })

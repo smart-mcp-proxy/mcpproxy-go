@@ -19,6 +19,7 @@
             statusTooltip ? 'tooltip tooltip-left' : ''
           ]"
           :data-tip="statusTooltip"
+          data-test="server-status-chip"
         >
           {{ statusText }}
         </div>
@@ -344,6 +345,7 @@ import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
+import { oauthSignInState } from '@/utils/health'
 
 interface Props {
   server: Server
@@ -367,6 +369,12 @@ const isHttpProtocol = computed(() => {
   return props.server.protocol === 'http' || props.server.protocol === 'streamable-http'
 })
 
+// MCP-1821 — OAuth sign-in state (null when no sign-in is required). When set,
+// the status chip reads a calm amber "Sign-in required" instead of red
+// "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA. The
+// existing health.action==='login' Login button (below) drives the action.
+const signInState = computed(() => oauthSignInState(props.server))
+
 // Unified health status computed properties
 const statusBadgeClass = computed(() => {
   const health = props.server.health
@@ -376,8 +384,14 @@ const statusBadgeClass = computed(() => {
       case 'disabled':
         return 'badge-neutral' // gray
       case 'quarantined':
+        // MCP-1821 — a quarantined server can ALSO be login-required; the
+        // actionable amber "Sign-in required" chip takes precedence over the
+        // purple quarantine chip so the user sees the next action.
+        if (signInState.value) return 'badge-warning'
         return 'badge-secondary' // purple-ish
       default:
+        // MCP-1821 — sign-in required reads amber, not red.
+        if (signInState.value) return 'badge-warning'
         // Use health level
         switch (health.level) {
           case 'healthy':
@@ -392,6 +406,9 @@ const statusBadgeClass = computed(() => {
     }
   }
   // Fallback to legacy logic
+  // MCP-1857 — a diagnostic-only OAuth login state (no health object) still
+  // reads calm amber, not red, mirroring the in-health branch above.
+  if (signInState.value) return 'badge-warning'
   if (props.server.connected) return 'badge-success'
   if (props.server.connecting) return 'badge-warning'
   return 'badge-error'
@@ -400,9 +417,15 @@ const statusBadgeClass = computed(() => {
 const statusText = computed(() => {
   const health = props.server.health
   if (health) {
+    // MCP-1821 — surface an actionable "Sign-in required" for OAuth login states,
+    // including a quarantined-and-login-required server (quarantine + sign-in coexist).
+    if (signInState.value && health.admin_state !== 'disabled') return 'Sign-in required'
     return health.summary || health.level
   }
   // Fallback to legacy logic
+  // MCP-1857 — surface the actionable "Sign-in required" for a diagnostic-only
+  // OAuth login state even when the record carries no health object.
+  if (signInState.value) return 'Sign-in required'
   if (props.server.connected) return 'Connected'
   if (props.server.connecting) return 'Connecting'
   return 'Disconnected'
