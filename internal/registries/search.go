@@ -181,22 +181,17 @@ func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.
 		return referenceServers(), nil
 	}
 
-	// registryGet sets the standard headers (Accept/User-Agent/auth) and
-	// auto-retries transient failures (timeouts, 5xx/429) with exponential
-	// backoff so a transient hiccup no longer fails the search.
-	resp, err := registryGet(ctx, reg, reg.ServersURL)
+	// registryGet sets the standard headers (Accept/User-Agent/auth), checks the
+	// status, and auto-retries transient failures (timeouts, 5xx/429) with
+	// exponential backoff so a transient hiccup no longer fails the search.
+	body, err := registryGet(ctx, reg, reg.ServersURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch servers: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("registry query returned %d: %s", resp.StatusCode, resp.Status)
 	}
 
 	// Parse response JSON
 	var rawData interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&rawData); err != nil {
+	if err := json.Unmarshal(body, &rawData); err != nil {
 		return nil, fmt.Errorf("invalid JSON from registry: %w", err)
 	}
 

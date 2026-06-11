@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 
@@ -44,24 +43,17 @@ func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *expe
 			return nil, fmt.Errorf("invalid registry URL %q: %w", reg.ServersURL, err)
 		}
 
-		// registryGet sets the standard headers (Accept/User-Agent/auth) and
-		// auto-retries transient failures (slow pages, 5xx/429) so a single
-		// hiccup mid-pagination no longer fails the whole listing.
-		resp, err := registryGet(ctx, reg, reqURL)
+		// registryGet sets the standard headers (Accept/User-Agent/auth), checks
+		// the status, and auto-retries transient failures (slow pages, 5xx/429)
+		// so a single hiccup mid-pagination no longer fails the whole listing.
+		body, err := registryGet(ctx, reg, reqURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch servers: %w", err)
 		}
 
 		var rawData interface{}
-		decodeErr := json.NewDecoder(resp.Body).Decode(&rawData)
-		status := resp.StatusCode
-		resp.Body.Close()
-
-		if status != http.StatusOK {
-			return nil, fmt.Errorf("registry query returned %d", status)
-		}
-		if decodeErr != nil {
-			return nil, fmt.Errorf("invalid JSON from registry: %w", decodeErr)
+		if err := json.Unmarshal(body, &rawData); err != nil {
+			return nil, fmt.Errorf("invalid JSON from registry: %w", err)
 		}
 
 		servers, next := parseOfficialPage(rawData)

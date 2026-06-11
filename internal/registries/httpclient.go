@@ -3,6 +3,7 @@ package registries
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -37,29 +38,32 @@ var (
 // the whole listing. Retries are handled separately by registryGet.
 func sharedRegistryClient() *http.Client {
 	registryHTTPClientOnce.Do(func() {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.MaxIdleConns = 20
-		transport.MaxIdleConnsPerHost = 10
-		transport.IdleConnTimeout = 90 * time.Second
-		registryHTTPClient = &http.Client{
-			Timeout:   registryRequestTimeout,
-			Transport: transport,
-		}
+		registryHTTPClient = buildRegistryClient()
 	})
 	return registryHTTPClient
 }
 
+// buildRegistryClient constructs the tuned registry HTTP client.
+func buildRegistryClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 20
+	transport.MaxIdleConnsPerHost = 10
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{
+		Timeout:   registryRequestTimeout,
+		Transport: transport,
+	}
+}
+
 // registryGet performs an idempotent GET against a registry endpoint with the
 // standard headers (Accept JSON, versioned User-Agent, and any configured key)
-// and automatic retries on transient failures: per-request timeouts, connection
-// errors, and 5xx/429 responses are retried with exponential backoff. The parent
-// ctx bounds the whole operation — once it is done, no further attempts are made.
-//
-// On success the caller owns the returned response body and must Close it. On a
-// persistently failing status (e.g. 5xx) the LAST response is returned (err nil)
-// so the caller's own status check produces a meaningful error rather than this
-// helper swallowing it.
-func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) (*http.Response, error) {
+// and returns the fully-read response body on a 200. Transient failures are
+// retried with exponential backoff: connection errors, per-request timeouts
+// (including ones that fire mid-body-read — http.Client.Timeout covers the whole
+// request, so the body is read INSIDE the attempt loop), and 5xx/429 responses.
+// The parent ctx bounds the whole operation — once it is done, no further
+// attempts are made. A non-2xx final status returns an error.
+func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte, error) {
 	client := sharedRegistryClient()
 
 	var lastErr error
@@ -87,29 +91,41 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) (*http.
 		// configured key.
 		applyRegistryAuth(req, reg)
 
+		// transientErr is set when a request/response/body-read error is worth
+		// retrying; it is decided against the PARENT ctx, never the error value.
+		// NOTE: a per-request Client.Timeout (incl. one firing during the body
+		// read) surfaces as context.DeadlineExceeded, so inspecting the parent
+		// ctx is what distinguishes "this attempt was slow" (retry) from "the
+		// whole operation is over" (stop) — the exact slow-page case this fixes.
 		resp, err := client.Do(req)
 		if err != nil {
-			// If the PARENT context was canceled or hit its deadline, a retry
-			// would fail identically — stop now. NOTE: a per-request
-			// Client.Timeout also surfaces as context.DeadlineExceeded, so we
-			// must inspect the parent ctx directly rather than the error value,
-			// or we'd refuse to retry the exact slow-page case this fixes.
 			if ctx.Err() != nil {
 				return nil, err
 			}
 			lastErr = err
-			continue // transient transport error — retry
-		}
-
-		// Retry server-side failures while attempts remain; on the final attempt
-		// return the response so the caller surfaces the status.
-		if isRetryableStatus(resp.StatusCode) && attempt < registryMaxAttempts {
-			lastErr = fmt.Errorf("registry returned %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
-			resp.Body.Close()
 			continue
 		}
 
-		return resp, nil
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return nil, readErr
+			}
+			lastErr = readErr
+			continue
+		}
+
+		// Retry server-side failures while attempts remain.
+		if isRetryableStatus(resp.StatusCode) && attempt < registryMaxAttempts {
+			lastErr = fmt.Errorf("registry returned %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("registry query returned %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		}
+
+		return body, nil
 	}
 
 	return nil, lastErr
