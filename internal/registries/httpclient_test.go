@@ -152,6 +152,26 @@ func TestRegistryGet_ParentContextStopsRetry(t *testing.T) {
 	}
 }
 
+// TestRegistryGet_RejectsOversizedBody verifies the buffered body is capped so a
+// large/hostile registry response fails fast instead of allocating unbounded.
+func TestRegistryGet_RejectsOversizedBody(t *testing.T) {
+	withFastRetries(t)
+	prev := registryMaxBodyBytes
+	registryMaxBodyBytes = 16
+	t.Cleanup(func() { registryMaxBodyBytes = prev })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"servers":[{"name":"way-bigger-than-sixteen-bytes"}]}`)
+	}))
+	defer srv.Close()
+
+	reg := &RegistryEntry{ID: "official", Name: "Official", ServersURL: srv.URL, Protocol: protocolOfficial}
+	if _, err := registryGet(context.Background(), reg, srv.URL); err == nil {
+		t.Fatal("expected an oversized-body error, got nil")
+	}
+}
+
 // TestFetchOfficialServers_RetryRecovers is the end-to-end guarantee: a single
 // transient page failure no longer fails the whole listing.
 func TestFetchOfficialServers_RetryRecovers(t *testing.T) {

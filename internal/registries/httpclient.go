@@ -27,6 +27,11 @@ const (
 // (500ms, then 1s). A var (not const) so tests can shrink it.
 var registryRetryBaseDelay = 500 * time.Millisecond
 
+// registryMaxBodyBytes caps how much of a registry response we buffer in memory,
+// bounding a large or hostile body (a real official page of 100 servers is a few
+// hundred KB, so 16 MiB is generous). A var so tests can shrink it.
+var registryMaxBodyBytes int64 = 16 << 20
+
 var (
 	registryHTTPClientOnce sync.Once
 	registryHTTPClient     *http.Client
@@ -106,7 +111,9 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 			continue
 		}
 
-		body, readErr := io.ReadAll(resp.Body)
+		// Cap the buffered body so a large/hostile response can't OOM us. Read
+		// one byte past the cap to detect an over-limit body.
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, registryMaxBodyBytes+1))
 		resp.Body.Close()
 		if readErr != nil {
 			if ctx.Err() != nil {
@@ -114,6 +121,10 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 			}
 			lastErr = readErr
 			continue
+		}
+		if int64(len(body)) > registryMaxBodyBytes {
+			// Not transient — a retry would hit the same oversized body.
+			return nil, fmt.Errorf("registry response exceeds %d bytes", registryMaxBodyBytes)
 		}
 
 		// Retry server-side failures while attempts remain.
