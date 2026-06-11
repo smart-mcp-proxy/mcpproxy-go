@@ -96,12 +96,12 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 		// configured key.
 		applyRegistryAuth(req, reg)
 
-		// transientErr is set when a request/response/body-read error is worth
-		// retrying; it is decided against the PARENT ctx, never the error value.
-		// NOTE: a per-request Client.Timeout (incl. one firing during the body
-		// read) surfaces as context.DeadlineExceeded, so inspecting the parent
-		// ctx is what distinguishes "this attempt was slow" (retry) from "the
-		// whole operation is over" (stop) — the exact slow-page case this fixes.
+		// Whether a request/response/body-read error is worth retrying is decided
+		// against the PARENT ctx, never the error value. NOTE: a per-request
+		// Client.Timeout (incl. one firing during the body read) surfaces as
+		// context.DeadlineExceeded, so inspecting the parent ctx is what
+		// distinguishes "this attempt was slow" (retry) from "the whole operation
+		// is over" (stop) — the exact slow-page case this fixes.
 		resp, err := client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
