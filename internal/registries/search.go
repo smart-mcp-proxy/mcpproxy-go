@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 )
@@ -183,22 +181,10 @@ func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.
 		return referenceServers(), nil
 	}
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", reg.ServersURL, http.NoBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Some registries (e.g. Pulse, issue #566) reject requests with an empty
-	// or bare User-Agent and require a versioned one (mirror guesser.go).
-	req.Header.Set("User-Agent", registryUserAgent())
-	// Opt-in registries (RequiresKey) authenticate via their configured key.
-	applyRegistryAuth(req, reg)
-
-	resp, err := client.Do(req)
+	// registryGet sets the standard headers (Accept/User-Agent/auth) and
+	// auto-retries transient failures (timeouts, 5xx/429) with exponential
+	// backoff so a transient hiccup no longer fails the search.
+	resp, err := registryGet(ctx, reg, reg.ServersURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch servers: %w", err)
 	}

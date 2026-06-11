@@ -1561,8 +1561,10 @@ func (r *Runtime) SearchRegistryServers(registryID, tag, query string, limit int
 	// Create a guesser for repository detection (with caching)
 	guesser := experiments.NewGuesser(r.cacheManager, r.logger)
 
-	// Search the registry
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Search the registry. Budget covers the official registry's full multi-page
+	// cursor walk plus per-request retries (registries.registryGet) — 30s was too
+	// tight once a single slow page exhausted it with no retry headroom.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	servers, err := registries.SearchServers(ctx, registryID, tag, query, limit, guesser)

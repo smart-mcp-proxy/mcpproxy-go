@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 )
@@ -37,8 +36,6 @@ const (
 // optional query is passed through as the registry-side `search` parameter to
 // reduce pagination; surfaces still filter client-side for exactness.
 func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string) ([]ServerEntry, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-
 	var all []ServerEntry
 	cursor := ""
 	for page := 0; page < officialMaxPages; page++ {
@@ -47,18 +44,10 @@ func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *expe
 			return nil, fmt.Errorf("invalid registry URL %q: %w", reg.ServersURL, err)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-		req.Header.Set("Accept", "application/json")
-		// Some registries reject empty/bare User-Agents (issue #566).
-		req.Header.Set("User-Agent", registryUserAgent())
-		// Opt-in official-protocol registries (e.g. Smithery) authenticate via
-		// their configured key.
-		applyRegistryAuth(req, reg)
-
-		resp, err := client.Do(req)
+		// registryGet sets the standard headers (Accept/User-Agent/auth) and
+		// auto-retries transient failures (slow pages, 5xx/429) so a single
+		// hiccup mid-pagination no longer fails the whole listing.
+		resp, err := registryGet(ctx, reg, reqURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch servers: %w", err)
 		}
