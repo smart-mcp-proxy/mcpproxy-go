@@ -1226,6 +1226,7 @@ import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus
 import { serverDisplayName } from '@/utils/serverRoute'
 import { oauthSignInState } from '@/utils/health'
 import { computeToolDiffSections } from '@/utils/toolDiff'
+import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 
 interface Props {
   // MCP-1112: vue-router decodes the percent-encoded ':serverName' param, so
@@ -1302,9 +1303,13 @@ const toolToggleLoading = ref<Record<string, boolean>>({})
 // they're mutually exclusive with each other and with any per-tool toggle.
 const bulkToolToggleLoading = ref(false)
 
-const quarantinedTools = computed(() => {
-  return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
-})
+// Which tools drive the tool-quarantine banner + per-tool Approve UI (MCP-2081):
+// only `changed` tools (rug-pull), plus any residual `pending` left alongside a
+// change. Baseline `pending` tools never alarm on their own, and the banner is
+// suppressed entirely while the server-level Security Quarantine banner shows.
+const quarantinedTools = computed(() =>
+  selectQuarantinedTools(toolApprovals.value, server.value?.quarantined)
+)
 
 const blockedToolCount = computed(() => {
   const q = server.value?.quarantine
