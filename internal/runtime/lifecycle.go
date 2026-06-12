@@ -1164,6 +1164,21 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		return fmt.Errorf("failed to reload configuration: %w", err)
 	}
 
+	// On unquarantine/approval, baseline-trust the server's CURRENT tool
+	// snapshot: promote its pending (never-reviewed) tool records to approved.
+	// Tool-level quarantine then guards only status=changed (rug-pull) records.
+	// (Spec 032, MCP-2100; trust model confirmed in MCP-2081.) Done before the
+	// re-index in HandleUpstreamServerChange so the newly-trusted tools become
+	// immediately searchable. Best-effort: a promotion failure must not abort
+	// the unquarantine the user already requested and that is already persisted.
+	if !quarantined {
+		if err := r.approveBaselineToolsForServer(serverName); err != nil {
+			r.logger.Warn("Failed to baseline-approve tools on server unquarantine",
+				zap.String("server", serverName),
+				zap.Error(err))
+		}
+	}
+
 	r.emitServersChanged("quarantine_toggle", map[string]any{
 		"server":      serverName,
 		"quarantined": quarantined,

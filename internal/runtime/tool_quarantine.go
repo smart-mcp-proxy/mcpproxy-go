@@ -962,6 +962,54 @@ func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
 	return out, nil
 }
 
+// approveBaselineToolsForServer promotes a server's pending tool-approval
+// records to approved as baseline trust when the server itself is
+// approved/unquarantined.
+//
+// Trust model (Spec 032, MCP-2081/MCP-2100, request_confirmation 7cfce731):
+// approving/unquarantining a server == trusting its CURRENT tool snapshot. So
+// pending (newly-discovered, never-reviewed) tools inherit that baseline trust
+// automatically. Tool-level quarantine is then reserved for status=changed
+// (rug-pull) records only.
+//
+// CRITICAL: this promotes status=pending ONLY. status=changed records are left
+// untouched so that re-approving a server later never silently clears a genuine
+// rug-pull flag (preserves Spec 032's rug-pull guarantee). This is precisely why
+// it does NOT reuse ApproveAllTools, which promotes both pending AND changed.
+func (r *Runtime) approveBaselineToolsForServer(serverName string) error {
+	if r.storageManager == nil {
+		return nil
+	}
+
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		return err
+	}
+
+	var pendingTools []string
+	for _, record := range records {
+		if record.Status == storage.ToolApprovalStatusPending {
+			pendingTools = append(pendingTools, record.ToolName)
+		}
+	}
+
+	if len(pendingTools) == 0 {
+		return nil
+	}
+
+	// ApproveTools sets ApprovedHash=CurrentHash, runs enforceInvariant
+	// (pending→approved is permitted), and emits activity + a single SSE event.
+	if err := r.ApproveTools(serverName, pendingTools, "system:server-approval-baseline"); err != nil {
+		return err
+	}
+
+	r.logger.Info("Baseline-approved pending tools on server approval",
+		zap.String("server", serverName),
+		zap.Int("count", len(pendingTools)))
+
+	return nil
+}
+
 // ApproveAllTools approves all pending/changed tools for a server.
 func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, error) {
 	if r.storageManager == nil {

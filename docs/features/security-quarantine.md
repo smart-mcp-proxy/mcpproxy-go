@@ -55,6 +55,11 @@ When a server is unquarantined (approved):
 1. The server connects to discover its tools
 2. Tools are **indexed and become searchable**
 3. Tool calls are allowed to execute normally
+4. Any **pending** (newly-discovered, never-reviewed) tool-approval records for
+   the server are **auto-promoted to approved** — approving a server means you
+   trust its current tool snapshot (baseline trust). Tools whose description or
+   schema later **changes** (`changed`, i.e. rug-pull) are *not* affected and
+   stay blocked until you re-approve them explicitly.
 
 ### Security Analysis
 
