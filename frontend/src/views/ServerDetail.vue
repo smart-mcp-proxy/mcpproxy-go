@@ -1148,7 +1148,7 @@
 
               <!-- Action buttons -->
               <div class="flex gap-3">
-                <router-link v-if="scanReport.job_id" :to="`/security/scans/${scanReport.job_id}`" class="btn btn-primary btn-sm">
+                <router-link v-if="scanReport.job_id" :to="scanReportPath(scanReport.job_id)" class="btn btn-primary btn-sm">
                   View Full Report &rarr;
                 </router-link>
               </div>
@@ -1223,7 +1223,7 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
-import { serverDisplayName } from '@/utils/serverRoute'
+import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
 import { computeToolDiffSections } from '@/utils/toolDiff'

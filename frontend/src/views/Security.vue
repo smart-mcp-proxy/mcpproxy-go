@@ -339,7 +339,7 @@
                   <td>
                     <router-link
                       v-if="scan.status === 'completed'"
-                      :to="`/security/scans/${encodeURIComponent(scan.id)}`"
+                      :to="scanReportPath(scan.id)"
                       class="link link-primary text-sm whitespace-nowrap"
                     >
                       Details →
@@ -448,6 +448,7 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import api from '@/services/api'
 import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { useSystemStore } from '@/stores/system'
+import { scanReportPath } from '@/utils/serverRoute'
 
 const systemStore = useSystemStore()
 
