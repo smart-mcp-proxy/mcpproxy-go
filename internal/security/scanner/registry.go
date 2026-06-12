@@ -31,10 +31,19 @@ func NewRegistry(dataDir string, logger *zap.Logger) *Registry {
 	return r
 }
 
-// loadBundledRegistry loads the default bundled scanner definitions
+// loadBundledRegistry loads the default bundled scanner definitions.
+//
+// In-process scanners (no Docker image to pull) start "installed" so they are
+// always available to the engine — they need no install step. Docker-backed
+// scanners start "available" and only become "installed" once their image is
+// pulled.
 func (r *Registry) loadBundledRegistry() {
 	for _, s := range bundledScanners {
-		s.Status = ScannerStatusAvailable
+		if s.InProcess {
+			s.Status = ScannerStatusInstalled
+		} else {
+			s.Status = ScannerStatusAvailable
+		}
 		r.scanners[s.ID] = s
 	}
 }

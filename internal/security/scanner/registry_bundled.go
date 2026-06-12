@@ -123,6 +123,23 @@ var bundledScanners = []*ScannerPlugin{
 		NetworkReq: true,   // Downloads rules from registry
 	},
 	{
+		ID:          inProcessTPAScannerID,
+		Name:        "Tool Description Analyzer (built-in)",
+		Vendor:      "MCPProxy",
+		Description: "Built-in, Docker-less analyzer for a connected server's tool descriptions and schemas. Detects Tool-Poisoning-Attack (TPA) indicators — hidden instructions, prompt-injection phrasing, data-exfiltration hints — and embedded secrets. Runs for ANY connected server, including remote http/sse servers with no source files or Docker container.",
+		License:     "Apache-2.0",
+		Homepage:    "https://github.com/smart-mcp-proxy/mcpproxy-go",
+		DockerImage: "",                 // in-process; no image to pull
+		Inputs:      []string{"source"}, // reads the exported tools.json
+		Outputs:     []string{"sarif"},
+		RequiredEnv: nil,
+		OptionalEnv: nil,
+		Command:     nil,
+		Timeout:     "30s",
+		NetworkReq:  false,
+		InProcess:   true,
+	},
+	{
 		ID:          "trivy-mcp",
 		Name:        "Trivy Vulnerability Scanner",
 		Vendor:      "Aqua Security",
