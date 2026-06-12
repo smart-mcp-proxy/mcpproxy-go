@@ -185,6 +185,12 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 	// Helper: check whether a scanner's image is present locally. Returns a
 	// prefail message if it is missing (caller marks the scanner failed).
 	checkImage := func(s *ScannerPlugin) string {
+		// In-process scanners have no Docker image — they never prefail on
+		// image availability, so they run even for remote servers with no
+		// local Docker (MCP-2082).
+		if s.InProcess {
+			return ""
+		}
 		if e.docker == nil {
 			return ""
 		}
@@ -344,6 +350,13 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 
 // runSingleScanner executes one scanner and returns its report plus execution logs
 func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req ScanRequest) (*ScanReport, scannerLogs, error) {
+	// In-process scanners run directly in Go — no Docker container, no source
+	// files required. They analyze the tool definitions exported to
+	// req.SourceDir/tools.json (MCP-2082).
+	if s.InProcess {
+		return e.runInProcessScanner(s, req)
+	}
+
 	// Parse timeout
 	timeout := 120 * time.Second
 	if s.Timeout != "" {

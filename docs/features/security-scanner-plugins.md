@@ -54,8 +54,11 @@ mcp-scan             Snyk Agent Scan          Snyk (Invariant Labs)   available 
 nova-proximity       Nova Proximity           MCPProxy                available    source
 ramparts             Ramparts MCP Scanner     Javelin                 available    source
 semgrep-mcp          Semgrep MCP Rules        Semgrep                 available    source
+tpa-descriptions     Tool Description Analy... MCPProxy                installed    source
 trivy-mcp            Trivy Vulnerability...   Aqua Security           available    source, container_image
 ```
+
+> `tpa-descriptions` is a built-in, **Docker-less** scanner and is `installed` (always on) out of the box — there is no image to pull. It analyzes a connected server's tool descriptions/schemas in-process, so it runs even for **remote `http`/`sse` servers** that have no source files or Docker container.
 
 ### 2. Enable scanners
 
@@ -105,7 +108,7 @@ mcpproxy security reject github-server
 
 ## Scanner registry
 
-MCPProxy ships with a bundled registry of 7 scanners. The bundled list lives in [`internal/security/scanner/registry_bundled.go`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/internal/security/scanner/registry_bundled.go).
+MCPProxy ships with a bundled registry of 8 scanners. The bundled list lives in [`internal/security/scanner/registry_bundled.go`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/internal/security/scanner/registry_bundled.go).
 
 | Scanner | Vendor | Inputs | Required env | Notes |
 |---------|--------|--------|--------------|-------|
@@ -115,6 +118,7 @@ MCPProxy ships with a bundled registry of 7 scanners. The bundled list lives in 
 | `nova-proximity` | MCPProxy (NOVA-inspired rules) | source | — | Keyword-based, fully offline. Very fast. |
 | `ramparts` | Javelin | source | — | Rust-based YARA scanner. *(Known upstream issue on arm64 macOS — see [Scanner Images](/features/scanner-images).)* |
 | `semgrep-mcp` | Semgrep | source | — | Static analysis with MCP-specific rules. Uses the upstream `returntocorp/semgrep:latest` image. |
+| `tpa-descriptions` | MCPProxy | source | — | **Built-in, Docker-less, always on.** In-process analysis of tool descriptions/schemas for Tool-Poisoning-Attack indicators (hidden instructions, prompt-injection phrasing, data-exfiltration hints) and embedded secrets. Runs for any connected server — including remote `http`/`sse` servers with no source or Docker. |
 | `trivy-mcp` | Aqua Security | source, container_image | — | Filesystem + CVE scan. Uses the upstream `ghcr.io/aquasecurity/trivy:latest` image. |
 
 See [Scanner Images](/features/scanner-images) for the image sources and why vendor images are preferred over custom wrappers.

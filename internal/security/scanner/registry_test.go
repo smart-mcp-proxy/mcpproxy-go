@@ -18,11 +18,35 @@ func TestRegistryListBundledScanners(t *testing.T) {
 		t.Errorf("expected %d bundled scanners, got %d", len(bundledScanners), len(scanners))
 	}
 
-	// All should be "available"
+	// Docker-backed scanners start "available"; in-process scanners (no image
+	// to pull) start "installed" so they always run (MCP-2082).
 	for _, s := range scanners {
-		if s.Status != ScannerStatusAvailable {
-			t.Errorf("scanner %s: expected status %q, got %q", s.ID, ScannerStatusAvailable, s.Status)
+		want := ScannerStatusAvailable
+		if s.InProcess {
+			want = ScannerStatusInstalled
 		}
+		if s.Status != want {
+			t.Errorf("scanner %s: expected status %q, got %q", s.ID, want, s.Status)
+		}
+	}
+}
+
+func TestRegistryInProcessScannerInstalledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	r := NewRegistry(dir, zap.NewNop())
+
+	s, err := r.Get(inProcessTPAScannerID)
+	if err != nil {
+		t.Fatalf("Get %s: %v", inProcessTPAScannerID, err)
+	}
+	if !s.InProcess {
+		t.Errorf("scanner %s should be marked InProcess", inProcessTPAScannerID)
+	}
+	if s.Status != ScannerStatusInstalled {
+		t.Errorf("in-process scanner status = %q, want %q", s.Status, ScannerStatusInstalled)
+	}
+	if s.DockerImage != "" {
+		t.Errorf("in-process scanner should have no Docker image, got %q", s.DockerImage)
 	}
 }
 

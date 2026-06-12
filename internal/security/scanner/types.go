@@ -65,6 +65,12 @@ type ScannerPlugin struct {
 	Command     []string         `json:"command"`
 	Timeout     string           `json:"timeout"`
 	NetworkReq  bool             `json:"network_required"`
+	// InProcess marks a Docker-less, built-in scanner that the engine runs
+	// in-process (e.g. the tool-description TPA analyzer). Such scanners have
+	// no Docker image to pull, are always "installed", and skip the
+	// image-availability gate so they run even for remote servers with no
+	// source/Docker (MCP-2082).
+	InProcess bool `json:"in_process,omitempty"`
 	// Runtime state (not in registry)
 	Status        string            `json:"status"` // available, installed, configured, error
 	InstalledAt   time.Time         `json:"installed_at,omitempty"`
