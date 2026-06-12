@@ -439,7 +439,11 @@ Or approve all pending/changed tools:
 
 #### GET /api/v1/servers/{name}/tools/{tool}/diff
 
-Get the description/schema diff for a changed tool.
+Get the description/schema diff for a changed tool. The response exposes every
+field that participates in the approval hash — description, input schema, and
+output schema — so an operator can see exactly what changed. A change may affect
+only one of these (for example, an upstream adding a new enum value to the output
+schema leaves the description byte-identical).
 
 **Response:**
 ```json
@@ -454,7 +458,9 @@ Get the description/schema diff for a changed tool.
     "previous_description": "Delete a repository",
     "current_description": "Delete a repository (modified description)",
     "previous_schema": "...",
-    "current_schema": "..."
+    "current_schema": "...",
+    "previous_output_schema": "...",
+    "current_output_schema": "..."
   }
 }
 ```
