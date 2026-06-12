@@ -202,7 +202,7 @@
           </div>
         </div>
 
-        <div v-if="server.quarantined" class="alert alert-warning">
+        <div v-if="server.quarantined" data-test="security-quarantine-banner" class="alert alert-warning">
           <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
           </svg>
@@ -331,7 +331,7 @@
 
           <div v-else class="space-y-4">
             <!-- Tool Quarantine Panel (Spec 032) -->
-            <div v-if="quarantinedTools.length > 0" class="alert alert-warning shadow-lg mb-4">
+            <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-banner" class="alert alert-warning shadow-lg mb-4">
               <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
@@ -352,7 +352,7 @@
             </div>
 
             <!-- Quarantined Tools List -->
-            <div v-if="quarantinedTools.length > 0" class="space-y-3 mb-6">
+            <div v-if="quarantinedTools.length > 0" data-test="tool-quarantine-list" class="space-y-3 mb-6">
               <div
                 v-for="tool in quarantinedTools"
                 :key="'q-' + tool.tool_name"
@@ -1224,6 +1224,7 @@ import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName } from '@/utils/serverRoute'
+import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
 import { computeToolDiffSections } from '@/utils/toolDiff'
 
@@ -1302,8 +1303,12 @@ const toolToggleLoading = ref<Record<string, boolean>>({})
 // they're mutually exclusive with each other and with any per-tool toggle.
 const bulkToolToggleLoading = ref(false)
 
+// MCP-2101 (Spec 032): the Tool-Quarantine banner / list keys off `changed`
+// (rug-pull) tools, NOT freshly-`pending` baseline tools, and is suppressed
+// entirely while the server-level Security Quarantine banner is showing.
+// See selectQuarantinedTools for the trust-model rationale.
 const quarantinedTools = computed(() => {
-  return toolApprovals.value.filter(t => t.status === 'pending' || t.status === 'changed')
+  return selectQuarantinedTools(toolApprovals.value, server.value?.quarantined ?? false)
 })
 
 const blockedToolCount = computed(() => {
