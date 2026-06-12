@@ -38,8 +38,8 @@ func (h *OAuthHandler) persistIDPSubjectToken(userID string, tokenResp *TokenRes
 		return
 	}
 	if h.credStore == nil || !h.credStore.Enabled() {
-		h.logger.Warnw("teams.store_idp_tokens is enabled but the credential store is disabled; "+
-			"IdP subject token not persisted (set MCPPROXY_CRED_KEY or teams.credential_encryption_key)",
+		h.logger.Warnw("server_edition.store_idp_tokens is enabled but the credential store is disabled; "+
+			"IdP subject token not persisted (set MCPPROXY_CRED_KEY or server_edition.credential_encryption_key)",
 			"user_id", userID)
 		return
 	}
