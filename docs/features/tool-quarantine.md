@@ -205,7 +205,17 @@ curl -H "X-API-Key: your-key" \
 1. Open the MCPProxy dashboard
 2. Click on a server in the server list
 3. Navigate to the **Tools** tab in the server detail view
-4. Review pending/changed tools and click **Approve** or **Approve All**
+4. Review changed (and any residual pending) tools and click **Approve** or **Approve All**
+
+The server detail view's **Tool Quarantine** banner is shown only when a tool's
+status is `changed` (a rug-pull). Once a change has surfaced, any residual
+`pending` tools are listed alongside it so they can be cleared in the same pass.
+Freshly-`pending` baseline tools do **not** raise the banner on their own:
+approving the **server** (lifting the server-level Security Quarantine) promotes
+its baseline `pending` tools to `approved`. While the server-level **Security
+Quarantine** banner is showing, the Tool-Quarantine banner is suppressed
+entirely — the operator approves the server first, and the two banners never
+appear at once.
 
 The server list page shows a quarantine badge with the count of pending/changed tools for each server.
 
