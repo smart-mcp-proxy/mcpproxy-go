@@ -172,6 +172,34 @@ func TestRegistryGet_RejectsOversizedBody(t *testing.T) {
 	}
 }
 
+// TestValidateRegistryURL guards the SSRF pin: only http(s) on the registry's
+// configured host is allowed; a hostile scheme or cross-host cursor is rejected.
+func TestValidateRegistryURL(t *testing.T) {
+	reg := &RegistryEntry{ServersURL: "https://registry.example.com/v0.1/servers"}
+	cases := []struct {
+		name    string
+		reqURL  string
+		wantErr bool
+	}{
+		{"same host + query", "https://registry.example.com/v0.1/servers?cursor=abc&limit=100", false},
+		{"plain http base", "http://registry.example.com/v0.1/servers", false},
+		{"cross-host cursor redirect", "https://evil.internal/v0.1/servers?cursor=x", true},
+		{"file scheme", "file:///etc/passwd", true},
+		{"no host", "https:///v0.1/servers", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validateRegistryURL(tc.reqURL, reg)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for %q, got nil", tc.reqURL)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.reqURL, err)
+			}
+		})
+	}
+}
+
 // TestFetchOfficialServers_RetryRecovers is the end-to-end guarantee: a single
 // transient page failure no longer fails the whole listing.
 func TestFetchOfficialServers_RetryRecovers(t *testing.T) {

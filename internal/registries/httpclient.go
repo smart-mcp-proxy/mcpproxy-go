@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -69,6 +71,17 @@ func buildRegistryClient() *http.Client {
 // The parent ctx bounds the whole operation — once it is done, no further
 // attempts are made. A non-2xx final status returns an error.
 func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte, error) {
+	// Pin the outbound request to the registry's configured http(s) host before
+	// it is issued. This bounds CWE-918 (request forgery): the official
+	// protocol's cursor-follow pagination builds each page URL from a
+	// registry-supplied nextCursor, and this guard guarantees a hostile cursor
+	// can never redirect the fetch off the configured host or onto a non-http
+	// scheme (file://, gopher://, …).
+	safeURL, err := validateRegistryURL(reqURL, reg)
+	if err != nil {
+		return nil, err
+	}
+
 	client := sharedRegistryClient()
 
 	var lastErr error
@@ -84,7 +97,7 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 			}
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, safeURL, http.NoBody)
 		if err != nil {
 			// A malformed request is not transient — fail fast.
 			return nil, fmt.Errorf("failed to create request: %w", err)
@@ -147,4 +160,36 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 // are not.
 func isRetryableStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code >= 500
+}
+
+// validateRegistryURL bounds an outbound registry request (CWE-918 request
+// forgery): the returned URL is re-serialized from a freshly parsed value whose
+// scheme is constrained to http/https and whose host is pinned to the registry's
+// configured ServersURL host. Pagination URLs (which embed a registry-supplied
+// nextCursor) and the base endpoint both flow through here, so a hostile cursor
+// or a redirect-style payload cannot point the fetch at an arbitrary host or a
+// non-http scheme. Returns the validated URL string to use for the request.
+func validateRegistryURL(reqURL string, reg *RegistryEntry) (string, error) {
+	u, err := url.Parse(reqURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid request URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("registry request scheme %q not allowed (want http/https)", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("registry request URL has no host")
+	}
+	// Pin to the configured registry host so a tainted cursor/path cannot
+	// redirect the request elsewhere.
+	if reg != nil && reg.ServersURL != "" {
+		base, err := url.Parse(reg.ServersURL)
+		if err != nil {
+			return "", fmt.Errorf("invalid registry servers URL %q: %w", reg.ServersURL, err)
+		}
+		if !strings.EqualFold(u.Host, base.Host) {
+			return "", fmt.Errorf("registry request host %q does not match configured host %q", u.Host, base.Host)
+		}
+	}
+	return u.String(), nil
 }
