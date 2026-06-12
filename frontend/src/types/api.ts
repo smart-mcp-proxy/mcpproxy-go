@@ -302,6 +302,11 @@ export interface ToolApproval {
   current_description?: string
   previous_schema?: string
   current_schema?: string
+  // Output schema diff fields (MCP-2096 / PR #638): exposed by
+  // GET /api/v1/servers/{id}/tools/{tool}/diff so the approval UI can render
+  // an Output-Schema diff section, not just description/input-schema.
+  previous_output_schema?: string
+  current_output_schema?: string
   enabled?: boolean
   disabled?: boolean
 }
