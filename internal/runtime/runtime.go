@@ -2111,6 +2111,49 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 		tools = append(tools, toolMap)
 	}
 
+	// Defensive fallback (MCP-2083): the per-server StateView tool list is volatile
+	// derived state — it is cleared on disconnect (supervisor clears Tools on a
+	// connection-down event) and only repopulated asynchronously by background
+	// discovery. Approving a quarantined server triggers a disconnect/reconnect
+	// cycle, and in the field this can leave StateView holding zero tools even
+	// though the durable search index already indexed the server's tools. Serving
+	// that empty snapshot makes the Tools tab show "No tools available" for a
+	// connected server that demonstrably has tools. When StateView reports no tools
+	// for a server, fall back to the authoritative search index so we never serve
+	// an empty list when indexed tools exist.
+	if len(tools) == 0 && r.indexManager != nil {
+		if indexed, err := r.indexManager.GetToolsByServer(serverName); err == nil && len(indexed) > 0 {
+			tools = make([]map[string]interface{}, 0, len(indexed))
+			for _, tool := range indexed {
+				// Index stores the full tool name; normalize to the bare tool name
+				// (no "server:" prefix) to match the StateView/approval-record
+				// convention used by the enrichment layer.
+				name := tool.Name
+				if idx := strings.Index(name, ":"); idx != -1 {
+					name = name[idx+1:]
+				}
+				toolMap := map[string]interface{}{
+					"name":        name,
+					"description": tool.Description,
+					"server_name": serverName,
+				}
+				if tool.ParamsJSON != "" {
+					var inputSchema map[string]interface{}
+					if err := json.Unmarshal([]byte(tool.ParamsJSON), &inputSchema); err == nil {
+						toolMap["inputSchema"] = inputSchema
+					}
+				}
+				if tool.Annotations != nil {
+					toolMap["annotations"] = tool.Annotations
+				}
+				tools = append(tools, toolMap)
+			}
+			r.logger.Debug("GetServerTools: StateView empty, served tools from search index fallback",
+				zap.String("server", serverName),
+				zap.Int("tool_count", len(tools)))
+		}
+	}
+
 	return tools, nil
 }
 
