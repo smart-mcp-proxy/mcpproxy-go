@@ -120,7 +120,7 @@
       </div>
 
       <!-- Server edition / multi-user settings (server edition only) -->
-      <div v-if="hasTeams" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
+      <div v-if="hasServerEdition" v-show="activeTab === 'teams'" class="card bg-base-100 shadow-md">
         <div class="card-body">
           <h2 class="card-title text-lg" data-test="settings-server-edition-title">{{ serverEditionTitle }}</h2>
           <SettingsSection section-id="teams" :fields="serverEditionFields" :working="state.working" :original="state.original" />
@@ -212,7 +212,12 @@ const loadError = ref('')
 const activeTab = ref<string>('security')
 const showConnect = ref(false)
 const state = reactive<{ working: any; original: any }>({ working: {}, original: {} })
-const hasTeams = computed(() => state.working && state.working.teams != null)
+// Server-edition (multi-user) config lives under `server_edition` (MCP-1086).
+// Gate on the canonical key, falling back to the legacy `teams` key so a config
+// written before the rename still surfaces the Server Edition tab.
+const hasServerEdition = computed(
+  () => state.working && (state.working.server_edition != null || state.working.teams != null)
+)
 
 // cross-section search: type to find any setting across all tabs
 const search = ref('')
@@ -220,7 +225,7 @@ const allFields = computed<SettingField[]>(() => [
   ...securityFields,
   ...generalFields,
   ...advancedAccordions.flatMap((a) => a.fields),
-  ...(hasTeams.value ? serverEditionFields : []),
+  ...(hasServerEdition.value ? serverEditionFields : []),
 ])
 const filteredFields = computed<SettingField[]>(() => {
   const q = search.value.trim().toLowerCase()
@@ -255,7 +260,7 @@ const tabs = computed(() => {
     { id: 'general', label: 'General', icon: '⚙️' },
     { id: 'advanced', label: 'Advanced', icon: '🧰' },
   ] as Array<{ id: string; label: string; icon: string }>
-  if (hasTeams.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: '👥' })
+  if (hasServerEdition.value) base.push({ id: 'teams', label: SERVER_EDITION_TAB_LABEL, icon: '👥' })
   base.push({ id: 'raw', label: 'Raw JSON', icon: '{ }' })
   return base
 })
@@ -282,6 +287,16 @@ function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v))
 }
 
+// Back-compat for the teams -> server_edition rename (MCP-1086): if a config
+// only carries the legacy `teams` key, mirror it onto `server_edition` so the
+// form (which binds to `server_edition.*`) hydrates. Mutates and returns cfg.
+function aliasServerEdition(cfg: any): any {
+  if (cfg && cfg.server_edition == null && cfg.teams != null) {
+    cfg.server_edition = cfg.teams
+  }
+  return cfg
+}
+
 async function loadConfig() {
   loading.value = true
   loadError.value = ''
@@ -289,8 +304,12 @@ async function loadConfig() {
     const response = await api.getConfig()
     if (response.success && response.data) {
       const cfg = response.data.config
-      state.working = clone(cfg)
-      state.original = clone(cfg)
+      // The server-edition form binds to `server_edition.*` (MCP-1086). The
+      // backend loader already normalizes a legacy `teams` key to
+      // `server_edition`, but alias it here too so a config still carrying the
+      // old key hydrates the form (edits always save under `server_edition`).
+      state.working = aliasServerEdition(clone(cfg))
+      state.original = aliasServerEdition(clone(cfg))
       configJson.value = JSON.stringify(cfg, null, 2)
       configStatus.value = { valid: true }
       loaded.value = true

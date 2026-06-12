@@ -1845,8 +1845,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		}
 		s.securityScanner = secService
 	}
-	// Wire teams multi-user OAuth (no-op in personal edition)
-	wireTeamsOAuth(s, httpAPIServer)
+	// Wire server edition multi-user OAuth (no-op in personal edition)
+	wireServerEditionOAuth(s, httpAPIServer)
 	mux.Handle("/api/", httpAPIServer)
 	mux.Handle("/events", httpAPIServer)
 

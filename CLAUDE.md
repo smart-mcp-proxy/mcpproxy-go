@@ -45,13 +45,13 @@ MCPProxy is built in two editions from the same codebase using Go build tags:
 |-----------|---------|
 | `cmd/mcpproxy/edition.go` | Default edition = "personal" |
 | `cmd/mcpproxy/edition_teams.go` | Build-tagged override for server edition |
-| `cmd/mcpproxy/teams_register.go` | Server feature registration entry point |
-| `internal/teams/` | Server-only code (all files have `//go:build server`) |
-| `internal/teams/auth/` | OAuth authentication, session management, JWT tokens, middleware |
-| `internal/teams/users/` | User/session models, BBolt store, user server management |
-| `internal/teams/workspace/` | Per-user workspace manager for personal upstream servers |
-| `internal/teams/multiuser/` | Multi-user router, tool filtering, activity isolation |
-| `internal/teams/api/` | Server REST API endpoints (user, admin, auth) |
+| `cmd/mcpproxy/serveredition_register.go` | Server feature registration entry point |
+| `internal/serveredition/` | Server-only code (all files have `//go:build server`) |
+| `internal/serveredition/auth/` | OAuth, sessions, JWT tokens, middleware |
+| `internal/serveredition/users/` | User/session models, BBolt store |
+| `internal/serveredition/workspace/` | Per-user workspace for personal upstreams |
+| `internal/serveredition/multiuser/` | Multi-user router, tool filtering, activity isolation |
+| `internal/serveredition/api/` | Server REST API endpoints (user, admin, auth) |
 | `native/macos/MCPProxy/` | Swift macOS tray app (SwiftUI, macOS 13+) |
 | `native/macos/MCPProxyUITest/` | Swift MCP server for UI testing (accessibility + screenshots) |
 | `native/windows/` | Future C# tray app (placeholder) |
@@ -70,7 +70,7 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 
 ```json
 {
-  "teams": {
+  "server_edition": {
     "enabled": true,
     "admin_emails": ["admin@company.com"],
     "oauth": {
@@ -117,7 +117,7 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 ### Server Testing
 
 ```bash
-go test -tags server ./internal/teams/... -v -race  # All server unit + integration tests
+go test -tags server ./internal/serveredition/... -v -race  # All server unit + integration tests
 go build -tags server ./cmd/mcpproxy                # Build server edition
 go build ./cmd/mcpproxy                            # Verify personal edition unaffected
 ```

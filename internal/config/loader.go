@@ -245,6 +245,23 @@ func loadConfigFile(path string, cfg *Config) error {
 		return fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Back-compat (MCP-1086): the server-edition block was renamed from the
+	// legacy "teams" key to "server_edition". An existing config that still uses
+	// "teams" is normalized onto ServerEdition on read. The new key always wins;
+	// only fall back to the legacy key when "server_edition" is absent. This
+	// compiles in both editions because ServerEditionConfig is a struct{} stub
+	// in the personal build (it simply unmarshals to an empty value there).
+	if _, hasNew := rawConfig["server_edition"]; !hasNew {
+		if legacy, hasLegacy := rawConfig["teams"]; hasLegacy {
+			if raw, err := json.Marshal(legacy); err == nil {
+				var se ServerEditionConfig
+				if err := json.Unmarshal(raw, &se); err == nil {
+					cfg.ServerEdition = &se
+				}
+			}
+		}
+	}
+
 	// Set created time if not specified
 	for _, server := range cfg.Servers {
 		if server.Created.IsZero() {

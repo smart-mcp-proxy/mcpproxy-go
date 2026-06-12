@@ -69,7 +69,7 @@ The Swift tray's existing periodic 30 s refresh and the `status`-event-driven re
 
 ```text
 go test -race ./internal/...                     ok (all packages)
-go test -tags server ./internal/teams/...        ok
+go test -tags server ./internal/serveredition/...        ok
 go vet ./...                                     ok
 gofmt -l <touched files>                         ok
 golangci-lint                                    0 issues

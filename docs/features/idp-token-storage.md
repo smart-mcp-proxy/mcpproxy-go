@@ -12,11 +12,12 @@ feature is **off by default** and requires an encryption key to activate.
 
 ## Configuration
 
-Two settings control the feature, both under the `teams` block:
+Two settings control the feature, both under the `server_edition` block (configs
+that still use the legacy `teams` key are accepted as a back-compat alias):
 
 ```json
 {
-  "teams": {
+  "server_edition": {
     "enabled": true,
     "store_idp_tokens": true,
     "credential_encryption_key": "<base64-encoded 32-byte AES key>",

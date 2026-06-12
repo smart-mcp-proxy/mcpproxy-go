@@ -1,0 +1,40 @@
+//go:build server
+
+package server
+
+import (
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition"
+)
+
+// wireServerEditionOAuth sets up server edition multi-user OAuth routes on the HTTP API server.
+// This is called during server initialization after the HTTP API server is created.
+func wireServerEditionOAuth(s *Server, httpAPIServer *httpapi.Server) {
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		s.logger.Debug("Server OAuth wiring skipped: no config available")
+		return
+	}
+
+	sm := s.runtime.StorageManager()
+	if sm == nil {
+		s.logger.Debug("Server OAuth wiring skipped: no storage manager available")
+		return
+	}
+
+	deps := serveredition.Dependencies{
+		Router:            httpAPIServer.Router(),
+		DB:                sm.GetDB(),
+		Logger:            s.logger.Sugar(),
+		Config:            cfg,
+		DataDir:           cfg.DataDir,
+		ManagementService: s.runtime.GetManagementService(),
+		StorageManager:    sm,
+	}
+
+	if err := serveredition.SetupAll(deps); err != nil {
+		s.logger.Error("Failed to initialize server features", zap.Error(err))
+	}
+}

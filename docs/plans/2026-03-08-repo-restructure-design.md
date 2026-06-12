@@ -13,8 +13,8 @@ MCPProxy personal and teams editions will be built from the **same repository** 
 ## Binary Architecture
 
 - `go build ./cmd/mcpproxy` → **Personal edition** (default)
-- `go build -tags teams ./cmd/mcpproxy` → **Teams edition**
-- Teams-only code lives in `internal/teams/` with `//go:build teams` guards
+- `go build -tags server ./cmd/mcpproxy` → **Teams edition**
+- Teams-only code lives in `internal/serveredition/` with `//go:build server` guards
 - Teams features self-register via `init()` pattern
 - Binary self-identifies edition in version output, startup logs, `/api/v1/status`
 
@@ -24,7 +24,7 @@ MCPProxy personal and teams editions will be built from the **same repository** 
 mcpproxy-go/
 ├── cmd/mcpproxy/
 │   ├── main.go                  ← shared entry point
-│   └── teams_register.go       ← //go:build teams
+│   └── teams_register.go       ← //go:build server
 ├── internal/
 │   ├── teams/                   ← teams-only code (all build-tagged)
 │   │   ├── auth/                ← OAuth authorization server

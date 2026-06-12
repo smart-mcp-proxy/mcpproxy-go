@@ -10,35 +10,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestTeamsConfig_StoreIDPTokensDefaultsFalse(t *testing.T) {
+func TestServerEditionConfig_StoreIDPTokensDefaultsFalse(t *testing.T) {
 	// Default config: privacy-preserving default (FR-006).
-	cfg := DefaultTeamsConfig()
+	cfg := DefaultServerEditionConfig()
 	assert.False(t, cfg.StoreIDPTokens)
 
 	// Absent from JSON => false.
-	var parsed TeamsConfig
+	var parsed ServerEditionConfig
 	require.NoError(t, json.Unmarshal([]byte(`{"enabled":false}`), &parsed))
 	assert.False(t, parsed.StoreIDPTokens)
 }
 
-func TestTeamsConfig_StoreIDPTokensParsed(t *testing.T) {
-	var parsed TeamsConfig
+func TestServerEditionConfig_StoreIDPTokensParsed(t *testing.T) {
+	var parsed ServerEditionConfig
 	require.NoError(t, json.Unmarshal([]byte(`{"store_idp_tokens":true}`), &parsed))
 	assert.True(t, parsed.StoreIDPTokens)
 }
 
-func TestTeamsConfig_CredentialEncryptionKeyParsed(t *testing.T) {
-	var parsed TeamsConfig
+func TestServerEditionConfig_CredentialEncryptionKeyParsed(t *testing.T) {
+	var parsed ServerEditionConfig
 	require.NoError(t, json.Unmarshal([]byte(`{"credential_encryption_key":"abc123"}`), &parsed))
 	assert.Equal(t, "abc123", parsed.CredentialEncryptionKey)
 }
 
-func TestTeamsConfig_CredentialEncryptionKeyEnvFallback(t *testing.T) {
+func TestServerEditionConfig_CredentialEncryptionKeyEnvFallback(t *testing.T) {
 	t.Setenv("MCPPROXY_CRED_KEY", "from-env-key")
-	cfg := &TeamsConfig{
+	cfg := &ServerEditionConfig{
 		Enabled:     true,
 		AdminEmails: []string{"admin@example.com"},
-		OAuth: &TeamsOAuthConfig{
+		OAuth: &ServerEditionOAuthConfig{
 			Provider:     "google",
 			ClientID:     "cid",
 			ClientSecret: "csec",
@@ -48,13 +48,13 @@ func TestTeamsConfig_CredentialEncryptionKeyEnvFallback(t *testing.T) {
 	assert.Equal(t, "from-env-key", cfg.CredentialEncryptionKey, "env MCPPROXY_CRED_KEY should fill an empty key")
 }
 
-func TestTeamsConfig_CredentialEncryptionKeyConfigWins(t *testing.T) {
+func TestServerEditionConfig_CredentialEncryptionKeyConfigWins(t *testing.T) {
 	t.Setenv("MCPPROXY_CRED_KEY", "from-env-key")
-	cfg := &TeamsConfig{
+	cfg := &ServerEditionConfig{
 		Enabled:                 true,
 		AdminEmails:             []string{"admin@example.com"},
 		CredentialEncryptionKey: "from-config",
-		OAuth: &TeamsOAuthConfig{
+		OAuth: &ServerEditionOAuthConfig{
 			Provider:     "google",
 			ClientID:     "cid",
 			ClientSecret: "csec",

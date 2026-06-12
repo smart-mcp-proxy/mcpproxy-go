@@ -262,17 +262,18 @@ export const GENERAL_FIELDS: SettingField[] = [
 ]
 
 // ---- Server edition (multi-user) section ----
-// User-facing wording is "Server Edition" (MCP-1087). The config dot-paths
-// deliberately stay on the legacy `teams.*` key: the backend rename of the
-// top-level config key (`teams` -> `server_edition`, MCP-1085 / PR #607) is
-// not merged, so a live config is still `teams`-keyed. Flip these to
-// `server_edition.*` in the follow-up only once that backend change lands.
+// User-facing wording is "Server Edition" (MCP-1087). The backend rename of the
+// top-level config key (`teams` -> `server_edition`, MCP-1086) has landed, so
+// these dot-paths write/read the canonical `server_edition.*` key. Legacy
+// `teams`-keyed configs still populate the form: the backend loader normalizes
+// `teams` -> `server_edition` on load, and Settings.vue aliases it defensively
+// so old configs hydrate the form while edits always save under `server_edition`.
 export const SERVER_EDITION_TAB_LABEL = 'Server Edition'
 export const SERVER_EDITION_SECTION_TITLE = '👥 Server Edition'
 export const SERVER_EDITION_FIELDS: SettingField[] = [
-  { key: 'teams.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
-  { key: 'teams.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
-  { key: 'teams.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
+  { key: 'server_edition.enabled', label: 'Enable multi-user mode', control: 'toggle', restart: true },
+  { key: 'server_edition.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
+  { key: 'server_edition.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
 ]
 
 // ---- Section 3: Advanced (subsystem accordions) ----
