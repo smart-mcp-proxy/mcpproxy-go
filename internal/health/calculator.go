@@ -47,6 +47,14 @@ type HealthCalculatorInput struct {
 	HasRefreshToken bool       // True if refresh token exists
 	UserLoggedOut   bool       // True if user explicitly logged out
 
+	// CallTimeOAuthRequired is set when a server connected anonymously (no config
+	// OAuth) and listed tools successfully, but a tool call returned an
+	// "authorization required" / 401 — i.e. the endpoint enforces OAuth only at
+	// tools/call time (e.g. Google's sqladmin MCP). The managed client records
+	// this on a call-time auth failure so we can surface a proactive Sign-in CTA
+	// instead of reporting the server as fully healthy. MCP-2084.
+	CallTimeOAuthRequired bool
+
 	// Secret/config detection
 	MissingSecret  string // Secret name if unresolved (e.g., "GITHUB_TOKEN")
 	OAuthConfigErr string // OAuth config error (e.g., "requires 'resource' parameter")
@@ -168,6 +176,23 @@ func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *
 			AdminState: StateEnabled,
 			Summary:    "Connecting...",
 			Action:     ActionNone, // Will resolve on its own — not an attention item
+		}
+	}
+
+	// 4b. Call-time OAuth requirement (MCP-2084). A server that connects
+	// anonymously and lists tools fine, but whose tools/call returns
+	// "authorization required", never sets OAuthRequired (no config OAuth) or a
+	// connection LastError, so it would otherwise fall through to the healthy
+	// branch below and look fully Ready. Surface a proactive amber Sign-in CTA
+	// instead. Placed after the connection-state switch so genuine error/
+	// disconnected/connecting states (which return above) always take priority.
+	if input.CallTimeOAuthRequired {
+		return &contracts.HealthStatus{
+			Level:      LevelDegraded,
+			AdminState: StateEnabled,
+			Summary:    "Sign-in required",
+			Detail:     "This server requires sign-in before its tools can be called.",
+			Action:     ActionLogin,
 		}
 	}
 

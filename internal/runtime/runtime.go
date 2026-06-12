@@ -1945,9 +1945,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// Add user_logged_out flag from managed client
 		// This indicates if the user explicitly logged out, which prevents auto-reconnection
 		var userLoggedOut bool
+		// MCP-2084: call-time OAuth requirement — set when an anonymously-connected
+		// server rejected a tools/call with "authorization required". Drives a
+		// proactive Sign-in CTA even though the server looks connected.
+		var callTimeOAuthRequired bool
 		if r.upstreamManager != nil {
 			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
 				userLoggedOut = client.IsUserLoggedOut()
+				callTimeOAuthRequired = client.IsOAuthCallRequired()
 			}
 		}
 		serverMap["user_logged_out"] = userLoggedOut
@@ -1959,19 +1964,20 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		}
 
 		healthInput := health.HealthCalculatorInput{
-			Name:            serverStatus.Name,
-			Enabled:         serverStatus.Enabled,
-			Quarantined:     serverStatus.Quarantined,
-			State:           serverStatus.State,
-			Connected:       connected,
-			LastError:       serverStatus.LastError,
-			OAuthRequired:   oauthConfig != nil,
-			OAuthStatus:     oauthStatus,
-			HasRefreshToken: hasRefreshToken,
-			UserLoggedOut:   userLoggedOut,
-			ToolCount:       serverStatus.ToolCount,
-			MissingSecret:   health.ExtractMissingSecret(serverStatus.LastError),
-			OAuthConfigErr:  health.ExtractOAuthConfigError(serverStatus.LastError),
+			Name:                  serverStatus.Name,
+			Enabled:               serverStatus.Enabled,
+			Quarantined:           serverStatus.Quarantined,
+			State:                 serverStatus.State,
+			Connected:             connected,
+			LastError:             serverStatus.LastError,
+			OAuthRequired:         oauthConfig != nil,
+			OAuthStatus:           oauthStatus,
+			HasRefreshToken:       hasRefreshToken,
+			UserLoggedOut:         userLoggedOut,
+			CallTimeOAuthRequired: callTimeOAuthRequired,
+			ToolCount:             serverStatus.ToolCount,
+			MissingSecret:         health.ExtractMissingSecret(serverStatus.LastError),
+			OAuthConfigErr:        health.ExtractOAuthConfigError(serverStatus.LastError),
 		}
 		if !tokenExpiresAt.IsZero() {
 			healthInput.TokenExpiresAt = &tokenExpiresAt

@@ -91,6 +91,14 @@ type Client struct {
 	// heavyweight tools/list, and tests can inject a fake. When nil the loop
 	// falls back to coreClient (hand-constructed clients in tests).
 	healthProbe livenessProber
+
+	// oauthCallRequired records that this server connected anonymously (no config
+	// OAuth) but a tools/call returned "authorization required" / 401 — the
+	// endpoint enforces OAuth only at call time (e.g. Google's sqladmin MCP). The
+	// runtime reads it via IsOAuthCallRequired() and feeds it into the health
+	// calculator so the UI shows a proactive Sign-in CTA instead of "Ready". A
+	// successful call or a fresh Connect clears it. MCP-2084.
+	oauthCallRequired atomic.Bool
 }
 
 // livenessProber is the minimal core-client surface the health loop needs: a
@@ -281,6 +289,11 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// recovered, would carry stale counts into the next health-check window.
 	mc.resetHealthCheckFailures()
 
+	// A fresh connection (e.g. a post-sign-in reconnect that now carries a token)
+	// starts clean: clear any stale call-time OAuth-required flag so the Sign-in
+	// CTA doesn't linger after the user has authenticated. MCP-2084.
+	mc.oauthCallRequired.Store(false)
+
 	// Update state manager with server info
 	if serverInfo := mc.coreClient.GetServerInfo(); serverInfo != nil {
 		mc.StateManager.SetServerInfo(serverInfo.ServerInfo.Name, serverInfo.ServerInfo.Version)
@@ -459,6 +472,15 @@ func (mc *Client) IsUserLoggedOut() bool {
 	return mc.StateManager.IsUserLoggedOut()
 }
 
+// IsOAuthCallRequired reports whether a tools/call against this otherwise-
+// connected server returned "authorization required" / 401, indicating the
+// endpoint enforces OAuth only at call time. The runtime feeds this into the
+// health calculator to surface a proactive Sign-in CTA. Cleared by a successful
+// call or a fresh Connect. MCP-2084.
+func (mc *Client) IsOAuthCallRequired() bool {
+	return mc.oauthCallRequired.Load()
+}
+
 // SetStateChangeCallback sets a callback for state changes
 func (mc *Client) SetStateChangeCallback(callback func(oldState, newState types.ConnectionState, info *types.ConnectionInfo)) {
 	mc.StateManager.SetStateChangeCallback(callback)
@@ -622,6 +644,7 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 
 	result, err := mc.coreClient.CallTool(ctx, toolName, args)
 	if err != nil {
+		mc.recordCallToolOAuthSignal(toolName, err)
 		// Check if it's a connection error and update state
 		if mc.isConnectionError(err) {
 			// Use different log levels based on error type
@@ -648,7 +671,34 @@ func (mc *Client) CallTool(ctx context.Context, toolName string, args map[string
 		return nil, err
 	}
 
+	// A successful call means OAuth (if it was ever required at call time) is now
+	// satisfied — clear the Sign-in CTA flag. MCP-2084.
+	if mc.oauthCallRequired.CompareAndSwap(true, false) {
+		mc.logger.Info("🔓 Tool call succeeded; clearing OAuth Sign-in CTA flag",
+			zap.String("server", mc.GetConfig().Name))
+	}
+
 	return result, nil
+}
+
+// recordCallToolOAuthSignal inspects a failed tools/call error and, when it is an
+// "authorization required" / 401 from an otherwise-connected server (NOT a
+// connection error), flags the server as needing OAuth sign-in. This covers
+// endpoints that connect + list tools anonymously but enforce OAuth only at
+// call time (e.g. Google's sqladmin MCP). The flag drives a proactive Sign-in
+// CTA via the health calculator. MCP-2084.
+func (mc *Client) recordCallToolOAuthSignal(toolName string, err error) {
+	if err == nil || mc.isConnectionError(err) {
+		return
+	}
+	if !mc.isOAuthAuthorizationRequired(err) && !mc.isOAuthError(err) {
+		return
+	}
+	if mc.oauthCallRequired.CompareAndSwap(false, true) {
+		mc.logger.Info("🔐 Tool call requires OAuth sign-in; flagging server for Sign-in CTA",
+			zap.String("server", mc.GetConfig().Name),
+			zap.String("tool", toolName))
+	}
 }
 
 func (mc *Client) cancelInFlightListTools() {
