@@ -258,8 +258,10 @@ func (c *OAuthConnector) Refresh(ctx context.Context, userID string) (*UpstreamC
 	return cred, nil
 }
 
-// tokenResponse is the subset of the OAuth token endpoint response we consume.
-type tokenResponse struct {
+// oauthTokenResponse is the subset of the OAuth token endpoint response we
+// consume. Named distinctly from token_exchanger.go's tokenResponse (RFC 8693)
+// to avoid a same-package redeclaration in the broker package.
+type oauthTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
@@ -269,7 +271,7 @@ type tokenResponse struct {
 
 // postToken sends a form-encoded request to the upstream token endpoint and
 // decodes the response. The gateway authenticates with client_secret when set.
-func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*tokenResponse, error) {
+func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*oauthTokenResponse, error) {
 	if c.cfg.ClientSecret != "" {
 		form.Set("client_secret", c.cfg.ClientSecret)
 	}
@@ -294,7 +296,7 @@ func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*token
 		return nil, fmt.Errorf("oauth connector: token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	var tok tokenResponse
+	var tok oauthTokenResponse
 	if err := json.Unmarshal(body, &tok); err != nil {
 		return nil, fmt.Errorf("oauth connector: parse token response: %w", err)
 	}
@@ -307,7 +309,7 @@ func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*token
 // credentialFromToken maps a token response into a stored UpstreamCredential.
 // fallbackRefresh is used when the response omits a refresh token (so a
 // non-rotating AS does not drop the user's refresh capability).
-func (c *OAuthConnector) credentialFromToken(tok *tokenResponse, fallbackRefresh string) *UpstreamCredential {
+func (c *OAuthConnector) credentialFromToken(tok *oauthTokenResponse, fallbackRefresh string) *UpstreamCredential {
 	tokenType := tok.TokenType
 	if tokenType == "" {
 		tokenType = "Bearer"
