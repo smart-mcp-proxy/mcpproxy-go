@@ -372,27 +372,45 @@
                         </span>
                       </div>
                       <p
-                        v-if="tool.status !== 'changed' || !tool.previous_description"
+                        v-if="tool.status !== 'changed' || computeToolDiffSections(tool).length === 0"
                         class="text-sm text-base-content/70 mt-1"
                       >{{ tool.description }}</p>
-                      <!-- Show before/after diff for changed tools -->
-                      <div v-if="tool.status === 'changed' && tool.previous_description" class="mt-2 space-y-2 text-xs">
-                        <div>
-                          <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">Before (approved)</div>
-                          <div class="bg-error/5 border border-error/20 px-2 py-1.5 rounded font-mono leading-relaxed">
-                            <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="'b'+i">
-                              <span v-if="part.type === 'removed'" class="bg-error/20 text-error font-semibold px-0.5 rounded">{{ part.text }}</span>
-                              <span v-else-if="part.type === 'same'">{{ part.text }}</span>
-                            </template>
-                          </div>
-                        </div>
-                        <div>
-                          <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">After (current)</div>
-                          <div class="bg-success/5 border border-success/20 px-2 py-1.5 rounded font-mono leading-relaxed">
-                            <template v-for="(part, i) in computeWordDiff(tool.previous_description, tool.current_description || tool.description)" :key="'a'+i">
-                              <span v-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
-                              <span v-else-if="part.type === 'same'">{{ part.text }}</span>
-                            </template>
+                      <!-- Per-field before/after diff for changed tools: a tool is
+                           flagged "changed" when its description, input schema, OR
+                           output schema differs from the approved version (MCP-2096).
+                           Render one section per field that actually changed so a
+                           schema-only change isn't an invisible phantom diff. -->
+                      <div
+                        v-if="tool.status === 'changed' && computeToolDiffSections(tool).length > 0"
+                        class="mt-2 space-y-3 text-xs"
+                        data-test="tool-diff"
+                      >
+                        <div
+                          v-for="section in computeToolDiffSections(tool)"
+                          :key="section.key"
+                          :data-test="'tool-diff-' + section.key"
+                        >
+                          <div class="text-[11px] font-semibold text-base-content/80 mb-0.5">{{ section.label }}</div>
+                          <div v-if="section.hint" class="text-[10px] text-base-content/50 mb-1">{{ section.hint }}</div>
+                          <div class="space-y-2">
+                            <div>
+                              <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">Before (approved)</div>
+                              <div class="bg-error/5 border border-error/20 px-2 py-1.5 rounded font-mono leading-relaxed whitespace-pre-wrap">
+                                <template v-for="(part, i) in computeWordDiff(section.before, section.after)" :key="'b'+i">
+                                  <span v-if="part.type === 'removed'" class="bg-error/20 text-error font-semibold px-0.5 rounded">{{ part.text }}</span>
+                                  <span v-else-if="part.type === 'same'">{{ part.text }}</span>
+                                </template>
+                              </div>
+                            </div>
+                            <div>
+                              <div class="text-[10px] font-semibold uppercase tracking-wide text-base-content/60 mb-1">After (current)</div>
+                              <div class="bg-success/5 border border-success/20 px-2 py-1.5 rounded font-mono leading-relaxed whitespace-pre-wrap">
+                                <template v-for="(part, i) in computeWordDiff(section.before, section.after)" :key="'a'+i">
+                                  <span v-if="part.type === 'added'" class="bg-success/20 text-success font-semibold px-0.5 rounded">{{ part.text }}</span>
+                                  <span v-else-if="part.type === 'same'">{{ part.text }}</span>
+                                </template>
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1207,6 +1225,7 @@ import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName } from '@/utils/serverRoute'
 import { oauthSignInState } from '@/utils/health'
+import { computeToolDiffSections } from '@/utils/toolDiff'
 
 interface Props {
   // MCP-1112: vue-router decodes the percent-encoded ':serverName' param, so
@@ -1747,7 +1766,10 @@ async function _loadToolApprovalsWithGen(gen: number) {
         }
       })
 
-      // Fetch diffs for changed tools to populate previous_description
+      // Fetch diffs for changed tools to populate the before/after fields used
+      // by computeToolDiffSections: description, input schema, AND output schema
+      // (MCP-2096 — output schema added in PR #638). Rendering only one field
+      // made schema-only changes look like phantom "changed" false positives.
       const changedTools = approvals.filter(t => t.status === 'changed')
       if (changedTools.length > 0) {
         const diffPromises = changedTools.map(async (tool) => {
@@ -1756,6 +1778,10 @@ async function _loadToolApprovalsWithGen(gen: number) {
             if (diffResp.success && diffResp.data) {
               tool.previous_description = diffResp.data.previous_description
               tool.current_description = diffResp.data.current_description
+              tool.previous_schema = diffResp.data.previous_schema
+              tool.current_schema = diffResp.data.current_schema
+              tool.previous_output_schema = diffResp.data.previous_output_schema
+              tool.current_output_schema = diffResp.data.current_output_schema
             }
           } catch {
             // Diff fetch failed, continue without it
