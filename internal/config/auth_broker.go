@@ -31,6 +31,10 @@ type AuthBrokerConfig struct {
 	Mode string `json:"mode" mapstructure:"mode"`
 	// TokenEndpoint is the IdP token endpoint used to mint the upstream credential.
 	TokenEndpoint string `json:"token_endpoint" mapstructure:"token_endpoint"`
+	// AuthorizationEndpoint is the upstream AS authorize URL the user is
+	// redirected to for consent. Required for the oauth_connect mode (Path B,
+	// spec 074 FR-011); unused by token_exchange/entra_obo.
+	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" mapstructure:"authorization_endpoint"`
 	// Resource is the RFC 8707 audience the resulting token is scoped to.
 	Resource string `json:"resource,omitempty" mapstructure:"resource"`
 	// Scopes requested for the upstream credential.
@@ -76,6 +80,11 @@ func (a *AuthBrokerConfig) Validate() error {
 	}
 	if a.TokenEndpoint == "" {
 		return fmt.Errorf("auth_broker.token_endpoint is required")
+	}
+	// The connect flow (Path B) additionally needs the upstream authorize URL
+	// to redirect the user to for consent.
+	if a.Mode == AuthBrokerModeOAuthConnect && a.AuthorizationEndpoint == "" {
+		return fmt.Errorf("auth_broker.authorization_endpoint is required for mode %q", AuthBrokerModeOAuthConnect)
 	}
 	return nil
 }
