@@ -4789,16 +4789,24 @@ func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Surface every field that participates in the approval hash so the operator
+	// can see exactly what changed. The output schema is part of the hashed
+	// contract (internal/runtime/tool_quarantine.go); omitting it here made
+	// output-schema-only changes (e.g. an upstream adding a new enum value) look
+	// like phantom rug-pull flags because the visible description was unchanged
+	// (MCP-2085).
 	s.writeSuccess(w, map[string]interface{}{
-		"server_name":          record.ServerName,
-		"tool_name":            record.ToolName,
-		"status":               record.Status,
-		"approved_hash":        record.ApprovedHash,
-		"current_hash":         record.CurrentHash,
-		"previous_description": record.PreviousDescription,
-		"current_description":  record.CurrentDescription,
-		"previous_schema":      record.PreviousSchema,
-		"current_schema":       record.CurrentSchema,
+		"server_name":            record.ServerName,
+		"tool_name":              record.ToolName,
+		"status":                 record.Status,
+		"approved_hash":          record.ApprovedHash,
+		"current_hash":           record.CurrentHash,
+		"previous_description":   record.PreviousDescription,
+		"current_description":    record.CurrentDescription,
+		"previous_schema":        record.PreviousSchema,
+		"current_schema":         record.CurrentSchema,
+		"previous_output_schema": record.PreviousOutputSchema,
+		"current_output_schema":  record.CurrentOutputSchema,
 	})
 }
 
