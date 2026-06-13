@@ -663,7 +663,12 @@ func (s *Server) handleGetScanReportByJobID(w http.ResponseWriter, r *http.Reque
 	if !s.requireSecurity(w, r) {
 		return
 	}
-	jobID := chi.URLParam(r, "jobId")
+	// chi routes on RawPath, so the param arrives percent-encoded. Scan job IDs
+	// embed the server name (scan-<serverName>-<ts>), and official-registry names
+	// contain '/', so the slash reaches us as %2F and must be decoded before the
+	// exact-match job lookup — otherwise the report page 404s for slash-named
+	// servers even after the SPA route resolves (MCP-2123).
+	jobID := decodePathParam(chi.URLParam(r, "jobId"))
 	if jobID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "job ID is required")
 		return

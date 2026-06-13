@@ -679,7 +679,11 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		// If no source dir was resolved (no Docker container, no working_dir),
 		// create a temp dir so Cisco scanner can at least scan tool definitions.
 		if req.SourceDir == "" {
-			tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-tools-%s-", serverName))
+			// The temp-dir name is purely cosmetic — os.MkdirTemp's random suffix
+			// already guarantees uniqueness. Keep the pattern a constant so no
+			// user-controlled server name flows into the path (go/path-injection,
+			// MCP-2155) and slash-named servers are trivially safe (MCP-2123).
+			tempDir, err := os.MkdirTemp("", "mcpproxy-scan-tools-")
 			if err == nil {
 				req.SourceDir = tempDir
 				// For HTTP/URL servers, preserve the "url" source method and path

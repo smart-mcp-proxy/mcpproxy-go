@@ -671,27 +671,11 @@ func TestIsPackageRunnerCommand(t *testing.T) {
 	}
 }
 
-func TestSanitizeForDocker(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"simple", "simple"},
-		{"my-server", "my-server"},
-		{"org/repo", "org-repo"},
-		{"host:port", "host-port"},
-		{"with.dots", "with-dots"},
-		{"with spaces", "with-spaces"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			if got := sanitizeForDocker(tt.input); got != tt.want {
-				t.Errorf("sanitizeForDocker(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
-}
+// Container-name sanitization now lives in internal/dockernaming
+// (SanitizeServerName) so the scanner's container lookup and the launcher's
+// container naming share one rule. Its behavior — including the MCP-2123
+// regression case where dotted official-registry names must be preserved — is
+// covered by TestSanitizeServerName in that package.
 
 // TestDockerCmdResolvesBinaryViaShellwrap verifies that the SourceResolver
 // resolves the docker binary through shellwrap.ResolveDockerPath rather than

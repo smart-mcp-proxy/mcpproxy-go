@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
@@ -307,12 +308,16 @@ func dirLooksLikeSource(dir string) bool {
 	return found
 }
 
-// findServerContainer finds the running Docker container for a server
-// MCPProxy names containers as: mcpproxy-<sanitized-server-name>-<suffix>
+// findServerContainer finds the running Docker container for a server.
+// MCPProxy names containers as: mcpproxy-<sanitized-server-name>-<suffix>.
+// The sanitization MUST match the one used to name the container at launch
+// (internal/upstream/core), hence the shared dockernaming package — official
+// registry names like "com.pulsemcp/google-flights" keep their dots and would
+// otherwise never match (MCP-2123).
 func (r *SourceResolver) findServerContainer(ctx context.Context, serverName string) (string, error) {
 	// Use docker ps with filter to find matching containers
 	cmd := r.dockerCmd(ctx, "ps",
-		"--filter", fmt.Sprintf("name=mcpproxy-%s-", sanitizeForDocker(serverName)),
+		"--filter", fmt.Sprintf("name=mcpproxy-%s-", dockernaming.SanitizeServerName(serverName)),
 		"--format", "{{.ID}}",
 		"--no-trunc",
 	)
@@ -346,8 +351,12 @@ func (r *SourceResolver) findServerContainer(ctx context.Context, serverName str
 // hoisted into the same shared cache cannot leak into the scan.
 func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID string, info ServerInfo) (string, func(), error) {
 	serverName := info.Name
-	// Create temp directory for extracted source
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-%s-", serverName))
+	// Create temp directory for extracted source. Keep the pattern a constant:
+	// os.MkdirTemp's random suffix already guarantees uniqueness, so embedding the
+	// (user-controlled) server name added nothing but a go/path-injection taint
+	// (MCP-2155) and a slash-rejection bug for official-registry names like
+	// "com.pulsemcp/google-flights" (MCP-2123). Dropping it fixes both.
+	tempDir, err := os.MkdirTemp("", "mcpproxy-scan-")
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -806,7 +815,10 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 // false positives (e.g. flagging shutil.py or tempfile.py as "malicious").
 func (r *SourceResolver) extractFullFromContainer(ctx context.Context, containerID string, info ServerInfo) (string, func(), error) {
 	serverName := info.Name
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-full-%s-", serverName))
+	// Keep the pattern a constant — os.MkdirTemp's random suffix guarantees
+	// uniqueness; embedding the user-controlled server name only added a
+	// go/path-injection taint (MCP-2155) and a slash-rejection bug (MCP-2123).
+	tempDir, err := os.MkdirTemp("", "mcpproxy-scan-full-")
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -1325,9 +1337,4 @@ func (r *SourceResolver) findGitCheckoutByRepo(checkoutsDir, repoName, gitURL st
 		return "", fmt.Errorf("no git checkout found matching repo %q", repoName)
 	}
 	return bestPath, nil
-}
-
-// sanitizeForDocker removes characters invalid in Docker container names
-func sanitizeForDocker(name string) string {
-	return strings.NewReplacer("/", "-", ":", "-", ".", "-", " ", "-").Replace(name)
 }

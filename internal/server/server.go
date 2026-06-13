@@ -1829,7 +1829,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			secService.SetScannerDisableNoNewPrivileges(true)
 		}
 		secService.SetEmitter(s.runtime)
-		secService.SetServerInfoProvider(&configServerInfoProvider{cfg: cfg, server: s})
+		secService.SetServerInfoProvider(&configServerInfoProvider{
+			cfg:        cfg,
+			liveConfig: s.runtime.Config, // resolve against the live snapshot (MCP-2123)
+			server:     s,
+		})
 		secService.SetServerUnquarantiner(&serverUnquarantinerAdapter{server: s})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
@@ -2699,16 +2703,37 @@ func (k *keyringSecretStore) ResolveSecret(ctx context.Context, refStr string) (
 }
 
 // configServerInfoProvider implements scanner.ServerInfoProvider using the config and server.
+//
+// liveConfig returns the CURRENT config snapshot. It must be preferred over the
+// boot-time cfg field: the runtime swaps in a fresh immutable snapshot on every
+// reload, so a server added at runtime (e.g. from the registry) only appears in
+// the live snapshot. Resolving against the stale boot cfg made such servers
+// invisible to the scanner — the root cause of MCP-2123 ("No Source Available"
+// for a freshly-added Docker-isolated stdio server). cfg is kept as a fallback
+// for callers/tests that don't wire a live accessor.
 type configServerInfoProvider struct {
-	cfg    *config.Config
-	server *Server
+	cfg        *config.Config
+	liveConfig func() *config.Config
+	server     *Server
+}
+
+// currentConfig returns the live config when an accessor is wired, otherwise the
+// boot-time snapshot.
+func (p *configServerInfoProvider) currentConfig() *config.Config {
+	if p.liveConfig != nil {
+		if cfg := p.liveConfig(); cfg != nil {
+			return cfg
+		}
+	}
+	return p.cfg
 }
 
 func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.ServerInfo, error) {
-	if p.cfg == nil {
+	cfg := p.currentConfig()
+	if cfg == nil {
 		return nil, fmt.Errorf("no config available")
 	}
-	for _, sc := range p.cfg.Servers {
+	for _, sc := range cfg.Servers {
 		if sc.Name == serverName {
 			return &scanner.ServerInfo{
 				Name:       sc.Name,

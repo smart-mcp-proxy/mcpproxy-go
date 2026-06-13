@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"math/big"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
 )
 
 // Command and package manager constants
@@ -534,43 +534,12 @@ func generateContainerName(serverName string) string {
 	return fmt.Sprintf("mcpproxy-%s-%s", sanitized, suffix)
 }
 
-// sanitizeServerNameForContainer converts server name to valid Docker container name
+// sanitizeServerNameForContainer converts server name to valid Docker container
+// name. It delegates to the shared dockernaming package so the scanner, which
+// looks containers up by this exact name prefix, can never drift from the rule
+// used to NAME the container here (MCP-2123).
 func sanitizeServerNameForContainer(name string) string {
-	// Replace invalid characters with hyphens
-	// Docker container names can contain: [a-zA-Z0-9][a-zA-Z0-9_.-]*
-	reg := regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
-	sanitized := reg.ReplaceAllString(name, "-")
-
-	// Remove multiple consecutive hyphens
-	for strings.Contains(sanitized, "--") {
-		sanitized = strings.ReplaceAll(sanitized, "--", "-")
-	}
-
-	// Ensure it starts with alphanumeric character
-	if sanitized != "" && !regexp.MustCompile(`^[a-zA-Z0-9]`).MatchString(sanitized) {
-		sanitized = "server-" + sanitized
-		// Remove consecutive hyphens that might have been created by the prefix addition
-		for strings.Contains(sanitized, "--") {
-			sanitized = strings.ReplaceAll(sanitized, "--", "-")
-		}
-	}
-
-	// Remove trailing hyphens/dots
-	sanitized = strings.TrimRight(sanitized, "-.")
-
-	// Ensure minimum length
-	if sanitized == "" {
-		sanitized = "server"
-	}
-
-	// Truncate if too long (Docker limit is 253 chars, leave room for prefix and suffix)
-	maxLen := 200 // mcpproxy- (9) + sanitized (200) + - (1) + suffix (4) = 214 chars
-	if len(sanitized) > maxLen {
-		sanitized = sanitized[:maxLen]
-		sanitized = strings.TrimRight(sanitized, "-.")
-	}
-
-	return sanitized
+	return dockernaming.SanitizeServerName(name)
 }
 
 // generateRandomSuffix generates a 4-character random alphanumeric suffix
