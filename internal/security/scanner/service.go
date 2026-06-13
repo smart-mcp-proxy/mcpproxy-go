@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
 	"go.uber.org/zap"
 )
 
@@ -679,7 +680,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		// If no source dir was resolved (no Docker container, no working_dir),
 		// create a temp dir so Cisco scanner can at least scan tool definitions.
 		if req.SourceDir == "" {
-			tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-tools-%s-", serverName))
+			tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-tools-%s-", dockernaming.SanitizeServerName(serverName)))
 			if err == nil {
 				req.SourceDir = tempDir
 				// For HTTP/URL servers, preserve the "url" source method and path

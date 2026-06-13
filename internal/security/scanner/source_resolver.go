@@ -351,8 +351,11 @@ func (r *SourceResolver) findServerContainer(ctx context.Context, serverName str
 // hoisted into the same shared cache cannot leak into the scan.
 func (r *SourceResolver) extractFromContainer(ctx context.Context, containerID string, info ServerInfo) (string, func(), error) {
 	serverName := info.Name
-	// Create temp directory for extracted source
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-%s-", serverName))
+	// Create temp directory for extracted source. The server name can contain
+	// path separators (official-registry names like "com.pulsemcp/google-flights"),
+	// which os.MkdirTemp rejects in the pattern ("contains path separator") — so
+	// sanitize it to the same token used for the container name (MCP-2123).
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-%s-", dockernaming.SanitizeServerName(serverName)))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -811,7 +814,8 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 // false positives (e.g. flagging shutil.py or tempfile.py as "malicious").
 func (r *SourceResolver) extractFullFromContainer(ctx context.Context, containerID string, info ServerInfo) (string, func(), error) {
 	serverName := info.Name
-	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-full-%s-", serverName))
+	// Sanitize: server names may contain '/' which os.MkdirTemp rejects (MCP-2123).
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("mcpproxy-scan-full-%s-", dockernaming.SanitizeServerName(serverName)))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create temp dir: %w", err)
 	}
