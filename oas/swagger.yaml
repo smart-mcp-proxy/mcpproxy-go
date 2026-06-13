@@ -75,6 +75,11 @@ components:
             so an unset key behaves exactly as before this feature (SC-005). Validated
             in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
           type: string
+        instructions:
+          description: |-
+            Instructions text returned in the MCP initialize response to guide AI agents.
+            When empty, a built-in default is used that explains retrieve_tools workflow.
+          type: string
         intent_declaration:
           $ref: '#/components/schemas/config.IntentDeclarationConfig'
         listen:

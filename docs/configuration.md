@@ -756,6 +756,22 @@ All three modes are always available on dedicated endpoints regardless of config
 
 See [Routing Modes](features/routing-modes.md) for complete details.
 
+## Server Instructions
+
+Text returned in the MCP `initialize` response to guide AI agents on how to use the proxy (e.g., use `retrieve_tools` to discover existing tools rather than `search_servers`).
+
+```json
+{
+  "instructions": "Use retrieve_tools to discover tools before assuming a capability is unavailable."
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `instructions` | string | _(built-in)_ | Custom instructions sent in the MCP `initialize` response. When empty, a built-in default explains the `retrieve_tools` → `call_tool_*` workflow and warns against using `search_servers` for existing tools. |
+
+**Note:** Applied at startup / on the next client connect — editing this value does not hot-reload into already-connected MCP sessions.
+
 ---
 
 ## Tool-Level Quarantine
