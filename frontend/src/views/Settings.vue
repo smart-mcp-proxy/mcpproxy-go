@@ -193,6 +193,7 @@ import {
   DOCS_BASE,
   docsUrl,
   type SettingField,
+  type SettingsAccordion,
 } from '@/views/settings/fields'
 import api from '@/services/api'
 
@@ -201,9 +202,27 @@ const systemStore = useSystemStore()
 
 const securityFields = SECURITY_FIELDS
 const generalFields = GENERAL_FIELDS
-const advancedAccordions = ADVANCED_ACCORDIONS
 const serverEditionFields = SERVER_EDITION_FIELDS
 const serverEditionTitle = SERVER_EDITION_SECTION_TITLE
+
+// Resolved built-in MCP `instructions` default (MCP-2175), fetched from the
+// backend so the `instructions` textarea placeholder never drifts from Go.
+const defaultInstructions = ref<string>('')
+
+// Inject the live default as the `instructions` field placeholder. Until the
+// fetch resolves (or against an older core that doesn't expose it) the static
+// catalogue placeholder ("Loading built-in default…") is used.
+const advancedAccordions = computed<SettingsAccordion[]>(() =>
+  ADVANCED_ACCORDIONS.map((acc) => {
+    if (!defaultInstructions.value || !acc.fields.some((f) => f.key === 'instructions')) return acc
+    return {
+      ...acc,
+      fields: acc.fields.map((f) =>
+        f.key === 'instructions' ? { ...f, placeholder: defaultInstructions.value } : f
+      ),
+    }
+  })
+)
 
 // ---- form state ----
 const loading = ref(false)
@@ -224,7 +243,7 @@ const search = ref('')
 const allFields = computed<SettingField[]>(() => [
   ...securityFields,
   ...generalFields,
-  ...advancedAccordions.flatMap((a) => a.fields),
+  ...advancedAccordions.value.flatMap((a) => a.fields),
   ...(hasServerEdition.value ? serverEditionFields : []),
 ])
 const filteredFields = computed<SettingField[]>(() => {
@@ -399,8 +418,23 @@ function handleConfigSaved() {
   loadConfig()
 }
 
+// Fetch the resolved built-in MCP instructions default for the textarea
+// placeholder (MCP-2175). Non-fatal: a failure or an older core just leaves the
+// static catalogue placeholder in place.
+async function loadDefaultInstructions() {
+  try {
+    const resp = await api.getStatus()
+    if (resp.success && typeof resp.data?.default_instructions === 'string') {
+      defaultInstructions.value = resp.data.default_instructions
+    }
+  } catch {
+    /* leave placeholder as the static fallback */
+  }
+}
+
 onMounted(() => {
   loadConfig()
+  loadDefaultInstructions()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
 })
 onUnmounted(() => {

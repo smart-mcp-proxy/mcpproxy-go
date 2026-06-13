@@ -770,6 +770,8 @@ Text returned in the MCP `initialize` response to guide AI agents on how to use 
 |-------|------|---------|-------------|
 | `instructions` | string | _(built-in)_ | Custom instructions sent in the MCP `initialize` response. When empty, a built-in default explains the `retrieve_tools` → `call_tool_*` workflow and warns against using `search_servers` for existing tools. |
 
+You can edit this from the Web UI under **Settings → Advanced → MCP server instructions**. The textarea shows the built-in default as a greyed-out placeholder; clearing it restores that default.
+
 **Note:** Applied at startup / on the next client connect — editing this value does not hot-reload into already-connected MCP sessions.
 
 ---

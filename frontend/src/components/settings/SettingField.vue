@@ -135,6 +135,20 @@
         <span v-if="validationError" class="text-error text-xs mt-1" :data-test="`setting-error-${field.key}`">{{ validationError }}</span>
       </div>
 
+      <!-- textarea (multi-line text, e.g. MCP server instructions) -->
+      <div v-else-if="field.control === 'textarea'" class="flex flex-col items-stretch w-full sm:w-96">
+        <textarea
+          class="textarea textarea-bordered textarea-sm w-full font-mono leading-snug"
+          :class="{ 'textarea-error': validationError }"
+          rows="6"
+          :value="modelValue ?? ''"
+          :placeholder="field.placeholder"
+          :data-test="`setting-textarea-${field.key}`"
+          @input="emitText(($event.target as HTMLTextAreaElement).value)"
+        ></textarea>
+        <span v-if="validationError" class="text-error text-xs mt-1" :data-test="`setting-error-${field.key}`">{{ validationError }}</span>
+      </div>
+
       <!-- multiselect (checkbox group) -->
       <div v-else-if="field.control === 'multiselect'" class="flex flex-wrap gap-3 justify-end max-w-xs">
         <label v-for="opt in field.options" :key="opt.value" class="label cursor-pointer gap-1 p-0">
@@ -208,6 +222,12 @@ function emitVal(v: any) {
 function emitText(raw: string) {
   if (props.field.control === 'duration' && props.field.optional && raw.trim() === '') {
     emitVal(null)
+    return
+  }
+  // Empty-means-default: a textarea cleared to only whitespace persists as ""
+  // (the backend maps "" → built-in default), never a whitespace-only string.
+  if (props.field.control === 'textarea' && raw.trim() === '') {
+    emitVal('')
     return
   }
   emitVal(raw)
