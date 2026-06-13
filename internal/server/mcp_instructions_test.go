@@ -22,4 +22,8 @@ func TestDefaultInstructions_ContainsKeyTerms(t *testing.T) {
 	assert.Contains(t, defaultInstructions, "search_servers")
 	assert.Contains(t, defaultInstructions, "call_tool_read")
 	assert.Contains(t, defaultInstructions, "upstream_servers")
+	// Routing-mode-aware guidance: the default must also cover the
+	// code_execution and direct (server__tool) modes (Spec 031).
+	assert.Contains(t, defaultInstructions, "code_execution")
+	assert.Contains(t, defaultInstructions, "server__tool")
 }
