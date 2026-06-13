@@ -9,6 +9,7 @@ export type ControlType =
   | 'select'
   | 'number'
   | 'text'
+  | 'textarea'
   | 'secret'
   | 'duration'
   | 'multiselect'
@@ -278,6 +279,26 @@ export const SERVER_EDITION_FIELDS: SettingField[] = [
 
 // ---- Section 3: Advanced (subsystem accordions) ----
 export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
+  {
+    id: 'mcp',
+    title: 'MCP server instructions',
+    description:
+      'Text sent to AI clients in the MCP initialize response, guiding how to use the proxy. Power-user, set-once option.',
+    fields: [
+      {
+        key: 'instructions',
+        label: 'Server instructions',
+        // Empty saves "" — Go maps that back to the built-in default, which is
+        // shown here as the placeholder (fetched live so it never drifts from
+        // the backend). Applied at startup / on the next client connect; it
+        // does not hot-reload into already-connected MCP sessions.
+        help: 'Leave blank to use the built-in default (shown greyed-out below). Applied on the next client connect, not to already-connected sessions.',
+        control: 'textarea',
+        optional: true,
+        placeholder: 'Loading built-in default…',
+      },
+    ],
+  },
   {
     id: 'code-execution',
     docs: '/features/code-execution',

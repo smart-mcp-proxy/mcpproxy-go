@@ -246,8 +246,11 @@ class APIService {
   }
 
   // Status endpoint
-  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string }>> {
-    return this.request<{ edition: string; running: boolean; routing_mode: string }>('/api/v1/status')
+  // `default_instructions` is the resolved built-in MCP instructions default
+  // (MCP-2175) — present once the backend exposes it; optional so the Web UI
+  // degrades gracefully against older cores.
+  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string }>> {
+    return this.request<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string }>('/api/v1/status')
   }
 
   // Routing mode endpoint
