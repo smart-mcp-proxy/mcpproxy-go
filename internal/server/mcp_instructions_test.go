@@ -17,6 +17,15 @@ func TestResolveInstructions_Custom(t *testing.T) {
 	assert.Equal(t, custom, result)
 }
 
+// TestServer_DefaultInstructions verifies the controller exposes the built-in
+// default (not a user's custom value) so /api/v1/status can surface it to the
+// Web UI placeholder without drift (MCP-2176).
+func TestServer_DefaultInstructions(t *testing.T) {
+	s := &Server{}
+	assert.Equal(t, defaultInstructions, s.DefaultInstructions())
+	assert.Contains(t, s.DefaultInstructions(), "retrieve_tools")
+}
+
 func TestDefaultInstructions_ContainsKeyTerms(t *testing.T) {
 	assert.Contains(t, defaultInstructions, "retrieve_tools")
 	assert.Contains(t, defaultInstructions, "search_servers")

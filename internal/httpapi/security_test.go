@@ -361,3 +361,6 @@ func (m *baseController) GetOnboardingState() (*storage.OnboardingState, error) 
 }
 func (m *baseController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
 func (m *baseController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
+func (m *baseController) DefaultInstructions() string {
+	return "test built-in default: use retrieve_tools to discover tools"
+}

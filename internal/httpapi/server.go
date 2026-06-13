@@ -109,6 +109,10 @@ type ServerController interface {
 	ValidateConfig(cfg *config.Config) ([]config.ValidationError, error)
 	ApplyConfig(cfg *config.Config, cfgPath string) (*internalRuntime.ConfigApplyResult, error)
 	GetConfig() (*config.Config, error)
+	// DefaultInstructions returns the built-in default MCP instructions text
+	// (independent of any user-configured custom value), so /api/v1/status can
+	// surface it to the Web UI as the instructions placeholder (MCP-2176).
+	DefaultInstructions() string
 
 	// Token statistics
 	GetTokenSavings() (*contracts.ServerTokenMetrics, error)
@@ -912,6 +916,11 @@ func (s *Server) handleGetStatus(w http.ResponseWriter, _ *http.Request) {
 		"status":         s.controller.GetStatus(),
 		"routing_mode":   routingMode,
 		"timestamp":      time.Now().Unix(),
+		// MCP-2176: built-in default MCP instructions. The Web UI renders this
+		// as the instructions textarea placeholder so the displayed default
+		// never drifts from the backend's resolveInstructions("") value. Always
+		// the built-in default, never the user's current custom value.
+		"default_instructions": s.controller.DefaultInstructions(),
 	}
 
 	// Spec 044 (FR-018): expose process-level env_kind + env_markers so the
