@@ -289,6 +289,10 @@ func (m *MockServerController) GetConfig() (*config.Config, error) {
 	}, nil
 }
 
+func (m *MockServerController) DefaultInstructions() string {
+	return "test built-in default: use retrieve_tools to discover tools"
+}
+
 // Readiness method
 func (m *MockServerController) IsReady() bool { return true }
 

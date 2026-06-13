@@ -180,3 +180,33 @@ func TestHandleGetStatus_IncludesRoutingMode(t *testing.T) {
 		assert.Equal(t, config.RoutingModeRetrieveTools, resp.Data["routing_mode"])
 	})
 }
+
+// TestHandleGetStatus_IncludesDefaultInstructions verifies the status response
+// exposes the built-in default MCP instructions so the Web UI can render them as
+// the instructions textarea placeholder without hardcoding the text (MCP-2176).
+func TestHandleGetStatus_IncludesDefaultInstructions(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: ""}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+	}
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.True(t, resp.Success)
+
+	defaultInstructions, ok := resp.Data["default_instructions"].(string)
+	require.True(t, ok, "default_instructions must be present and a string")
+	assert.NotEmpty(t, defaultInstructions)
+	assert.Contains(t, defaultInstructions, "retrieve_tools")
+}

@@ -2205,6 +2205,15 @@ func (s *Server) GetConfig() (*config.Config, error) {
 	return s.runtime.GetConfig()
 }
 
+// DefaultInstructions returns the built-in default MCP instructions text,
+// independent of any user-configured custom value. It backs the
+// /api/v1/status `default_instructions` field so the Web UI can render the
+// built-in default as the instructions placeholder without hardcoding the
+// text (MCP-2176). This mirrors resolveInstructions("").
+func (s *Server) DefaultInstructions() string {
+	return defaultInstructions
+}
+
 // ValidateConfig validates a configuration
 func (s *Server) ValidateConfig(cfg *config.Config) ([]config.ValidationError, error) {
 	return s.runtime.ValidateConfig(cfg)
