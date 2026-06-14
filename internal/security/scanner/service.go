@@ -1207,12 +1207,12 @@ func (s *Service) findLatestPassJobs(serverName string) (*ScanJob, *ScanJob, err
 	// Pick the newest Pass-1 and Pass-2 job IDs by start time.
 	var pass1Meta, pass2Meta *ScanJobMeta
 	for _, m := range metas {
-		switch {
-		case m.ScanPass == ScanPassSupplyChainAudit:
+		switch m.ScanPass {
+		case ScanPassSupplyChainAudit:
 			if pass2Meta == nil || m.StartedAt.After(pass2Meta.StartedAt) {
 				pass2Meta = m
 			}
-		case m.ScanPass == ScanPassSecurityScan || m.ScanPass == 0:
+		case ScanPassSecurityScan, 0:
 			// ScanPass == 0 handles legacy jobs (before two-pass was added)
 			if pass1Meta == nil || m.StartedAt.After(pass1Meta.StartedAt) {
 				pass1Meta = m
