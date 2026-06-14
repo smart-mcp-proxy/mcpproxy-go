@@ -32,6 +32,7 @@ type Storage interface {
 	SaveScanJob(job *ScanJob) error
 	GetScanJob(id string) (*ScanJob, error)
 	ListScanJobs(serverName string) ([]*ScanJob, error)
+	ListScanJobMetas(serverName string) ([]*ScanJobMeta, error)
 	GetLatestScanJob(serverName string) (*ScanJob, error)
 	DeleteScanJob(id string) error
 	DeleteServerScanJobs(serverName string) error
@@ -1083,25 +1084,23 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 	agg.Pass1Complete = job.ScanPass == ScanPassSecurityScan && job.Status == ScanJobStatusCompleted
 	agg.Pass2Complete = job.ScanPass == ScanPassSupplyChainAudit && job.Status == ScanJobStatusCompleted
 
-	// If this is a Pass 1 job, try to find and merge companion Pass 2 results
+	// If this is a Pass 1 job, try to find and merge companion Pass 2 results.
+	// The companion is resolved via the lightweight scan-job index, so this does
+	// NOT deserialize the full per-server scan history (MCP-2205).
 	if job.ScanPass == ScanPassSecurityScan || job.ScanPass == 0 {
-		allJobs, _ := s.storage.ListScanJobs(job.ServerName)
-		for _, j := range allJobs {
-			if j.ScanPass == ScanPassSupplyChainAudit && j.Status == ScanJobStatusCompleted && j.StartedAt.After(job.StartedAt) {
-				pass2Reports, err := s.storage.ListScanReportsByJob(j.ID)
-				if err == nil {
-					for _, r := range pass2Reports {
-						for i := range r.Findings {
-							r.Findings[i].ScanPass = ScanPassSupplyChainAudit
-						}
+		if companionID := s.findCompanionPass2JobID(job); companionID != "" {
+			pass2Reports, err := s.storage.ListScanReportsByJob(companionID)
+			if err == nil {
+				for _, r := range pass2Reports {
+					for i := range r.Findings {
+						r.Findings[i].ScanPass = ScanPassSupplyChainAudit
 					}
-					allMerged := append(reports, pass2Reports...)
-					allMerged = deduplicatePass2Findings(allMerged)
-					agg = AggregateReportsWithJobStatus(job.ID, job.ServerName, allMerged, job)
-					agg.Pass1Complete = true
-					agg.Pass2Complete = true
 				}
-				break
+				allMerged := append(reports, pass2Reports...)
+				allMerged = deduplicatePass2Findings(allMerged)
+				agg = AggregateReportsWithJobStatus(job.ID, job.ServerName, allMerged, job)
+				agg.Pass1Complete = true
+				agg.Pass2Complete = true
 			}
 		}
 
@@ -1116,6 +1115,40 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 	agg.ScannerStatuses = job.ScannerStatuses
 
 	return agg, nil
+}
+
+// findCompanionPass2JobID returns the ID of the Pass-2 (supply-chain audit) job
+// that companions the given Pass-1 job: the earliest completed Pass-2 job that
+// started after it. It reads the lightweight scan-job metadata index rather than
+// the full job records, so its cost is independent of scan-output size and the
+// report path no longer slows down as a server accrues scan history (MCP-2205).
+// Returns "" when no companion exists.
+func (s *Service) findCompanionPass2JobID(pass1 *ScanJob) string {
+	metas, err := s.storage.ListScanJobMetas(pass1.ServerName)
+	if err != nil {
+		s.logger.Warn("failed to list scan job metadata for companion lookup",
+			zap.String("server", pass1.ServerName),
+			zap.Error(err),
+		)
+		return ""
+	}
+
+	var best *ScanJobMeta
+	for _, m := range metas {
+		if m.ScanPass != ScanPassSupplyChainAudit || m.Status != ScanJobStatusCompleted {
+			continue
+		}
+		if !m.StartedAt.After(pass1.StartedAt) {
+			continue
+		}
+		if best == nil || m.StartedAt.Before(best.StartedAt) {
+			best = m
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	return best.ID
 }
 
 // deduplicatePass2Findings removes Pass 2 findings that duplicate Pass 1 findings.
@@ -1158,36 +1191,49 @@ func deduplicatePass2Findings(reports []*ScanReport) []*ScanReport {
 // findLatestPassJobs finds the latest Pass 1 and Pass 2 jobs for a server.
 // Returns (pass1Job, pass2Job, error). At least one must be non-nil on success.
 func (s *Service) findLatestPassJobs(serverName string) (*ScanJob, *ScanJob, error) {
-	jobs, err := s.storage.ListScanJobs(serverName)
+	// Read lightweight metadata rather than full job records so this scales with
+	// neither scan-output size nor history depth: we deserialize at most the two
+	// jobs we actually return (MCP-2205).
+	metas, err := s.storage.ListScanJobMetas(serverName)
 	if err != nil {
 		// Surface the underlying I/O error so the caller can distinguish
 		// transient failures from "no records found".
-		return nil, nil, fmt.Errorf("list scan jobs for %s: %w", serverName, err)
+		return nil, nil, fmt.Errorf("list scan job metadata for %s: %w", serverName, err)
 	}
-	if len(jobs) == 0 {
+	if len(metas) == 0 {
 		return nil, nil, fmt.Errorf("%w: %s", errNoScans, serverName)
 	}
 
-	// Sort by start time descending (newest first)
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].StartedAt.After(jobs[j].StartedAt)
-	})
+	// Pick the newest Pass-1 and Pass-2 job IDs by start time.
+	var pass1Meta, pass2Meta *ScanJobMeta
+	for _, m := range metas {
+		switch {
+		case m.ScanPass == ScanPassSupplyChainAudit:
+			if pass2Meta == nil || m.StartedAt.After(pass2Meta.StartedAt) {
+				pass2Meta = m
+			}
+		case m.ScanPass == ScanPassSecurityScan || m.ScanPass == 0:
+			// ScanPass == 0 handles legacy jobs (before two-pass was added)
+			if pass1Meta == nil || m.StartedAt.After(pass1Meta.StartedAt) {
+				pass1Meta = m
+			}
+		}
+	}
+
+	if pass1Meta == nil && pass2Meta == nil {
+		return nil, nil, fmt.Errorf("%w: %s", errNoScans, serverName)
+	}
 
 	var pass1Job, pass2Job *ScanJob
-	for _, j := range jobs {
-		if j.ScanPass == ScanPassSupplyChainAudit && pass2Job == nil {
-			pass2Job = j
-		} else if (j.ScanPass == ScanPassSecurityScan || j.ScanPass == 0) && pass1Job == nil {
-			// ScanPass == 0 handles legacy jobs (before two-pass was added)
-			pass1Job = j
-		}
-		if pass1Job != nil && pass2Job != nil {
-			break
+	if pass1Meta != nil {
+		if pass1Job, err = s.storage.GetScanJob(pass1Meta.ID); err != nil {
+			return nil, nil, fmt.Errorf("load latest pass-1 job %s: %w", pass1Meta.ID, err)
 		}
 	}
-
-	if pass1Job == nil && pass2Job == nil {
-		return nil, nil, fmt.Errorf("%w: %s", errNoScans, serverName)
+	if pass2Meta != nil {
+		if pass2Job, err = s.storage.GetScanJob(pass2Meta.ID); err != nil {
+			return nil, nil, fmt.Errorf("load latest pass-2 job %s: %w", pass2Meta.ID, err)
+		}
 	}
 
 	return pass1Job, pass2Job, nil

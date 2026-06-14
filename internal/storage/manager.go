@@ -532,6 +532,15 @@ func (m *Manager) ListScanJobs(serverName string) ([]*scanner.ScanJob, error) {
 	return m.db.ListScanJobs(serverName)
 }
 
+// ListScanJobMetas returns lightweight scan-job metadata, optionally filtered by
+// server name (MCP-2205).
+func (m *Manager) ListScanJobMetas(serverName string) ([]*scanner.ScanJobMeta, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	return m.db.ListScanJobMetas(serverName)
+}
+
 // GetLatestScanJob returns the most recent scan job for a server
 func (m *Manager) GetLatestScanJob(serverName string) (*scanner.ScanJob, error) {
 	m.mu.RLock()

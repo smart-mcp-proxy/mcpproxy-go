@@ -93,6 +93,26 @@ func (m *mockStorage) ListScanJobs(serverName string) ([]*ScanJob, error) {
 	return result, nil
 }
 
+func (m *mockStorage) ListScanJobMetas(serverName string) ([]*ScanJobMeta, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var result []*ScanJobMeta
+	for _, j := range m.jobs {
+		if serverName != "" && j.ServerName != serverName {
+			continue
+		}
+		result = append(result, &ScanJobMeta{
+			ID:          j.ID,
+			ServerName:  j.ServerName,
+			Status:      j.Status,
+			ScanPass:    j.ScanPass,
+			StartedAt:   j.StartedAt,
+			CompletedAt: j.CompletedAt,
+		})
+	}
+	return result, nil
+}
+
 func (m *mockStorage) GetLatestScanJob(serverName string) (*ScanJob, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1545,12 +1565,14 @@ func TestScanFindingScanPassTag(t *testing.T) {
 	}
 }
 
-// countingStorage wraps any Storage and counts ListScanJobs invocations.
-// Used for verifying the GetScanSummary negative-cache behavior introduced in
-// spec 047.
+// countingStorage wraps any Storage and counts storage probes. listCalls counts
+// the heavy full-history ListScanJobs path (MCP-2205 asserts this stays 0 on the
+// report hot paths); metaCalls counts the lightweight ListScanJobMetas index
+// path used by the GetScanSummary negative-cache behavior (spec 047).
 type countingStorage struct {
 	Storage
 	listCalls atomic.Int64
+	metaCalls atomic.Int64
 }
 
 func newCountingStorage(inner Storage) *countingStorage {
@@ -1560,6 +1582,11 @@ func newCountingStorage(inner Storage) *countingStorage {
 func (c *countingStorage) ListScanJobs(serverName string) ([]*ScanJob, error) {
 	c.listCalls.Add(1)
 	return c.Storage.ListScanJobs(serverName)
+}
+
+func (c *countingStorage) ListScanJobMetas(serverName string) ([]*ScanJobMeta, error) {
+	c.metaCalls.Add(1)
+	return c.Storage.ListScanJobMetas(serverName)
 }
 
 // erroringStorage returns a transient error from ListScanJobs while delegating
@@ -1572,6 +1599,11 @@ type erroringStorage struct {
 }
 
 func (e *erroringStorage) ListScanJobs(string) ([]*ScanJob, error) {
+	e.listCalls.Add(1)
+	return nil, e.err
+}
+
+func (e *erroringStorage) ListScanJobMetas(string) ([]*ScanJobMeta, error) {
 	e.listCalls.Add(1)
 	return nil, e.err
 }
@@ -1590,8 +1622,8 @@ func TestGetScanSummary_CachesNegativeResult(t *testing.T) {
 	}
 
 	// Without the negative-cache fix, this would be N storage calls.
-	if got := store.listCalls.Load(); got != 1 {
-		t.Errorf("expected exactly 1 ListScanJobs call after %d GetScanSummary invocations, got %d", N, got)
+	if got := store.metaCalls.Load(); got != 1 {
+		t.Errorf("expected exactly 1 ListScanJobMetas call after %d GetScanSummary invocations, got %d", N, got)
 	}
 }
 
@@ -1606,7 +1638,7 @@ func TestGetScanSummary_DoesNotCacheOnTransientError(t *testing.T) {
 
 	// Transient error must NOT populate the negative cache: every call retries.
 	if got := store.listCalls.Load(); got != int64(N) {
-		t.Errorf("expected %d ListScanJobs calls (no caching of transient errors), got %d", N, got)
+		t.Errorf("expected %d storage probes (no caching of transient errors), got %d", N, got)
 	}
 }
 
@@ -1619,8 +1651,8 @@ func TestGetScanSummary_OverwritesNilSentinelOnRealScan(t *testing.T) {
 	if got := svc.GetScanSummary(context.Background(), "later-scanned"); got != nil {
 		t.Fatalf("expected nil summary on first call, got %+v", got)
 	}
-	if got := store.listCalls.Load(); got != 1 {
-		t.Fatalf("expected 1 ListScanJobs call after first GetScanSummary, got %d", got)
+	if got := store.metaCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 ListScanJobMetas call after first GetScanSummary, got %d", got)
 	}
 
 	// Simulate a real scan landing for that server: insert a completed Pass-1 job
@@ -1644,5 +1676,97 @@ func TestGetScanSummary_OverwritesNilSentinelOnRealScan(t *testing.T) {
 	// Subsequent GetScanSummary returns the real summary, not the nil sentinel.
 	if got := svc.GetScanSummary(context.Background(), "later-scanned"); got == nil || got.Status != "clean" {
 		t.Errorf("expected real summary {Status: clean}, got %+v", got)
+	}
+}
+
+// TestGetScanReportByJobID_LatencyIndependentOfHistory verifies the MCP-2205
+// fix: aggregating a Pass-1 report must NOT deserialize the full per-server scan
+// history (ListScanJobs), whose job payloads carry large stdout/stderr. The
+// companion Pass-2 lookup uses the lightweight metadata index instead, so report
+// latency does not grow with how many times a server has been scanned.
+func TestGetScanReportByJobID_LatencyIndependentOfHistory(t *testing.T) {
+	mock := newMockStorage()
+	store := newCountingStorage(mock)
+	svc := NewService(store, NewRegistry(t.TempDir(), zap.NewNop()), nil, t.TempDir(), zap.NewNop())
+
+	now := time.Now()
+
+	// Pass-1 job under inspection + its report.
+	pass1 := &ScanJob{ID: "p1", ServerName: "srv", Status: ScanJobStatusCompleted, ScanPass: ScanPassSecurityScan, StartedAt: now.Add(-10 * time.Minute)}
+	_ = mock.SaveScanJob(pass1)
+	_ = mock.SaveScanReport(&ScanReport{ID: "r1", JobID: "p1", ServerName: "srv", ScannerID: "s",
+		Findings: []ScanFinding{{RuleID: "T1", Title: "tool poisoning", Scanner: "s", ThreatLevel: ThreatLevelDangerous}}})
+
+	// Companion Pass-2 job that started after Pass-1 + its report.
+	pass2 := &ScanJob{ID: "p2", ServerName: "srv", Status: ScanJobStatusCompleted, ScanPass: ScanPassSupplyChainAudit, StartedAt: now.Add(-8 * time.Minute)}
+	_ = mock.SaveScanJob(pass2)
+	_ = mock.SaveScanReport(&ScanReport{ID: "r2", JobID: "p2", ServerName: "srv", ScannerID: "s",
+		Findings: []ScanFinding{{RuleID: "CVE-1", Title: "known cve", Scanner: "s", ThreatLevel: ThreatLevelWarning}}})
+
+	// Large historical backlog for the same server (the symptom: reports get
+	// slower the more a server is scanned).
+	for i := 0; i < 100; i++ {
+		_ = mock.SaveScanJob(&ScanJob{
+			ID:         fmt.Sprintf("noise-%d", i),
+			ServerName: "srv",
+			Status:     ScanJobStatusCompleted,
+			ScanPass:   ScanPassSecurityScan,
+			StartedAt:  now.Add(time.Duration(-20-i) * time.Minute),
+		})
+	}
+
+	agg, err := svc.GetScanReportByJobID(context.Background(), "p1")
+	if err != nil {
+		t.Fatalf("GetScanReportByJobID: %v", err)
+	}
+
+	// Correctness: companion Pass-2 still merged in.
+	if !agg.Pass1Complete || !agg.Pass2Complete {
+		t.Errorf("expected both passes complete, got pass1=%v pass2=%v", agg.Pass1Complete, agg.Pass2Complete)
+	}
+	if len(agg.Findings) != 2 {
+		t.Fatalf("expected 2 merged findings (Pass-1 + companion Pass-2), got %d", len(agg.Findings))
+	}
+
+	// Latency guard: must not scan the full per-server job history.
+	if got := store.listCalls.Load(); got != 0 {
+		t.Errorf("expected 0 ListScanJobs (full-history) calls in report path, got %d", got)
+	}
+}
+
+// TestGetScanReport_LatestLatencyIndependentOfHistory verifies the MCP-2205 fix
+// also covers the "latest report" path (GetScanReport by server name, used by the
+// Web UI server-detail view). Resolving the latest Pass-1/Pass-2 jobs must use the
+// lightweight metadata index plus targeted GetScanJob loads (at most two full job
+// deserializations), not a full ListScanJobs over the server's scan history.
+func TestGetScanReport_LatestLatencyIndependentOfHistory(t *testing.T) {
+	mock := newMockStorage()
+	store := newCountingStorage(mock)
+	svc := NewService(store, NewRegistry(t.TempDir(), zap.NewNop()), nil, t.TempDir(), zap.NewNop())
+
+	now := time.Now()
+
+	// Latest Pass-1 + Pass-2 with reports.
+	_ = mock.SaveScanJob(&ScanJob{ID: "latest-p1", ServerName: "srv", Status: ScanJobStatusCompleted, ScanPass: ScanPassSecurityScan, StartedAt: now.Add(-2 * time.Minute)})
+	_ = mock.SaveScanReport(&ScanReport{ID: "lr1", JobID: "latest-p1", ServerName: "srv", ScannerID: "s",
+		Findings: []ScanFinding{{RuleID: "T1", Title: "tp", Scanner: "s", ThreatLevel: ThreatLevelDangerous}}})
+	_ = mock.SaveScanJob(&ScanJob{ID: "latest-p2", ServerName: "srv", Status: ScanJobStatusCompleted, ScanPass: ScanPassSupplyChainAudit, StartedAt: now.Add(-1 * time.Minute)})
+	_ = mock.SaveScanReport(&ScanReport{ID: "lr2", JobID: "latest-p2", ServerName: "srv", ScannerID: "s",
+		Findings: []ScanFinding{{RuleID: "CVE-9", Title: "cve", Scanner: "s", ThreatLevel: ThreatLevelWarning}}})
+
+	// Large historical backlog.
+	for i := 0; i < 100; i++ {
+		_ = mock.SaveScanJob(&ScanJob{ID: fmt.Sprintf("old-%d", i), ServerName: "srv", Status: ScanJobStatusCompleted, ScanPass: ScanPassSecurityScan, StartedAt: now.Add(time.Duration(-10-i) * time.Minute)})
+	}
+
+	report, err := svc.GetScanReport(context.Background(), "srv")
+	if err != nil {
+		t.Fatalf("GetScanReport: %v", err)
+	}
+	if len(report.Findings) != 2 {
+		t.Fatalf("expected 2 merged findings, got %d", len(report.Findings))
+	}
+	if got := store.listCalls.Load(); got != 0 {
+		t.Errorf("expected 0 ListScanJobs (full-history) calls in latest-report path, got %d", got)
 	}
 }

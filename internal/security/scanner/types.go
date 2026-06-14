@@ -120,6 +120,20 @@ type ScanJob struct {
 	ScanContext *ScanContext `json:"scan_context,omitempty"`
 }
 
+// ScanJobMeta is a lightweight projection of a scan job, persisted in a
+// dedicated index bucket so that companion-job lookups during report
+// aggregation never deserialize the full job payload (whose ScannerStatuses can
+// carry large stdout/stderr blobs). This keeps report latency independent of a
+// server's scan history. See MCP-2205.
+type ScanJobMeta struct {
+	ID          string    `json:"id"`
+	ServerName  string    `json:"server_name"`
+	Status      string    `json:"status"`
+	ScanPass    int       `json:"scan_pass"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+}
+
 // ScanJobSummary is a lightweight view of a scan job for history listing
 type ScanJobSummary struct {
 	ID            string    `json:"id"`
