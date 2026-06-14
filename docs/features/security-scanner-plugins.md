@@ -245,6 +245,12 @@ Scanners communicate results via SARIF 2.1.0. Exit code `0` indicates "scan comp
 6. Tool definitions only — last resort (HTTP / SSE / unresolvable)
 ```
 
+For `uvx` servers the package cache lookup (step 2) covers persistent `uv tool install`
+locations, git checkouts, **and** the ephemeral `~/.cache/uv/archive-v0` wheel
+cache that a plain `uvx <pkg>` populates — so a locally-run Python MCP server
+resolves to its real source from the local cache (no network) before step 5's
+published fetch is reached, and works in air-gapped deployments.
+
 The resolved method and path are recorded on the scan job and visible via both the text and JSON report. The `source_method` field reports how source was obtained: `docker_extract`, `npx_cache`, `uvx_cache`, `working_dir`, `npm_pack`, `pip_download`, `url`, or `tool_definitions_only`. See [Security Commands → scan](/cli/security-commands#security-scan) for more.
 
 #### Published package fetch (npx / uvx)

@@ -1305,7 +1305,149 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 		}, nil
 	}
 
+	// Strategy 3: ephemeral uvx archive cache (~/.cache/uv/archive-v0/<hash>/).
+	// `uvx <pkg>` (the common case) never populates the persistent tools dir
+	// above — it unpacks the published wheel into a content-addressed archive
+	// entry keyed by an opaque hash, not by package name. So a server that HAS
+	// been run locally still missed both strategies above and fell through to a
+	// tool-definitions-only scan (or, post-MCP-2206, a redundant network fetch).
+	// The container resolver (findContainerTargetDir) already searches this
+	// cache; the host resolver now does too. Found by globbing every archive
+	// entry and matching the wheel's `.dist-info` (robust to dist-name vs
+	// import-name differences). git+URL packages live in git-v0 (Strategy 1),
+	// not archive-v0, so they are skipped here.
+	if !isGitURL {
+		archiveRoot := filepath.Join(homeDir, ".cache", "uv", "archive-v0")
+		if dir, ok := findUvxArchiveDir(archiveRoot, stripPkgVersion(cleanPkg)); ok {
+			r.logger.Info("Resolved source from UV archive cache",
+				zap.String("server", info.Name),
+				zap.String("package", cleanPkg),
+				zap.String("path", dir),
+			)
+			return &ResolvedSource{
+				SourceDir: dir,
+				Method:    "uvx_cache",
+				Cleanup:   func() {},
+			}, nil
+		}
+	}
+
 	return nil, fmt.Errorf("package %q not found in UV cache", pkgName)
+}
+
+// stripPkgVersion trims a PEP 508 version specifier and/or extras from a
+// package spec, leaving the bare distribution name. Handles `pkg==1.0`,
+// `pkg>=1.0`, `pkg~=1.0`, `pkg!=1.0`, `pkg[extra]`, and a trailing space/marker.
+// (The `@version` form is already stripped earlier by the caller.)
+func stripPkgVersion(spec string) string {
+	cut := len(spec)
+	for _, c := range []string{"==", ">=", "<=", "~=", "!=", ">", "<", "[", " ", ";"} {
+		if idx := strings.Index(spec, c); idx >= 0 && idx < cut {
+			cut = idx
+		}
+	}
+	return strings.TrimSpace(spec[:cut])
+}
+
+// normalizeDistName applies PEP 503 / wheel normalization to a Python
+// distribution name: lowercase, with runs of "-", "_" and "." collapsed to a
+// single "_". This matches the form uv writes for `.dist-info` directory names
+// (e.g. "My.Cool-Server" → "my_cool_server"), so a config's free-form package
+// spec can be matched against on-disk wheels.
+func normalizeDistName(name string) string {
+	n := strings.ToLower(name)
+	n = strings.NewReplacer("-", "_", ".", "_").Replace(n)
+	for strings.Contains(n, "__") {
+		n = strings.ReplaceAll(n, "__", "_")
+	}
+	return strings.Trim(n, "_")
+}
+
+// findUvxArchiveDir locates the unpacked wheel for distribution pkg inside the
+// uv ephemeral archive cache. Each archive entry (~/.cache/uv/archive-v0/<hash>)
+// holds exactly one unpacked wheel, content-addressed by an opaque hash — so the
+// package is found by scanning entries and matching the wheel's `.dist-info`
+// directory rather than by constructing a name-based path. Both the flat layout
+// (<hash>/<dist>-<ver>.dist-info) and the venv-style layout
+// (<hash>/lib/python*/site-packages/<dist>-<ver>.dist-info) are supported. When
+// multiple entries match (e.g. several cached versions) the most recently
+// modified entry wins, consistent with resolveNpxCache. Returns the archive
+// entry root (the <hash> dir) and ok=true on a hit.
+func findUvxArchiveDir(archiveRoot, pkg string) (string, bool) {
+	norm := normalizeDistName(pkg)
+	if norm == "" {
+		return "", false
+	}
+	entries, err := os.ReadDir(archiveRoot)
+	if err != nil {
+		return "", false
+	}
+
+	var best string
+	var bestMod int64
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		entryPath := filepath.Join(archiveRoot, entry.Name())
+		// Check the flat layout, then any venv-style site-packages dirs.
+		matchDirs := []string{entryPath}
+		if sp, _ := filepath.Glob(filepath.Join(entryPath, "lib", "python*", "site-packages")); len(sp) > 0 {
+			matchDirs = append(matchDirs, sp...)
+		}
+		matched := false
+		for _, d := range matchDirs {
+			if dirHasDistInfo(d, norm) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		modTime := int64(0)
+		if fi, err := entry.Info(); err == nil {
+			modTime = fi.ModTime().Unix()
+		}
+		if best == "" || modTime > bestMod {
+			best = entryPath
+			bestMod = modTime
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
+}
+
+// dirHasDistInfo reports whether dir directly contains a `<name>-<version>.dist-info`
+// directory whose normalized distribution name equals norm. A wheel's `.dist-info`
+// name is `{normalized-distribution}-{version}.dist-info`, and the normalized
+// distribution name contains no "-" (those become "_"), so the FIRST "-" cleanly
+// separates name from version.
+func dirHasDistInfo(dir, norm string) bool {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range es {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(strings.ToLower(name), ".dist-info") {
+			continue
+		}
+		base := name[:len(name)-len(".dist-info")]
+		idx := strings.Index(base, "-")
+		if idx <= 0 {
+			continue
+		}
+		if normalizeDistName(base[:idx]) == norm {
+			return true
+		}
+	}
+	return false
 }
 
 // findGitCheckoutByRepo searches UV git checkouts for a directory that matches the given repo.

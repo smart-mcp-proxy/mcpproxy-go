@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -505,6 +506,166 @@ func TestResolveUvxCacheGitCheckout(t *testing.T) {
 	}
 	if result.Method != "uvx_cache" {
 		t.Errorf("expected method 'uvx_cache', got %q", result.Method)
+	}
+}
+
+// writeUvArchiveWheel materializes a fake unpacked wheel inside a uv archive-v0
+// entry. uv content-addresses each wheel by an opaque hash, so the package is
+// found by globbing all entries and matching the .dist-info directory — never
+// by constructing a name-based path. distName is the (un-normalized) PyPI
+// distribution name; it gets PEP 503 normalized (lowercased, -._ → _) for the
+// .dist-info name, mirroring what uv writes to disk.
+func writeUvArchiveWheel(t *testing.T, homeDir, hash, distName, version, importPkg string, venvStyle bool) string {
+	t.Helper()
+	norm := strings.ToLower(distName)
+	norm = strings.NewReplacer("-", "_", ".", "_").Replace(norm)
+	entry := filepath.Join(homeDir, ".cache", "uv", "archive-v0", hash)
+	base := entry
+	if venvStyle {
+		base = filepath.Join(entry, "lib", "python3.11", "site-packages")
+	}
+	pkgDir := filepath.Join(base, importPkg)
+	if err := os.MkdirAll(pkgDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "__init__.py"), []byte("# server source"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	distInfo := filepath.Join(base, norm+"-"+version+".dist-info")
+	if err := os.MkdirAll(distInfo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(distInfo, "METADATA"), []byte("Name: "+distName+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return entry
+}
+
+// TestResolveUvxCacheArchiveFlat verifies the COMMON `uvx <pkg>` case: the
+// package was run locally (so its wheel sits unpacked in the ephemeral
+// ~/.cache/uv/archive-v0 cache) but was never `uv tool install`-ed, so the
+// tools dir is empty. Before MCP-2400 this fell through to
+// tool_definitions_only / a network fetch; now it resolves from local cache.
+func TestResolveUvxCacheArchiveFlat(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	entry := writeUvArchiveWheel(t, homeDir, "Ab12Cd34Ef56", "mcp-server-fetch", "1.2.3", "mcp_server_fetch", false)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "fetch",
+		Command: "uvx",
+		Args:    []string{"mcp-server-fetch"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != entry {
+		t.Errorf("expected source_dir %q, got %q", entry, result.SourceDir)
+	}
+	if result.Method != "uvx_cache" {
+		t.Errorf("expected method 'uvx_cache', got %q", result.Method)
+	}
+}
+
+// TestResolveUvxCacheArchiveVenvStyle verifies the venv-style archive layout
+// (<hash>/lib/python*/site-packages/<pkg>) is also discovered.
+func TestResolveUvxCacheArchiveVenvStyle(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	entry := writeUvArchiveWheel(t, homeDir, "Zz99Yy88Xx77", "some-tool", "0.4.0", "some_tool", true)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "some-tool",
+		Command: "uvx",
+		Args:    []string{"--from", "some-tool", "some-tool"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != entry {
+		t.Errorf("expected source_dir %q, got %q", entry, result.SourceDir)
+	}
+}
+
+// TestResolveUvxCacheArchiveNameNormalization verifies a uvx spec with a
+// version pin and hyphen/case differences still matches the underscore-
+// normalized .dist-info on disk.
+func TestResolveUvxCacheArchiveNameNormalization(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	entry := writeUvArchiveWheel(t, homeDir, "Hash1234", "My.Cool-Server", "2.0.0", "my_cool_server", false)
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "cool",
+		Command: "uvx",
+		Args:    []string{"My.Cool-Server==2.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != entry {
+		t.Errorf("expected source_dir %q, got %q", entry, result.SourceDir)
+	}
+}
+
+// TestResolveUvxCacheArchiveNewestWins verifies that when the same distribution
+// is cached at multiple versions (multiple archive hashes), the most recently
+// modified entry is chosen — consistent with resolveNpxCache.
+func TestResolveUvxCacheArchiveNewestWins(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	old := writeUvArchiveWheel(t, homeDir, "old0000", "dup-pkg", "1.0.0", "dup_pkg", false)
+	newer := writeUvArchiveWheel(t, homeDir, "new1111", "dup-pkg", "2.0.0", "dup_pkg", false)
+	// Force a deterministic ordering of mod times.
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "dup",
+		Command: "uvx",
+		Args:    []string{"dup-pkg"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != newer {
+		t.Errorf("expected newest entry %q, got %q", newer, result.SourceDir)
+	}
+	_ = old
+}
+
+// TestResolveUvxCacheArchiveNoMatch verifies a clean error (fall-through) when
+// the package is not present in any local uv cache.
+func TestResolveUvxCacheArchiveNoMatch(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	// A different package is cached; the requested one is absent.
+	writeUvArchiveWheel(t, homeDir, "other999", "unrelated-pkg", "1.0.0", "unrelated_pkg", false)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.resolveUvxCache(ServerInfo{
+		Name:    "missing",
+		Command: "uvx",
+		Args:    []string{"definitely-not-cached"},
+	})
+	if err == nil {
+		t.Error("expected error when package absent from uv cache")
 	}
 }
 
