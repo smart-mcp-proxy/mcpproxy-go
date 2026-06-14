@@ -63,7 +63,40 @@ Pull requests run the build step but do **not** push, so Dockerfile drift
 is caught in CI without leaking images from forks.
 
 Images are multi-arch (`linux/amd64` + `linux/arm64`), tagged with both
-`:latest` and a short-SHA tag for pinning.
+`:latest` and a short-SHA tag for pinning. **Exception:** the `ramparts`
+image is **`linux/amd64`-only** — its arm64 leg cold-compiles the Rust
+crate under QEMU and exhausts the CI runner budget (MCP-2395 / #665).
+On arm64 hosts (e.g. Apple Silicon) the amd64 image runs under emulation,
+which is functional but slower.
+
+## Ramparts (v0.8.x) — stdio replay design
+
+Ramparts ≥ 0.8.0 dropped file/directory scanning. `ramparts scan <target>`
+now expects a **live MCP endpoint** (an HTTP URL or a `stdio:` subprocess):
+it performs the MCP handshake, enumerates the advertised tools, and runs its
+YARA rules against them. The old `--format sarif --output FILE /scan/source`
+invocation is invalid in v0.8.x (no `sarif` format, no `--output` flag, and a
+directory is not a valid target).
+
+MCPProxy never re-executes the untrusted upstream just to give Ramparts a
+target — that would violate the "never execute scanned source" invariant
+(MCP-2206/#658). Instead the engine exports the tool definitions it already
+captured from the running upstream into `/scan/source/tools.json` (the same
+file the Cisco scanner consumes), and the entrypoint points Ramparts at a
+**static stdio replay shim**:
+
+```
+ramparts scan "stdio:python3:/usr/local/bin/mcp-replay.py" --format json
+```
+
+`mcp-replay.py` speaks just enough of the MCP stdio protocol to replay those
+captured tool definitions — it runs no upstream code. The image therefore also
+ships a `python3` runtime, plus Ramparts' YARA `rules/`, `taxonomies/`, and
+default `config.yaml` (loaded relative to the `/scan` working directory; a
+binary-only image loads **zero** rules and reports no findings). The native
+JSON output (`{security_issues, yara_results}`) is parsed directly by
+`internal/security/scanner/engine.go`. LLM-backed analysis stays out of scope,
+so the scanner runs fully offline (`NetworkReq: false`).
 
 ## Background image pull UX
 
