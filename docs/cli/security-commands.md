@@ -374,11 +374,12 @@ mcpproxy security scan my-new-server --scanners nova-proximity,trivy-mcp
 
 Before running any scanner, mcpproxy determines *what to scan*. The resolver order is:
 
-1. **Docker-isolated servers** → extract `/app` (or the server's `WorkingDir`) from the running container.
-2. **Package-runner commands** (`npx`, `uvx`, `pipx`, `bunx`) → resolve from the local package cache (`~/.npm/_npx/…`, `~/.cache/uv/…`, etc.). This path is tried **first** for package runners.
-3. **Working directory** from the server config.
-4. **Arg-scan fallback** — iterate positional command args, accept the first one that exists as a directory AND contains a source marker (`package.json`, `pyproject.toml`, `setup.py`, `Cargo.toml`, `go.mod`, etc.).
-5. **Tool definitions only** — export the server's tool schemas to a temp dir and scan those (used for HTTP/SSE servers and as a last-resort fallback).
+1. **Docker-image servers** (`command: docker`, `args: [run, …, mcp/fetch]` — also `podman` / `docker container run`) → `source_method=container_image`. The scan target is the image reference itself. Image-capable scanners (Trivy) run in image mode (`trivy image mcp/fetch`) instead of scanning an empty source tree. Trivy resolves the image via the local daemon/containerd/podman, falling back to pulling it from the remote registry, so no Docker socket mount is needed.
+2. **Docker-isolated servers** → extract `/app` (or the server's `WorkingDir`) from the running container.
+3. **Package-runner commands** (`npx`, `uvx`, `pipx`, `bunx`) → resolve from the local package cache (`~/.npm/_npx/…`, `~/.cache/uv/…`, etc.). This path is tried **first** for package runners.
+4. **Working directory** from the server config.
+5. **Arg-scan fallback** — iterate positional command args, accept the first one that exists as a directory AND contains a source marker (`package.json`, `pyproject.toml`, `setup.py`, `Cargo.toml`, `go.mod`, etc.).
+6. **Tool definitions only** — export the server's tool schemas to a temp dir and scan those (used for HTTP/SSE servers and as a last-resort fallback).
 
 The `source_method` and `source_path` are recorded on the scan job and shown in both the text and JSON report. This is how you verify a scanner is examining the right directory.
 

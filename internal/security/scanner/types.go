@@ -63,8 +63,13 @@ type ScannerPlugin struct {
 	RequiredEnv []EnvRequirement `json:"required_env"`
 	OptionalEnv []EnvRequirement `json:"optional_env"`
 	Command     []string         `json:"command"`
-	Timeout     string           `json:"timeout"`
-	NetworkReq  bool             `json:"network_required"`
+	// ImageCommand is the command template used when the scan target is a Docker
+	// image reference rather than a source directory (input "container_image").
+	// The token "{{IMAGE}}" is replaced with the image reference at runtime.
+	// Only consulted when the scanner declares "container_image" in Inputs.
+	ImageCommand []string `json:"image_command,omitempty"`
+	Timeout      string   `json:"timeout"`
+	NetworkReq   bool     `json:"network_required"`
 	// InProcess marks a Docker-less, built-in scanner that the engine runs
 	// in-process (e.g. the tool-description TPA analyzer). Such scanners have
 	// no Docker image to pull, are always "installed", and skip the

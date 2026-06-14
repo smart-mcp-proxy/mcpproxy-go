@@ -152,7 +152,12 @@ var bundledScanners = []*ScannerPlugin{
 		RequiredEnv: nil,
 		OptionalEnv: nil,
 		Command:     []string{"fs", "--format", "sarif", "/scan/source"},
-		Timeout:     "300s", // First run downloads vuln DB (~90MB)
-		NetworkReq:  true,   // Needs to download vulnerability database
+		// For Docker-image servers (`docker run mcp/fetch`) scan the image itself
+		// instead of an empty source dir. Trivy resolves the image via the local
+		// daemon/containerd/podman and falls back to pulling from the remote
+		// registry (network is enabled), so no docker socket mount is required.
+		ImageCommand: []string{"image", "--format", "sarif", "{{IMAGE}}"},
+		Timeout:      "300s", // First run downloads vuln DB (~90MB)
+		NetworkReq:   true,   // Needs to download vulnerability database
 	},
 }
