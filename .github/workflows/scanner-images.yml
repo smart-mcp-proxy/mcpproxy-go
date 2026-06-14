@@ -37,19 +37,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `platforms` defaults to multi-arch. ramparts overrides to linux/amd64
+        # only: it is the lone Rust-from-source wrapper, and `cargo install
+        # ramparts` for an emulated linux/arm64 leg runs under QEMU (~5-10x
+        # slower). A cold build of both arches blows past the runner budget and
+        # the job gets cancelled mid-compile (MCP-2395). amd64-only finishes in
+        # time; the binary is consumed on the host arch by Docker isolation.
         include:
           - id: snyk
             image: ghcr.io/smart-mcp-proxy/scanner-snyk
             context: docker/scanners/snyk
+            platforms: linux/amd64,linux/arm64
           - id: cisco
             image: ghcr.io/smart-mcp-proxy/scanner-cisco
             context: docker/scanners/cisco
+            platforms: linux/amd64,linux/arm64
           - id: ramparts
             image: ghcr.io/smart-mcp-proxy/scanner-ramparts
             context: docker/scanners/ramparts
+            platforms: linux/amd64
           - id: proximity
             image: ghcr.io/smart-mcp-proxy/scanner-proximity
             context: docker/scanners/proximity
+            platforms: linux/amd64,linux/arm64
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
@@ -88,7 +98,7 @@ jobs:
         uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75  # v6.9.0
         with:
           context: ${{ matrix.context }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha,scope=scanner-${{ matrix.id }}
