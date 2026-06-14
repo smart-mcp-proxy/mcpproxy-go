@@ -1777,11 +1777,14 @@ type SecurityConfig struct {
 	// the scan degrades to tool-definitions-only (no real source-level
 	// analysis). See MCP-2206.
 	//
-	// Fetching uses `npm pack` (npm) and `uv pip download` / `pip download`
-	// (Python), which only download + unpack archives and NEVER run install,
-	// build, or setup.py — a scanner must not execute the untrusted code it is
-	// scanning. Extraction is hardened against path traversal and
-	// decompression bombs.
+	// Fetching uses `npm pack --ignore-scripts` (npm) and `uv pip download` /
+	// `pip download` with `--only-binary=:all:` (Python), which only download +
+	// unpack archives and NEVER run install, build, or setup.py — a scanner must
+	// not execute the untrusted code it is scanning. The Python
+	// `--only-binary=:all:` flag is required because downloading an sdist would
+	// invoke its build backend (setup.py); packages with no wheel fall back to
+	// tool-definitions-only instead. Extraction is hardened against path
+	// traversal and decompression bombs.
 	//
 	// Default (nil) is ENABLED. Set to false on air-gapped deployments to
 	// forbid the scanner's network egress; such servers then fall back to the

@@ -254,7 +254,7 @@ Package-runner servers (`npx`, `uvx`) are the **primary** quarantine/scan target
 **The source is fetched but never executed.** A scanner must not run the untrusted code it is scanning. The fetch only ever downloads and unpacks archives:
 
 - **npm (`npx`)** — `npm pack <pkg>@<version> --ignore-scripts` downloads the published tarball without running any lifecycle scripts (`install`/`postinstall`), then it is extracted (`source_method=npm_pack`).
-- **PyPI (`uvx`)** — `uv pip download <pkg>==<version> --no-deps` (falling back to `pip download`) fetches the wheel or sdist; wheels (preferred) and sdists are unpacked **without building** or running `setup.py` (`source_method=pip_download`).
+- **PyPI (`uvx`)** — `uv pip download <pkg>==<version> --no-deps --only-binary=:all:` (falling back to `pip download`) fetches **only a prebuilt wheel**, which is unpacked without building or running `setup.py` (`source_method=pip_download`). `--only-binary=:all:` is mandatory: downloading an sdist would invoke the package's PEP 517 build backend (`setup.py egg_info`) to resolve metadata, executing the untrusted code. A package that ships **no wheel** therefore fails the fetch and falls back to tool definitions only — sdists are never built or extracted.
 
 Extraction is hardened against path traversal (zip-slip), symlink escape, and decompression bombs (bounded file count and total size). If the toolchain is missing, the host is offline, or the fetch fails, resolution falls through to **tool definitions only** with no regression.
 

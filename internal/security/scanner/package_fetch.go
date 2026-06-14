@@ -26,10 +26,14 @@ import (
 //
 // Security crux: a scanner must never execute the untrusted code it is about to
 // scan. We therefore only ever DOWNLOAD (npm pack / uv pip download / pip
-// download) and EXTRACT archives. We never install, build, or run setup.py, and
-// we pass --ignore-scripts / --no-deps / --only-binary to be explicit. Archive
-// extraction is hardened against path traversal (zip-slip), symlink escape, and
-// decompression bombs (bounded file count + total size).
+// download) and EXTRACT archives. We never install, build, or run setup.py. npm
+// pack uses --ignore-scripts; the Python path passes --no-deps AND
+// --only-binary=:all: so pip/uv only ever fetch a prebuilt wheel — downloading
+// an sdist would invoke its PEP 517 build backend (setup.py egg_info) to resolve
+// metadata, executing the package's code. A package with no wheel therefore
+// fails the fetch and falls back to tool-definitions-only. Archive extraction is
+// hardened against path traversal (zip-slip), symlink escape, and decompression
+// bombs (bounded file count + total size).
 
 const (
 	// fetchMaxFiles caps the number of files extracted from a fetched package.
@@ -97,21 +101,28 @@ func npmPackArgs(spec, destDir string) []string {
 }
 
 // uvDownloadArgs builds the `uv pip download` argument list. --no-deps avoids
-// pulling the dependency tree (we only scan the target's own source);
-// extraction of the downloaded wheel/sdist runs no code.
+// pulling the dependency tree (we only scan the target's own source).
+// --only-binary=:all: forces a wheel and NEVER builds an sdist: a plain
+// `pip/uv download` of an sdist invokes the package's PEP 517 build backend
+// (setup.py egg_info) to resolve metadata, which would EXECUTE the untrusted
+// code we are about to scan. With this flag, a package that ships no wheel makes
+// the download fail, and the caller falls back to tool-definitions-only.
 func uvDownloadArgs(spec, destDir string) []string {
-	return []string{"pip", "download", spec, "--no-deps", "-d", destDir}
+	return []string{"pip", "download", spec, "--no-deps", "--only-binary=:all:", "-d", destDir}
 }
 
 // pipDownloadArgs builds the `pip download` argument list (fallback when uv is
-// unavailable). --no-deps for the same reason as uv.
+// unavailable). --no-deps and --only-binary=:all: for the same reasons as uv —
+// the latter guarantees we never build (and thus never execute) an sdist.
 func pipDownloadArgs(spec, destDir string) []string {
-	return []string{"download", spec, "--no-deps", "-d", destDir}
+	return []string{"download", spec, "--no-deps", "--only-binary=:all:", "-d", destDir}
 }
 
 // findDownloadedArchive locates the archive produced by a download command in
-// dir. Wheels (.whl) are preferred over sdists (.tar.gz) because extracting a
-// wheel never touches setup.py. npm pack writes a single .tgz.
+// dir. A wheel (.whl) is returned immediately. npm pack writes a single .tgz.
+// A bare .tar.gz (a Python sdist) is reported as a last resort so the caller can
+// detect and REFUSE it — the Python path only accepts wheels (--only-binary=:all:),
+// because building/extracting an sdist would execute the package's code.
 func findDownloadedArchive(dir string) (path string, kind archiveKind, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -381,9 +392,8 @@ func (r *SourceResolver) fetchPythonPackage(ctx context.Context, info ServerInfo
 	}
 	cleanup := func() { os.RemoveAll(dlDir) }
 
-	// Prefer uv, fall back to pip. uv prefers a wheel via --only-binary when
-	// possible; we leave format selection to the resolver and pick the wheel at
-	// extraction time.
+	// Prefer uv, fall back to pip. Both pass --only-binary=:all: so only a wheel
+	// is ever downloaded — building an sdist would execute the package's code.
 	if err := r.runPythonDownload(ctx, dlDir, spec); err != nil {
 		cleanup()
 		return nil, err
@@ -394,24 +404,17 @@ func (r *SourceResolver) fetchPythonPackage(ctx context.Context, info ServerInfo
 		cleanup()
 		return nil, fmt.Errorf("python download produced no archive: %w", err)
 	}
-	switch kind {
-	case archiveZip:
-		if err := extractZip(archive, srcDir, fetchMaxFiles, fetchMaxTotalBytes); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("extract wheel: %w", err)
-		}
-	case archiveTarGz:
-		f, oerr := os.Open(archive)
-		if oerr != nil {
-			cleanup()
-			return nil, oerr
-		}
-		err := extractTarballGz(f, srcDir, fetchMaxFiles, fetchMaxTotalBytes)
-		f.Close()
-		if err != nil {
-			cleanup()
-			return nil, fmt.Errorf("extract sdist: %w", err)
-		}
+	// Wheel-only: --only-binary=:all: guarantees a wheel, but we refuse anything
+	// else as defense-in-depth — extracting (or building) an sdist would run the
+	// untrusted package's setup.py / PEP 517 backend. A package that ships no
+	// wheel falls back to tool-definitions-only.
+	if kind != archiveZip {
+		cleanup()
+		return nil, fmt.Errorf("python download produced a non-wheel archive; refusing to build/extract an sdist (would execute untrusted code)")
+	}
+	if err := extractZip(archive, srcDir, fetchMaxFiles, fetchMaxTotalBytes); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("extract wheel: %w", err)
 	}
 
 	r.logger.Info("Fetched published Python package source for scan",
@@ -422,8 +425,10 @@ func (r *SourceResolver) fetchPythonPackage(ctx context.Context, info ServerInfo
 	return &ResolvedSource{SourceDir: srcDir, Method: "pip_download", Cleanup: cleanup}, nil
 }
 
-// runPythonDownload tries `uv pip download` first, then `pip download`. Neither
-// executes the package (no build/setup.py); wheel/sdist are just downloaded.
+// runPythonDownload tries `uv pip download` first, then `pip download`. Both
+// pass --only-binary=:all:, so only a prebuilt wheel is fetched and no code runs
+// (a sdist download would build the package). If the package ships no wheel the
+// command fails and the caller falls back to tool-definitions-only.
 func (r *SourceResolver) runPythonDownload(ctx context.Context, dlDir, spec string) error {
 	if uvBin, err := exec.LookPath("uv"); err == nil {
 		cmd := exec.CommandContext(ctx, uvBin, uvDownloadArgs(spec, dlDir)...)

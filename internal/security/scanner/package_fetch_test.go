@@ -248,6 +248,27 @@ func TestPipDownloadArgs_NoExecution(t *testing.T) {
 	}
 }
 
+// MCP-2391: a `pip download` / `uv pip download` of an sdist runs the package's
+// PEP 517 build backend (setup.py egg_info) to resolve metadata — i.e. it
+// EXECUTES code from the package being scanned. --only-binary=:all: forces a
+// wheel and makes the download FAIL (no extraction) when only an sdist exists,
+// instead of silently building it. These positive assertions guard the flag so
+// it cannot be dropped without a red test (TestUv/PipDownloadArgs_NoExecution
+// only asserted ABSENCE of verbs, which let the original BLOCKER through).
+func TestUvDownloadArgs_OnlyBinary(t *testing.T) {
+	args := uvDownloadArgs("flights==0.2.4", "/tmp/dest")
+	if !hasExactArg(args, "--only-binary=:all:") {
+		t.Errorf("uv download MUST pass --only-binary=:all: to never build an sdist (code execution): %v", args)
+	}
+}
+
+func TestPipDownloadArgs_OnlyBinary(t *testing.T) {
+	args := pipDownloadArgs("flights==0.2.4", "/tmp/dest")
+	if !hasExactArg(args, "--only-binary=:all:") {
+		t.Errorf("pip download MUST pass --only-binary=:all: to never build an sdist (code execution): %v", args)
+	}
+}
+
 func hasExactArg(args []string, want string) bool {
 	for _, a := range args {
 		if a == want {
