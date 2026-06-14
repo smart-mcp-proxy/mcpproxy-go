@@ -437,6 +437,42 @@ Or approve all pending/changed tools:
 }
 ```
 
+#### POST /api/v1/servers/{name}/tools/block
+
+Atomically **block** tools = approve **and** disable them in a single server-side
+operation. Use this to acknowledge a pending/changed tool (clearing its
+quarantine flag) while keeping it hidden from MCP clients. The approve and
+disable land in one write per tool, so a tool is never left in the
+approved+enabled state.
+
+**Request Body:**
+```json
+{
+  "tools": ["create_issue", "delete_repo"]
+}
+```
+
+Or block all pending/changed tools:
+```json
+{
+  "block_all": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "blocked": 2,
+    "tools": ["create_issue", "delete_repo"],
+    "message": "Blocked 2 tools for server github-server"
+  }
+}
+```
+
+Returns `400` if neither `tools` nor `block_all` is provided.
+
 #### GET /api/v1/servers/{name}/tools/{tool}/diff
 
 Get the description/schema diff for a changed tool. The response exposes every

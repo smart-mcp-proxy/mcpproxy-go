@@ -395,6 +395,107 @@ func TestApproveAllTools(t *testing.T) {
 	assert.Equal(t, 0, len(result.BlockedTools))
 }
 
+func TestBlockTools_ApprovedAndDisabled(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true},
+	})
+
+	// Create pending tools
+	tools := []*config.ToolMetadata{
+		{ServerName: "github", Name: "create_issue", Description: "Creates issues", ParamsJSON: `{}`, Hash: "h1"},
+		{ServerName: "github", Name: "list_repos", Description: "Lists repos", ParamsJSON: `{}`, Hash: "h2"},
+	}
+
+	result, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.Equal(t, 2, len(result.BlockedTools))
+
+	// Block one tool — must end up approved AND disabled (all-or-nothing).
+	count, err := rt.BlockTools("github", []string{"create_issue"}, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status, "blocked tool must be approved")
+	assert.True(t, record.Disabled, "blocked tool must be disabled")
+	assert.Equal(t, "admin", record.ApprovedBy)
+	assert.NotEmpty(t, record.ApprovedHash)
+
+	// A blocked (approved+disabled) tool is still blocked from indexing.
+	result, err = rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+	assert.True(t, result.BlockedTools["create_issue"])
+
+	// list_repos was untouched — still pending.
+	record2, err := rt.storageManager.GetToolApproval("github", "list_repos")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusPending, record2.Status)
+	assert.False(t, record2.Disabled)
+}
+
+func TestBlockAllTools(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true},
+	})
+
+	tools := []*config.ToolMetadata{
+		{ServerName: "github", Name: "create_issue", Description: "Creates issues", ParamsJSON: `{}`, Hash: "h1"},
+		{ServerName: "github", Name: "list_repos", Description: "Lists repos", ParamsJSON: `{}`, Hash: "h2"},
+	}
+
+	_, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+
+	count, err := rt.BlockAllTools("github", "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 2, count)
+
+	records, err := rt.storageManager.ListToolApprovals("github")
+	require.NoError(t, err)
+	for _, r := range records {
+		assert.Equal(t, storage.ToolApprovalStatusApproved, r.Status)
+		assert.True(t, r.Disabled, "block-all must disable every tool")
+	}
+}
+
+// TestBlockTools_ConfigDeniedToolNeverEnabled verifies the invariant that a
+// config-denied tool is never enabled by a block (block only disables).
+func TestBlockTools_ConfigDeniedToolNeverEnabled(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true, DisabledTools: []string{"create_issue"}},
+	})
+
+	require.True(t, rt.IsToolConfigDenied("github", "create_issue"),
+		"precondition: create_issue must be config-denied")
+
+	tools := []*config.ToolMetadata{
+		{ServerName: "github", Name: "create_issue", Description: "Creates issues", ParamsJSON: `{}`, Hash: "h1"},
+	}
+	_, err := rt.checkToolApprovals("github", tools)
+	require.NoError(t, err)
+
+	count, err := rt.BlockTools("github", []string{"create_issue"}, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+
+	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+	assert.True(t, record.Disabled, "config-denied tool must remain disabled after block, never enabled")
+}
+
+func TestBlockTools_MissingRecordSkipped(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true},
+	})
+
+	// No approval record exists for "ghost" — it should be skipped, not error.
+	count, err := rt.BlockTools("github", []string{"ghost"}, "admin")
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
 func TestCalculateToolApprovalHash(t *testing.T) {
 	h1 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, nil)
 	h2 := calculateToolApprovalHash("tool_a", "desc A", `{"type":"object"}`, nil)

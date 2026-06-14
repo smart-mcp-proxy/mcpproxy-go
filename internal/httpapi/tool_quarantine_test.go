@@ -39,6 +39,11 @@ type mockToolQuarantineController struct {
 	setAllToolsEnabledTo   *bool
 	setAllToolsEnabledFor  string
 	setAllToolsChangedFake int
+	blockErr               error
+	blockAllErr            error
+	blockedCount           int
+	blockedTools           []string
+	blockedServer          string
 }
 
 func (m *mockToolQuarantineController) GetCurrentConfig() any {
@@ -66,6 +71,20 @@ func (m *mockToolQuarantineController) ApproveTools(serverName string, toolNames
 func (m *mockToolQuarantineController) ApproveAllTools(serverName string, approvedBy string) (int, error) {
 	m.approvedServer = serverName
 	return m.approvedCount, m.approveAllErr
+}
+
+func (m *mockToolQuarantineController) BlockTools(serverName string, toolNames []string, _ string) (int, error) {
+	m.blockedServer = serverName
+	m.blockedTools = toolNames
+	if m.blockErr != nil {
+		return 0, m.blockErr
+	}
+	return len(toolNames), nil
+}
+
+func (m *mockToolQuarantineController) BlockAllTools(serverName string, _ string) (int, error) {
+	m.blockedServer = serverName
+	return m.blockedCount, m.blockAllErr
 }
 
 func (m *mockToolQuarantineController) GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error) {
@@ -330,6 +349,106 @@ func TestHandleApproveTools_ApproveError(t *testing.T) {
 
 	body := `{"tools": ["create_issue"]}`
 	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// =============================================================================
+// MCP-2198: atomic block (approve+disable) handler tests
+// =============================================================================
+
+func TestHandleBlockTools_SpecificTools(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	body := `{"tools": ["create_issue", "list_repos"]}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/block", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "github", ctrl.blockedServer)
+	assert.Equal(t, []string{"create_issue", "list_repos"}, ctrl.blockedTools)
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(2), data["blocked"])
+}
+
+func TestHandleBlockTools_BlockAll(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey:       "test-key",
+		blockedCount: 5,
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	body := `{"block_all": true}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/block", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "github", ctrl.blockedServer)
+
+	var resp map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &resp)
+	require.NoError(t, err)
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(5), data["blocked"])
+}
+
+func TestHandleBlockTools_EmptyToolsAndNoBlockAll(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	body := `{"tools": []}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/block", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleBlockTools_InvalidJSON(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	body := `{invalid`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/block", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+
+	server.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleBlockTools_BlockError(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey:   "test-key",
+		blockErr: fmt.Errorf("server not found"),
+	}
+	logger := zap.NewNop().Sugar()
+	server := NewServer(ctrl, logger, nil)
+
+	body := `{"tools": ["create_issue"]}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/block", bytes.NewBufferString(body))
 	req.Header.Set("X-API-Key", "test-key")
 	w := httptest.NewRecorder()
 
