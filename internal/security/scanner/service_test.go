@@ -1176,9 +1176,53 @@ func TestServiceGetScanSummaryPartialSuccess(t *testing.T) {
 	if summary == nil {
 		t.Fatal("expected non-nil summary")
 	}
-	// At least one scanner succeeded, so status should be "clean" (no findings)
-	if summary.Status != "clean" {
-		t.Errorf("expected status 'clean', got %q", summary.Status)
+	// MCP-2401: a scanner failed, so coverage is incomplete. A "0/100 clean"
+	// verdict here is misleading — the score's confidence is degraded because
+	// 1 of 2 scanners never ran. Status must reflect that, not plain "clean".
+	if summary.Status != "degraded" {
+		t.Errorf("expected status 'degraded' for incomplete coverage, got %q", summary.Status)
+	}
+	if summary.ScannersTotal != 2 || summary.ScannersRun != 1 || summary.ScannersFailed != 1 {
+		t.Errorf("expected coverage 1 run / 1 failed / 2 total, got %d run / %d failed / %d total",
+			summary.ScannersRun, summary.ScannersFailed, summary.ScannersTotal)
+	}
+}
+
+// TestServiceGetScanSummaryDegradedWithInfoFindings covers MCP-2401 when the
+// surviving scanners produced only informational findings but coverage is
+// incomplete — the verdict must degrade rather than read "clean".
+func TestServiceGetScanSummaryDegradedWithInfoFindings(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-degraded-info",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"s1", "s2"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "s1", Status: ScanJobStatusCompleted, FindingsCount: 1},
+			{ScannerID: "s2", Status: ScanJobStatusFailed, Error: "image not found"},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r1", JobID: "j-degraded-info", ServerName: "server-a", ScannerID: "s1",
+		Findings: []ScanFinding{
+			{RuleID: "info-1", ThreatLevel: ThreatLevelInfo, Severity: "info", Title: "informational"},
+		},
+		ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Status != "degraded" {
+		t.Errorf("expected status 'degraded' for incomplete coverage with info-only findings, got %q", summary.Status)
+	}
+	if summary.ScannersFailed != 1 {
+		t.Errorf("expected 1 failed scanner, got %d", summary.ScannersFailed)
 	}
 }
 
@@ -1207,6 +1251,11 @@ func TestServiceGetScanSummaryClean(t *testing.T) {
 	}
 	if summary.Status != "clean" {
 		t.Errorf("expected status 'clean', got %q", summary.Status)
+	}
+	// MCP-2401: full coverage (no failed scanners) keeps the verdict "clean".
+	if summary.ScannersTotal != 1 || summary.ScannersRun != 1 || summary.ScannersFailed != 0 {
+		t.Errorf("expected coverage 1 run / 0 failed / 1 total, got %d run / %d failed / %d total",
+			summary.ScannersRun, summary.ScannersFailed, summary.ScannersTotal)
 	}
 }
 

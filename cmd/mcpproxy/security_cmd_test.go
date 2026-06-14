@@ -427,3 +427,50 @@ func TestPrintReportTableRendersScannerTimings(t *testing.T) {
 		}
 	}
 }
+
+// TestPrintReportTableFlagsDegradedRiskScore verifies MCP-2401: when coverage
+// is incomplete the risk-score line itself carries a degraded marker, so a low
+// "X/100" number is not read as a trustworthy all-clear.
+func TestPrintReportTableFlagsDegradedRiskScore(t *testing.T) {
+	report := map[string]interface{}{
+		"job_id":          "scan-foo-1",
+		"risk_score":      float64(0),
+		"scanned_at":      "2026-04-26T17:39:05Z",
+		"scanners_run":    float64(3),
+		"scanners_failed": float64(2),
+		"scanners_total":  float64(5),
+		"findings":        []interface{}{},
+	}
+	out := captureStdout(t, func() {
+		_ = printReportTable("foo", report, nil)
+	})
+	if !strings.Contains(out, "Risk Score:") || !strings.Contains(out, "degraded") {
+		t.Errorf("expected degraded marker on the Risk Score line; got:\n%s", out)
+	}
+	if !strings.Contains(out, "2 of 5") {
+		t.Errorf("expected coverage detail '2 of 5' on the Risk Score line; got:\n%s", out)
+	}
+}
+
+// TestPrintReportTableFullCoverageNoDegradedMarker ensures a complete scan does
+// not get a degraded marker on the risk-score line.
+func TestPrintReportTableFullCoverageNoDegradedMarker(t *testing.T) {
+	report := map[string]interface{}{
+		"job_id":          "scan-foo-2",
+		"risk_score":      float64(0),
+		"scanned_at":      "2026-04-26T17:39:05Z",
+		"scanners_run":    float64(5),
+		"scanners_failed": float64(0),
+		"scanners_total":  float64(5),
+		"findings":        []interface{}{},
+	}
+	out := captureStdout(t, func() {
+		_ = printReportTable("foo", report, nil)
+	})
+	// The "Risk Score:" line must not be annotated as degraded.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "Risk Score:") && strings.Contains(line, "degraded") {
+			t.Errorf("did not expect degraded marker for full coverage; got line: %q", line)
+		}
+	}
+}

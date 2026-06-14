@@ -1599,16 +1599,21 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		return summary
 	}
 
-	// Check scanner statuses on primary job
+	// Compute scanner coverage for the primary (security) scan pass. This drives
+	// the "degraded" verdict below: a clean/low risk score is not trustworthy
+	// when some scanners never ran (MCP-2401). If no scanner completed at all the
+	// scan is a flat failure, not merely degraded.
 	if len(primaryJob.ScannerStatuses) > 0 {
-		allFailed := true
 		for _, ss := range primaryJob.ScannerStatuses {
-			if ss.Status == ScanJobStatusCompleted {
-				allFailed = false
-				break
+			summary.ScannersTotal++
+			switch ss.Status {
+			case ScanJobStatusCompleted:
+				summary.ScannersRun++
+			case ScanJobStatusFailed:
+				summary.ScannersFailed++
 			}
 		}
-		if allFailed {
+		if summary.ScannersRun == 0 {
 			summary.Status = "failed"
 			s.cacheScanSummary(serverName, summary)
 			return summary
@@ -1653,6 +1658,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 				summary.Status = "failed"
 			}
 		}
+		summary.degradeIfIncompleteCoverage()
 		s.cacheScanSummary(serverName, summary)
 		return summary
 	}
@@ -1685,17 +1691,37 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		summary.Status = "clean" // Only informational findings
 	}
 
+	// Incomplete coverage downgrades a would-be "clean" verdict (MCP-2401).
+	summary.degradeIfIncompleteCoverage()
+
 	// Cache for fast subsequent reads
 	s.cacheScanSummary(serverName, summary)
 	return summary
+}
+
+// degradeIfIncompleteCoverage downgrades a "clean" verdict to "degraded" when
+// at least one scanner failed, so a low/zero risk score is not read as a
+// trustworthy all-clear while a chunk of the scanner fleet never ran. Findings-
+// driven verdicts ("dangerous"/"warnings") are left intact — they already
+// signal risk; coverage can only have hidden more, never less (MCP-2401).
+func (sum *ScanSummary) degradeIfIncompleteCoverage() {
+	if sum.Status == "clean" && sum.ScannersFailed > 0 {
+		sum.Status = "degraded"
+	}
 }
 
 // ScanSummary is a compact representation of scan status for the server list.
 type ScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"`
-	Status        string         `json:"status"` // clean, warnings, dangerous, failed, not_scanned, scanning
+	Status        string         `json:"status"` // clean, degraded, warnings, dangerous, failed, not_scanned, scanning
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
+	// Scanner coverage for the primary (security) scan pass. When ScannersFailed
+	// > 0 the risk score is computed from incomplete data, so a "clean"/low score
+	// is not trustworthy — Status is reported as "degraded" instead (MCP-2401).
+	ScannersRun    int `json:"scanners_run"`
+	ScannersFailed int `json:"scanners_failed"`
+	ScannersTotal  int `json:"scanners_total"`
 }
 
 // FindingCounts groups findings by user-facing threat level.

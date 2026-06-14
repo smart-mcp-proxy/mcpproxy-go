@@ -293,7 +293,7 @@ Scan completed for "everything".
 
 Security Report: everything
 Scan ID:     scan-everything-1775804891180898000
-Risk Score:  0/100
+Risk Score:  0/100 (degraded — 1 of 7 scanners did not run)
 Scanned:     2026-04-10 10:08:19
 Scanners:    6 run, 1 failed (ramparts) of 7
 
@@ -472,7 +472,7 @@ Use `-o json`, `-o yaml`, or `-o sarif` for machine-readable output.
 ```
 Security Report: everything
 Scan ID:     scan-everything-1775804891180898000
-Risk Score:  0/100
+Risk Score:  0/100 (degraded — 1 of 7 scanners did not run)
 Scanned:     2026-04-10 10:08:19
 Scanners:    6 run, 1 failed (ramparts) of 7
 
