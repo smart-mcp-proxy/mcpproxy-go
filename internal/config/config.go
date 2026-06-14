@@ -1768,4 +1768,23 @@ type SecurityConfig struct {
 	// is small. The preferred fix remains replacing snap docker with a
 	// distro-packaged docker.
 	ScannerDisableNoNewPrivileges bool `json:"scanner_disable_no_new_privileges,omitempty" mapstructure:"scanner-disable-no-new-privileges"`
+
+	// ScannerFetchPackageSource controls whether the scanner fetches the
+	// PUBLISHED source of package-runner servers (npx/uvx) — without executing
+	// it — when no local source is available (no Docker container, no local
+	// package cache, no working_dir). This is the primary quarantine/scan
+	// target: a quarantined-on-add server is never run locally, so without this
+	// the scan degrades to tool-definitions-only (no real source-level
+	// analysis). See MCP-2206.
+	//
+	// Fetching uses `npm pack` (npm) and `uv pip download` / `pip download`
+	// (Python), which only download + unpack archives and NEVER run install,
+	// build, or setup.py — a scanner must not execute the untrusted code it is
+	// scanning. Extraction is hardened against path traversal and
+	// decompression bombs.
+	//
+	// Default (nil) is ENABLED. Set to false on air-gapped deployments to
+	// forbid the scanner's network egress; such servers then fall back to the
+	// tool-definitions-only scan with no regression.
+	ScannerFetchPackageSource *bool `json:"scanner_fetch_package_source,omitempty" mapstructure:"scanner-fetch-package-source"`
 }

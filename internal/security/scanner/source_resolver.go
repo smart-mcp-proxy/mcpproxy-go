@@ -21,11 +21,23 @@ import (
 //   - Local stdio servers: uses working_dir or command directory
 type SourceResolver struct {
 	logger *zap.Logger
+
+	// fetchPackageSource, when true (the default), allows the resolver to fetch
+	// the PUBLISHED source of a package-runner server (npx/uvx) — without
+	// executing it — as a last resort before falling back to a
+	// tool-definitions-only scan. Air-gapped deployments can disable this via
+	// security.scanner_fetch_package_source=false to forbid network egress.
+	fetchPackageSource bool
 }
 
 // NewSourceResolver creates a new SourceResolver
 func NewSourceResolver(logger *zap.Logger) *SourceResolver {
-	return &SourceResolver{logger: logger}
+	return &SourceResolver{logger: logger, fetchPackageSource: true}
+}
+
+// SetFetchPackageSource toggles the published-package-source fetch fallback.
+func (r *SourceResolver) SetFetchPackageSource(enabled bool) {
+	r.fetchPackageSource = enabled
 }
 
 // dockerCmd builds an exec.Cmd that invokes the resolved `docker` binary.
@@ -225,6 +237,23 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 	if info.Command != "" && !isPackageRunnerCommand(info.Command) {
 		if resolved, err := r.resolveFromPackageCache(ctx, info); err == nil {
 			return resolved, nil
+		}
+	}
+
+	// Final fallback for package-runner servers (npx/uvx): fetch the PUBLISHED
+	// package source without executing it. This is the primary scan target —
+	// a quarantined-on-add server is never run locally, so the local cache above
+	// always misses (MCP-2206). Fetching real source lets the AI + supply-chain
+	// scanners run instead of degrading to tool_definitions_only.
+	if r.fetchPackageSource && info.Command != "" && isPackageRunnerCommand(info.Command) {
+		if resolved, err := r.resolveFromPackageFetch(ctx, info); err == nil {
+			return resolved, nil
+		} else {
+			r.logger.Debug("Published package fetch failed, falling back to tool definitions only",
+				zap.String("server", info.Name),
+				zap.String("command", info.Command),
+				zap.Error(err),
+			)
 		}
 	}
 
@@ -800,6 +829,16 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 				Method:    "working_dir",
 				Cleanup:   func() {},
 			}, nil
+		}
+	}
+
+	// Final fallback for package-runner servers: fetch the published package
+	// source without executing it (MCP-2206). Same rationale as Pass 1 — without
+	// a local container or cache, Pass 2 supply-chain scanning would otherwise
+	// have nothing to analyze for npx/uvx servers.
+	if r.fetchPackageSource && info.Command != "" && isPackageRunnerCommand(info.Command) {
+		if resolved, err := r.resolveFromPackageFetch(ctx, info); err == nil {
+			return resolved, nil
 		}
 	}
 

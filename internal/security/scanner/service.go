@@ -161,6 +161,21 @@ func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
 	}
 }
 
+// SetFetchPackageSource toggles whether the source resolver may fetch the
+// published source of package-runner servers (npx/uvx) for scanning. See
+// SecurityConfig.ScannerFetchPackageSource (MCP-2206). Default is enabled.
+func (s *Service) SetFetchPackageSource(enabled bool) {
+	if s.sourceResolver == nil {
+		return
+	}
+	s.sourceResolver.SetFetchPackageSource(enabled)
+	if !enabled {
+		s.logger.Info("Scanner published-package-source fetch disabled " +
+			"(security.scanner_fetch_package_source=false); npx/uvx servers " +
+			"without local source will scan tool definitions only.")
+	}
+}
+
 // emit returns the most recently configured EventEmitter. Always returns a
 // non-nil value; callers can invoke methods on it directly.
 func (s *Service) emit() EventEmitter {

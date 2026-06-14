@@ -564,6 +564,12 @@ func TestSourceResolverNpxDataDirFallsThroughWhenNoCache(t *testing.T) {
 	os.WriteFile(filepath.Join(dataDir, "data.csv"), []byte("a,b,c"), 0644)
 
 	r := NewSourceResolver(zap.NewNop())
+	// Pin the published-package-source fetch OFF (MCP-2206) so this test isolates
+	// the LOCAL cache-miss fallthrough deterministically. With fetch enabled the
+	// resolver would (correctly) `npm pack` the published package, which both
+	// changes the outcome and depends on npm + network being present — covered
+	// separately by the package_fetch unit tests.
+	r.SetFetchPackageSource(false)
 	_, err := r.Resolve(context.Background(), ServerInfo{
 		Name:     "fs-server",
 		Protocol: "stdio",
