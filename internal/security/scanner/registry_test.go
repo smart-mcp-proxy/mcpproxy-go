@@ -31,6 +31,33 @@ func TestRegistryListBundledScanners(t *testing.T) {
 	}
 }
 
+// TestRampartsV08Invariants guards the v0.8.x URL/stdio scanning contract
+// (MCP-2422). Ramparts dropped directory scanning, so the registry entry must
+// run via the entrypoint (Command nil) and needs no container network — the
+// stdio replay shim is local-only and YARA runs offline. A regression here
+// (e.g. someone restoring a CLI Command or flipping NetworkReq back to true)
+// would silently break offline scanning or re-introduce a stale invocation.
+func TestRampartsV08Invariants(t *testing.T) {
+	r := NewRegistry(t.TempDir(), zap.NewNop())
+
+	s, err := r.Get("ramparts")
+	if err != nil {
+		t.Fatalf("Get ramparts: %v", err)
+	}
+	if s.Command != nil {
+		t.Errorf("ramparts Command should be nil (entrypoint-driven), got %v", s.Command)
+	}
+	if s.NetworkReq {
+		t.Errorf("ramparts should not require network: replay shim is local and YARA is offline")
+	}
+	if s.InProcess {
+		t.Errorf("ramparts is a Docker-backed scanner, should not be InProcess")
+	}
+	if s.DockerImage == "" {
+		t.Errorf("ramparts must declare a Docker image")
+	}
+}
+
 func TestRegistryInProcessScannerInstalledByDefault(t *testing.T) {
 	dir := t.TempDir()
 	r := NewRegistry(dir, zap.NewNop())

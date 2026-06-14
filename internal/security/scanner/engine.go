@@ -1047,22 +1047,43 @@ func parseRampartsOutput(data []byte, scannerID string) []ScanFinding {
 	// Parse security_issues (tool_issues, prompt_issues, resource_issues)
 	parseIssues := func(issues []rampartsIssue, issueType string) {
 		for _, issue := range issues {
-			finding := ScanFinding{
-				RuleID:      strings.ToLower(strings.ReplaceAll(issue.Type, " ", "_")),
-				Title:       issue.Type + " in " + issueType + ": " + issue.ToolName,
-				Description: issue.Description,
-				Scanner:     scannerID,
-				Location:    issueType + ":" + issue.ToolName,
+			// The subject differs per issue kind: tools carry tool_name,
+			// prompts prompt_name, resources resource_uri (v0.8.x).
+			subject := issue.ToolName
+			if subject == "" {
+				subject = issue.PromptName
 			}
-			switch strings.ToUpper(issue.Impact) {
+			if subject == "" {
+				subject = issue.ResourceURI
+			}
+
+			title := issue.Message
+			if title == "" {
+				title = issue.IssueType + " in " + issueType + ": " + subject
+			}
+			desc := issue.Description
+			if desc == "" {
+				desc = issue.Details
+			}
+
+			finding := ScanFinding{
+				RuleID:      strings.ToLower(issue.IssueType),
+				Title:       title,
+				Description: desc,
+				Scanner:     scannerID,
+				Location:    issueType + ":" + subject,
+			}
+			switch strings.ToUpper(issue.Severity) {
 			case "CRITICAL":
 				finding.Severity = SeverityCritical
 			case "HIGH":
 				finding.Severity = SeverityHigh
 			case "MEDIUM":
 				finding.Severity = SeverityMedium
-			default:
+			case "LOW":
 				finding.Severity = SeverityLow
+			default:
+				finding.Severity = SeverityMedium
 			}
 			findings = append(findings, finding)
 		}
@@ -1075,12 +1096,20 @@ func parseRampartsOutput(data []byte, scannerID string) []ScanFinding {
 	return findings
 }
 
-// rampartsIssue represents a security issue from Ramparts
+// rampartsIssue represents a security issue from Ramparts. Field names track
+// the v0.8.x `SecurityIssue` serialization (issue_type/severity/message/details
+// + per-kind subject fields); the pre-v0.8 `type`/`impact` keys no longer exist
+// upstream, so reading them yielded empty rule IDs and mis-graded severities
+// (MCP-2422).
 type rampartsIssue struct {
 	ToolName    string `json:"tool_name"`
-	Type        string `json:"type"`
-	Impact      string `json:"impact"`
+	PromptName  string `json:"prompt_name"`
+	ResourceURI string `json:"resource_uri"`
+	IssueType   string `json:"issue_type"`
+	Severity    string `json:"severity"`
+	Message     string `json:"message"`
 	Description string `json:"description"`
+	Details     string `json:"details"`
 }
 
 func truncate(s string, maxLen int) string {

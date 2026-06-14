@@ -92,7 +92,7 @@ var bundledScanners = []*ScannerPlugin{
 		ID:          "ramparts",
 		Name:        "Ramparts MCP Scanner",
 		Vendor:      "Javelin (getjavelin.com)",
-		Description: "Rust-based MCP security scanner with YARA rules. Detects tool poisoning, SQL injection, command injection, path traversal, secrets leakage, and prompt injection.",
+		Description: "Rust-based MCP security scanner with YARA rules. Detects tool poisoning, SQL injection, command injection, path traversal, secrets leakage, and prompt injection. Runs fully offline: v0.8.x scans a live MCP endpoint, so MCPProxy replays the captured tool definitions to it over stdio (the upstream is never re-executed).",
 		License:     "Proprietary",
 		Homepage:    "https://github.com/getjavelin/ramparts",
 		DockerImage: "ghcr.io/smart-mcp-proxy/scanner-ramparts:latest",
@@ -100,9 +100,15 @@ var bundledScanners = []*ScannerPlugin{
 		Outputs:     []string{"sarif"},
 		RequiredEnv: nil,
 		OptionalEnv: nil,
-		Command:     nil, // Uses entrypoint.sh
-		Timeout:     "120s",
-		NetworkReq:  true, // Stub MCP server runs inside container
+		// Uses entrypoint.sh. v0.8.x dropped directory scanning: the entrypoint
+		// runs `ramparts scan stdio:python3:/usr/local/bin/mcp-replay.py` against
+		// a static shim that replays /scan/source/tools.json over MCP. See
+		// docker/scanners/ramparts/entrypoint.sh + mcp-replay.py.
+		Command: nil,
+		Timeout: "120s",
+		// YARA analysis is fully offline and the replay shim is local-only, so no
+		// container network is required (LLM-backed analysis remains out of scope).
+		NetworkReq: false,
 	},
 	{
 		ID:          "semgrep-mcp",
