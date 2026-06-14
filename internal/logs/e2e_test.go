@@ -336,12 +336,21 @@ func TestE2E_MCPProxyWithLogging(t *testing.T) {
 	// Wait for the command to finish
 	_ = cmd.Wait()
 
-	// Check if log file was created
-	logFilePath, err := GetLogFilePath("mcpproxy-e2e-binary.log")
-	require.NoError(t, err)
-
+	// Because the config sets a non-default data_dir (tempDir) and no
+	// --log-dir was given, logs are co-located under <data-dir>/logs rather
+	// than the shared OS-standard location (MCP-2250). This keeps test/e2e
+	// runs from polluting the real ~/Library/Logs/mcpproxy/main.log.
+	logFilePath := filepath.Join(tempDir, "logs", "mcpproxy-e2e-binary.log")
 	_, err = os.Stat(logFilePath)
-	assert.NoError(t, err, "Log file should be created by mcpproxy binary")
+	assert.NoError(t, err, "Log file should be created under <data-dir>/logs by mcpproxy binary")
+
+	// The shared OS-standard location must NOT receive this run's log.
+	osStdPath, osErr := GetLogFilePath("mcpproxy-e2e-binary.log")
+	require.NoError(t, osErr)
+	if _, statErr := os.Stat(osStdPath); statErr == nil {
+		t.Errorf("custom data_dir run leaked its log into the shared OS-standard dir: %s", osStdPath)
+		os.Remove(osStdPath)
+	}
 
 	// Read and verify log content
 	if err == nil {
@@ -351,9 +360,6 @@ func TestE2E_MCPProxyWithLogging(t *testing.T) {
 		contentStr := string(content)
 		assert.Contains(t, contentStr, "Starting mcpproxy", "Log should contain startup message")
 		assert.Contains(t, contentStr, "Log directory configured", "Log should contain directory info")
-
-		// Clean up
-		os.Remove(logFilePath)
 	}
 }
 

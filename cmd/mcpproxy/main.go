@@ -466,10 +466,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Override log directory if specified
-	if cmdLogDir != "" {
-		cfg.Logging.LogDir = cmdLogDir
-	}
+	// Resolve the log directory. An explicit --log-dir wins; otherwise a
+	// non-default data dir co-locates logs under <data-dir>/logs so that
+	// tests/e2e/harness `serve` runs do not pollute the shared OS-standard
+	// prod log (root cause of the phantom "core restarts every 10s" in
+	// MCP-2250). The default data dir keeps the OS-standard location.
+	cfg.Logging.LogDir = resolveServeLogDir(cmdLogDir, cfg.Logging.LogDir, cfg.DataDir, defaultDataDirPath())
 
 	// Setup logger with new logging system
 	logger, err := logs.SetupLogger(cfg.Logging)
