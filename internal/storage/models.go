@@ -32,6 +32,7 @@ const (
 	// Security scanner buckets (Spec 039)
 	ScannersBucket           = "security_scanners"
 	ScanJobsBucket           = "security_scan_jobs"
+	ScanJobIndexBucket       = "security_scan_job_index" // lightweight ScanJobMeta index (MCP-2205)
 	ScanReportsBucket        = "security_reports"
 	IntegrityBaselinesBucket = "integrity_baselines"
 

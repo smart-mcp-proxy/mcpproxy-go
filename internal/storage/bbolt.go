@@ -93,6 +93,7 @@ func (b *BoltDB) initBuckets() error {
 			ActivityStatsBucket,
 			ScannersBucket,
 			ScanJobsBucket,
+			ScanJobIndexBucket,
 			ScanReportsBucket,
 			IntegrityBaselinesBucket,
 			OnboardingBucket,
@@ -102,6 +103,12 @@ func (b *BoltDB) initBuckets() error {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
 			}
+		}
+
+		// Backfill the scan-job index for databases created before MCP-2205.
+		// Idempotent: only runs when the index is empty but jobs exist.
+		if err := backfillScanJobIndex(tx); err != nil {
+			return fmt.Errorf("failed to backfill scan job index: %w", err)
 		}
 
 		// Set schema version only for new databases. Existing databases keep their

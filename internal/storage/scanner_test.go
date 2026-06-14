@@ -499,3 +499,163 @@ func TestIntegrityBaselineGetNotFound(t *testing.T) {
 		t.Error("expected error for nonexistent baseline, got nil")
 	}
 }
+
+// largeStatuses builds scanner statuses with big stdout/stderr payloads so the
+// backfill / metadata tests exercise the case the bug is about: full job records
+// are expensive to deserialize, but metadata is not.
+func largeStatuses() []scanner.ScannerJobStatus {
+	big := make([]byte, 64*1024)
+	for i := range big {
+		big[i] = 'x'
+	}
+	return []scanner.ScannerJobStatus{
+		{ScannerID: "osv", Status: "completed", Stdout: string(big), Stderr: string(big), FindingsCount: 1},
+	}
+}
+
+func TestListScanJobMetas_ProjectsLightweightFields(t *testing.T) {
+	db := newTestDB(t)
+
+	now := time.Now().Truncate(time.Second)
+	job := &scanner.ScanJob{
+		ID:              "scan-srv-1",
+		ServerName:      "srv",
+		Status:          scanner.ScanJobStatusCompleted,
+		ScanPass:        scanner.ScanPassSecurityScan,
+		StartedAt:       now,
+		CompletedAt:     now.Add(time.Second),
+		ScannerStatuses: largeStatuses(),
+	}
+	if err := db.SaveScanJob(job); err != nil {
+		t.Fatalf("SaveScanJob: %v", err)
+	}
+
+	metas, err := db.ListScanJobMetas("srv")
+	if err != nil {
+		t.Fatalf("ListScanJobMetas: %v", err)
+	}
+	if len(metas) != 1 {
+		t.Fatalf("expected 1 meta, got %d", len(metas))
+	}
+	m := metas[0]
+	if m.ID != "scan-srv-1" || m.ServerName != "srv" || m.ScanPass != scanner.ScanPassSecurityScan ||
+		m.Status != scanner.ScanJobStatusCompleted {
+		t.Errorf("unexpected meta: %+v", m)
+	}
+	if !m.StartedAt.Equal(now) {
+		t.Errorf("expected StartedAt %v, got %v", now, m.StartedAt)
+	}
+}
+
+func TestListScanJobMetas_FilterByServer(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	for i, srv := range []string{"a", "a", "b"} {
+		job := &scanner.ScanJob{
+			ID:         "job-" + srv + "-" + time.Duration(i).String(),
+			ServerName: srv,
+			Status:     scanner.ScanJobStatusCompleted,
+			StartedAt:  now.Add(time.Duration(i) * time.Second),
+		}
+		if err := db.SaveScanJob(job); err != nil {
+			t.Fatalf("SaveScanJob: %v", err)
+		}
+	}
+	metas, err := db.ListScanJobMetas("a")
+	if err != nil {
+		t.Fatalf("ListScanJobMetas: %v", err)
+	}
+	if len(metas) != 2 {
+		t.Fatalf("expected 2 metas for server a, got %d", len(metas))
+	}
+	all, err := db.ListScanJobMetas("")
+	if err != nil {
+		t.Fatalf("ListScanJobMetas(all): %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("expected 3 metas total, got %d", len(all))
+	}
+}
+
+func TestScanJobIndex_MaintainedOnDelete(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	job := &scanner.ScanJob{ID: "j1", ServerName: "srv", Status: scanner.ScanJobStatusCompleted, StartedAt: now}
+	if err := db.SaveScanJob(job); err != nil {
+		t.Fatalf("SaveScanJob: %v", err)
+	}
+	if err := db.DeleteScanJob("j1"); err != nil {
+		t.Fatalf("DeleteScanJob: %v", err)
+	}
+	metas, err := db.ListScanJobMetas("srv")
+	if err != nil {
+		t.Fatalf("ListScanJobMetas: %v", err)
+	}
+	if len(metas) != 0 {
+		t.Errorf("expected index entry removed on delete, got %d metas", len(metas))
+	}
+}
+
+func TestScanJobIndex_MaintainedOnDeleteServerJobs(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		job := &scanner.ScanJob{ID: "j" + time.Duration(i).String(), ServerName: "srv", Status: scanner.ScanJobStatusCompleted, StartedAt: now.Add(time.Duration(i) * time.Second)}
+		if err := db.SaveScanJob(job); err != nil {
+			t.Fatalf("SaveScanJob: %v", err)
+		}
+	}
+	if err := db.DeleteServerScanJobs("srv"); err != nil {
+		t.Fatalf("DeleteServerScanJobs: %v", err)
+	}
+	metas, err := db.ListScanJobMetas("srv")
+	if err != nil {
+		t.Fatalf("ListScanJobMetas: %v", err)
+	}
+	if len(metas) != 0 {
+		t.Errorf("expected all index entries removed, got %d metas", len(metas))
+	}
+}
+
+// TestScanJobIndex_BackfillFromExistingJobs simulates a DB upgraded from a
+// version that predates the index: jobs exist in the jobs bucket but the index
+// bucket is empty. Reopening the DB must backfill the index so metadata reads
+// (and thus report aggregation) work without re-scanning.
+func TestScanJobIndex_BackfillFromExistingJobs(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop().Sugar()
+
+	db, err := NewBoltDB(dir, logger)
+	if err != nil {
+		t.Fatalf("NewBoltDB: %v", err)
+	}
+	now := time.Now().Truncate(time.Second)
+	job := &scanner.ScanJob{ID: "legacy-1", ServerName: "srv", Status: scanner.ScanJobStatusCompleted, ScanPass: scanner.ScanPassSecurityScan, StartedAt: now, ScannerStatuses: largeStatuses()}
+	if err := db.SaveScanJob(job); err != nil {
+		t.Fatalf("SaveScanJob: %v", err)
+	}
+
+	// Wipe the index bucket to emulate a pre-index database.
+	if err := db.dropScanJobIndexForTest(); err != nil {
+		t.Fatalf("dropScanJobIndexForTest: %v", err)
+	}
+	if metas, _ := db.ListScanJobMetas("srv"); len(metas) != 0 {
+		t.Fatalf("precondition: expected empty index after wipe, got %d", len(metas))
+	}
+	db.Close()
+
+	// Reopen: backfill should repopulate the index from the jobs bucket.
+	db2, err := NewBoltDB(dir, logger)
+	if err != nil {
+		t.Fatalf("reopen NewBoltDB: %v", err)
+	}
+	t.Cleanup(func() { db2.Close() })
+
+	metas, err := db2.ListScanJobMetas("srv")
+	if err != nil {
+		t.Fatalf("ListScanJobMetas after reopen: %v", err)
+	}
+	if len(metas) != 1 || metas[0].ID != "legacy-1" {
+		t.Fatalf("expected backfilled meta legacy-1, got %+v", metas)
+	}
+}

@@ -1,11 +1,59 @@
 package storage
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"go.etcd.io/bbolt"
 )
+
+// scanJobMetaFrom projects a full ScanJob into its lightweight index entry.
+func scanJobMetaFrom(job *scanner.ScanJob) *scanner.ScanJobMeta {
+	return &scanner.ScanJobMeta{
+		ID:          job.ID,
+		ServerName:  job.ServerName,
+		Status:      job.Status,
+		ScanPass:    job.ScanPass,
+		StartedAt:   job.StartedAt,
+		CompletedAt: job.CompletedAt,
+	}
+}
+
+// putScanJobIndex writes the lightweight index entry for a job within tx.
+func putScanJobIndex(tx *bbolt.Tx, job *scanner.ScanJob) error {
+	data, err := json.Marshal(scanJobMetaFrom(job))
+	if err != nil {
+		return err
+	}
+	return tx.Bucket([]byte(ScanJobIndexBucket)).Put([]byte(job.ID), data)
+}
+
+// backfillScanJobIndex repopulates the scan-job index from the jobs bucket when
+// the index is empty (i.e. a database created before the index existed). It is
+// idempotent and a no-op once the index has at least one entry. Runs inside the
+// open transaction. See MCP-2205.
+func backfillScanJobIndex(tx *bbolt.Tx) error {
+	idx := tx.Bucket([]byte(ScanJobIndexBucket))
+	if idx.Stats().KeyN > 0 {
+		return nil // already populated
+	}
+	jobs := tx.Bucket([]byte(ScanJobsBucket))
+	if jobs == nil || jobs.Stats().KeyN == 0 {
+		return nil // nothing to backfill
+	}
+	return jobs.ForEach(func(k, v []byte) error {
+		job := &scanner.ScanJob{}
+		if err := job.UnmarshalBinary(v); err != nil {
+			return err
+		}
+		data, err := json.Marshal(scanJobMetaFrom(job))
+		if err != nil {
+			return err
+		}
+		return idx.Put(k, data)
+	})
+}
 
 // Scanner plugin CRUD operations
 
@@ -76,7 +124,57 @@ func (b *BoltDB) SaveScanJob(job *scanner.ScanJob) error {
 		if err != nil {
 			return err
 		}
-		return bucket.Put([]byte(job.ID), data)
+		if err := bucket.Put([]byte(job.ID), data); err != nil {
+			return err
+		}
+		// Keep the lightweight index in sync (MCP-2205).
+		return putScanJobIndex(tx, job)
+	})
+}
+
+// ListScanJobMetas returns lightweight scan-job metadata, optionally filtered by
+// server name. Unlike ListScanJobs it reads from a dedicated index bucket and
+// never deserializes the large per-job stdout/stderr payloads, so its cost is
+// independent of scan-output size. See MCP-2205.
+func (b *BoltDB) ListScanJobMetas(serverName string) ([]*scanner.ScanJobMeta, error) {
+	var records []*scanner.ScanJobMeta
+
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ScanJobIndexBucket))
+		return bucket.ForEach(func(_, v []byte) error {
+			meta := &scanner.ScanJobMeta{}
+			if err := json.Unmarshal(v, meta); err != nil {
+				return err
+			}
+			if serverName != "" && meta.ServerName != serverName {
+				return nil
+			}
+			records = append(records, meta)
+			return nil
+		})
+	})
+
+	return records, err
+}
+
+// dropScanJobIndexForTest deletes every entry in the scan-job index bucket.
+// Used by tests to emulate a pre-index database for backfill verification.
+func (b *BoltDB) dropScanJobIndexForTest() error {
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ScanJobIndexBucket))
+		var keys [][]byte
+		if err := bucket.ForEach(func(k, _ []byte) error {
+			keys = append(keys, append([]byte(nil), k...))
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, k := range keys {
+			if err := bucket.Delete(k); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
@@ -154,8 +252,10 @@ func (b *BoltDB) GetLatestScanJob(serverName string) (*scanner.ScanJob, error) {
 // DeleteScanJob deletes a scan job by ID
 func (b *BoltDB) DeleteScanJob(id string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(ScanJobsBucket))
-		return bucket.Delete([]byte(id))
+		if err := tx.Bucket([]byte(ScanJobsBucket)).Delete([]byte(id)); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte(ScanJobIndexBucket)).Delete([]byte(id))
 	})
 }
 
@@ -163,6 +263,7 @@ func (b *BoltDB) DeleteScanJob(id string) error {
 func (b *BoltDB) DeleteServerScanJobs(serverName string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ScanJobsBucket))
+		idx := tx.Bucket([]byte(ScanJobIndexBucket))
 		var keysToDelete [][]byte
 		err := bucket.ForEach(func(k, v []byte) error {
 			record := &scanner.ScanJob{}
@@ -170,7 +271,7 @@ func (b *BoltDB) DeleteServerScanJobs(serverName string) error {
 				return err
 			}
 			if record.ServerName == serverName {
-				keysToDelete = append(keysToDelete, k)
+				keysToDelete = append(keysToDelete, append([]byte(nil), k...))
 			}
 			return nil
 		})
@@ -179,6 +280,9 @@ func (b *BoltDB) DeleteServerScanJobs(serverName string) error {
 		}
 		for _, key := range keysToDelete {
 			if err := bucket.Delete(key); err != nil {
+				return err
+			}
+			if err := idx.Delete(key); err != nil {
 				return err
 			}
 		}
