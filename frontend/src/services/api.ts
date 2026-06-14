@@ -404,6 +404,20 @@ class APIService {
     })
   }
 
+  // MCP-2199: reject pending/changed quarantined tools. Mirrors approveTools
+  // against POST .../tools/block — {tools:[...]} for an explicit set,
+  // {block_all:true} otherwise. Blocking is reversible (the tool can be
+  // re-enabled later), so no destructive-confirm gate is needed.
+  async blockTools(serverName: string, tools?: string[]): Promise<APIResponse<{ blocked: number }>> {
+    const body = tools && tools.length > 0
+      ? { tools }
+      : { block_all: true }
+    return this.request<{ blocked: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/block`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  }
+
   async setToolEnabled(serverName: string, toolName: string, enabled: boolean): Promise<APIResponse<{
     server_name: string
     tool_name: string
