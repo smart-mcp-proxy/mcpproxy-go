@@ -329,3 +329,101 @@ func TestPrintReportTableRendersFailedScannerReasons(t *testing.T) {
 		}
 	}
 }
+
+// TestFormatScannerDurationMs verifies the per-scanner duration formatter:
+// sub-second values render in milliseconds, second-and-up values render as a
+// compact "X.Ys", and missing/zero timing renders as a dash rather than "0ms".
+func TestFormatScannerDurationMs(t *testing.T) {
+	cases := []struct {
+		ms   float64
+		want string
+	}{
+		{0, "-"},
+		{-5, "-"},
+		{850, "850ms"},
+		{999, "999ms"},
+		{1000, "1.0s"},
+		{1500, "1.5s"},
+		{12340, "12.3s"},
+	}
+	for _, c := range cases {
+		if got := formatScannerDurationMs(c.ms); got != c.want {
+			t.Errorf("formatScannerDurationMs(%v) = %q, want %q", c.ms, got, c.want)
+		}
+	}
+}
+
+// TestScannerDurationMs verifies that the explicit duration_ms field is
+// preferred, with a fallback to computing the duration from the
+// started_at/completed_at timestamps for reports produced before duration_ms
+// was recorded.
+func TestScannerDurationMs(t *testing.T) {
+	// Explicit duration_ms wins.
+	if got := scannerDurationMs(map[string]interface{}{"duration_ms": float64(1200)}); got != 1200 {
+		t.Errorf("expected 1200 from explicit duration_ms, got %v", got)
+	}
+	// Fallback: compute from timestamps when duration_ms is absent.
+	got := scannerDurationMs(map[string]interface{}{
+		"started_at":   "2026-06-14T10:00:00Z",
+		"completed_at": "2026-06-14T10:00:02Z",
+	})
+	if got != 2000 {
+		t.Errorf("expected 2000 from timestamp fallback, got %v", got)
+	}
+	// No timing data → 0.
+	if got := scannerDurationMs(map[string]interface{}{"scanner_id": "x"}); got != 0 {
+		t.Errorf("expected 0 with no timing, got %v", got)
+	}
+}
+
+// TestPrintScannerStatusTableRendersDuration verifies the per-scanner status
+// table gained a DURATION column populated from each scanner's timing.
+func TestPrintScannerStatusTableRendersDuration(t *testing.T) {
+	out := captureStdout(t, func() {
+		printScannerStatusTable([]interface{}{
+			map[string]interface{}{
+				"scanner_id":     "mcp-scan",
+				"status":         "completed",
+				"findings_count": float64(2),
+				"duration_ms":    float64(1500),
+			},
+			map[string]interface{}{
+				"scanner_id":   "trivy-mcp",
+				"status":       "completed",
+				"started_at":   "2026-06-14T10:00:00Z",
+				"completed_at": "2026-06-14T10:00:03Z",
+			},
+		})
+	})
+	for _, w := range []string{"DURATION", "mcp-scan", "1.5s", "trivy-mcp", "3.0s"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("status table missing %q\n--- output ---\n%s", w, out)
+		}
+	}
+}
+
+// TestPrintReportTableRendersScannerTimings verifies the scan report renders a
+// per-scanner timing block sourced from scanner_statuses.
+func TestPrintReportTableRendersScannerTimings(t *testing.T) {
+	report := map[string]interface{}{
+		"job_id":     "scan-foo-1",
+		"risk_score": float64(0),
+		"scanned_at": "2026-04-26T17:39:05Z",
+		"findings":   []interface{}{},
+		"scanner_statuses": []interface{}{
+			map[string]interface{}{
+				"scanner_id":  "mcp-scan",
+				"status":      "completed",
+				"duration_ms": float64(1200),
+			},
+		},
+	}
+	out := captureStdout(t, func() {
+		_ = printReportTable("foo", report, nil)
+	})
+	for _, w := range []string{"Scanner timing:", "mcp-scan", "1.2s"} {
+		if !strings.Contains(out, w) {
+			t.Errorf("report missing %q\n--- output ---\n%s", w, out)
+		}
+	}
+}

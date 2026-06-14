@@ -297,6 +297,11 @@ Risk Score:  0/100
 Scanned:     2026-04-10 10:08:19
 Scanners:    6 run, 1 failed (ramparts) of 7
 
+Scanner timing:
+  mcp-scan             completed    1.2s
+  trivy-mcp            completed    12.3s
+  ramparts             failed       -
+
 WARNING: Scan coverage incomplete: 1 of 7 scanners did not run
 
 === Security Scan (Pass 1) ===
@@ -421,16 +426,18 @@ Scan Status: everything
   Started:  2026-04-10 08:41:17
   Finished: 2026-04-10 08:42:09
 
-  SCANNER              STATUS       FINDINGS ERROR
-  -----------------------------------------------------------------
-  cisco-mcp-scanner    completed    0
-  mcp-ai-scanner       completed    0
-  mcp-scan             failed       0        scanner mcp-scan produ...
-  nova-proximity       completed    0
-  ramparts             failed       0        scanner ramparts produ...
-  semgrep-mcp          completed    0
-  trivy-mcp            completed    0
+  SCANNER              STATUS       DURATION   FINDINGS ERROR
+  ---------------------------------------------------------------------------
+  cisco-mcp-scanner    completed    1.2s       0
+  mcp-ai-scanner       completed    3.4s       0
+  mcp-scan             failed       850ms      0        scanner mcp-scan produ...
+  nova-proximity       completed    2.1s       0
+  ramparts             failed       120ms      0        scanner ramparts produ...
+  semgrep-mcp          completed    5.7s       0
+  trivy-mcp            completed    12.3s      0
 ```
+
+The `DURATION` column is each scanner's wall-clock execution time, computed from its `started_at`/`completed_at` timestamps. It renders `-` when timing is unavailable (e.g. a scanner that never started).
 
 :::tip Use status for diagnostics
 If `security report` shows "0 findings" but you think a scanner should have flagged something, open `status` — failed scanners appear here with their truncated stderr. The full stderr is available via `security status <server> -o json`.
@@ -469,6 +476,11 @@ Risk Score:  0/100
 Scanned:     2026-04-10 10:08:19
 Scanners:    6 run, 1 failed (ramparts) of 7
 
+Scanner timing:
+  mcp-scan             completed    1.2s
+  trivy-mcp            completed    12.3s
+  ramparts             failed       -
+
 WARNING: Scan coverage incomplete: 1 of 7 scanners did not run
 
 === Security Scan (Pass 1) ===
@@ -488,6 +500,7 @@ The `Scanners: X run, Y failed (names) of Z` line surfaces per-scanner failures 
 - `summary` — severity counts (`critical`, `high`, `medium`, `low`, `info`, `dangerous`, `warnings`, `info_level`, `total`)
 - `findings` — normalized findings across all scanners
 - `reports` — per-scanner raw results (also includes SARIF when `?include_sarif=true` is passed to the REST endpoint)
+- `scanner_statuses` — per-scanner execution records, each with `scanner_id`, `status`, `started_at`, `completed_at`, `duration_ms` (wall-clock execution time in milliseconds), `findings_count`, and `error`
 - `scan_context` — source method, source path, scanned file list
 - `scanners_run`, `scanners_failed`, `scanners_total`
 - `pass1_complete`, `pass2_complete`, `pass2_running`

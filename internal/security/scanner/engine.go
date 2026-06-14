@@ -675,6 +675,10 @@ func (e *Engine) updateScannerStatus(job *ScanJob, scannerID, status string, sta
 			}
 			job.ScannerStatuses[i].Error = errMsg
 			job.ScannerStatuses[i].FindingsCount = findingsCount
+			// Recompute duration once both timestamps are known. The live scan
+			// path sets StartedAt and CompletedAt in separate calls, so this
+			// derives from the stored StartedAt when CompletedAt arrives.
+			job.ScannerStatuses[i].DurationMs = job.ScannerStatuses[i].Duration().Milliseconds()
 			return
 		}
 	}

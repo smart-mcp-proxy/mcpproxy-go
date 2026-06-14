@@ -174,11 +174,23 @@ type ScannerJobStatus struct {
 	Status        string    `json:"status"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
 	CompletedAt   time.Time `json:"completed_at,omitempty"`
+	DurationMs    int64     `json:"duration_ms"` // Wall-clock execution time in ms; 0 when timing is unavailable
 	Error         string    `json:"error,omitempty"`
 	FindingsCount int       `json:"findings_count"`
 	Stdout        string    `json:"stdout,omitempty"` // Scanner stdout (for log viewing)
 	Stderr        string    `json:"stderr,omitempty"` // Scanner stderr (for log viewing)
 	ExitCode      int       `json:"exit_code"`
+}
+
+// Duration returns the scanner's wall-clock execution time, or 0 when the
+// start/complete timestamps are unavailable or inconsistent (e.g. the scanner
+// is still running, never started, or the completion clock skewed earlier than
+// the start).
+func (s ScannerJobStatus) Duration() time.Duration {
+	if s.StartedAt.IsZero() || s.CompletedAt.IsZero() || s.CompletedAt.Before(s.StartedAt) {
+		return 0
+	}
+	return s.CompletedAt.Sub(s.StartedAt)
 }
 
 // User-facing threat category constants
