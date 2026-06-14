@@ -192,6 +192,20 @@ func (s *Service) syncRegistryFromStorage() {
 		return
 	}
 	for _, inst := range installed {
+		// Heal in-process scanners (e.g. tpa-descriptions) that an older build
+		// wrongly persisted in a Docker state (error/pulling/available): they
+		// have no image, are always runnable, and must be "installed" so the
+		// engine runs them instead of prefail-skipping every scan (MCP-2396).
+		if reg, err := s.registry.Get(inst.ID); err == nil && reg.InProcess &&
+			inst.Status != ScannerStatusInstalled && inst.Status != ScannerStatusConfigured {
+			healed := targetStatusAfterPull(inst)
+			inst.Status = healed
+			inst.ErrorMsg = ""
+			_ = s.storage.SaveScanner(inst)
+			s.logger.Info("Healed in-process scanner stuck in Docker state",
+				zap.String("scanner", inst.ID), zap.String("status", healed))
+		}
+
 		_ = s.registry.UpdateStatus(inst.ID, inst.Status)
 		// Also update configured env so the engine can pass it to containers
 		if inst.ConfiguredEnv != nil {
@@ -296,6 +310,24 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 		if existing.ImageOverride != "" {
 			scanner.ImageOverride = existing.ImageOverride
 		}
+	}
+
+	// In-process scanners (e.g. tpa-descriptions) run in Go with no Docker
+	// image to pull, so there is nothing to install. Mark them enabled
+	// synchronously and skip the Docker image-availability path entirely —
+	// otherwise the empty EffectiveImage() falls through to the pull path and
+	// the scanner gets stuck in "error"/"pulling", prefail-skipping every scan
+	// (MCP-2396).
+	if scanner.InProcess {
+		scanner.Status = targetStatusAfterPull(scanner)
+		scanner.InstalledAt = time.Now()
+		scanner.ErrorMsg = ""
+		if err := s.storage.SaveScanner(scanner); err != nil {
+			return fmt.Errorf("failed to save scanner: %w", err)
+		}
+		_ = s.registry.UpdateStatus(id, scanner.Status)
+		s.emit().EmitSecurityScannerChanged(id, scanner.Status, "")
+		return nil
 	}
 
 	image := scanner.EffectiveImage()
