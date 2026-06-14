@@ -1254,6 +1254,104 @@ func getMapFloat(m map[string]interface{}, key string) float64 {
 	return 0
 }
 
+// scannerDurationMs returns a scanner_statuses entry's wall-clock duration in
+// milliseconds. It prefers the explicit duration_ms field and falls back to
+// computing it from started_at/completed_at so reports produced before
+// duration_ms was recorded still render a timing value.
+func scannerDurationMs(ss map[string]interface{}) float64 {
+	if ms := getMapFloat(ss, "duration_ms"); ms > 0 {
+		return ms
+	}
+	start := getMapString(ss, "started_at")
+	end := getMapString(ss, "completed_at")
+	if start == "" || end == "" {
+		return 0
+	}
+	st, err1 := time.Parse(time.RFC3339Nano, start)
+	et, err2 := time.Parse(time.RFC3339Nano, end)
+	if err1 != nil || err2 != nil || et.Before(st) {
+		return 0
+	}
+	return float64(et.Sub(st).Milliseconds())
+}
+
+// formatScannerDurationMs renders a per-scanner duration for human-readable
+// output: sub-second values in milliseconds, larger values as a compact "X.Ys",
+// and missing/zero timing as a dash.
+func formatScannerDurationMs(ms float64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", int(ms))
+	}
+	return fmt.Sprintf("%.1fs", ms/1000)
+}
+
+// printScannerStatusTable renders the per-scanner execution table including a
+// DURATION column. Nothing is printed when there are no scanner statuses.
+func printScannerStatusTable(scannerStatuses []interface{}) {
+	if len(scannerStatuses) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Printf("  %-20s %-12s %-10s %-8s %s\n", "SCANNER", "STATUS", "DURATION", "FINDINGS", "ERROR")
+	fmt.Printf("  %s\n", strings.Repeat("-", 75))
+	for _, s := range scannerStatuses {
+		ss, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		scannerID := getMapString(ss, "scanner_id")
+		ssStatus := getMapString(ss, "status")
+		findings := "0"
+		if fc, ok := ss["findings_count"].(float64); ok {
+			findings = fmt.Sprintf("%d", int(fc))
+		}
+		ssErr := getMapString(ss, "error")
+		if len(ssErr) > 25 {
+			ssErr = ssErr[:22] + "..."
+		}
+		dur := formatScannerDurationMs(scannerDurationMs(ss))
+		fmt.Printf("  %-20s %-12s %-10s %-8s %s\n", scannerID, ssStatus, dur, findings, ssErr)
+	}
+}
+
+// printScannerTimings renders a compact per-scanner wall-clock timing block
+// from a scan report's scanner_statuses. Nothing is printed when timing data
+// is absent.
+func printScannerTimings(report map[string]interface{}) {
+	statuses, ok := report["scanner_statuses"].([]interface{})
+	if !ok || len(statuses) == 0 {
+		return
+	}
+	type timingRow struct{ id, status, dur string }
+	rows := make([]timingRow, 0, len(statuses))
+	for _, s := range statuses {
+		ss, ok := s.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id := getMapString(ss, "scanner_id")
+		if id == "" {
+			continue
+		}
+		rows = append(rows, timingRow{
+			id:     id,
+			status: getMapString(ss, "status"),
+			dur:    formatScannerDurationMs(scannerDurationMs(ss)),
+		})
+	}
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Scanner timing:")
+	for _, r := range rows {
+		fmt.Printf("  %-20s %-12s %s\n", r.id, r.status, r.dur)
+	}
+}
+
 func runSecurityStatus(_ *cobra.Command, args []string) error {
 	client, _, err := newSecurityCLIClient()
 	if err != nil {
@@ -1310,26 +1408,9 @@ func runSecurityStatus(_ *cobra.Command, args []string) error {
 		fmt.Printf("  Error:    %s\n", errMsg)
 	}
 
-	// Per-scanner statuses
-	if scannerStatuses, ok := status["scanner_statuses"].([]interface{}); ok && len(scannerStatuses) > 0 {
-		fmt.Println()
-		fmt.Printf("  %-20s %-12s %-8s %s\n", "SCANNER", "STATUS", "FINDINGS", "ERROR")
-		fmt.Printf("  %s\n", strings.Repeat("-", 65))
-		for _, s := range scannerStatuses {
-			if ss, ok := s.(map[string]interface{}); ok {
-				scannerID := getMapString(ss, "scanner_id")
-				ssStatus := getMapString(ss, "status")
-				findings := "0"
-				if fc, ok := ss["findings_count"].(float64); ok {
-					findings = fmt.Sprintf("%d", int(fc))
-				}
-				ssErr := getMapString(ss, "error")
-				if len(ssErr) > 25 {
-					ssErr = ssErr[:22] + "..."
-				}
-				fmt.Printf("  %-20s %-12s %-8s %s\n", scannerID, ssStatus, findings, ssErr)
-			}
-		}
+	// Per-scanner statuses (includes a DURATION column)
+	if scannerStatuses, ok := status["scanner_statuses"].([]interface{}); ok {
+		printScannerStatusTable(scannerStatuses)
 	}
 
 	return nil
@@ -1767,6 +1848,11 @@ func printReportTable(serverName string, report map[string]interface{}, failedSc
 		line += fmt.Sprintf(" of %d", scannersTotal)
 		fmt.Println(line)
 	}
+
+	// Per-scanner wall-clock timing, so users can see which scanner dominated
+	// the scan time. Sourced from scanner_statuses; silently skipped when the
+	// report carries no per-scanner status data.
+	printScannerTimings(report)
 
 	// Scan context: show the user what was actually scanned. Without this the
 	// terse "0 findings" / "1 finding" output gives no signal as to whether
