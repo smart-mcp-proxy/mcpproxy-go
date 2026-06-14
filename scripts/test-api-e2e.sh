@@ -113,9 +113,14 @@ log_fail() {
 }
 
 # Extract API key from server logs
+# Optional $1 overrides the log path (used by scripts/test-extract-api-key.sh).
+# -a forces grep to treat the log as text: the server log can contain NUL bytes
+# (and ANSI color codes), which otherwise make grep report "Binary file ... matches"
+# instead of the match, corrupting API_KEY. See MCP-2404.
 extract_api_key() {
-    if [ -f "/tmp/mcpproxy_e2e.log" ]; then
-        API_KEY=$(grep -o '"api_key": "[^"]*"' "/tmp/mcpproxy_e2e.log" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
+    local log_file="${1:-/tmp/mcpproxy_e2e.log}"
+    if [ -f "$log_file" ]; then
+        API_KEY=$(grep -ao '"api_key": "[^"]*"' "$log_file" | sed 's/.*"api_key": "\([^"]*\)".*/\1/' | head -1)
         if [ ! -z "$API_KEY" ]; then
             echo "Extracted API key: ${API_KEY:0:8}..."
         fi
