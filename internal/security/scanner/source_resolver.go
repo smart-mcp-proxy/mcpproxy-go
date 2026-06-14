@@ -1177,8 +1177,18 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 	}
 
 	// Search for the package in npx cache: ~/.npm/_npx/<hash>/node_modules/<package>/
+	//
+	// The SAME package name can appear under multiple npx cache hashes. One may
+	// hold the real installed source (package.json + dist/lib/*.js) while another
+	// holds only a tools.json stub that mcpproxy itself wrote into the cache when
+	// it dumped tool definitions. The stub's mtime is frequently NEWER than the
+	// real source (it was just written), so a naive newest-mtime pick selects the
+	// stub and the scan reports a false "1 file" coverage (MCP-2397). We therefore
+	// prefer candidates that look like real package source, and only fall back to
+	// the newest-mtime tiebreak among candidates of the same class.
 	var bestMatch string
 	var bestModTime int64
+	var bestReal bool
 
 	entries, err := os.ReadDir(npxCacheDir)
 	if err != nil {
@@ -1191,20 +1201,49 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 		}
 		candidatePath := filepath.Join(npxCacheDir, entry.Name(), "node_modules", pkgName)
 		stat, err := os.Stat(candidatePath)
-		if err != nil {
+		if err != nil || !stat.IsDir() {
 			continue
 		}
-		if stat.IsDir() {
-			modTime := stat.ModTime().Unix()
-			if modTime > bestModTime {
-				bestModTime = modTime
-				bestMatch = candidatePath
-			}
+		real := npxCacheLooksReal(candidatePath)
+		modTime := stat.ModTime().Unix()
+
+		// Selection order:
+		//  1. any real-source candidate beats any stub;
+		//  2. within the same class, the newest mtime wins.
+		better := false
+		switch {
+		case bestMatch == "":
+			better = true
+		case real && !bestReal:
+			better = true
+		case real == bestReal && modTime > bestModTime:
+			better = true
+		}
+		if better {
+			bestMatch = candidatePath
+			bestModTime = modTime
+			bestReal = real
 		}
 	}
 
 	if bestMatch == "" {
 		return nil, fmt.Errorf("package %q not found in npx cache (%s)", pkgName, npxCacheDir)
+	}
+
+	if !bestReal {
+		// Every candidate was a bare stub (e.g. a lone tools.json mcpproxy wrote
+		// into the cache) — no real installed source exists locally. Returning the
+		// stub here would report false "1 file" coverage AND, post-MCP-2206, would
+		// short-circuit the caller's published-source fetch fallback in Resolve(),
+		// which can fetch the REAL package source without executing it. So we treat
+		// stub-only as "not found" and let that fallback (or a tool_definitions_only
+		// degrade when fetch is disabled) take over instead.
+		r.logger.Warn("npx cache held only stub directories (no real package source); deferring to published-source fetch fallback",
+			zap.String("server", info.Name),
+			zap.String("package", pkgName),
+			zap.String("stub_path", bestMatch),
+		)
+		return nil, fmt.Errorf("npx cache for %q contained only stub directories (no real source) in %s", pkgName, npxCacheDir)
 	}
 
 	r.logger.Info("Resolved source from npx cache",
@@ -1218,6 +1257,38 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 		Method:    "npx_cache",
 		Cleanup:   func() {},
 	}, nil
+}
+
+// npxCacheLooksReal reports whether an npx cache package directory holds the
+// real installed package rather than a bare stub. Every npm package ships a
+// package.json, so its presence is the canonical marker of real source. A stub
+// directory mcpproxy creates just to hold a dumped tools.json has none. As a
+// secondary signal we also accept a directory that contains a conventional
+// build/source subdirectory (dist/lib/build/src) or any JavaScript/TypeScript
+// source file, in case an unusual package omits package.json at the cache root.
+func npxCacheLooksReal(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return true
+	}
+	for _, sub := range []string{"dist", "lib", "build", "src"} {
+		if stat, err := os.Stat(filepath.Join(dir, sub)); err == nil && stat.IsDir() {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".js", ".mjs", ".cjs", ".ts":
+			return true
+		}
+	}
+	return false
 }
 
 // resolveUvxCache finds a uvx package's source in ~/.cache/uv/ or ~/.local/share/uv/tools/

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -431,6 +432,81 @@ func TestResolveNpxCache(t *testing.T) {
 	}
 	if result.Method != "npx_cache" {
 		t.Errorf("expected method 'npx_cache', got %q", result.Method)
+	}
+}
+
+// TestResolveNpxCachePrefersRealSourceOverStub reproduces MCP-2397: when the
+// same package name exists under multiple npx cache hashes, one holding the
+// real installed source (package.json + dist) and another holding only a
+// tools.json stub that mcpproxy itself wrote, the resolver must scan the real
+// source even when the stub directory has a NEWER mtime. The old newest-mtime
+// heuristic would pick the stub and report false "1 file scanned" coverage.
+func TestResolveNpxCachePrefersRealSourceOverStub(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir) // Windows uses USERPROFILE
+
+	pkg := filepath.Join("node_modules", "@modelcontextprotocol", "server-everything")
+
+	// Real source under one hash: package.json + dist/*.js (older mtime).
+	realDir := filepath.Join(homeDir, ".npm", "_npx", "realhash", pkg)
+	os.MkdirAll(filepath.Join(realDir, "dist"), 0755)
+	os.WriteFile(filepath.Join(realDir, "package.json"), []byte(`{"name":"@modelcontextprotocol/server-everything"}`), 0644)
+	os.WriteFile(filepath.Join(realDir, "dist", "index.js"), []byte("// real server source"), 0644)
+
+	// Stub under a different hash: only a tools.json (newer mtime → would win
+	// under the old heuristic).
+	stubDir := filepath.Join(homeDir, ".npm", "_npx", "stubhash", pkg)
+	os.MkdirAll(stubDir, 0755)
+	os.WriteFile(filepath.Join(stubDir, "tools.json"), []byte(`{"tools":[]}`), 0644)
+
+	// Force the stub directory to be strictly newer than the real one so the
+	// legacy newest-mtime selection would choose the stub.
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now()
+	if err := os.Chtimes(realDir, older, older); err != nil {
+		t.Fatalf("chtimes real: %v", err)
+	}
+	if err := os.Chtimes(stubDir, newer, newer); err != nil {
+		t.Fatalf("chtimes stub: %v", err)
+	}
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveNpxCache(ServerInfo{
+		Name:    "everything-server",
+		Command: "npx",
+		Args:    []string{"-y", "@modelcontextprotocol/server-everything"},
+	})
+	if err != nil {
+		t.Fatalf("resolveNpxCache: %v", err)
+	}
+	if result.SourceDir != realDir {
+		t.Errorf("expected real source %q, got stub %q", realDir, result.SourceDir)
+	}
+}
+
+// TestResolveNpxCacheStubOnlyReturnsError verifies the post-MCP-2206
+// interaction: when the npx cache holds ONLY a tools.json stub (no real
+// package source anywhere locally), resolveNpxCache returns an error rather
+// than the stub. This lets Resolve()'s published-source fetch fallback take
+// over and fetch the real source, instead of reporting false "1 file" coverage.
+func TestResolveNpxCacheStubOnlyReturnsError(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir) // Windows uses USERPROFILE
+
+	stubDir := filepath.Join(homeDir, ".npm", "_npx", "stubhash", "node_modules", "@modelcontextprotocol", "server-everything")
+	os.MkdirAll(stubDir, 0755)
+	os.WriteFile(filepath.Join(stubDir, "tools.json"), []byte(`{"tools":[]}`), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.resolveNpxCache(ServerInfo{
+		Name:    "everything-server",
+		Command: "npx",
+		Args:    []string{"-y", "@modelcontextprotocol/server-everything"},
+	})
+	if err == nil {
+		t.Fatal("expected error when npx cache contains only a stub, got nil (would short-circuit the published-fetch fallback)")
 	}
 }
 
