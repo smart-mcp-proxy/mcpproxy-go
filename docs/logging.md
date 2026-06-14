@@ -73,6 +73,13 @@ The logging system automatically selects the appropriate directory based on your
 - **Location**: `~/.mcpproxy/logs/`
 - **Used when**: OS detection fails or standard directories are inaccessible
 
+### Custom data directory
+- **Location**: `<data-dir>/logs/`
+- **Used when**: the resolved data directory is **not** the default (`~/.mcpproxy`) — i.e. you ran with a custom `--data-dir` flag or a `data_dir` set in the config file — **and** no explicit `--log-dir` was given.
+- **Rationale**: co-locating logs with a custom data directory keeps non-default runs (integration tests, e2e scripts, throwaway/QA instances) self-contained so they never write into the shared OS-standard log (`~/Library/Logs/mcpproxy/main.log`). Mixing many short-lived `serve` processes into that single shared file previously made the log unreadable and produced misleading "the core restarts every ~10s" signals.
+- **Override**: an explicit `--log-dir` always takes precedence; the default data directory (`~/.mcpproxy`) is unaffected and still logs to the OS-standard location above.
+- **Resolution order**: `--log-dir` flag → `logging.log_dir` in config → `<data-dir>/logs` (non-default data dir) → OS-standard location.
+
 ## Configuration Options
 
 ### Log Levels
@@ -383,4 +390,4 @@ The logging system follows established standards for each operating system:
 - **Windows**: [Application Data Guidelines](https://docs.microsoft.com/en-us/windows/win32/shell/knownfolderid)
 - **Linux**: [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html)
 
-This ensures that logs are stored in the expected locations for each platform, making them easy to find and manage. 
+This ensures that logs are stored in the expected locations for each platform, making them easy to find and manage.
