@@ -543,7 +543,12 @@ actor CoreProcessManager {
             }
 
         case "config.reloaded":
-            // Configuration reloaded; refresh everything once
+            // Configuration reloaded; refresh everything once.
+            // A re-init loop re-emits config.reloaded each cycle even when the
+            // SSE connection stays up, so treat it as an instability signal:
+            // this re-arms the settle gate and suppresses the replay-driven
+            // quarantine/sensitive notifications for the duration (MCP-2328).
+            await notificationService.markConnectionUnsettled()
             await refreshState()
             await MainActor.run {
                 appState.serversVersion += 1
@@ -803,6 +808,19 @@ actor CoreProcessManager {
     /// Transition the core state via the main actor.
     private func transitionState(to newState: CoreState) async {
         await appState.transition(to: newState)
+
+        // Signal connection instability so replay-driven notifications
+        // (quarantine, sensitive-data) are suppressed until the connection
+        // settles. Every reconnect / relaunch / crash funnels through here,
+        // so during a backend re-init loop the gate is re-armed each cycle and
+        // never settles — breaking the notification storm (MCP-2328).
+        // `.connected` is the steady state and is intentionally NOT marked.
+        switch newState {
+        case .launching, .waitingForCore, .reconnecting, .error:
+            await notificationService.markConnectionUnsettled()
+        case .idle, .connected, .shuttingDown:
+            break
+        }
     }
 
     // MARK: - Private: API Key Generation
