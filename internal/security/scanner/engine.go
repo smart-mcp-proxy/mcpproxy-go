@@ -1073,19 +1073,34 @@ var ciscoServerURLPattern = regexp.MustCompile(
 	`(?m)^[ \t]*"server_url"[ \t]*:[ \t]*"https?://[^"]*deepwiki[^"]*"[ \t]*,?[ \t]*\r?\n?`,
 )
 
-// sanitizeCiscoStdout replaces the upstream-hardcoded deepwiki placeholder
-// URL line with a short annotation referencing the tracking issue. The rest
-// of the raw output is preserved for debugging.
+// ciscoCoverageCaveat is prepended to every cisco-mcp-scanner execution log so
+// the scanner's coverage is never over-trusted. The bundled cisco scanner runs
+// `static --tools tools.json` (registry_bundled.go): it analyzes the exported
+// tool definitions with YARA + readiness rules and never connects to the live
+// server endpoint, so an is_safe/SAFE result reflects the tool definitions, not
+// the server's runtime behavior. Surfacing this unconditionally (not only when
+// the upstream deepwiki placeholder happens to appear) keeps the caveat honest
+// even if a future upstream release changes its raw output. See issue #383 / MCP-2399.
+const ciscoCoverageCaveat = "// [mcpproxy] coverage caveat: cisco-mcp-scanner performs STATIC analysis of " +
+	"the exported tool definitions only. It does not connect to or probe the live server endpoint and " +
+	"makes no network request, so a \"safe\"/is_safe result reflects the analyzed tool definitions, not " +
+	"the server's live runtime behavior (see issue #383).\n"
+
+// sanitizeCiscoStdout prepends a static-analysis coverage caveat and replaces
+// the upstream-hardcoded deepwiki placeholder URL line with a short annotation
+// referencing the tracking issue. The rest of the raw output is preserved for
+// debugging. The caveat leads the output so it survives MaxLogBytes truncation.
 //
 // Assumes pretty-printed multi-line output; minified single-line JSON
 // bypasses this filter (acceptable since the cisco scanner emits multi-line).
 func sanitizeCiscoStdout(stdout string) string {
-	if !strings.Contains(stdout, "deepwiki") {
-		return stdout
+	sanitized := stdout
+	if strings.Contains(sanitized, "deepwiki") {
+		sanitized = ciscoServerURLPattern.ReplaceAllString(
+			sanitized,
+			"// [mcpproxy] upstream cisco-ai-mcp-scanner emits a hardcoded "+
+				"placeholder server_url; no network request was made (see issue #383)\n",
+		)
 	}
-	return ciscoServerURLPattern.ReplaceAllString(
-		stdout,
-		"// [mcpproxy] upstream cisco-ai-mcp-scanner emits a hardcoded "+
-			"placeholder server_url; no network request was made (see issue #383)\n",
-	)
+	return ciscoCoverageCaveat + sanitized
 }
