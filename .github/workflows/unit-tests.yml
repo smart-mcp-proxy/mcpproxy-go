@@ -178,6 +178,34 @@ jobs:
           version: v2.6.2
           args: --config .github/.golangci.yml --timeout=5m
 
+  server-edition:
+    name: Server Edition
+    runs-on: ubuntu-latest
+    env:
+      GO111MODULE: "on"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Build server edition
+        run: go build -tags server ./cmd/mcpproxy
+
+      - name: Test server edition packages
+        run: go test -race -tags server ./internal/teams/... ./internal/config/...
+
   build:
     name: Build
     needs: [build-frontend, verify-oas]
