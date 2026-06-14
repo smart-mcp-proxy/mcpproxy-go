@@ -28,6 +28,52 @@ enum NotificationAction: String {
     case update = "UPDATE"
 }
 
+// MARK: - Connection Settle Gate
+
+/// Decides whether SSE-replay-driven notifications (quarantine, sensitive-data)
+/// may fire, based on how recently the core connection was unsettled.
+///
+/// These notifications use a "count went up vs the last-seen value" heuristic.
+/// When the core is stuck in a re-init / restart loop (observed ~10s cadence),
+/// each cycle disconnects then replays the full server/activity state, so the
+/// tracked count transiently drops and is re-established — making every cycle
+/// look like a brand-new event and producing a notification storm (MCP-2328).
+///
+/// The gate requires the connection to have been free of instability for
+/// `settleInterval` before such notifications are allowed again. An active loop
+/// re-marks the connection unsettled faster than it can settle (the loop period
+/// is shorter than `settleInterval`), so nothing fires for its duration; a
+/// genuinely stable connection settles and lets legitimate events through.
+struct ConnectionSettleGate {
+
+    /// How long the connection must be free of instability before
+    /// replay-driven notifications are allowed again. Chosen above the
+    /// observed ~10s re-init loop period so an active loop never appears
+    /// settled.
+    let settleInterval: TimeInterval
+
+    /// Timestamp of the most recent instability signal, or `nil` if the
+    /// connection has never been marked unsettled (steady since launch).
+    private var lastUnsettledAt: Date?
+
+    init(settleInterval: TimeInterval = 12) {
+        self.settleInterval = settleInterval
+    }
+
+    /// Record an instability signal: a reconnect, relaunch, error transition,
+    /// or config reload. Resets the settle window.
+    mutating func markUnsettled(now: Date = Date()) {
+        lastUnsettledAt = now
+    }
+
+    /// Whether replay-driven notifications may fire at `now`. True when no
+    /// instability has been seen within `settleInterval`.
+    func isSettled(now: Date = Date()) -> Bool {
+        guard let last = lastUnsettledAt else { return true }
+        return now.timeIntervalSince(last) >= settleInterval
+    }
+}
+
 // MARK: - Notification Service
 
 /// Actor that manages macOS notification delivery with rate limiting.
@@ -42,6 +88,11 @@ actor NotificationService {
 
     /// Minimum interval between repeated notifications of the same kind.
     private let rateLimitInterval: TimeInterval = 300 // 5 minutes
+
+    /// Gate that suppresses replay-driven notifications while the core
+    /// connection is unsettled (e.g. during a backend re-init loop). See
+    /// `ConnectionSettleGate` and `markConnectionUnsettled()`.
+    private var settleGate = ConnectionSettleGate()
 
     /// The shared notification center.
     private let center = UNUserNotificationCenter.current()
@@ -68,10 +119,27 @@ actor NotificationService {
         center.setNotificationCategories(categories)
     }
 
+    // MARK: - Connection State
+
+    /// Record that the core connection just became unsettled — a reconnect,
+    /// relaunch, error transition, or config reload. Replay-driven
+    /// notifications (quarantine, sensitive-data) are suppressed until the
+    /// connection has been continuously settled for the gate's interval. This
+    /// is what breaks the notification storm during a backend re-init loop
+    /// (MCP-2328): each loop cycle re-marks the connection unsettled before it
+    /// can settle, so no spurious replay alert ever fires.
+    func markConnectionUnsettled() {
+        settleGate.markUnsettled()
+    }
+
     // MARK: - Notification Senders
 
     /// Notify about sensitive data detected in a tool call.
     func sendSensitiveDataAlert(server: String, tool: String, category: String) async {
+        // Suppress while the connection is unsettled: a re-init loop replays
+        // the full activity list each cycle, which the count-delta heuristic
+        // upstream would otherwise read as a fresh detection.
+        guard settleGate.isSettled() else { return }
         let key = "sensitive:\(server):\(tool)"
         guard shouldDeliver(key: key) else { return }
 
@@ -93,6 +161,10 @@ actor NotificationService {
 
     /// Notify about a server entering quarantine (new or changed tools detected).
     func sendQuarantineAlert(server: String, toolCount: Int) async {
+        // Suppress while the connection is unsettled: a re-init loop replays
+        // the full server list each cycle, which the count-delta heuristic
+        // upstream would otherwise read as a fresh quarantine event.
+        guard settleGate.isSettled() else { return }
         let key = "quarantine:\(server)"
         guard shouldDeliver(key: key) else { return }
 
