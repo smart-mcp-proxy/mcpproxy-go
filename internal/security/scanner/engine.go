@@ -50,13 +50,14 @@ func NewEngine(docker *DockerRunner, registry *Registry, dataDir string, logger 
 
 // ScanRequest describes a scan to execute
 type ScanRequest struct {
-	ServerName  string
-	SourceDir   string            // Path to server source files (for "source" input)
-	DryRun      bool              // If true, don't affect quarantine state
-	ScannerIDs  []string          // Specific scanners to use (empty = all installed)
-	Env         map[string]string // Additional environment variables
-	ScanContext *ScanContext      // Context metadata (set by service)
-	ScanPass    int               // 1 = security scan (fast), 2 = supply chain audit (background)
+	ServerName     string
+	SourceDir      string            // Path to server source files (for "source" input)
+	ContainerImage string            // Docker image reference (for "container_image" input)
+	DryRun         bool              // If true, don't affect quarantine state
+	ScannerIDs     []string          // Specific scanners to use (empty = all installed)
+	Env            map[string]string // Additional environment variables
+	ScanContext    *ScanContext      // Context metadata (set by service)
+	ScanPass       int               // 1 = security scan (fast), 2 = supply chain audit (background)
 }
 
 // ScanCallback receives scan lifecycle events
@@ -349,6 +350,32 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 }
 
 // runSingleScanner executes one scanner and returns its report plus execution logs
+// scannerSupportsInput reports whether the scanner declares the given input type.
+func scannerSupportsInput(s *ScannerPlugin, input string) bool {
+	for _, in := range s.Inputs {
+		if in == input {
+			return true
+		}
+	}
+	return false
+}
+
+// effectiveScannerCommand returns the command to run for a scanner. When the
+// scan target is a Docker image (req.ContainerImage set) and the scanner both
+// declares the "container_image" input and provides an ImageCommand template,
+// the image-mode command is returned with "{{IMAGE}}" substituted for the image
+// reference. Otherwise the scanner's default (source-mode) Command is returned.
+func effectiveScannerCommand(s *ScannerPlugin, req ScanRequest) []string {
+	if req.ContainerImage == "" || len(s.ImageCommand) == 0 || !scannerSupportsInput(s, "container_image") {
+		return s.Command
+	}
+	out := make([]string, len(s.ImageCommand))
+	for i, tok := range s.ImageCommand {
+		out[i] = strings.ReplaceAll(tok, "{{IMAGE}}", req.ContainerImage)
+	}
+	return out
+}
+
 func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req ScanRequest) (*ScanReport, scannerLogs, error) {
 	// In-process scanners run directly in Go — no Docker container, no source
 	// files required. They analyze the tool definitions exported to
@@ -465,7 +492,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	cfg := ScannerRunConfig{
 		ContainerName:          GenerateContainerName(s.ID, req.ServerName),
 		Image:                  s.EffectiveImage(),
-		Command:                s.Command,
+		Command:                effectiveScannerCommand(s, req),
 		Env:                    env,
 		SourceDir:              req.SourceDir,
 		ReportDir:              reportDir,

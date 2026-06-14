@@ -83,14 +83,15 @@ type ServerInfo struct {
 
 // ResolvedSource contains the resolved source information for scanning
 type ResolvedSource struct {
-	SourceDir   string   // Host directory containing source files
-	ContainerID string   // Docker container ID (if applicable)
-	ServerURL   string   // URL for mcp_connection input (HTTP/SSE servers)
-	Method      string   // How source was resolved: "docker_extract", "working_dir", "local_path", "url", "manual"
-	Cleanup     func()   // Cleanup function (removes temp dirs)
-	Files       []string // List of files found in source dir (capped)
-	TotalFiles  int      // Total file count
-	TotalSize   int64    // Total size in bytes
+	SourceDir      string   // Host directory containing source files
+	ContainerID    string   // Docker container ID (if applicable)
+	ContainerImage string   // Docker image reference (for "container_image" input)
+	ServerURL      string   // URL for mcp_connection input (HTTP/SSE servers)
+	Method         string   // How source was resolved: "docker_extract", "container_image", "working_dir", "local_path", "url", "manual"
+	Cleanup        func()   // Cleanup function (removes temp dirs)
+	Files          []string // List of files found in source dir (capped)
+	TotalFiles     int      // Total file count
+	TotalSize      int64    // Total size in bytes
 }
 
 // Resolve determines the source directory for scanning a server.
@@ -110,6 +111,26 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 			}, nil
 		}
 		return nil, fmt.Errorf("HTTP server %s has no URL configured", info.Name)
+	}
+
+	// User-managed Docker-image servers (e.g. `docker run -i --rm mcp/fetch`).
+	// These are NOT mcpproxy-managed containers (which use uvx/npx commands wrapped
+	// in `mcpproxy-<name>-*` containers and are handled below). Here the user wired
+	// `docker run <image>` directly as the server command, so there is no source
+	// tree to extract and no managed container to diff — the scan target is the
+	// image itself. Surface it so scanners that accept a "container_image" input
+	// (Trivy) can scan the image instead of falling back to an empty source dir
+	// (which produced source_method=tool_definitions_only and zero scanning).
+	if image := dockerImageFromCommand(info); image != "" {
+		r.logger.Info("Resolved source as Docker image reference",
+			zap.String("server", info.Name),
+			zap.String("image", image),
+		)
+		return &ResolvedSource{
+			ContainerImage: image,
+			Method:         "container_image",
+			Cleanup:        func() {},
+		}, nil
 	}
 
 	// Stdio servers: try Docker container first
@@ -271,6 +292,81 @@ func isPackageRunnerCommand(command string) bool {
 		return true
 	}
 	return false
+}
+
+// dockerRunValueFlags lists the `docker run` / `podman run` flags that consume
+// the following argument as their value. Used by dockerImageFromCommand to skip
+// past flag values when locating the positional image reference. Flags not in
+// this set (and not containing "=") are treated as boolean (e.g. -i, -t, --rm),
+// consuming no extra token. Attached forms ("--flag=value", "-eFOO=bar") carry
+// their value inline and are detected by the "=" check, so they need no entry.
+var dockerRunValueFlags = map[string]bool{
+	// Short forms
+	"-e": true, "-v": true, "-p": true, "-u": true, "-w": true, "-l": true, "-m": true,
+	// Long forms
+	"--env": true, "--volume": true, "--publish": true, "--name": true,
+	"--workdir": true, "--entrypoint": true, "--network": true, "--net": true,
+	"--user": true, "--label": true, "--mount": true, "--env-file": true,
+	"--add-host": true, "--device": true, "--expose": true, "--hostname": true,
+	"--memory": true, "--memory-swap": true, "--cpus": true, "--cpu-shares": true,
+	"--cpuset-cpus": true, "--platform": true, "--pull": true, "--restart": true,
+	"--log-driver": true, "--log-opt": true, "--cap-add": true, "--cap-drop": true,
+	"--security-opt": true, "--tmpfs": true, "--ulimit": true, "--gpus": true,
+	"--dns": true, "--link": true, "--volumes-from": true, "--sysctl": true,
+	"--shm-size": true, "--stop-signal": true, "--stop-timeout": true,
+	"--pid": true, "--ipc": true, "--uts": true, "--userns": true,
+	"--cgroupns": true, "--group-add": true, "--runtime": true,
+	"--health-cmd": true, "--health-interval": true, "--health-timeout": true,
+	"--health-retries": true, "--health-start-period": true,
+}
+
+// dockerImageFromCommand returns the Docker/Podman image reference for a server
+// whose command is a literal `docker run <image>` (or `podman run <image>`, or
+// `docker container run <image>`). It returns "" when the command is not a
+// docker/podman run invocation or no positional image argument can be found.
+//
+// This handles the common case where a user wires an MCP server as
+// `command: "docker", args: ["run", "-i", "--rm", "mcp/fetch"]`. Such servers
+// are not mcpproxy-managed containers, so the running-container resolver finds
+// nothing; without this the scan degraded to tool-definitions-only and Trivy
+// scanned an empty directory.
+//
+// Flag handling follows docker's CLI grammar: flags containing "=" carry their
+// value inline; flags listed in dockerRunValueFlags consume the next token;
+// every other flag (and combined short booleans like -it) consumes no value.
+// The first non-flag token after `run` is the image; anything after it belongs
+// to the containerized command and is ignored.
+func dockerImageFromCommand(info ServerInfo) string {
+	base := strings.ToLower(filepath.Base(info.Command))
+	if base != "docker" && base != "podman" {
+		return ""
+	}
+
+	args := info.Args
+	// Skip an optional "container" management subcommand: `docker container run`.
+	if len(args) > 0 && args[0] == "container" {
+		args = args[1:]
+	}
+	if len(args) == 0 || args[0] != "run" {
+		return ""
+	}
+	args = args[1:]
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			if strings.Contains(arg, "=") {
+				continue // --flag=value / -eFOO=bar — value is inline
+			}
+			if dockerRunValueFlags[arg] {
+				i++ // consume the flag's value token
+			}
+			continue
+		}
+		// First positional argument after `run` is the image reference.
+		return arg
+	}
+	return ""
 }
 
 // isSourceFile returns true if the path looks like a source-code file by
@@ -796,6 +892,21 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 			}, nil
 		}
 		return nil, fmt.Errorf("HTTP server %s has no URL configured", info.Name)
+	}
+
+	// User-managed Docker-image servers: scan the image, not a source tree.
+	// Pass 2 (supply chain audit) benefits most here — Trivy image mode reports
+	// CVEs in the image's OS packages and bundled dependencies.
+	if image := dockerImageFromCommand(info); image != "" {
+		r.logger.Info("Resolved full source as Docker image reference for Pass 2",
+			zap.String("server", info.Name),
+			zap.String("image", image),
+		)
+		return &ResolvedSource{
+			ContainerImage: image,
+			Method:         "container_image",
+			Cleanup:        func() {},
+		}, nil
 	}
 
 	// Stdio servers: try Docker container first — extract FULL container

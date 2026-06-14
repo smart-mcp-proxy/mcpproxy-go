@@ -692,6 +692,17 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				scanCtx.SourcePath = resolved.ServerURL
 			}
 			scanCtx.ContainerID = resolved.ContainerID
+			// Docker-image servers (`docker run mcp/fetch`): the scan target is the
+			// image itself, not a source dir. Carry the reference so image-capable
+			// scanners (Trivy) run in image mode, and surface it in the context.
+			if resolved.ContainerImage != "" {
+				req.ContainerImage = resolved.ContainerImage
+				scanCtx.ContainerImage = resolved.ContainerImage
+				scanCtx.DockerIsolation = true
+				if scanCtx.SourcePath == "" {
+					scanCtx.SourcePath = resolved.ContainerImage
+				}
+			}
 			// Determine Docker isolation status
 			if resolved.Method == "docker_extract" {
 				scanCtx.DockerIsolation = true
@@ -734,9 +745,10 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			tempDir, err := os.MkdirTemp("", "mcpproxy-scan-tools-")
 			if err == nil {
 				req.SourceDir = tempDir
-				// For HTTP/URL servers, preserve the "url" source method and path
-				// (the temp dir is only for tool definitions, not the real source)
-				if scanCtx.SourceMethod != "url" {
+				// For HTTP/URL and Docker-image servers, preserve the real source
+				// method and path — the temp dir is only for tool definitions, not
+				// the real scan target (the URL / the image).
+				if scanCtx.SourceMethod != "url" && scanCtx.SourceMethod != "container_image" {
 					scanCtx.SourceMethod = "tool_definitions_only"
 					scanCtx.SourcePath = tempDir
 				}
@@ -867,6 +879,14 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 			scanCtx.SourcePath = resolved.ServerURL
 		}
 		scanCtx.ContainerID = resolved.ContainerID
+		// Docker-image servers: scan the image (Trivy image mode reports OS-package
+		// and bundled-dependency CVEs). No source dir to enrich or export tools into.
+		if resolved.ContainerImage != "" {
+			req.ContainerImage = resolved.ContainerImage
+			scanCtx.ContainerImage = resolved.ContainerImage
+			scanCtx.SourcePath = resolved.ContainerImage
+			scanCtx.DockerIsolation = true
+		}
 		if resolved.Method == "docker_extract" {
 			scanCtx.DockerIsolation = true
 		}
@@ -875,8 +895,9 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 		scanCtx.TotalFiles = resolved.TotalFiles
 		scanCtx.TotalSizeBytes = resolved.TotalSize
 
-		// Export tool definitions for Cisco scanner
-		if s.serverInfo != nil {
+		// Export tool definitions for Cisco scanner (only when there is a real
+		// source dir to write tools.json into — image-only servers have none).
+		if s.serverInfo != nil && req.SourceDir != "" {
 			s.exportToolDefinitions(serverName, req.SourceDir)
 		}
 	} else {
