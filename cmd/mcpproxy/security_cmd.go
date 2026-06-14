@@ -1823,19 +1823,28 @@ func printReportTable(serverName string, report map[string]interface{}, failedSc
 	scannedAt := getMapString(report, "scanned_at")
 	jobID := getMapString(report, "job_id")
 
+	// F-10 / MCP-2401: scanner coverage. Read counts up front so the risk-score
+	// line can flag low confidence when part of the fleet never ran.
+	scannersRun := int(getMapFloat(report, "scanners_run"))
+	scannersFailed := int(getMapFloat(report, "scanners_failed"))
+	scannersTotal := int(getMapFloat(report, "scanners_total"))
+
 	fmt.Printf("Security Report: %s\n", serverName)
 	if jobID != "" {
 		fmt.Printf("Scan ID:     %s\n", jobID)
 	}
-	fmt.Printf("Risk Score:  %s/100\n", riskScore)
+	riskLine := fmt.Sprintf("Risk Score:  %s/100", riskScore)
+	if scannersFailed > 0 && scannersTotal > 0 {
+		// MCP-2401: the score was computed from an incomplete scan. Flag the
+		// degraded confidence on the number itself, not only in the warning
+		// block below, so a glance at "0/100" isn't read as an all-clear.
+		riskLine += fmt.Sprintf(" (degraded — %d of %d scanners did not run)", scannersFailed, scannersTotal)
+	}
+	fmt.Println(riskLine)
 	if scannedAt != "" {
 		fmt.Printf("Scanned:     %s\n", formatTimestamp(scannedAt))
 	}
 
-	// F-10: scanner coverage line. Pull counts from the aggregated report.
-	scannersRun := int(getMapFloat(report, "scanners_run"))
-	scannersFailed := int(getMapFloat(report, "scanners_failed"))
-	scannersTotal := int(getMapFloat(report, "scanners_total"))
 	if scannersTotal > 0 {
 		line := fmt.Sprintf("Scanners:    %d run, %d failed", scannersRun, scannersFailed)
 		if scannersFailed > 0 && len(failedScanners) > 0 {

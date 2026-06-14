@@ -1771,8 +1771,18 @@ components:
         risk_score:
           description: 0-100
           type: integer
+        scanners_failed:
+          type: integer
+        scanners_run:
+          description: |-
+            Scanner coverage for the primary scan pass. "degraded" status means
+            ScannersFailed > 0, so the risk score reflects an incomplete scan and a
+            low score should not be read as a trustworthy all-clear (MCP-2401).
+          type: integer
+        scanners_total:
+          type: integer
         status:
-          description: '"clean", "warnings", "dangerous", "failed", "not_scanned",
+          description: '"clean", "degraded", "warnings", "dangerous", "failed", "not_scanned",
             "scanning"'
           type: string
       type: object

@@ -97,8 +97,14 @@ type DiagnosticFixStep struct {
 type SecurityScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"` // 0-100
-	Status        string         `json:"status"`     // "clean", "warnings", "dangerous", "failed", "not_scanned", "scanning"
+	Status        string         `json:"status"`     // "clean", "degraded", "warnings", "dangerous", "failed", "not_scanned", "scanning"
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
+	// Scanner coverage for the primary scan pass. "degraded" status means
+	// ScannersFailed > 0, so the risk score reflects an incomplete scan and a
+	// low score should not be read as a trustworthy all-clear (MCP-2401).
+	ScannersRun    int `json:"scanners_run"`
+	ScannersFailed int `json:"scanners_failed"`
+	ScannersTotal  int `json:"scanners_total"`
 }
 
 // FindingCounts groups findings by user-facing threat category.

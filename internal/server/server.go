@@ -2694,9 +2694,12 @@ func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context,
 		return nil
 	}
 	out := &contracts.SecurityScanSummary{
-		LastScanAt: summary.LastScanAt,
-		RiskScore:  summary.RiskScore,
-		Status:     summary.Status,
+		LastScanAt:     summary.LastScanAt,
+		RiskScore:      summary.RiskScore,
+		Status:         summary.Status,
+		ScannersRun:    summary.ScannersRun,
+		ScannersFailed: summary.ScannersFailed,
+		ScannersTotal:  summary.ScannersTotal,
 	}
 	if summary.FindingCounts != nil {
 		out.FindingCounts = &contracts.FindingCounts{
