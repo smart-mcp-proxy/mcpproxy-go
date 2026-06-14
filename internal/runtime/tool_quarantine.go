@@ -1039,6 +1039,114 @@ func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, er
 	return len(toolNames), nil
 }
 
+// BlockTools atomically "blocks" the named tools for a server. A block is an
+// approve+disable performed as a single, all-or-nothing record write per tool:
+// the tool's quarantine status is promoted to approved (clearing any pending /
+// changed flag, exactly like ApproveTools) AND its Disabled flag is set so it is
+// hidden from MCP clients. Because both mutations land in one SaveToolApproval,
+// a tool is never observably left in the approved+enabled state — that is the
+// invariant this endpoint exists to guarantee.
+//
+// Why a single combined write instead of ApproveTools followed by
+// SetToolEnabled(disabled): two sequential saves leave a window where a crash or
+// I/O error after the approve but before the disable yields an approved+enabled
+// tool — the exact state callers want to avoid. Folding both into one write
+// removes that window.
+//
+// Config-denied tools (enabled_tools / disabled_tools) need no special handling:
+// block only ever disables, so it can never enable a tool the operator forbids.
+//
+// Returns the number of tools actually blocked. Missing approval records are
+// skipped with a warning (mirrors ApproveTools), not treated as a hard error.
+func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy string) (int, error) {
+	if r.storageManager == nil {
+		return 0, nil
+	}
+
+	blocked := 0
+	for _, toolName := range toolNames {
+		record, err := r.storageManager.GetToolApproval(serverName, toolName)
+		if err != nil {
+			r.logger.Warn("Tool approval record not found for block",
+				zap.String("server", serverName),
+				zap.String("tool", toolName),
+				zap.Error(err))
+			continue
+		}
+
+		// The approve half of a block is a user action, so the pending/changed
+		// → approved transition is permitted by the quarantine invariant.
+		if err := r.enforceInvariant(serverName, toolName, record.Status, storage.ToolApprovalStatusApproved, ReasonUserApprove); err != nil {
+			return blocked, err
+		}
+
+		// Approve + disable in a single write — all-or-nothing.
+		record.Status = storage.ToolApprovalStatusApproved
+		record.ApprovedHash = record.CurrentHash
+		record.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+		record.ApprovedAt = time.Now().UTC()
+		record.ApprovedBy = blockedBy
+		record.PreviousDescription = ""
+		record.PreviousSchema = ""
+		record.PreviousOutputSchema = ""
+		record.Disabled = true
+
+		if err := r.storageManager.SaveToolApproval(record); err != nil {
+			return blocked, err
+		}
+		blocked++
+
+		r.logger.Info("Tool blocked (approved + disabled)",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.String("blocked_by", blockedBy))
+
+		// Single per-tool audit event describing the block as one action.
+		r.emitToolQuarantineEvent(serverName, toolName, "tool_blocked",
+			"", record.ApprovedHash, "", record.CurrentDescription, "", record.CurrentSchema)
+	}
+
+	// One SSE emit per call (not per tool) so an open Servers/overview page
+	// refreshes its quarantine badge — mirrors ApproveTools.
+	if blocked > 0 {
+		r.emitServersChanged("tools_blocked", map[string]any{
+			"server":        serverName,
+			"blocked_count": blocked,
+			"blocked_by":    blockedBy,
+		})
+	}
+
+	return blocked, nil
+}
+
+// BlockAllTools blocks (approve+disable) every pending/changed tool for a
+// server. Mirrors ApproveAllTools' selection set so the two bulk operations
+// dismiss the same quarantine queue — approve keeps tools visible, block hides
+// them. Returns the number of tools blocked.
+func (r *Runtime) BlockAllTools(serverName string, blockedBy string) (int, error) {
+	if r.storageManager == nil {
+		return 0, nil
+	}
+
+	records, err := r.storageManager.ListToolApprovals(serverName)
+	if err != nil {
+		return 0, err
+	}
+
+	var toolNames []string
+	for _, record := range records {
+		if record.Status == storage.ToolApprovalStatusPending || record.Status == storage.ToolApprovalStatusChanged {
+			toolNames = append(toolNames, record.ToolName)
+		}
+	}
+
+	if len(toolNames) == 0 {
+		return 0, nil
+	}
+
+	return r.BlockTools(serverName, toolNames, blockedBy)
+}
+
 // emitToolQuarantineEvent emits an activity event for tool quarantine changes.
 func (r *Runtime) emitToolQuarantineEvent(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema string) {
 	metadata := map[string]interface{}{

@@ -726,14 +726,14 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, enable_tool, disable_tool"),
-				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "enable_tool", "disable_tool"),
+				mcp.Description("Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled."),
+				mcp.Enum("list_quarantined", "inspect_quarantined", "quarantine_server", "inspect_tools", "approve_tool", "approve_all_tools", "block_tool", "block_all_tools", "enable_tool", "disable_tool"),
 			),
 			mcp.WithString("name",
-				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools)"),
+				mcp.Description("Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools)"),
 			),
 			mcp.WithString("tool_name",
-				mcp.Description("Tool name (required for approve_tool operation)"),
+				mcp.Description("Tool name (required for approve_tool and block_tool operations)"),
 			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: quarantineSecurityTool, Handler: p.handleQuarantineSecurity})
@@ -2659,6 +2659,10 @@ func (p *MCPProxyServer) handleQuarantineSecurity(ctx context.Context, request m
 		result, opErr = p.handleApproveToolByName(request)
 	case "approve_all_tools":
 		result, opErr = p.handleApproveAllToolsByServer(request)
+	case "block_tool":
+		result, opErr = p.handleBlockToolByName(request)
+	case "block_all_tools":
+		result, opErr = p.handleBlockAllToolsByServer(request)
 	case "enable_tool":
 		result, opErr = p.handleSetToolEnabledByName(request, true)
 	case "disable_tool":
@@ -2789,6 +2793,45 @@ func (p *MCPProxyServer) handleApproveAllToolsByServer(request mcp.CallToolReque
 	}
 
 	return mcp.NewToolResultText(fmt.Sprintf("Approved %d tool(s) on server '%s'.", count, serverName)), nil
+}
+
+// handleBlockToolByName atomically blocks (approve+disable) a single tool (MCP-2198).
+func (p *MCPProxyServer) handleBlockToolByName(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	toolName := request.GetString("tool_name", "")
+	if toolName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'tool_name'"), nil
+	}
+
+	count, err := p.mainServer.runtime.BlockTools(serverName, []string{toolName}, "mcp")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to block tool '%s': %v", toolName, err)), nil
+	}
+	if count == 0 {
+		return mcp.NewToolResultText(fmt.Sprintf("Tool '%s' on server '%s' was not found (no approval record); nothing blocked.", toolName, serverName)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Tool '%s' on server '%s' has been blocked (approved + disabled).", toolName, serverName)), nil
+}
+
+// handleBlockAllToolsByServer atomically blocks (approve+disable) all
+// pending/changed tools for a server (MCP-2198).
+func (p *MCPProxyServer) handleBlockAllToolsByServer(request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName := request.GetString("name", "")
+	if serverName == "" {
+		return mcp.NewToolResultError("Missing required parameter 'name' (server name)"), nil
+	}
+
+	count, err := p.mainServer.runtime.BlockAllTools(serverName, "mcp")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to block tools: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Blocked %d tool(s) on server '%s' (approved + disabled).", count, serverName)), nil
 }
 
 func (p *MCPProxyServer) handleSetToolEnabledByName(request mcp.CallToolRequest, enabled bool) (*mcp.CallToolResult, error) {

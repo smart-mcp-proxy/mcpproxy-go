@@ -368,12 +368,12 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 - **`call_tool_write`** - Proxy write tool calls to upstream servers (Spec 018)
 - **`call_tool_destructive`** - Proxy destructive tool calls to upstream servers (Spec 018)
 - **`code_execution`** - Execute JavaScript to orchestrate multiple tools (disabled by default)
-- **`upstream_servers`** - CRUD operations for server management. Spec 049: list/get entries carry a conditional `tools` count block only when a server has ≥1 non-callable tool.
-- **`quarantine_security`** - Security quarantine management: list/inspect quarantined servers, inspect/approve/approve-all tools (Spec 032)
+- **`upstream_servers`** - CRUD for server management (Spec 049).
+- **`quarantine_security`** - Security quarantine: list/inspect quarantined servers, inspect/approve/approve-all tools, and block/block-all (atomic approve+disable) (Spec 032).
 
 **Tool Format**: `<serverName>:<toolName>` (e.g., `github:create_issue`)
 
-**Intent Declaration (Spec 018)**: Tool variants enable granular IDE permission control. The `operation_type` is automatically inferred from the tool variant (`call_tool_read` → "read", etc.). Optional `intent` fields for audit:
+**Intent Declaration (Spec 018)**: Tool variants enable granular IDE permission control; `operation_type` is inferred from the variant (`call_tool_read` → "read"). Optional `intent` fields for audit:
 ```json
 {
   "intent": {
@@ -406,6 +406,7 @@ See [docs/configuration.md](docs/configuration.md) for complete reference.
 | `DELETE /api/v1/tokens/{name}` | Revoke agent token |
 | `POST /api/v1/tokens/{name}/regenerate` | Regenerate agent token secret |
 | `POST /api/v1/servers/{id}/tools/approve` | Approve pending/changed tools (Spec 032) |
+| `POST /api/v1/servers/{id}/tools/block` | Block (approve+disable) tools (Spec 032) |
 | `GET /api/v1/servers/{id}/tools/{tool}/diff` | View tool description/schema changes (Spec 032) |
 | `GET /api/v1/servers/{id}/tools/export` | Export tool approval records (Spec 032) |
 | `POST /api/v1/feedback` | Submit feedback/bug report (proxied to GitHub Issues) |

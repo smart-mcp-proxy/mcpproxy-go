@@ -2593,6 +2593,17 @@ func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, err
 	return s.runtime.ApproveAllTools(serverName, approvedBy)
 }
 
+// BlockTools atomically blocks (approve+disable) specific tools (MCP-2198).
+func (s *Server) BlockTools(serverName string, toolNames []string, blockedBy string) (int, error) {
+	return s.runtime.BlockTools(serverName, toolNames, blockedBy)
+}
+
+// BlockAllTools atomically blocks (approve+disable) all pending/changed tools
+// for a server (MCP-2198).
+func (s *Server) BlockAllTools(serverName string, blockedBy string) (int, error) {
+	return s.runtime.BlockAllTools(serverName, blockedBy)
+}
+
 // SetToolEnabled sets whether a tool is enabled for MCP exposure (Spec 032).
 func (s *Server) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
 	return s.runtime.SetToolEnabled(serverName, toolName, enabled, updatedBy)

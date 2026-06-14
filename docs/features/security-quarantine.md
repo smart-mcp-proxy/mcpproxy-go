@@ -178,6 +178,23 @@ See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 - Configuration: `quarantine_enabled` and `skip_quarantine`
 - REST API endpoints for tool approval management
 
+### Block (approve + disable)
+
+When reviewing a pending or changed tool you may want to **acknowledge it but
+keep it hidden** from MCP clients — for example, dismissing a noisy "changed"
+flag for a tool you never intend to use. The **block** operation does this
+atomically: it approves the tool (clearing the quarantine flag) **and** disables
+it in a single, all-or-nothing server-side write, so a tool is never left in the
+approved+enabled state.
+
+- **REST**: `POST /api/v1/servers/{id}/tools/block` with `{"tools":[...]}` or
+  `{"block_all": true}`.
+- **MCP**: `quarantine_security` operations `block_tool` (with `name` +
+  `tool_name`) and `block_all_tools` (with `name`).
+
+A blocked tool can be re-exposed later with the normal enable operation
+(`POST /api/v1/servers/{id}/tools/{tool}/enabled` with `{"enabled": true}`).
+
 ## Disabling Quarantine
 
 **Not recommended**, but you can opt out of quarantine globally by setting a

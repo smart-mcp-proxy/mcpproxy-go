@@ -4693,6 +4693,46 @@ paths:
       summary: Get tools for a server
       tags:
       - servers
+  /api/v1/servers/{id}/tools/block:
+    post:
+      description: Atomically approves AND disables the given tools (or all
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Block result
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal server error
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Block (approve+disable) tools for a server
+      tags:
+      - servers
   /api/v1/servers/{id}/tools/disable_all:
     post:
       description: Bulk-toggles every known tool of a server. The "changed" field

@@ -169,6 +169,10 @@ type ServerController interface {
 	ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error)
 	ApproveTools(serverName string, toolNames []string, approvedBy string) error
 	ApproveAllTools(serverName string, approvedBy string) (int, error)
+	// BlockTools / BlockAllTools atomically approve+disable tools (MCP-2198):
+	// all-or-nothing so a tool is never left approved+enabled.
+	BlockTools(serverName string, toolNames []string, blockedBy string) (int, error)
+	BlockAllTools(serverName string, blockedBy string) (int, error)
 	GetToolApproval(serverName, toolName string) (*storage.ToolApprovalRecord, error)
 
 	// Onboarding wizard (Spec 046)
@@ -634,6 +638,9 @@ func (s *Server) setupRoutes() {
 
 			// Tool-level quarantine (Spec 032)
 			r.Post("/tools/approve", s.handleApproveTools)
+			// Atomic block = approve+disable (MCP-2198). Server-side so the
+			// pair is all-or-nothing — a tool is never left approved+enabled.
+			r.Post("/tools/block", s.handleBlockTools)
 			r.Post("/tools/{tool}/enabled", s.handleSetToolEnabled)
 			// Bulk per-tool enable/disable. Mirrors /servers/enable_all
 			// + /servers/disable_all but scoped to a single server's tools.
@@ -4662,6 +4669,75 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 		"approved": len(req.Tools),
 		"tools":    req.Tools,
 		"message":  fmt.Sprintf("Approved %d tools for server %s", len(req.Tools), serverID),
+	})
+}
+
+// handleBlockTools handles POST /api/v1/servers/{id}/tools/block
+// A block is an atomic approve+disable performed in the runtime so the pair is
+// all-or-nothing — a tool is never left approved+enabled. Mirrors
+// handleApproveTools: accepts either {"tools":[...]} or {"block_all":true}.
+//
+// @Summary Block (approve+disable) tools for a server
+// @Description Atomically approves AND disables the given tools (or all
+//
+//	pending/changed tools when block_all=true) for a server. The approve and
+//	disable land in a single write per tool, so a tool is never left in the
+//	approved+enabled state. The "blocked" field counts tools actually blocked.
+//
+// @Tags servers
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.SuccessResponse "Block result"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request"
+// @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Router /api/v1/servers/{id}/tools/block [post]
+func (s *Server) handleBlockTools(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	var req struct {
+		Tools    []string `json:"tools"`
+		BlockAll bool     `json:"block_all"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	if req.BlockAll {
+		count, err := s.controller.BlockAllTools(serverID, "api")
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to block tools: %v", err))
+			return
+		}
+		s.writeSuccess(w, map[string]interface{}{
+			"blocked": count,
+			"message": fmt.Sprintf("Blocked %d tools for server %s", count, serverID),
+		})
+		return
+	}
+
+	if len(req.Tools) == 0 {
+		s.writeError(w, r, http.StatusBadRequest, "Either 'tools' array or 'block_all: true' required")
+		return
+	}
+
+	count, err := s.controller.BlockTools(serverID, req.Tools, "api")
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to block tools: %v", err))
+		return
+	}
+
+	s.writeSuccess(w, map[string]interface{}{
+		"blocked": count,
+		"tools":   req.Tools,
+		"message": fmt.Sprintf("Blocked %d tools for server %s", count, serverID),
 	})
 }
 
