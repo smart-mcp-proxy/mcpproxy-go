@@ -630,31 +630,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		status.ToolCount = state.ToolCount
 
 		// Phase 7.1: Convert ToolMetadata to ToolInfo and cache in StateView
-		if state.Tools != nil {
-			status.Tools = make([]stateview.ToolInfo, len(state.Tools))
-			for i, tool := range state.Tools {
-				// Parse ParamsJSON into InputSchema
-				var inputSchema map[string]interface{}
-				if tool.ParamsJSON != "" {
-					// ParamsJSON is already a JSON string, we'll store it as-is
-					// The API endpoint will parse it if needed
-					inputSchema = map[string]interface{}{
-						"type":       "object",
-						"properties": map[string]interface{}{}, // TODO: Parse ParamsJSON
-					}
-				}
-
-				status.Tools[i] = stateview.ToolInfo{
-					Name:             tool.Name,
-					Description:      tool.Description,
-					InputSchema:      inputSchema,
-					Annotations:      tool.Annotations,
-					OutputSchemaJSON: tool.OutputSchemaJSON,
-				}
-			}
-		} else {
-			status.Tools = nil
-		}
+		status.Tools = toolInfosFromMetadata(state.Tools)
 
 		// Map connection state to string
 		// Use detailed state from ConnectionInfo when available to avoid mislabeling disconnected servers as "connecting"
@@ -765,6 +741,37 @@ func (s *Supervisor) SetErrorCodeNotifier(fn func(code string)) {
 	s.errorCodeNotifier = fn
 }
 
+// toolInfosFromMetadata converts cached upstream tool metadata into the
+// StateView ToolInfo representation. Shared by reconcile, background-discovery
+// refresh, and reconnect repopulation so all three paths produce an identical
+// StateView tool set (MCP-2094).
+func toolInfosFromMetadata(tools []*config.ToolMetadata) []stateview.ToolInfo {
+	if tools == nil {
+		return nil
+	}
+	infos := make([]stateview.ToolInfo, len(tools))
+	for i, tool := range tools {
+		// Parse ParamsJSON into InputSchema
+		var inputSchema map[string]interface{}
+		if tool.ParamsJSON != "" {
+			// ParamsJSON is already a JSON string; the API endpoint parses it if needed.
+			inputSchema = map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{}, // TODO: Parse ParamsJSON
+			}
+		}
+
+		infos[i] = stateview.ToolInfo{
+			Name:             tool.Name,
+			Description:      tool.Description,
+			InputSchema:      inputSchema,
+			Annotations:      tool.Annotations,
+			OutputSchemaJSON: tool.OutputSchemaJSON,
+		}
+	}
+	return infos
+}
+
 // RefreshToolsFromDiscovery updates both the Supervisor snapshot and StateView with tools from background discovery.
 // This is called after DiscoverAndIndexTools completes to populate the UI cache.
 func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) error {
@@ -811,39 +818,16 @@ func (s *Supervisor) RefreshToolsFromDiscovery(tools []*config.ToolMetadata) err
 	// Update StateView for each server
 	for serverName, serverTools := range toolsByServer {
 		s.stateView.UpdateServer(serverName, func(status *stateview.ServerStatus) {
-			// Defensive check: Only update if we have more or equal tools than currently shown
-			// This prevents overwriting valid tools with stale data from delayed discoveries
-			// Exception: Always update if current tools is 0 (initial population)
-			if len(status.Tools) > 0 && len(serverTools) < len(status.Tools) {
-				s.logger.Debug("StateView already has more tools, skipping update to prevent stale data",
-					zap.String("server", serverName),
-					zap.Int("current_tools", len(status.Tools)),
-					zap.Int("new_tools", len(serverTools)))
-				return
-			}
-
+			// StateView mirrors the Supervisor snapshot (updated unconditionally
+			// above), so apply discovery results as last-writer-wins. A prior
+			// size-based guard skipped updates whenever the new set was smaller,
+			// which pinned StateView to a stale higher count when a server
+			// legitimately dropped tools — diverging from the snapshot and from
+			// the bleve index. Servers with zero discovered tools never reach
+			// this loop (they're absent from toolsByServer), so a size guard
+			// could not protect against empty/stale discoveries anyway (MCP-2094).
 			status.ToolCount = len(serverTools)
-			status.Tools = make([]stateview.ToolInfo, len(serverTools))
-
-			for i, tool := range serverTools {
-				// Parse ParamsJSON into InputSchema
-				var inputSchema map[string]interface{}
-				if tool.ParamsJSON != "" {
-					// ParamsJSON is already a JSON string
-					inputSchema = map[string]interface{}{
-						"type":       "object",
-						"properties": map[string]interface{}{}, // TODO: Parse ParamsJSON
-					}
-				}
-
-				status.Tools[i] = stateview.ToolInfo{
-					Name:             tool.Name,
-					Description:      tool.Description,
-					InputSchema:      inputSchema,
-					Annotations:      tool.Annotations,
-					OutputSchemaJSON: tool.OutputSchemaJSON,
-				}
-			}
+			status.Tools = toolInfosFromMetadata(serverTools)
 		})
 	}
 
@@ -942,13 +926,27 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 				if connected {
 					t := event.Timestamp
 					status.ConnectedAt = &t
-					// Don't populate Tools here - background indexing will handle it
-					// Only update the count if tools haven't been discovered yet
-					// This prevents overwriting tool data from background discovery
+					// Repopulate the per-server tool set from the retained
+					// Supervisor snapshot so StateView stays the consistent
+					// source of truth across a reconnect/unquarantine. The
+					// disconnect branch below clears StateView.Tools, but the
+					// snapshot keeps them (Tools are never cleared in the
+					// snapshot), so we can restore immediately instead of
+					// waiting for background discovery to re-run. Background
+					// discovery (RefreshToolsFromDiscovery) later overwrites
+					// with fresh data. Without this, StateView consumers that
+					// don't use the #635 read fallback (tray counts, SSE
+					// servers.changed, health/diagnostics) report 0 tools for a
+					// connected server that has tools (MCP-2094).
 					if len(status.Tools) == 0 {
-						status.ToolCount = toolCount
+						if len(state.Tools) > 0 {
+							status.Tools = toolInfosFromMetadata(state.Tools)
+							status.ToolCount = len(state.Tools)
+						} else {
+							status.ToolCount = toolCount
+						}
 					}
-					// If tools are already populated, keep the existing count
+					// If tools are already populated, keep the existing set/count
 
 					// CRITICAL: Clear error when connected, even if connInfo is unavailable
 					// This ensures stale OAuth/connection errors don't persist after successful reconnection
