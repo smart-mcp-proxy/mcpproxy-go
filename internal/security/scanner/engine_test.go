@@ -841,10 +841,43 @@ func TestSanitizeCiscoStdout_PreservesScanResults(t *testing.T) {
 	}
 }
 
-func TestSanitizeCiscoStdout_NoOpWithoutDeepwiki(t *testing.T) {
+// TestSanitizeCiscoStdout_SurfacesCoverageCaveatWithoutDeepwiki asserts the
+// static-analysis coverage caveat is surfaced even when the upstream output
+// carries no deepwiki placeholder line. The caveat must not depend on the
+// upstream placeholder string, which a future cisco-ai-mcp-scanner release may
+// change or drop — the static-only limitation is permanent regardless. See MCP-2399.
+func TestSanitizeCiscoStdout_SurfacesCoverageCaveatWithoutDeepwiki(t *testing.T) {
 	in := `{"scan_results": [{"tool_name": "x", "is_safe": true}]}`
-	if got := sanitizeCiscoStdout(in); got != in {
-		t.Errorf("expected no-op, got diff: %s", got)
+	out := sanitizeCiscoStdout(in)
+	if !strings.Contains(out, ciscoCoverageCaveat) {
+		t.Errorf("expected static-analysis coverage caveat to be surfaced, got:\n%s", out)
+	}
+	// Original payload must be preserved verbatim after the caveat header.
+	if !strings.Contains(out, in) {
+		t.Errorf("expected original output preserved, got:\n%s", out)
+	}
+	// Caveat must state the key facts: static-only and no network request.
+	if !strings.Contains(ciscoCoverageCaveat, "static") && !strings.Contains(ciscoCoverageCaveat, "STATIC") {
+		t.Error("caveat must state the analysis is static")
+	}
+	if !strings.Contains(ciscoCoverageCaveat, "network request") {
+		t.Error("caveat must state no network request is made")
+	}
+}
+
+// TestSanitizeCiscoStdout_CaveatAlwaysLeadsOutput asserts the caveat is the
+// first thing in the sanitized output so it survives MaxLogBytes truncation.
+func TestSanitizeCiscoStdout_CaveatAlwaysLeadsOutput(t *testing.T) {
+	withDeepwiki := `{
+  "server_url": "https://mcp.deepwiki.com/mcp",
+  "scan_results": [{"tool_name": "x", "is_safe": true}]
+}`
+	out := sanitizeCiscoStdout(withDeepwiki)
+	if !strings.HasPrefix(out, ciscoCoverageCaveat) {
+		t.Errorf("expected caveat to lead the output, got:\n%s", out)
+	}
+	if strings.Contains(out, "deepwiki") {
+		t.Errorf("expected deepwiki line still stripped, got:\n%s", out)
 	}
 }
 
