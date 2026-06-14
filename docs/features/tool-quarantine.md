@@ -207,6 +207,12 @@ curl -H "X-API-Key: your-key" \
 3. Navigate to the **Tools** tab in the server detail view
 4. Review changed (and any residual pending) tools and click **Approve** or **Approve All**
 
+Each quarantined tool also offers a **Block** button (and the banner a **Block
+All**) next to Approve. Blocking rejects the tool: it leaves the quarantine list
+and is disabled in the tools list, so AI agents can neither see nor call it.
+Blocking is reversible — re-enable the tool later with its toggle in the tools
+list (or `mcpproxy tools enable <server:tool>`).
+
 The server detail view's **Tool Quarantine** banner is shown only when a tool's
 status is `changed` (a rug-pull). Once a change has surfaced, any residual
 `pending` tools are listed alongside it so they can be cleared in the same pass.

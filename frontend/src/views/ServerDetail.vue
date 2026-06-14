@@ -341,14 +341,27 @@
                   {{ quarantinedTools.length }} tool(s) require approval before they can be used by AI agents.
                 </div>
               </div>
-              <button
-                @click="approveAllTools"
-                :disabled="approvalLoading"
-                class="btn btn-sm btn-warning"
-              >
-                <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
-                Approve All
-              </button>
+              <div class="flex items-center gap-2">
+                <button
+                  data-test="quarantine-approve-all"
+                  @click="approveAllTools"
+                  :disabled="approvalLoading"
+                  class="btn btn-sm btn-warning"
+                >
+                  <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
+                  Approve All
+                </button>
+                <!-- MCP-2199: reject every quarantined tool (reversible). -->
+                <button
+                  data-test="quarantine-block-all"
+                  @click="blockAllTools"
+                  :disabled="approvalLoading"
+                  class="btn btn-sm btn-outline btn-error"
+                >
+                  <span v-if="approvalLoading" class="loading loading-spinner loading-xs"></span>
+                  Block All
+                </button>
+              </div>
             </div>
 
             <!-- Quarantined Tools List -->
@@ -421,14 +434,25 @@
                         title="Tool is denied by mcp_config.json; approval has no effect while the config lock is active"
                       >🔒 locked by config</span>
                     </template>
-                    <button
-                      v-else
-                      @click="approveTool(tool.tool_name)"
-                      :disabled="approvalLoading"
-                      class="btn btn-sm btn-outline ml-4"
-                    >
-                      Approve
-                    </button>
+                    <div v-else class="flex items-center gap-2 ml-4 self-center">
+                      <button
+                        :data-test="'quarantine-approve-' + tool.tool_name"
+                        @click="approveTool(tool.tool_name)"
+                        :disabled="approvalLoading"
+                        class="btn btn-sm btn-outline"
+                      >
+                        Approve
+                      </button>
+                      <!-- MCP-2199: reject this quarantined tool (reversible). -->
+                      <button
+                        :data-test="'quarantine-block-' + tool.tool_name"
+                        @click="blockTool(tool.tool_name)"
+                        :disabled="approvalLoading"
+                        class="btn btn-sm btn-outline btn-error"
+                      >
+                        Block
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1863,6 +1887,73 @@ async function approveAllTools() {
       type: 'error',
       title: 'Approval Failed',
       message: err instanceof Error ? err.message : 'Failed to approve tools',
+    })
+  } finally {
+    approvalLoading.value = false
+  }
+}
+
+// MCP-2199: reject a quarantined tool — it leaves the quarantine list and is
+// disabled in the tools list. Reversible (re-enable via the tools toggle), so
+// no destructive-confirm modal. Mirrors approveTool, reusing approvalLoading.
+async function blockTool(toolName: string) {
+  if (!server.value) return
+  approvalLoading.value = true
+  try {
+    const response = await api.blockTools(server.value.name, [toolName])
+    if (response.success) {
+      systemStore.addToast({
+        type: 'success',
+        title: 'Tool Blocked',
+        message: `${toolName} has been blocked`,
+      })
+      await loadToolApprovals()
+      // Refresh server data to update quarantine counts
+      await serversStore.fetchServers()
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Block Failed',
+        message: response.error || 'Failed to block tool',
+      })
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Block Failed',
+      message: err instanceof Error ? err.message : 'Failed to block tool',
+    })
+  } finally {
+    approvalLoading.value = false
+  }
+}
+
+async function blockAllTools() {
+  if (!server.value) return
+  approvalLoading.value = true
+  try {
+    const response = await api.blockTools(server.value.name)
+    if (response.success) {
+      systemStore.addToast({
+        type: 'success',
+        title: 'Tools Blocked',
+        message: `All quarantined tools for ${server.value.name} have been blocked`,
+      })
+      await loadToolApprovals()
+      // Refresh server data to update quarantine counts
+      await serversStore.fetchServers()
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Block Failed',
+        message: response.error || 'Failed to block tools',
+      })
+    }
+  } catch (err) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Block Failed',
+      message: err instanceof Error ? err.message : 'Failed to block tools',
     })
   } finally {
     approvalLoading.value = false
