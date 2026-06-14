@@ -92,4 +92,23 @@ describe('ServerDetail — Block buttons in Tool Quarantine (MCP-2199)', () => {
     await flushPromises()
     expect(api.blockTools).toHaveBeenCalledWith('github')
   })
+
+  // MCP-2217 (PR #654 review): blocking a tool must also re-fetch serverTools so
+  // the Available Tools row/toggle reflects the now-disabled state immediately,
+  // not just after a manual reload. Mirrors the approve / enable-disable paths.
+  it('Block refreshes serverTools (getServerTools) after success', async () => {
+    const { wrapper, api } = await mountDetail()
+    ;(api.getServerTools as ReturnType<typeof vi.fn>).mockClear()
+    await wrapper.find('[data-test="quarantine-block-create_issue"]').trigger('click')
+    await flushPromises()
+    expect(api.getServerTools).toHaveBeenCalledWith('github')
+  })
+
+  it('Block All refreshes serverTools (getServerTools) after success', async () => {
+    const { wrapper, api } = await mountDetail()
+    ;(api.getServerTools as ReturnType<typeof vi.fn>).mockClear()
+    await wrapper.find('[data-test="quarantine-block-all"]').trigger('click')
+    await flushPromises()
+    expect(api.getServerTools).toHaveBeenCalledWith('github')
+  })
 })

@@ -1908,6 +1908,9 @@ async function blockTool(toolName: string) {
         message: `${toolName} has been blocked`,
       })
       await loadToolApprovals()
+      // Refresh serverTools so the Available Tools row/toggle shows the now-
+      // disabled state immediately (MCP-2217) — mirrors the enable/disable path.
+      await loadTools()
       // Refresh server data to update quarantine counts
       await serversStore.fetchServers()
     } else {
@@ -1940,6 +1943,9 @@ async function blockAllTools() {
         message: `All quarantined tools for ${server.value.name} have been blocked`,
       })
       await loadToolApprovals()
+      // Refresh serverTools so the Available Tools rows/toggles show the now-
+      // disabled state immediately (MCP-2217) — mirrors the enable/disable path.
+      await loadTools()
       // Refresh server data to update quarantine counts
       await serversStore.fetchServers()
     } else {
