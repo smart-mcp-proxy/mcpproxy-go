@@ -241,10 +241,24 @@ Scanners communicate results via SARIF 2.1.0. Exit code `0` indicates "scan comp
 2. Package cache (npx/uvx/pipx/bunx) — PREFERRED for package runners
 3. WorkingDir (from server config)
 4. Arg-scan fallback — accepts only directories containing source markers
-5. Tool definitions only — last resort (HTTP / SSE / unresolvable)
+5. Published package fetch (npx/uvx) — download & unpack real source, no execution
+6. Tool definitions only — last resort (HTTP / SSE / unresolvable)
 ```
 
-The resolved method and path are recorded on the scan job and visible via both the text and JSON report. See [Security Commands → scan](/cli/security-commands#security-scan) for more.
+The resolved method and path are recorded on the scan job and visible via both the text and JSON report. The `source_method` field reports how source was obtained: `docker_extract`, `npx_cache`, `uvx_cache`, `working_dir`, `npm_pack`, `pip_download`, `url`, or `tool_definitions_only`. See [Security Commands → scan](/cli/security-commands#security-scan) for more.
+
+#### Published package fetch (npx / uvx)
+
+Package-runner servers (`npx`, `uvx`) are the **primary** quarantine/scan target, but a server quarantined on add has never run locally — so the local package cache (step 2) misses and, before this fallback existed, the scan degraded to **tool definitions only** (no real source-level analysis). Step 5 closes that gap by downloading the *published* package source so the AI and supply-chain scanners run against real code.
+
+**The source is fetched but never executed.** A scanner must not run the untrusted code it is scanning. The fetch only ever downloads and unpacks archives:
+
+- **npm (`npx`)** — `npm pack <pkg>@<version> --ignore-scripts` downloads the published tarball without running any lifecycle scripts (`install`/`postinstall`), then it is extracted (`source_method=npm_pack`).
+- **PyPI (`uvx`)** — `uv pip download <pkg>==<version> --no-deps --only-binary=:all:` (falling back to `pip download`) fetches **only a prebuilt wheel**, which is unpacked without building or running `setup.py` (`source_method=pip_download`). `--only-binary=:all:` is mandatory: downloading an sdist would invoke the package's PEP 517 build backend (`setup.py egg_info`) to resolve metadata, executing the untrusted code. A package that ships **no wheel** therefore fails the fetch and falls back to tool definitions only — sdists are never built or extracted.
+
+Extraction is hardened against path traversal (zip-slip), symlink escape, and decompression bombs (bounded file count and total size). If the toolchain is missing, the host is offline, or the fetch fails, resolution falls through to **tool definitions only** with no regression.
+
+This fallback is **enabled by default**. Air-gapped deployments that must forbid the scanner's network egress can disable it with `security.scanner_fetch_package_source: false` — package-runner servers without local source then scan tool definitions only.
 
 ## SARIF normalization
 

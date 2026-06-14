@@ -1828,6 +1828,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerDisableNoNewPrivileges {
 			secService.SetScannerDisableNoNewPrivileges(true)
 		}
+		// Published-package-source fetch is enabled by default; only an explicit
+		// false in config disables it (MCP-2206).
+		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerFetchPackageSource != nil && !*cfg.Security.ScannerFetchPackageSource {
+			secService.SetFetchPackageSource(false)
+		}
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
 			cfg:        cfg,
