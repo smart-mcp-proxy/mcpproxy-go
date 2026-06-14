@@ -471,6 +471,133 @@ func TestServiceListScannersMerge(t *testing.T) {
 	}
 }
 
+// TestServiceInstallInProcessScanner verifies that enabling an in-process
+// (Docker-less) scanner like tpa-descriptions lands it in the "installed"
+// state synchronously without ever touching Docker. Before MCP-2396 the
+// enable path always assumed a Docker image, so an empty-image in-process
+// scanner fell through to the pull path and got stuck in "error" with an
+// empty error message — prefail-skipping every scan with an unactionable
+// "reconfigure it from the Security page" notice.
+func TestServiceInstallInProcessScanner(t *testing.T) {
+	svc, store, emitter := newTestService(t)
+
+	// Register a bundled in-process scanner mirroring tpa-descriptions: no
+	// Docker image, seeds as "installed".
+	svc.registry.scanners["tpa-descriptions"] = &ScannerPlugin{
+		ID:        "tpa-descriptions",
+		Name:      "TPA Descriptions",
+		InProcess: true,
+		Inputs:    []string{"mcp_connection"},
+		Outputs:   []string{"sarif"},
+		Status:    ScannerStatusInstalled,
+	}
+
+	if err := svc.InstallScanner(context.Background(), "tpa-descriptions"); err != nil {
+		t.Fatalf("InstallScanner(tpa-descriptions) returned error: %v", err)
+	}
+
+	got, err := svc.GetScanner(context.Background(), "tpa-descriptions")
+	if err != nil {
+		t.Fatalf("GetScanner failed: %v", err)
+	}
+	if got.Status != ScannerStatusInstalled {
+		t.Fatalf("expected status %q, got %q (err=%q)", ScannerStatusInstalled, got.Status, got.ErrorMsg)
+	}
+	if got.ErrorMsg != "" {
+		t.Errorf("expected empty ErrorMsg after enabling in-process scanner, got %q", got.ErrorMsg)
+	}
+
+	// Must be persisted as installed so a restart keeps it enabled.
+	persisted, err := store.GetScanner("tpa-descriptions")
+	if err != nil {
+		t.Fatalf("expected in-process scanner persisted to storage: %v", err)
+	}
+	if persisted.Status != ScannerStatusInstalled {
+		t.Errorf("expected persisted status 'installed', got %q", persisted.Status)
+	}
+
+	// A scanner_changed event announcing "installed" (not "error"/"pulling")
+	// must have been emitted so the UI reflects the enabled state.
+	var sawInstalled bool
+	for _, ev := range emitter.events {
+		if ev.eventType != "scanner_changed" {
+			continue
+		}
+		if ev.data["scanner_id"] == "tpa-descriptions" {
+			if ev.data["status"] != ScannerStatusInstalled {
+				t.Errorf("expected scanner_changed status 'installed', got %v (err=%v)", ev.data["status"], ev.data["error"])
+			}
+			sawInstalled = true
+		}
+	}
+	if !sawInstalled {
+		t.Errorf("expected a scanner_changed event for tpa-descriptions, got %+v", emitter.events)
+	}
+}
+
+// TestServiceHealsInProcessScannerStuckInError verifies that a service
+// constructed with an in-process scanner whose persisted state is "error"
+// (the bad state an older build left behind) self-heals to "installed" at
+// startup, so the engine runs it instead of prefail-skipping it (MCP-2396).
+func TestServiceHealsInProcessScannerStuckInError(t *testing.T) {
+	logger := zap.NewNop()
+	store := newMockStorage()
+	// Pre-seed storage with a stale error record, as an older buggy enable
+	// path would have left it.
+	_ = store.SaveScanner(&ScannerPlugin{
+		ID:        "tpa-descriptions",
+		Name:      "TPA Descriptions",
+		InProcess: true,
+		Status:    ScannerStatusError,
+		ErrorMsg:  "",
+	})
+
+	registry := &Registry{
+		scanners: map[string]*ScannerPlugin{
+			"tpa-descriptions": {
+				ID:        "tpa-descriptions",
+				Name:      "TPA Descriptions",
+				InProcess: true,
+				Inputs:    []string{"mcp_connection"},
+				Outputs:   []string{"sarif"},
+				Status:    ScannerStatusInstalled,
+			},
+		},
+		logger: logger,
+	}
+
+	svc := NewService(store, registry, NewDockerRunner(logger), t.TempDir(), logger)
+
+	// Registry should now report the in-process scanner as installed.
+	reg, err := registry.Get("tpa-descriptions")
+	if err != nil {
+		t.Fatalf("registry.Get failed: %v", err)
+	}
+	if reg.Status != ScannerStatusInstalled {
+		t.Errorf("expected registry status 'installed' after heal, got %q", reg.Status)
+	}
+
+	// And the heal should be persisted so it survives subsequent restarts.
+	persisted, err := store.GetScanner("tpa-descriptions")
+	if err != nil {
+		t.Fatalf("GetScanner failed: %v", err)
+	}
+	if persisted.Status != ScannerStatusInstalled {
+		t.Errorf("expected persisted status 'installed' after heal, got %q", persisted.Status)
+	}
+
+	// ListScanners (registry+storage merge) must surface it as installed.
+	list, err := svc.ListScanners(context.Background())
+	if err != nil {
+		t.Fatalf("ListScanners failed: %v", err)
+	}
+	for _, sc := range list {
+		if sc.ID == "tpa-descriptions" && sc.Status != ScannerStatusInstalled {
+			t.Errorf("expected merged status 'installed', got %q", sc.Status)
+		}
+	}
+}
+
 func TestServiceConfigureScanner(t *testing.T) {
 	svc, store, _ := newTestService(t)
 
