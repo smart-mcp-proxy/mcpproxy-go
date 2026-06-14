@@ -4678,12 +4678,7 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 // handleApproveTools: accepts either {"tools":[...]} or {"block_all":true}.
 //
 // @Summary Block (approve+disable) tools for a server
-// @Description Atomically approves AND disables the given tools (or all
-//
-//	pending/changed tools when block_all=true) for a server. The approve and
-//	disable land in a single write per tool, so a tool is never left in the
-//	approved+enabled state. The "blocked" field counts tools actually blocked.
-//
+// @Description Atomically approves AND disables the given tools (or all pending/changed tools when block_all=true) for a server. The approve and disable land in a single write per tool, so a tool is never left in the approved+enabled state. The "blocked" field counts tools actually blocked.
 // @Tags servers
 // @Accept json
 // @Produce json
