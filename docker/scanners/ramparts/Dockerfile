@@ -7,7 +7,13 @@
 #
 # We use a two-stage build: a Rust builder installs the `ramparts` crate
 # and the final image ships a slim Debian with just the binary.
-FROM rust:1-slim AS builder
+#
+# IMPORTANT: the builder's Debian release MUST match the runtime stage
+# (`debian:bookworm-slim`, glibc 2.36). The unpinned `rust:1-slim` tag now
+# resolves to Debian trixie (glibc 2.39+), so the binary it produces fails
+# at runtime on bookworm with `GLIBC_2.39 not found` (MCP-2395). Pinning the
+# builder to `-bookworm` keeps both stages on the same glibc.
+FROM rust:1-slim-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config libssl-dev ca-certificates git && \
     rm -rf /var/lib/apt/lists/*
