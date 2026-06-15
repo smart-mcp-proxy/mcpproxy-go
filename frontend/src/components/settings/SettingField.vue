@@ -137,6 +137,14 @@
 
       <!-- textarea (multi-line text, e.g. MCP server instructions) -->
       <div v-else-if="field.control === 'textarea'" class="flex flex-col items-stretch w-full sm:w-96">
+        <div v-if="field.resetDefault != null" class="flex justify-end mb-1">
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs text-base-content/50 hover:text-base-content"
+            :data-test="`setting-reset-${field.key}`"
+            @click="emitText(field.resetDefault ?? '')"
+          >↩ Reset to default</button>
+        </div>
         <textarea
           class="textarea textarea-bordered textarea-sm w-full font-mono leading-snug"
           :class="{ 'textarea-error': validationError }"

@@ -5,7 +5,7 @@
       :key="f.key"
       :field="f"
       :model-value="getPath(working, f.key)"
-      :dirty="!!dirty[f.key]"
+      :dirty="isFieldDirty(f.key)"
       @update:model-value="onChange(f, $event)"
     />
     <p v-if="!fields.length" class="text-sm text-base-content/50 py-4">No settings match your search.</p>
@@ -98,7 +98,25 @@ const confirmEl = ref<HTMLDialogElement | null>(null)
 const pendingMessages = ref<string[]>([])
 const pendingInfoOnly = ref(false)
 
-const dirtyKeys = computed(() => Object.keys(dirty.value))
+// A field is dirty if the user changed it through a control (tracked in the
+// `dirty` ref by onChange) OR its working value diverges from the last-saved
+// original. The latter catches values written onto `state.working` from OUTSIDE
+// a control — notably the instructions prefill in Settings.vue (MCP-2484).
+// Without it, "Save without editing" after a prefill would PATCH nothing because
+// the field was never marked dirty.
+const dirtyKeys = computed(() => {
+  const keys = new Set(Object.keys(dirty.value))
+  for (const f of props.fields) {
+    if (!eq(getPath(props.working, f.key), getPath(props.original, f.key))) keys.add(f.key)
+  }
+  return [...keys]
+})
+
+function isFieldDirty(key: string): boolean {
+  if (key in dirty.value) return true
+  const f = props.fields.find((x) => x.key === key)
+  return f != null && !eq(getPath(props.working, key), getPath(props.original, key))
+}
 
 // Block Save only when a CHANGED field is invalid — a pre-existing value the
 // user hasn't touched must never block saving unrelated edits.
