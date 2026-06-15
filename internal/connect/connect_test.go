@@ -57,11 +57,13 @@ func TestConnect_OpenCode_AllowsTrailingCommaJSON(t *testing.T) {
 func testService(t *testing.T) (*Service, string) {
 	t.Helper()
 	homeDir := t.TempDir()
-	// On Windows, ConfigPath("opencode", homeDir) reads %LOCALAPPDATA% from
-	// the real environment and only falls back to homeDir when the env is
-	// unset. Pin it under the test temp dir so the fallback path is the one
-	// that fires regardless of CI runner state. No-op on macOS/Linux.
+	// On Windows, ConfigPath reads %LOCALAPPDATA% (opencode) and %APPDATA%
+	// (claude-desktop, vscode) from the real environment, ignoring homeDir,
+	// and only falls back to homeDir when those env vars are unset. Pin both
+	// under the test temp dir so every client's config path is isolated
+	// per-test regardless of CI runner state. No-op on macOS/Linux.
 	t.Setenv("LOCALAPPDATA", filepath.Join(homeDir, "AppData", "Local"))
+	t.Setenv("APPDATA", filepath.Join(homeDir, "AppData", "Roaming"))
 	svc := NewServiceWithHome("127.0.0.1:8080", "", homeDir)
 	return svc, homeDir
 }
@@ -70,6 +72,7 @@ func testServiceWithKey(t *testing.T) (*Service, string) {
 	t.Helper()
 	homeDir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", filepath.Join(homeDir, "AppData", "Local"))
+	t.Setenv("APPDATA", filepath.Join(homeDir, "AppData", "Roaming"))
 	svc := NewServiceWithHome("127.0.0.1:8080", "test-key-123", homeDir)
 	return svc, homeDir
 }
