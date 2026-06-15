@@ -62,10 +62,12 @@ if [ ! -s "$REPORT" ]; then
 fi
 
 # Validate $REPORT is a GENUINE Ramparts report, not an error payload. A real
-# report carries a top-level "security_issues" object and a "yara_results"
-# array (mirrors the engine's isRampartsOutput() probe). An error/garbled JSON
-# lacks these; without this gate it would parse as 0 findings = a spurious clean
-# scan (fail-open). python3 is already in the image for the replay shim.
+# report carries a top-level "security_issues" OBJECT (with the tool/prompt/
+# resource issue arrays) and a "yara_results" ARRAY. We TYPE-check, not just
+# presence-check: an error payload such as {"security_issues":"scan failed"}
+# has the key present but the wrong type and must fail CLOSED — a presence-only
+# gate would wave it through as a spurious clean scan (MCP-2443 re-review).
+# python3 is already in the image for the replay shim.
 if ! python3 - "$REPORT" <<'PY'
 import json, sys
 try:
@@ -75,9 +77,10 @@ except (OSError, ValueError) as exc:
     print(f"report is not valid JSON: {exc}", file=sys.stderr)
     sys.exit(1)
 if (not isinstance(data, dict)
-        or data.get("security_issues") is None
+        or not isinstance(data.get("security_issues"), dict)
         or not isinstance(data.get("yara_results"), list)):
-    print("report lacks security_issues/yara_results (error payload or wrong shape)", file=sys.stderr)
+    print("report is not a Ramparts report: security_issues must be an object "
+          "and yara_results an array (error payload or wrong shape)", file=sys.stderr)
     sys.exit(1)
 sys.exit(0)
 PY

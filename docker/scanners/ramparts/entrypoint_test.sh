@@ -30,6 +30,11 @@ VALID='{"url":"stdio:replay","security_issues":{"tool_issues":[]},"yara_results"
 VALID_FINDING='{"url":"stdio:replay","security_issues":{"tool_issues":[{"message":"poison"}]},"yara_results":[]}'
 ERROR_PAYLOAD='{"error":"failed to connect to MCP endpoint","code":1}'
 GARBLED='{not valid json'
+# Type-confusion error payloads: the expected keys are PRESENT but carry the
+# wrong type (a status string, not the real result object/array). A presence-only
+# gate would wave these through as clean (MCP-2443 re-review).
+STRING_SECISSUES='{"url":"stdio:replay","security_issues":"scan failed","yara_results":[]}'
+STRING_YARA='{"url":"stdio:replay","security_issues":{"tool_issues":[]},"yara_results":"oops"}'
 
 # run_case <name> <stub_rc> <report_body> <expect_exit> <expect_report_present:yes|no>
 run_case() {
@@ -64,6 +69,9 @@ run_case "error_payload_rc0_fails"         0 "$ERROR_PAYLOAD" 1 no
 # Acceptance: empty/garbled report -> scan marked failed (report removed).
 run_case "empty_report_fails"              1 ""               1 no
 run_case "garbled_report_fails"            1 "$GARBLED"       1 no
+# Type-confusion: keys present but wrong type must fail closed, not read clean.
+run_case "string_security_issues_fails"    0 "$STRING_SECISSUES" 1 no
+run_case "string_yara_results_fails"       0 "$STRING_YARA"      1 no
 
 rm -rf "$STUBDIR"
 echo
