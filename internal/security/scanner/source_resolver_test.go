@@ -957,6 +957,12 @@ func TestNpxContainerLocateScript(t *testing.T) {
 	dirB := filepath.Join(root, "hashB", "node_modules", pkg)
 	os.MkdirAll(dirB, 0755)
 	os.WriteFile(filepath.Join(dirB, "package.json"), []byte(`{"name":"x","version":"1.0.0"}`), 0644)
+	// hashC holds a version with regex-special chars: a literal '.' and '-'. A pin
+	// of "1.0.0-alpha.1" must NOT match this "1.0.0-alpha-1" (the '.' is not a
+	// wildcard) — the container compare must be literal, not an ERE (MCP-2445 round-3).
+	dirC := filepath.Join(root, "hashC", "node_modules", pkg)
+	os.MkdirAll(dirC, 0755)
+	os.WriteFile(filepath.Join(dirC, "package.json"), []byte(`{"name":"x","version":"1.0.0-alpha-1"}`), 0644)
 
 	run := func(version string) string {
 		script := npxContainerLocateScript(root, pkg, version)
@@ -979,6 +985,15 @@ func TestNpxContainerLocateScript(t *testing.T) {
 	// version (MCP-2445 round-2 hole #3): scanning the wrong version = false coverage.
 	if got := run("9.9.9"); got != "" {
 		t.Errorf("unmatched pin: got %q, want empty (no mismatched substitute)", got)
+	}
+	// Regex-special pin must compare LITERALLY: "1.0.0-alpha.1" must NOT match the
+	// cached "1.0.0-alpha-1" (an ERE would treat '.' as a wildcard) — MCP-2445 round-3.
+	if got := run("1.0.0-alpha.1"); got != "" {
+		t.Errorf("regex-special pin matched a different version (got %q); compare must be literal", got)
+	}
+	// The exact version (incl. the literal '.') still resolves.
+	if got := run("1.0.0-alpha-1"); got != dirC {
+		t.Errorf("exact regex-special pin: got %q, want %q", got, dirC)
 	}
 }
 

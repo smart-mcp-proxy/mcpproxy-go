@@ -802,12 +802,19 @@ func npxContainerLocateScript(npxGlobRoot, pkg, version string) string {
 	if version != "" {
 		// Pinned: return ONLY a bucket whose package.json declares that exact
 		// version. A pin-miss returns nothing — never a mismatched version, which
-		// would scan the wrong code and report false coverage (MCP-2445). The
-		// pattern tolerates arbitrary JSON spacing around the colon.
+		// would scan the wrong code and report false coverage (MCP-2445).
+		//
+		// The version is compared as a LITERAL shell string ([ "$v" = '...' ]),
+		// NOT as a regex: a pin like "1.0.0-alpha.1" must not match a cached
+		// "1.0.0-alpha-1" ('.' is not a wildcard) — MCP-2445 round-3. We extract
+		// the package.json "version" value with a grep whose pattern matches only
+		// the KEY (the value is captured as "[^\"]*", never the pin), pull the
+		// value out with sed, then compare it literally.
 		verEsc := strings.ReplaceAll(version, "'", `'\''`)
 		return "for d in " + npxGlobRoot + "/*/node_modules/'" + pkgEsc + "'; do " +
 			"[ -d \"$d\" ] || continue; " +
-			"if grep -Eq '\"version\"[[:space:]]*:[[:space:]]*\"" + verEsc + "\"' \"$d/package.json\" 2>/dev/null; then printf '%s\\n' \"$d\"; exit 0; fi; " +
+			"v=$(grep -o '\"version\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' \"$d/package.json\" 2>/dev/null | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\\1/'); " +
+			"if [ \"$v\" = '" + verEsc + "' ]; then printf '%s\\n' \"$d\"; exit 0; fi; " +
 			"done"
 	}
 	// Unpinned: first matching bucket.
