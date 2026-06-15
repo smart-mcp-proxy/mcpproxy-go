@@ -3,7 +3,9 @@ package scanner
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -741,6 +743,157 @@ func TestResolveUvxCacheArchiveNoMatch(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error when package absent from uv cache")
+	}
+}
+
+// TestResolveNpxCacheHonorsPinnedVersion (MCP-2445) verifies that when the same
+// package is cached under multiple npx hashes at DIFFERENT versions, a spec with
+// an exact version pin selects the matching install — NOT the newest-mtime one.
+func TestResolveNpxCacheHonorsPinnedVersion(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	pkg := filepath.Join("node_modules", "@modelcontextprotocol", "server-everything")
+
+	// Pinned version 1.0.0 lives under an OLDER mtime.
+	wantDir := filepath.Join(homeDir, ".npm", "_npx", "wanthash", pkg)
+	os.MkdirAll(wantDir, 0755)
+	os.WriteFile(filepath.Join(wantDir, "package.json"),
+		[]byte(`{"name":"@modelcontextprotocol/server-everything","version":"1.0.0"}`), 0644)
+
+	// A NEWER but version-mismatched install (2.0.0) would win newest-mtime.
+	otherDir := filepath.Join(homeDir, ".npm", "_npx", "otherhash", pkg)
+	os.MkdirAll(otherDir, 0755)
+	os.WriteFile(filepath.Join(otherDir, "package.json"),
+		[]byte(`{"name":"@modelcontextprotocol/server-everything","version":"2.0.0"}`), 0644)
+
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now()
+	if err := os.Chtimes(wantDir, older, older); err != nil {
+		t.Fatalf("chtimes want: %v", err)
+	}
+	if err := os.Chtimes(otherDir, newer, newer); err != nil {
+		t.Fatalf("chtimes other: %v", err)
+	}
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveNpxCache(ServerInfo{
+		Name:    "everything-server",
+		Command: "npx",
+		Args:    []string{"-y", "@modelcontextprotocol/server-everything@1.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("resolveNpxCache: %v", err)
+	}
+	if result.SourceDir != wantDir {
+		t.Errorf("expected version-pinned dir %q, got %q", wantDir, result.SourceDir)
+	}
+}
+
+// TestResolveUvxCacheWithFlag (MCP-2445) verifies that `uvx --with <extra> <pkg>`
+// resolves the TARGET package, not the additional `--with` dependency. The old
+// parser stopped at the first positional after `--with`, mistaking the extra dep
+// (or, with `--with x --from y`, never reaching `--from`) for the target.
+func TestResolveUvxCacheWithFlag(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	// Only the TARGET package is present in the tools dir; the --with dep is not.
+	toolDir := filepath.Join(homeDir, ".local", "share", "uv", "tools", "main-tool")
+	os.MkdirAll(toolDir, 0755)
+	os.WriteFile(filepath.Join(toolDir, "main.py"), []byte("# main"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	for _, args := range [][]string{
+		{"--with", "extra-dep", "main-tool"},
+		{"--with", "extra-dep", "--from", "main-tool", "main-tool"},
+	} {
+		result, err := r.resolveUvxCache(ServerInfo{Name: "main-tool", Command: "uvx", Args: args})
+		if err != nil {
+			t.Fatalf("resolveUvxCache(%v): %v", args, err)
+		}
+		if result.SourceDir != toolDir {
+			t.Errorf("args %v: expected target tool dir %q (not the --with dep), got %q", args, toolDir, result.SourceDir)
+		}
+	}
+}
+
+// TestResolveUvxCacheArchiveHonorsPinnedVersion (MCP-2445) verifies that an exact
+// version pin selects the matching .dist-info archive entry over a newer one.
+func TestResolveUvxCacheArchiveHonorsPinnedVersion(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	wantEntry := writeUvArchiveWheel(t, homeDir, "Hashwant", "mcp-server-fetch", "1.0.0", "mcp_server_fetch", false)
+	otherEntry := writeUvArchiveWheel(t, homeDir, "Hashother", "mcp-server-fetch", "2.0.0", "mcp_server_fetch", false)
+
+	older := time.Now().Add(-2 * time.Hour)
+	newer := time.Now()
+	if err := os.Chtimes(wantEntry, older, older); err != nil {
+		t.Fatalf("chtimes want: %v", err)
+	}
+	if err := os.Chtimes(otherEntry, newer, newer); err != nil {
+		t.Fatalf("chtimes other: %v", err)
+	}
+
+	r := NewSourceResolver(zap.NewNop())
+	result, err := r.resolveUvxCache(ServerInfo{
+		Name:    "fetch",
+		Command: "uvx",
+		Args:    []string{"mcp-server-fetch==1.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("resolveUvxCache: %v", err)
+	}
+	if result.SourceDir != wantEntry {
+		t.Errorf("expected version-pinned archive %q, got %q", wantEntry, result.SourceDir)
+	}
+}
+
+// TestNpxContainerLocateScript (MCP-2445) exercises the generated /bin/sh locate
+// script on the host against a fake npx cache tree. It proves: (a) with a version
+// pin, the bucket whose package.json declares that version is returned even when a
+// different version sorts first in the glob; (b) with no pin, the first match is
+// returned (previous behavior).
+func TestNpxContainerLocateScript(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("script targets /bin/sh; not applicable on Windows")
+	}
+	root := t.TempDir()
+	pkg := "@modelcontextprotocol/server-everything"
+
+	// hashA sorts first alphabetically and holds version 2.0.0.
+	dirA := filepath.Join(root, "hashA", "node_modules", pkg)
+	os.MkdirAll(dirA, 0755)
+	os.WriteFile(filepath.Join(dirA, "package.json"), []byte(`{"name":"x","version":"2.0.0"}`), 0644)
+	// hashB sorts later and holds the pinned version 1.0.0.
+	dirB := filepath.Join(root, "hashB", "node_modules", pkg)
+	os.MkdirAll(dirB, 0755)
+	os.WriteFile(filepath.Join(dirB, "package.json"), []byte(`{"name":"x","version":"1.0.0"}`), 0644)
+
+	run := func(version string) string {
+		script := npxContainerLocateScript(root, pkg, version)
+		out, err := exec.Command("sh", "-c", script).Output()
+		if err != nil {
+			t.Fatalf("script error (version=%q): %v", version, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	// Version pin selects the matching bucket, not the first-globbed one.
+	if got := run("1.0.0"); got != dirB {
+		t.Errorf("version pin 1.0.0: got %q, want %q", got, dirB)
+	}
+	// No pin returns the first match (hashA sorts first).
+	if got := run(""); got != dirA {
+		t.Errorf("no pin: got %q, want first match %q", got, dirA)
+	}
+	// A pin with no matching install falls back to the first match.
+	if got := run("9.9.9"); got != dirA {
+		t.Errorf("unmatched pin: got %q, want fallback %q", got, dirA)
 	}
 }
 

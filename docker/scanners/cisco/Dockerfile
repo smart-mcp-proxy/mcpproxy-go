@@ -14,11 +14,12 @@ LABEL org.opencontainers.image.source="https://github.com/smart-mcp-proxy/mcppro
 LABEL org.opencontainers.image.description="Cisco MCP Scanner (YARA + readiness) packaged for MCPProxy"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
-# Install the vendor package. We pin the top-level tool name so the image
-# fails at build time if the upstream package name ever changes. The CLI
-# does not accept --version, so we run `-h` as a sanity check that the
-# binary is on PATH.
-RUN pip install --no-cache-dir cisco-ai-mcp-scanner && mcp-scanner -h >/dev/null
+# Install the vendor package. We pin BOTH the top-level tool name and an exact
+# version so the image is reproducible and cannot silently pull a new upstream
+# release (supply-chain / rug-pull guard). Bump this pin deliberately. The CLI
+# does not accept --version, so we run `-h` as a sanity check that the binary is
+# on PATH.
+RUN pip install --no-cache-dir cisco-ai-mcp-scanner==4.7.3 && mcp-scanner -h >/dev/null
 
 WORKDIR /scan
 ENTRYPOINT ["mcp-scanner"]

@@ -3,6 +3,7 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -288,7 +289,11 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 func isPackageRunnerCommand(command string) bool {
 	base := strings.ToLower(filepath.Base(command))
 	switch base {
-	case "npx", "uvx", "pipx", "bunx":
+	// pnpm/yarn are runners only in their `dlx` form; that is the only way an MCP
+	// server is launched from them, and resolveFromPackageFetch dispatches pnpm to
+	// the npm fetch path. Including them here lets that fetch fallback actually run
+	// (previously pnpm was dispatched but never gated true here — a dead branch).
+	case "npx", "uvx", "pipx", "bunx", "bun", "pnpm", "yarn":
 		return true
 	}
 	return false
@@ -746,18 +751,8 @@ func npxTargetPackage(info ServerInfo) string {
 	if info.Command == "" || filepath.Base(info.Command) != "npx" {
 		return ""
 	}
-	for _, arg := range info.Args {
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		pkg := arg
-		// Strip version: @scope/name@1.0.0 → @scope/name, pkg@1.0.0 → pkg
-		if idx := strings.LastIndex(pkg, "@"); idx > 0 {
-			pkg = pkg[:idx]
-		}
-		return pkg
-	}
-	return ""
+	name, _ := parsePackageSpec(runnerPackageSpec("npx", info.Args))
+	return name
 }
 
 // uvxTargetPackage returns the Python package name a uvx-based server launches.
@@ -768,17 +763,9 @@ func uvxTargetPackage(info ServerInfo) string {
 	if info.Command == "" || filepath.Base(info.Command) != "uvx" {
 		return ""
 	}
-	var raw string
-	for i, arg := range info.Args {
-		if arg == "--from" && i+1 < len(info.Args) {
-			raw = info.Args[i+1]
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			raw = arg
-			break
-		}
-	}
+	// runnerPackageSpec skips `--with <dep>` / `-p <python>` values so the target
+	// is not shadowed by an extra dependency or python version (MCP-2445).
+	raw := runnerPackageSpec("uvx", info.Args)
 	if raw == "" {
 		return ""
 	}
@@ -792,13 +779,32 @@ func uvxTargetPackage(info ServerInfo) string {
 		return ""
 	}
 	// Strip version specifier: pkg@1.0 or pkg==1.0.
-	if idx := strings.LastIndex(raw, "@"); idx > 0 {
-		raw = raw[:idx]
+	name, _ := parsePackageSpec(raw)
+	return name
+}
+
+// npxContainerLocateScript builds a /bin/sh script that locates the npx cache
+// directory for pkg under npxGlobRoot (`<root>/<hash>/node_modules/<pkg>`). When
+// version is non-empty it PREFERS a bucket whose package.json declares that exact
+// version (honoring a version pin across a multi-version cache), and otherwise
+// echoes the first matching directory — preserving the previous newest/first
+// behavior. The package name and version are single-quote escaped for safe
+// embedding. Factored out so the shell logic is unit-testable on the host.
+func npxContainerLocateScript(npxGlobRoot, pkg, version string) string {
+	pkgEsc := strings.ReplaceAll(pkg, "'", `'\''`)
+	verClause := ""
+	if version != "" {
+		verEsc := strings.ReplaceAll(version, "'", `'\''`)
+		// The .dist-info-free npm case: match the version inside package.json. The
+		// pattern tolerates arbitrary JSON spacing around the colon.
+		verClause = "if grep -Eq '\"version\"[[:space:]]*:[[:space:]]*\"" + verEsc + "\"' \"$d/package.json\" 2>/dev/null; then printf '%s\\n' \"$d\"; exit 0; fi; "
 	}
-	if idx := strings.Index(raw, "=="); idx > 0 {
-		raw = raw[:idx]
-	}
-	return raw
+	return "first=''; for d in " + npxGlobRoot + "/*/node_modules/'" + pkgEsc + "'; do " +
+		"[ -d \"$d\" ] || continue; " +
+		"[ -z \"$first\" ] && first=\"$d\"; " +
+		verClause +
+		"done; " +
+		"[ -n \"$first\" ] && printf '%s\\n' \"$first\""
 }
 
 // findContainerTargetDir locates the target package's directory inside a
@@ -811,13 +817,11 @@ func uvxTargetPackage(info ServerInfo) string {
 // target cannot be located.
 func (r *SourceResolver) findContainerTargetDir(ctx context.Context, containerID string, info ServerInfo) string {
 	if pkg := npxTargetPackage(info); pkg != "" {
-		// Shell-escape single quotes in the package name and glob for it under
-		// every npx cache bucket inside the container.
-		escaped := strings.ReplaceAll(pkg, "'", `'\''`)
-		script := fmt.Sprintf(
-			"ls -d /root/.npm/_npx/*/node_modules/'%s' 2>/dev/null | head -n 1",
-			escaped,
-		)
+		// Glob for the package under every npx cache bucket inside the container.
+		// When the spec carries an exact version pin, prefer the bucket whose
+		// package.json declares that version over the first match (MCP-2445).
+		_, wantVer := parsePackageSpec(runnerPackageSpec("npx", info.Args))
+		script := npxContainerLocateScript("/root/.npm/_npx", pkg, wantVer)
 		if out, ok := r.dockerExecCapture(ctx, containerID, script); ok {
 			if path := strings.TrimSpace(out); path != "" {
 				return path
@@ -1259,21 +1263,15 @@ func (r *SourceResolver) resolveFromPackageCache(ctx context.Context, info Serve
 
 // resolveNpxCache finds an npx package's source in ~/.npm/_npx/*/node_modules/<package>/
 func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, error) {
-	// Extract package name from args (first non-flag arg)
-	pkgName := ""
-	for _, arg := range info.Args {
-		if !strings.HasPrefix(arg, "-") {
-			pkgName = arg
-			break
-		}
-	}
-	if pkgName == "" {
+	// Extract the target package spec (handles `npx -p <pkg>`, `pnpm dlx <pkg>`,
+	// version pins, etc.) then split name from any exact version pin.
+	spec := runnerPackageSpec(strings.ToLower(filepath.Base(info.Command)), info.Args)
+	if spec == "" {
 		return nil, fmt.Errorf("no package name found in npx args")
 	}
-
-	// Strip version specifier: @modelcontextprotocol/server-everything@1.0.0 → @modelcontextprotocol/server-everything
-	if idx := strings.LastIndex(pkgName, "@"); idx > 0 {
-		pkgName = pkgName[:idx]
+	pkgName, wantVersion := parsePackageSpec(spec)
+	if pkgName == "" {
+		return nil, fmt.Errorf("no package name found in npx args")
 	}
 
 	// Find npm cache directory
@@ -1296,10 +1294,13 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 	// real source (it was just written), so a naive newest-mtime pick selects the
 	// stub and the scan reports a false "1 file" coverage (MCP-2397). We therefore
 	// prefer candidates that look like real package source, and only fall back to
-	// the newest-mtime tiebreak among candidates of the same class.
+	// the newest-mtime tiebreak among candidates of the same class. When the spec
+	// carries an exact version pin, a candidate whose package.json declares that
+	// version is preferred over a newer-but-mismatched install (MCP-2445).
 	var bestMatch string
 	var bestModTime int64
 	var bestReal bool
+	var bestVerMatch bool
 
 	entries, err := os.ReadDir(npxCacheDir)
 	if err != nil {
@@ -1316,24 +1317,29 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 			continue
 		}
 		real := npxCacheLooksReal(candidatePath)
+		verMatch := npxCacheVersionMatches(candidatePath, wantVersion)
 		modTime := stat.ModTime().Unix()
 
-		// Selection order:
+		// Selection order (most to least significant):
 		//  1. any real-source candidate beats any stub;
-		//  2. within the same class, the newest mtime wins.
+		//  2. a version-pin match beats a mismatch;
+		//  3. within the same class, the newest mtime wins.
 		better := false
 		switch {
 		case bestMatch == "":
 			better = true
-		case real && !bestReal:
-			better = true
-		case real == bestReal && modTime > bestModTime:
-			better = true
+		case real != bestReal:
+			better = real
+		case verMatch != bestVerMatch:
+			better = verMatch
+		default:
+			better = modTime > bestModTime
 		}
 		if better {
 			bestMatch = candidatePath
 			bestModTime = modTime
 			bestReal = real
+			bestVerMatch = verMatch
 		}
 	}
 
@@ -1370,6 +1376,27 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 	}, nil
 }
 
+// npxCacheVersionMatches reports whether the package.json at dir declares exactly
+// the given version. Returns false when version is empty or the file is missing /
+// unparseable. Used to prefer a version-pinned install over a newer-but-
+// mismatched one in a multi-version npx cache.
+func npxCacheVersionMatches(dir, version string) bool {
+	if version == "" {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	if err != nil {
+		return false
+	}
+	var pj struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &pj); err != nil {
+		return false
+	}
+	return pj.Version == version
+}
+
 // npxCacheLooksReal reports whether an npx cache package directory holds the
 // real installed package rather than a bare stub. Every npm package ships a
 // package.json, so its presence is the canonical marker of real source. A stub
@@ -1404,28 +1431,17 @@ func npxCacheLooksReal(dir string) bool {
 
 // resolveUvxCache finds a uvx package's source in ~/.cache/uv/ or ~/.local/share/uv/tools/
 func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, error) {
-	// Extract package name from args
-	// uvx supports: uvx <package>, uvx --from <package> <command>, uvx git+<url>
-	pkgName := ""
-	isGitURL := false
-	for i, arg := range info.Args {
-		if arg == "--from" && i+1 < len(info.Args) {
-			pkgName = info.Args[i+1]
-			break
-		}
-		if !strings.HasPrefix(arg, "-") {
-			pkgName = arg
-			break
-		}
-	}
+	// Extract the target package spec. runnerPackageSpec handles `uvx <pkg>`,
+	// `uvx --from <pkg> <cmd>`, `uvx git+<url>`, and crucially skips `--with <dep>`
+	// / `-p <python>` values so the additional dependency or python version is not
+	// mistaken for the target (MCP-2445).
+	pkgName := runnerPackageSpec(strings.ToLower(filepath.Base(info.Command)), info.Args)
 	if pkgName == "" {
 		return nil, fmt.Errorf("no package name found in uvx args")
 	}
 
 	// Check if it's a git URL: git+https://github.com/...
-	if strings.HasPrefix(pkgName, "git+") {
-		isGitURL = true
-	}
+	isGitURL := strings.HasPrefix(pkgName, "git+")
 
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -1500,7 +1516,10 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 	// not archive-v0, so they are skipped here.
 	if !isGitURL {
 		archiveRoot := filepath.Join(homeDir, ".cache", "uv", "archive-v0")
-		if dir, ok := findUvxArchiveDir(archiveRoot, stripPkgVersion(cleanPkg)); ok {
+		// Honor an exact version pin: prefer the archive entry whose .dist-info
+		// declares the pinned version over a newer-but-mismatched one (MCP-2445).
+		_, wantVersion := parsePackageSpec(pkgName)
+		if dir, ok := findUvxArchiveDir(archiveRoot, stripPkgVersion(cleanPkg), wantVersion); ok {
 			r.logger.Info("Resolved source from UV archive cache",
 				zap.String("server", info.Name),
 				zap.String("package", cleanPkg),
@@ -1552,10 +1571,11 @@ func normalizeDistName(name string) string {
 // directory rather than by constructing a name-based path. Both the flat layout
 // (<hash>/<dist>-<ver>.dist-info) and the venv-style layout
 // (<hash>/lib/python*/site-packages/<dist>-<ver>.dist-info) are supported. When
-// multiple entries match (e.g. several cached versions) the most recently
-// modified entry wins, consistent with resolveNpxCache. Returns the archive
-// entry root (the <hash> dir) and ok=true on a hit.
-func findUvxArchiveDir(archiveRoot, pkg string) (string, bool) {
+// multiple entries match (e.g. several cached versions) a wantVersion match wins
+// first; otherwise the most recently modified entry wins, consistent with
+// resolveNpxCache. wantVersion may be "" (no pin). Returns the archive entry root
+// (the <hash> dir) and ok=true on a hit.
+func findUvxArchiveDir(archiveRoot, pkg, wantVersion string) (string, bool) {
 	norm := normalizeDistName(pkg)
 	if norm == "" {
 		return "", false
@@ -1567,6 +1587,7 @@ func findUvxArchiveDir(archiveRoot, pkg string) (string, bool) {
 
 	var best string
 	var bestMod int64
+	var bestVerMatch bool
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -1578,10 +1599,14 @@ func findUvxArchiveDir(archiveRoot, pkg string) (string, bool) {
 			matchDirs = append(matchDirs, sp...)
 		}
 		matched := false
+		verMatch := false
 		for _, d := range matchDirs {
-			if dirHasDistInfo(d, norm) {
+			nm, vm := distInfoMatch(d, norm, wantVersion)
+			if nm {
 				matched = true
-				break
+				if vm {
+					verMatch = true
+				}
 			}
 		}
 		if !matched {
@@ -1591,9 +1616,20 @@ func findUvxArchiveDir(archiveRoot, pkg string) (string, bool) {
 		if fi, err := entry.Info(); err == nil {
 			modTime = fi.ModTime().Unix()
 		}
-		if best == "" || modTime > bestMod {
+		// Selection: a version-pin match beats a mismatch; then newest mtime wins.
+		better := false
+		switch {
+		case best == "":
+			better = true
+		case verMatch != bestVerMatch:
+			better = verMatch
+		default:
+			better = modTime > bestMod
+		}
+		if better {
 			best = entryPath
 			bestMod = modTime
+			bestVerMatch = verMatch
 		}
 	}
 	if best == "" {
@@ -1602,15 +1638,17 @@ func findUvxArchiveDir(archiveRoot, pkg string) (string, bool) {
 	return best, true
 }
 
-// dirHasDistInfo reports whether dir directly contains a `<name>-<version>.dist-info`
-// directory whose normalized distribution name equals norm. A wheel's `.dist-info`
-// name is `{normalized-distribution}-{version}.dist-info`, and the normalized
-// distribution name contains no "-" (those become "_"), so the FIRST "-" cleanly
-// separates name from version.
-func dirHasDistInfo(dir, norm string) bool {
+// distInfoMatch reports whether dir directly contains a `<name>-<version>.dist-info`
+// directory whose normalized distribution name equals norm (nameMatch), and — when
+// wantVersion is non-empty — whether that directory's version equals wantVersion
+// (versionMatch). A wheel's `.dist-info` name is
+// `{normalized-distribution}-{version}.dist-info`, and the normalized distribution
+// name contains no "-" (those become "_"), so the FIRST "-" cleanly separates name
+// from version.
+func distInfoMatch(dir, norm, wantVersion string) (nameMatch, versionMatch bool) {
 	es, err := os.ReadDir(dir)
 	if err != nil {
-		return false
+		return false, false
 	}
 	for _, e := range es {
 		if !e.IsDir() {
@@ -1625,11 +1663,16 @@ func dirHasDistInfo(dir, norm string) bool {
 		if idx <= 0 {
 			continue
 		}
-		if normalizeDistName(base[:idx]) == norm {
-			return true
+		if normalizeDistName(base[:idx]) != norm {
+			continue
+		}
+		nameMatch = true
+		if wantVersion != "" && base[idx+1:] == wantVersion {
+			// Exact version match — best possible, return immediately.
+			return true, true
 		}
 	}
-	return false
+	return nameMatch, versionMatch
 }
 
 // findGitCheckoutByRepo searches UV git checkouts for a directory that matches the given repo.
