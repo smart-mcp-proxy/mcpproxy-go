@@ -124,7 +124,12 @@ func TestValidateTelemetryURL(t *testing.T) {
 			t.Errorf("validateTelemetryURL(%q) unexpected error: %v", u, err)
 		}
 	}
-	bad := []string{"file:///etc/passwd", "gopher://x/heartbeat", "/heartbeat", "telemetry.mcpproxy.app/heartbeat"}
+	bad := []string{
+		"file:///etc/passwd", "gopher://x/heartbeat", "/heartbeat",
+		"telemetry.mcpproxy.app/heartbeat",   // no scheme
+		"https://evil.example.com/heartbeat", // non-allowlisted host
+		"http://169.254.169.254/heartbeat",   // link-local metadata, not loopback
+	}
 	for _, u := range bad {
 		if _, err := validateTelemetryURL(u); err == nil {
 			t.Errorf("validateTelemetryURL(%q) expected error, got nil", u)

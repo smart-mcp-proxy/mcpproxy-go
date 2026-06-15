@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -101,11 +102,12 @@ func (s *Service) SendOptOutBeacon(ctx context.Context) error {
 
 // validateTelemetryURL bounds an outbound telemetry request (CWE-918 request
 // forgery). It parses the candidate URL, constrains the scheme to http/https,
-// requires a non-empty host, and returns the re-serialized URL to use for the
-// request. The telemetry endpoint is operator-configured (default production
-// host, overridable for self-hosting/testing), so the host is intentionally not
-// pinned to a single value — but a non-http scheme (file://, gopher://, …) or a
-// malformed/schemeless URL is rejected before any request is issued.
+// and PINS the host to the built-in telemetry host (or a loopback address used
+// by tests / local development) before returning the re-serialized URL. The
+// opt-out beacon carries the anonymous install ID, so pinning the destination
+// guarantees a malformed or hostile endpoint value can never redirect that ID
+// to an arbitrary host. The `endpoint` config override is documented as a
+// testing aid (loopback), so this pin does not regress any supported setup.
 func validateTelemetryURL(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -114,10 +116,41 @@ func validateTelemetryURL(rawURL string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("telemetry URL scheme %q not allowed (want http/https)", u.Scheme)
 	}
-	if u.Host == "" {
-		return "", fmt.Errorf("telemetry URL has no host")
+	if !isAllowedTelemetryHost(u.Hostname()) {
+		return "", fmt.Errorf("telemetry URL host %q not allowed", u.Hostname())
 	}
 	return u.String(), nil
+}
+
+// isAllowedTelemetryHost reports whether host is an acceptable telemetry
+// destination: the built-in production host, or a loopback address (tests and
+// local development). This equality guard is what bounds the request-forgery
+// surface — the host is constrained to a fixed safe set rather than taken
+// verbatim from configuration.
+func isAllowedTelemetryHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	if def := defaultTelemetryHost(); def != "" && strings.EqualFold(host, def) {
+		return true
+	}
+	return false
+}
+
+// defaultTelemetryHost returns the host of the built-in telemetry endpoint,
+// derived from config so it can never drift from GetTelemetryEndpoint.
+func defaultTelemetryHost() string {
+	u, err := url.Parse((&config.Config{}).GetTelemetryEndpoint())
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // NotifyConfigChanged informs the telemetry service that the live configuration
