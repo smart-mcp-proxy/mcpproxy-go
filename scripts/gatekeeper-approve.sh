@@ -26,18 +26,27 @@
 # A convenient place: ~/.mcpproxy-gatekeeper/env  (chmod 600, gitignored).
 #
 # Usage:
-#   gatekeeper-approve.sh --pr <N> [--verdict accept|request_changes] [--dry-run]
+#   gatekeeper-approve.sh --pr <N> [--verdict accept|request_changes]
+#                         [--reviewed-sha <sha>] [--dry-run]
 #
-#   --pr <N>        (required) PR number to act on.
-#   --verdict <v>   override the Paperclip verdict lookup (testing).
-#   --dry-run       do everything except POST the review (and print the plan).
+#   --pr <N>            (required) PR number to act on.
+#   --verdict <v>       override the Paperclip verdict lookup (testing/manual).
+#   --reviewed-sha <s>  override the reviewed SHA (pairs with --verdict; required
+#                       to approve via the manual override path — fail-closed).
+#   --dry-run           do everything except POST the review (and print the plan).
 #
 # Safe to run repeatedly (idempotent): no-ops if the PR is closed/merged, if the
-# verdict isn't ACCEPT, if the Gatekeeper already approved the current head, or
-# if Codex's reviewed SHA != the current head (stale → needs re-review).
+# verdict isn't ACCEPT, or if the Gatekeeper already approved the current head.
+#
+# FAIL-CLOSED SHA GUARD (MCP-1249 Codex REQUEST_CHANGES): the script approves the
+# PR's CURRENT head ONLY when it can resolve a reviewed SHA that EQUALS that head.
+# If no reviewed SHA can be resolved, it REFUSES (never approves blind) so a
+# post-review force-push of unreviewed code cannot inherit an old ACCEPT. The
+# manual --verdict accept override is held to the same requirement.
 #
 # Exit codes: 0 ok/approved/dry-run/no-op; 2 not configured; 3 verdict not accept;
-#   5 GitHub/API error; 6 stale verdict (head moved past reviewed SHA).
+#   5 GitHub/API error; 6 stale verdict (reviewed SHA != head);
+#   7 no reviewed SHA resolvable (fail-closed refusal).
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -49,11 +58,12 @@ CODEX_REVIEWER_AGENT_ID="${CODEX_REVIEWER_AGENT_ID:-5b94562c-524f-4c29-bc24-3524
 # Optional config file
 [[ -f "${HOME}/.mcpproxy-gatekeeper/env" ]] && source "${HOME}/.mcpproxy-gatekeeper/env"
 
-PR=""; VERDICT_OVERRIDE=""; DRY_RUN=0
+PR=""; VERDICT_OVERRIDE=""; REVIEWED_SHA_OVERRIDE=""; DRY_RUN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pr) PR="$2"; shift 2;;
     --verdict) VERDICT_OVERRIDE="$2"; shift 2;;
+    --reviewed-sha) REVIEWED_SHA_OVERRIDE="$2"; shift 2;;
     --dry-run) DRY_RUN=1; shift;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 1;;
@@ -66,7 +76,7 @@ log() { echo "[gatekeeper] $*" >&2; }
 # ── 1. Resolve the Codex review verdict (+reviewed SHA) from Paperclip ───────
 # Emits "<verdict> <reviewed_sha_or_empty>".
 resolve_verdict() {
-  if [[ -n "$VERDICT_OVERRIDE" ]]; then echo "$VERDICT_OVERRIDE "; return; fi
+  if [[ -n "$VERDICT_OVERRIDE" ]]; then echo "$VERDICT_OVERRIDE ${REVIEWED_SHA_OVERRIDE:-}"; return; fi
   # Reads are fine unauthenticated against the local instance.
   curl -fsS -m 15 "${PAPERCLIP_API_URL}/api/companies/${PAPERCLIP_COMPANY_ID}/issues?q=Review%20PR%20%23${PR}" 2>/dev/null \
   | PR="$PR" CODEX="$CODEX_REVIEWER_AGENT_ID" BASE="$PAPERCLIP_API_URL" python3 -c '
@@ -144,10 +154,22 @@ if [[ "$PR_STATE" != "OPEN" ]]; then
   exit 0
 fi
 
-# Stale-verdict guard: only approve the exact SHA Codex reviewed. If the head
-# moved past the reviewed commit, the verdict is stale → needs re-review.
-if [[ -n "$REVIEWED_SHA" && -n "$HEAD" && "$REVIEWED_SHA" != "$HEAD" ]]; then
-  log "STALE: Codex reviewed ${REVIEWED_SHA:0:9} but head is ${HEAD:0:9} — NOT approving (re-review needed)."
+# Fail-closed stale-verdict guard (MCP-1249 Codex REQUEST_CHANGES): we approve
+# ONLY the exact SHA the reviewer reviewed. The checks below are UNCONDITIONAL —
+# a missing or non-matching reviewed SHA must REFUSE, never approve blind. This
+# closes the hole where an old ACCEPT (or a verdict that pinned no SHA) would
+# auto-approve the current head after a post-review force-push of unreviewed code.
+if [[ -z "$HEAD" ]]; then
+  log "REFUSING: could not resolve the PR head SHA — fail-closed (will not approve)."
+  exit 5
+fi
+if [[ -z "$REVIEWED_SHA" ]]; then
+  log "REFUSING: no reviewed SHA could be resolved from the ACCEPT verdict — fail-closed (will not approve blind)."
+  log "  The reviewer must pin the reviewed commit SHA in the verdict comment; for a manual override pass --reviewed-sha <sha>."
+  exit 7
+fi
+if [[ "$REVIEWED_SHA" != "$HEAD" ]]; then
+  log "STALE: reviewer reviewed ${REVIEWED_SHA:0:9} but head is ${HEAD:0:9} — NOT approving (re-review needed)."
   exit 6
 fi
 
