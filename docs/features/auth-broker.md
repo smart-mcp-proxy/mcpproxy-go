@@ -79,6 +79,17 @@ Config validation fails with `auth_broker.authorization_endpoint is required for
 
 A denied consent (`error=access_denied`) clears the pending flow and stores nothing.
 
+## Credential resolution
+
+On each proxied request the broker resolves the per-user credential to inject, in a strict **per-user-only** order. There is **no shared or static fallback** — a request that cannot produce a per-user credential fails rather than borrowing another identity:
+
+1. A valid cached per-user credential is injected directly; if it is within the near-expiry window it is refreshed first (re-minted for `token_exchange`/`entra_obo`, or renewed from the stored refresh token for `oauth_connect`).
+2. Otherwise, for `token_exchange`/`entra_obo`, a credential is minted from the user's stored IdP subject token.
+3. Otherwise, for `oauth_connect` upstreams the user has not connected — or whose stored credential expired and could not be refreshed — the request fails with an **actionable error carrying the connect URL**, so the user is told to (re)connect rather than being silently denied.
+4. Otherwise the request fails with "no per-user credential available".
+
+Concurrent requests for the same `(user, upstream)` are coalesced (single-flight) so a burst does not trigger duplicate upstream token flows. A policy-decision hook is evaluated per call immediately before the credential is returned; no policy engine ships yet, so it permits every injection by default.
+
 ## See also
 
 - [OAuth Authentication](./oauth-authentication.md) — upstream OAuth for the personal edition.
