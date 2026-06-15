@@ -174,7 +174,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useServersStore } from '@/stores/servers'
@@ -192,6 +192,7 @@ import {
   SERVER_EDITION_SECTION_TITLE,
   DOCS_BASE,
   docsUrl,
+  isBlankInstructions,
   type SettingField,
   type SettingsAccordion,
 } from '@/views/settings/fields'
@@ -209,20 +210,34 @@ const serverEditionTitle = SERVER_EDITION_SECTION_TITLE
 // backend so the `instructions` textarea placeholder never drifts from Go.
 const defaultInstructions = ref<string>('')
 
-// Inject the live default as the `instructions` field placeholder. Until the
-// fetch resolves (or against an older core that doesn't expose it) the static
-// catalogue placeholder ("Loading built-in default…") is used.
+// Inject the live default as the `instructions` field placeholder AND as the
+// resetDefault value (drives the "Reset to default" button). Until the fetch
+// resolves the static catalogue placeholder is used.
 const advancedAccordions = computed<SettingsAccordion[]>(() =>
   ADVANCED_ACCORDIONS.map((acc) => {
     if (!defaultInstructions.value || !acc.fields.some((f) => f.key === 'instructions')) return acc
     return {
       ...acc,
       fields: acc.fields.map((f) =>
-        f.key === 'instructions' ? { ...f, placeholder: defaultInstructions.value } : f
+        f.key === 'instructions'
+          ? { ...f, placeholder: defaultInstructions.value, resetDefault: defaultInstructions.value }
+          : f
       ),
     }
   })
 )
+
+// Prefill the instructions textarea with the built-in default when the config
+// field is empty (fresh install or blank override). Only runs when BOTH the
+// config AND the default are loaded; whichever resolves second triggers it.
+// Never overwrites a user's saved value (non-empty instructions stay as-is).
+function maybePrefillInstructions() {
+  if (!defaultInstructions.value) return
+  if (!loaded.value) return
+  if (isBlankInstructions(state.working.instructions)) {
+    state.working.instructions = defaultInstructions.value
+  }
+}
 
 // ---- form state ----
 const loading = ref(false)
@@ -332,6 +347,7 @@ async function loadConfig() {
       configJson.value = JSON.stringify(cfg, null, 2)
       configStatus.value = { valid: true }
       loaded.value = true
+      maybePrefillInstructions()
     } else {
       loadError.value = response.error || 'Failed to load configuration'
     }
@@ -426,11 +442,19 @@ async function loadDefaultInstructions() {
     const resp = await api.getStatus()
     if (resp.success && typeof resp.data?.default_instructions === 'string') {
       defaultInstructions.value = resp.data.default_instructions
+      // In case loadConfig already ran and set loaded=true, prefill now.
+      maybePrefillInstructions()
     }
   } catch {
     /* leave placeholder as the static fallback */
   }
 }
+
+// Also trigger prefill if defaultInstructions resolves after config is loaded
+// (handles the common case where /api/v1/status is slower than /api/v1/config).
+watch(defaultInstructions, () => {
+  maybePrefillInstructions()
+})
 
 onMounted(() => {
   loadConfig()
