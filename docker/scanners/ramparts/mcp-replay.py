@@ -35,21 +35,46 @@ def log(msg):
     print(f"[mcp-replay] {msg}", file=sys.stderr, flush=True)
 
 
-def load_tools():
-    """Read the captured tool definitions. Returns a list of MCP tool objects.
+class ToolsLoadError(Exception):
+    """Raised when tools.json cannot be loaded into a usable tool list.
 
-    Tolerant of a missing/empty/garbled file: an empty tool list still lets the
-    handshake complete so Ramparts emits a (clean) report instead of a connect
-    error.
+    This is the fail-CLOSED signal: rather than serve 0 tools (which makes
+    Ramparts emit a spurious "clean" report and defeats the security gate —
+    MCP-2443), the shim aborts so Ramparts sees a dead endpoint and the
+    entrypoint marks the scan as failed.
+    """
+
+
+def load_tools():
+    """Read the captured tool definitions. Returns a non-empty list of MCP
+    tool objects.
+
+    Fails CLOSED (raises ToolsLoadError) when the captured definitions are
+    missing, unreadable, empty, not valid JSON, the wrong shape, or yield zero
+    usable tools. mcpproxy only writes /scan/source/tools.json when it captured
+    at least one named tool (Service.exportToolDefinitions), so any of these
+    conditions means a broken/garbled input — NOT a legitimate clean scan.
     """
     try:
         with open(TOOLS_PATH, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError) as exc:
-        log(f"could not read {TOOLS_PATH}: {exc}; serving 0 tools")
-        return []
+            raw_bytes = fh.read()
+    except OSError as exc:
+        raise ToolsLoadError(f"could not read {TOOLS_PATH}: {exc}")
 
-    raw = data.get("tools", []) if isinstance(data, dict) else []
+    if not raw_bytes.strip():
+        raise ToolsLoadError(f"{TOOLS_PATH} is empty")
+
+    try:
+        data = json.loads(raw_bytes)
+    except ValueError as exc:
+        raise ToolsLoadError(f"{TOOLS_PATH} is not valid JSON: {exc}")
+
+    if not isinstance(data, dict):
+        raise ToolsLoadError(f"{TOOLS_PATH} root is {type(data).__name__}, expected an object")
+    raw = data.get("tools")
+    if not isinstance(raw, list):
+        raise ToolsLoadError(f"{TOOLS_PATH} has no \"tools\" array (got {type(raw).__name__})")
+
     tools = []
     for entry in raw:
         if not isinstance(entry, dict) or not entry.get("name"):
@@ -64,6 +89,9 @@ def load_tools():
         if entry.get("annotations"):
             tool["annotations"] = entry["annotations"]
         tools.append(tool)
+
+    if not tools:
+        raise ToolsLoadError(f"{TOOLS_PATH} yielded 0 usable tools (none had a name)")
     return tools
 
 
@@ -111,7 +139,14 @@ def handle(msg, tools):
 
 
 def main():
-    tools = load_tools()
+    try:
+        tools = load_tools()
+    except ToolsLoadError as exc:
+        # Fail CLOSED: abort before the handshake so Ramparts cannot complete a
+        # scan and report it clean. Exit code 2 distinguishes a load failure
+        # from a normal exit; the entrypoint propagates this as a scan failure.
+        log(f"FATAL: {exc}; aborting (fail-closed)")
+        return 2
     log(f"serving {len(tools)} captured tool definition(s) from {TOOLS_PATH}")
     for line in sys.stdin:
         line = line.strip()

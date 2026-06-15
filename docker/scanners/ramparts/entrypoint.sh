@@ -24,19 +24,72 @@
 # them at /scan and WORKDIR is /scan (see Dockerfile).
 set -u
 
-REPORT=/scan/report/results.json
+# Overridable so the test harness (entrypoint_test.sh) can run without Docker.
+REPORT_DIR="${REPORT_DIR:-/scan/report}"
+REPLAY="${MCP_REPLAY:-/usr/local/bin/mcp-replay.py}"
+REPORT="$REPORT_DIR/results.json"
+RAMPARTS_STDERR="$REPORT_DIR/ramparts.stderr"
+
+# fail_closed marks the scan as FAILED. The Go scanner runner ignores the
+# container exit code (docker.go RunScanner returns nil for a non-zero exit),
+# so a non-zero exit alone is NOT enough — it reads whatever report file exists.
+# We therefore DELETE the report so the engine finds no output and records the
+# scanner as failed instead of parsing a stale/error payload as a clean scan
+# (MCP-2443: defeat the fail-open).
+fail_closed() {
+  echo "ramparts scan FAILED (fail-closed): $1" >&2
+  echo "ramparts exit code: ${rc:-unknown}" >&2
+  if [ -f "$RAMPARTS_STDERR" ]; then
+    echo "--- ramparts stderr ---" >&2
+    cat "$RAMPARTS_STDERR" >&2 2>/dev/null || true
+  fi
+  rm -f "$REPORT"
+  exit 1
+}
 
 # `scan`'s --format accepts json|raw|table|text (no sarif) and has no --output
 # flag, so emit native JSON to stdout and capture it. MCPProxy's engine parses
 # the Ramparts JSON shape ({security_issues{...}, yara_results[]}) directly.
-# A non-zero exit from findings/offline-LLM is expected and tolerated by the
-# engine as long as a report was produced, so don't let `set -e` abort here.
-ramparts scan "stdio:python3:/usr/local/bin/mcp-replay.py" \
+# Ramparts may exit non-zero to signal findings/offline-LLM, so capture the code
+# rather than abort; the gate below is the report's shape, not the bare exit.
+ramparts scan "stdio:python3:$REPLAY" \
   --format json \
-  > "$REPORT" 2>/scan/report/ramparts.stderr || true
+  > "$REPORT" 2>"$RAMPARTS_STDERR"
+rc=$?
 
 if [ ! -s "$REPORT" ]; then
-  echo "ramparts produced no report; stderr follows:" >&2
-  cat /scan/report/ramparts.stderr >&2 2>/dev/null || true
-  exit 1
+  fail_closed "ramparts produced no report"
+fi
+
+# Validate $REPORT is a GENUINE Ramparts report, not an error payload. A real
+# report carries a top-level "security_issues" OBJECT (with the tool/prompt/
+# resource issue arrays) and a "yara_results" ARRAY. We TYPE-check, not just
+# presence-check: an error payload such as {"security_issues":"scan failed"}
+# has the key present but the wrong type and must fail CLOSED — a presence-only
+# gate would wave it through as a spurious clean scan (MCP-2443 re-review).
+# python3 is already in the image for the replay shim.
+if ! python3 - "$REPORT" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError) as exc:
+    print(f"report is not valid JSON: {exc}", file=sys.stderr)
+    sys.exit(1)
+if (not isinstance(data, dict)
+        or not isinstance(data.get("security_issues"), dict)
+        or not isinstance(data.get("yara_results"), list)):
+    print("report is not a Ramparts report: security_issues must be an object "
+          "and yara_results an array (error payload or wrong shape)", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  fail_closed "report is not a valid Ramparts report (error payload or wrong shape)"
+fi
+
+# A valid report with rc != 0 means Ramparts signalled findings/offline-LLM — a
+# real result we keep. (rc != 0 with no valid report already failed above.)
+if [ "$rc" -ne 0 ]; then
+  echo "ramparts exited $rc but produced a valid report (findings/offline-LLM); keeping it" >&2
 fi
