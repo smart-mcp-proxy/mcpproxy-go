@@ -254,6 +254,8 @@ Add mcpproxy as a remote MCP server via Settings → Connectors → Add Custom C
 
 #### Option A: Free Plan — JSON Configuration
 
+> **💡 One-click:** mcpproxy's built-in **Connect** wizard (Web UI / tray) can write this bridge configuration for you automatically — pick **Claude Desktop** and click **Connect**. It registers the `npx -y mcp-remote` bridge shown below (Node.js required). The manual steps remain available if you prefer to edit the file yourself.
+
 1. Create the config file if it doesn't exist:
 
 **macOS:**

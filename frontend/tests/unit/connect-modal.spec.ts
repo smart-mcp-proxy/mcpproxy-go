@@ -96,6 +96,69 @@ describe('ConnectModal', () => {
     expect(wrapper.text()).toContain('⌘')
   })
 
+  it('renders a Connect button and bridge note for Claude Desktop', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'claude-desktop',
+        name: 'Claude Desktop',
+        config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+        exists: true,
+        connected: false,
+        supported: true,
+        note: 'Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.',
+        icon: 'claude-desktop',
+      }],
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // A real one-click Connect button must be offered (not greyed out).
+    const connectButton = wrapper.find('button.btn-primary.btn-xs')
+    expect(connectButton.exists()).toBe(true)
+    expect(connectButton.text()).toContain('Connect')
+
+    // The bridge note must be surfaced to the user.
+    expect(wrapper.text()).toContain('mcp-remote stdio bridge')
+  })
+
+  it('shows Connect for a bridge client even when its config file does not exist', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'claude-desktop',
+        name: 'Claude Desktop',
+        config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+        exists: false,
+        connected: false,
+        supported: true,
+        bridge: true,
+        note: 'Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.',
+        icon: 'claude-desktop',
+      }],
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // Fresh install: no config file yet, but the bridge Connect must still appear.
+    const connectButton = wrapper.find('button.btn-primary.btn-xs')
+    expect(connectButton.exists()).toBe(true)
+    expect(connectButton.text()).toContain('Connect')
+    expect(wrapper.text()).not.toContain('Config not found')
+  })
+
   it('disconnect uses server_name alias when OpenCode status is adopted', async () => {
     ;(api.getConnectStatus as any).mockResolvedValue({
       success: true,

@@ -795,6 +795,8 @@ export interface ClientStatus {
   connected: boolean
   supported: boolean
   reason?: string
+  note?: string
+  bridge?: boolean
   icon: string
   server_name?: string
 }

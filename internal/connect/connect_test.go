@@ -57,11 +57,13 @@ func TestConnect_OpenCode_AllowsTrailingCommaJSON(t *testing.T) {
 func testService(t *testing.T) (*Service, string) {
 	t.Helper()
 	homeDir := t.TempDir()
-	// On Windows, ConfigPath("opencode", homeDir) reads %LOCALAPPDATA% from
-	// the real environment and only falls back to homeDir when the env is
-	// unset. Pin it under the test temp dir so the fallback path is the one
-	// that fires regardless of CI runner state. No-op on macOS/Linux.
+	// On Windows, ConfigPath reads %LOCALAPPDATA% (opencode) and %APPDATA%
+	// (claude-desktop, vscode) from the real environment, ignoring homeDir,
+	// and only falls back to homeDir when those env vars are unset. Pin both
+	// under the test temp dir so every client's config path is isolated
+	// per-test regardless of CI runner state. No-op on macOS/Linux.
 	t.Setenv("LOCALAPPDATA", filepath.Join(homeDir, "AppData", "Local"))
+	t.Setenv("APPDATA", filepath.Join(homeDir, "AppData", "Roaming"))
 	svc := NewServiceWithHome("127.0.0.1:8080", "", homeDir)
 	return svc, homeDir
 }
@@ -70,6 +72,7 @@ func testServiceWithKey(t *testing.T) (*Service, string) {
 	t.Helper()
 	homeDir := t.TempDir()
 	t.Setenv("LOCALAPPDATA", filepath.Join(homeDir, "AppData", "Local"))
+	t.Setenv("APPDATA", filepath.Join(homeDir, "AppData", "Roaming"))
 	svc := NewServiceWithHome("127.0.0.1:8080", "test-key-123", homeDir)
 	return svc, homeDir
 }
@@ -735,18 +738,180 @@ func TestDisconnect_TOML(t *testing.T) {
 	}
 }
 
-// ---------- Unsupported client tests ----------
+// ---------- Claude Desktop stdio-bridge tests (MCP-2479) ----------
 
-func TestConnect_UnsupportedClient(t *testing.T) {
-	svc, _ := testService(t)
+// Claude Desktop only speaks stdio, so mcpproxy connects via an mcp-remote
+// stdio bridge instead of a direct HTTP/SSE URL. It must be a supported,
+// one-click client.
+func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
+	client := FindClient("claude-desktop")
+	if client == nil {
+		t.Fatal("expected claude-desktop client definition")
+	}
+	if !client.Supported {
+		t.Error("claude-desktop should be supported via the mcp-remote stdio bridge")
+	}
+	if client.Note == "" {
+		t.Error("claude-desktop should carry a note explaining the mcp-remote bridge")
+	}
+	if !strings.Contains(strings.ToLower(client.Note), "mcp-remote") {
+		t.Errorf("claude-desktop note should mention mcp-remote, got: %q", client.Note)
+	}
+	// Bridge clients can be connected even when no config file exists yet
+	// (Connect creates it), so the frontend must offer the button on fresh
+	// installs.
+	if !client.Bridge {
+		t.Error("claude-desktop should be flagged as a bridge client")
+	}
+}
 
-	_, err := svc.Connect("claude-desktop", "", false)
-	if err == nil {
-		t.Fatal("Expected error for unsupported client")
+func TestBuildServerEntry_ClaudeDesktop_StdioBridge(t *testing.T) {
+	entry := buildServerEntry("claude-desktop", "http://127.0.0.1:8080/mcp")
+
+	if entry["command"] != "npx" {
+		t.Errorf("expected command=npx, got %v", entry["command"])
 	}
-	if !strings.Contains(err.Error(), "not supported") {
-		t.Errorf("Expected 'not supported' in error, got: %v", err)
+	args, ok := entry["args"].([]string)
+	if !ok {
+		t.Fatalf("expected args []string, got %T", entry["args"])
 	}
+	want := []string{"-y", "mcp-remote", "http://127.0.0.1:8080/mcp"}
+	if len(args) != len(want) {
+		t.Fatalf("expected args %v, got %v", want, args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d]=%q, want %q", i, args[i], want[i])
+		}
+	}
+	// A stdio bridge has no direct URL/type fields.
+	if _, ok := entry["url"]; ok {
+		t.Error("stdio-bridge entry should not contain a url field")
+	}
+}
+
+func TestConnect_ClaudeDesktop_WritesStdioBridge(t *testing.T) {
+	svc, homeDir := testService(t)
+
+	cfgPath := ConfigPath("claude-desktop", homeDir)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Connect("claude-desktop", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Expected success, got: %s", result.Message)
+	}
+
+	raw, _ := os.ReadFile(result.ConfigPath)
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("Parse config failed: %v", err)
+	}
+
+	servers, ok := data["mcpServers"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Missing mcpServers key")
+	}
+	entry, ok := servers["mcpproxy"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Missing mcpproxy entry")
+	}
+	if entry["command"] != "npx" {
+		t.Errorf("Expected command=npx, got %v", entry["command"])
+	}
+	args, ok := entry["args"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected args array, got %T", entry["args"])
+	}
+	want := []string{"-y", "mcp-remote", "http://127.0.0.1:8080/mcp"}
+	if len(args) != len(want) {
+		t.Fatalf("Expected args %v, got %v", want, args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d]=%v, want %q", i, args[i], want[i])
+		}
+	}
+}
+
+func TestConnect_ClaudeDesktop_BridgeIncludesAPIKey(t *testing.T) {
+	svc, homeDir := testServiceWithKey(t)
+
+	cfgPath := ConfigPath("claude-desktop", homeDir)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.Connect("claude-desktop", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, _ := os.ReadFile(result.ConfigPath)
+	var data map[string]interface{}
+	json.Unmarshal(raw, &data)
+
+	servers := data["mcpServers"].(map[string]interface{})
+	entry := servers["mcpproxy"].(map[string]interface{})
+	args := entry["args"].([]interface{})
+	lastArg, _ := args[len(args)-1].(string)
+	if lastArg != "http://127.0.0.1:8080/mcp?apikey=test-key-123" {
+		t.Errorf("Expected bridge URL with apikey, got %v", lastArg)
+	}
+}
+
+func TestGetAllStatus_ClaudeDesktop_DetectsBridgeConnection(t *testing.T) {
+	svc, homeDir := testService(t)
+
+	cfgPath := ConfigPath("claude-desktop", homeDir)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Connect("claude-desktop", "", false); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range svc.GetAllStatus() {
+		if s.ID == "claude-desktop" {
+			if !s.Connected {
+				t.Error("expected claude-desktop connected=true after bridge connect")
+			}
+			return
+		}
+	}
+	t.Fatal("claude-desktop status not found")
+}
+
+// Gap 2 (Codex review): a bridge written under a custom server_name has no
+// URL field and a non-"mcpproxy" key, so it must be detected by inspecting
+// the entry's args (mcp-remote + mcpURL).
+func TestGetAllStatus_ClaudeDesktop_DetectsBridgeUnderCustomName(t *testing.T) {
+	svc, homeDir := testService(t)
+
+	cfgPath := ConfigPath("claude-desktop", homeDir)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Connect("claude-desktop", "my-bridge", false); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range svc.GetAllStatus() {
+		if s.ID == "claude-desktop" {
+			if !s.Connected {
+				t.Error("expected claude-desktop connected via bridge args under a custom name")
+			}
+			if s.ServerName != "my-bridge" {
+				t.Errorf("expected server_name=my-bridge, got %q", s.ServerName)
+			}
+			return
+		}
+	}
+	t.Fatal("claude-desktop status not found")
 }
 
 func TestConnect_UnknownClient(t *testing.T) {
@@ -797,14 +962,18 @@ func TestGetAllStatus(t *testing.T) {
 		t.Errorf("Expected %d statuses, got %d", len(allClients), len(statuses))
 	}
 
-	// Verify claude-desktop is not supported
+	// Verify claude-desktop is supported via the mcp-remote stdio bridge and
+	// surfaces a note explaining the bridge.
 	for _, s := range statuses {
 		if s.ID == "claude-desktop" {
-			if s.Supported {
-				t.Error("claude-desktop should not be supported")
+			if !s.Supported {
+				t.Error("claude-desktop should be supported via the mcp-remote bridge")
 			}
-			if s.Reason == "" {
-				t.Error("claude-desktop should have a reason")
+			if s.Note == "" {
+				t.Error("claude-desktop should expose a bridge note")
+			}
+			if !s.Bridge {
+				t.Error("claude-desktop status should expose bridge=true")
 			}
 		}
 	}
