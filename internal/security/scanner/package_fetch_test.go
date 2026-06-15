@@ -510,6 +510,27 @@ func TestValidatePackageSpec(t *testing.T) {
 		{"npm", "file:../evil", false},
 		{"npm", "https://example.com/pkg.tgz", false},
 		{"npm", "", false},
+		// MCP-2442 re-review: PEP 508 / npm direct-reference '@'-tail bypass — the
+		// NAME parses as a bare registry name but the tail is a path/URL/VCS, which
+		// reaches pip/npm verbatim and STILL executes setup.py. The WHOLE spec
+		// (including the tail after '@') must be validated.
+		{"npm", "pkg@./local", false},
+		{"npm", "pkg@/abs/path", false},
+		{"npm", "pkg@~/evil", false},
+		{"npm", "pkg@git+https://github.com/user/repo.git", false},
+		{"npm", "pkg@file:./evil", false},
+		{"npm", "pkg@https://example.com/pkg.tgz", false},
+		{"npm", "@scope/pkg@./local", false},
+		{"python", "pkg@./local", false},
+		{"python", "pkg@/abs/path", false},
+		{"python", "pkg@git+https://github.com/user/repo.git", false},
+		{"python", "pkg@~/evil", false},
+		{"python", "flights @ git+https://example.com/repo.git", false},
+		// Bare version pins / dist-tags after '@' stay valid (no regression).
+		{"npm", "pkg@1.2.3", true},
+		{"npm", "pkg@1.2.3-beta.1", true},
+		{"npm", "pkg@latest", true},
+		{"npm", "@scope/pkg@2.0.0", true},
 	}
 	for _, c := range cases {
 		err := validatePackageSpec(c.ecosystem, c.spec)
@@ -541,6 +562,9 @@ func TestResolveFromPackageFetch_RejectsNonRegistrySpec(t *testing.T) {
 		{Name: "evil-path", Protocol: "stdio", Command: "uvx", Args: []string{"--from", pkgDir, "evil"}},
 		{Name: "evil-git", Protocol: "stdio", Command: "uvx", Args: []string{"--from", "git+https://example.com/repo.git", "evil"}},
 		{Name: "evil-npm-path", Protocol: "stdio", Command: "npx", Args: []string{"-y", "./local-evil"}},
+		// MCP-2442 re-review: PEP 508 / npm direct-reference '@'-tail bypass.
+		{Name: "evil-uvx-directref", Protocol: "stdio", Command: "uvx", Args: []string{"--from", "evilpkg@" + pkgDir, "evil"}},
+		{Name: "evil-npm-directref", Protocol: "stdio", Command: "npx", Args: []string{"-y", "evilpkg@./local-evil"}},
 	}
 	for _, info := range cases {
 		res, err := r.resolveFromPackageFetch(context.Background(), info)

@@ -114,6 +114,13 @@ var (
 	// pep503NameRe matches a PEP 503 / PEP 508 distribution name (case
 	// insensitive). No path/URL/VCS characters are permitted.
 	pep503NameRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+	// bareVersionRe matches a plain version pin, range, or npm dist-tag. It must
+	// START with an alphanumeric (so it rejects "./x", "/abs", "~/x", "../x") and
+	// contains NO '/' or ':' (so it rejects local paths and direct-reference
+	// URLs). This validates the 'name@<tail>' / 'name==<tail>' tail so a PEP 508 /
+	// npm direct reference (e.g. "pkg@./local", "pkg@/abs") cannot smuggle a
+	// path/URL/VCS past the name check and on to pip/npm (MCP-2442 re-review).
+	bareVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_~^*<>=!,-]*$`)
 )
 
 // validatePackageSpec rejects any package spec that is not a bare registry name
@@ -145,18 +152,32 @@ func validatePackageSpec(ecosystem, spec string) error {
 	if strings.Contains(spec, "..") {
 		return fmt.Errorf("package spec %q contains a path traversal", spec)
 	}
-	name, _ := parsePackageSpec(spec)
+	name, version := parsePackageSpec(spec)
 	switch ecosystem {
 	case "npm":
 		if !npmNameRe.MatchString(name) {
 			return fmt.Errorf("%q is not a valid npm package name", name)
 		}
 	case "python":
+		// Python version pins use "==" / ">=" etc., never "@". The ONLY use of
+		// "@" in a PEP 508 spec is a direct reference ("name @ url"), which is
+		// always a path/URL/VCS — never a registry fetch. Reject any "@" outright.
+		if strings.Contains(spec, "@") {
+			return fmt.Errorf("python package spec %q is a PEP 508 direct reference (@), not a registry name", spec)
+		}
 		if !pep503NameRe.MatchString(name) {
 			return fmt.Errorf("%q is not a valid PEP 503 package name", name)
 		}
 	default:
 		return fmt.Errorf("unknown ecosystem %q", ecosystem)
+	}
+	// Validate the version / tail too. parsePackageSpec splits "name@tail" on the
+	// last '@'; without this check a direct-reference tail (e.g. "./local",
+	// "/abs", "~/x") would pass because only the NAME was validated, and the full
+	// untrusted spec would still reach pip/npm and execute setup.py (MCP-2442
+	// re-review). The tail must be a bare version specifier / dist-tag.
+	if version != "" && !bareVersionRe.MatchString(version) {
+		return fmt.Errorf("package spec %q has a non-version reference tail %q (path/URL/VCS not allowed)", spec, version)
 	}
 	return nil
 }
