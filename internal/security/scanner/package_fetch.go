@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -45,6 +46,10 @@ const (
 	fetchMaxTotalBytes int64 = 256 << 20 // 256 MiB
 	// fetchMaxFileBytes caps any single extracted file.
 	fetchMaxFileBytes int64 = 64 << 20 // 64 MiB
+	// packageFetchTimeout bounds a single published-source fetch (download +
+	// extract). A hung or throttled registry must not stall the scan; on timeout
+	// the caller degrades to a tool-definitions-only scan.
+	packageFetchTimeout = 90 * time.Second
 )
 
 type archiveKind int
@@ -182,16 +187,124 @@ func validatePackageSpec(ecosystem, spec string) error {
 	return nil
 }
 
-// firstPackageArg returns the package spec from a runner command's args. It
-// honors `--from <pkg>` (uvx) and otherwise returns the first non-flag arg.
-func firstPackageArg(args []string) string {
-	for i, arg := range args {
-		if arg == "--from" && i+1 < len(args) {
-			return args[i+1]
+// runnerSubcommand returns the keyword that must precede the package token for a
+// subcommand-style runner (e.g. `pipx run <pkg>`, `pnpm dlx <pkg>`). Runners that
+// take the package as their first positional (npx, uvx, bunx) return "".
+func runnerSubcommand(commandBase string) string {
+	switch commandBase {
+	case "pipx":
+		return "run"
+	case "pnpm", "yarn":
+		return "dlx"
+	case "bun":
+		return "x"
+	}
+	return ""
+}
+
+// isNpmRunner reports whether a runner belongs to the npm/Node family (as opposed
+// to the uv/Python family). The two families differ in how flags name packages:
+// npx uses `--package`/`-p`, uv uses `--from`, and `-p` means `--python` for uv.
+func isNpmRunner(commandBase string) bool {
+	switch commandBase {
+	case "npx", "pnpm", "yarn", "bunx", "bun":
+		return true
+	}
+	return false
+}
+
+// runnerFlagTakesValue reports whether a flag consumes the FOLLOWING token as a
+// value that is NOT the target package (a python version, an extra dependency, a
+// command string, an index URL, ...). Its value must be skipped so it is never
+// mistaken for the package. Attached forms ("--python=3.11") carry their value
+// inline and consume no extra token.
+func runnerFlagTakesValue(npm bool, flag string) bool {
+	if strings.Contains(flag, "=") {
+		return false
+	}
+	if npm {
+		// npx -c/--call <cmd> carries a command string; --package/-p are handled
+		// earlier as package-naming flags, so they never reach here.
+		switch flag {
+		case "-c", "--call":
+			return true
 		}
-		if !strings.HasPrefix(arg, "-") {
-			return arg
+		return false
+	}
+	// uv / uvx / pipx value flags whose argument is not the target package.
+	switch flag {
+	case "-p", "--python",
+		"--with", "--with-editable", "--with-requirements",
+		"-i", "--index", "--index-url", "--index-strategy",
+		"-c", "--constraint", "--reinstall-package", "--refresh-package":
+		return true
+	}
+	return false
+}
+
+// runnerPackageSpec extracts the TARGET package spec (name plus any version pin,
+// returned verbatim) that a package-runner command will execute, from its command
+// base and argument list. It understands:
+//   - a leading runner subcommand keyword (`pipx run`, `pnpm dlx`, `yarn dlx`,
+//     `bun x`) that precedes the package token — and which is REQUIRED for those
+//     runners: a bare `pnpm start` / `bun server.ts` is a local invocation, not a
+//     remote fetch, and yields "" (no package);
+//   - flags that NAME the target package — uv `--from <pkg>`, npx `--package`/
+//     `-p <pkg>` — whose value is returned directly;
+//   - value-bearing flags whose argument is NOT the target (`--with <dep>`,
+//     uv `-p`/`--python <ver>`, `-c <cmd>`, index flags), whose value is skipped.
+//
+// The first remaining positional token is the package. Returns "" when no package
+// can be determined.
+func runnerPackageSpec(commandBase string, args []string) string {
+	npm := isNpmRunner(commandBase)
+
+	// Subcommand-style runners (pnpm/yarn `dlx`, `bun x`, `pipx run`) REQUIRE
+	// their keyword before anything is treated as a package. The keyword check
+	// runs BEFORE any flag parsing, so a package flag cannot bypass it: a bare
+	// `pnpm start`, `bun server.ts`, `pipx install foo`, or `pnpm -p start` has
+	// no keyword and resolves nothing (a local invocation, not a remote fetch —
+	// fetching the wrong token would mean false coverage + typosquat risk;
+	// MCP-2445). Leading global flags before the keyword (e.g. `pnpm --silent
+	// dlx`) are skipped. npx/uvx/bunx have no subcommand and parse from the start.
+	if sub := runnerSubcommand(commandBase); sub != "" {
+		i := 0
+		for i < len(args) {
+			arg := args[i]
+			if strings.HasPrefix(arg, "-") {
+				if i+1 < len(args) && runnerFlagTakesValue(npm, arg) {
+					i++
+				}
+				i++
+				continue
+			}
+			break // first positional token
 		}
+		if i >= len(args) || args[i] != sub {
+			return "" // first positional is not the required keyword → no package
+		}
+		args = args[i+1:] // parse only what follows the keyword
+	}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		hasNext := i+1 < len(args)
+		// Flags that name the target package directly: return their value.
+		if hasNext {
+			if !npm && arg == "--from" {
+				return args[i+1]
+			}
+			if npm && (arg == "--package" || arg == "-p") {
+				return args[i+1]
+			}
+		}
+		if strings.HasPrefix(arg, "-") {
+			if hasNext && runnerFlagTakesValue(npm, arg) {
+				i++ // skip the flag's value too
+			}
+			continue
+		}
+		return arg
 	}
 	return ""
 }
@@ -463,13 +576,20 @@ func writeArchiveFile(target string, src io.Reader, limit int64) (int64, error) 
 // guaranteeing no regression versus today's behavior.
 func (r *SourceResolver) resolveFromPackageFetch(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
 	cmdBase := strings.ToLower(filepath.Base(info.Command))
-	spec := firstPackageArg(info.Args)
+	spec := runnerPackageSpec(cmdBase, info.Args)
 	if spec == "" {
 		return nil, fmt.Errorf("no package spec in args for %s", info.Name)
 	}
 
+	// Bound the whole fetch (download + extract): a slow or hung registry must
+	// not stall the scan indefinitely. exec.CommandContext kills the download
+	// subprocess when this deadline fires, and the caller falls back to a
+	// tool-definitions-only scan.
+	ctx, cancel := context.WithTimeout(ctx, packageFetchTimeout)
+	defer cancel()
+
 	switch cmdBase {
-	case "npx", "bunx", "pnpm":
+	case "npx", "bunx", "bun", "pnpm", "yarn":
 		if err := validatePackageSpec("npm", spec); err != nil {
 			return nil, fmt.Errorf("refusing to fetch untrusted spec for %s: %w", info.Name, err)
 		}

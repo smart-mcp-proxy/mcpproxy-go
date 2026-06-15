@@ -37,21 +37,58 @@ func TestParsePackageSpec(t *testing.T) {
 	}
 }
 
-func TestFirstPackageArg(t *testing.T) {
+func TestRunnerPackageSpec(t *testing.T) {
 	cases := []struct {
-		args []string
-		want string
+		name    string
+		command string
+		args    []string
+		want    string
 	}{
-		{[]string{"-y", "google-flights-mcp-server@0.2.4"}, "google-flights-mcp-server@0.2.4"},
-		{[]string{"--from", "pkg-a", "cmd"}, "pkg-a"},
-		{[]string{"pkg-only"}, "pkg-only"},
-		{[]string{"-y"}, ""},
-		{nil, ""},
+		// npx: -y is a boolean flag, the package follows.
+		{"npx -y", "npx", []string{"-y", "google-flights-mcp-server@0.2.4"}, "google-flights-mcp-server@0.2.4"},
+		{"npx bare", "npx", []string{"server-everything"}, "server-everything"},
+		// npx --package / -p NAMES the target; -c carries a command string.
+		{"npx -p", "npx", []string{"-p", "@scope/srv@1.2.3", "-c", "srv"}, "@scope/srv@1.2.3"},
+		{"npx --package", "npx", []string{"--package", "srv", "-c", "run-srv"}, "srv"},
+		// Subcommand runners: the subcommand keyword is NOT the package.
+		{"pipx run", "pipx", []string{"run", "some-pkg"}, "some-pkg"},
+		{"pnpm dlx", "pnpm", []string{"dlx", "some-pkg"}, "some-pkg"},
+		{"yarn dlx", "yarn", []string{"dlx", "some-pkg@2.0.0"}, "some-pkg@2.0.0"},
+		{"bun x", "bun", []string{"x", "some-pkg"}, "some-pkg"},
+		// uvx: --from names the distribution; a positional after it is the command.
+		{"uvx --from", "uvx", []string{"--from", "pkg-a", "cmd"}, "pkg-a"},
+		{"uvx bare", "uvx", []string{"pkg-only"}, "pkg-only"},
+		// uvx --with adds an EXTRA dep; the target is the first real positional.
+		{"uvx --with then target", "uvx", []string{"--with", "extra-dep", "main-pkg"}, "main-pkg"},
+		{"uvx --with then --from", "uvx", []string{"--with", "extra-dep", "--from", "main-pkg", "cmd"}, "main-pkg"},
+		// uvx -p/--python carries a version, NOT the package.
+		{"uvx -p python", "uvx", []string{"-p", "3.11", "main-pkg"}, "main-pkg"},
+		{"uvx --python", "uvx", []string{"--python", "3.12", "--from", "main-pkg", "cmd"}, "main-pkg"},
+		// Subcommand runners WITHOUT the keyword must NOT resolve a package spec —
+		// these are local invocations, not remote package fetches (MCP-2445 re-review).
+		// Fetching the first positional here = false coverage + typosquat risk.
+		{"pnpm start (local script)", "pnpm", []string{"start"}, ""},
+		{"pnpm run build (local script)", "pnpm", []string{"run", "build"}, ""},
+		{"bun server.ts (local file)", "bun", []string{"server.ts"}, ""},
+		{"bun run dev (local script)", "bun", []string{"run", "dev"}, ""},
+		{"yarn build (local script)", "yarn", []string{"build"}, ""},
+		{"pipx install foo (not ephemeral run)", "pipx", []string{"install", "foo"}, ""},
+		// The subcommand keyword is enforced BEFORE flag parsing, so a package
+		// flag cannot bypass it (MCP-2445 round-2 hole #1).
+		{"pnpm -p start (flag bypass)", "pnpm", []string{"-p", "start"}, ""},
+		{"bun -p server.ts (flag bypass)", "bun", []string{"-p", "server.ts"}, ""},
+		{"pnpm --package x (no dlx)", "pnpm", []string{"--package", "x", "start"}, ""},
+		// Leading global flags before the keyword are fine; keyword still required.
+		{"pnpm --silent dlx pkg", "pnpm", []string{"--silent", "dlx", "pkg"}, "pkg"},
+		// Degenerate inputs.
+		{"npx flag only", "npx", []string{"-y"}, ""},
+		{"nil", "npx", nil, ""},
+		{"pipx run only", "pipx", []string{"run"}, ""},
 	}
 	for _, c := range cases {
-		got := firstPackageArg(c.args)
+		got := runnerPackageSpec(filepath.Base(c.command), c.args)
 		if got != c.want {
-			t.Errorf("firstPackageArg(%v) = %q, want %q", c.args, got, c.want)
+			t.Errorf("%s: runnerPackageSpec(%q, %v) = %q, want %q", c.name, c.command, c.args, got, c.want)
 		}
 	}
 }
