@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the Gatekeeper auto-trigger (MCP-1249).
+  Runs gatekeeper-sweep.sh on an interval so Codex-ACCEPT PRs are approved
+  (and auto-merged) hands-off. Local-machine deployment only.
+
+  Install:
+    sed "s#__SWEEP__#$PWD/scripts/gatekeeper-sweep.sh#; s#__LOG__#$HOME/.mcpproxy-gatekeeper/sweep.log#" \
+      scripts/app.mcpproxy.gatekeeper.sweep.plist > ~/Library/LaunchAgents/app.mcpproxy.gatekeeper.sweep.plist
+    launchctl load  ~/Library/LaunchAgents/app.mcpproxy.gatekeeper.sweep.plist   # enable
+    launchctl unload ~/Library/LaunchAgents/app.mcpproxy.gatekeeper.sweep.plist  # disable
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>             <string>app.mcpproxy.gatekeeper.sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__SWEEP__</string>
+  </array>
+  <key>StartInterval</key>     <integer>300</integer>
+  <key>RunAtLoad</key>         <true/>
+  <key>StandardOutPath</key>   <string>__LOG__</string>
+  <key>StandardErrorPath</key> <string>__LOG__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>ProcessType</key>       <string>Background</string>
+  <key>LowPriorityIO</key>     <true/>
+</dict>
+</plist>
