@@ -127,11 +127,25 @@ func NewEndpointDeprecatedError(url, message, migrationGuide, newEndpoint string
 
 // HTTPTransportConfig holds configuration for HTTP transport
 type HTTPTransportConfig struct {
-	URL          string
-	Headers      map[string]string
-	OAuthConfig  *client.OAuthConfig
-	UseOAuth     bool
+	URL         string
+	Headers     map[string]string
+	OAuthConfig *client.OAuthConfig
+	UseOAuth    bool
+	// BrokeredAuth, when set, injects a per-user resolved credential into the
+	// outbound headers, replacing any configured/inbound auth header (spec 074
+	// FR-016/FR-017). It is edition-neutral plain data so the server-edition
+	// credential broker can drive injection without this package importing it.
+	BrokeredAuth *BrokeredAuth
 	TraceEnabled bool // Enable detailed HTTP/SSE frame tracing
+}
+
+// effectiveHeaders returns the outbound header set, applying brokered per-user
+// auth injection when configured (spec 074 FR-016/FR-017).
+func (cfg *HTTPTransportConfig) effectiveHeaders() map[string]string {
+	if cfg.BrokeredAuth == nil {
+		return cfg.Headers
+	}
+	return EffectiveHeaders(cfg.Headers, cfg.BrokeredAuth)
 }
 
 // CreateHTTPClient creates a new MCP client using HTTP transport
@@ -200,6 +214,11 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.URL))
 
+	// Apply brokered per-user auth injection (spec 074): replaces any configured
+	// auth header with the resolved per-user credential and never forwards the
+	// inbound gateway/IdP token (FR-017).
+	headers := cfg.effectiveHeaders()
+
 	// If tracing is enabled, create HTTP client with logging transport
 	if cfg.TraceEnabled {
 		logger.Info("🔍 HTTP TRACE MODE ENABLED - All HTTP traffic will be logged")
@@ -216,9 +235,9 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 
 		var httpTransport transport.Interface
 		var err error
-		if len(cfg.Headers) > 0 {
+		if len(headers) > 0 {
 			httpTransport, err = transport.NewStreamableHTTP(cfg.URL,
-				transport.WithHTTPHeaders(cfg.Headers),
+				transport.WithHTTPHeaders(headers),
 				transport.WithHTTPBasicClient(httpClient))
 		} else {
 			httpTransport, err = transport.NewStreamableHTTP(cfg.URL,
@@ -231,10 +250,10 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	// Use regular HTTP client
-	if len(cfg.Headers) > 0 {
-		logger.Debug("Adding HTTP headers", zap.Int("header_count", len(cfg.Headers)))
+	if len(headers) > 0 {
+		logger.Debug("Adding HTTP headers", zap.Int("header_count", len(headers)))
 		httpTransport, err := transport.NewStreamableHTTP(cfg.URL,
-			transport.WithHTTPHeaders(cfg.Headers))
+			transport.WithHTTPHeaders(headers))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create HTTP transport: %w", err)
 		}
@@ -305,9 +324,15 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	}
 
 	logger.Debug("Creating regular SSE client", zap.String("url", cfg.URL))
+
+	// Apply brokered per-user auth injection (spec 074): replaces any configured
+	// auth header with the resolved per-user credential and never forwards the
+	// inbound gateway/IdP token (FR-017).
+	headers := cfg.effectiveHeaders()
+
 	// Use regular SSE client
-	if len(cfg.Headers) > 0 {
-		logger.Debug("Adding SSE headers", zap.Int("header_count", len(cfg.Headers)))
+	if len(headers) > 0 {
+		logger.Debug("Adding SSE headers", zap.Int("header_count", len(headers)))
 		// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
 		// The Timeout field covers the entire request duration, which kills long-lived SSE streams
 		// Instead, we rely on IdleConnTimeout to detect dead connections
@@ -335,12 +360,12 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			zap.String("url", cfg.URL),
 			zap.Duration("idle_timeout", 300*time.Second),
 			zap.Duration("header_timeout", 30*time.Second),
-			zap.Int("header_count", len(cfg.Headers)),
+			zap.Int("header_count", len(headers)),
 			zap.String("note", "Removed http.Client.Timeout to allow SSE streams longer than 3 minutes"))
 
 		sseClient, err := client.NewSSEMCPClient(cfg.URL,
 			client.WithHTTPClient(httpClient),
-			client.WithHeaders(cfg.Headers))
+			client.WithHeaders(headers))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create SSE client: %w", err)
 		}

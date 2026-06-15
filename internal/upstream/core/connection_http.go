@@ -113,13 +113,37 @@ func (c *Client) connectSSE(ctx context.Context) error {
 	return fmt.Errorf("all SSE authentication strategies failed, last error: %w", lastErr)
 }
 
+// SetBrokeredAuth sets the per-user resolved upstream credential for this
+// connection. When set, the headers-auth strategy injects it into the configured
+// outbound header, replacing any inbound/configured auth (spec 074
+// FR-016/FR-017). Pass nil to clear it (non-brokered behaviour).
+func (c *Client) SetBrokeredAuth(b *transport.BrokeredAuth) {
+	c.brokeredAuth = b
+}
+
+// canUseHeadersStrategy reports whether the headers-auth strategy can run: it
+// needs either statically-configured headers or a per-user brokered credential
+// to inject. A brokered upstream commonly carries no static headers (FR-016).
+func (c *Client) canUseHeadersStrategy() bool {
+	return len(c.config.Headers) > 0 || c.brokeredAuth != nil
+}
+
+// brokeredHTTPConfig builds the HTTP transport config for the headers-auth
+// strategy, threading the per-user brokered credential through so the transport
+// layer injects it (spec 074 FR-016/FR-017).
+func (c *Client) brokeredHTTPConfig() *transport.HTTPTransportConfig {
+	httpConfig := transport.CreateHTTPTransportConfig(c.config, nil)
+	httpConfig.BrokeredAuth = c.brokeredAuth
+	return httpConfig
+}
+
 // tryHeadersAuth attempts authentication using configured headers
 func (c *Client) tryHeadersAuth(ctx context.Context) error {
-	if len(c.config.Headers) == 0 {
+	if !c.canUseHeadersStrategy() {
 		return fmt.Errorf("no headers configured")
 	}
 
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, nil)
+	httpConfig := c.brokeredHTTPConfig()
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client with headers: %w", err)
@@ -171,11 +195,11 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // trySSEHeadersAuth attempts SSE authentication using configured headers
 func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
-	if len(c.config.Headers) == 0 {
+	if !c.canUseHeadersStrategy() {
 		return fmt.Errorf("no headers configured")
 	}
 
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, nil)
+	httpConfig := c.brokeredHTTPConfig()
 	sseClient, err := transport.CreateSSEClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create SSE client with headers: %w", err)

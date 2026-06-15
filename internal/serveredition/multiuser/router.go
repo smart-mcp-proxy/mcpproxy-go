@@ -12,6 +12,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/broker"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/workspace"
 )
 
@@ -147,6 +148,29 @@ func (r *Router) GetServerForUser(ctx context.Context, serverName string) (*Serv
 	}
 
 	return nil, fmt.Errorf("server %q not found or not accessible", serverName)
+}
+
+// BrokeredConnectionKey returns the per-(user, server) pooling key for a
+// brokered upstream connection (spec 074 FR-018). It resolves the calling user
+// and the named server (shared or personal), then keys the connection by both
+// so a shared upstream brokered per-user never reuses one user's
+// credential/connection for another. The connection pool MUST use this key when
+// caching brokered upstream clients.
+//
+// It errors if there is no auth context or the server is not accessible to the
+// user; it does not require the server to actually declare an auth_broker block,
+// so callers can key uniformly and decide per server whether to broker.
+func (r *Router) BrokeredConnectionKey(ctx context.Context, serverName string) (string, error) {
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil {
+		return "", fmt.Errorf("no authentication context")
+	}
+
+	info, err := r.GetServerForUser(ctx, serverName)
+	if err != nil {
+		return "", err
+	}
+	return broker.ConnectionKey(ac.GetUserID(), info.Config), nil
 }
 
 // IsServerAccessible returns true if the user from the context can access
