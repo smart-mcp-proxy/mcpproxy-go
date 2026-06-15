@@ -3,6 +3,7 @@ package runtime
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,26 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
+
+// skipQuarantinePropertyTestOnWindows skips the rapid-based property tests below
+// on Windows. Each rapid.Check iteration creates and tears down a full
+// BBolt-backed Runtime in a temp dir; with hundreds of iterations under `-race`
+// these tests run for several minutes. On Windows the slower file IO/timers push
+// them past the 5m package timeout of the Unit Tests (windows-latest) job, which
+// runs `go test -race -timeout 5m ./...` without `-short`, producing flaky
+// "panic: test timed out after 5m0s" reds in internal/runtime (MCP-2493).
+//
+// The invariants these tests assert (tool-approval hash + storage state machine)
+// are platform-independent, so full coverage on Linux/macOS — plus the dedicated
+// heavy-runtime CI job — is sufficient. This mirrors the existing Windows skip in
+// apply_config_restart_test.go.
+func skipQuarantinePropertyTestOnWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("heavy rapid property test exceeds the 5m Windows -race package timeout (MCP-2493); " +
+			"platform-independent invariants are fully covered on Linux/macOS and the heavy-runtime CI job")
+	}
+}
 
 // =============================================================================
 // Unit tests for assertToolApprovalInvariant
@@ -356,6 +377,7 @@ func TestRapidQuarantineStateMachine(t *testing.T) {
 	if testing.Short() {
 		t.Skip("heavy property test (~270s under -race); runs in the stress-tests CI job")
 	}
+	skipQuarantinePropertyTestOnWindows(t)
 	rapid.Check(t, func(t *rapid.T) {
 		// Set up runtime with quarantine enabled
 		tempDir, err := os.MkdirTemp("", "quarantine-rapid-*")
@@ -504,6 +526,7 @@ func TestRapidInvariant_ChangedNeverAutoApproved(t *testing.T) {
 	if testing.Short() {
 		t.Skip("heavy property test (~70s under -race); runs in the stress-tests CI job")
 	}
+	skipQuarantinePropertyTestOnWindows(t)
 	rapid.Check(t, func(t *rapid.T) {
 		tempDir, err := os.MkdirTemp("", "quarantine-changed-*")
 		if err != nil {
@@ -585,6 +608,7 @@ func TestRapidInvariant_ChangedNeverAutoApproved(t *testing.T) {
 // TestRapidInvariant_PendingNeverAutoApproved is a focused property test that
 // verifies pending tools never auto-approve when quarantine is enabled.
 func TestRapidInvariant_PendingNeverAutoApproved(t *testing.T) {
+	skipQuarantinePropertyTestOnWindows(t)
 	rapid.Check(t, func(t *rapid.T) {
 		tempDir, err := os.MkdirTemp("", "quarantine-pending-*")
 		if err != nil {
