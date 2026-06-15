@@ -117,6 +117,21 @@ func TestSendOptOutBeacon_PayloadShape(t *testing.T) {
 	}
 }
 
+func TestValidateTelemetryURL(t *testing.T) {
+	ok := []string{"https://telemetry.mcpproxy.app/v1/heartbeat", "http://127.0.0.1:8080/heartbeat"}
+	for _, u := range ok {
+		if _, err := validateTelemetryURL(u); err != nil {
+			t.Errorf("validateTelemetryURL(%q) unexpected error: %v", u, err)
+		}
+	}
+	bad := []string{"file:///etc/passwd", "gopher://x/heartbeat", "/heartbeat", "telemetry.mcpproxy.app/heartbeat"}
+	for _, u := range bad {
+		if _, err := validateTelemetryURL(u); err == nil {
+			t.Errorf("validateTelemetryURL(%q) expected error, got nil", u)
+		}
+	}
+}
+
 // TestNotifyConfigChanged_FiresExactlyOnceOnDisable verifies the server-side
 // transition detection: an enabled->disabled config swap emits exactly one
 // opt-out beacon carrying the anonymous ID.

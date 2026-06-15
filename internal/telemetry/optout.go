@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -71,8 +73,16 @@ func (s *Service) SendOptOutBeacon(ctx context.Context) error {
 		return fmt.Errorf("opt-out beacon failed anonymity scan: %w", scanErr)
 	}
 
-	url := s.endpoint + "/heartbeat"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
+	// Bound the outbound request (CWE-918 request forgery): the endpoint is a
+	// configured value, so re-parse it, constrain the scheme to http/https,
+	// require a host, and issue the request against the re-serialized URL. This
+	// mirrors validateRegistryURL and guarantees a malformed/non-http endpoint
+	// can never aim the beacon at, e.g., file:// or a schemeless host.
+	beaconURL, err := validateTelemetryURL(strings.TrimRight(s.endpoint, "/") + "/heartbeat")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, beaconURL, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("build opt-out request: %w", err)
 	}
@@ -87,6 +97,27 @@ func (s *Service) SendOptOutBeacon(ctx context.Context) error {
 		return fmt.Errorf("opt-out beacon rejected with status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// validateTelemetryURL bounds an outbound telemetry request (CWE-918 request
+// forgery). It parses the candidate URL, constrains the scheme to http/https,
+// requires a non-empty host, and returns the re-serialized URL to use for the
+// request. The telemetry endpoint is operator-configured (default production
+// host, overridable for self-hosting/testing), so the host is intentionally not
+// pinned to a single value — but a non-http scheme (file://, gopher://, …) or a
+// malformed/schemeless URL is rejected before any request is issued.
+func validateTelemetryURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid telemetry URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("telemetry URL scheme %q not allowed (want http/https)", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("telemetry URL has no host")
+	}
+	return u.String(), nil
 }
 
 // NotifyConfigChanged informs the telemetry service that the live configuration
