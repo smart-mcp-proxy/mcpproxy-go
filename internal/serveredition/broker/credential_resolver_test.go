@@ -71,14 +71,16 @@ func (s *fakeStore) seed(userID, serverKey string, cred *UpstreamCredential) {
 
 // fakeExchanger records calls and returns a programmed credential/error.
 type fakeExchanger struct {
-	calls   int32
-	cred    *UpstreamCredential
-	err     error
-	delay   time.Duration
-	startWG *sync.WaitGroup
+	calls     int32
+	cred      *UpstreamCredential
+	err       error
+	delay     time.Duration
+	startWG   *sync.WaitGroup
+	gotCtxErr error
 }
 
-func (e *fakeExchanger) Exchange(_ context.Context, userID, serverKey string, _ *config.AuthBrokerConfig) (*UpstreamCredential, error) {
+func (e *fakeExchanger) Exchange(ctx context.Context, userID, serverKey string, _ *config.AuthBrokerConfig) (*UpstreamCredential, error) {
+	e.gotCtxErr = ctx.Err()
 	if e.startWG != nil {
 		e.startWG.Done()
 	}
@@ -398,5 +400,86 @@ func TestResolve_SingleFlight_CoalescesConcurrentAcquisitions(t *testing.T) {
 	}
 	if c := atomic.LoadInt32(&ex.calls); c != 1 {
 		t.Fatalf("single-flight should coalesce to 1 upstream acquisition, got %d", c)
+	}
+}
+
+// TestResolve_SingleFlight_DetachesCallerCancellation proves the must-fix from
+// review: the in-flight acquisition must not inherit the calling request's
+// cancellation, or a cancelled caller would broadcast its ctx error to every
+// co-pending acquisition for the same (user, server).
+func TestResolve_SingleFlight_DetachesCallerCancellation(t *testing.T) {
+	store := newFakeStore()
+	server := httpServer("grafana", tokenExchangeBroker())
+	ex := &fakeExchanger{cred: &UpstreamCredential{AccessToken: "exchanged"}}
+	r := NewCredentialResolver(ResolverDeps{Store: store, Exchanger: ex})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // caller's request is already cancelled before acquisition runs
+
+	got, err := r.Resolve(ctx, "alice", server)
+	if err != nil {
+		t.Fatalf("acquisition should run despite caller cancellation, got error: %v", err)
+	}
+	if got.AccessToken != "exchanged" {
+		t.Fatalf("expected exchanged token, got %q", got.AccessToken)
+	}
+	if ex.gotCtxErr != nil {
+		t.Fatalf("flight context must be detached from caller cancellation, got ctx.Err()=%v", ex.gotCtxErr)
+	}
+}
+
+// TestResolve_TokenExchange_NearExpiry_NoDoubleExchangeOnFailure proves the
+// advisory fix: a near-expiry token-exchange credential whose re-mint fails must
+// surface that single error, not retry Exchange a second time.
+func TestResolve_TokenExchange_NearExpiry_NoDoubleExchangeOnFailure(t *testing.T) {
+	store := newFakeStore()
+	server := httpServer("grafana", tokenExchangeBroker())
+	key := oauth.GenerateServerKey(server.Name, server.URL)
+	store.seed("alice", key, &UpstreamCredential{AccessToken: "old", ExpiresAt: time.Now().Add(5 * time.Second)})
+
+	ex := &fakeExchanger{err: errors.New("token exchange failed: status 401, error \"invalid_grant\"")}
+	r := NewCredentialResolver(ResolverDeps{Store: store, Exchanger: ex})
+
+	_, err := r.Resolve(context.Background(), "alice", server)
+	if err == nil {
+		t.Fatal("expected the exchange error to propagate, got nil")
+	}
+	if c := atomic.LoadInt32(&ex.calls); c != 1 {
+		t.Fatalf("near-expiry exchange failure must not double-call Exchange, got %d calls", c)
+	}
+}
+
+// TestResolve_ConnectFlow_RefreshFails_ReturnsReconnectError proves the advisory
+// fix: an already-connected user whose refresh fails gets an actionable
+// reconnect error (with the connect URL), not a misleading "never connected".
+func TestResolve_ConnectFlow_RefreshFails_ReturnsReconnectError(t *testing.T) {
+	store := newFakeStore()
+	server := httpServer("github", connectBroker())
+	key := oauth.GenerateServerKey(server.Name, server.URL)
+	store.seed("alice", key, &UpstreamCredential{AccessToken: "old", RefreshToken: "rt", ExpiresAt: time.Now().Add(5 * time.Second)})
+
+	conn := &fakeConnector{
+		serverKey:  key,
+		authURL:    "https://idp/authorize?client_id=client&state=state-xyz",
+		refreshErr: errors.New("oauth connector: token endpoint returned 400: invalid_grant"),
+	}
+	r := NewCredentialResolver(ResolverDeps{Store: store, Connectors: &fakeConnectorProvider{conn: conn}})
+
+	_, err := r.Resolve(context.Background(), "alice", server)
+	var nce *NotConnectedError
+	if !errors.As(err, &nce) {
+		t.Fatalf("expected *NotConnectedError, got %T: %v", err, err)
+	}
+	if nce.Reason == "" || !strings.Contains(nce.Reason, "reconnect") {
+		t.Fatalf("expected a reconnect reason, got %q", nce.Reason)
+	}
+	if nce.ConnectURL != conn.authURL {
+		t.Fatalf("expected connect URL %q, got %q", conn.authURL, nce.ConnectURL)
+	}
+	if c := atomic.LoadInt32(&conn.refreshCalls); c != 1 {
+		t.Fatalf("expected exactly 1 refresh attempt, got %d", c)
+	}
+	if c := atomic.LoadInt32(&conn.buildCalls); c != 1 {
+		t.Fatalf("expected the connect URL to be built once, got %d", c)
 	}
 }
