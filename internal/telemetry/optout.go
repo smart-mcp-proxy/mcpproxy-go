@@ -42,20 +42,23 @@ func TelemetryDisableTransition(prior, next *config.Config) bool {
 	return prior.IsTelemetryEnabled() && !next.IsTelemetryEnabled()
 }
 
-// SendOptOutBeacon posts a single opt-out beacon to the telemetry endpoint,
-// reusing the existing /heartbeat ingest path. It is best-effort: callers MUST
-// disable telemetry regardless of the returned error. The caller supplies the
-// context (with its own short timeout) so the send never blocks a config save.
-func SendOptOutBeacon(ctx context.Context, client *http.Client, endpoint, anonymousID string) error {
-	if anonymousID == "" {
+// SendOptOutBeacon posts a single opt-out beacon to the configured telemetry
+// endpoint, reusing the existing /heartbeat ingest path. It is best-effort:
+// callers MUST disable telemetry regardless of the returned error, and supply a
+// context with a short timeout so the send never blocks a config save.
+//
+// The destination is taken from the service's own resolved endpoint/config
+// (the exact indirection the heartbeat and feedback senders use) rather than a
+// caller-supplied URL, so this never sends to an arbitrary, request-derived
+// host.
+func (s *Service) SendOptOutBeacon(ctx context.Context) error {
+	anonID := s.config.GetAnonymousID()
+	if anonID == "" {
 		// Nothing to dedup on — never send an identity-less beacon.
 		return errors.New("opt-out beacon skipped: no anonymous_id")
 	}
-	if client == nil {
-		client = http.DefaultClient
-	}
 
-	beacon := OptOutBeacon{Event: OptOutEvent, AnonymousID: anonymousID}
+	beacon := OptOutBeacon{Event: OptOutEvent, AnonymousID: anonID}
 	data, err := json.Marshal(beacon)
 	if err != nil {
 		return fmt.Errorf("marshal opt-out beacon: %w", err)
@@ -68,13 +71,14 @@ func SendOptOutBeacon(ctx context.Context, client *http.Client, endpoint, anonym
 		return fmt.Errorf("opt-out beacon failed anonymity scan: %w", scanErr)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/heartbeat", bytes.NewReader(data))
+	url := s.endpoint + "/heartbeat"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("build opt-out request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("send opt-out beacon: %w", err)
 	}
@@ -130,19 +134,15 @@ func (s *Service) NotifyConfigChanged(newCfg *config.Config) {
 	if !isValidSemver(s.version) {
 		return
 	}
-	anonID := newCfg.GetAnonymousID()
-	if anonID == "" {
+	if newCfg.GetAnonymousID() == "" {
 		return
 	}
 
-	endpoint := s.endpoint
-	client := s.client
-	logger := s.logger
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), optOutBeaconTimeout)
 		defer cancel()
-		if err := SendOptOutBeacon(ctx, client, endpoint, anonID); err != nil {
-			logger.Debug("opt-out beacon send failed (telemetry still disabled)", zap.Error(err))
+		if err := s.SendOptOutBeacon(ctx); err != nil {
+			s.logger.Debug("opt-out beacon send failed (telemetry still disabled)", zap.Error(err))
 		}
 	}()
 }

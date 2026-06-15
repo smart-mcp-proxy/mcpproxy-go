@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.etcd.io/bbolt"
+	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
@@ -273,7 +273,6 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	// disabled must not emit another beacon.
 	wasEnabled := cfg.IsTelemetryEnabled()
 	anonID := cfg.GetAnonymousID()
-	endpoint := cfg.GetTelemetryEndpoint()
 
 	if cfg.Telemetry == nil {
 		cfg.Telemetry = &config.TelemetryConfig{}
@@ -293,8 +292,10 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	if wasEnabled && anonID != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		client := &http.Client{Timeout: 5 * time.Second}
-		if beaconErr := telemetry.SendOptOutBeacon(ctx, client, endpoint, anonID); beaconErr != nil {
+		// Reuse the telemetry service's own sender so the destination is the
+		// resolved telemetry endpoint (never an arbitrary caller-supplied URL).
+		beaconSvc := telemetry.New(cfg, "", "", "", zap.NewNop())
+		if beaconErr := beaconSvc.SendOptOutBeacon(ctx); beaconErr != nil {
 			// Best-effort only — telemetry is already disabled on disk. Surface
 			// at a low level so scripts aren't tripped up.
 			fmt.Println("Note: opt-out signal could not be delivered (telemetry is still disabled).")

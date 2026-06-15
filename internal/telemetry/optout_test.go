@@ -67,6 +67,7 @@ func TestSendOptOutBeacon_PayloadShape(t *testing.T) {
 		method string
 		body   map[string]any
 	}
+	clearTelemetryEnv(t)
 	done := make(chan capture, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -77,8 +78,11 @@ func TestSendOptOutBeacon_PayloadShape(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := SendOptOutBeacon(context.Background(), server.Client(), server.URL, "anon-123")
-	if err != nil {
+	cfg := &config.Config{Telemetry: &config.TelemetryConfig{
+		AnonymousID: "anon-123", Endpoint: server.URL,
+	}}
+	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	if err := svc.SendOptOutBeacon(context.Background()); err != nil {
 		t.Fatalf("SendOptOutBeacon returned error: %v", err)
 	}
 
