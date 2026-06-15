@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -8,6 +9,68 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// telemetryEnabledFromContract marshals the contract representation of cfg and
+// extracts the resolved telemetry.enabled value (or reports it absent).
+func telemetryEnabledFromContract(t *testing.T, cfg *config.Config) (enabled, present bool) {
+	t.Helper()
+	raw, err := json.Marshal(ConvertConfigToContract(cfg))
+	require.NoError(t, err)
+
+	var decoded struct {
+		Telemetry *struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"telemetry"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	if decoded.Telemetry == nil || decoded.Telemetry.Enabled == nil {
+		return false, false
+	}
+	return *decoded.Telemetry.Enabled, true
+}
+
+// TestConvertConfigToContract_TelemetryMaterializedOnFreshDefault asserts that
+// /api/v1/config exposes the resolved telemetry.enabled value (true) on a fresh
+// install where Telemetry is nil, instead of omitting the key (which clients
+// coerce to false). Regression test for MCP-2477.
+func TestConvertConfigToContract_TelemetryMaterializedOnFreshDefault(t *testing.T) {
+	t.Setenv("MCPPROXY_TELEMETRY", "") // ensure no env override
+	cfg := config.DefaultConfig()
+	require.Nil(t, cfg.Telemetry, "precondition: DefaultConfig leaves Telemetry nil")
+
+	enabled, present := telemetryEnabledFromContract(t, cfg)
+	assert.True(t, present, "telemetry.enabled must be present in the API response")
+	assert.True(t, enabled, "telemetry.enabled must serialize as true on a fresh default install")
+
+	// Materialization must not mutate the shared config.
+	assert.Nil(t, cfg.Telemetry, "ConvertConfigToContract must not mutate the source config")
+}
+
+// TestConvertConfigToContract_TelemetryEnabledNilMaterialized covers the case
+// where a TelemetryConfig exists but Enabled is nil — it must resolve to true.
+func TestConvertConfigToContract_TelemetryEnabledNilMaterialized(t *testing.T) {
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+	cfg := config.DefaultConfig()
+	cfg.Telemetry = &config.TelemetryConfig{AnonymousID: "abc"} // Enabled nil
+
+	enabled, present := telemetryEnabledFromContract(t, cfg)
+	assert.True(t, present, "telemetry.enabled must be present when Enabled is nil")
+	assert.True(t, enabled, "telemetry.enabled must resolve to true when Enabled is nil")
+	assert.Nil(t, cfg.Telemetry.Enabled, "source TelemetryConfig.Enabled must remain nil")
+}
+
+// TestConvertConfigToContract_TelemetryExplicitFalsePreserved asserts an
+// explicit opt-out is faithfully serialized (not overwritten by the default).
+func TestConvertConfigToContract_TelemetryExplicitFalsePreserved(t *testing.T) {
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+	disabled := false
+	cfg := config.DefaultConfig()
+	cfg.Telemetry = &config.TelemetryConfig{Enabled: &disabled}
+
+	enabled, present := telemetryEnabledFromContract(t, cfg)
+	assert.True(t, present, "telemetry.enabled must be present when explicitly set")
+	assert.False(t, enabled, "explicit telemetry opt-out must be preserved")
+}
 
 // TestConvertGenericServersToTyped_OAuth verifies OAuth config is properly extracted
 func TestConvertGenericServersToTyped_OAuth(t *testing.T) {
