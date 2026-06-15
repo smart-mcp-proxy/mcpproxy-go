@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -117,29 +116,28 @@ func validateTelemetryURL(rawURL string) (string, error) {
 		return "", fmt.Errorf("telemetry URL scheme %q not allowed (want http/https)", u.Scheme)
 	}
 	// Inline host allowlist guard (CWE-918 barrier). The request is only issued
-	// when the host matches a fixed safe value — the built-in production host or
-	// a loopback address (tests / local development). Kept inline as an
-	// `if !match { return }` equality guard on the same control-flow path as the
-	// sink, mirroring validateRegistryURL (the repo's accepted pattern).
-	host := u.Hostname()
-	loopback := strings.EqualFold(host, "localhost")
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		loopback = true
-	}
-	if !loopback && !strings.EqualFold(host, defaultTelemetryHost()) {
+	// when the host EXACTLY equals a fixed safe value — the built-in production
+	// host or an explicit loopback literal (tests / local development). Explicit
+	// equality via switch (no helper, no EqualFold/IsLoopback) keeps the guard on
+	// the same control-flow path as the sink and in the canonical barrier shape,
+	// mirroring validateRegistryURL (the repo's accepted pattern).
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "localhost", "127.0.0.1", "::1", defaultTelemetryHost():
+		return u.String(), nil
+	default:
 		return "", fmt.Errorf("telemetry URL host %q not allowed", host)
 	}
-	return u.String(), nil
 }
 
-// defaultTelemetryHost returns the host of the built-in telemetry endpoint,
-// derived from config so it can never drift from GetTelemetryEndpoint.
+// defaultTelemetryHost returns the lower-cased host of the built-in telemetry
+// endpoint, derived from config so it can never drift from GetTelemetryEndpoint.
 func defaultTelemetryHost() string {
 	u, err := url.Parse((&config.Config{}).GetTelemetryEndpoint())
 	if err != nil {
 		return ""
 	}
-	return u.Hostname()
+	return strings.ToLower(u.Hostname())
 }
 
 // NotifyConfigChanged informs the telemetry service that the live configuration
