@@ -9,27 +9,60 @@ import (
 	"go.uber.org/zap"
 )
 
+// authStrategy pairs an auth strategy's display name with its attempt function.
+type authStrategy struct {
+	name string
+	fn   func(context.Context) error
+}
+
+// httpAuthStrategies returns the ordered HTTP auth strategies to attempt.
+//
+// A per-user brokered connection is FAIL-CLOSED (spec 074, security-critical):
+// the ONLY permitted strategy is the brokered headers. It must never fall back
+// to no-auth or shared OAuth — either would connect with the wrong identity and
+// defeat per-user isolation (FR-014/FR-017). Non-brokered connections keep the
+// historical headers -> no-auth -> OAuth chain unchanged.
+func (c *Client) httpAuthStrategies() []authStrategy {
+	if c.brokeredAuth != nil {
+		return []authStrategy{{"headers", c.tryHeadersAuth}}
+	}
+	return []authStrategy{
+		{"headers", c.tryHeadersAuth},
+		{"no-auth", c.tryNoAuth},
+		{"OAuth", c.tryOAuthAuth},
+	}
+}
+
+// sseAuthStrategies is the SSE counterpart of httpAuthStrategies, with the same
+// fail-closed guarantee for brokered connections.
+func (c *Client) sseAuthStrategies() []authStrategy {
+	if c.brokeredAuth != nil {
+		return []authStrategy{{"headers", c.trySSEHeadersAuth}}
+	}
+	return []authStrategy{
+		{"headers", c.trySSEHeadersAuth},
+		{"no-auth", c.trySSENoAuth},
+		{"OAuth", c.trySSEOAuthAuth},
+	}
+}
+
 // connectHTTP establishes HTTP transport connection with auth fallback
 func (c *Client) connectHTTP(ctx context.Context) error {
-	// Try authentication strategies in order: headers -> no-auth -> OAuth
-	authStrategies := []func(context.Context) error{
-		c.tryHeadersAuth,
-		c.tryNoAuth,
-		c.tryOAuthAuth,
-	}
+	// Strategy order (and, for brokered connections, the fail-closed single
+	// strategy) is decided by httpAuthStrategies.
+	authStrategies := c.httpAuthStrategies()
 
 	var lastErr error
-	for i, authFunc := range authStrategies {
-		strategyName := []string{"headers", "no-auth", "OAuth"}[i]
+	for i, strategy := range authStrategies {
 		c.logger.Debug("🔐 Trying authentication strategy",
 			zap.Int("strategy_index", i),
-			zap.String("strategy", strategyName))
+			zap.String("strategy", strategy.name))
 
-		if err := authFunc(ctx); err != nil {
+		if err := strategy.fn(ctx); err != nil {
 			lastErr = err
 			c.logger.Debug("🚫 Auth strategy failed",
 				zap.Int("strategy_index", i),
-				zap.String("strategy", strategyName),
+				zap.String("strategy", strategy.name),
 				zap.Error(err))
 
 			// For configuration errors (like no headers), always try next strategy
@@ -50,7 +83,7 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 		}
 		c.logger.Info("✅ Authentication successful",
 			zap.Int("strategy_index", i),
-			zap.String("strategy", strategyName))
+			zap.String("strategy", strategy.name))
 
 		// Register notification handler for tools/list_changed
 		c.registerNotificationHandler()
@@ -63,21 +96,18 @@ func (c *Client) connectHTTP(ctx context.Context) error {
 
 // connectSSE establishes SSE transport connection with auth fallback
 func (c *Client) connectSSE(ctx context.Context) error {
-	// Try authentication strategies in order: headers -> no-auth -> OAuth
-	authStrategies := []func(context.Context) error{
-		c.trySSEHeadersAuth,
-		c.trySSENoAuth,
-		c.trySSEOAuthAuth,
-	}
+	// Strategy order (and, for brokered connections, the fail-closed single
+	// strategy) is decided by sseAuthStrategies.
+	authStrategies := c.sseAuthStrategies()
 
 	var lastErr error
-	for i, authFunc := range authStrategies {
-		strategyName := []string{"headers", "no-auth", "OAuth"}[i]
+	for i, strategy := range authStrategies {
+		strategyName := strategy.name
 		c.logger.Debug("🔐 Trying SSE authentication strategy",
 			zap.Int("strategy_index", i),
 			zap.String("strategy", strategyName))
 
-		if err := authFunc(ctx); err != nil {
+		if err := strategy.fn(ctx); err != nil {
 			lastErr = err
 			c.logger.Debug("🚫 SSE auth strategy failed",
 				zap.Int("strategy_index", i),
