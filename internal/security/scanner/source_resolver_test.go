@@ -791,6 +791,90 @@ func TestResolveNpxCacheHonorsPinnedVersion(t *testing.T) {
 	}
 }
 
+// TestResolveNpxCachePinMissNotResolved (MCP-2445 round-2 hole #3) verifies that
+// when an exact version is pinned but ONLY a different version is cached, the
+// resolver returns an error rather than substituting the mismatched version
+// (which would scan the wrong code and report false coverage).
+func TestResolveNpxCachePinMissNotResolved(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	pkg := filepath.Join("node_modules", "@modelcontextprotocol", "server-everything")
+	// Only version 2.0.0 is cached; the spec pins 1.0.0.
+	dir := filepath.Join(homeDir, ".npm", "_npx", "onlyhash", pkg)
+	os.MkdirAll(dir, 0755)
+	os.WriteFile(filepath.Join(dir, "package.json"),
+		[]byte(`{"name":"@modelcontextprotocol/server-everything","version":"2.0.0"}`), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.resolveNpxCache(ServerInfo{
+		Name:    "everything-server",
+		Command: "npx",
+		Args:    []string{"-y", "@modelcontextprotocol/server-everything@1.0.0"},
+	})
+	if err == nil {
+		t.Fatal("expected error on version-pin miss (must not substitute a mismatched cached version)")
+	}
+}
+
+// TestResolveUvxCacheArchivePinMissNotResolved (MCP-2445 round-2 hole #3): an
+// exact pin absent from the archive cache must NOT fall back to a different
+// cached version.
+func TestResolveUvxCacheArchivePinMissNotResolved(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	// Only 2.0.0 cached; spec pins 1.0.0.
+	writeUvArchiveWheel(t, homeDir, "Hashonly", "mcp-server-fetch", "2.0.0", "mcp_server_fetch", false)
+
+	r := NewSourceResolver(zap.NewNop())
+	_, err := r.resolveUvxCache(ServerInfo{
+		Name:    "fetch",
+		Command: "uvx",
+		Args:    []string{"mcp-server-fetch==1.0.0"},
+	})
+	if err == nil {
+		t.Fatal("expected error on uvx archive version-pin miss (must not substitute a mismatched version)")
+	}
+}
+
+// TestResolveUvxCacheToolsDirPinGuard (MCP-2445 round-2 hole #3): the persistent
+// `uv tool install` tools dir must not satisfy a version pin it doesn't match.
+func TestResolveUvxCacheToolsDirPinGuard(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	// Tools dir installed at 2.0.0 (dist-info under the venv site-packages).
+	toolsDir := filepath.Join(homeDir, ".local", "share", "uv", "tools", "my-tool")
+	sp := filepath.Join(toolsDir, "lib", "python3.11", "site-packages")
+	os.MkdirAll(filepath.Join(sp, "my_tool-2.0.0.dist-info"), 0755)
+	os.WriteFile(filepath.Join(sp, "my_tool-2.0.0.dist-info", "METADATA"), []byte("Name: my-tool\n"), 0644)
+	os.MkdirAll(filepath.Join(sp, "my_tool"), 0755)
+	os.WriteFile(filepath.Join(sp, "my_tool", "__init__.py"), []byte("# src"), 0644)
+
+	r := NewSourceResolver(zap.NewNop())
+
+	// Pin 1.0.0 (absent) → must NOT resolve the 2.0.0 tools dir.
+	if _, err := r.resolveUvxCache(ServerInfo{Name: "my-tool", Command: "uvx", Args: []string{"my-tool==1.0.0"}}); err == nil {
+		t.Error("expected pin-miss error: tools dir is 2.0.0, pinned 1.0.0")
+	}
+	// Pin 2.0.0 (present) → resolves the tools dir.
+	res, err := r.resolveUvxCache(ServerInfo{Name: "my-tool", Command: "uvx", Args: []string{"my-tool==2.0.0"}})
+	if err != nil {
+		t.Fatalf("exact-pin hit should resolve: %v", err)
+	}
+	if res.SourceDir != toolsDir {
+		t.Errorf("got %q, want tools dir %q", res.SourceDir, toolsDir)
+	}
+	// No pin → resolves the tools dir (unchanged behavior).
+	if _, err := r.resolveUvxCache(ServerInfo{Name: "my-tool", Command: "uvx", Args: []string{"my-tool"}}); err != nil {
+		t.Errorf("unpinned should resolve tools dir: %v", err)
+	}
+}
+
 // TestResolveUvxCacheWithFlag (MCP-2445) verifies that `uvx --with <extra> <pkg>`
 // resolves the TARGET package, not the additional `--with` dependency. The old
 // parser stopped at the first positional after `--with`, mistaking the extra dep
@@ -891,9 +975,10 @@ func TestNpxContainerLocateScript(t *testing.T) {
 	if got := run(""); got != dirA {
 		t.Errorf("no pin: got %q, want first match %q", got, dirA)
 	}
-	// A pin with no matching install falls back to the first match.
-	if got := run("9.9.9"); got != dirA {
-		t.Errorf("unmatched pin: got %q, want fallback %q", got, dirA)
+	// A pin with no matching install returns NOTHING — never a mismatched
+	// version (MCP-2445 round-2 hole #3): scanning the wrong version = false coverage.
+	if got := run("9.9.9"); got != "" {
+		t.Errorf("unmatched pin: got %q, want empty (no mismatched substitute)", got)
 	}
 }
 
@@ -1045,22 +1130,36 @@ func TestDirLooksLikeSource(t *testing.T) {
 
 func TestIsPackageRunnerCommand(t *testing.T) {
 	tests := []struct {
+		name string
 		cmd  string
+		args []string
 		want bool
 	}{
-		{"npx", true},
-		{"/usr/local/bin/npx", true},
-		{"uvx", true},
-		{"pipx", true},
-		{"bunx", true},
-		{"python", false},
-		{"node", false},
-		{"./server", false},
+		// npx/uvx/bunx always run a package — runner by name.
+		{"npx", "npx", []string{"-y", "pkg"}, true},
+		{"npx path", "/usr/local/bin/npx", []string{"pkg"}, true},
+		{"uvx", "uvx", []string{"pkg"}, true},
+		{"bunx", "bunx", []string{"pkg"}, true},
+		// Subcommand-style runners: ONLY a runner when the ephemeral-run keyword is
+		// present (argument-aware classification, MCP-2445 round-2 hole #2).
+		{"pipx run", "pipx", []string{"run", "pkg"}, true},
+		{"pipx install (not runner)", "pipx", []string{"install", "pkg"}, false},
+		{"pnpm dlx", "pnpm", []string{"dlx", "pkg"}, true},
+		{"pnpm start (not runner)", "pnpm", []string{"start"}, false},
+		{"pnpm -p start (not runner)", "pnpm", []string{"-p", "start"}, false},
+		{"yarn dlx", "yarn", []string{"dlx", "pkg"}, true},
+		{"yarn build (not runner)", "yarn", []string{"build"}, false},
+		{"bun x", "bun", []string{"x", "pkg"}, true},
+		{"bun server.ts (not runner)", "bun", []string{"server.ts"}, false},
+		// Non-runners.
+		{"python", "python", []string{"app.py"}, false},
+		{"node", "node", []string{"server.js"}, false},
+		{"./server", "./server", nil, false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.cmd, func(t *testing.T) {
-			if got := isPackageRunnerCommand(tt.cmd); got != tt.want {
-				t.Errorf("isPackageRunnerCommand(%q) = %v, want %v", tt.cmd, got, tt.want)
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPackageRunnerCommand(tt.cmd, tt.args); got != tt.want {
+				t.Errorf("isPackageRunnerCommand(%q, %v) = %v, want %v", tt.cmd, tt.args, got, tt.want)
 			}
 		})
 	}

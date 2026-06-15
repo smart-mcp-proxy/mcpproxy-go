@@ -257,9 +257,35 @@ func runnerFlagTakesValue(npm bool, flag string) bool {
 // The first remaining positional token is the package. Returns "" when no package
 // can be determined.
 func runnerPackageSpec(commandBase string, args []string) string {
-	sub := runnerSubcommand(commandBase)
-	subSkipped := sub == ""
 	npm := isNpmRunner(commandBase)
+
+	// Subcommand-style runners (pnpm/yarn `dlx`, `bun x`, `pipx run`) REQUIRE
+	// their keyword before anything is treated as a package. The keyword check
+	// runs BEFORE any flag parsing, so a package flag cannot bypass it: a bare
+	// `pnpm start`, `bun server.ts`, `pipx install foo`, or `pnpm -p start` has
+	// no keyword and resolves nothing (a local invocation, not a remote fetch —
+	// fetching the wrong token would mean false coverage + typosquat risk;
+	// MCP-2445). Leading global flags before the keyword (e.g. `pnpm --silent
+	// dlx`) are skipped. npx/uvx/bunx have no subcommand and parse from the start.
+	if sub := runnerSubcommand(commandBase); sub != "" {
+		i := 0
+		for i < len(args) {
+			arg := args[i]
+			if strings.HasPrefix(arg, "-") {
+				if i+1 < len(args) && runnerFlagTakesValue(npm, arg) {
+					i++
+				}
+				i++
+				continue
+			}
+			break // first positional token
+		}
+		if i >= len(args) || args[i] != sub {
+			return "" // first positional is not the required keyword → no package
+		}
+		args = args[i+1:] // parse only what follows the keyword
+	}
+
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		hasNext := i+1 < len(args)
@@ -277,20 +303,6 @@ func runnerPackageSpec(commandBase string, args []string) string {
 				i++ // skip the flag's value too
 			}
 			continue
-		}
-		// First positional token. Subcommand-style runners (pnpm/yarn/bun/pipx)
-		// REQUIRE their keyword (dlx/x/run) before the package token: a bare
-		// `pnpm start`, `bun server.ts`, or `pipx install foo` is a LOCAL
-		// invocation, NOT a remote package fetch, so it must not resolve a spec —
-		// fetching the wrong token would mean false coverage and typosquat risk
-		// (MCP-2445 re-review). Once the keyword is consumed the next positional
-		// is the package.
-		if !subSkipped {
-			if arg == sub {
-				subSkipped = true
-				continue
-			}
-			return ""
 		}
 		return arg
 	}

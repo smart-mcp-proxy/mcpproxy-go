@@ -174,7 +174,7 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 	// a server like `npx @modelcontextprotocol/server-filesystem /tmp/data`
 	// from picking up the user's data dir (`/tmp/data`) as the server
 	// source — the arg is the filesystem server's allowed root, not code.
-	if info.Command != "" && isPackageRunnerCommand(info.Command) {
+	if info.Command != "" && isPackageRunnerCommand(info.Command, info.Args) {
 		if resolved, err := r.resolveFromPackageCache(ctx, info); err == nil {
 			return resolved, nil
 		} else {
@@ -256,7 +256,7 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 
 	// Last resort: try the package cache for any other command (e.g. the user
 	// has an absolute path to node_modules that we didn't match above).
-	if info.Command != "" && !isPackageRunnerCommand(info.Command) {
+	if info.Command != "" && !isPackageRunnerCommand(info.Command, info.Args) {
 		if resolved, err := r.resolveFromPackageCache(ctx, info); err == nil {
 			return resolved, nil
 		}
@@ -267,7 +267,7 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 	// a quarantined-on-add server is never run locally, so the local cache above
 	// always misses (MCP-2206). Fetching real source lets the AI + supply-chain
 	// scanners run instead of degrading to tool_definitions_only.
-	if r.fetchPackageSource && info.Command != "" && isPackageRunnerCommand(info.Command) {
+	if r.fetchPackageSource && info.Command != "" && isPackageRunnerCommand(info.Command, info.Args) {
 		if resolved, err := r.resolveFromPackageFetch(ctx, info); err == nil {
 			return resolved, nil
 		} else {
@@ -286,15 +286,22 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 // a remote registry rather than running local source code. For these, the
 // server source lives in the package manager's cache, not in any positional
 // argument.
-func isPackageRunnerCommand(command string) bool {
+//
+// Classification is ARGUMENT-AWARE for subcommand-style runners (MCP-2445):
+// npx/uvx/bunx always run a remote package by name, but pnpm/yarn/bun/pipx are
+// general multi-command tools — they are runners ONLY when their ephemeral-run
+// keyword (`dlx`/`x`/`run`) is actually present. Classifying `pnpm start` or
+// `bun server.ts` as a runner by name alone would route a local invocation into
+// the package cache/fetch path and scan the wrong token. We decide this up front
+// rather than relying on a later parser failure.
+func isPackageRunnerCommand(command string, args []string) bool {
 	base := strings.ToLower(filepath.Base(command))
 	switch base {
-	// pnpm/yarn are runners only in their `dlx` form; that is the only way an MCP
-	// server is launched from them, and resolveFromPackageFetch dispatches pnpm to
-	// the npm fetch path. Including them here lets that fetch fallback actually run
-	// (previously pnpm was dispatched but never gated true here — a dead branch).
-	case "npx", "uvx", "pipx", "bunx", "bun", "pnpm", "yarn":
+	case "npx", "uvx", "bunx":
 		return true
+	case "pipx", "pnpm", "yarn", "bun":
+		// Runner only when the ephemeral-run keyword yields a resolvable package.
+		return runnerPackageSpec(base, args) != ""
 	}
 	return false
 }
@@ -792,19 +799,20 @@ func uvxTargetPackage(info ServerInfo) string {
 // embedding. Factored out so the shell logic is unit-testable on the host.
 func npxContainerLocateScript(npxGlobRoot, pkg, version string) string {
 	pkgEsc := strings.ReplaceAll(pkg, "'", `'\''`)
-	verClause := ""
 	if version != "" {
-		verEsc := strings.ReplaceAll(version, "'", `'\''`)
-		// The .dist-info-free npm case: match the version inside package.json. The
+		// Pinned: return ONLY a bucket whose package.json declares that exact
+		// version. A pin-miss returns nothing — never a mismatched version, which
+		// would scan the wrong code and report false coverage (MCP-2445). The
 		// pattern tolerates arbitrary JSON spacing around the colon.
-		verClause = "if grep -Eq '\"version\"[[:space:]]*:[[:space:]]*\"" + verEsc + "\"' \"$d/package.json\" 2>/dev/null; then printf '%s\\n' \"$d\"; exit 0; fi; "
+		verEsc := strings.ReplaceAll(version, "'", `'\''`)
+		return "for d in " + npxGlobRoot + "/*/node_modules/'" + pkgEsc + "'; do " +
+			"[ -d \"$d\" ] || continue; " +
+			"if grep -Eq '\"version\"[[:space:]]*:[[:space:]]*\"" + verEsc + "\"' \"$d/package.json\" 2>/dev/null; then printf '%s\\n' \"$d\"; exit 0; fi; " +
+			"done"
 	}
-	return "first=''; for d in " + npxGlobRoot + "/*/node_modules/'" + pkgEsc + "'; do " +
-		"[ -d \"$d\" ] || continue; " +
-		"[ -z \"$first\" ] && first=\"$d\"; " +
-		verClause +
-		"done; " +
-		"[ -n \"$first\" ] && printf '%s\\n' \"$first\""
+	// Unpinned: first matching bucket.
+	return "for d in " + npxGlobRoot + "/*/node_modules/'" + pkgEsc + "'; do " +
+		"[ -d \"$d\" ] || continue; printf '%s\\n' \"$d\"; exit 0; done"
 }
 
 // findContainerTargetDir locates the target package's directory inside a
@@ -951,7 +959,7 @@ func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo)
 	// source without executing it (MCP-2206). Same rationale as Pass 1 — without
 	// a local container or cache, Pass 2 supply-chain scanning would otherwise
 	// have nothing to analyze for npx/uvx servers.
-	if r.fetchPackageSource && info.Command != "" && isPackageRunnerCommand(info.Command) {
+	if r.fetchPackageSource && info.Command != "" && isPackageRunnerCommand(info.Command, info.Args) {
 		if resolved, err := r.resolveFromPackageFetch(ctx, info); err == nil {
 			return resolved, nil
 		}
@@ -1347,6 +1355,19 @@ func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, erro
 		return nil, fmt.Errorf("package %q not found in npx cache (%s)", pkgName, npxCacheDir)
 	}
 
+	if wantVersion != "" && !bestVerMatch {
+		// An exact version was pinned but no cached candidate declares it. Do NOT
+		// substitute a different cached version — scanning the wrong code reports
+		// false coverage (MCP-2445). Defer to the published-source fetch fallback,
+		// which fetches the PINNED version, or degrade to tool_definitions_only.
+		r.logger.Warn("npx cache has the package but not the pinned version; deferring to published-source fetch",
+			zap.String("server", info.Name),
+			zap.String("package", pkgName),
+			zap.String("pinned_version", wantVersion),
+		)
+		return nil, fmt.Errorf("npx cache for %q has no entry matching pinned version %q (avoiding mismatched-version scan)", pkgName, wantVersion)
+	}
+
 	if !bestReal {
 		// Every candidate was a bare stub (e.g. a lone tools.json mcpproxy wrote
 		// into the cache) — no real installed source exists locally. Returning the
@@ -1443,6 +1464,13 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 	// Check if it's a git URL: git+https://github.com/...
 	isGitURL := strings.HasPrefix(pkgName, "git+")
 
+	// Exact version pin (if any). Only meaningful for registry packages — git
+	// specs pin via the URL ref, not a PEP 440 version.
+	wantVersion := ""
+	if !isGitURL {
+		_, wantVersion = parsePackageSpec(pkgName)
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot determine home directory: %w", err)
@@ -1474,33 +1502,48 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 		}
 	}
 
-	// Strategy 2: UV tools directory (for regular packages)
-	// Strip version: package@version → package
+	// Strategy 2: UV tools directory (for regular packages). Reduce the spec to a
+	// bare distribution name: strip a git+ URL to its repo, otherwise strip the
+	// `@version` form AND any PEP 440 specifier (`==`, `>=`, extras …) — the latter
+	// was previously missed, so a `pkg==1.0` spec produced a bogus `tools/pkg==1.0`
+	// path that never matched.
 	cleanPkg := pkgName
-	if idx := strings.LastIndex(cleanPkg, "@"); idx > 0 {
-		cleanPkg = cleanPkg[:idx]
-	}
-	// Also strip git+ prefix and URL
 	if strings.HasPrefix(cleanPkg, "git+") {
 		// Extract package name from URL: git+https://github.com/org/repo → repo
 		parts := strings.Split(cleanPkg, "/")
 		if len(parts) > 0 {
 			cleanPkg = parts[len(parts)-1]
 		}
+	} else {
+		if idx := strings.LastIndex(cleanPkg, "@"); idx > 0 {
+			cleanPkg = cleanPkg[:idx]
+		}
+		cleanPkg = stripPkgVersion(cleanPkg)
 	}
 
 	toolsDir := filepath.Join(homeDir, ".local", "share", "uv", "tools", cleanPkg)
 	if stat, err := os.Stat(toolsDir); err == nil && stat.IsDir() {
-		r.logger.Info("Resolved source from UV tools directory",
+		// When a version is pinned, only accept the tools dir if it actually holds
+		// that version — otherwise fall through so the published-source fetch gets
+		// the PINNED version instead of scanning whatever was `uv tool install`-ed
+		// (MCP-2445: never substitute a mismatched version).
+		if wantVersion == "" || uvDirHasVersion(toolsDir, stripPkgVersion(cleanPkg), wantVersion) {
+			r.logger.Info("Resolved source from UV tools directory",
+				zap.String("server", info.Name),
+				zap.String("package", cleanPkg),
+				zap.String("path", toolsDir),
+			)
+			return &ResolvedSource{
+				SourceDir: toolsDir,
+				Method:    "uvx_cache",
+				Cleanup:   func() {},
+			}, nil
+		}
+		r.logger.Warn("UV tools dir present but not the pinned version; deferring to archive/published-source fetch",
 			zap.String("server", info.Name),
 			zap.String("package", cleanPkg),
-			zap.String("path", toolsDir),
+			zap.String("pinned_version", wantVersion),
 		)
-		return &ResolvedSource{
-			SourceDir: toolsDir,
-			Method:    "uvx_cache",
-			Cleanup:   func() {},
-		}, nil
 	}
 
 	// Strategy 3: ephemeral uvx archive cache (~/.cache/uv/archive-v0/<hash>/).
@@ -1516,9 +1559,8 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 	// not archive-v0, so they are skipped here.
 	if !isGitURL {
 		archiveRoot := filepath.Join(homeDir, ".cache", "uv", "archive-v0")
-		// Honor an exact version pin: prefer the archive entry whose .dist-info
-		// declares the pinned version over a newer-but-mismatched one (MCP-2445).
-		_, wantVersion := parsePackageSpec(pkgName)
+		// Honor an exact version pin: select the archive entry whose .dist-info
+		// declares the pinned version; a pin-miss resolves nothing (MCP-2445).
 		if dir, ok := findUvxArchiveDir(archiveRoot, stripPkgVersion(cleanPkg), wantVersion); ok {
 			r.logger.Info("Resolved source from UV archive cache",
 				zap.String("server", info.Name),
@@ -1635,7 +1677,34 @@ func findUvxArchiveDir(archiveRoot, pkg, wantVersion string) (string, bool) {
 	if best == "" {
 		return "", false
 	}
+	if wantVersion != "" && !bestVerMatch {
+		// Pinned version requested but no archive entry declares it. Do not
+		// substitute a different cached version (false coverage) — report not found
+		// so the caller fetches the pinned version or degrades (MCP-2445).
+		return "", false
+	}
 	return best, true
+}
+
+// uvDirHasVersion reports whether a uv venv-style directory (a `uv tool install`
+// tools dir) holds distribution pkg at exactly version. It looks for a matching
+// `<dist>-<version>.dist-info` under any `lib/python*/site-packages`. Used to keep
+// a version pin honest against the persistent tools dir.
+func uvDirHasVersion(root, pkg, version string) bool {
+	if version == "" {
+		return false
+	}
+	norm := normalizeDistName(pkg)
+	if norm == "" {
+		return false
+	}
+	sps, _ := filepath.Glob(filepath.Join(root, "lib", "python*", "site-packages"))
+	for _, d := range sps {
+		if _, vm := distInfoMatch(d, norm, version); vm {
+			return true
+		}
+	}
+	return false
 }
 
 // distInfoMatch reports whether dir directly contains a `<name>-<version>.dist-info`

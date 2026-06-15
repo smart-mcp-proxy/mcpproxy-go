@@ -73,6 +73,13 @@ func TestRunnerPackageSpec(t *testing.T) {
 		{"bun run dev (local script)", "bun", []string{"run", "dev"}, ""},
 		{"yarn build (local script)", "yarn", []string{"build"}, ""},
 		{"pipx install foo (not ephemeral run)", "pipx", []string{"install", "foo"}, ""},
+		// The subcommand keyword is enforced BEFORE flag parsing, so a package
+		// flag cannot bypass it (MCP-2445 round-2 hole #1).
+		{"pnpm -p start (flag bypass)", "pnpm", []string{"-p", "start"}, ""},
+		{"bun -p server.ts (flag bypass)", "bun", []string{"-p", "server.ts"}, ""},
+		{"pnpm --package x (no dlx)", "pnpm", []string{"--package", "x", "start"}, ""},
+		// Leading global flags before the keyword are fine; keyword still required.
+		{"pnpm --silent dlx pkg", "pnpm", []string{"--silent", "dlx", "pkg"}, "pkg"},
 		// Degenerate inputs.
 		{"npx flag only", "npx", []string{"-y"}, ""},
 		{"nil", "npx", nil, ""},
