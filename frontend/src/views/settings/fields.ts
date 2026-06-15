@@ -49,6 +49,11 @@ export interface SettingField {
   docs?: string // doc page path on docs.mcpproxy.app, e.g. "/features/docker-isolation"
   valueKind?: ValueKind // extra format validation for text/secret fields
   optional?: boolean // when true, an empty value is valid (skips kind validation)
+  // When set, the control renders a compact "Reset to default" button that
+  // repopulates the editable value with this text. Injected at runtime once the
+  // live default (e.g. the backend-resolved `instructions` default) is fetched
+  // (MCP-2484).
+  resetDefault?: string
 }
 
 export interface SettingsAccordion {

@@ -59,3 +59,45 @@ describe('instructions field catalogue (MCP-2175)', () => {
     expect(validateField(f, 'custom instructions text')).toBeNull()
   })
 })
+
+// MCP-2484 — a compact "Reset to default" button next to the instructions
+// textarea. The live default (Go `defaultInstructions`, fetched from
+// /api/v1/status) is injected onto the field as `resetDefault`; clicking the
+// button repopulates the editable value (it flows through the normal change
+// path so the section marks it dirty and Save persists it as `instructions`).
+
+const resettableField: Field = {
+  key: 'instructions',
+  label: 'Server instructions',
+  control: 'textarea',
+  optional: true,
+  placeholder: 'BUILT-IN DEFAULT',
+  resetDefault: 'THE BUILT-IN DEFAULT TEXT',
+}
+
+describe('SettingField "Reset to default" (MCP-2484)', () => {
+  it('renders a compact reset button when the field carries a resetDefault', () => {
+    const w = mount(SettingField, { props: { field: resettableField, modelValue: 'custom' } })
+    expect(w.find('[data-test="setting-reset-instructions"]').exists()).toBe(true)
+  })
+
+  it('emits the default text when the reset button is clicked', async () => {
+    const w = mount(SettingField, { props: { field: resettableField, modelValue: 'custom edited' } })
+    await w.find('[data-test="setting-reset-instructions"]').trigger('click')
+    const emits = w.emitted('update:modelValue')
+    expect(emits).toBeTruthy()
+    expect(emits![emits!.length - 1][0]).toBe('THE BUILT-IN DEFAULT TEXT')
+  })
+
+  it('hides the reset button until the async default has loaded (no resetDefault)', () => {
+    const w = mount(SettingField, {
+      props: { field: { ...resettableField, resetDefault: undefined }, modelValue: '' },
+    })
+    expect(w.find('[data-test="setting-reset-instructions"]').exists()).toBe(false)
+  })
+
+  it('does not render a reset button on a field without resetDefault', () => {
+    const w = mount(SettingField, { props: { field: instrField, modelValue: '' } })
+    expect(w.find('[data-test="setting-reset-instructions"]').exists()).toBe(false)
+  })
+})
