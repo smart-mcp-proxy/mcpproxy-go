@@ -1029,6 +1029,14 @@ func (r *Runtime) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload servers: %w", err)
 	}
 
+	// MCP-2482: detect a telemetry enabled->disabled flip across the reload and
+	// fire the one-time opt-out beacon. This covers config changes that arrive
+	// via a disk reload (there is no fsnotify auto-watcher, so this is the
+	// manual/triggered-reload path). nil-safe + fire-and-forget.
+	if r.telemetryService != nil {
+		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
+	}
+
 	go r.postConfigReload()
 
 	r.logger.Info("Configuration reload completed",

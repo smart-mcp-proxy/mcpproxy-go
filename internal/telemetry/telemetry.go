@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -218,7 +220,23 @@ type Service struct {
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
 	heartbeatInterval time.Duration
+
+	// MCP-2482: one-time opt-out beacon state.
+	// mu guards resolvedEnabled, config, and endpoint, which NotifyConfigChanged
+	// mutates on a live config swap.
+	mu sync.Mutex
+	// resolvedEnabled is the last-known resolved telemetry-enabled state
+	// (IsTelemetryEnabled — nil means enabled). Used to detect the
+	// enabled->disabled flip that fires the opt-out beacon.
+	resolvedEnabled bool
+	// optedOut latches true once the opt-out beacon has fired; it gates all
+	// further heartbeat emission so no telemetry leaves after the user opts out.
+	optedOut atomic.Bool
 }
+
+// optOutBeaconTimeout bounds the best-effort opt-out beacon send so a slow or
+// unreachable endpoint never delays the config save that triggered it.
+const optOutBeaconTimeout = 5 * time.Second
 
 // New creates a new telemetry service.
 func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logger) *Service {
@@ -237,6 +255,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		envDisabledReason: envReason,
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
+		resolvedEnabled:   cfg.IsTelemetryEnabled(),
 	}
 }
 
@@ -410,6 +429,12 @@ func (s *Service) Start(ctx context.Context) {
 }
 
 func (s *Service) sendHeartbeat(ctx context.Context) {
+	// MCP-2482: once the user has opted out, no further telemetry is emitted —
+	// even if the long-running heartbeat loop is still ticking.
+	if s.optedOut.Load() {
+		return
+	}
+
 	payload := s.buildHeartbeat()
 
 	data, err := json.Marshal(payload)

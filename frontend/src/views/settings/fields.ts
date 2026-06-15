@@ -250,13 +250,13 @@ export const GENERAL_FIELDS: SettingField[] = [
     key: 'telemetry.enabled',
     docs: '/features/telemetry',
     label: 'Anonymous usage telemetry',
-    help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.',
+    help: 'Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time. Disabling sends a single anonymous opt-out signal, then stops all telemetry.',
     control: 'toggle',
     danger: {
       confirmValue: false,
       tone: 'info',
       message:
-        'Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal. Turn it off anyway?',
+        'Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal, and sends a single anonymous opt-out signal before all telemetry stops. Turn it off anyway?',
     },
   },
   { key: 'enable_prompts', label: 'Expose MCP prompts to clients', help: 'Advertises mcpproxy’s built-in guided prompts to connected AI clients: “setup-new-mcp-server” (add a server) and “troubleshoot-mcp-server” (diagnose connection issues).', control: 'toggle' },

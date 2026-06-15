@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,6 +268,13 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// Capture the resolved state BEFORE mutating, so we can detect a genuine
+	// enabled->disabled transition (MCP-2482). A second `disable` when already
+	// disabled must not emit another beacon.
+	wasEnabled := cfg.IsTelemetryEnabled()
+	anonID := cfg.GetAnonymousID()
+	endpoint := cfg.GetTelemetryEndpoint()
+
 	if cfg.Telemetry == nil {
 		cfg.Telemetry = &config.TelemetryConfig{}
 	}
@@ -276,6 +284,21 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	configPath := telemetryConfigSavePath(cfg)
 	if err := config.SaveConfig(cfg, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	// One-time opt-out beacon: best-effort, fire on the real enabled->disabled
+	// flip. When a daemon is running it does NOT auto-reload this file (there is
+	// no fsnotify watcher), so the CLI is responsible for the beacon in the
+	// CLI-driven path. If there is no anonymous ID there is nothing to dedup on.
+	if wasEnabled && anonID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		client := &http.Client{Timeout: 5 * time.Second}
+		if beaconErr := telemetry.SendOptOutBeacon(ctx, client, endpoint, anonID); beaconErr != nil {
+			// Best-effort only — telemetry is already disabled on disk. Surface
+			// at a low level so scripts aren't tripped up.
+			fmt.Println("Note: opt-out signal could not be delivered (telemetry is still disabled).")
+		}
 	}
 
 	fmt.Println("Telemetry disabled.")
