@@ -204,7 +204,7 @@ jobs:
         run: go build -tags server ./cmd/mcpproxy
 
       - name: Test server edition packages
-        run: go test -race -tags server ./internal/teams/... ./internal/config/...
+        run: go test -race -tags server ./internal/serveredition/... ./internal/config/...
 
   build:
     name: Build
