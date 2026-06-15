@@ -31,17 +31,61 @@ type OptOutBeacon struct {
 	AnonymousID string `json:"anonymous_id"`
 }
 
+// EffectiveTelemetryEnabled resolves whether telemetry is ACTUALLY active for
+// cfg, honoring both the config bool (IsTelemetryEnabled — nil means enabled per
+// MCP-2477) AND the startup env overrides (DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY
+// via IsDisabledByEnv). This must match the same effective resolution startup
+// uses: telemetry that was never enabled (e.g. DO_NOT_TRACK=1 or CI=true) must
+// never be considered "enabled", so disabling it produces no opt-out beacon.
+func EffectiveTelemetryEnabled(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if disabled, _ := IsDisabledByEnv(); disabled {
+		return false
+	}
+	return cfg.IsTelemetryEnabled()
+}
+
 // TelemetryDisableTransition reports whether the resolved telemetry state moved
-// from enabled to disabled between prior and next. "Resolved" follows
-// Config.IsTelemetryEnabled — a nil Telemetry block or a nil Enabled pointer
-// resolves to enabled (telemetry is opt-out), per MCP-2477. This is the single
+// from enabled to disabled between prior and next, using the SAME effective
+// resolution as startup (config bool + env overrides). This is the single
 // source of truth for the enabled->disabled flip, shared by the running daemon
 // (REST / reload paths) and the `mcpproxy telemetry disable` CLI.
 func TelemetryDisableTransition(prior, next *config.Config) bool {
 	if prior == nil || next == nil {
 		return false
 	}
-	return prior.IsTelemetryEnabled() && !next.IsTelemetryEnabled()
+	return EffectiveTelemetryEnabled(prior) && !EffectiveTelemetryEnabled(next)
+}
+
+// EmitOptOutBeacon applies the shared eligibility guards and, if eligible, sends
+// the opt-out beacon synchronously. It is the single guarded send entry point
+// used by BOTH the daemon (fire-and-forget in a goroutine from
+// NotifyConfigChanged) and the `mcpproxy telemetry disable` CLI — so neither
+// duplicates the send nor bypasses a guard.
+//
+// Guards (all must hold, mirroring the heartbeat eligibility):
+//   - valid semver build (dev builds never emit telemetry),
+//   - telemetry not disabled by environment (DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY),
+//   - an anonymous install ID exists (nothing to dedup on otherwise).
+//
+// Returns true if a send was attempted (regardless of HTTP outcome). Best-effort:
+// callers disable telemetry whether or not this succeeds.
+func (s *Service) EmitOptOutBeacon(ctx context.Context) bool {
+	if !isValidSemver(s.version) {
+		return false
+	}
+	if disabled, _ := IsDisabledByEnv(); disabled {
+		return false
+	}
+	if s.config.GetAnonymousID() == "" {
+		return false
+	}
+	if err := s.SendOptOutBeacon(ctx); err != nil {
+		s.logger.Debug("opt-out beacon send failed (telemetry still disabled)", zap.Error(err))
+	}
+	return true
 }
 
 // SendOptOutBeacon posts a single opt-out beacon to the configured telemetry
@@ -160,7 +204,10 @@ func (s *Service) NotifyConfigChanged(newCfg *config.Config) {
 
 	s.mu.Lock()
 	prior := s.resolvedEnabled
-	next := newCfg.IsTelemetryEnabled()
+	// Use the SAME effective resolution as startup (config bool + env overrides)
+	// so an env-disabled install (DO_NOT_TRACK / CI) — which never emitted
+	// telemetry — never produces an opt-out beacon on a config flip.
+	next := EffectiveTelemetryEnabled(newCfg)
 	s.resolvedEnabled = next
 	// Keep the service's live config/endpoint current. ApplyConfig swaps the
 	// runtime's *config.Config pointer wholesale, so without this the service
@@ -181,19 +228,11 @@ func (s *Service) NotifyConfigChanged(newCfg *config.Config) {
 	// Stop all further telemetry immediately, before the (slower) network send.
 	s.optedOut.Store(true)
 
-	// Dev builds never emit telemetry; don't emit a beacon for them either.
-	if !isValidSemver(s.version) {
-		return
-	}
-	if newCfg.GetAnonymousID() == "" {
-		return
-	}
-
+	// Fire-and-forget through the shared guarded entry point (semver / env /
+	// anon-id guards live there). Never blocks the caller (the config save).
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), optOutBeaconTimeout)
 		defer cancel()
-		if err := s.SendOptOutBeacon(ctx); err != nil {
-			s.logger.Debug("opt-out beacon send failed (telemetry still disabled)", zap.Error(err))
-		}
+		s.EmitOptOutBeacon(ctx)
 	}()
 }

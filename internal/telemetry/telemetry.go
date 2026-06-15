@@ -255,7 +255,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		envDisabledReason: envReason,
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
-		resolvedEnabled:   cfg.IsTelemetryEnabled(),
+		resolvedEnabled:   EffectiveTelemetryEnabled(cfg),
 	}
 }
 
@@ -471,6 +471,15 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+
+	// MCP-2482: re-check the opt-out latch immediately before transmit. The
+	// entry check above can pass for a heartbeat already in flight when the user
+	// opts out mid-build; without this second check that heartbeat would still
+	// ship a full usage payload AFTER the opt-out. No usage data leaves once the
+	// latch is set.
+	if s.optedOut.Load() {
+		return
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

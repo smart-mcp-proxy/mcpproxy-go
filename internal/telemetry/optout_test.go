@@ -272,3 +272,131 @@ func TestOptOut_StopsFurtherHeartbeats(t *testing.T) {
 		t.Fatalf("heartbeat emitted after opt-out: hits went %d -> %d", hitsAfterBeacon, got)
 	}
 }
+
+// hookStats is a RuntimeStats whose GetServerCount fires a hook, letting a test
+// flip state DURING buildHeartbeat to exercise the in-flight opt-out race.
+type hookStats struct {
+	onServerCount func()
+}
+
+func (h *hookStats) GetServerCount() int {
+	if h.onServerCount != nil {
+		h.onServerCount()
+	}
+	return 1
+}
+func (h *hookStats) GetConnectedServerCount() int      { return 0 }
+func (h *hookStats) GetToolCount() int                 { return 0 }
+func (h *hookStats) GetRoutingMode() string            { return "retrieve_tools" }
+func (h *hookStats) IsQuarantineEnabled() bool         { return false }
+func (h *hookStats) IsDockerAvailable() bool           { return false }
+func (h *hookStats) GetDockerIsolatedServerCount() int { return 0 }
+
+// TestSendHeartbeat_RechecksOptOutBeforeTransmit covers Codex fix #2: a heartbeat
+// already in flight when the opt-out latch flips must NOT transmit a usage
+// payload. The latch is flipped mid-buildHeartbeat (so the entry check has
+// already passed); the pre-transmit re-check must suppress the send.
+func TestSendHeartbeat_RechecksOptOutBeforeTransmit(t *testing.T) {
+	clearTelemetryEnv(t)
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Telemetry: &config.TelemetryConfig{
+		Enabled: boolPtr(true), AnonymousID: "anon-xyz", Endpoint: server.URL,
+	}}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	// Flip the opt-out latch while the payload is being built (after the entry
+	// guard, before transmit).
+	svc.SetRuntimeStats(&hookStats{onServerCount: func() { svc.optedOut.Store(true) }})
+
+	svc.sendHeartbeat(context.Background())
+
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("usage heartbeat transmitted after mid-flight opt-out: %d sends", got)
+	}
+}
+
+// TestNotifyConfigChanged_NoBeaconWhenEnvDisabled covers Codex fix #1: when
+// telemetry is disabled by environment (DO_NOT_TRACK / CI), it was never
+// enabled, so a config enabled->disabled flip must emit NO opt-out beacon.
+func TestNotifyConfigChanged_NoBeaconWhenEnvDisabled(t *testing.T) {
+	clearTelemetryEnv(t)
+	t.Setenv("DO_NOT_TRACK", "1") // env-disabled: telemetry never ran
+
+	received := make(chan struct{}, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	enabled := &config.Config{Telemetry: &config.TelemetryConfig{
+		Enabled: boolPtr(true), AnonymousID: "anon-xyz", Endpoint: server.URL,
+	}}
+	disabled := &config.Config{Telemetry: &config.TelemetryConfig{
+		Enabled: boolPtr(false), AnonymousID: "anon-xyz", Endpoint: server.URL,
+	}}
+
+	svc := New(enabled, "", "v1.2.3", "personal", zap.NewNop())
+	svc.NotifyConfigChanged(disabled)
+
+	select {
+	case <-received:
+		t.Fatal("no beacon expected when telemetry was env-disabled (never enabled)")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestEmitOptOutBeacon_Guards covers Codex fix #3: the single guarded send entry
+// (used by both the daemon and the CLI) must skip on a dev/non-semver build, when
+// env-disabled, and when there is no anonymous ID — and send only when eligible.
+func TestEmitOptOutBeacon_Guards(t *testing.T) {
+	newSvc := func(version, anonID string, endpoint string) *Service {
+		return New(&config.Config{Telemetry: &config.TelemetryConfig{
+			AnonymousID: anonID, Endpoint: endpoint,
+		}}, "", version, "personal", zap.NewNop())
+	}
+
+	t.Run("dev_build_skips", func(t *testing.T) {
+		clearTelemetryEnv(t)
+		if newSvc("dev", "anon", "http://127.0.0.1:0").EmitOptOutBeacon(context.Background()) {
+			t.Fatal("dev (non-semver) build must not attempt a beacon")
+		}
+	})
+
+	t.Run("env_disabled_skips", func(t *testing.T) {
+		clearTelemetryEnv(t)
+		t.Setenv("CI", "true")
+		if newSvc("v1.2.3", "anon", "http://127.0.0.1:0").EmitOptOutBeacon(context.Background()) {
+			t.Fatal("env-disabled (CI) build must not attempt a beacon")
+		}
+	})
+
+	t.Run("no_anon_id_skips", func(t *testing.T) {
+		clearTelemetryEnv(t)
+		if newSvc("v1.2.3", "", "http://127.0.0.1:0").EmitOptOutBeacon(context.Background()) {
+			t.Fatal("missing anonymous ID must not attempt a beacon")
+		}
+	})
+
+	t.Run("eligible_sends", func(t *testing.T) {
+		clearTelemetryEnv(t)
+		var hits atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+		if !newSvc("v1.2.3", "anon", server.URL).EmitOptOutBeacon(context.Background()) {
+			t.Fatal("eligible service should attempt a beacon")
+		}
+		if hits.Load() != 1 {
+			t.Fatalf("expected exactly one beacon, got %d", hits.Load())
+		}
+	})
+}

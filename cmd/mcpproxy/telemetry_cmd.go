@@ -268,11 +268,12 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Capture the resolved state BEFORE mutating, so we can detect a genuine
-	// enabled->disabled transition (MCP-2482). A second `disable` when already
-	// disabled must not emit another beacon.
-	wasEnabled := cfg.IsTelemetryEnabled()
-	anonID := cfg.GetAnonymousID()
+	// Capture the EFFECTIVE resolved state BEFORE mutating, so we only beacon on
+	// a genuine enabled->disabled transition (MCP-2482). Effective resolution
+	// includes env overrides (DO_NOT_TRACK / CI), so an install where telemetry
+	// was never actually enabled emits nothing. A second `disable` when already
+	// disabled also emits nothing (wasEnabled == false).
+	wasEnabled := telemetry.EffectiveTelemetryEnabled(cfg)
 
 	if cfg.Telemetry == nil {
 		cfg.Telemetry = &config.TelemetryConfig{}
@@ -285,24 +286,23 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	// One-time opt-out beacon: best-effort, fire on the real enabled->disabled
-	// flip. When a daemon is running it does NOT auto-reload this file (there is
-	// no fsnotify watcher), so the CLI is responsible for the beacon in the
-	// CLI-driven path. If there is no anonymous ID there is nothing to dedup on.
-	if wasEnabled && anonID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// Reuse the telemetry service's own sender so the destination is the
-		// resolved telemetry endpoint (never an arbitrary caller-supplied URL).
-		beaconSvc := telemetry.New(cfg, "", "", "", zap.NewNop())
-		if beaconErr := beaconSvc.SendOptOutBeacon(ctx); beaconErr != nil {
-			// Best-effort only — telemetry is already disabled on disk. Surface
-			// at a low level so scripts aren't tripped up.
-			fmt.Println("Note: opt-out signal could not be delivered (telemetry is still disabled).")
-		}
-	}
-
+	// The disable is now persisted and effective — confirm immediately so the
+	// command never appears to hang on the (best-effort) beacon below.
 	fmt.Println("Telemetry disabled.")
+
+	// One-time opt-out beacon. When a daemon is running it does NOT auto-reload
+	// this file (there is no fsnotify watcher), so the CLI is responsible for the
+	// beacon in the CLI-driven path. Route it through the SAME guarded server-side
+	// entry point (EmitOptOutBeacon applies the dev-build/semver, env, and
+	// anon-id guards and owns the single send) rather than duplicating the send
+	// or bypassing a guard. A short timeout keeps this from blocking on a slow
+	// endpoint; the CLI is short-lived so the send must complete before exit.
+	if wasEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		beaconSvc := telemetry.New(cfg, "", version, Edition, zap.NewNop())
+		beaconSvc.EmitOptOutBeacon(ctx)
+	}
 	return nil
 }
 
