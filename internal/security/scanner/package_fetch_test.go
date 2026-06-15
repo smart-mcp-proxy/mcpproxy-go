@@ -85,7 +85,7 @@ func TestExtractTarballGz_Normal(t *testing.T) {
 		"package/lib/util.js":  "module.exports = {}",
 	})
 	dest := t.TempDir()
-	if err := extractTarballGz(bytes.NewReader(data), dest, 1000, 10<<20); err != nil {
+	if err := extractTarballGz(bytes.NewReader(data), dest, 1000, 10<<20, fetchMaxFileBytes); err != nil {
 		t.Fatalf("extractTarballGz: %v", err)
 	}
 	for _, rel := range []string{"package/index.js", "package/package.json", "package/lib/util.js"} {
@@ -102,10 +102,16 @@ func TestExtractTarballGz_RejectsZipSlip(t *testing.T) {
 	})
 	dest := t.TempDir()
 	// Extraction should not error fatally on the bad entry but MUST skip it.
-	_ = extractTarballGz(bytes.NewReader(data), dest, 1000, 10<<20)
+	_ = extractTarballGz(bytes.NewReader(data), dest, 1000, 10<<20, fetchMaxFileBytes)
 	escaped := filepath.Join(filepath.Dir(filepath.Dir(dest)), "etc", "evil.txt")
 	if _, err := os.Stat(escaped); err == nil {
 		t.Fatalf("zip-slip: file escaped to %s", escaped)
+	}
+	// safeJoin must REJECT the traversal entry, not rewrite it into an in-dest
+	// path (the MCP-2444 bug): the rewritten location must not exist either.
+	rewritten := filepath.Join(dest, "etc", "evil.txt")
+	if _, err := os.Stat(rewritten); err == nil {
+		t.Fatalf("traversal entry was rewritten into dest at %s instead of being rejected", rewritten)
 	}
 	// The legitimate entry should still be present.
 	if _, err := os.Stat(filepath.Join(dest, "package", "ok.js")); err != nil {
@@ -125,7 +131,7 @@ func TestExtractTarballGz_RejectsSymlinkEscape(t *testing.T) {
 	tw.Close()
 	gw.Close()
 	dest := t.TempDir()
-	_ = extractTarballGz(bytes.NewReader(buf.Bytes()), dest, 1000, 10<<20)
+	_ = extractTarballGz(bytes.NewReader(buf.Bytes()), dest, 1000, 10<<20, fetchMaxFileBytes)
 	link := filepath.Join(dest, "package", "evil-link")
 	if _, err := os.Lstat(link); err == nil {
 		t.Fatalf("symlink entry should have been skipped, found %s", link)
@@ -137,8 +143,159 @@ func TestExtractTarballGz_SizeCap(t *testing.T) {
 		"package/big.bin": strings.Repeat("A", 1024),
 	})
 	dest := t.TempDir()
-	if err := extractTarballGz(bytes.NewReader(data), dest, 1000, 100); err == nil {
+	if err := extractTarballGz(bytes.NewReader(data), dest, 1000, 100, fetchMaxFileBytes); err == nil {
 		t.Fatal("expected size-cap error, got nil")
+	}
+}
+
+// tarItem is an ordered tar entry (the map-based writeTarGz can't control order
+// or emit directory/non-regular entries).
+type tarItem struct {
+	name     string
+	body     string
+	typeflag byte
+}
+
+// writeTarGzOrdered builds an in-memory .tar.gz from ordered entries.
+func writeTarGzOrdered(t *testing.T, items []tarItem) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for _, it := range items {
+		hdr := &tar.Header{Name: it.name, Mode: 0o644, Size: int64(len(it.body)), Typeflag: it.typeflag}
+		if it.typeflag == tar.TypeDir {
+			hdr.Mode = 0o755
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if len(it.body) > 0 {
+			if _, err := tw.Write([]byte(it.body)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// MCP-2444 bug #2: safeJoin must REJECT path-traversal / absolute entries with an
+// error, never sanitize/rewrite them into an in-dest path.
+func TestSafeJoin_RejectsTraversal(t *testing.T) {
+	dest := t.TempDir()
+	reject := []string{
+		"../escape",
+		"../../etc/passwd",
+		"a/../../b",
+		"/etc/passwd",
+		"package/../../escape",
+	}
+	for _, name := range reject {
+		if got, err := safeJoin(dest, name); err == nil {
+			t.Errorf("safeJoin(%q) = %q, want error (path traversal must be rejected)", name, got)
+		}
+	}
+	allow := []string{"package/index.js", "pkg/sub/file.py", "flights-0.2.4.dist-info/METADATA"}
+	for _, name := range allow {
+		if _, err := safeJoin(dest, name); err != nil {
+			t.Errorf("safeJoin(%q) returned unexpected error: %v", name, err)
+		}
+	}
+}
+
+// MCP-2444 bug #1: total DECOMPRESSED bytes must be bounded across SKIPPED tar
+// members — a gzip bomb made of oversized (therefore skipped) members must still
+// abort at the decompressed-byte cap rather than being decompressed in full.
+func TestExtractTarballGz_GzipBombSkippedMembers(t *testing.T) {
+	const maxFileBytes = 1 << 10 // 1 KiB: every member below is oversized -> skipped
+	const maxTotalBytes = 8 << 10
+	var items []tarItem
+	for i := 0; i < 16; i++ {
+		// 4 KiB body (> maxFileBytes => skipped) of highly-compressible data;
+		// 16 * 4 KiB = 64 KiB decompressed >> 8 KiB cap.
+		items = append(items, tarItem{name: "package/big" + string(rune('a'+i)) + ".bin", body: strings.Repeat("A", 4<<10), typeflag: tar.TypeReg})
+	}
+	data := writeTarGzOrdered(t, items)
+	dest := t.TempDir()
+	if err := extractTarballGz(bytes.NewReader(data), dest, 100000, maxTotalBytes, maxFileBytes); err == nil {
+		t.Fatal("expected decompression-bomb abort across skipped members, got nil")
+	}
+}
+
+// MCP-2444 bug #3: oversized files must be CHARGED to the file-count cap (a
+// truncated-but-large file still counts), not silently skipped without charge.
+func TestExtractTarballGz_OversizedFileCharged(t *testing.T) {
+	const maxFileBytes = 10
+	items := []tarItem{
+		{name: "package/a.bin", body: strings.Repeat("A", 100), typeflag: tar.TypeReg},
+		{name: "package/b.bin", body: strings.Repeat("A", 100), typeflag: tar.TypeReg},
+		{name: "package/c.bin", body: strings.Repeat("A", 100), typeflag: tar.TypeReg},
+	}
+	data := writeTarGzOrdered(t, items)
+	dest := t.TempDir()
+	// maxFiles=2; three oversized files must trip the count cap on the third.
+	if err := extractTarballGz(bytes.NewReader(data), dest, 2, 10<<20, maxFileBytes); err == nil {
+		t.Fatal("expected file-count cap to trip on oversized (charged) files, got nil")
+	}
+}
+
+// MCP-2444 bug #4: directory creation must be capped (charged toward the entry
+// limit) so an all-directories archive cannot bypass the file-count limit.
+func TestExtractTarballGz_DirCap(t *testing.T) {
+	var items []tarItem
+	for i := 0; i < 8; i++ {
+		items = append(items, tarItem{name: "package/d" + string(rune('a'+i)) + "/", typeflag: tar.TypeDir})
+	}
+	data := writeTarGzOrdered(t, items)
+	dest := t.TempDir()
+	if err := extractTarballGz(bytes.NewReader(data), dest, 3, 10<<20, fetchMaxFileBytes); err == nil {
+		t.Fatal("expected directory-count cap to trip, got nil")
+	}
+}
+
+// writeZipOrdered builds an in-memory .zip with ordered entries (dir entries use
+// a trailing slash, matching the zip convention).
+func writeZipOrdered(t *testing.T, names []string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, name := range names {
+		if strings.HasSuffix(name, "/") {
+			if _, err := zw.Create(name); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// MCP-2444 bug #4 (zip path): directory entries must be capped too.
+func TestExtractZip_DirCap(t *testing.T) {
+	names := []string{"da/", "db/", "dc/", "dd/", "de/"}
+	zipPath := filepath.Join(t.TempDir(), "dirs.whl")
+	if err := os.WriteFile(zipPath, writeZipOrdered(t, names), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if err := extractZip(zipPath, dest, 3, 10<<20, fetchMaxFileBytes); err == nil {
+		t.Fatal("expected directory-count cap to trip in zip path, got nil")
 	}
 }
 
@@ -173,7 +330,7 @@ func TestExtractZip_Normal(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	if err := extractZip(zipPath, dest, 1000, 10<<20); err != nil {
+	if err := extractZip(zipPath, dest, 1000, 10<<20, fetchMaxFileBytes); err != nil {
 		t.Fatalf("extractZip: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dest, "flights", "server.py")); err != nil {
@@ -191,10 +348,14 @@ func TestExtractZip_RejectsZipSlip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := t.TempDir()
-	_ = extractZip(zipPath, dest, 1000, 10<<20)
+	_ = extractZip(zipPath, dest, 1000, 10<<20, fetchMaxFileBytes)
 	escaped := filepath.Join(filepath.Dir(filepath.Dir(dest)), "etc", "evil.txt")
 	if _, err := os.Stat(escaped); err == nil {
 		t.Fatalf("zip-slip: file escaped to %s", escaped)
+	}
+	// Reject, don't rewrite: the in-dest rewritten path must not exist either.
+	if _, err := os.Stat(filepath.Join(dest, "etc", "evil.txt")); err == nil {
+		t.Fatalf("traversal entry was rewritten into dest instead of being rejected")
 	}
 }
 
