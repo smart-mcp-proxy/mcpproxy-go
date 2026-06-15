@@ -98,6 +98,22 @@ JSON output (`{security_issues, yara_results}`) is parsed directly by
 `internal/security/scanner/engine.go`. LLM-backed analysis stays out of scope,
 so the scanner runs fully offline (`NetworkReq: false`).
 
+**Fail-closed (MCP-2443).** The scanner must never report a broken run as a
+clean scan. Because the Go runner ignores the container's exit code, the
+entrypoint enforces this by **deleting the report** on any failure so the
+engine records the scanner as *failed* rather than parsing a stale/error
+payload as zero findings:
+
+- `mcp-replay.py` aborts (non-zero exit, serves no tools) when
+  `/scan/source/tools.json` is missing, empty, not valid JSON, the wrong shape,
+  or yields zero usable tools — instead of replaying an empty tool list that
+  would make Ramparts emit a spurious clean report.
+- `entrypoint.sh` validates that the captured output is a genuine Ramparts
+  report (a top-level `security_issues` object and `yara_results` array, the
+  same shape `isRampartsOutput()` probes). An error payload, garbled JSON, or
+  empty output marks the scan failed. A non-zero Ramparts exit accompanied by a
+  *valid* report is kept (Ramparts signals findings/offline-LLM that way).
+
 ## Background image pull UX
 
 MCPProxy pulls these images lazily:

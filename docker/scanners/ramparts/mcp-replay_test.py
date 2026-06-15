@@ -111,13 +111,75 @@ def test_unknown_method_returns_jsonrpc_error():
     assert resp is not None and resp["error"]["code"] == -32601, resp
 
 
-def test_missing_tools_file_serves_empty_list():
-    # Point at a path that does not exist; handshake must still complete.
-    env = dict(os.environ, RAMPARTS_REPLAY_TOOLS="/nonexistent/tools.json")
-    stdin = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}) + "\n"
-    proc = subprocess.run([sys.executable, SHIM], input=stdin, capture_output=True, text=True, env=env, timeout=15)
+def run_shim_raw(stdin, tools_bytes=None, no_file=False):
+    """Run the shim against a raw tools.json byte payload (or no file at all)
+    and return (decoded_stdout_frames, stderr, returncode)."""
+    if no_file:
+        env = dict(os.environ, RAMPARTS_REPLAY_TOOLS="/nonexistent/tools.json")
+        proc = subprocess.run([sys.executable, SHIM], input=stdin, capture_output=True, text=True, env=env, timeout=15)
+    else:
+        with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as fh:
+            fh.write(tools_bytes if tools_bytes is not None else b"")
+            tools_path = fh.name
+        try:
+            env = dict(os.environ, RAMPARTS_REPLAY_TOOLS=tools_path)
+            proc = subprocess.run([sys.executable, SHIM], input=stdin, capture_output=True, text=True, env=env, timeout=15)
+        finally:
+            os.unlink(tools_path)
     out = [json.loads(ln) for ln in proc.stdout.splitlines() if ln.strip()]
-    assert by_id(out, 1)["result"]["tools"] == [], out
+    return out, proc.stderr, proc.returncode
+
+
+HANDSHAKE = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}) + "\n"
+
+
+def test_missing_tools_file_fails_closed():
+    # A missing tools.json is a pipeline failure, not a clean zero-tool server:
+    # the shim must exit non-zero and serve NO frames so Ramparts cannot emit a
+    # spurious "clean" report (fail CLOSED — MCP-2443).
+    out, stderr, rc = run_shim_raw(HANDSHAKE, no_file=True)
+    assert rc != 0, f"missing file must exit non-zero, got rc={rc}"
+    assert out == [], f"must serve no frames on fail-closed, got {out}"
+    assert "tools.json" in stderr, stderr
+
+
+def test_empty_file_fails_closed():
+    out, stderr, rc = run_shim_raw(HANDSHAKE, tools_bytes=b"")
+    assert rc != 0, f"empty file must exit non-zero, got rc={rc}"
+    assert out == [], out
+
+
+def test_garbled_json_fails_closed():
+    out, _stderr, rc = run_shim_raw(HANDSHAKE, tools_bytes=b"{not json at all")
+    assert rc != 0, f"garbled json must exit non-zero, got rc={rc}"
+    assert out == [], out
+
+
+def test_wrong_shape_fails_closed():
+    # Valid JSON but not the expected {"tools": [...]} document.
+    for payload in (b'[]', b'{"error": "boom"}', b'{"tools": "notalist"}', b'"a string"'):
+        out, _stderr, rc = run_shim_raw(HANDSHAKE, tools_bytes=payload)
+        assert rc != 0, f"wrong-shape {payload!r} must exit non-zero, got rc={rc}"
+        assert out == [], f"{payload!r} -> {out}"
+
+
+def test_empty_tool_list_fails_closed():
+    # {"tools": []} (or a list whose entries are all malformed) yields zero
+    # usable tools — nothing to scan, so fail closed rather than report clean.
+    for payload in (b'{"tools": []}', b'{"tools": [{"description": "no name"}]}'):
+        out, _stderr, rc = run_shim_raw(HANDSHAKE, tools_bytes=payload)
+        assert rc != 0, f"zero usable tools {payload!r} must exit non-zero, got rc={rc}"
+        assert out == [], f"{payload!r} -> {out}"
+
+
+def test_partial_garble_with_real_tool_still_scans():
+    # A list with one malformed entry but at least one real tool must scan
+    # normally (don't fail the whole scan over a single bad entry).
+    payload = json.dumps({"tools": [{"description": "no name"}, {"name": "real_tool"}]}).encode()
+    out, _stderr, rc = run_shim_raw(HANDSHAKE, tools_bytes=payload)
+    assert rc == 0, f"a real tool present must scan (rc=0), got rc={rc}"
+    tools = by_id(out, 1)["result"]["tools"]
+    assert {t["name"] for t in tools} == {"real_tool"}, tools
 
 
 def main():
