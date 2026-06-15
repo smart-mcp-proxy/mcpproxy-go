@@ -14,8 +14,10 @@ type ClientDef struct {
 	Name      string // Human-readable name, e.g. "Claude Code"
 	Format    string // File format: "json" or "toml"
 	ServerKey string // Top-level key for server entries: "mcpServers" or "servers"
-	Supported bool   // Whether this client supports HTTP/SSE transport
+	Supported bool   // Whether this client can be connected (directly or via a bridge)
 	Reason    string // Explanation when Supported is false
+	Note      string // Optional caveat shown for supported clients (e.g. bridge requirement)
+	Bridge    bool   // Connects via a stdio bridge; Connect can create the config when absent
 	Icon      string // Icon identifier for frontend use
 }
 
@@ -34,8 +36,9 @@ var allClients = []ClientDef{
 		Name:      "Claude Desktop",
 		Format:    "json",
 		ServerKey: "mcpServers",
-		Supported: false,
-		Reason:    "Claude Desktop only supports stdio transport; HTTP/SSE not available",
+		Supported: true,
+		Note:      "Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.",
+		Bridge:    true,
 		Icon:      "claude-desktop",
 	},
 	{
@@ -185,6 +188,13 @@ func buildServerEntry(clientID, mcpURL string) map[string]interface{} {
 		return map[string]interface{}{
 			"type": "http",
 			"url":  mcpURL,
+		}
+	case "claude-desktop":
+		// Claude Desktop only speaks stdio, so bridge to mcpproxy's HTTP
+		// endpoint with mcp-remote run via npx.
+		return map[string]interface{}{
+			"command": "npx",
+			"args":    []string{"-y", "mcp-remote", mcpURL},
 		}
 	case "cursor":
 		return map[string]interface{}{

@@ -49,6 +49,7 @@ export interface SettingField {
   docs?: string // doc page path on docs.mcpproxy.app, e.g. "/features/docker-isolation"
   valueKind?: ValueKind // extra format validation for text/secret fields
   optional?: boolean // when true, an empty value is valid (skips kind validation)
+  resetDefault?: string // when set, render an inline "Reset to default" button that emits this value
 }
 
 export interface SettingsAccordion {
@@ -276,6 +277,12 @@ export const SERVER_EDITION_FIELDS: SettingField[] = [
   { key: 'server_edition.oauth.provider', label: 'OAuth provider', control: 'select', options: ['', 'google', 'github', 'microsoft'].map((v) => ({ value: v, label: v || '(none)' })) },
   { key: 'server_edition.max_user_servers', label: 'Max servers per user', control: 'number', min: 0 },
 ]
+
+// isBlankInstructions returns true when a saved instructions value is empty /
+// whitespace-only / null / undefined — i.e. eligible for prefill from the built-in default.
+export function isBlankInstructions(v: string | null | undefined): boolean {
+  return !v || v.trim() === ''
+}
 
 // ---- Section 3: Advanced (subsystem accordions) ----
 export const ADVANCED_ACCORDIONS: SettingsAccordion[] = [
