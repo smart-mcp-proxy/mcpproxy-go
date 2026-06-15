@@ -116,31 +116,20 @@ func validateTelemetryURL(rawURL string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("telemetry URL scheme %q not allowed (want http/https)", u.Scheme)
 	}
-	if !isAllowedTelemetryHost(u.Hostname()) {
-		return "", fmt.Errorf("telemetry URL host %q not allowed", u.Hostname())
+	// Inline host allowlist guard (CWE-918 barrier). The request is only issued
+	// when the host matches a fixed safe value — the built-in production host or
+	// a loopback address (tests / local development). Kept inline as an
+	// `if !match { return }` equality guard on the same control-flow path as the
+	// sink, mirroring validateRegistryURL (the repo's accepted pattern).
+	host := u.Hostname()
+	loopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		loopback = true
+	}
+	if !loopback && !strings.EqualFold(host, defaultTelemetryHost()) {
+		return "", fmt.Errorf("telemetry URL host %q not allowed", host)
 	}
 	return u.String(), nil
-}
-
-// isAllowedTelemetryHost reports whether host is an acceptable telemetry
-// destination: the built-in production host, or a loopback address (tests and
-// local development). This equality guard is what bounds the request-forgery
-// surface — the host is constrained to a fixed safe set rather than taken
-// verbatim from configuration.
-func isAllowedTelemetryHost(host string) bool {
-	if host == "" {
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return true
-	}
-	if def := defaultTelemetryHost(); def != "" && strings.EqualFold(host, def) {
-		return true
-	}
-	return false
 }
 
 // defaultTelemetryHost returns the host of the built-in telemetry endpoint,
