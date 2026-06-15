@@ -757,6 +757,12 @@ func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
 	if !strings.Contains(strings.ToLower(client.Note), "mcp-remote") {
 		t.Errorf("claude-desktop note should mention mcp-remote, got: %q", client.Note)
 	}
+	// Bridge clients can be connected even when no config file exists yet
+	// (Connect creates it), so the frontend must offer the button on fresh
+	// installs.
+	if !client.Bridge {
+		t.Error("claude-desktop should be flagged as a bridge client")
+	}
 }
 
 func TestBuildServerEntry_ClaudeDesktop_StdioBridge(t *testing.T) {
@@ -880,6 +886,34 @@ func TestGetAllStatus_ClaudeDesktop_DetectsBridgeConnection(t *testing.T) {
 	t.Fatal("claude-desktop status not found")
 }
 
+// Gap 2 (Codex review): a bridge written under a custom server_name has no
+// URL field and a non-"mcpproxy" key, so it must be detected by inspecting
+// the entry's args (mcp-remote + mcpURL).
+func TestGetAllStatus_ClaudeDesktop_DetectsBridgeUnderCustomName(t *testing.T) {
+	svc, homeDir := testService(t)
+
+	cfgPath := ConfigPath("claude-desktop", homeDir)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Connect("claude-desktop", "my-bridge", false); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, s := range svc.GetAllStatus() {
+		if s.ID == "claude-desktop" {
+			if !s.Connected {
+				t.Error("expected claude-desktop connected via bridge args under a custom name")
+			}
+			if s.ServerName != "my-bridge" {
+				t.Errorf("expected server_name=my-bridge, got %q", s.ServerName)
+			}
+			return
+		}
+	}
+	t.Fatal("claude-desktop status not found")
+}
+
 func TestConnect_UnknownClient(t *testing.T) {
 	svc, _ := testService(t)
 
@@ -937,6 +971,9 @@ func TestGetAllStatus(t *testing.T) {
 			}
 			if s.Note == "" {
 				t.Error("claude-desktop should expose a bridge note")
+			}
+			if !s.Bridge {
+				t.Error("claude-desktop status should expose bridge=true")
 			}
 		}
 	}

@@ -34,6 +34,7 @@ type ClientStatus struct {
 	Supported  bool   `json:"supported"`        // client can be connected (directly or via a bridge)
 	Reason     string `json:"reason,omitempty"` // why not supported
 	Note       string `json:"note,omitempty"`   // caveat for supported clients (e.g. bridge requirement)
+	Bridge     bool   `json:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
 	Icon       string `json:"icon"`
 	ServerName string `json:"server_name,omitempty"` // name under which mcpproxy is registered
 }
@@ -121,6 +122,7 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			Supported:  c.Supported,
 			Reason:     c.Reason,
 			Note:       c.Note,
+			Bridge:     c.Bridge,
 			Icon:       c.Icon,
 		}
 
@@ -672,6 +674,13 @@ func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool)
 			}
 		}
 
+		// Stdio-bridge clients (e.g. Claude Desktop) have no URL field; the
+		// mcpproxy endpoint lives in the command args. Detect by inspecting
+		// args so a bridge written under a custom server name is still found.
+		if entryPointsToBridge(entry, mcpURL, baseURL) {
+			return name, true
+		}
+
 		// Also match by server name
 		if name == defaultServerName {
 			return name, true
@@ -679,6 +688,30 @@ func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool)
 	}
 
 	return "", false
+}
+
+// entryPointsToBridge reports whether a JSON config entry is an mcp-remote
+// stdio bridge targeting our MCP endpoint, regardless of the entry key.
+func entryPointsToBridge(entry map[string]interface{}, mcpURL, baseURL string) bool {
+	rawArgs, ok := entry["args"].([]interface{})
+	if !ok {
+		return false
+	}
+	hasBridgePkg := false
+	pointsToUs := false
+	for _, a := range rawArgs {
+		s, ok := a.(string)
+		if !ok {
+			continue
+		}
+		if s == "mcp-remote" {
+			hasBridgePkg = true
+		}
+		if s == mcpURL || s == baseURL || strings.HasPrefix(s, baseURL+"?") {
+			pointsToUs = true
+		}
+	}
+	return hasBridgePkg && pointsToUs
 }
 
 var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)

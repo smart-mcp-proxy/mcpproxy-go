@@ -38,7 +38,7 @@
           </div>
           <div class="shrink-0 ml-2">
             <span v-if="!client.supported" class="badge badge-ghost badge-sm">{{ client.reason || 'Not supported' }}</span>
-            <span v-else-if="!client.exists" class="text-xs opacity-40">Config not found</span>
+            <span v-else-if="!client.exists && !client.bridge" class="text-xs opacity-40">Config not found</span>
             <button
               v-else-if="client.connected"
               @click="disconnect(client.id)"
@@ -115,7 +115,9 @@ const loading = reactive({
 })
 
 const connectableClients = computed(() =>
-  clients.value.filter(c => c.supported && c.exists && !c.connected)
+  // Bridge clients (e.g. Claude Desktop) can be connected even without an
+  // existing config file — Connect creates it.
+  clients.value.filter(c => c.supported && (c.exists || c.bridge) && !c.connected)
 )
 
 const allConnected = computed(() =>

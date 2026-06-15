@@ -17,6 +17,7 @@ type ClientDef struct {
 	Supported bool   // Whether this client can be connected (directly or via a bridge)
 	Reason    string // Explanation when Supported is false
 	Note      string // Optional caveat shown for supported clients (e.g. bridge requirement)
+	Bridge    bool   // Connects via a stdio bridge; Connect can create the config when absent
 	Icon      string // Icon identifier for frontend use
 }
 
@@ -37,6 +38,7 @@ var allClients = []ClientDef{
 		ServerKey: "mcpServers",
 		Supported: true,
 		Note:      "Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.",
+		Bridge:    true,
 		Icon:      "claude-desktop",
 	},
 	{
