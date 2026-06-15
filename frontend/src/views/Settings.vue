@@ -174,8 +174,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
-import { RouterLink } from 'vue-router'
+import { ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { RouterLink, useRoute } from 'vue-router'
 import { VueMonacoEditor } from '@guolao/vue-monaco-editor'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -200,6 +200,7 @@ import api from '@/services/api'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const route = useRoute()
 
 const securityFields = SECURITY_FIELDS
 const generalFields = GENERAL_FIELDS
@@ -434,6 +435,41 @@ function handleConfigSaved() {
   loadConfig()
 }
 
+// Deep-link support (MCP-2482): the telemetry consent banner links to
+// /settings?focus=telemetry.enabled. Map any field key to the tab that renders
+// it, switch to that tab, open the enclosing accordion if it lives under
+// Advanced, then scroll to and briefly highlight the field row.
+function tabForFieldKey(key: string): string {
+  if (securityFields.some((f) => f.key === key)) return 'security'
+  if (generalFields.some((f) => f.key === key)) return 'general'
+  if (advancedAccordions.value.some((a) => a.fields.some((f) => f.key === key))) return 'advanced'
+  if (serverEditionFields.some((f) => f.key === key)) return 'teams'
+  return activeTab.value
+}
+
+async function focusField(key: string) {
+  // Clear any active search so the tabbed layout (not search results) renders.
+  search.value = ''
+  activeTab.value = tabForFieldKey(key)
+  await nextTick()
+
+  // Advanced settings live inside collapsed <details>; open the one holding it.
+  const acc = advancedAccordions.value.find((a) => a.fields.some((f) => f.key === key))
+  if (acc) {
+    const summary = document.querySelector(`[data-test="settings-accordion-${acc.id}"]`)
+    const det = summary?.closest('details') as HTMLDetailsElement | null
+    if (det) det.open = true
+    await nextTick()
+  }
+
+  const row = document.querySelector(`[data-test="setting-row-${key}"]`) as HTMLElement | null
+  if (!row) return
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const highlight = ['ring-2', 'ring-primary', 'ring-offset-2']
+  row.classList.add(...highlight)
+  setTimeout(() => row.classList.remove(...highlight), 2500)
+}
+
 // Fetch the resolved built-in MCP instructions default for the textarea
 // placeholder (MCP-2175). Non-fatal: a failure or an older core just leaves the
 // static catalogue placeholder in place.
@@ -456,10 +492,15 @@ watch(defaultInstructions, () => {
   maybePrefillInstructions()
 })
 
-onMounted(() => {
-  loadConfig()
+onMounted(async () => {
   loadDefaultInstructions()
   window.addEventListener('mcpproxy:config-saved', handleConfigSaved)
+  await loadConfig()
+  const focus = route.query.focus
+  if (typeof focus === 'string' && focus) {
+    await nextTick()
+    await focusField(focus)
+  }
 })
 onUnmounted(() => {
   window.removeEventListener('mcpproxy:config-saved', handleConfigSaved)

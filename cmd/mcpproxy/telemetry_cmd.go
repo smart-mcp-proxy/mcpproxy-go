@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.etcd.io/bbolt"
+	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
@@ -267,6 +268,13 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
+	// Capture the EFFECTIVE resolved state BEFORE mutating, so we only beacon on
+	// a genuine enabled->disabled transition (MCP-2482). Effective resolution
+	// includes env overrides (DO_NOT_TRACK / CI), so an install where telemetry
+	// was never actually enabled emits nothing. A second `disable` when already
+	// disabled also emits nothing (wasEnabled == false).
+	wasEnabled := telemetry.EffectiveTelemetryEnabled(cfg)
+
 	if cfg.Telemetry == nil {
 		cfg.Telemetry = &config.TelemetryConfig{}
 	}
@@ -278,7 +286,23 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
+	// The disable is now persisted and effective — confirm immediately so the
+	// command never appears to hang on the (best-effort) beacon below.
 	fmt.Println("Telemetry disabled.")
+
+	// One-time opt-out beacon. When a daemon is running it does NOT auto-reload
+	// this file (there is no fsnotify watcher), so the CLI is responsible for the
+	// beacon in the CLI-driven path. Route it through the SAME guarded server-side
+	// entry point (EmitOptOutBeacon applies the dev-build/semver, env, and
+	// anon-id guards and owns the single send) rather than duplicating the send
+	// or bypassing a guard. A short timeout keeps this from blocking on a slow
+	// endpoint; the CLI is short-lived so the send must complete before exit.
+	if wasEnabled {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		beaconSvc := telemetry.New(cfg, "", version, Edition, zap.NewNop())
+		beaconSvc.EmitOptOutBeacon(ctx)
+	}
 	return nil
 }
 

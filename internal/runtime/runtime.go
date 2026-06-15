@@ -1304,6 +1304,14 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// Event handlers may need to acquire locks on other resources
 	r.mu.Unlock()
 
+	// MCP-2482: drive the one-time telemetry opt-out beacon on an
+	// enabled->disabled flip. NotifyConfigChanged is fire-and-forget and
+	// nil-safe, so this never blocks the apply path. Covers web UI + macOS app,
+	// which both reach this via the REST /config apply pipeline.
+	if r.telemetryService != nil {
+		r.telemetryService.NotifyConfigChanged(newCfg)
+	}
+
 	// Update configSvc to notify subscribers (like supervisor)
 	// This must happen BEFORE LoadConfiguredServers to ensure supervisor reconciles
 	if err := r.configSvc.Update(&configCopy, configsvc.UpdateTypeModify, "api_apply_config"); err != nil {

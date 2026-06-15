@@ -1,0 +1,238 @@
+package telemetry
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+)
+
+// OptOutEvent is the distinguishing field value carried by the one-time opt-out
+// beacon. Receivers route a payload to the opt-out funnel by the presence of
+// this `event` value on the existing /heartbeat ingest path — no new endpoint
+// is required (MCP-2482).
+const OptOutEvent = "telemetry_disabled"
+
+// OptOutBeacon is the minimal payload sent exactly once when a user disables
+// telemetry. It carries ONLY the anonymous install ID (for unique opt-out
+// counting / dedup) and the distinguishing event marker. It deliberately omits
+// every usage field — sending data after an opt-out is only defensible because
+// this payload contains nothing but the dedup ID.
+type OptOutBeacon struct {
+	Event       string `json:"event"`
+	AnonymousID string `json:"anonymous_id"`
+}
+
+// EffectiveTelemetryEnabled resolves whether telemetry is ACTUALLY active for
+// cfg, honoring both the config bool (IsTelemetryEnabled — nil means enabled per
+// MCP-2477) AND the startup env overrides (DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY
+// via IsDisabledByEnv). This must match the same effective resolution startup
+// uses: telemetry that was never enabled (e.g. DO_NOT_TRACK=1 or CI=true) must
+// never be considered "enabled", so disabling it produces no opt-out beacon.
+func EffectiveTelemetryEnabled(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	if disabled, _ := IsDisabledByEnv(); disabled {
+		return false
+	}
+	return cfg.IsTelemetryEnabled()
+}
+
+// TelemetryDisableTransition reports whether the resolved telemetry state moved
+// from enabled to disabled between prior and next, using the SAME effective
+// resolution as startup (config bool + env overrides). This is the single
+// source of truth for the enabled->disabled flip, shared by the running daemon
+// (REST / reload paths) and the `mcpproxy telemetry disable` CLI.
+func TelemetryDisableTransition(prior, next *config.Config) bool {
+	if prior == nil || next == nil {
+		return false
+	}
+	return EffectiveTelemetryEnabled(prior) && !EffectiveTelemetryEnabled(next)
+}
+
+// EmitOptOutBeacon applies the shared eligibility guards and, if eligible, sends
+// the opt-out beacon synchronously. It is the single guarded send entry point
+// used by BOTH the daemon (fire-and-forget in a goroutine from
+// NotifyConfigChanged) and the `mcpproxy telemetry disable` CLI — so neither
+// duplicates the send nor bypasses a guard.
+//
+// Guards (all must hold, mirroring the heartbeat eligibility):
+//   - valid semver build (dev builds never emit telemetry),
+//   - telemetry not disabled by environment (DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY),
+//   - an anonymous install ID exists (nothing to dedup on otherwise).
+//
+// Returns true if a send was attempted (regardless of HTTP outcome). Best-effort:
+// callers disable telemetry whether or not this succeeds.
+func (s *Service) EmitOptOutBeacon(ctx context.Context) bool {
+	if !isValidSemver(s.version) {
+		return false
+	}
+	if disabled, _ := IsDisabledByEnv(); disabled {
+		return false
+	}
+	if s.config.GetAnonymousID() == "" {
+		return false
+	}
+	if err := s.SendOptOutBeacon(ctx); err != nil {
+		s.logger.Debug("opt-out beacon send failed (telemetry still disabled)", zap.Error(err))
+	}
+	return true
+}
+
+// SendOptOutBeacon posts a single opt-out beacon to the configured telemetry
+// endpoint, reusing the existing /heartbeat ingest path. It is best-effort:
+// callers MUST disable telemetry regardless of the returned error, and supply a
+// context with a short timeout so the send never blocks a config save.
+//
+// The destination is taken from the service's own resolved endpoint/config
+// (the exact indirection the heartbeat and feedback senders use) rather than a
+// caller-supplied URL, so this never sends to an arbitrary, request-derived
+// host.
+func (s *Service) SendOptOutBeacon(ctx context.Context) error {
+	anonID := s.config.GetAnonymousID()
+	if anonID == "" {
+		// Nothing to dedup on — never send an identity-less beacon.
+		return errors.New("opt-out beacon skipped: no anonymous_id")
+	}
+
+	beacon := OptOutBeacon{Event: OptOutEvent, AnonymousID: anonID}
+	data, err := json.Marshal(beacon)
+	if err != nil {
+		return fmt.Errorf("marshal opt-out beacon: %w", err)
+	}
+
+	// Defense-in-depth: the same anonymity scanner that guards heartbeats also
+	// guards the beacon. The payload is a constant + a UUID, so this is belt-
+	// and-suspenders, but it keeps a single invariant for everything we emit.
+	if scanErr := ScanForPII(data); scanErr != nil {
+		return fmt.Errorf("opt-out beacon failed anonymity scan: %w", scanErr)
+	}
+
+	// Bound the outbound request (CWE-918 request forgery): the endpoint is a
+	// configured value, so re-parse it, constrain the scheme to http/https,
+	// require a host, and issue the request against the re-serialized URL. This
+	// mirrors validateRegistryURL and guarantees a malformed/non-http endpoint
+	// can never aim the beacon at, e.g., file:// or a schemeless host.
+	beaconURL, err := validateTelemetryURL(strings.TrimRight(s.endpoint, "/") + "/heartbeat")
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, beaconURL, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("build opt-out request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("send opt-out beacon: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("opt-out beacon rejected with status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// validateTelemetryURL bounds an outbound telemetry request (CWE-918 request
+// forgery). It parses the candidate URL, constrains the scheme to http/https,
+// and PINS the host to the built-in telemetry host (or a loopback address used
+// by tests / local development) before returning the re-serialized URL. The
+// opt-out beacon carries the anonymous install ID, so pinning the destination
+// guarantees a malformed or hostile endpoint value can never redirect that ID
+// to an arbitrary host. The `endpoint` config override is documented as a
+// testing aid (loopback), so this pin does not regress any supported setup.
+func validateTelemetryURL(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid telemetry URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("telemetry URL scheme %q not allowed (want http/https)", u.Scheme)
+	}
+	// Inline host allowlist guard (CWE-918 barrier). The request is only issued
+	// when the host EXACTLY equals a fixed safe value — the built-in production
+	// host or an explicit loopback literal (tests / local development). Explicit
+	// equality via switch (no helper, no EqualFold/IsLoopback) keeps the guard on
+	// the same control-flow path as the sink and in the canonical barrier shape,
+	// mirroring validateRegistryURL (the repo's accepted pattern).
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "localhost", "127.0.0.1", "::1", defaultTelemetryHost():
+		return u.String(), nil
+	default:
+		return "", fmt.Errorf("telemetry URL host %q not allowed", host)
+	}
+}
+
+// defaultTelemetryHost returns the lower-cased host of the built-in telemetry
+// endpoint, derived from config so it can never drift from GetTelemetryEndpoint.
+func defaultTelemetryHost() string {
+	u, err := url.Parse((&config.Config{}).GetTelemetryEndpoint())
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Hostname())
+}
+
+// NotifyConfigChanged informs the telemetry service that the live configuration
+// has been swapped. It is the single server-side hook for the opt-out beacon:
+// the running daemon calls it from every config-write path (REST apply, disk
+// reload) so web UI, macOS app, and CLI-driven changes are all covered by one
+// implementation.
+//
+// On a resolved enabled->disabled transition it:
+//  1. immediately marks telemetry opted-out (no further heartbeats are sent),
+//  2. fires exactly one fire-and-forget opt-out beacon with a short timeout.
+//
+// The send is best-effort: a failure does not re-enable telemetry. On a
+// disabled->enabled transition it clears the opt-out latch so a later disable
+// flip emits its own beacon (exactly once per flip). It never blocks the caller.
+func (s *Service) NotifyConfigChanged(newCfg *config.Config) {
+	if newCfg == nil {
+		return
+	}
+
+	s.mu.Lock()
+	prior := s.resolvedEnabled
+	// Use the SAME effective resolution as startup (config bool + env overrides)
+	// so an env-disabled install (DO_NOT_TRACK / CI) — which never emitted
+	// telemetry — never produces an opt-out beacon on a config flip.
+	next := EffectiveTelemetryEnabled(newCfg)
+	s.resolvedEnabled = next
+	// Keep the service's live config/endpoint current. ApplyConfig swaps the
+	// runtime's *config.Config pointer wholesale, so without this the service
+	// would read a stale snapshot (see the stale-config-snapshot pitfall).
+	s.config = newCfg
+	s.endpoint = newCfg.GetTelemetryEndpoint()
+	transition := prior && !next
+	s.mu.Unlock()
+
+	if !transition {
+		// Re-enabling clears the latch so a future disable flip can fire again.
+		if !prior && next {
+			s.optedOut.Store(false)
+		}
+		return
+	}
+
+	// Stop all further telemetry immediately, before the (slower) network send.
+	s.optedOut.Store(true)
+
+	// Fire-and-forget through the shared guarded entry point (semver / env /
+	// anon-id guards live there). Never blocks the caller (the config save).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), optOutBeaconTimeout)
+		defer cancel()
+		s.EmitOptOutBeacon(ctx)
+	}()
+}
