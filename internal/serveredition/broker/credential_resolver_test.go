@@ -483,3 +483,97 @@ func TestResolve_ConnectFlow_RefreshFails_ReturnsReconnectError(t *testing.T) {
 		t.Fatalf("expected the connect URL to be built once, got %d", c)
 	}
 }
+
+// TestResolve_CrossUserIsolation_NeverReturnsAnotherUsersCredential is the
+// direct cross-user isolation guard (MCP-2578, backlog follow-up to MCP-1039 /
+// #688). #688 verified isolation only structurally (every lookup is
+// store.Get(userID, serverKey)-keyed with no shared fallback); this asserts the
+// behaviour end-to-end: seed user B's credential, Resolve as user A for the
+// SAME serverKey, and prove user A gets the fail-closed path and NEVER user B's
+// token.
+//
+// The seeded user B credential is deliberately VALID and not near expiry, so a
+// regression that dropped the per-user keying (a shared/static fallback) would
+// make acquire() return it directly from cache (FR-014). With correct keying,
+// store.Get(userA, key) misses and user A falls through to its own — absent —
+// acquisition path, which fails closed.
+func TestResolve_CrossUserIsolation_NeverReturnsAnotherUsersCredential(t *testing.T) {
+	const userBToken = "userB-secret-token-MUST-NOT-LEAK"
+
+	t.Run("token_exchange mode falls closed, not to user B's cache", func(t *testing.T) {
+		store := newFakeStore()
+		server := httpServer("grafana", tokenExchangeBroker())
+		key := oauth.GenerateServerKey(server.Name, server.URL)
+
+		// Seed user B with a valid, long-lived credential for the same serverKey.
+		store.seed("userB", key, &UpstreamCredential{
+			Type:        "oauth2",
+			AccessToken: userBToken,
+			ExpiresAt:   time.Now().Add(time.Hour),
+			ObtainedVia: "token_exchange",
+		})
+
+		// User A has no credential and its own acquisition path fails (fail closed).
+		ex := &fakeExchanger{err: errors.New("token exchange failed: status 401, error \"invalid_grant\"")}
+		r := NewCredentialResolver(ResolverDeps{Store: store, Exchanger: ex})
+
+		got, err := r.Resolve(context.Background(), "userA", server)
+		if err == nil {
+			t.Fatal("expected user A to fail closed (no per-user credential), got nil error")
+		}
+		if got != nil {
+			t.Fatalf("user A must receive no credential, got %+v", got)
+		}
+		// The acquisition path must have been exercised — proving user A did NOT
+		// short-circuit to user B's cached credential (which a shared fallback
+		// would do, skipping Exchange entirely).
+		if c := atomic.LoadInt32(&ex.calls); c != 1 {
+			t.Fatalf("expected user A to go through its own acquisition (1 Exchange call), got %d — a shared cache fallback would skip it", c)
+		}
+
+		// User B's credential is still intact and retrievable as user B, proving
+		// the seed was real and the miss for user A is isolation, not absence.
+		bCred, bErr := store.Get("userB", key)
+		if bErr != nil || bCred == nil || bCred.AccessToken != userBToken {
+			t.Fatalf("user B's credential should be intact; got %+v err=%v", bCred, bErr)
+		}
+	})
+
+	t.Run("oauth_connect mode falls closed to NotConnectedError, not user B's cache", func(t *testing.T) {
+		store := newFakeStore()
+		server := httpServer("github", connectBroker())
+		key := oauth.GenerateServerKey(server.Name, server.URL)
+
+		// Seed user B with a valid connect-flow credential for the same serverKey.
+		store.seed("userB", key, &UpstreamCredential{
+			Type:         "oauth2",
+			AccessToken:  userBToken,
+			RefreshToken: "userB-refresh",
+			ExpiresAt:    time.Now().Add(time.Hour),
+			ObtainedVia:  "oauth_connect",
+		})
+
+		conn := &fakeConnector{serverKey: key, authURL: "https://idp/authorize?client_id=client&state=state-xyz"}
+		r := NewCredentialResolver(ResolverDeps{Store: store, Connectors: &fakeConnectorProvider{conn: conn}})
+
+		got, err := r.Resolve(context.Background(), "userA", server)
+		if got != nil {
+			t.Fatalf("user A must receive no credential, got %+v", got)
+		}
+		var nce *NotConnectedError
+		if !errors.As(err, &nce) {
+			t.Fatalf("expected user A to fail closed with *NotConnectedError, got %T: %v", err, err)
+		}
+		if nce.ConnectURL != conn.authURL {
+			t.Fatalf("expected the actionable connect URL %q, got %q", conn.authURL, nce.ConnectURL)
+		}
+		// User A must be steered into its own connect flow, never handed user B's
+		// existing connection (no refresh against user B's cached credential).
+		if c := atomic.LoadInt32(&conn.refreshCalls); c != 0 {
+			t.Fatalf("user A must not refresh against user B's cached credential, got %d refresh calls", c)
+		}
+		if !strings.Contains(err.Error(), conn.authURL) || strings.Contains(err.Error(), userBToken) {
+			t.Fatalf("error must surface user A's connect URL and never user B's token, got %q", err.Error())
+		}
+	})
+}
