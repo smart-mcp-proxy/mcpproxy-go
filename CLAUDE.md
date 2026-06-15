@@ -101,10 +101,6 @@ Server edition supports OAuth-based multi-user authentication with Google, GitHu
 | `POST /api/v1/user/servers` | Session/JWT | Add personal upstream server |
 | `GET /api/v1/user/activity` | Session/JWT | User's activity log |
 | `GET /api/v1/user/diagnostics` | Session/JWT | Server health for user's servers |
-| `GET /api/v1/user/credentials` | Session/JWT | List brokered-credential connection status (no secrets) |
-| `DELETE /api/v1/user/credentials/{server}` | Session/JWT | Disconnect/revoke a brokered credential |
-| `GET /api/v1/user/credentials/{server}/connect` | Session/JWT | Initiate per-user OAuth connect (Path B), redirects to upstream |
-| `GET /api/v1/user/credentials/{server}/callback` | Session/JWT | Per-user OAuth connect callback, stores credential |
 | `GET /api/v1/admin/users` | Admin | List all users |
 | `POST /api/v1/admin/users/{id}/disable` | Admin | Disable a user |
 | `GET /api/v1/admin/activity` | Admin | All users' activity logs |
