@@ -745,6 +745,19 @@ MCPProxy automatically checks for updates every 4 hours. The update information 
 
 Get Docker isolation status.
 
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `docker_available` | bool | Genuine Docker daemon reachability (result of a real `docker info` probe). |
+| `isolation_enabled` | bool | Whether `docker_isolation.enabled` is set in config. The UI treats isolation as "active" only when both this and `docker_available` are true. |
+| `recovery_mode` | bool | Whether the Docker recovery monitor is actively retrying. |
+| `failure_count` | int | Consecutive recovery failures. |
+| `attempts_since_up` | int | Recovery attempts since the daemon was last seen available. |
+| `last_attempt` | string | Timestamp of the last recovery attempt. |
+| `last_error` | string | Last recovery error message, if any. |
+| `last_successful_at` | string | Timestamp of the last successful daemon contact. |
+
 ### Secrets
 
 #### GET /api/v1/secrets

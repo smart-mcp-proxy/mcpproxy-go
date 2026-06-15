@@ -308,6 +308,13 @@ func (s *Server) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return s.runtime.GetDockerRecoveryStatus()
 }
 
+// IsDockerAvailable reports whether the host has a reachable Docker daemon via
+// a real probe. The /api/v1/docker/status endpoint uses this for genuine
+// availability rather than the synthetic recovery-state value (MCP-2478).
+func (s *Server) IsDockerAvailable() bool {
+	return s.runtime.IsDockerAvailable()
+}
+
 // StatusChannel returns a channel that receives status updates
 func (s *Server) StatusChannel() <-chan interface{} {
 	return s.statusCh
