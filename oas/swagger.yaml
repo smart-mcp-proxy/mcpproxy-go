@@ -3279,7 +3279,8 @@ paths:
         Remove the MCPProxy entry from the specified client's configuration file.
         Creates a backup of the existing config before modifying.
       parameters:
-      - description: Client ID (claude-code, cursor, windsurf, vscode, codex, gemini)
+      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
+          codex, gemini, opencode)
         in: path
         name: client
         required: true
@@ -3327,7 +3328,8 @@ paths:
         Register MCPProxy as an MCP server in the specified client's configuration file.
         Creates a backup of the existing config before modifying.
       parameters:
-      - description: Client ID (claude-code, cursor, windsurf, vscode, codex, gemini)
+      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
+          codex, gemini, opencode)
         in: path
         name: client
         required: true

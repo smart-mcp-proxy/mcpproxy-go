@@ -46,7 +46,7 @@ func (s *Server) handleGetConnectStatus(w http.ResponseWriter, r *http.Request) 
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, cursor, windsurf, vscode, codex, gemini)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
 // @Param       body   body   ConnectRequest false "Optional connection parameters"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
@@ -108,7 +108,7 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string         true  "Client ID (claude-code, cursor, windsurf, vscode, codex, gemini)"
+// @Param       client path   string         true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
 // @Param       body   body   ConnectRequest false "Optional parameters (server_name)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"

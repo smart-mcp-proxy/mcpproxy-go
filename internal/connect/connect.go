@@ -31,8 +31,9 @@ type ClientStatus struct {
 	ConfigPath string `json:"config_path"`
 	Exists     bool   `json:"exists"`           // config file exists on disk
 	Connected  bool   `json:"connected"`        // mcpproxy entry present in config
-	Supported  bool   `json:"supported"`        // client supports HTTP/SSE
+	Supported  bool   `json:"supported"`        // client can be connected (directly or via a bridge)
 	Reason     string `json:"reason,omitempty"` // why not supported
+	Note       string `json:"note,omitempty"`   // caveat for supported clients (e.g. bridge requirement)
 	Icon       string `json:"icon"`
 	ServerName string `json:"server_name,omitempty"` // name under which mcpproxy is registered
 }
@@ -119,6 +120,7 @@ func (s *Service) GetAllStatus() []ClientStatus {
 			ConfigPath: cfgPath,
 			Supported:  c.Supported,
 			Reason:     c.Reason,
+			Note:       c.Note,
 			Icon:       c.Icon,
 		}
 

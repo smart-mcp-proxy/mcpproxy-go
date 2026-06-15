@@ -33,6 +33,7 @@
             <div class="min-w-0 flex-1">
               <div class="font-medium text-sm truncate">{{ client.name }}</div>
               <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
+              <div v-if="client.note" class="text-xs opacity-60 italic mt-0.5" :title="client.note">{{ client.note }}</div>
             </div>
           </div>
           <div class="shrink-0 ml-2">
