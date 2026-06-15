@@ -530,6 +530,25 @@ func ConvertConfigToContract(cfg *config.Config) interface{} {
 		return nil
 	}
 
+	// Materialize the resolved telemetry.enabled value before marshaling.
+	// Telemetry is opt-out (default enabled), but DefaultConfig leaves the
+	// Telemetry field nil and Enabled is a pointer with `omitempty`, so a fresh
+	// install would omit the `telemetry` key entirely. Both the web UI and macOS
+	// clients coerce the missing bool to false, displaying telemetry as DISABLED
+	// even though Config.IsTelemetryEnabled() reports true (MCP-2477). Mirror that
+	// resolution into the serialized response without mutating the shared config.
+	if cfg.Telemetry == nil || cfg.Telemetry.Enabled == nil {
+		cfgCopy := *cfg
+		var tel config.TelemetryConfig
+		if cfg.Telemetry != nil {
+			tel = *cfg.Telemetry
+		}
+		enabled := cfg.IsTelemetryEnabled()
+		tel.Enabled = &enabled
+		cfgCopy.Telemetry = &tel
+		return &cfgCopy
+	}
+
 	// Return the config as-is for JSON marshaling
 	// The JSON tags on config.Config will handle serialization
 	return cfg
