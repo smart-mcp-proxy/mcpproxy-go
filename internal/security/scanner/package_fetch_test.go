@@ -5,10 +5,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func TestParsePackageSpec(t *testing.T) {
@@ -464,4 +467,95 @@ func TestFindDownloadedArchive(t *testing.T) {
 	if got2 != whl || kind2 != archiveZip {
 		t.Errorf("wheel should be preferred: got (%q,%v)", got2, kind2)
 	}
+}
+
+// MCP-2442: a `pip download` / `uv pip download` of a NON-REGISTRY spec
+// (local path, git+, URL, file:, VCS, ssh) STILL executes the package's
+// setup.py / PEP 517 build backend even with --only-binary=:all: — arbitrary
+// code execution from untrusted server config on the (static) scan path. The
+// fetch must validate the spec is a bare PEP 503 / npm registry name and REFUSE
+// anything else, falling back to tool-definitions-only.
+func TestValidatePackageSpec(t *testing.T) {
+	cases := []struct {
+		ecosystem string
+		spec      string
+		wantOK    bool
+	}{
+		// Registry names (allowed) — must not regress.
+		{"python", "flights", true},
+		{"python", "flights==0.2.4", true},
+		{"python", "google-flights-mcp-server==0.2.4", true},
+		{"python", "Flask", true},
+		{"python", "some.dotted.name", true},
+		{"npm", "google-flights-mcp-server", true},
+		{"npm", "google-flights-mcp-server@0.2.4", true},
+		{"npm", "@modelcontextprotocol/server-everything", true},
+		{"npm", "@modelcontextprotocol/server-everything@1.0.0", true},
+		// Non-registry specs (must be REJECTED → fall back to tool-defs).
+		{"python", "./local-pkg", false},
+		{"python", "../evil", false},
+		{"python", "/abs/path/pkg", false},
+		{"python", "~/pkg", false},
+		{"python", "file:./pkg", false},
+		{"python", "git+https://github.com/user/repo.git", false},
+		{"python", "git+ssh://[email protected]/user/repo.git", false},
+		{"python", "https://example.com/pkg.tar.gz", false},
+		{"python", "[email protected]:user/repo.git", false},
+		{"python", "hg+https://example.com/repo", false},
+		{"python", `C:\Users\evil\pkg`, false},
+		{"python", "", false},
+		{"npm", "./local-pkg", false},
+		{"npm", "/abs/path", false},
+		{"npm", "git+https://github.com/user/repo.git", false},
+		{"npm", "file:../evil", false},
+		{"npm", "https://example.com/pkg.tgz", false},
+		{"npm", "", false},
+	}
+	for _, c := range cases {
+		err := validatePackageSpec(c.ecosystem, c.spec)
+		if c.wantOK && err != nil {
+			t.Errorf("validatePackageSpec(%q, %q) = %v, want OK", c.ecosystem, c.spec, err)
+		}
+		if !c.wantOK && err == nil {
+			t.Errorf("validatePackageSpec(%q, %q) = nil, want rejection", c.ecosystem, c.spec)
+		}
+	}
+}
+
+// TestResolveFromPackageFetch_RejectsNonRegistrySpec proves the resolver refuses
+// a non-registry uvx spec BEFORE invoking any download command — so the untrusted
+// package's setup.py is never executed. We point the spec at a local directory
+// containing a setup.py that drops an execution marker; the resolver must return
+// an error (caller falls back to tool_definitions_only) and the marker must be
+// absent.
+func TestResolveFromPackageFetch_RejectsNonRegistrySpec(t *testing.T) {
+	pkgDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "EXECUTED.marker")
+	setupPy := "import pathlib\npathlib.Path(" + pyQuote(marker) + ").write_text('pwned')\n"
+	if err := os.WriteFile(filepath.Join(pkgDir, "setup.py"), []byte(setupPy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewSourceResolver(zap.NewNop())
+	cases := []ServerInfo{
+		{Name: "evil-path", Protocol: "stdio", Command: "uvx", Args: []string{"--from", pkgDir, "evil"}},
+		{Name: "evil-git", Protocol: "stdio", Command: "uvx", Args: []string{"--from", "git+https://example.com/repo.git", "evil"}},
+		{Name: "evil-npm-path", Protocol: "stdio", Command: "npx", Args: []string{"-y", "./local-evil"}},
+	}
+	for _, info := range cases {
+		res, err := r.resolveFromPackageFetch(context.Background(), info)
+		if err == nil {
+			if res != nil && res.Cleanup != nil {
+				res.Cleanup()
+			}
+			t.Errorf("%s: expected error (fallback to tool-defs), got nil", info.Name)
+		}
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("setup.py was EXECUTED — marker present at %s", marker)
+	}
+}
+
+func pyQuote(s string) string {
+	return "r'" + s + "'"
 }

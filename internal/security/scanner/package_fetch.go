@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"go.uber.org/zap"
@@ -102,6 +103,62 @@ func parsePackageSpec(spec string) (name, version string) {
 		return spec[:idx], spec[idx+1:]
 	}
 	return spec, ""
+}
+
+var (
+	// npmNameRe matches a bare npm registry package name: an optional
+	// "@scope/" prefix followed by the package name. It deliberately excludes
+	// any character ('/', ':', etc. beyond the single scope separator) that
+	// would appear in a path, URL, or VCS spec.
+	npmNameRe = regexp.MustCompile(`^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$`)
+	// pep503NameRe matches a PEP 503 / PEP 508 distribution name (case
+	// insensitive). No path/URL/VCS characters are permitted.
+	pep503NameRe = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+)
+
+// validatePackageSpec rejects any package spec that is not a bare registry name
+// (optionally version-pinned). This is a SECURITY gate, not a convenience check:
+// for a local-path, file:, URL, or VCS (git+/hg+/ssh) spec, `pip download` /
+// `uv pip download` STILL invoke the package's setup.py / PEP 517 build backend
+// to resolve metadata — EVEN with --only-binary=:all: — which executes untrusted
+// code from the server config on the (meant-to-be-static) scan path (MCP-2442).
+// `npm pack` of a non-registry spec is similarly unsafe. Only a bare PEP 503
+// (python) / npm registry name is guaranteed to download-without-build. On
+// rejection the caller falls back to tool_definitions_only (no fetch, no exec).
+func validatePackageSpec(ecosystem, spec string) error {
+	if spec == "" {
+		return fmt.Errorf("empty package spec")
+	}
+	// Disqualify URLs (any scheme), file:, VCS (git+/hg+/...), ssh, drive
+	// letters, and Windows paths up front. None of ':' or '\' ever appear in a
+	// bare registry name or a PEP 508 version pin, so their mere presence means
+	// the spec is not a registry name.
+	if strings.ContainsAny(spec, ":\\") {
+		return fmt.Errorf("package spec %q is not a bare registry name (contains path/URL/VCS markers)", spec)
+	}
+	// Disqualify filesystem paths (absolute, relative, home-relative) and any
+	// path traversal. A scoped npm name legitimately starts with '@', which is
+	// not matched here.
+	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") || strings.HasPrefix(spec, "~") {
+		return fmt.Errorf("package spec %q looks like a filesystem path", spec)
+	}
+	if strings.Contains(spec, "..") {
+		return fmt.Errorf("package spec %q contains a path traversal", spec)
+	}
+	name, _ := parsePackageSpec(spec)
+	switch ecosystem {
+	case "npm":
+		if !npmNameRe.MatchString(name) {
+			return fmt.Errorf("%q is not a valid npm package name", name)
+		}
+	case "python":
+		if !pep503NameRe.MatchString(name) {
+			return fmt.Errorf("%q is not a valid PEP 503 package name", name)
+		}
+	default:
+		return fmt.Errorf("unknown ecosystem %q", ecosystem)
+	}
+	return nil
 }
 
 // firstPackageArg returns the package spec from a runner command's args. It
@@ -392,8 +449,14 @@ func (r *SourceResolver) resolveFromPackageFetch(ctx context.Context, info Serve
 
 	switch cmdBase {
 	case "npx", "bunx", "pnpm":
+		if err := validatePackageSpec("npm", spec); err != nil {
+			return nil, fmt.Errorf("refusing to fetch untrusted spec for %s: %w", info.Name, err)
+		}
 		return r.fetchNpmPackage(ctx, info, spec)
 	case "uvx", "pipx":
+		if err := validatePackageSpec("python", spec); err != nil {
+			return nil, fmt.Errorf("refusing to fetch untrusted spec for %s: %w", info.Name, err)
+		}
 		return r.fetchPythonPackage(ctx, info, spec)
 	}
 	return nil, fmt.Errorf("package fetch unsupported for command %q", cmdBase)
