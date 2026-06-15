@@ -64,6 +64,15 @@ func TestRunnerPackageSpec(t *testing.T) {
 		// uvx -p/--python carries a version, NOT the package.
 		{"uvx -p python", "uvx", []string{"-p", "3.11", "main-pkg"}, "main-pkg"},
 		{"uvx --python", "uvx", []string{"--python", "3.12", "--from", "main-pkg", "cmd"}, "main-pkg"},
+		// Subcommand runners WITHOUT the keyword must NOT resolve a package spec —
+		// these are local invocations, not remote package fetches (MCP-2445 re-review).
+		// Fetching the first positional here = false coverage + typosquat risk.
+		{"pnpm start (local script)", "pnpm", []string{"start"}, ""},
+		{"pnpm run build (local script)", "pnpm", []string{"run", "build"}, ""},
+		{"bun server.ts (local file)", "bun", []string{"server.ts"}, ""},
+		{"bun run dev (local script)", "bun", []string{"run", "dev"}, ""},
+		{"yarn build (local script)", "yarn", []string{"build"}, ""},
+		{"pipx install foo (not ephemeral run)", "pipx", []string{"install", "foo"}, ""},
 		// Degenerate inputs.
 		{"npx flag only", "npx", []string{"-y"}, ""},
 		{"nil", "npx", nil, ""},

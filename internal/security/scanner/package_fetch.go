@@ -246,7 +246,9 @@ func runnerFlagTakesValue(npm bool, flag string) bool {
 // returned verbatim) that a package-runner command will execute, from its command
 // base and argument list. It understands:
 //   - a leading runner subcommand keyword (`pipx run`, `pnpm dlx`, `yarn dlx`,
-//     `bun x`) that precedes the package token;
+//     `bun x`) that precedes the package token — and which is REQUIRED for those
+//     runners: a bare `pnpm start` / `bun server.ts` is a local invocation, not a
+//     remote fetch, and yields "" (no package);
 //   - flags that NAME the target package — uv `--from <pkg>`, npx `--package`/
 //     `-p <pkg>` — whose value is returned directly;
 //   - value-bearing flags whose argument is NOT the target (`--with <dep>`,
@@ -276,10 +278,19 @@ func runnerPackageSpec(commandBase string, args []string) string {
 			}
 			continue
 		}
-		// First positional token. Skip a leading runner subcommand keyword once.
-		if !subSkipped && arg == sub {
-			subSkipped = true
-			continue
+		// First positional token. Subcommand-style runners (pnpm/yarn/bun/pipx)
+		// REQUIRE their keyword (dlx/x/run) before the package token: a bare
+		// `pnpm start`, `bun server.ts`, or `pipx install foo` is a LOCAL
+		// invocation, NOT a remote package fetch, so it must not resolve a spec —
+		// fetching the wrong token would mean false coverage and typosquat risk
+		// (MCP-2445 re-review). Once the keyword is consumed the next positional
+		// is the package.
+		if !subSkipped {
+			if arg == sub {
+				subSkipped = true
+				continue
+			}
+			return ""
 		}
 		return arg
 	}
