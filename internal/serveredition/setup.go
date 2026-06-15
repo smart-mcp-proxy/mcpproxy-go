@@ -87,6 +87,10 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	adminHandlers := teamsapi.NewAdminHandlers(userStore, nil, sessionManager, cfg.AdminEmails, sharedServers, deps.Config, configPath, deps.ManagementService, deps.Logger)
 	userHandlers := teamsapi.NewUserHandlers(userStore, sharedServers, deps.StorageManager, hmacKey, deps.Logger)
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
+	// Per-user brokered-credential surfaces (spec 074 T8): list connection
+	// status, disconnect, and the Path B connect/callback flow. Reuses the same
+	// credential store wired into the OAuth login handler above.
+	credentialHandlers := teamsapi.NewCredentialHandlers(credStore, sharedServers, deps.Logger)
 
 	deps.Router.Group(func(r chi.Router) {
 		r.Use(authMiddleware.Middleware())
@@ -95,6 +99,7 @@ func setupMultiUserOAuth(deps Dependencies) error {
 		adminHandlers.RegisterRoutesWithPrefix(r, "/api/v1")
 		userHandlers.RegisterRoutesWithPrefix(r, "/api/v1")
 		userActivityHandlers.RegisterRoutesWithPrefix(r, "/api/v1")
+		credentialHandlers.RegisterRoutesWithPrefix(r, "/api/v1")
 	})
 
 	deps.Logger.Infow("Server multi-user OAuth initialized",
