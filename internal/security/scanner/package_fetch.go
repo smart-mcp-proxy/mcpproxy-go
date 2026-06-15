@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,6 +52,30 @@ const (
 	archiveTarGz archiveKind = iota
 	archiveZip
 )
+
+// errArchiveTooLarge is returned by cappedReader once the total number of bytes
+// read past it exceeds the cap. It is the decompression-bomb backstop.
+var errArchiveTooLarge = errors.New("decompressed archive exceeded size cap")
+
+// cappedReader counts every byte read through it and fails the read once the
+// running total exceeds limit. Wrapping the gzip stream with it bounds the TOTAL
+// decompressed output — including the bodies of tar members we skip (oversized,
+// symlink, traversal), which the tar reader still decompresses while advancing
+// to the next header. This closes the gzip-bomb-via-skipped-members hole.
+type cappedReader struct {
+	r     io.Reader
+	n     int64
+	limit int64
+}
+
+func (c *cappedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	if c.n > c.limit {
+		return n, errArchiveTooLarge
+	}
+	return n, err
+}
 
 // parsePackageSpec splits a package spec into its name and exact version.
 // Only exact pins are honored ("pkg@1.2.3", "pkg==1.2.3"); range/min specifiers
@@ -154,11 +179,26 @@ func findDownloadedArchive(dir string) (path string, kind archiveKind, err error
 	return "", 0, fmt.Errorf("no package archive found in %s", dir)
 }
 
-// safeJoin joins destDir with a (possibly hostile) archive entry name and
-// returns an error if the result would escape destDir (path traversal).
+// safeJoin joins destDir with a (possibly hostile) archive entry name. It
+// REJECTS — never sanitizes/rewrites — absolute paths and any path-traversal
+// entry: an entry like "../../etc/passwd" must error out, not be silently
+// cleaned into an in-dest path (the MCP-2444 bug). Archive entry names use '/'
+// separators by convention; we treat both '/' and '\' as separators so a
+// Windows-style traversal can't slip through.
 func safeJoin(destDir, name string) (string, error) {
-	cleaned := filepath.Clean("/" + name) // make absolute then strip leading /
-	target := filepath.Join(destDir, cleaned)
+	if name == "" {
+		return "", fmt.Errorf("empty archive entry name")
+	}
+	if filepath.IsAbs(name) || strings.HasPrefix(name, "/") || strings.HasPrefix(name, `\`) {
+		return "", fmt.Errorf("entry %q is an absolute path", name)
+	}
+	for _, part := range strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if part == ".." {
+			return "", fmt.Errorf("entry %q contains a path-traversal component", name)
+		}
+	}
+	target := filepath.Join(destDir, filepath.Clean(name))
+	// Defense in depth: confirm the result stays within destDir.
 	rel, err := filepath.Rel(destDir, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("entry %q escapes destination", name)
@@ -168,51 +208,73 @@ func safeJoin(destDir, name string) (string, error) {
 
 // extractTarballGz extracts a gzip-compressed tar stream into destDir. It is
 // hardened for UNTRUSTED input: regular files and directories only (symlinks,
-// hardlinks, devices skipped), path-traversal entries skipped, and bounded by
-// maxFiles and maxTotalBytes.
-func extractTarballGz(r io.Reader, destDir string, maxFiles int, maxTotalBytes int64) error {
+// hardlinks, devices skipped), path-traversal entries rejected (not rewritten),
+// and bounded by maxFiles (files + directories combined), maxTotalBytes (TOTAL
+// decompressed bytes, including the bodies of skipped members — gzip-bomb guard)
+// and maxFileBytes (any single file).
+func extractTarballGz(r io.Reader, destDir string, maxFiles int, maxTotalBytes, maxFileBytes int64) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("gzip: %w", err)
 	}
 	defer gz.Close()
 
-	tr := tar.NewReader(gz)
-	var fileCount int
+	// Read the tar through a cappedReader so EVERY decompressed byte counts —
+	// including bodies of entries we skip, which tar.Reader decompresses while
+	// seeking the next header. This bounds a bomb even when all members are
+	// skipped (oversized/symlink/traversal).
+	capped := &cappedReader{r: gz, limit: maxTotalBytes}
+	tr := tar.NewReader(capped)
+
+	var entryCount int // files + directories, both charged to maxFiles
 	var totalBytes int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
+		if errors.Is(err, errArchiveTooLarge) {
+			return fmt.Errorf("package exceeds max total size (%d bytes)", maxTotalBytes)
+		}
 		if err != nil {
 			return fmt.Errorf("tar: %w", err)
 		}
+
 		// Only regular files and directories. Symlinks/hardlinks are escape
 		// vectors and are never needed for source scanning.
 		switch hdr.Typeflag {
 		case tar.TypeDir:
+			// Cap directory creation alongside files: charge it to the same
+			// entry limit BEFORE creating, so an all-directories archive can't
+			// bypass the file-count cap.
+			if entryCount >= maxFiles {
+				return fmt.Errorf("package exceeds max entry count (%d)", maxFiles)
+			}
 			target, jerr := safeJoin(destDir, hdr.Name)
 			if jerr != nil {
-				continue
+				continue // reject traversal/absolute dir entry
 			}
+			entryCount++
 			_ = os.MkdirAll(target, 0o755)
 			continue
 		case tar.TypeReg, tar.TypeRegA: //nolint:staticcheck // TypeRegA for legacy tars
 			// handled below
 		default:
-			continue // symlink, hardlink, char/block device, fifo — skip
+			continue // symlink, hardlink, char/block device, fifo — skip (body still counted by capped)
 		}
 
 		target, jerr := safeJoin(destDir, hdr.Name)
 		if jerr != nil {
-			continue
+			continue // reject traversal/absolute file entry
 		}
-		if fileCount >= maxFiles {
-			return fmt.Errorf("package exceeds max file count (%d)", maxFiles)
+		if entryCount >= maxFiles {
+			return fmt.Errorf("package exceeds max entry count (%d)", maxFiles)
 		}
-		if hdr.Size > fetchMaxFileBytes {
-			continue // skip oversized single file rather than abort
+		// Charge the entry now so an oversized or partially-written file still
+		// counts toward the caps (it consumed resources either way).
+		entryCount++
+		if hdr.Size > maxFileBytes {
+			continue // skip oversized single file; its body is still counted by capped
 		}
 		if totalBytes+hdr.Size > maxTotalBytes {
 			return fmt.Errorf("package exceeds max total size (%d bytes)", maxTotalBytes)
@@ -221,31 +283,40 @@ func extractTarballGz(r io.Reader, destDir string, maxFiles int, maxTotalBytes i
 			continue
 		}
 		written, werr := writeArchiveFile(target, tr, hdr.Size)
-		if werr != nil {
-			continue
+		totalBytes += written // charge bytes even on a partial/failed write
+		if errors.Is(werr, errArchiveTooLarge) {
+			return fmt.Errorf("package exceeds max total size (%d bytes)", maxTotalBytes)
 		}
-		totalBytes += written
-		fileCount++
 	}
 	return nil
 }
 
 // extractZip extracts a zip archive (e.g. a Python wheel) into destDir with the
-// same untrusted-input hardening as extractTarballGz.
-func extractZip(zipPath, destDir string, maxFiles int, maxTotalBytes int64) error {
+// same untrusted-input hardening as extractTarballGz: directories and files are
+// charged to a single entry cap (maxFiles), traversal/absolute entries are
+// rejected, and a single entry that lies about its decompressed size is bounded
+// by writeArchiveFile (deflate-bomb guard) with its written bytes charged.
+func extractZip(zipPath, destDir string, maxFiles int, maxTotalBytes, maxFileBytes int64) error {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
 		return fmt.Errorf("zip: %w", err)
 	}
 	defer zr.Close()
 
-	var fileCount int
+	var entryCount int // files + directories, both charged to maxFiles
 	var totalBytes int64
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
-			if target, jerr := safeJoin(destDir, f.Name); jerr == nil {
-				_ = os.MkdirAll(target, 0o755)
+			// Cap directory creation before the file-count limit can be bypassed.
+			if entryCount >= maxFiles {
+				return fmt.Errorf("package exceeds max entry count (%d)", maxFiles)
 			}
+			target, jerr := safeJoin(destDir, f.Name)
+			if jerr != nil {
+				continue // reject traversal/absolute dir entry
+			}
+			entryCount++
+			_ = os.MkdirAll(target, 0o755)
 			continue
 		}
 		// Skip symlinks (mode bit) — escape vector.
@@ -254,13 +325,16 @@ func extractZip(zipPath, destDir string, maxFiles int, maxTotalBytes int64) erro
 		}
 		target, jerr := safeJoin(destDir, f.Name)
 		if jerr != nil {
-			continue
+			continue // reject traversal/absolute file entry
 		}
-		if fileCount >= maxFiles {
-			return fmt.Errorf("package exceeds max file count (%d)", maxFiles)
+		if entryCount >= maxFiles {
+			return fmt.Errorf("package exceeds max entry count (%d)", maxFiles)
 		}
+		// Charge the entry now so an oversized or partially-written file still
+		// counts toward the caps.
+		entryCount++
 		size := int64(f.UncompressedSize64)
-		if size > fetchMaxFileBytes {
+		if size > maxFileBytes {
 			continue
 		}
 		if totalBytes+size > maxTotalBytes {
@@ -276,11 +350,8 @@ func extractZip(zipPath, destDir string, maxFiles int, maxTotalBytes int64) erro
 		}
 		written, werr := writeArchiveFile(target, rc, size)
 		rc.Close()
-		if werr != nil {
-			continue
-		}
-		totalBytes += written
-		fileCount++
+		totalBytes += written // charge bytes even on a partial/failed write
+		_ = werr
 	}
 	return nil
 }
@@ -365,7 +436,7 @@ func (r *SourceResolver) fetchNpmPackage(ctx context.Context, info ServerInfo, s
 		return nil, err
 	}
 	defer f.Close()
-	if err := extractTarballGz(f, srcDir, fetchMaxFiles, fetchMaxTotalBytes); err != nil {
+	if err := extractTarballGz(f, srcDir, fetchMaxFiles, fetchMaxTotalBytes, fetchMaxFileBytes); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("extract npm tarball: %w", err)
 	}
@@ -412,7 +483,7 @@ func (r *SourceResolver) fetchPythonPackage(ctx context.Context, info ServerInfo
 		cleanup()
 		return nil, fmt.Errorf("python download produced a non-wheel archive; refusing to build/extract an sdist (would execute untrusted code)")
 	}
-	if err := extractZip(archive, srcDir, fetchMaxFiles, fetchMaxTotalBytes); err != nil {
+	if err := extractZip(archive, srcDir, fetchMaxFiles, fetchMaxTotalBytes, fetchMaxFileBytes); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("extract wheel: %w", err)
 	}
