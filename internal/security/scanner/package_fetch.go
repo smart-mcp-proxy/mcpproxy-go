@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"go.uber.org/zap"
@@ -102,6 +103,59 @@ func parsePackageSpec(spec string) (name, version string) {
 		return spec[:idx], spec[idx+1:]
 	}
 	return spec, ""
+}
+
+// pep503NameRe matches a bare PEP 503 Python distribution name (the only thing
+// we will hand to pip/uv on the scan path). No path separators, no scheme.
+var pep503NameRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+
+// npmNameRe matches a bare npm registry name, optionally scoped (@scope/name).
+// The single '/' of a scope is the ONLY slash permitted — a real filesystem
+// path (or "@scope/../escape") must not pass.
+var npmNameRe = regexp.MustCompile(`^(?:@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// isBareRegistrySpec reports whether spec is a bare registry package name
+// (with an optional version pin) for the given ecosystem ("python" or "npm").
+//
+// MCP-2442 (CRITICAL/P0): the package-fetch scan path must REFUSE anything that
+// is not a bare registry name. pip/uv/npm execute the package's build backend
+// (setup.py / PEP 517 egg_info) when given a local path, git+/VCS, URL, file:,
+// or PEP 508 direct-reference spec — even with --only-binary=:all: /
+// --ignore-scripts — which is arbitrary code execution during a static scan.
+// Bare registry names are safe (wheel-only download / `npm pack --ignore-scripts`).
+// A rejected spec makes the fetch caller fall back to tool_definitions_only.
+func isBareRegistrySpec(spec, ecosystem string) bool {
+	if spec == "" || strings.TrimSpace(spec) != spec {
+		return false
+	}
+	// No whitespace (PEP 508 direct references use "name @ url").
+	if strings.ContainsAny(spec, " \t\r\n;") {
+		return false
+	}
+	// No URLs, VCS prefixes, file: refs, or direct references.
+	lower := strings.ToLower(spec)
+	for _, bad := range []string{"://", "git+", "hg+", "svn+", "bzr+", "file:", "@http", "@git"} {
+		if strings.Contains(lower, bad) {
+			return false
+		}
+	}
+	// No path indicators (absolute, relative, home, backslash, parent-dir).
+	if strings.HasPrefix(spec, ".") || strings.HasPrefix(spec, "/") ||
+		strings.HasPrefix(spec, "~") || strings.HasPrefix(spec, "\\") {
+		return false
+	}
+	if strings.Contains(spec, "\\") || strings.Contains(spec, "..") {
+		return false
+	}
+	// Validate the bare NAME (version specifier stripped) against the ecosystem.
+	name, _ := parsePackageSpec(spec)
+	switch ecosystem {
+	case "python":
+		return pep503NameRe.MatchString(name)
+	case "npm":
+		return npmNameRe.MatchString(name)
+	}
+	return false
 }
 
 // firstPackageArg returns the package spec from a runner command's args. It
@@ -392,8 +446,14 @@ func (r *SourceResolver) resolveFromPackageFetch(ctx context.Context, info Serve
 
 	switch cmdBase {
 	case "npx", "bunx", "pnpm":
+		if !isBareRegistrySpec(spec, "npm") {
+			return nil, fmt.Errorf("refusing to fetch non-registry npm spec %q for %s: path/URL/VCS/file specs can execute package code during a static scan (MCP-2442); falling back to tool_definitions_only", spec, info.Name)
+		}
 		return r.fetchNpmPackage(ctx, info, spec)
 	case "uvx", "pipx":
+		if !isBareRegistrySpec(spec, "python") {
+			return nil, fmt.Errorf("refusing to fetch non-registry python spec %q for %s: path/URL/VCS/file specs execute setup.py during a static scan (MCP-2442); falling back to tool_definitions_only", spec, info.Name)
+		}
 		return r.fetchPythonPackage(ctx, info, spec)
 	}
 	return nil, fmt.Errorf("package fetch unsupported for command %q", cmdBase)
