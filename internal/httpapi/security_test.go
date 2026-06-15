@@ -244,6 +244,7 @@ func (m *baseController) ForceReconnectAllServers(reason string) error       { r
 func (m *baseController) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 	return nil
 }
+func (m *baseController) IsDockerAvailable() bool { return false }
 func (m *baseController) QuarantineServer(serverName string, quarantined bool) error {
 	return nil
 }

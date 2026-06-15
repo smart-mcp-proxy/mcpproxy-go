@@ -70,6 +70,10 @@ type ServerController interface {
 	RestartServer(serverName string) error
 	ForceReconnectAllServers(reason string) error
 	GetDockerRecoveryStatus() *storage.DockerRecoveryState
+	// IsDockerAvailable reports genuine Docker daemon reachability via a real
+	// probe (not the synthetic recovery-state value returned when isolation is
+	// off). Used by /api/v1/docker/status — see MCP-2478.
+	IsDockerAvailable() bool
 	QuarantineServer(serverName string, quarantined bool) error
 	GetQuarantinedServers() ([]map[string]interface{}, error)
 	UnquarantineServer(serverName string) error
@@ -4612,8 +4616,24 @@ func (s *Server) handleGetDockerStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Report GENUINE daemon availability from a real probe, not the synthetic
+	// DockerAvailable:true that GetDockerRecoveryStatus returns when Docker
+	// recovery is disabled (isolation off). See MCP-2478: the dashboard bound
+	// its "Docker isolation active" badge to docker_available and lit up on
+	// hosts that have no Docker daemon at all. The recovery fields below stay
+	// purely diagnostic.
+	dockerAvailable := s.controller.IsDockerAvailable()
+
+	// isolation_enabled lets the UI label the badge "active" only when the user
+	// actually turned Docker isolation on AND the daemon is reachable.
+	isolationEnabled := false
+	if cfg, err := s.controller.GetConfig(); err == nil && cfg != nil && cfg.DockerIsolation != nil {
+		isolationEnabled = cfg.DockerIsolation.Enabled
+	}
+
 	response := map[string]interface{}{
-		"docker_available":   status.DockerAvailable,
+		"docker_available":   dockerAvailable,
+		"isolation_enabled":  isolationEnabled,
 		"recovery_mode":      status.RecoveryMode,
 		"failure_count":      status.FailureCount,
 		"attempts_since_up":  status.AttemptsSinceUp,

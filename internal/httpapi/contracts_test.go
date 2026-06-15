@@ -168,6 +168,7 @@ func (m *MockServerController) GetDockerRecoveryStatus() *storage.DockerRecovery
 		LastError:       "",
 	}
 }
+func (m *MockServerController) IsDockerAvailable() bool { return true }
 func (m *MockServerController) GetRecentSessions(_ int) ([]*contracts.MCPSession, int, error) {
 	return []*contracts.MCPSession{}, 0, nil
 }

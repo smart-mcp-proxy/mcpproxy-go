@@ -510,6 +510,7 @@ class APIService {
   // Docker status
   async getDockerStatus(): Promise<APIResponse<{
     docker_available: boolean
+    isolation_enabled: boolean
     recovery_mode: boolean
     failure_count: number
     attempts_since_up: number

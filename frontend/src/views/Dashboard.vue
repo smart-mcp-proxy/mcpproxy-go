@@ -528,17 +528,16 @@ const {
 
 const loadSecurityStatus = async () => {
   try {
-    // Docker status from dedicated endpoint
+    // Docker status from dedicated endpoint. The badge reads "active" only when
+    // Docker isolation is genuinely in effect: the user enabled it AND a real
+    // Docker daemon is reachable. docker_available now reflects a genuine daemon
+    // probe (MCP-2478) — we must NOT fake it from connected stdio servers, which
+    // do not imply isolation is on.
     const dockerResponse = await api.getDockerStatus()
     if (dockerResponse.success && dockerResponse.data) {
-      let available = dockerResponse.data.docker_available ?? false
-      // Workaround: Docker health checker can get stuck at 'max retries exceeded'
-      // even when Docker containers are running. If API says unavailable but
-      // we have connected stdio servers (which use Docker), treat as available.
-      if (!available && serversStore.servers.some(s => s.connected && s.protocol === 'stdio')) {
-        available = true
-      }
-      dockerStatus.value = { available }
+      const daemonAvailable = dockerResponse.data.docker_available ?? false
+      const isolationEnabled = dockerResponse.data.isolation_enabled ?? false
+      dockerStatus.value = { available: daemonAvailable && isolationEnabled }
     }
   } catch {
     // Docker endpoint may not exist - treat as unavailable
