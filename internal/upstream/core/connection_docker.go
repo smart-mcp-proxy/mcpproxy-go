@@ -109,15 +109,23 @@ func (c *Client) injectEnvVarsIntoDockerArgs(args []string, envVars map[string]s
 
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
 func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile string) []string {
-	// Shell args typically look like: ["-l", "-c", "docker run -i --rm mcp/duckduckgo"]
-	// Fix: Check for correct shell format - args can be 2 or 3 elements
-	if len(shellArgs) < 2 || shellArgs[len(shellArgs)-2] != "-c" {
-		// If it's not the expected format, log error and fall back
+	// Shell args look like:
+	//   Unix/bash:     ["-l", "-c", "docker run …"]  → second-to-last is "-c"
+	//   Windows cmd:   ["/c",       "docker run …"]  → second-to-last is "/c"
+	// Accept both flags so cidfile insertion works on all platforms.
+	if len(shellArgs) < 2 {
 		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
 			zap.String("server", c.config.Name),
 			zap.Strings("shell_args", shellArgs),
 			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
-		// Don't append cidfile to shell args as it won't work
+		return shellArgs
+	}
+	secondToLast := shellArgs[len(shellArgs)-2]
+	if secondToLast != "-c" && secondToLast != "/c" {
+		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
+			zap.String("server", c.config.Name),
+			zap.Strings("shell_args", shellArgs),
+			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
 		return shellArgs
 	}
 

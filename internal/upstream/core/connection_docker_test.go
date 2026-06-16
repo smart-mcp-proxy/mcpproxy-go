@@ -68,6 +68,21 @@ func TestSetupDockerIsolationCidfileInsertionWithAbsolutePath(t *testing.T) {
 		"cidfile must be inserted right after the absolute-path docker run, got: %s", cmdStr)
 }
 
+// TestInsertCidfileWindowsCmdFormat verifies cidfile insertion works with the
+// Windows cmd.exe shell-wrap format: ["/c", "docker run …"] (second-to-last
+// arg is "/c", not "-c"). This is a cross-platform unit test for the guard
+// that previously rejected the /c flag as an unrecognised format.
+func TestInsertCidfileWindowsCmdFormat(t *testing.T) {
+	const fakeDocker = "/opt/fake/bin/docker"
+	c := newIsolatedTestClient()
+	// Simulate Windows cmd.exe output: shell returns ["/c", cmdStr]
+	windowsShellArgs := []string{"/c", fakeDocker + " run --rm -i ghcr.io/some/image python -m srv"}
+	withCid := c.insertCidfileIntoShellDockerCommand(windowsShellArgs, "/tmp/cid.txt")
+	cmdStr := withCid[len(withCid)-1]
+	assert.Contains(t, cmdStr, fakeDocker+" run --cidfile /tmp/cid.txt",
+		"cidfile must be inserted in Windows cmd /c format too, got: %s", cmdStr)
+}
+
 // TestSetupDockerIsolationFallsBackToBareDocker verifies that when docker
 // cannot be resolved to an absolute path, the spawn falls back to the bare
 // "docker" command (preserving prior behavior / login-shell resolution).
