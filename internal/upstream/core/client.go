@@ -19,6 +19,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	proxytransport "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
@@ -67,6 +68,14 @@ type Client struct {
 	// SSE transport has limitations with concurrent requests - responses can get lost
 	// when multiple requests are in-flight simultaneously
 	sseRequestMu sync.Mutex
+
+	// brokeredAuth, when set, is the per-user upstream credential the gateway
+	// resolved for this (user, server) connection. The headers-auth strategy
+	// injects it into the configured outbound header, replacing any inbound or
+	// statically-configured auth — the gateway/IdP token is never forwarded
+	// (spec 074 FR-016/FR-017). nil for non-brokered upstreams (unchanged
+	// behaviour).
+	brokeredAuth *proxytransport.BrokeredAuth
 
 	// Transport type and stderr access (for stdio)
 	transportType string

@@ -90,6 +90,21 @@ On each proxied request the broker resolves the per-user credential to inject, i
 
 Concurrent requests for the same `(user, upstream)` are coalesced (single-flight) so a burst does not trigger duplicate upstream token flows. A policy-decision hook is evaluated per call immediately before the credential is returned; no policy engine ships yet, so it permits every injection by default.
 
+## Header injection
+
+The resolved per-user credential is injected into the configured outbound header (`header`, default `Authorization`) using the value template (`header_format`, default `Bearer {token}`), then the request is forwarded to the upstream.
+
+Injection is a **replacement**, not a merge:
+
+- Any header on the upstream config whose name matches `header` (case-insensitively) is **removed** before the resolved credential is set, so a brokered upstream presents exactly one value for that header.
+- The inbound gateway/IdP token is **never forwarded** to the upstream. Brokering exists precisely so the upstream sees a credential minted *for it*, scoped to the calling user — not the token the user presented to the gateway.
+
+Injection applies only to **HTTP-family** upstreams (`http`, `sse`, `streamable-http`). Brokering on a `stdio` upstream is rejected — at config validation, and again as a runtime guard at the injection boundary — with a clear "unsupported in this phase" message.
+
+## Per-(user, server) connection keying
+
+A **shared** upstream that is brokered per-user must carry **each user's own** credential. Brokered upstream connections are therefore keyed by `(user, server)`, never by server alone: one user's connection (and the credential injected on it) is never reused for another user. The server-component of the key reuses the same `name + URL` scheme as the credential store, so a connection and its cached credential stay in lockstep.
+
 ## See also
 
 - [OAuth Authentication](./oauth-authentication.md) — upstream OAuth for the personal edition.
