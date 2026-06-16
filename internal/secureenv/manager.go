@@ -136,16 +136,42 @@ func (m *Manager) discoverPaths() *PathDiscovery {
 	return discovery
 }
 
-// discoverUnixPaths discovers common Unix/macOS tool paths
+// discoverUnixPaths discovers common Unix/macOS tool paths that actually exist.
 func (m *Manager) discoverUnixPaths() []string {
+	// Filter the platform candidate list to only paths that actually exist.
+	var existingPaths []string
+	for _, path := range unixCandidatePaths() {
+		if _, err := os.Stat(path); err == nil {
+			existingPaths = append(existingPaths, path)
+		}
+	}
+
+	return existingPaths
+}
+
+// unixCandidatePaths returns the ordered list of well-known Unix/macOS tool
+// directories to probe for existence. Split out (pure, no I/O) so platform-
+// specific inclusion can be unit-tested without depending on what is installed
+// on the test host.
+func unixCandidatePaths() []string {
 	commonPaths := []string{
-		"/usr/local/bin",    // Homebrew, Docker Desktop, etc.
+		"/usr/local/bin",    // Homebrew, Docker Desktop symlink, etc.
 		"/usr/bin",          // System binaries
 		"/bin",              // Core system binaries
 		"/opt/homebrew/bin", // Apple Silicon Homebrew
 		"/usr/local/sbin",   // System admin binaries
 		"/usr/sbin",         // System admin binaries
 		"/sbin",             // System admin binaries
+	}
+
+	// macOS (#696): Docker Desktop installed the default way (without the
+	// optional, admin-gated "install CLI tools" step) leaves the docker CLI
+	// only inside the app bundle, which is not on any standard PATH dir. Adding
+	// it (defense in depth for the absolute-path spawn fix) lets nested/child
+	// docker resolution work for isolated servers. Existence is filtered by the
+	// caller, so this is a no-op on hosts without Docker Desktop.
+	if runtime.GOOS == "darwin" {
+		commonPaths = append(commonPaths, "/Applications/Docker.app/Contents/Resources/bin")
 	}
 
 	// Add user-specific paths
@@ -159,15 +185,7 @@ func (m *Manager) discoverUnixPaths() []string {
 		)
 	}
 
-	// Filter to only include paths that actually exist
-	var existingPaths []string
-	for _, path := range commonPaths {
-		if _, err := os.Stat(path); err == nil {
-			existingPaths = append(existingPaths, path)
-		}
-	}
-
-	return existingPaths
+	return commonPaths
 }
 
 // discoverWindowsPaths discovers common Windows tool paths

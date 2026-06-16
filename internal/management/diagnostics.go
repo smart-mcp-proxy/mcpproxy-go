@@ -191,7 +191,14 @@ func (s *service) checkDockerDaemon() *contracts.DockerStatus {
 	}
 	dockerBin, resolveErr := shellwrap.ResolveDockerPath(logger)
 	if resolveErr != nil || dockerBin == "" {
-		dockerBin = "docker"
+		// Honest availability (#696): if the CLI can't be resolved to an
+		// absolute path, Docker-isolated servers can't spawn it. Report
+		// unavailable with an actionable error rather than probing a bare
+		// "docker" that is not the binary used for spawning.
+		status.Available = false
+		status.Error = "Docker CLI not found on PATH or well-known install locations (on macOS the CLI ships at /Applications/Docker.app/Contents/Resources/bin/docker even without the optional CLI-tools step)"
+		s.logger.Debugw("Docker CLI not resolvable; reporting docker unavailable", "error", resolveErr)
+		return status
 	}
 	cmd := exec.CommandContext(ctx, dockerBin, "info", "--format", "{{.ServerVersion}}")
 	output, err := cmd.Output()

@@ -123,6 +123,7 @@ type MCPProxyServer struct {
 
 	// Docker availability cache
 	dockerAvailableCache *bool
+	dockerPathCache      string
 	dockerCacheTime      time.Time
 
 	// JavaScript runtime pool for code execution
@@ -2889,8 +2890,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	// Check Docker availability only if Docker isolation is globally enabled
 	dockerIsolationGlobalEnabled := p.config.DockerIsolation != nil && p.config.DockerIsolation.Enabled
 	var dockerAvailable bool
+	var dockerPath string
 	if dockerIsolationGlobalEnabled {
-		dockerAvailable = p.checkDockerAvailable()
+		dockerAvailable, dockerPath = p.resolveDockerStatus()
 	}
 
 	// Enhance server list with connection status and Docker isolation info
@@ -3062,6 +3064,7 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		"total":   len(servers),
 		"docker_status": map[string]interface{}{
 			"available":        dockerAvailable,
+			"docker_path":      dockerPath,
 			"global_enabled":   dockerIsolationGlobalEnabled,
 			"isolation_config": p.config.DockerIsolation,
 		},
@@ -3069,9 +3072,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 
 	if !dockerAvailable && dockerIsolationGlobalEnabled {
 		result["warnings"] = []string{
-			"Docker isolation is enabled but Docker daemon is not available",
+			"Docker isolation is enabled but the Docker CLI is not resolvable / the daemon is not reachable",
 			"Servers configured for isolation will fail to start",
-			"Install Docker or disable isolation in config",
+			"Install Docker (on macOS the CLI ships at /Applications/Docker.app/Contents/Resources/bin/docker even without the optional CLI-tools step), or disable isolation in config",
 		}
 	}
 
@@ -3189,35 +3192,52 @@ func (p *MCPProxyServer) handleDoctor(ctx context.Context, request mcp.CallToolR
 	return mcp.NewToolResultError("Management service not available"), nil
 }
 
-// checkDockerAvailable checks if Docker daemon is available with caching
-func (p *MCPProxyServer) checkDockerAvailable() bool {
+// dockerPathResolver resolves the absolute docker path. Indirected through a
+// package var so tests can stub resolution without a real Docker install.
+var dockerPathResolver = shellwrap.ResolveDockerPath
+
+// resolveDockerStatus reports whether docker is actually invocable and the
+// absolute path it resolved to (empty when unresolvable). Result cached 30s.
+//
+// Honesty (#696): docker is reported available ONLY when the CLI is RESOLVABLE
+// (ResolveDockerPath succeeds) AND `docker info` succeeds. We deliberately do
+// NOT fall back to a bare "docker" probe when resolution fails — that would
+// report available:true even though Docker-isolated servers (which invoke
+// docker by its resolved absolute path) cannot launch it, exactly the
+// misreport in issue #696.
+func (p *MCPProxyServer) resolveDockerStatus() (available bool, dockerPath string) {
 	// Cache result for 30 seconds to avoid repeated expensive checks
 	now := time.Now()
 	if p.dockerAvailableCache != nil && now.Sub(p.dockerCacheTime) < 30*time.Second {
-		return *p.dockerAvailableCache
+		return *p.dockerAvailableCache, p.dockerPathCache
+	}
+
+	// Resolve docker via shellwrap so tray-launched processes with a minimal
+	// inherited PATH still find Docker Desktop / Homebrew / Colima installs.
+	dockerBin, resolveErr := dockerPathResolver(p.logger)
+	if resolveErr != nil || dockerBin == "" {
+		p.logger.Debug("Docker CLI not resolvable; reporting docker unavailable", zap.Error(resolveErr))
+		unavailable := false
+		p.dockerAvailableCache = &unavailable
+		p.dockerPathCache = ""
+		p.dockerCacheTime = now
+		return false, ""
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
-	// Resolve docker via shellwrap so tray-launched processes with a minimal
-	// inherited PATH still find Docker Desktop / Homebrew / Colima installs.
-	dockerBin, resolveErr := shellwrap.ResolveDockerPath(p.logger)
-	if resolveErr != nil || dockerBin == "" {
-		dockerBin = "docker"
-	}
-	cmd := exec.CommandContext(ctx, dockerBin, "info")
-
-	err := cmd.Run()
-	available := err == nil
+	err := exec.CommandContext(ctx, dockerBin, "info").Run()
+	available = err == nil
 
 	// Cache the result
 	p.dockerAvailableCache = &available
+	p.dockerPathCache = dockerBin
 	p.dockerCacheTime = now
 
 	if !available {
-		p.logger.Debug("Docker daemon not available", zap.Error(err))
+		p.logger.Debug("Docker daemon not available", zap.String("docker_path", dockerBin), zap.Error(err))
 	}
-	return available
+	return available, dockerBin
 }
 
 // getIsolationManager returns the isolation manager for checking settings

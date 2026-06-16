@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -326,18 +327,87 @@ func (c *Client) RecentStderrSnapshot() []string {
 // formatRecentStderr returns a human-readable, indented block of recent
 // stderr lines suitable for embedding in an error message. Empty when no
 // stderr has been captured.
+//
+// Two readability transforms are applied (#696): a "command not found"
+// actionable hint is led when the child failed to resolve a binary (notably
+// docker), and runs of identical consecutive lines are collapsed into a single
+// "… (repeated N×)" entry so a process that prints the same error on each of
+// its ~20 connection retries produces one readable line instead of a wall.
 func (c *Client) formatRecentStderr() string {
 	lines := c.RecentStderrSnapshot()
 	if len(lines) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	for _, l := range lines {
+	if hint := commandNotFoundHint(lines); hint != "" {
+		b.WriteString(hint)
+		b.WriteByte('\n')
+	}
+	for _, l := range collapseRepeatedLines(lines) {
 		b.WriteString("  | ")
 		b.WriteString(l)
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// collapseRepeatedLines collapses runs of identical consecutive lines into a
+// single "<line> (repeated N×)" entry. Non-repeated lines pass through verbatim.
+func collapseRepeatedLines(lines []string) []string {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		j := i + 1
+		for j < len(lines) && lines[j] == lines[i] {
+			j++
+		}
+		if n := j - i; n > 1 {
+			out = append(out, fmt.Sprintf("%s (repeated %d×)", lines[i], n))
+		} else {
+			out = append(out, lines[i])
+		}
+		i = j
+	}
+	return out
+}
+
+var (
+	// cmdNotFoundZshRe matches zsh's form: "zsh:1: command not found: docker".
+	cmdNotFoundZshRe = regexp.MustCompile(`command not found: (\S+)`)
+	// cmdNotFoundBashRe matches bash/sh's form: "bash: docker: command not found".
+	cmdNotFoundBashRe = regexp.MustCompile(`([^\s:]+): command not found`)
+)
+
+// extractMissingCommand returns the name of a binary the shell could not find
+// in a stderr line, or "" if the line is not a "command not found" error.
+func extractMissingCommand(line string) string {
+	if m := cmdNotFoundZshRe.FindStringSubmatch(line); m != nil {
+		return strings.Trim(m[1], `"'`)
+	}
+	if m := cmdNotFoundBashRe.FindStringSubmatch(line); m != nil {
+		return strings.Trim(m[1], `"'`)
+	}
+	return ""
+}
+
+// commandNotFoundHint scans captured stderr for a shell "command not found"
+// error and returns a single actionable message, or "" if none is present. The
+// docker-specific case (#696) points the user at the app-bundle binary that
+// Docker Desktop ships even when the optional CLI-tools step was skipped.
+func commandNotFoundHint(lines []string) string {
+	for _, l := range lines {
+		cmd := extractMissingCommand(l)
+		if cmd == "" {
+			continue
+		}
+		if cmd == "docker" {
+			return "Docker CLI not found on PATH. Install Docker Desktop CLI tools, or it is bundled at /Applications/Docker.app/Contents/Resources/bin/docker — restart the affected servers."
+		}
+		return fmt.Sprintf("Command %q not found on the spawn PATH. Ensure it is installed and on PATH, then restart the affected servers.", cmd)
+	}
+	return ""
 }
 
 func shortContainerID(id string) string {

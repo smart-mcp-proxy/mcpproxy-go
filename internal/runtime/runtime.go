@@ -2564,12 +2564,20 @@ func (r *Runtime) IsDockerAvailable() bool {
 	// tray with a minimal inherited PATH (see issue: tray "Docker daemon not
 	// available" warning despite healthy daemon + socket).
 	dockerBin, resolveErr := shellwrap.ResolveDockerPath(r.logger)
+	var err error
+	var newResult bool
 	if resolveErr != nil || dockerBin == "" {
-		dockerBin = "docker"
+		// Honest availability (#696): if the CLI can't be resolved to an
+		// absolute path, Docker-isolated servers can't spawn it — report
+		// unavailable rather than probing a bare "docker" that is not the
+		// binary used for spawning.
+		err = resolveErr
+		newResult = false
+	} else {
+		cmd := exec.CommandContext(ctx, dockerBin, "info", "--format", "{{.ServerVersion}}")
+		err = cmd.Run()
+		newResult = err == nil
 	}
-	cmd := exec.CommandContext(ctx, dockerBin, "info", "--format", "{{.ServerVersion}}")
-	err := cmd.Run()
-	newResult := err == nil
 
 	// Log only on state changes (or first probe) so repeated heartbeats don't
 	// spam the log. Rationale: users care about transitions ("Docker just

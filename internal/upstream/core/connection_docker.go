@@ -4,8 +4,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
+
+// resolveDockerBinary resolves the absolute path to the `docker` binary. It is
+// indirected through a package var (rather than calling shellwrap.ResolveDockerPath
+// directly) so tests can stub resolution without a real Docker install. Mirrors
+// newDockerCmd's resolution so spawn and runtime-cleanup use the same binary.
+var resolveDockerBinary = shellwrap.ResolveDockerPath
 
 // setupDockerIsolation configures Docker isolation for the MCP server process.
 // Returns the docker command and arguments to execute.
@@ -54,9 +61,27 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 			zap.String("container_command", containerCommand))
 	}
 
-	// CRITICAL FIX: Wrap Docker command with user shell to inherit proper PATH
-	// This fixes issues when mcpproxy is launched via Launchpad/GUI where PATH doesn't include Docker
-	return c.wrapWithUserShell(cmdDocker, finalArgs)
+	// CRITICAL FIX (#696): resolve `docker` to an ABSOLUTE path before shell-wrapping.
+	// Docker Desktop installed the default way on macOS (without the optional,
+	// admin-gated "install CLI tools" step) leaves the docker CLI only inside the
+	// app bundle at /Applications/Docker.app/Contents/Resources/bin/docker, which
+	// is NOT on any standard PATH dir nor on the (often unreliable) login-shell
+	// PATH a LaunchAgent captures. Invoking docker by absolute path — mirroring
+	// newDockerCmd — bypasses PATH entirely so isolated servers spawn successfully.
+	// Fall back to the bare "docker" command only when resolution fails.
+	//
+	// We still wrap in the user login shell so env-var inheritance and the
+	// existing cidfile insertion (which scans the command string for "docker run")
+	// keep working; the trailing "docker run" substring matches the absolute path.
+	dockerBin := cmdDocker
+	if resolved, resErr := resolveDockerBinary(c.logger); resErr == nil && resolved != "" {
+		dockerBin = resolved
+	} else if resErr != nil {
+		c.logger.Warn("Could not resolve docker to an absolute path; falling back to bare 'docker' (isolated server may fail if docker is not on the spawn PATH)",
+			zap.String("server", c.config.Name),
+			zap.Error(resErr))
+	}
+	return c.wrapWithUserShell(dockerBin, finalArgs)
 }
 
 // injectEnvVarsIntoDockerArgs injects environment variables as -e flags into Docker run args
@@ -84,15 +109,23 @@ func (c *Client) injectEnvVarsIntoDockerArgs(args []string, envVars map[string]s
 
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
 func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile string) []string {
-	// Shell args typically look like: ["-l", "-c", "docker run -i --rm mcp/duckduckgo"]
-	// Fix: Check for correct shell format - args can be 2 or 3 elements
-	if len(shellArgs) < 2 || shellArgs[len(shellArgs)-2] != "-c" {
-		// If it's not the expected format, log error and fall back
+	// Shell args look like:
+	//   Unix/bash:     ["-l", "-c", "docker run …"]  → second-to-last is "-c"
+	//   Windows cmd:   ["/c",       "docker run …"]  → second-to-last is "/c"
+	// Accept both flags so cidfile insertion works on all platforms.
+	if len(shellArgs) < 2 {
 		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
 			zap.String("server", c.config.Name),
 			zap.Strings("shell_args", shellArgs),
 			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
-		// Don't append cidfile to shell args as it won't work
+		return shellArgs
+	}
+	secondToLast := shellArgs[len(shellArgs)-2]
+	if secondToLast != "-c" && secondToLast != "/c" {
+		c.logger.Error("Unexpected shell command format for Docker cidfile insertion - cannot track container ID",
+			zap.String("server", c.config.Name),
+			zap.Strings("shell_args", shellArgs),
+			zap.String("expected_format", "[shell, -c, docker_command] or [-l, -c, docker_command]"))
 		return shellArgs
 	}
 
