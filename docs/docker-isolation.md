@@ -123,7 +123,7 @@ Starting in this release, MCPProxy emits a one-time warning in the main log when
 
 When anonymous telemetry is enabled, MCPProxy reports two Docker-related counters at daily cadence:
 
-- `server_docker_available_bool` — whether the host has a reachable Docker daemon. Probed with `docker info --format {{.ServerVersion}}` and cached for up to 15 minutes (5 minutes when the previous probe failed, so a late Docker-Desktop launch is picked up promptly).
+- `server_docker_available_bool` — whether Docker is actually invocable. Reported `true` only when the `docker` CLI is **resolvable to an absolute path** *and* `docker info --format {{.ServerVersion}}` succeeds (it does **not** fall back to a bare `docker` PATH probe, which could misreport availability when the binary is only inside the macOS app bundle — see issue #696). Cached for up to 15 minutes (5 minutes when the previous probe failed, so a late Docker-Desktop launch is picked up promptly).
 - `server_docker_isolated_count` — how many of your configured stdio servers are **configured** for isolation, i.e. servers for which `ShouldIsolate()` returns true. This is a configuration metric, not a count of running containers; it goes to zero whenever the global flag is off regardless of per-server opt-ins.
 
 ## Runtime Detection
@@ -244,6 +244,23 @@ docker stats
 - Ensure using full images (`python:3.11` not `python:3.11-slim`)
 - Check container logs for specific error messages
 - Verify network access for package repositories
+
+**`command not found: docker` on macOS (Docker Desktop installed):**
+- Docker Desktop installed the default way leaves the `docker` CLI only inside
+  the app bundle at `/Applications/Docker.app/Contents/Resources/bin/docker` —
+  it is **not** on a standard `PATH` dir unless you ran the optional,
+  admin-gated "install CLI tools" step. When mcpproxy is launched from a
+  LaunchAgent / tray, the captured login-shell `PATH` may omit this directory.
+- mcpproxy resolves the `docker` binary to its **absolute path** before
+  spawning an isolated server (and also adds the bundle bin dir to the enhanced
+  spawn `PATH`), so isolation works even without the CLI-tools step. If you
+  still see this error, confirm the binary exists at the bundle path above, or
+  run Docker Desktop's "install CLI tools".
+- `upstream_servers list` reports `docker_status.docker_path` (the resolved
+  binary) and reports `docker_status.available` / per-server `docker_available`
+  as `true` **only** when the CLI is actually resolvable *and* `docker info`
+  succeeds. A `false` value with `docker_path: ""` means the CLI could not be
+  resolved on the spawn path.
 
 ## Security Considerations
 
