@@ -78,6 +78,63 @@ Secret, etc.) and inject it as `MCPPROXY_CRED_KEY` at runtime.
 4. **Re-auth** — when no refresh token is available, or the refresh fails, the
    user is required to sign in again (`ErrReauthRequired`).
 
+## Per-user credentials REST API (server edition)
+
+Brokered upstreams expose a per-user credential surface under the session/JWT
+auth middleware. Every endpoint is scoped to the authenticated caller — a user
+can only see and manage their own credentials, never another user's.
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/user/credentials` | List the connection status of every brokered upstream for the caller. |
+| `DELETE /api/v1/user/credentials/{server}` | Disconnect (revoke) the caller's credential for an upstream. |
+| `GET /api/v1/user/credentials/{server}/connect` | Initiate the per-user OAuth connect flow (Path B); 302-redirects to the upstream authorization server. |
+| `GET /api/v1/user/credentials/{server}/callback` | OAuth connect callback; exchanges the code, stores the per-user credential, and redirects back to the Web UI. |
+
+### Connection status (`GET /api/v1/user/credentials`)
+
+The list returns **non-secret metadata only** — access and refresh tokens are
+never serialized. Each entry carries a `status`:
+
+- `connected` — a valid, non-expired per-user credential exists.
+- `expired` — a credential exists but its access token has expired.
+- `not_connected` — no per-user credential exists for this upstream.
+- `unavailable` — the credential store is disabled (no encryption key configured).
+
+For `oauth_connect` upstreams that are `not_connected` or `expired`, the entry
+includes an actionable `connect_path` pointing at the connect endpoint.
+
+```json
+{
+  "credentials": [
+    {
+      "server": "github-shared",
+      "mode": "oauth_connect",
+      "status": "not_connected",
+      "connect_path": "/api/v1/user/credentials/github-shared/connect"
+    },
+    {
+      "server": "internal-api",
+      "mode": "token_exchange",
+      "status": "connected",
+      "token_type": "Bearer",
+      "scopes": ["read"],
+      "expires_at": "2026-06-15T20:00:00Z"
+    }
+  ]
+}
+```
+
+### Connect flow (Path B)
+
+`connect` builds an authorization-code + PKCE URL bound to the authenticated
+user and redirects there. After consent, the upstream redirects to `callback`,
+which validates the one-time `state`, exchanges the code, and persists the
+per-user credential (encrypted, `obtained_via=connect_flow`). The credential is
+always stored under the **initiating** user, so the callback cannot be used to
+write into another user's record. The browser then lands on `/ui/` with a
+`credential_connected` / `credential_error` query flag.
+
 ## Operational notes
 
 - **Key rotation** is not yet supported. Rotating the key requires clearing the
