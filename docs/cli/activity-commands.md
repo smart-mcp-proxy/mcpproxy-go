@@ -54,7 +54,7 @@ mcpproxy activity list [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change` |
+| `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
 | `--status` | | | Filter by status: `success`, `error`, `blocked` |
@@ -175,7 +175,7 @@ mcpproxy activity watch [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change` |
+| `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
 
 ### Examples

@@ -44,15 +44,17 @@ type CredentialHandlers struct {
 }
 
 // NewCredentialHandlers builds the handlers over a credential store and the set
-// of shared servers (only those carrying an auth_broker block are brokered).
-func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config.ServerConfig, logger *zap.SugaredLogger) *CredentialHandlers {
+// of shared servers (only those carrying an auth_broker block are brokered). The
+// audit sink (spec 074 T10) records per-user connect-flow events to the activity
+// log; a nil sink disables audit emission.
+func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config.ServerConfig, audit broker.AuditSink, logger *zap.SugaredLogger) *CredentialHandlers {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
 	return &CredentialHandlers{
 		store:         store,
 		brokerServers: sharedServers,
-		connectors:    newConnectorProvider(store, logger.Desugar()),
+		connectors:    newConnectorProvider(store, logger.Desugar(), audit),
 		logger:        logger,
 	}
 }

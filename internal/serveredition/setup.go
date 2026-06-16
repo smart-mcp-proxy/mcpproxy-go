@@ -89,8 +89,12 @@ func setupMultiUserOAuth(deps Dependencies) error {
 	userActivityHandlers := teamsapi.NewUserActivityHandlers(nil, userStore, sharedServers, deps.Logger)
 	// Per-user brokered-credential surfaces (spec 074 T8): list connection
 	// status, disconnect, and the Path B connect/callback flow. Reuses the same
-	// credential store wired into the OAuth login handler above.
-	credentialHandlers := teamsapi.NewCredentialHandlers(credStore, sharedServers, deps.Logger)
+	// credential store wired into the OAuth login handler above. The audit sink
+	// (spec 074 T10) records connect/acquire/refresh/inject events to the existing
+	// activity log; a nil StorageManager yields a no-op sink (auditing is
+	// best-effort and never blocks brokering).
+	brokerAudit := teamsapi.NewActivityAuditSink(deps.StorageManager, deps.Logger)
+	credentialHandlers := teamsapi.NewCredentialHandlers(credStore, sharedServers, brokerAudit, deps.Logger)
 
 	deps.Router.Group(func(r chi.Router) {
 		r.Use(authMiddleware.Middleware())
