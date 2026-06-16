@@ -209,6 +209,9 @@ func main() {
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
 
+	// Server-edition-only commands (e.g. `credential`). No-op in personal edition.
+	registerServerEditionCommands(rootCmd)
+
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added
 	clioutput.SetupHelpJSON(rootCmd)
