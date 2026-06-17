@@ -966,6 +966,7 @@
                   @click="startSecurityScan"
                   :disabled="scanLoading || !dockerAvailable"
                   class="btn btn-primary"
+                  data-test="scan-button"
                 >
                   <span v-if="scanLoading" class="loading loading-spinner loading-xs"></span>
                   <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1011,7 +1012,7 @@
             </div>
 
             <!-- Scan Progress (visible during active scan) -->
-            <div v-if="scanLoading" class="space-y-3">
+            <div v-if="scanLoading" class="space-y-3" data-test="scan-progress">
               <template v-if="scanProgress && scanProgress.total > 0">
                 <div class="flex items-center justify-between text-sm">
                   <span class="font-medium">Scanning with {{ scanProgress.total }} scanner{{ scanProgress.total !== 1 ? 's' : '' }}...</span>
@@ -1172,7 +1173,7 @@
 
               <!-- Action buttons -->
               <div class="flex gap-3">
-                <router-link v-if="scanReport.job_id" :to="scanReportPath(scanReport.job_id)" class="btn btn-primary btn-sm">
+                <router-link v-if="scanReport.job_id" :to="scanReportPath(scanReport.job_id)" class="btn btn-primary btn-sm" data-test="scan-report-link">
                   View Full Report &rarr;
                 </router-link>
               </div>
@@ -1248,6 +1249,7 @@ import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
+import { isTerminalScanStatus, decideScanReconcile } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
 import { computeToolDiffSections } from '@/utils/toolDiff'
@@ -2748,7 +2750,7 @@ async function loadScannerNames() {
   }
 }
 
-async function loadScanReport(force = false) {
+async function loadScanReport(force = false, skipPolling = false) {
   if (!server.value) return
   // Only load if we have a previous scan (skip check when force-loading after scan completion)
   if (!force && !server.value.security_scan?.last_scan_at && !scanReport.value) return
@@ -2772,17 +2774,57 @@ async function loadScanReport(force = false) {
     }
     if (statusRes.success && statusRes.data) {
       scanStatus.value = statusRes.data
-      // If scan is still running (e.g., page reload during scan), resume polling
-      if (statusRes.data.status === 'running' || statusRes.data.status === 'pending') {
+      const decision = decideScanReconcile(
+        { status: statusRes.data.status, jobId: statusRes.data.id, scanPass: statusRes.data.scan_pass },
+        { scanLoading: scanLoading.value, activeScanJobId: activeScanJobId.value },
+      )
+      if (decision.resumePolling && !skipPolling) {
+        // Scan still running (e.g., page reload during scan) — resume polling.
+        // skipPolling=true when called post-finalize: a concurrent Pass-2 job must
+        // not re-enable scanLoading and hide the just-completed Pass-1 report.
         activeScanJobId.value = statusRes.data.id
         scanLoading.value = true
         startScanPolling()
+      } else if (decision.finalize && scanLoading.value) {
+        // MCP-2740: authoritative status is terminal but the spinner is still up
+        // (stale flag from a sub-2s scan or one that finished while unmounted).
+        // Clear it here — no recursive report reload, we already have the freshest
+        // report above.
+        clearScanRunState()
+        if (decision.isError) scanError.value = statusRes.data.error || 'Scan failed'
       }
     }
   } catch (err) {
     // Silently fail - report may not exist yet
   } finally {
     scanReportLoading.value = false
+  }
+}
+
+// Clear the live-scan run state (spinner, polling timer, tracked job id). Pure
+// state reset — does NOT reload the report (callers that need it call separately),
+// which keeps it safe to invoke from inside loadScanReport without recursion.
+function clearScanRunState() {
+  stopScanPolling()
+  scanLoading.value = false
+  activeScanJobId.value = null
+}
+
+// Finalize the scan UI from an authoritative terminal (or newer Pass-2) status.
+// Idempotent: safe to call repeatedly. Only emits the success toast when a scan
+// was actually in flight, so reconciling on a fresh tab-open stays silent.
+async function finalizeScan(data: any, decision: { isError: boolean }) {
+  const wasLoading = scanLoading.value
+  clearScanRunState()
+  if (decision.isError) {
+    scanError.value = data?.error || 'Scan failed'
+    return
+  }
+  await loadScanReport(true, true)
+  await serversStore.fetchServers()
+  // server is a computed from the store — no manual reassignment needed.
+  if (wasLoading) {
+    systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
   }
 }
 
@@ -2795,38 +2837,16 @@ function startScanPolling() {
       if (statusResp.success && statusResp.data) {
         // Update scan status for live progress display
         scanStatus.value = statusResp.data
-        const jobId = statusResp.data.id
-        const status = statusResp.data.status
-
-        // Only react to the active job (Pass 1). Ignore completed Pass 2 from previous runs.
-        if (activeScanJobId.value && jobId !== activeScanJobId.value) {
-          // Different job — could be Pass 2 starting after Pass 1 completed.
-          if (statusResp.data.scan_pass === 2) {
-            // Pass 2 started or completed — Pass 1 is done. Finish polling.
-            stopScanPolling()
-            scanLoading.value = false
-            activeScanJobId.value = null
-            await loadScanReport(true)
-            await serversStore.fetchServers()
-            // server is a computed from the store — no manual reassignment needed.
-            systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
-          }
-          return
-        }
-
-        if (status === 'completed' || status === 'complete') {
-          stopScanPolling()
-          scanLoading.value = false
-          activeScanJobId.value = null
-          await loadScanReport(true)
-          await serversStore.fetchServers()
-          // server is a computed from the store — no manual reassignment needed.
-          systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
-        } else if (status === 'failed' || status === 'error') {
-          stopScanPolling()
-          scanLoading.value = false
-          activeScanJobId.value = null
-          scanError.value = statusResp.data.error || 'Scan failed'
+        const decision = decideScanReconcile(
+          { status: statusResp.data.status, jobId: statusResp.data.id, scanPass: statusResp.data.scan_pass },
+          { scanLoading: scanLoading.value, activeScanJobId: activeScanJobId.value },
+        )
+        // MCP-2740: finalize the instant the backend reports a terminal status (or a
+        // newer Pass-2 job), regardless of activeScanJobId / scan_pass — a sub-2s scan
+        // can finalize before the polled id ever matches, which previously left the
+        // "Scanning…" spinner stuck and the Report button disabled forever.
+        if (decision.finalize) {
+          await finalizeScan(statusResp.data, decision)
         }
       }
     } catch {
@@ -2891,6 +2911,17 @@ async function cancelSecurityScan() {
     scanError.value = err.response?.data?.error || 'Failed to cancel scan'
   }
 }
+
+// Safety net (MCP-2740): the spinner must never outlive a terminal backend status.
+// If any path sets scanStatus to a terminal status while scanLoading is still true,
+// reconcile here so the UI can't get stuck on "Scanning…" regardless of poll-timer
+// lifecycle or job-id bookkeeping.
+watch(() => scanStatus.value?.status, (status) => {
+  if (scanLoading.value && isTerminalScanStatus(status)) {
+    clearScanRunState()
+    if (!scanReport.value) loadScanReport(true, true)
+  }
+})
 
 
 // Server detail hints
