@@ -44,6 +44,12 @@ export interface ScanReconcileDecision {
   finalize: boolean
   /** The finalize is due to a failed/errored job (set error, skip success toast). */
   isError: boolean
+  /**
+   * The finalize is due to a cancelled job (MCP-2755). Terminal but NOT a success:
+   * the caller suppresses the "Scan Complete" toast. Report/score rendering is
+   * left unchanged (pre-existing behavior, out of scope).
+   */
+  isCancelled: boolean
   /** The job is still running/pending and polling should (continue to) run. */
   resumePolling: boolean
 }
@@ -67,6 +73,7 @@ export function decideScanReconcile(
     return {
       finalize: true,
       isError: status === 'failed' || status === 'error',
+      isCancelled: status === 'cancelled' || status === 'canceled',
       resumePolling: false,
     }
   }
@@ -78,13 +85,29 @@ export function decideScanReconcile(
     input.jobId !== state.activeScanJobId &&
     input.scanPass === 2
   ) {
-    return { finalize: true, isError: false, resumePolling: false }
+    return { finalize: true, isError: false, isCancelled: false, resumePolling: false }
   }
 
   // Still in flight.
   return {
     finalize: false,
     isError: false,
+    isCancelled: false,
     resumePolling: status === 'running' || status === 'pending',
   }
+}
+
+/**
+ * Which finalize toast to show, if any (MCP-2755). A cancelled scan is terminal but
+ * NOT a success, so it must NOT fire the "Scan Complete" toast — it gets a neutral
+ * "Scan cancelled" notice instead. Only fires when a scan was actually in flight in
+ * this tab (`wasLoading`), so reconciling on a fresh tab-open stays silent. Errors
+ * use the dedicated error banner, not a toast.
+ */
+export function finalizeToastKind(
+  decision: Pick<ScanReconcileDecision, 'isError' | 'isCancelled'>,
+  wasLoading: boolean,
+): 'success' | 'cancelled' | null {
+  if (!wasLoading || decision.isError) return null
+  return decision.isCancelled ? 'cancelled' : 'success'
 }

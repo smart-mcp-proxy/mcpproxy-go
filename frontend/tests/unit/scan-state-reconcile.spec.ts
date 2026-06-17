@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { isTerminalScanStatus, decideScanReconcile } from '@/utils/scanState'
+import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 
 // MCP-2740: A finished security scan stayed stuck on "Scanning… 5/5 complete"
 // with the Report button disabled because terminal state was only derived from a
@@ -56,8 +56,19 @@ describe('decideScanReconcile (MCP-2740)', () => {
     })
   })
 
-  it('finalizes a cancelled job', () => {
-    expect(decideScanReconcile({ status: 'cancelled', jobId: 'job-A' }, loadingState).finalize).toBe(true)
+  it('finalizes a cancelled job as terminal-non-success (MCP-2755)', () => {
+    for (const status of ['cancelled', 'canceled']) {
+      const d = decideScanReconcile({ status, jobId: 'job-A' }, loadingState)
+      expect(d.finalize).toBe(true)
+      expect(d.isError).toBe(false)
+      expect(d.isCancelled).toBe(true)
+    }
+  })
+
+  it('does NOT flag cancellation for completed/failed/running statuses (MCP-2755)', () => {
+    for (const status of ['completed', 'complete', 'failed', 'error', 'running']) {
+      expect(decideScanReconcile({ status, jobId: 'job-A' }, loadingState).isCancelled).toBe(false)
+    }
   })
 
   it('finalizes when a newer Pass-2 job is running (Pass 1 is done)', () => {
@@ -91,5 +102,27 @@ describe('decideScanReconcile (MCP-2740)', () => {
     expect(d.resumePolling).toBe(true)
     // Callers that invoke loadScanReport after clearScanRunState MUST pass
     // skipPolling=true to suppress this branch and preserve the Pass-1 report.
+  })
+})
+
+// MCP-2755 (Codex P3 from #698): a cancelled scan is terminal but NOT a success, so
+// finalizeScan must NOT fire the "Scan Complete" toast for it. This is the minimal
+// fix — report/score rendering is intentionally left as-is (out of scope).
+describe('finalizeToastKind (MCP-2755)', () => {
+  it('a cancelled scan does NOT fire the success toast (shows the cancelled notice instead)', () => {
+    expect(finalizeToastKind({ isError: false, isCancelled: true }, true)).toBe('cancelled')
+  })
+
+  it('a successful scan fires the success toast', () => {
+    expect(finalizeToastKind({ isError: false, isCancelled: false }, true)).toBe('success')
+  })
+
+  it('stays silent when no scan was in flight (reconcile on a fresh tab-open)', () => {
+    expect(finalizeToastKind({ isError: false, isCancelled: false }, false)).toBeNull()
+    expect(finalizeToastKind({ isError: false, isCancelled: true }, false)).toBeNull()
+  })
+
+  it('fires no toast for an error (it uses the error banner)', () => {
+    expect(finalizeToastKind({ isError: true, isCancelled: false }, true)).toBeNull()
   })
 })
