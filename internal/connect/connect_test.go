@@ -875,15 +875,14 @@ func TestGetAllStatus_ClaudeDesktop_DetectsBridgeConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, s := range svc.GetAllStatus() {
-		if s.ID == "claude-desktop" {
-			if !s.Connected {
-				t.Error("expected claude-desktop connected=true after bridge connect")
-			}
-			return
-		}
+	// Spec 075: bridge-connected detection is now resolved on demand.
+	st, err := svc.GetStatus("claude-desktop")
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
 	}
-	t.Fatal("claude-desktop status not found")
+	if !st.Connected {
+		t.Error("expected claude-desktop connected=true after bridge connect")
+	}
 }
 
 // Gap 2 (Codex review): a bridge written under a custom server_name has no
@@ -900,18 +899,17 @@ func TestGetAllStatus_ClaudeDesktop_DetectsBridgeUnderCustomName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, s := range svc.GetAllStatus() {
-		if s.ID == "claude-desktop" {
-			if !s.Connected {
-				t.Error("expected claude-desktop connected via bridge args under a custom name")
-			}
-			if s.ServerName != "my-bridge" {
-				t.Errorf("expected server_name=my-bridge, got %q", s.ServerName)
-			}
-			return
-		}
+	// Spec 075: resolved on demand rather than from the overall listing.
+	st, err := svc.GetStatus("claude-desktop")
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
 	}
-	t.Fatal("claude-desktop status not found")
+	if !st.Connected {
+		t.Error("expected claude-desktop connected via bridge args under a custom name")
+	}
+	if st.ServerName != "my-bridge" {
+		t.Errorf("expected server_name=my-bridge, got %q", st.ServerName)
+	}
 }
 
 func TestConnect_UnknownClient(t *testing.T) {
@@ -988,17 +986,33 @@ func TestGetAllStatus_AfterConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	statuses := svc.GetAllStatus()
-	for _, s := range statuses {
+	// Spec 075: GetAllStatus is content-read-free, so Connected is resolved via
+	// the on-demand GetStatus path rather than the overall listing.
+	overall := svc.GetAllStatus()
+	for _, s := range overall {
 		if s.ID == "claude-code" {
 			if !s.Exists {
 				t.Error("Expected exists=true for claude-code after connect")
 			}
-			if !s.Connected {
-				t.Error("Expected connected=true for claude-code after connect")
+			if s.Connected {
+				t.Error("Expected overall status Connected=false (content-read-free) for claude-code")
+			}
+			if s.AccessState != accessUnknown {
+				t.Errorf("Expected overall access_state=unknown, got %q", s.AccessState)
 			}
 			break
 		}
+	}
+
+	st, err := svc.GetStatus("claude-code")
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if !st.Exists {
+		t.Error("Expected exists=true for claude-code after connect")
+	}
+	if !st.Connected {
+		t.Error("Expected connected=true for claude-code after connect (on-demand)")
 	}
 }
 
