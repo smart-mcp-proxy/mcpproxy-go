@@ -86,15 +86,13 @@ func DefaultEnvConfig() *EnvConfig {
 	}
 	allowedVars = append(allowedVars, localeVars...)
 
-	// Add container / proxy / tool-home passthrough variables (MCP-2751).
-	// These are NOT secrets; they mirror the curated set hydrated from the
-	// login shell by shellwrap.HydrateFromLoginShell so the now-present vars
-	// survive this allow-list filter and reach upstream stdio/docker spawns.
-	// Matching is case-insensitive (see isKeyAllowed), so the lowercase proxy
-	// spellings are covered by the canonical entries.
+	// Add container / tool-home passthrough variables (MCP-2751). These are NOT
+	// secrets; they mirror the curated set hydrated by shellwrap.HydrateFromLoginShell
+	// so the now-present vars survive this allow-list filter and reach upstream
+	// stdio/docker spawns. Proxy vars (HTTP_PROXY etc.) are intentionally excluded
+	// — proxy forwarding is a separate opt-in concern.
 	allowedVars = append(allowedVars,
 		"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
-		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 		"NVM_DIR", "ASDF_DIR", "PYENV_ROOT", "VOLTA_HOME", "HOMEBREW_PREFIX", "COLIMA_HOME",
 	)
 

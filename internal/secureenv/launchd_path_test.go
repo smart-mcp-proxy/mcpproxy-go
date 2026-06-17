@@ -215,12 +215,12 @@ func TestLaunchdMinimalPath_AlreadyComprehensive(t *testing.T) {
 		"comprehensive PATH must be returned unchanged — terminal-launched processes should not be polluted by login-shell capture")
 }
 
-// TestBuildSecureEnvironment_AllowsHydratedDockerAndProxyVars verifies the
-// allow-list extension for MCP-2751: once shellwrap.HydrateFromLoginShell has
-// placed curated DOCKER_*/proxy vars into the process env, the default
-// allow-list must pass them through to spawned upstreams — while genuine
-// secrets remain filtered out.
-func TestBuildSecureEnvironment_AllowsHydratedDockerAndProxyVars(t *testing.T) {
+// TestBuildSecureEnvironment_AllowsHydratedDockerVars verifies the allow-list
+// extension for MCP-2751: once shellwrap.HydrateFromLoginShell has placed
+// curated DOCKER_*/tool-home vars into the process env, the default allow-list
+// must pass them through to spawned upstreams — while secrets remain filtered.
+// Proxy vars are intentionally excluded from the allow-list (separate follow-up).
+func TestBuildSecureEnvironment_AllowsHydratedDockerVars(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses unix PATH semantics")
 	}
@@ -243,11 +243,12 @@ func TestBuildSecureEnvironment_AllowsHydratedDockerAndProxyVars(t *testing.T) {
 	os.Setenv("HOME", "/tmp/test-home")
 	os.Setenv("DOCKER_HOST", "unix:///Users/me/.docker/run/docker.sock")
 	os.Setenv("DOCKER_CONTEXT", "desktop-linux")
-	os.Setenv("HTTPS_PROXY", "http://proxy.corp:8080")
 	os.Setenv("HOMEBREW_PREFIX", "/opt/homebrew")
 	// Genuine secrets that must still be filtered out by the allow-list.
 	os.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
 	os.Setenv("GITHUB_TOKEN", "ghp_dummy_test_token_1234567890abcdef")
+	// Proxy vars are excluded from the allow-list.
+	os.Setenv("HTTPS_PROXY", "http://proxy.corp:8080")
 
 	manager := NewManager(DefaultEnvConfig())
 	joined := strings.Join(manager.BuildSecureEnvironment(), "\n")
@@ -255,9 +256,9 @@ func TestBuildSecureEnvironment_AllowsHydratedDockerAndProxyVars(t *testing.T) {
 	assert.Contains(t, joined, "DOCKER_HOST=unix:///Users/me/.docker/run/docker.sock",
 		"curated DOCKER_HOST must survive the allow-list")
 	assert.Contains(t, joined, "DOCKER_CONTEXT=desktop-linux")
-	assert.Contains(t, joined, "HTTPS_PROXY=http://proxy.corp:8080")
 	assert.Contains(t, joined, "HOMEBREW_PREFIX=/opt/homebrew")
 
+	assert.NotContains(t, joined, "HTTPS_PROXY", "proxy vars must be filtered (out of scope)")
 	assert.NotContains(t, joined, "AWS_ACCESS_KEY_ID", "secrets must still be filtered out")
 	assert.NotContains(t, joined, "GITHUB_TOKEN", "secrets must still be filtered out")
 }

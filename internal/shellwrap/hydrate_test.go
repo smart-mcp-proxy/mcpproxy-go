@@ -83,7 +83,7 @@ func TestHydrate_GateNoOpOnNonDarwin(t *testing.T) {
 	assert.Empty(t, snapshot)
 }
 
-func TestHydrate_GateNoOpOnComprehensivePath(t *testing.T) {
+func TestHydrate_GateNoOpOnComprehensivePathAndAllDockerPresent(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("login-shell hydration is unix-only")
 	}
@@ -92,10 +92,14 @@ func TestHydrate_GateNoOpOnComprehensivePath(t *testing.T) {
 	restoreEnvAfter(t)
 	withHydrationGOOS(t, "darwin")
 
-	// Comprehensive PATH (contains /usr/local/bin) ⇒ terminal launch ⇒ no-op,
-	// even though a fake login shell would export DOCKER_HOST.
+	// Comprehensive PATH AND all DOCKER_* vars already present ⇒ neither gate
+	// condition triggers ⇒ hydration is a no-op.
 	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
-	os.Unsetenv("DOCKER_HOST")
+	t.Setenv("DOCKER_HOST", "unix:///already/set.sock")
+	t.Setenv("DOCKER_CONTEXT", "desktop-linux")
+	t.Setenv("DOCKER_CONFIG", "/Users/me/.docker")
+	t.Setenv("DOCKER_CERT_PATH", "/Users/me/.docker/certs")
+	t.Setenv("DOCKER_TLS_VERIFY", "1")
 
 	dir := t.TempDir()
 	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
@@ -105,9 +109,49 @@ func TestHydrate_GateNoOpOnComprehensivePath(t *testing.T) {
 	t.Setenv("SHELL", fake)
 
 	applied, snapshot := HydrateFromLoginShell(nil)
-	assert.False(t, applied, "comprehensive PATH must not be hydrated")
+	assert.False(t, applied, "comprehensive PATH + all docker vars ⇒ no-op")
 	assert.Empty(t, snapshot)
-	assert.Empty(t, os.Getenv("DOCKER_HOST"), "gate must short-circuit before capture")
+	assert.Equal(t, "unix:///already/set.sock", os.Getenv("DOCKER_HOST"),
+		"existing DOCKER_HOST must not be touched")
+}
+
+func TestHydrate_ComprehensivePathStillHydratesDockerIfMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("login-shell hydration is unix-only")
+	}
+	resetLoginShellEnvCacheForTest()
+	t.Cleanup(resetLoginShellEnvCacheForTest)
+	restoreEnvAfter(t)
+	withHydrationGOOS(t, "darwin")
+
+	// PATH is comprehensive (pre-seeded by /etc/paths or similar), but DOCKER_HOST
+	// is absent — the second gate condition triggers hydration for curated vars
+	// but must NOT merge PATH.
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+	os.Unsetenv("DOCKER_HOST")
+	os.Unsetenv("DOCKER_CONTEXT")
+	os.Unsetenv("DOCKER_CONFIG")
+	os.Unsetenv("DOCKER_CERT_PATH")
+	os.Unsetenv("DOCKER_TLS_VERIFY")
+
+	dir := t.TempDir()
+	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
+		"PATH":        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+		"DOCKER_HOST": "unix:///Users/me/.docker/run/docker.sock",
+	})
+	t.Setenv("SHELL", fake)
+
+	applied, snapshot := HydrateFromLoginShell(nil)
+	require.True(t, applied, "missing DOCKER_HOST must trigger hydration")
+
+	assert.Equal(t, "unix:///Users/me/.docker/run/docker.sock", os.Getenv("DOCKER_HOST"))
+
+	// PATH must not be modified — it was already comprehensive.
+	assert.Equal(t, "/usr/local/bin:/usr/bin:/bin", os.Getenv("PATH"),
+		"comprehensive PATH must not be merged")
+	assert.NotContains(t, snapshot, "PATH",
+		"PATH must not appear in the snapshot when unchanged")
+	assert.Contains(t, snapshot, "DOCKER_HOST")
 }
 
 func TestHydrate_MinimalPathHydratesCuratedSet(t *testing.T) {
@@ -121,8 +165,6 @@ func TestHydrate_MinimalPathHydratesCuratedSet(t *testing.T) {
 
 	t.Setenv("PATH", "/usr/bin:/bin") // launchd-minimal
 	os.Unsetenv("DOCKER_HOST")
-	os.Unsetenv("HTTPS_PROXY")
-	os.Unsetenv("https_proxy")
 	os.Unsetenv("HOMEBREW_PREFIX")
 	os.Unsetenv("GITHUB_TOKEN")
 
@@ -130,9 +172,10 @@ func TestHydrate_MinimalPathHydratesCuratedSet(t *testing.T) {
 	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
 		"PATH":            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
 		"DOCKER_HOST":     "unix:///Users/me/.docker/run/docker.sock",
-		"HTTPS_PROXY":     "http://proxy.corp:8080",
 		"HOMEBREW_PREFIX": "/opt/homebrew",
 		"GITHUB_TOKEN":    "ghp_secret_must_not_be_imported",
+		// Proxy vars must NOT be imported — they are out of scope for this fix.
+		"HTTPS_PROXY": "http://proxy.corp:8080",
 	})
 	t.Setenv("SHELL", fake)
 
@@ -144,10 +187,14 @@ func TestHydrate_MinimalPathHydratesCuratedSet(t *testing.T) {
 		"PATH must be enriched login-first, got %q", os.Getenv("PATH"))
 	assert.Contains(t, os.Getenv("PATH"), "/usr/bin")
 
-	// Curated container / proxy / tool-home vars present in the process env.
+	// Curated container / tool-home vars present in the process env.
 	assert.Equal(t, "unix:///Users/me/.docker/run/docker.sock", os.Getenv("DOCKER_HOST"))
-	assert.Equal(t, "http://proxy.corp:8080", os.Getenv("HTTPS_PROXY"))
 	assert.Equal(t, "/opt/homebrew", os.Getenv("HOMEBREW_PREFIX"))
+
+	// Proxy vars are NOT in the allow-list and must never be hydrated.
+	assert.Empty(t, os.Getenv("HTTPS_PROXY"), "proxy vars must never be hydrated (out of scope)")
+	_, proxyLeaked := snapshot["HTTPS_PROXY"]
+	assert.False(t, proxyLeaked, "proxy var must not appear in the diagnostic snapshot")
 
 	// Secrets are NOT in the allow-list and must never be hydrated.
 	assert.Empty(t, os.Getenv("GITHUB_TOKEN"), "secrets must never be hydrated into the daemon")
@@ -185,77 +232,6 @@ func TestHydrate_SetIfEmptyNeverClobbers(t *testing.T) {
 		"operator-set DOCKER_HOST must never be clobbered")
 	_, inSnap := snapshot["DOCKER_HOST"]
 	assert.False(t, inSnap, "un-applied (clobber-skipped) key must not be in snapshot")
-}
-
-func TestHydrate_PreservesIntentionallyEmptyVar(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("login-shell hydration is unix-only")
-	}
-	resetLoginShellEnvCacheForTest()
-	t.Cleanup(resetLoginShellEnvCacheForTest)
-	restoreEnvAfter(t)
-	withHydrationGOOS(t, "darwin")
-
-	t.Setenv("PATH", "/usr/bin:/bin")
-	// Operator explicitly sets HTTPS_PROXY="" to DISABLE an inherited proxy.
-	// This is a deliberate value, not "unset", and must survive hydration.
-	t.Setenv("HTTPS_PROXY", "")
-
-	dir := t.TempDir()
-	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
-		"PATH":        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-		"HTTPS_PROXY": "http://login-shell-proxy:8080",
-	})
-	t.Setenv("SHELL", fake)
-
-	applied, snapshot := HydrateFromLoginShell(nil)
-	require.True(t, applied, "PATH enrichment still applies")
-
-	v, present := os.LookupEnv("HTTPS_PROXY")
-	assert.True(t, present, "the intentionally-empty var must remain present")
-	assert.Equal(t, "", v,
-		"an explicitly set-empty operator value must not be overwritten from the login shell")
-	_, inSnap := snapshot["HTTPS_PROXY"]
-	assert.False(t, inSnap, "a preserved (un-applied) key must not be in the snapshot")
-}
-
-func TestHydrate_ProxyCaseAliasingPreservesOperatorIntent(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("login-shell hydration is unix-only")
-	}
-	resetLoginShellEnvCacheForTest()
-	t.Cleanup(resetLoginShellEnvCacheForTest)
-	restoreEnvAfter(t)
-	withHydrationGOOS(t, "darwin")
-
-	t.Setenv("PATH", "/usr/bin:/bin")
-	os.Unsetenv("HTTP_PROXY")
-	os.Unsetenv("http_proxy")
-	os.Unsetenv("NO_PROXY")
-	os.Unsetenv("no_proxy")
-	os.Unsetenv("HTTPS_PROXY")
-	// Operator disabled the proxy via the LOWERCASE spelling, set to empty.
-	// Clients honor either case, so the UPPER spelling must NOT be imported.
-	t.Setenv("https_proxy", "")
-
-	dir := t.TempDir()
-	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
-		"PATH":        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-		"HTTPS_PROXY": "http://login-shell-proxy:8080",
-	})
-	t.Setenv("SHELL", fake)
-
-	applied, snapshot := HydrateFromLoginShell(nil)
-	require.True(t, applied, "PATH enrichment still applies")
-
-	_, upPresent := os.LookupEnv("HTTPS_PROXY")
-	assert.False(t, upPresent,
-		"uppercase HTTPS_PROXY must not be imported when the lowercase spelling is operator-set")
-	lo, loPresent := os.LookupEnv("https_proxy")
-	assert.True(t, loPresent)
-	assert.Equal(t, "", lo, "operator's empty lowercase https_proxy must be preserved")
-	assert.NotContains(t, snapshot, "HTTPS_PROXY")
-	assert.NotContains(t, snapshot, "https_proxy")
 }
 
 func TestHydrate_NeverTouchesHomeUserShell(t *testing.T) {

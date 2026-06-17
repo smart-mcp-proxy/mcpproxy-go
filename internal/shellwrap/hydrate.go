@@ -162,30 +162,16 @@ func resetLoginShellEnvCacheForTest() {
 // Linux CI runners. Defaults to the real GOOS.
 var hydrationGOOS = runtime.GOOS
 
-// curatedSingleKeys is the allow-list of single-spelling environment variables
-// hydrated from the login shell. It deliberately EXCLUDES secrets (AWS_*,
-// GITHUB_TOKEN, ANTHROPIC_API_KEY, …): wholesale import would pull developer
-// credentials into the daemon and every MCP subprocess. We import only PATH
-// (handled separately), container, and tool-home configuration. HOME / USER /
-// SHELL are never touched. Proxy vars are handled separately (proxyVarPairs)
-// because they are case-insensitive to clients.
+// curatedSingleKeys is the allow-list of environment variables hydrated from
+// the login shell. It deliberately EXCLUDES secrets (AWS_*, GITHUB_TOKEN,
+// ANTHROPIC_API_KEY, …) and proxy vars (HTTP_PROXY/HTTPS_PROXY — proxy
+// forwarding is out of scope here; filed as a separate opt-in follow-up).
+// HOME / USER / SHELL are never touched.
 var curatedSingleKeys = []string{
 	// Docker / container engine selection (supersedes the per-spawn capture in #699).
 	"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
 	// Tool-home roots that node/python version managers rely on.
 	"NVM_DIR", "ASDF_DIR", "PYENV_ROOT", "VOLTA_HOME", "HOMEBREW_PREFIX", "COLIMA_HOME",
-}
-
-// proxyVarPairs groups each logical proxy variable's UPPER/lower spellings.
-// HTTP clients (Go's net/http, curl, docker, …) honor EITHER spelling, so the
-// two spellings are one logical var: if the operator set either one (even to
-// empty, to disable an inherited proxy), hydrating the other spelling from the
-// login shell would override that intent. We therefore skip BOTH spellings when
-// EITHER is already present.
-var proxyVarPairs = [][2]string{
-	{"HTTP_PROXY", "http_proxy"},
-	{"HTTPS_PROXY", "https_proxy"},
-	{"NO_PROXY", "no_proxy"},
 }
 
 // HydrateFromLoginShell performs a one-time, allow-listed merge of the user's
@@ -194,27 +180,28 @@ var proxyVarPairs = [][2]string{
 // uvx/npx, secureenv.BuildSecureEnvironment, ResolveDockerPath) inherits a
 // correct PATH and curated vars with no call-site changes.
 //
-// It is a no-op (applied=false) unless mcpproxy was launched into a degraded
-// environment: macOS only, AND the ambient PATH looks launchd-minimal (lacks
-// /usr/local/bin and /opt/homebrew/bin). Terminal launches are left untouched.
+// Hydration is triggered on macOS when:
+//   - the ambient PATH looks launchd-minimal (lacks /usr/local/bin or
+//     /opt/homebrew/bin), OR
+//   - any DOCKER_* curated var is absent (a GUI launcher may pre-seed PATH
+//     via /etc/paths yet still not export DOCKER_HOST from rc files).
 //
-// PATH is merged login-first (enriching, never shrinking). Curated keys are
-// applied set-if-unset only — any operator-set value (including an explicitly
-// empty value used to disable an inherited one) is never clobbered. The
-// returned snapshot maps each applied key to its value for diagnostics; this
-// function never logs values (key names + lengths only).
+// PATH is merged login-first (enriching, never shrinking) only when the PATH
+// is launchd-minimal. Curated keys are applied set-if-unset whenever hydration
+// triggers. The returned snapshot maps each applied key to its value for
+// diagnostics; this function never logs values (key names + lengths only).
 func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[string]string) {
 	snapshot = make(map[string]string)
 
 	if hydrationGOOS != osDarwin {
-		// Linux LaunchAgent-equivalent is systemd (Environment=/EnvironmentFile=),
-		// not shell sourcing. Windows uses the registry PATH and has no login
-		// shell. Gate off both.
+		// Linux: systemd Environment=/EnvironmentFile=. Windows: registry PATH.
+		// Neither uses login-shell sourcing.
 		return false, snapshot
 	}
-	if !looksLikeLaunchdMinimalPath(os.Getenv("PATH")) {
-		// Healthy interactive launch — preserve the zero-cost / no-pollution
-		// guarantee (mirrors secureenv TestLaunchdMinimalPath_AlreadyComprehensive).
+
+	pathIsMinimal := looksLikeLaunchdMinimalPath(os.Getenv("PATH"))
+	if !pathIsMinimal && !anyDockerVarMissing() {
+		// Healthy interactive launch with all docker vars present — no-op.
 		return false, snapshot
 	}
 
@@ -225,36 +212,24 @@ func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[strin
 
 	sep := string(os.PathListSeparator)
 
-	// PATH: always merge login-first so docker / uvx / npx and their credential
-	// helpers resolve. Enrich only — never shrink an already-broader PATH.
-	if loginPath := env["PATH"]; loginPath != "" {
-		current := os.Getenv("PATH")
-		merged := mergePathUnique(loginPath, current, sep)
-		if merged != current {
-			_ = os.Setenv("PATH", merged)
-			snapshot["PATH"] = merged
+	// PATH: merge login-first so docker / uvx / npx resolve correctly.
+	// Only merge when PATH looks launchd-minimal — a comprehensive PATH is left
+	// untouched even if curated vars triggered hydration.
+	if pathIsMinimal {
+		if loginPath := env["PATH"]; loginPath != "" {
+			current := os.Getenv("PATH")
+			merged := mergePathUnique(loginPath, current, sep)
+			if merged != current {
+				_ = os.Setenv("PATH", merged)
+				snapshot["PATH"] = merged
+			}
 		}
 	}
 
-	// Single-spelling curated keys: set-if-unset only, never clobber an
-	// operator-set value (LookupEnv, so an explicit empty value is preserved).
+	// Curated keys: set-if-unset only, never clobber an operator-set value
+	// (LookupEnv so an explicit empty value is preserved).
 	for _, key := range curatedSingleKeys {
 		setEnvIfUnset(env, key, snapshot)
-	}
-
-	// Proxy trio: alias-aware. If EITHER spelling is already present (even
-	// intentionally empty, e.g. `https_proxy=` to disable), skip hydrating BOTH
-	// — clients honor either spelling so importing the opposite case would
-	// override operator intent.
-	for _, pair := range proxyVarPairs {
-		if _, up := os.LookupEnv(pair[0]); up {
-			continue
-		}
-		if _, lo := os.LookupEnv(pair[1]); lo {
-			continue
-		}
-		setEnvIfUnset(env, pair[0], snapshot)
-		setEnvIfUnset(env, pair[1], snapshot)
 	}
 
 	if len(snapshot) == 0 {
@@ -273,6 +248,22 @@ func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[strin
 		}
 	}
 	return true, snapshot
+}
+
+// anyDockerVarMissing reports whether any DOCKER_* entry from curatedSingleKeys
+// is absent from the current process environment. Used as a secondary hydration
+// trigger when PATH is already comprehensive but Docker connectivity vars are
+// absent (common when a GUI launcher pre-seeds PATH via /etc/paths but rc files
+// set DOCKER_HOST only in login-shell context).
+func anyDockerVarMissing() bool {
+	for _, key := range curatedSingleKeys {
+		if strings.HasPrefix(key, "DOCKER_") {
+			if _, present := os.LookupEnv(key); !present {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // setEnvIfUnset hydrates a single key from the captured login-shell env when it
