@@ -36,6 +36,7 @@ func (fakeRuntimeStats) GetRoutingMode() string            { return "retrieve_to
 func (fakeRuntimeStats) IsQuarantineEnabled() bool         { return true }
 func (fakeRuntimeStats) IsDockerAvailable() bool           { return false }
 func (fakeRuntimeStats) GetDockerIsolatedServerCount() int { return 0 }
+func (fakeRuntimeStats) GetDockerCLISource() string        { return "absent" }
 
 func TestHandleGetTelemetryPayload_OK(t *testing.T) {
 	logger := zap.NewNop().Sugar()
