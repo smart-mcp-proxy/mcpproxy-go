@@ -86,6 +86,16 @@ func DefaultEnvConfig() *EnvConfig {
 	}
 	allowedVars = append(allowedVars, localeVars...)
 
+	// Add container / tool-home passthrough variables (MCP-2751). These are NOT
+	// secrets; they mirror the curated set hydrated by shellwrap.HydrateFromLoginShell
+	// so the now-present vars survive this allow-list filter and reach upstream
+	// stdio/docker spawns. Proxy vars (HTTP_PROXY etc.) are intentionally excluded
+	// — proxy forwarding is a separate opt-in concern.
+	allowedVars = append(allowedVars,
+		"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
+		"NVM_DIR", "ASDF_DIR", "PYENV_ROOT", "VOLTA_HOME", "HOMEBREW_PREFIX", "COLIMA_HOME",
+	)
+
 	return &EnvConfig{
 		InheritSystemSafe: true,
 		AllowedSystemVars: allowedVars,

@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	_ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Import generated swagger docs
@@ -498,6 +499,17 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.String("edition", Edition),
 		zap.String("log_level", cmdLogLevel),
 		zap.Bool("log_to_file", cmdLogToFile))
+
+	// MCP-2751: when launched from a macOS GUI/launchd context (Launchpad, the
+	// SMAppService login item, or the tray spawning the core), the process
+	// inherits a launchd-minimal environment and never sources the user's
+	// login shell — so it lacks Homebrew/Docker PATH entries and exported vars
+	// like DOCKER_HOST. Hydrate a curated allow-list (PATH + DOCKER_*/proxy/
+	// tool-home) once, before any manager reads os.Environ(), so every spawn
+	// path (docker, stdio servers, uvx/npx, ResolveDockerPath,
+	// secureenv.BuildSecureEnvironment) inherits a correct environment with no
+	// call-site changes. No-op on terminal launches and non-macOS.
+	shellwrap.HydrateFromLoginShell(logger)
 
 	// Pass edition and version to internal packages
 	httpapi.SetEdition(Edition)
