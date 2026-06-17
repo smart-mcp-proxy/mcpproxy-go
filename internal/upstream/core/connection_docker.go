@@ -82,29 +82,57 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	// inside the -c string: the login shell re-derives $PATH from rc files and
 	// can drop the bundle dir, so the bug persisted. Exec'ing the absolute path
 	// directly (mirroring newDockerCmd's exec.CommandContext(dockerBin, …))
-	// bypasses PATH entirely. The spawn env already carries the enhanced PATH
-	// and the hydrated DOCKER_* daemon vars (BuildSecureEnvironment with
-	// EnhancePath=true, after the startup login-shell hydration in MCP-2751), so
-	// no login shell is needed for env inheritance either.
+	// bypasses PATH entirely.
 	//
-	// We only direct-exec a VERIFIED absolute executable. ResolveDockerPath's
-	// last resort runs `command -v docker` in the login shell, which can emit a
-	// shell function name, an alias, or a bare command name rather than a real
-	// binary path; direct-exec'ing that would fail with "no such file". For any
-	// non-absolute / non-executable result we fall back to a login-shell wrap of
-	// bare "docker", giving the interactive PATH a last-resort chance to find it.
-	if resolved, resErr := resolveDockerBinary(c.logger); resErr == nil && isDirectExecutable(resolved) {
+	// Two preconditions gate the direct-exec:
+	//
+	//  1. The resolved value must be a VERIFIED absolute executable
+	//     (isDirectExecutable). ResolveDockerPath's last resort runs
+	//     `command -v docker` in the login shell, which can emit a shell
+	//     function name, an alias, or a bare command name rather than a real
+	//     binary path; direct-exec'ing that would fail with "no such file".
+	//
+	//  2. The docker daemon-config env (DOCKER_HOST/DOCKER_CONTEXT) must be
+	//     guaranteed in the spawn env WITHOUT the login shell
+	//     (dockerDaemonEnvGuaranteed). Dropping the `$SHELL -l` wrap also drops
+	//     rc-file env inheritance. On macOS the startup hydration (MCP-2751)
+	//     already captured DOCKER_* from the login shell into os.Environ(), and
+	//     secureenv forwards them — but that hydration is Darwin-only. On Linux
+	//     a rootless/remote daemon whose DOCKER_HOST lives only in .profile would
+	//     be lost by direct-exec (the regression #699 kept the shell wrap to
+	//     avoid). So on non-Darwin we only direct-exec when DOCKER_HOST/
+	//     DOCKER_CONTEXT are already in os.Environ(); otherwise we keep the
+	//     login-shell wrap so `docker run` still finds the daemon.
+	//
+	// When we fall back to the shell wrap we still prefer the resolved absolute
+	// path as the wrapped command (it sidesteps the login shell's PATH
+	// re-derivation), dropping to bare "docker" only when resolution failed.
+	resolved, resErr := resolveDockerBinary(c.logger)
+	switch {
+	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
 		return resolved, finalArgs, false
-	} else if resErr != nil {
+	case resErr != nil:
 		c.logger.Warn("Could not resolve docker to an absolute path; falling back to bare 'docker' via login shell (isolated server may fail if docker is not on the spawn PATH)",
 			zap.String("server", c.config.Name),
 			zap.Error(resErr))
-	} else if resolved != "" {
-		c.logger.Warn("Resolved docker value is not a verified absolute executable; falling back to bare 'docker' via login shell",
+	case !isDirectExecutable(resolved):
+		c.logger.Warn("Resolved docker value is not a verified absolute executable; falling back to login-shell wrap",
+			zap.String("server", c.config.Name),
+			zap.String("resolved", resolved))
+	default:
+		// Verified absolute executable, but the daemon env is not guaranteed
+		// without the login shell (non-Darwin, no DOCKER_HOST/DOCKER_CONTEXT in
+		// os.Environ()). Keep the shell wrap so rc-file DOCKER_* are inherited.
+		c.logger.Debug("docker daemon env not guaranteed in process env; keeping login-shell wrap so rc-file DOCKER_* are inherited",
 			zap.String("server", c.config.Name),
 			zap.String("resolved", resolved))
 	}
-	shellCmd, shellArgs := c.wrapWithUserShell(cmdDocker, finalArgs)
+
+	dockerBin := cmdDocker
+	if isDirectExecutable(resolved) {
+		dockerBin = resolved
+	}
+	shellCmd, shellArgs := c.wrapWithUserShell(dockerBin, finalArgs)
 	return shellCmd, shellArgs, true
 }
 
@@ -122,12 +150,36 @@ func isDirectExecutable(path string) bool {
 	if err != nil || info.IsDir() {
 		return false
 	}
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == osWindows {
 		// Windows file mode bits don't convey the executable flag; an absolute
 		// path to a regular file is the strongest portable signal here.
 		return true
 	}
 	return info.Mode().Perm()&0o111 != 0
+}
+
+// dockerDaemonEnvGOOS mirrors runtime.GOOS; a package var so tests can exercise
+// the Darwin branch on a non-Darwin CI host.
+var dockerDaemonEnvGOOS = runtime.GOOS
+
+// dockerDaemonEnvGuaranteed reports whether the docker daemon-config env
+// (DOCKER_HOST/DOCKER_CONTEXT) is guaranteed to reach a direct-exec'd docker
+// process WITHOUT a login-shell wrap.
+//
+// On macOS the startup login-shell hydration (shellwrap.HydrateFromLoginShell,
+// MCP-2751) captures DOCKER_* into os.Environ() — its gate fires whenever a
+// docker var is missing — so the secureenv allow-list forwards them and the
+// shell wrap is unnecessary. That hydration is Darwin-only, so on other
+// platforms direct-exec is only safe to skip the shell wrap when DOCKER_HOST or
+// DOCKER_CONTEXT are ALREADY exported into mcpproxy's own environment. When they
+// are configured only in the user's login-shell rc (Codex's non-Darwin rootless
+// regression on PR #703), we must keep the `$SHELL -l` wrap so `docker run`
+// inherits them.
+func dockerDaemonEnvGuaranteed() bool {
+	if dockerDaemonEnvGOOS == osDarwin {
+		return true
+	}
+	return os.Getenv("DOCKER_HOST") != "" || os.Getenv("DOCKER_CONTEXT") != ""
 }
 
 // insertCidfileIntoDockerArgs inserts "--cidfile <file>" immediately after the

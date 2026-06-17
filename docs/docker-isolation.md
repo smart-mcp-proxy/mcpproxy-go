@@ -259,11 +259,16 @@ docker stats
   still routed the spawn through `$SHELL -l -c "<docker> run …"`, where the
   login shell re-derived `PATH` from rc files and could drop the bundle dir —
   so the error persisted; direct exec fixes that. Direct exec is used only when
-  the resolved value is a verified absolute executable; a non-absolute result
-  (e.g. a shell function/alias from `command -v docker`) falls back to the
-  login-shell wrap of bare `docker`. If you still see this error, confirm the
-  binary exists at the bundle path above, or run Docker Desktop's "install CLI
-  tools".
+  (a) the resolved value is a verified absolute executable and (b) the docker
+  daemon-config env is guaranteed without the login shell — on macOS via the
+  startup login-shell hydration, or on any platform when `DOCKER_HOST` /
+  `DOCKER_CONTEXT` are already exported into mcpproxy's environment. A
+  non-absolute result (e.g. a shell function/alias from `command -v docker`), or
+  a rootless/remote daemon on Linux whose `DOCKER_HOST` lives only in the
+  login-shell rc, falls back to the `$SHELL -l` wrap (still using the resolved
+  absolute path when one was found) so `docker run` keeps inheriting the daemon
+  config. If you still see this error, confirm the binary exists at the bundle
+  path above, or run Docker Desktop's "install CLI tools".
 - `upstream_servers list` reports `docker_status.docker_path` (the resolved
   binary) and reports `docker_status.available` / per-server `docker_available`
   as `true` **only** when the CLI is actually resolvable *and* `docker info`

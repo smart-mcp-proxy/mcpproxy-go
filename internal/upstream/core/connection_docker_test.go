@@ -27,6 +27,16 @@ func newIsolatedTestClient() *Client {
 	}
 }
 
+// forceDockerDaemonEnvGOOS overrides the GOOS the daemon-env guard sees, so the
+// Darwin (env-guaranteed-by-hydration) and non-Darwin branches can both be
+// exercised on a single CI host. Restored on cleanup.
+func forceDockerDaemonEnvGOOS(t *testing.T, goos string) {
+	t.Helper()
+	orig := dockerDaemonEnvGOOS
+	t.Cleanup(func() { dockerDaemonEnvGOOS = orig })
+	dockerDaemonEnvGOOS = goos
+}
+
 // writeFakeDockerExecutable writes a real, executable file under a fresh temp
 // dir and returns its absolute path. The direct-exec guard (MCP-2753) only
 // trusts a resolved value that is an ABSOLUTE path to an actual executable, so
@@ -56,6 +66,7 @@ func writeFakeDockerExecutable(t *testing.T) string {
 // shell can still override. Exec'ing the absolute path bypasses PATH entirely.
 func TestSetupDockerIsolationExecsResolvedBinaryDirectly(t *testing.T) {
 	fakeDocker := writeFakeDockerExecutable(t)
+	forceDockerDaemonEnvGOOS(t, osDarwin) // daemon env guaranteed via startup hydration
 
 	orig := resolveDockerBinary
 	t.Cleanup(func() { resolveDockerBinary = orig })
@@ -82,6 +93,7 @@ func TestSetupDockerIsolationExecsResolvedBinaryDirectly(t *testing.T) {
 // "docker" command that the login-shell PATH may be unable to resolve.
 func TestSetupDockerIsolationUsesResolvedAbsolutePath(t *testing.T) {
 	fakeDocker := writeFakeDockerExecutable(t)
+	forceDockerDaemonEnvGOOS(t, osDarwin)
 
 	orig := resolveDockerBinary
 	t.Cleanup(func() { resolveDockerBinary = orig })
@@ -145,6 +157,7 @@ func TestSetupDockerIsolationShellWrapsNonExecutableResolved(t *testing.T) {
 // token in the raw docker argv.
 func TestSetupDockerIsolationCidfileInsertionWithAbsolutePath(t *testing.T) {
 	fakeDocker := writeFakeDockerExecutable(t)
+	forceDockerDaemonEnvGOOS(t, osDarwin)
 
 	orig := resolveDockerBinary
 	t.Cleanup(func() { resolveDockerBinary = orig })
@@ -217,4 +230,93 @@ func TestSetupDockerIsolationFallsBackToBareDocker(t *testing.T) {
 	cmdStr := shellArgs[len(shellArgs)-1]
 	assert.True(t, strings.HasPrefix(cmdStr, "docker run"),
 		"on resolution failure the spawn must fall back to bare 'docker', got: %s", cmdStr)
+}
+
+// TestSetupDockerIsolationShellWrapsWhenDaemonEnvMissingNonDarwin is the
+// Codex round-4 (PR #703) regression guard. On non-Darwin hosts the startup
+// login-shell hydration (MCP-2751) does NOT run, so a rootless/remote daemon
+// whose DOCKER_HOST is exported only by the login-shell rc (.profile) is not in
+// mcpproxy's os.Environ(). Direct-exec drops the `$SHELL -l` wrap and would lose
+// that daemon config — the exact DOCKER_* loss #699 kept the shell wrap to
+// avoid. So even with a verified absolute docker binary, the spawn must stay
+// shell-wrapped (which sources the rc and recovers DOCKER_HOST), and it must
+// wrap the resolved ABSOLUTE path (not bare 'docker').
+func TestSetupDockerIsolationShellWrapsWhenDaemonEnvMissingNonDarwin(t *testing.T) {
+	fakeDocker := writeFakeDockerExecutable(t)
+	forceDockerDaemonEnvGOOS(t, "linux")
+	t.Setenv("DOCKER_HOST", "")    // not exported into mcpproxy's own env
+	t.Setenv("DOCKER_CONTEXT", "") // only present in the user's login-shell rc
+
+	orig := resolveDockerBinary
+	t.Cleanup(func() { resolveDockerBinary = orig })
+	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
+
+	c := newIsolatedTestClient()
+	cmd, shellArgs, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+
+	require.True(t, shellWrapped,
+		"non-Darwin with no DOCKER_HOST in env must keep the login-shell wrap to inherit rc-file DOCKER_*")
+	require.NotEmpty(t, shellArgs)
+	cmdStr := shellArgs[len(shellArgs)-1]
+	assert.Contains(t, cmdStr, fakeDocker,
+		"shell fallback should still use the resolved absolute path, got: %s", cmdStr)
+	assert.False(t, strings.HasPrefix(cmdStr, "docker run"),
+		"shell fallback must not degrade to bare 'docker' when an absolute path resolved, got: %s", cmdStr)
+	// Sanity: the wrapped command must reference the absolute path, not be the
+	// raw binary handed to direct exec.
+	assert.NotEqual(t, fakeDocker, cmd)
+}
+
+// TestSetupDockerIsolationDirectExecsWhenDockerHostInEnv proves the non-Darwin
+// happy path: when DOCKER_HOST is already exported into mcpproxy's environment,
+// the daemon config is guaranteed without the login shell, so the verified
+// absolute binary is direct-exec'd (no shell wrap) even off macOS.
+func TestSetupDockerIsolationDirectExecsWhenDockerHostInEnv(t *testing.T) {
+	fakeDocker := writeFakeDockerExecutable(t)
+	forceDockerDaemonEnvGOOS(t, "linux")
+	t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+
+	orig := resolveDockerBinary
+	t.Cleanup(func() { resolveDockerBinary = orig })
+	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
+
+	c := newIsolatedTestClient()
+	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+
+	assert.False(t, shellWrapped,
+		"DOCKER_HOST in os.Environ() guarantees daemon config — direct-exec is safe off macOS")
+	assert.Equal(t, fakeDocker, cmd)
+	require.NotEmpty(t, args)
+	assert.Equal(t, cmdRun, args[0])
+}
+
+// TestDockerDaemonEnvGuaranteed unit-tests the gate directly.
+func TestDockerDaemonEnvGuaranteed(t *testing.T) {
+	t.Run("darwin is always guaranteed (startup hydration)", func(t *testing.T) {
+		forceDockerDaemonEnvGOOS(t, osDarwin)
+		t.Setenv("DOCKER_HOST", "")
+		t.Setenv("DOCKER_CONTEXT", "")
+		assert.True(t, dockerDaemonEnvGuaranteed())
+	})
+
+	t.Run("non-darwin without DOCKER_HOST/DOCKER_CONTEXT is not guaranteed", func(t *testing.T) {
+		forceDockerDaemonEnvGOOS(t, "linux")
+		t.Setenv("DOCKER_HOST", "")
+		t.Setenv("DOCKER_CONTEXT", "")
+		assert.False(t, dockerDaemonEnvGuaranteed())
+	})
+
+	t.Run("non-darwin with DOCKER_HOST is guaranteed", func(t *testing.T) {
+		forceDockerDaemonEnvGOOS(t, "linux")
+		t.Setenv("DOCKER_HOST", "tcp://127.0.0.1:2375")
+		t.Setenv("DOCKER_CONTEXT", "")
+		assert.True(t, dockerDaemonEnvGuaranteed())
+	})
+
+	t.Run("non-darwin with DOCKER_CONTEXT is guaranteed", func(t *testing.T) {
+		forceDockerDaemonEnvGOOS(t, "linux")
+		t.Setenv("DOCKER_HOST", "")
+		t.Setenv("DOCKER_CONTEXT", "colima")
+		assert.True(t, dockerDaemonEnvGuaranteed())
+	})
 }
