@@ -217,15 +217,27 @@ func ResolveDockerPath(logger *zap.Logger) (string, error) {
 	dockerPathMu.Lock()
 	defer dockerPathMu.Unlock()
 
-	// Honor cache: keep successful resolutions forever; treat failures as
-	// retryable after dockerPathNegativeTTL.
-	if dockerPathHasResult {
-		if dockerPathErr == nil {
-			return dockerPath, nil
+	// Honor cache: keep successful resolutions forever.
+	if dockerPathHasResult && dockerPathErr == nil {
+		return dockerPath, nil
+	}
+
+	// A cached negative within its TTL would normally short-circuit here. But
+	// the well-known-path probe is a pure os.Stat — never sandbox- or
+	// login-shell-restricted — so a negative cached because only the restricted
+	// login-shell leg failed must NOT permanently shadow a docker binary that is
+	// sitting at a well-known path right now (the spawn-vs-status divergence in
+	// MCP-2744). Re-run the cheap probe before honoring a live negative; on
+	// success, upgrade the cache to a permanent success and return it.
+	if dockerPathHasResult && dockerPathErr != nil &&
+		!dockerPathExpires.IsZero() && time.Now().Before(dockerPathExpires) {
+		if p := probeWellKnownDocker(logger); p != "" {
+			dockerPath = p
+			dockerPathErr = nil
+			dockerPathExpires = time.Time{}
+			return p, nil
 		}
-		if !dockerPathExpires.IsZero() && time.Now().Before(dockerPathExpires) {
-			return dockerPath, dockerPathErr
-		}
+		return dockerPath, dockerPathErr
 	}
 
 	path, err := resolveDockerPathUncached(logger)

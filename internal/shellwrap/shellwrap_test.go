@@ -219,6 +219,51 @@ func TestResolveDockerPath_NegativeTTLRetry(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestResolveDockerPath_StatProbeOverridesLiveNegative is the MCP-2744
+// regression guard: a still-LIVE cached negative (within its TTL, NOT expired)
+// must never shadow a docker binary that is sitting at a well-known path right
+// now. The well-known-path probe is a pure os.Stat — it is never sandbox- or
+// login-shell-restricted — so the first resolution failing only because the
+// restricted login-shell leg failed must not poison discovery for the whole
+// TTL window. Distinct from TestResolveDockerPath_NegativeTTLRetry, which
+// relies on TTL expiry; here the TTL stays at its default so the negative is
+// still "live" on the second call.
+func TestResolveDockerPath_StatProbeOverridesLiveNegative(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	// Leave dockerPathNegativeTTL at its default (60s) so the cached negative is
+	// still valid on the second call — we prove the os.Stat probe overrides it.
+
+	// FIRST call fails everywhere: no PATH docker, no well-known docker, the
+	// login shell emits nothing.
+	prevPaths := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return nil }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prevPaths })
+
+	t.Setenv("PATH", t.TempDir())
+	shellDir := t.TempDir()
+	fakeShell := writeFakeShell(t, shellDir, "")
+	t.Setenv("SHELL", fakeShell)
+
+	_, err := ResolveDockerPath(nil)
+	require.Error(t, err, "first call should cache a negative (docker absent everywhere)")
+
+	// Docker Desktop's bundle binary now appears at a well-known path. The cheap
+	// os.Stat probe must override the still-live cached negative on the very
+	// next call — no TTL expiry required.
+	dockerDir := t.TempDir()
+	want := writeFakeDocker(t, dockerDir)
+	wellKnownDockerPathsFn = func() []string { return []string{want} }
+
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err, "a live negative must not shadow a now-present well-known docker")
+	assert.Equal(t, want, got)
+}
+
 // TestResolveDockerPath_WellKnownPathFallback simulates a PKG-installer
 // context: docker is missing from $PATH and the login shell emits nothing,
 // but Docker Desktop installed a binary at a well-known path. The fallback
