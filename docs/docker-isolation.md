@@ -251,11 +251,19 @@ docker stats
   it is **not** on a standard `PATH` dir unless you ran the optional,
   admin-gated "install CLI tools" step. When mcpproxy is launched from a
   LaunchAgent / tray, the captured login-shell `PATH` may omit this directory.
-- mcpproxy resolves the `docker` binary to its **absolute path** before
-  spawning an isolated server (and also adds the bundle bin dir to the enhanced
-  spawn `PATH`), so isolation works even without the CLI-tools step. If you
-  still see this error, confirm the binary exists at the bundle path above, or
-  run Docker Desktop's "install CLI tools".
+- mcpproxy resolves the `docker` binary to its **absolute path** and then
+  **exec's it directly** (no login-shell wrap) when spawning an isolated server,
+  so the spawn bypasses `PATH` entirely and works even without the CLI-tools
+  step. (The enhanced spawn `PATH` still includes the bundle bin dir as a
+  belt-and-suspenders measure.) Earlier builds resolved the absolute path but
+  still routed the spawn through `$SHELL -l -c "<docker> run …"`, where the
+  login shell re-derived `PATH` from rc files and could drop the bundle dir —
+  so the error persisted; direct exec fixes that. Direct exec is used only when
+  the resolved value is a verified absolute executable; a non-absolute result
+  (e.g. a shell function/alias from `command -v docker`) falls back to the
+  login-shell wrap of bare `docker`. If you still see this error, confirm the
+  binary exists at the bundle path above, or run Docker Desktop's "install CLI
+  tools".
 - `upstream_servers list` reports `docker_status.docker_path` (the resolved
   binary) and reports `docker_status.available` / per-server `docker_available`
   as `true` **only** when the CLI is actually resolvable *and* `docker info`

@@ -141,13 +141,21 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			zap.String("server", c.config.Name),
 			zap.String("original_command", c.config.Command))
 
-		// Use Docker isolation (now shell-wrapped for PATH inheritance)
-		finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
+		// Use Docker isolation. On resolution to a verified absolute executable
+		// this direct-execs the docker binary (no shell wrap); otherwise it falls
+		// back to a login-shell wrap. dockerShellWrapped selects the matching
+		// cidfile helper.
+		var dockerShellWrapped bool
+		finalCommand, finalArgs, dockerShellWrapped = c.setupDockerIsolation(c.config.Command, args)
 		c.isDockerCommand = true
 
-		// Add cidfile to shell-wrapped Docker command if we have one
+		// Add cidfile to the Docker command if we have one
 		if cidFile != "" {
-			finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			if dockerShellWrapped {
+				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			} else {
+				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
+			}
 		}
 	} else {
 		// For direct docker commands, inject env vars as -e flags before shell wrapping
