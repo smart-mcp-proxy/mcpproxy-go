@@ -1249,7 +1249,7 @@ import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
-import { isTerminalScanStatus, decideScanReconcile } from '@/utils/scanState'
+import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
 import { computeToolDiffSections } from '@/utils/toolDiff'
@@ -2813,7 +2813,7 @@ function clearScanRunState() {
 // Finalize the scan UI from an authoritative terminal (or newer Pass-2) status.
 // Idempotent: safe to call repeatedly. Only emits the success toast when a scan
 // was actually in flight, so reconciling on a fresh tab-open stays silent.
-async function finalizeScan(data: any, decision: { isError: boolean }) {
+async function finalizeScan(data: any, decision: { isError: boolean; isCancelled: boolean }) {
   const wasLoading = scanLoading.value
   clearScanRunState()
   if (decision.isError) {
@@ -2823,8 +2823,14 @@ async function finalizeScan(data: any, decision: { isError: boolean }) {
   await loadScanReport(true, true)
   await serversStore.fetchServers()
   // server is a computed from the store — no manual reassignment needed.
-  if (wasLoading) {
+  // MCP-2755: a cancelled scan is terminal but NOT a success — suppress the "Scan
+  // Complete" toast and show a neutral "Scan cancelled" notice instead. Report/score
+  // rendering is left exactly as before (pre-existing behavior, out of scope).
+  const toast = finalizeToastKind(decision, wasLoading)
+  if (toast === 'success') {
     systemStore.addToast({ type: 'success', title: 'Scan Complete', message: `Security scan for ${server.value?.name} finished.` })
+  } else if (toast === 'cancelled') {
+    systemStore.addToast({ type: 'info', title: 'Scan cancelled', message: `Security scan for ${server.value?.name} was cancelled.` })
   }
 }
 
