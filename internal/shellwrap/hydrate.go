@@ -189,7 +189,8 @@ var curatedHydrationKeys = []string{
 // /usr/local/bin and /opt/homebrew/bin). Terminal launches are left untouched.
 //
 // PATH is merged login-first (enriching, never shrinking). Curated keys are
-// applied set-if-empty only — an operator-set value is never clobbered. The
+// applied set-if-unset only — any operator-set value (including an explicitly
+// empty value used to disable an inherited one) is never clobbered. The
 // returned snapshot maps each applied key to its value for diagnostics; this
 // function never logs values (key names + lengths only).
 func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[string]string) {
@@ -225,13 +226,19 @@ func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[strin
 		}
 	}
 
-	// Curated keys: set-if-empty only, never clobber an operator-set value.
+	// Curated keys: set-if-unset only, never clobber an operator-set value.
 	for _, key := range curatedHydrationKeys {
 		val, ok := env[key]
 		if !ok || val == "" {
 			continue
 		}
-		if os.Getenv(key) != "" {
+		// Use LookupEnv (not Getenv != "") so an explicitly set-empty value is
+		// treated as operator intent and preserved. An operator may set e.g.
+		// `HTTPS_PROXY=` or `DOCKER_HOST=` to DISABLE an inherited value;
+		// overwriting it from the login shell would violate the never-clobber
+		// contract. launchd never sets these to empty, so present-but-empty is
+		// always deliberate.
+		if _, present := os.LookupEnv(key); present {
 			continue
 		}
 		_ = os.Setenv(key, val)

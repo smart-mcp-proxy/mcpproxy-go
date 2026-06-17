@@ -186,6 +186,38 @@ func TestHydrate_SetIfEmptyNeverClobbers(t *testing.T) {
 	assert.False(t, inSnap, "un-applied (clobber-skipped) key must not be in snapshot")
 }
 
+func TestHydrate_PreservesIntentionallyEmptyVar(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("login-shell hydration is unix-only")
+	}
+	resetLoginShellEnvCacheForTest()
+	t.Cleanup(resetLoginShellEnvCacheForTest)
+	restoreEnvAfter(t)
+	withHydrationGOOS(t, "darwin")
+
+	t.Setenv("PATH", "/usr/bin:/bin")
+	// Operator explicitly sets HTTPS_PROXY="" to DISABLE an inherited proxy.
+	// This is a deliberate value, not "unset", and must survive hydration.
+	t.Setenv("HTTPS_PROXY", "")
+
+	dir := t.TempDir()
+	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
+		"PATH":        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+		"HTTPS_PROXY": "http://login-shell-proxy:8080",
+	})
+	t.Setenv("SHELL", fake)
+
+	applied, snapshot := HydrateFromLoginShell(nil)
+	require.True(t, applied, "PATH enrichment still applies")
+
+	v, present := os.LookupEnv("HTTPS_PROXY")
+	assert.True(t, present, "the intentionally-empty var must remain present")
+	assert.Equal(t, "", v,
+		"an explicitly set-empty operator value must not be overwritten from the login shell")
+	_, inSnap := snapshot["HTTPS_PROXY"]
+	assert.False(t, inSnap, "a preserved (un-applied) key must not be in the snapshot")
+}
+
 func TestHydrate_NeverTouchesHomeUserShell(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("login-shell hydration is unix-only")
