@@ -122,6 +122,7 @@ func TestHydrate_MinimalPathHydratesCuratedSet(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin") // launchd-minimal
 	os.Unsetenv("DOCKER_HOST")
 	os.Unsetenv("HTTPS_PROXY")
+	os.Unsetenv("https_proxy")
 	os.Unsetenv("HOMEBREW_PREFIX")
 	os.Unsetenv("GITHUB_TOKEN")
 
@@ -216,6 +217,45 @@ func TestHydrate_PreservesIntentionallyEmptyVar(t *testing.T) {
 		"an explicitly set-empty operator value must not be overwritten from the login shell")
 	_, inSnap := snapshot["HTTPS_PROXY"]
 	assert.False(t, inSnap, "a preserved (un-applied) key must not be in the snapshot")
+}
+
+func TestHydrate_ProxyCaseAliasingPreservesOperatorIntent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("login-shell hydration is unix-only")
+	}
+	resetLoginShellEnvCacheForTest()
+	t.Cleanup(resetLoginShellEnvCacheForTest)
+	restoreEnvAfter(t)
+	withHydrationGOOS(t, "darwin")
+
+	t.Setenv("PATH", "/usr/bin:/bin")
+	os.Unsetenv("HTTP_PROXY")
+	os.Unsetenv("http_proxy")
+	os.Unsetenv("NO_PROXY")
+	os.Unsetenv("no_proxy")
+	os.Unsetenv("HTTPS_PROXY")
+	// Operator disabled the proxy via the LOWERCASE spelling, set to empty.
+	// Clients honor either case, so the UPPER spelling must NOT be imported.
+	t.Setenv("https_proxy", "")
+
+	dir := t.TempDir()
+	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
+		"PATH":        "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+		"HTTPS_PROXY": "http://login-shell-proxy:8080",
+	})
+	t.Setenv("SHELL", fake)
+
+	applied, snapshot := HydrateFromLoginShell(nil)
+	require.True(t, applied, "PATH enrichment still applies")
+
+	_, upPresent := os.LookupEnv("HTTPS_PROXY")
+	assert.False(t, upPresent,
+		"uppercase HTTPS_PROXY must not be imported when the lowercase spelling is operator-set")
+	lo, loPresent := os.LookupEnv("https_proxy")
+	assert.True(t, loPresent)
+	assert.Equal(t, "", lo, "operator's empty lowercase https_proxy must be preserved")
+	assert.NotContains(t, snapshot, "HTTPS_PROXY")
+	assert.NotContains(t, snapshot, "https_proxy")
 }
 
 func TestHydrate_NeverTouchesHomeUserShell(t *testing.T) {

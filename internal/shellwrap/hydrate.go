@@ -162,20 +162,30 @@ func resetLoginShellEnvCacheForTest() {
 // Linux CI runners. Defaults to the real GOOS.
 var hydrationGOOS = runtime.GOOS
 
-// curatedHydrationKeys is the allow-list of environment variables hydrated from
-// the login shell. It deliberately EXCLUDES secrets (AWS_*, GITHUB_TOKEN,
-// ANTHROPIC_API_KEY, …): wholesale import would pull developer credentials into
-// the daemon and every MCP subprocess. We import only PATH (handled
-// separately), container, proxy, and tool-home configuration. HOME / USER /
-// SHELL are never touched.
-var curatedHydrationKeys = []string{
+// curatedSingleKeys is the allow-list of single-spelling environment variables
+// hydrated from the login shell. It deliberately EXCLUDES secrets (AWS_*,
+// GITHUB_TOKEN, ANTHROPIC_API_KEY, …): wholesale import would pull developer
+// credentials into the daemon and every MCP subprocess. We import only PATH
+// (handled separately), container, and tool-home configuration. HOME / USER /
+// SHELL are never touched. Proxy vars are handled separately (proxyVarPairs)
+// because they are case-insensitive to clients.
+var curatedSingleKeys = []string{
 	// Docker / container engine selection (supersedes the per-spawn capture in #699).
 	"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY",
-	// Outbound proxy configuration (both canonical and lowercase spellings).
-	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-	"http_proxy", "https_proxy", "no_proxy",
 	// Tool-home roots that node/python version managers rely on.
 	"NVM_DIR", "ASDF_DIR", "PYENV_ROOT", "VOLTA_HOME", "HOMEBREW_PREFIX", "COLIMA_HOME",
+}
+
+// proxyVarPairs groups each logical proxy variable's UPPER/lower spellings.
+// HTTP clients (Go's net/http, curl, docker, …) honor EITHER spelling, so the
+// two spellings are one logical var: if the operator set either one (even to
+// empty, to disable an inherited proxy), hydrating the other spelling from the
+// login shell would override that intent. We therefore skip BOTH spellings when
+// EITHER is already present.
+var proxyVarPairs = [][2]string{
+	{"HTTP_PROXY", "http_proxy"},
+	{"HTTPS_PROXY", "https_proxy"},
+	{"NO_PROXY", "no_proxy"},
 }
 
 // HydrateFromLoginShell performs a one-time, allow-listed merge of the user's
@@ -226,23 +236,25 @@ func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[strin
 		}
 	}
 
-	// Curated keys: set-if-unset only, never clobber an operator-set value.
-	for _, key := range curatedHydrationKeys {
-		val, ok := env[key]
-		if !ok || val == "" {
+	// Single-spelling curated keys: set-if-unset only, never clobber an
+	// operator-set value (LookupEnv, so an explicit empty value is preserved).
+	for _, key := range curatedSingleKeys {
+		setEnvIfUnset(env, key, snapshot)
+	}
+
+	// Proxy trio: alias-aware. If EITHER spelling is already present (even
+	// intentionally empty, e.g. `https_proxy=` to disable), skip hydrating BOTH
+	// — clients honor either spelling so importing the opposite case would
+	// override operator intent.
+	for _, pair := range proxyVarPairs {
+		if _, up := os.LookupEnv(pair[0]); up {
 			continue
 		}
-		// Use LookupEnv (not Getenv != "") so an explicitly set-empty value is
-		// treated as operator intent and preserved. An operator may set e.g.
-		// `HTTPS_PROXY=` or `DOCKER_HOST=` to DISABLE an inherited value;
-		// overwriting it from the login shell would violate the never-clobber
-		// contract. launchd never sets these to empty, so present-but-empty is
-		// always deliberate.
-		if _, present := os.LookupEnv(key); present {
+		if _, lo := os.LookupEnv(pair[1]); lo {
 			continue
 		}
-		_ = os.Setenv(key, val)
-		snapshot[key] = val
+		setEnvIfUnset(env, pair[0], snapshot)
+		setEnvIfUnset(env, pair[1], snapshot)
 	}
 
 	if len(snapshot) == 0 {
@@ -261,6 +273,22 @@ func HydrateFromLoginShell(logger *zap.Logger) (applied bool, snapshot map[strin
 		}
 	}
 	return true, snapshot
+}
+
+// setEnvIfUnset hydrates a single key from the captured login-shell env when it
+// provides a non-empty value and the key is not already present in the process
+// env. Records applied keys in snapshot. Uses LookupEnv so an explicitly
+// set-empty operator value is preserved.
+func setEnvIfUnset(loginEnv map[string]string, key string, snapshot map[string]string) {
+	val, ok := loginEnv[key]
+	if !ok || val == "" {
+		return
+	}
+	if _, present := os.LookupEnv(key); present {
+		return
+	}
+	_ = os.Setenv(key, val)
+	snapshot[key] = val
 }
 
 // looksLikeLaunchdMinimalPath mirrors the secureenv heuristic
