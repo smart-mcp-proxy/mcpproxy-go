@@ -77,4 +77,19 @@ describe('decideScanReconcile (MCP-2740)', () => {
     expect(d.finalize).toBe(false)
     expect(d.resumePolling).toBe(true)
   })
+
+  // Codex P2 (PR #698): after Pass-1 finalizes, loadScanReport(true) is called to
+  // refresh the report. At that point scanLoading=false and activeScanJobId=null.
+  // If the backend is already running Pass-2, decideScanReconcile correctly returns
+  // resumePolling=true — but the caller must pass skipPolling=true so it does NOT
+  // re-enable scanLoading and hide the just-completed Pass-1 report.
+  // This test documents that invariant: the cleared state + running Pass-2 → resumePolling.
+  it('returns resumePolling for a running Pass-2 seen after scan state was cleared (post-finalize)', () => {
+    const clearedState = { scanLoading: false, activeScanJobId: null }
+    const d = decideScanReconcile({ status: 'running', jobId: 'job-B', scanPass: 2 }, clearedState)
+    expect(d.finalize).toBe(false)
+    expect(d.resumePolling).toBe(true)
+    // Callers that invoke loadScanReport after clearScanRunState MUST pass
+    // skipPolling=true to suppress this branch and preserve the Pass-1 report.
+  })
 })

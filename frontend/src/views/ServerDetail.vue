@@ -2750,7 +2750,7 @@ async function loadScannerNames() {
   }
 }
 
-async function loadScanReport(force = false) {
+async function loadScanReport(force = false, skipPolling = false) {
   if (!server.value) return
   // Only load if we have a previous scan (skip check when force-loading after scan completion)
   if (!force && !server.value.security_scan?.last_scan_at && !scanReport.value) return
@@ -2778,8 +2778,10 @@ async function loadScanReport(force = false) {
         { status: statusRes.data.status, jobId: statusRes.data.id, scanPass: statusRes.data.scan_pass },
         { scanLoading: scanLoading.value, activeScanJobId: activeScanJobId.value },
       )
-      if (decision.resumePolling) {
+      if (decision.resumePolling && !skipPolling) {
         // Scan still running (e.g., page reload during scan) — resume polling.
+        // skipPolling=true when called post-finalize: a concurrent Pass-2 job must
+        // not re-enable scanLoading and hide the just-completed Pass-1 report.
         activeScanJobId.value = statusRes.data.id
         scanLoading.value = true
         startScanPolling()
@@ -2818,7 +2820,7 @@ async function finalizeScan(data: any, decision: { isError: boolean }) {
     scanError.value = data?.error || 'Scan failed'
     return
   }
-  await loadScanReport(true)
+  await loadScanReport(true, true)
   await serversStore.fetchServers()
   // server is a computed from the store — no manual reassignment needed.
   if (wasLoading) {
@@ -2917,7 +2919,7 @@ async function cancelSecurityScan() {
 watch(() => scanStatus.value?.status, (status) => {
   if (scanLoading.value && isTerminalScanStatus(status)) {
     clearScanRunState()
-    if (!scanReport.value) loadScanReport(true)
+    if (!scanReport.value) loadScanReport(true, true)
   }
 })
 
