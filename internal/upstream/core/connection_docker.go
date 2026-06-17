@@ -2,6 +2,9 @@ package core
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -15,8 +18,12 @@ import (
 var resolveDockerBinary = shellwrap.ResolveDockerPath
 
 // setupDockerIsolation configures Docker isolation for the MCP server process.
-// Returns the docker command and arguments to execute.
-func (c *Client) setupDockerIsolation(command string, args []string) (dockerCommand string, dockerArgs []string) {
+// Returns the docker command, arguments, and whether the returned command was
+// wrapped in the user's login shell. shellWrapped governs how the caller
+// inserts --cidfile: a direct-exec spawn (shellWrapped == false) uses the
+// args-based insertCidfileIntoDockerArgs, while the login-shell fallback
+// (shellWrapped == true) uses the string-based insertCidfileIntoShellDockerCommand.
+func (c *Client) setupDockerIsolation(command string, args []string) (dockerCommand string, dockerArgs []string, shellWrapped bool) {
 	// Detect the runtime type from the command
 	runtimeType := c.isolationManager.DetectRuntimeType(command)
 	c.logger.Debug("Detected runtime type for Docker isolation",
@@ -30,7 +37,8 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 		c.logger.Error("Failed to build Docker args, falling back to shell wrapping",
 			zap.String("server", c.config.Name),
 			zap.Error(err))
-		return c.wrapWithUserShell(command, args)
+		shellCmd, shellArgs := c.wrapWithUserShell(command, args)
+		return shellCmd, shellArgs, true
 	}
 
 	// Extract container name from Docker args for tracking
@@ -61,27 +69,142 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 			zap.String("container_command", containerCommand))
 	}
 
-	// CRITICAL FIX (#696): resolve `docker` to an ABSOLUTE path before shell-wrapping.
-	// Docker Desktop installed the default way on macOS (without the optional,
-	// admin-gated "install CLI tools" step) leaves the docker CLI only inside the
-	// app bundle at /Applications/Docker.app/Contents/Resources/bin/docker, which
-	// is NOT on any standard PATH dir nor on the (often unreliable) login-shell
-	// PATH a LaunchAgent captures. Invoking docker by absolute path — mirroring
-	// newDockerCmd — bypasses PATH entirely so isolated servers spawn successfully.
-	// Fall back to the bare "docker" command only when resolution fails.
+	// CRITICAL FIX (#696 / MCP-2744 / MCP-2753): resolve `docker` to an ABSOLUTE
+	// path and exec it DIRECTLY — no login-shell wrap. Docker Desktop installed
+	// the default way on macOS (without the optional, admin-gated "install CLI
+	// tools" step) leaves the docker CLI only inside the app bundle at
+	// /Applications/Docker.app/Contents/Resources/bin/docker, which is NOT on
+	// any standard PATH dir nor on the (often unreliable) login-shell PATH a
+	// LaunchAgent captures.
 	//
-	// We still wrap in the user login shell so env-var inheritance and the
-	// existing cidfile insertion (which scans the command string for "docker run")
-	// keep working; the trailing "docker run" substring matches the absolute path.
-	dockerBin := cmdDocker
-	if resolved, resErr := resolveDockerBinary(c.logger); resErr == nil && resolved != "" {
-		dockerBin = resolved
-	} else if resErr != nil {
-		c.logger.Warn("Could not resolve docker to an absolute path; falling back to bare 'docker' (isolated server may fail if docker is not on the spawn PATH)",
+	// #697 resolved the absolute path but still routed the spawn through
+	// `$SHELL -l -c "<docker> run …"`. There the absolute path is only a token
+	// inside the -c string: the login shell re-derives $PATH from rc files and
+	// can drop the bundle dir, so the bug persisted. Exec'ing the absolute path
+	// directly (mirroring newDockerCmd's exec.CommandContext(dockerBin, …))
+	// bypasses PATH entirely.
+	//
+	// Two preconditions gate the direct-exec:
+	//
+	//  1. The resolved value must be a VERIFIED absolute executable
+	//     (isDirectExecutable). ResolveDockerPath's last resort runs
+	//     `command -v docker` in the login shell, which can emit a shell
+	//     function name, an alias, or a bare command name rather than a real
+	//     binary path; direct-exec'ing that would fail with "no such file".
+	//
+	//  2. The docker daemon-config env (DOCKER_HOST/DOCKER_CONTEXT) must be
+	//     guaranteed in the spawn env WITHOUT the login shell
+	//     (dockerDaemonEnvGuaranteed). Dropping the `$SHELL -l` wrap also drops
+	//     rc-file env inheritance. On macOS the startup hydration (MCP-2751)
+	//     already captured DOCKER_* from the login shell into os.Environ(), and
+	//     secureenv forwards them — but that hydration is Darwin-only. On Linux
+	//     a rootless/remote daemon whose DOCKER_HOST lives only in .profile would
+	//     be lost by direct-exec (the regression #699 kept the shell wrap to
+	//     avoid). So on non-Darwin we only direct-exec when DOCKER_HOST/
+	//     DOCKER_CONTEXT are already in os.Environ(); otherwise we keep the
+	//     login-shell wrap so `docker run` still finds the daemon.
+	//
+	// When we fall back to the shell wrap we still prefer the resolved absolute
+	// path as the wrapped command (it sidesteps the login shell's PATH
+	// re-derivation), dropping to bare "docker" only when resolution failed.
+	resolved, resErr := resolveDockerBinary(c.logger)
+	switch {
+	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
+		return resolved, finalArgs, false
+	case resErr != nil:
+		c.logger.Warn("Could not resolve docker to an absolute path; falling back to bare 'docker' via login shell (isolated server may fail if docker is not on the spawn PATH)",
 			zap.String("server", c.config.Name),
 			zap.Error(resErr))
+	case !isDirectExecutable(resolved):
+		c.logger.Warn("Resolved docker value is not a verified absolute executable; falling back to login-shell wrap",
+			zap.String("server", c.config.Name),
+			zap.String("resolved", resolved))
+	default:
+		// Verified absolute executable, but the daemon env is not guaranteed
+		// without the login shell (non-Darwin, no DOCKER_HOST/DOCKER_CONTEXT in
+		// os.Environ()). Keep the shell wrap so rc-file DOCKER_* are inherited.
+		c.logger.Debug("docker daemon env not guaranteed in process env; keeping login-shell wrap so rc-file DOCKER_* are inherited",
+			zap.String("server", c.config.Name),
+			zap.String("resolved", resolved))
 	}
-	return c.wrapWithUserShell(dockerBin, finalArgs)
+
+	dockerBin := cmdDocker
+	if isDirectExecutable(resolved) {
+		dockerBin = resolved
+	}
+	shellCmd, shellArgs := c.wrapWithUserShell(dockerBin, finalArgs)
+	return shellCmd, shellArgs, true
+}
+
+// isDirectExecutable reports whether path is safe to hand to exec directly
+// (without a login-shell wrap): it must be an ABSOLUTE path to an existing,
+// non-directory file that is executable. This is the Codex round-3 guard for
+// MCP-2753 — a resolved value such as a shell function/alias name or a bare
+// command name (which `command -v docker` can emit) is rejected so it is
+// shell-wrapped instead of failing a direct exec.
+func isDirectExecutable(path string) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == osWindows {
+		// Windows file mode bits don't convey the executable flag; an absolute
+		// path to a regular file is the strongest portable signal here.
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+// dockerDaemonEnvGOOS mirrors runtime.GOOS; a package var so tests can exercise
+// the Darwin branch on a non-Darwin CI host.
+var dockerDaemonEnvGOOS = runtime.GOOS
+
+// dockerDaemonEnvGuaranteed reports whether the docker daemon-config env
+// (DOCKER_HOST/DOCKER_CONTEXT) is guaranteed to reach a direct-exec'd docker
+// process WITHOUT a login-shell wrap.
+//
+// On macOS the startup login-shell hydration (shellwrap.HydrateFromLoginShell,
+// MCP-2751) captures DOCKER_* into os.Environ() — its gate fires whenever a
+// docker var is missing — so the secureenv allow-list forwards them and the
+// shell wrap is unnecessary. That hydration is Darwin-only, so on other
+// platforms direct-exec is only safe to skip the shell wrap when DOCKER_HOST or
+// DOCKER_CONTEXT are ALREADY exported into mcpproxy's own environment. When they
+// are configured only in the user's login-shell rc (Codex's non-Darwin rootless
+// regression on PR #703), we must keep the `$SHELL -l` wrap so `docker run`
+// inherits them.
+func dockerDaemonEnvGuaranteed() bool {
+	if dockerDaemonEnvGOOS == osDarwin {
+		return true
+	}
+	return os.Getenv("DOCKER_HOST") != "" || os.Getenv("DOCKER_CONTEXT") != ""
+}
+
+// insertCidfileIntoDockerArgs inserts "--cidfile <file>" immediately after the
+// "run" token in a direct-exec docker argument slice (no shell wrap). It is the
+// args-based sibling of insertCidfileIntoShellDockerCommand used on the
+// direct-exec spawn path (MCP-2753). Operating on argv (rather than a shell
+// command string) makes it platform-agnostic and sidesteps the -c vs /c shell
+// quirk #697 had to patch.
+func (c *Client) insertCidfileIntoDockerArgs(args []string, cidFile string) []string {
+	if len(args) == 0 || args[0] != cmdRun {
+		c.logger.Warn("Could not find 'run' as the first docker arg for cidfile insertion - container ID tracking may be limited",
+			zap.String("server", c.config.Name),
+			zap.Strings("args", args))
+		return args
+	}
+
+	newArgs := make([]string, 0, len(args)+2)
+	newArgs = append(newArgs, args[0]) // "run"
+	newArgs = append(newArgs, "--cidfile", cidFile)
+	newArgs = append(newArgs, args[1:]...)
+
+	c.logger.Debug("Inserted cidfile into direct-exec docker args",
+		zap.String("server", c.config.Name),
+		zap.String("cid_file", cidFile))
+	return newArgs
 }
 
 // injectEnvVarsIntoDockerArgs injects environment variables as -e flags into Docker run args

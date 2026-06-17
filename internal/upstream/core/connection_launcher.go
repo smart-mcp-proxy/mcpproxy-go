@@ -247,9 +247,14 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	var finalArgs []string
 
 	if c.isolationManager != nil && c.isolationManager.ShouldIsolate(c.config) {
-		finalCommand, finalArgs = c.setupDockerIsolation(c.config.Command, args)
+		var dockerShellWrapped bool
+		finalCommand, finalArgs, dockerShellWrapped = c.setupDockerIsolation(c.config.Command, args)
 		if cidFile != "" {
-			finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			if dockerShellWrapped {
+				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			} else {
+				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
+			}
 		}
 	} else {
 		argsToWrap := args
