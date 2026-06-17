@@ -634,6 +634,32 @@ Success returns `data.server` (`name`, `protocol`, `command`, `args`, `url`,
 Drop a registry's cached server lists. Returns
 `{ "registry_id": "...", "cleared": <n> }`.
 
+### Connect (client wizard)
+
+#### GET /api/v1/connect
+
+Lists the connection status of every known MCP client (Claude Desktop, Cursor,
+VS Code, Codex, Gemini, OpenCode, …).
+
+As of Spec 075, the overall listing determines each client's installed state
+using **file-existence metadata only** (`os.Stat`) and performs **zero config
+content reads** — so simply viewing status never triggers the macOS
+"wants to access data from other apps" privacy prompt. Each per-client object is
+additive-compatible and gains two fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `exists` | bool | Config file present (metadata only). |
+| `connected` | bool | mcpproxy registered in the config. Authoritative **only** when `access_state == "accessible"`; `false`/unresolved in the overall listing. |
+| `access_state` | string | `"unknown"` in the overall listing (not content-checked); resolved to `"accessible"`, `"absent"`, or `"malformed"` by an on-demand single-client read. |
+| `remediation` | string | Present only when access is denied (populated by later stories). |
+
+A client that is installed but not yet content-checked reads as
+`exists=true, connected=false, access_state="unknown"`. Resolving `connected`
+requires an explicit per-client read (connect/disconnect, or the CLI
+`mcpproxy connect` command), which is the only place a privacy prompt may
+legitimately appear.
+
 ### Real-time Updates
 
 #### GET /events

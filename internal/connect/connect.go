@@ -3,13 +3,26 @@ package connect
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+)
+
+// AccessState classifies a per-client config access (Spec 075). It is left as
+// accessUnknown by the content-read-free overall status and resolved by the
+// on-demand GetStatus / connect / disconnect paths.
+const (
+	accessUnknown    = "unknown"    // overall status: not content-checked
+	accessAccessible = "accessible" // config read and parsed successfully
+	accessAbsent     = "absent"     // config file does not exist (not installed)
+	accessMalformed  = "malformed"  // config read but contents unparseable
+	// accessDenied ("denied", macOS TCC App-Data) is added in US2.
 )
 
 // ConnectResult describes the outcome of a connect or disconnect operation.
@@ -37,6 +50,13 @@ type ClientStatus struct {
 	Bridge     bool   `json:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
 	Icon       string `json:"icon"`
 	ServerName string `json:"server_name,omitempty"` // name under which mcpproxy is registered
+
+	// AccessState classifies the per-client content access (Spec 075, additive).
+	// Empty/"unknown" in the content-read-free overall status; resolved to
+	// "accessible"/"absent"/"malformed" (and "denied" in US2) by on-demand reads.
+	AccessState string `json:"access_state"`
+	// Remediation carries actionable fix text, populated only when access is denied.
+	Remediation string `json:"remediation,omitempty"`
 }
 
 // Service provides connect/disconnect operations for MCP client configurations.
@@ -44,6 +64,9 @@ type Service struct {
 	listenAddr string // e.g. "127.0.0.1:8080"
 	apiKey     string // optional API key
 	homeDir    string // override for testing; empty means use os.UserHomeDir
+	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
+	// tests inject a permission-denied error or a call counter through it.
+	readFile func(string) ([]byte, error)
 }
 
 // NewService creates a Service that will inject the given listen address
@@ -52,6 +75,7 @@ func NewService(listenAddr, apiKey string) *Service {
 	return &Service{
 		listenAddr: listenAddr,
 		apiKey:     apiKey,
+		readFile:   os.ReadFile,
 	}
 }
 
@@ -61,7 +85,31 @@ func NewServiceWithHome(listenAddr, apiKey, homeDir string) *Service {
 		listenAddr: listenAddr,
 		apiKey:     apiKey,
 		homeDir:    homeDir,
+		readFile:   os.ReadFile,
 	}
+}
+
+// NewServiceWithReader creates a Service with a custom content reader (for
+// testing the access-classification seam without a real OS denial).
+func NewServiceWithReader(listenAddr, apiKey, homeDir string, readFile func(string) ([]byte, error)) *Service {
+	return &Service{
+		listenAddr: listenAddr,
+		apiKey:     apiKey,
+		homeDir:    homeDir,
+		readFile:   readFile,
+	}
+}
+
+// setReadFile overrides the content-read seam (test helper).
+func (s *Service) setReadFile(fn func(string) ([]byte, error)) { s.readFile = fn }
+
+// read performs a config content read through the seam, falling back to
+// os.ReadFile for a zero-value Service.
+func (s *Service) read(path string) ([]byte, error) {
+	if s.readFile != nil {
+		return s.readFile(path)
+	}
+	return os.ReadFile(path)
 }
 
 // mcpURL builds the MCPProxy MCP endpoint URL.
@@ -86,8 +134,14 @@ const defaultServerName = "mcpproxy"
 // predicate (Spec 046).
 func (s *Service) GetConnectedCount() int {
 	count := 0
-	for _, st := range s.GetAllStatus() {
-		if st.Connected {
+	for _, c := range GetAllClients() {
+		if !c.Supported {
+			continue
+		}
+		// On-demand per-client read: GetConnectedCount/IDs are the one internal
+		// caller that legitimately needs the connected truth for the wizard
+		// predicate, and it reads lazily per client (Spec 075 T011).
+		if st, err := s.GetStatus(c.ID); err == nil && st.Connected {
 			count++
 		}
 	}
@@ -98,10 +152,13 @@ func (s *Service) GetConnectedCount() int {
 // mcpproxy is currently registered. Identifiers come from the fixed
 // per-client adapter table; user-entered values never appear here.
 func (s *Service) GetConnectedIDs() []string {
-	statuses := s.GetAllStatus()
-	ids := make([]string, 0, len(statuses))
-	for _, st := range statuses {
-		if st.Connected {
+	clients := GetAllClients()
+	ids := make([]string, 0, len(clients))
+	for _, c := range clients {
+		if !c.Supported {
+			continue
+		}
+		if st, err := s.GetStatus(c.ID); err == nil && st.Connected {
 			ids = append(ids, st.ID)
 		}
 	}
@@ -109,6 +166,12 @@ func (s *Service) GetConnectedIDs() []string {
 }
 
 // GetAllStatus returns the connection status for every known client.
+//
+// It determines "installed" via os.Stat metadata only and performs ZERO config
+// content reads (Spec 075 FR-001): no client config file is opened, so simply
+// viewing status raises no macOS App-Data privacy prompt. AccessState is left as
+// "unknown" and Connected stays false for installed clients until an explicit
+// per-client read via GetStatus.
 func (s *Service) GetAllStatus() []ClientStatus {
 	clients := GetAllClients()
 	statuses := make([]ClientStatus, 0, len(clients))
@@ -116,32 +179,89 @@ func (s *Service) GetAllStatus() []ClientStatus {
 	for _, c := range clients {
 		cfgPath := ConfigPath(c.ID, s.homeDir)
 		status := ClientStatus{
-			ID:         c.ID,
-			Name:       c.Name,
-			ConfigPath: cfgPath,
-			Supported:  c.Supported,
-			Reason:     c.Reason,
-			Note:       c.Note,
-			Bridge:     c.Bridge,
-			Icon:       c.Icon,
+			ID:          c.ID,
+			Name:        c.Name,
+			ConfigPath:  cfgPath,
+			Supported:   c.Supported,
+			Reason:      c.Reason,
+			Note:        c.Note,
+			Bridge:      c.Bridge,
+			Icon:        c.Icon,
+			AccessState: accessUnknown,
 		}
 
+		// Metadata-only existence check (no content read).
 		if _, err := os.Stat(cfgPath); err == nil {
 			status.Exists = true
-		}
-
-		// Check if mcpproxy entry exists in the config
-		if status.Exists && c.Supported {
-			if name, found := s.findEntry(c, cfgPath); found {
-				status.Connected = true
-				status.ServerName = name
-			}
 		}
 
 		statuses = append(statuses, status)
 	}
 
 	return statuses
+}
+
+// GetStatus returns the status for a single client, reading its config contents
+// on demand (Spec 075 FR-002). This is the scoped, explicit-action path where a
+// macOS App-Data prompt may legitimately appear. It resolves Connected and
+// AccessState (accessible/absent/malformed; "denied" is added in US2).
+func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
+	c := FindClient(clientID)
+	if c == nil {
+		return ClientStatus{}, fmt.Errorf("unknown client: %s", clientID)
+	}
+
+	cfgPath := ConfigPath(c.ID, s.homeDir)
+	status := ClientStatus{
+		ID:          c.ID,
+		Name:        c.Name,
+		ConfigPath:  cfgPath,
+		Supported:   c.Supported,
+		Reason:      c.Reason,
+		Note:        c.Note,
+		Bridge:      c.Bridge,
+		Icon:        c.Icon,
+		AccessState: accessUnknown,
+	}
+
+	if _, err := os.Stat(cfgPath); err == nil {
+		status.Exists = true
+	}
+	if !status.Exists {
+		status.AccessState = accessAbsent
+		return status, nil
+	}
+	if !c.Supported {
+		return status, nil
+	}
+
+	name, found, outcome := s.entryAccess(*c, cfgPath)
+	status.AccessState = outcome
+	if outcome == accessAccessible && found {
+		status.Connected = true
+		status.ServerName = name
+	}
+	return status, nil
+}
+
+// entryAccess reads the client config exactly once via the seam, then reports
+// the registered server name (if any), whether mcpproxy is connected, and the
+// access outcome. US1 classifies accessible/absent/malformed; US2 refines a
+// permission denial (currently surfaced as accessUnknown) into accessDenied.
+func (s *Service) entryAccess(client ClientDef, cfgPath string) (name string, found bool, outcome string) {
+	raw, err := s.read(cfgPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, accessAbsent
+		}
+		// US1: unclassified read error. US2 maps fs.ErrPermission -> denied.
+		return "", false, accessUnknown
+	}
+	name, found, parsedOK := s.findEntryFromBytes(client, raw)
+	if !parsedOK {
+		return "", false, accessMalformed
+	}
+	return name, found, accessAccessible
 }
 
 // Connect registers MCPProxy in the specified client's configuration file.
@@ -208,7 +328,7 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 // connectJSON adds or updates the mcpproxy entry in a JSON config file.
 func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL string, force bool) (*ConnectResult, error) {
 	// Read existing config or start fresh
-	data, perm, err := readOrCreateJSON(cfgPath)
+	data, perm, err := s.readOrCreateJSON(cfgPath)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +394,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 	}
 
 	// Verify by re-reading
-	if err := verifyJSONEntry(cfgPath, serversKey, serverName); err != nil {
+	if err := s.verifyJSONEntry(cfgPath, serversKey, serverName); err != nil {
 		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 
@@ -291,7 +411,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 
 // disconnectJSON removes the mcpproxy entry from a JSON config file.
 func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) (*ConnectResult, error) {
-	raw, err := os.ReadFile(cfgPath)
+	raw, err := s.read(cfgPath)
 	if os.IsNotExist(err) {
 		return &ConnectResult{
 			Success:    false,
@@ -374,7 +494,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 
 // connectTOML adds or updates the mcpproxy entry in a TOML config file (Codex).
 func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL string, force bool) (*ConnectResult, error) {
-	data, perm, err := readOrCreateTOML(cfgPath)
+	data, perm, err := s.readOrCreateTOML(cfgPath)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +561,7 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL str
 
 // disconnectTOML removes the mcpproxy entry from a TOML config file.
 func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) (*ConnectResult, error) {
-	raw, err := os.ReadFile(cfgPath)
+	raw, err := s.read(cfgPath)
 	if os.IsNotExist(err) {
 		return &ConnectResult{
 			Success:    false,
@@ -528,10 +648,10 @@ func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) 
 
 // readOrCreateJSON reads a JSON config file, or returns an empty map with default permissions
 // if the file does not exist.
-func readOrCreateJSON(path string) (map[string]interface{}, os.FileMode, error) {
+func (s *Service) readOrCreateJSON(path string) (map[string]interface{}, os.FileMode, error) {
 	perm := os.FileMode(0o644)
 
-	raw, err := os.ReadFile(path)
+	raw, err := s.read(path)
 	if os.IsNotExist(err) {
 		return make(map[string]interface{}), perm, nil
 	}
@@ -553,10 +673,10 @@ func readOrCreateJSON(path string) (map[string]interface{}, os.FileMode, error) 
 }
 
 // readOrCreateTOML reads a TOML config file, or returns an empty map with default permissions.
-func readOrCreateTOML(path string) (map[string]interface{}, os.FileMode, error) {
+func (s *Service) readOrCreateTOML(path string) (map[string]interface{}, os.FileMode, error) {
 	perm := os.FileMode(0o644)
 
-	raw, err := os.ReadFile(path)
+	raw, err := s.read(path)
 	if os.IsNotExist(err) {
 		return make(map[string]interface{}), perm, nil
 	}
@@ -588,8 +708,8 @@ func marshalJSONIndent(data interface{}) ([]byte, error) {
 }
 
 // verifyJSONEntry re-reads the config file and checks that the expected entry exists.
-func verifyJSONEntry(path, serversKey, serverName string) error {
-	raw, err := os.ReadFile(path)
+func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
+	raw, err := s.read(path)
 	if err != nil {
 		return fmt.Errorf("re-read %s: %w", path, err)
 	}
@@ -630,30 +750,29 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, req
 	return "", false
 }
 
-// findEntry checks whether a config file contains an mcpproxy-like entry.
-// It returns the server name and true if found.
-func (s *Service) findEntry(client ClientDef, cfgPath string) (string, bool) {
+// findEntryFromBytes checks whether already-read config bytes contain an
+// mcpproxy-like entry. It returns the server name, whether it was found, and
+// whether the bytes parsed successfully (parsedOK=false => malformed). All
+// content reads route through s.read (Spec 075 T010); this function never
+// touches the filesystem.
+func (s *Service) findEntryFromBytes(client ClientDef, raw []byte) (name string, found, parsedOK bool) {
 	if client.Format == "toml" {
-		return s.findEntryTOML(cfgPath)
+		return s.findEntryTOMLBytes(raw)
 	}
-	return s.findEntryJSON(client, cfgPath)
+	return s.findEntryJSONBytes(client, raw)
 }
 
-// findEntryJSON looks for an entry in a JSON config that points to our MCP URL.
-func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool) {
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return "", false
-	}
-
+// findEntryJSONBytes parses JSON config bytes and looks for an entry that points
+// to our MCP URL.
+func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string, found, parsedOK bool) {
 	var data map[string]interface{}
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return "", false
+		return "", false, false
 	}
 
 	serversMap, ok := data[client.ServerKey].(map[string]interface{})
 	if !ok {
-		return "", false
+		return "", false, true
 	}
 
 	mcpURL := s.mcpURL()
@@ -669,7 +788,7 @@ func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool)
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
 				if u == mcpURL || u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-					return name, true
+					return name, true, true
 				}
 			}
 		}
@@ -678,16 +797,16 @@ func (s *Service) findEntryJSON(client ClientDef, cfgPath string) (string, bool)
 		// mcpproxy endpoint lives in the command args. Detect by inspecting
 		// args so a bridge written under a custom server name is still found.
 		if entryPointsToBridge(entry, mcpURL, baseURL) {
-			return name, true
+			return name, true, true
 		}
 
 		// Also match by server name
 		if name == defaultServerName {
-			return name, true
+			return name, true, true
 		}
 	}
 
-	return "", false
+	return "", false, true
 }
 
 // entryPointsToBridge reports whether a JSON config entry is an mcp-remote
@@ -724,26 +843,22 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	return json.Unmarshal(cleaned, out)
 }
 
-// findEntryTOML looks for an entry in a TOML config that points to our MCP URL.
-func (s *Service) findEntryTOML(cfgPath string) (string, bool) {
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return "", false
-	}
-
+// findEntryTOMLBytes parses TOML config bytes and looks for an entry that points
+// to our MCP URL.
+func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK bool) {
 	var data map[string]interface{}
 	if _, err := toml.Decode(string(raw), &data); err != nil {
-		return "", false
+		return "", false, false
 	}
 
 	serversRaw, ok := data["mcp_servers"]
 	if !ok {
-		return "", false
+		return "", false, true
 	}
 
 	serversMap, ok := serversRaw.(map[string]interface{})
 	if !ok {
-		return "", false
+		return "", false, true
 	}
 
 	mcpURL := s.mcpURL()
@@ -756,13 +871,13 @@ func (s *Service) findEntryTOML(cfgPath string) (string, bool) {
 		}
 		if u, ok := entry["url"].(string); ok {
 			if u == mcpURL || u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-				return name, true
+				return name, true, true
 			}
 		}
 		if name == defaultServerName {
-			return name, true
+			return name, true, true
 		}
 	}
 
-	return "", false
+	return "", false, true
 }

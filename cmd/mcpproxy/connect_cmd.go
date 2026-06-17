@@ -132,7 +132,19 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 }
 
 func printConnectStatus(svc *connect.Service, formatter clioutput.OutputFormatter, format string) error {
+	// Spec 075: GetAllStatus is content-read-free and leaves Connected/AccessState
+	// unresolved. Running `mcpproxy connect` is an explicit user action, so resolve
+	// each supported+installed client's connected state on demand via GetStatus to
+	// preserve the CONNECTED column. Unsupported/absent clients keep the cheap
+	// metadata-only listing (no content read).
 	statuses := svc.GetAllStatus()
+	for i := range statuses {
+		if statuses[i].Supported && statuses[i].Exists {
+			if st, err := svc.GetStatus(statuses[i].ID); err == nil {
+				statuses[i] = st
+			}
+		}
+	}
 
 	if format == "table" {
 		headers := []string{"CLIENT", "STATUS", "CONFIG PATH", "CONNECTED"}
