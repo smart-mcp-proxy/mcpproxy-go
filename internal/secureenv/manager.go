@@ -345,12 +345,26 @@ func redactProxyCredentials(value string) string {
 	if value == "" {
 		return value
 	}
-	u, err := url.Parse(value)
-	if err != nil || u.User == nil {
-		return value
+	// Scheme-qualified values (http://user:pass@host) parse with Userinfo set.
+	if u, err := url.Parse(value); err == nil && u.User != nil {
+		u.User = nil
+		return u.String()
 	}
-	u.User = nil
-	return u.String()
+	// Schemeless values (user:pass@host:8080) are misread by url.Parse — it
+	// treats "user" as the scheme, leaving Userinfo nil, so the value would be
+	// forwarded with credentials intact. Re-parse with a dummy scheme so the
+	// userinfo is recognized as part of the authority, then strip the scheme we
+	// added. The "://" guard avoids touching already-schemed values, and
+	// requiring an "@" keeps non-URL values (e.g. NO_PROXY host lists) untouched.
+	// An "@" that lives in a path rather than the authority (e.g. host/path@x)
+	// leaves Userinfo nil under url.Parse, so it is correctly left intact.
+	if !strings.Contains(value, "://") && strings.Contains(value, "@") {
+		if u, err := url.Parse("http://" + value); err == nil && u.User != nil {
+			u.User = nil
+			return strings.TrimPrefix(u.String(), "http://")
+		}
+	}
+	return value
 }
 
 // ensureComprehensivePath ensures PATH includes all discovered tool paths

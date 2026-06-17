@@ -29,6 +29,13 @@ func TestRedactProxyCredentials(t *testing.T) {
 		{"no scheme host list", "localhost,127.0.0.1,.internal", "localhost,127.0.0.1,.internal"},
 		{"empty", "", ""},
 		{"unparseable kept", "://bad url with spaces", "://bad url with spaces"},
+		// Schemeless proxy values: url.Parse misreads "user" as the scheme and
+		// leaves Userinfo nil, so naive redaction would leak the credentials
+		// (Codex PR #704 review). Must still be stripped.
+		{"schemeless user and pass", "user:pass@proxy.example.com:8080", "proxy.example.com:8080"},
+		{"schemeless user only", "user@proxy.example.com:3128", "proxy.example.com:3128"},
+		{"schemeless no userinfo", "proxy.example.com:8080", "proxy.example.com:8080"},
+		{"schemeless at-in-path not stripped", "proxy.example.com:8080/path@x", "proxy.example.com:8080/path@x"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -76,6 +83,23 @@ func TestBuildSecureEnvironment_ForwardsProxyWhenOptedIn(t *testing.T) {
 	}
 	if got, ok := envValue(env, "NO_PROXY"); !ok || got != "localhost,127.0.0.1" {
 		t.Errorf("NO_PROXY = %q (present=%v), want %q unchanged", got, ok, "localhost,127.0.0.1")
+	}
+}
+
+// A schemeless proxy value carrying credentials must not be forwarded verbatim.
+func TestBuildSecureEnvironment_ForwardsSchemelessProxyRedacted(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "user:pass@proxy.example.com:8080")
+
+	m := NewManager(&EnvConfig{InheritSystemSafe: false, ForwardProxyEnv: true})
+	got, ok := envValue(m.BuildSecureEnvironment(), "HTTP_PROXY")
+	if !ok {
+		t.Fatal("HTTP_PROXY not forwarded when opted in")
+	}
+	if strings.Contains(got, "pass") || strings.Contains(got, "@") {
+		t.Errorf("schemeless proxy credentials leaked to upstream: %q", got)
+	}
+	if want := "proxy.example.com:8080"; got != want {
+		t.Errorf("HTTP_PROXY = %q, want redacted %q", got, want)
 	}
 }
 
