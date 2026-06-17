@@ -125,6 +125,7 @@ func classifyDocker(err error, _ ClassifierHints) Code {
 	case strings.Contains(msg, "docker not found in path"),
 		strings.Contains(msg, "docker not found in login shell"),
 		strings.Contains(msg, "docker: command not found"),
+		strings.Contains(msg, "command not found: docker"), // zsh: "zsh:1: command not found: docker"
 		strings.Contains(msg, "docker: not found"),
 		strings.Contains(msg, `"docker": executable file not found`):
 		return DockerCLINotFound
@@ -192,9 +193,13 @@ func classifyDockerIsolatedSpawn(err error) Code {
 	msg := strings.ToLower(err.Error())
 	switch {
 	// (1) docker binary unresolved: shellwrap resolution failure, or the shell
-	// / Go exec layer reporting `docker` itself missing.
+	// / Go exec layer reporting `docker` itself missing. Cover both shell
+	// wordings: bash/sh `docker: command not found` AND zsh's reversed
+	// `zsh:1: command not found: docker` (the common macOS login-shell shape) —
+	// the latter must beat the generic "command not found" → EXEC case below.
 	case strings.Contains(msg, `"docker": executable file not found`),
 		strings.Contains(msg, "docker: command not found"),
+		strings.Contains(msg, "command not found: docker"),
 		strings.Contains(msg, "docker: not found"),
 		strings.Contains(msg, "docker not found in path"),
 		strings.Contains(msg, "docker not found in login shell"):

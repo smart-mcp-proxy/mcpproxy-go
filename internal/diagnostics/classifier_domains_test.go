@@ -98,6 +98,15 @@ func TestClassify_Docker_IsolationSpawn(t *testing.T) {
 			want: DockerCLINotFound,
 		},
 		{
+			// #696 via zsh login shell: the common macOS shape is the REVERSED
+			// wording `zsh:1: command not found: docker` (name after the colon),
+			// which must still classify as CLI-not-found, not in-container EXEC.
+			name: "cli_not_found_zsh_reversed",
+			err:  errors.New("stdio transport (docker_isolation=true): recent stderr: zsh:1: command not found: docker"),
+			hint: ClassifierHints{Transport: "stdio", DockerIsolated: true},
+			want: DockerCLINotFound,
+		},
+		{
 			// shellwrap resolution failure surfaces this even without the hint.
 			name: "cli_not_found_resolve",
 			err:  errors.New("docker not found in PATH or well-known locations"),
