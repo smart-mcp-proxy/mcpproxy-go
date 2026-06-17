@@ -55,8 +55,17 @@ sudo apt install nodejs npm  # Debian/Ubuntu
 
 ### 2. Make the GUI inherit the shell PATH (macOS)
 
-The macOS tray launches mcpproxy with the user's login `PATH`, which is shorter
-than your interactive shell `PATH`. Either:
+When launched from a macOS GUI/launchd context (Launchpad, the login item, or
+the tray spawning the core), mcpproxy inherits a launchd-minimal environment
+rather than your interactive shell `PATH`. Since the daemon now **hydrates the
+login-shell environment once at startup** — sourcing your login shell to merge
+in `PATH` (and curated `DOCKER_*`/proxy/tool-home vars) — `uvx`/`npx` installed
+in `/opt/homebrew/bin`, `~/.local/bin`, or a version-manager shim directory are
+normally found automatically. (Hydration is a no-op when mcpproxy is started
+from a terminal whose `PATH` is already comprehensive.)
+
+If the tool still isn't found — e.g. it lives in a directory your login shell
+doesn't export, or your rc files don't run non-interactively — either:
 
 - Move the binary to a system directory: `sudo ln -s "$(which uvx)" /usr/local/bin/uvx`, or
 - Set an absolute path in the upstream config: `"command": "/Users/you/.local/bin/uvx"`.

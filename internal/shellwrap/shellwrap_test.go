@@ -420,7 +420,10 @@ func TestLoginShellPATH_CapturesFromShell(t *testing.T) {
 
 	dir := t.TempDir()
 	want := "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-	fake := writeFakeShell(t, dir, want)
+	// The login shell exports this PATH; captureLoginShellEnv's `env -0` then
+	// reports it back. PATH must include /usr/bin so the fake shell can locate
+	// the `env` binary.
+	fake := writeFakeLoginEnvShell(t, dir, map[string]string{"PATH": want})
 	t.Setenv("SHELL", fake)
 
 	got := LoginShellPATH(nil)
@@ -454,9 +457,13 @@ func TestMinimalEnv_PrefersLoginShellPATH(t *testing.T) {
 	// Simulate a LaunchAgent-like ambient PATH (missing homebrew/local).
 	t.Setenv("PATH", "/usr/bin:/bin")
 
-	// Point $SHELL at a fake shell that prints the real (enriched) PATH.
+	// Point $SHELL at a fake login shell that exports the real (enriched) PATH,
+	// so captureLoginShellEnv reports it back enriched while the ambient PATH
+	// stays minimal.
 	dir := t.TempDir()
-	fake := writeFakeShell(t, dir, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
+	fake := writeFakeLoginEnvShell(t, dir, map[string]string{
+		"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+	})
 	t.Setenv("SHELL", fake)
 
 	env := MinimalEnv()

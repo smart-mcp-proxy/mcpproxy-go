@@ -215,6 +215,53 @@ func TestLaunchdMinimalPath_AlreadyComprehensive(t *testing.T) {
 		"comprehensive PATH must be returned unchanged — terminal-launched processes should not be polluted by login-shell capture")
 }
 
+// TestBuildSecureEnvironment_AllowsHydratedDockerAndProxyVars verifies the
+// allow-list extension for MCP-2751: once shellwrap.HydrateFromLoginShell has
+// placed curated DOCKER_*/proxy vars into the process env, the default
+// allow-list must pass them through to spawned upstreams — while genuine
+// secrets remain filtered out.
+func TestBuildSecureEnvironment_AllowsHydratedDockerAndProxyVars(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses unix PATH semantics")
+	}
+
+	originalEnv := os.Environ()
+	defer func() {
+		os.Clearenv()
+		for _, env := range originalEnv {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				os.Setenv(parts[0], parts[1])
+			}
+		}
+	}()
+
+	t.Cleanup(withFakeLoginShellPath(""))
+
+	os.Clearenv()
+	os.Setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+	os.Setenv("HOME", "/tmp/test-home")
+	os.Setenv("DOCKER_HOST", "unix:///Users/me/.docker/run/docker.sock")
+	os.Setenv("DOCKER_CONTEXT", "desktop-linux")
+	os.Setenv("HTTPS_PROXY", "http://proxy.corp:8080")
+	os.Setenv("HOMEBREW_PREFIX", "/opt/homebrew")
+	// Genuine secrets that must still be filtered out by the allow-list.
+	os.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
+	os.Setenv("GITHUB_TOKEN", "ghp_dummy_test_token_1234567890abcdef")
+
+	manager := NewManager(DefaultEnvConfig())
+	joined := strings.Join(manager.BuildSecureEnvironment(), "\n")
+
+	assert.Contains(t, joined, "DOCKER_HOST=unix:///Users/me/.docker/run/docker.sock",
+		"curated DOCKER_HOST must survive the allow-list")
+	assert.Contains(t, joined, "DOCKER_CONTEXT=desktop-linux")
+	assert.Contains(t, joined, "HTTPS_PROXY=http://proxy.corp:8080")
+	assert.Contains(t, joined, "HOMEBREW_PREFIX=/opt/homebrew")
+
+	assert.NotContains(t, joined, "AWS_ACCESS_KEY_ID", "secrets must still be filtered out")
+	assert.NotContains(t, joined, "GITHUB_TOKEN", "secrets must still be filtered out")
+}
+
 // --- test helpers --------------------------------------------------------
 
 // withFakeLoginShellPath swaps loginShellPATHFn for a stub returning `path`.
