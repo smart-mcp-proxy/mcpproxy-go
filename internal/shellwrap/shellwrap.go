@@ -228,7 +228,16 @@ func probeWellKnownDocker(logger *zap.Logger) string {
 func ResolveDockerPath(logger *zap.Logger) (string, error) {
 	dockerPathMu.Lock()
 	defer dockerPathMu.Unlock()
+	return resolveDockerPathLocked(logger)
+}
 
+// resolveDockerPathLocked is the single cache-aware resolver. Callers MUST hold
+// dockerPathMu. It is the one place the docker-path cache (path, err, expiry)
+// AND the parallel dockerPathSource enum are written, so ResolveDockerPath and
+// ResolveDockerSource can never diverge on the same cache state — including the
+// MCP-2744 stat-probe override. (Earlier the two functions duplicated this
+// logic and the source-tracking drifted between them.)
+func resolveDockerPathLocked(logger *zap.Logger) (string, error) {
 	// Honor cache: keep successful resolutions forever.
 	if dockerPathHasResult && dockerPathErr == nil {
 		return dockerPath, nil
@@ -273,33 +282,18 @@ func ResolveDockerPath(logger *zap.Logger) (string, error) {
 // ResolveDockerSource returns the coarse, fixed-enum label describing how the
 // docker CLI was resolved (DockerSourcePath / DockerSourceBundled /
 // DockerSourceLoginShell), or DockerSourceAbsent when docker cannot be found.
-// It shares the same cache as ResolveDockerPath, so a prior successful or
-// failed resolution is reused (honoring the negative TTL). Never returns the
-// resolved path — only the branch — so callers (telemetry) cannot leak it.
+// It drives the SAME cache path as ResolveDockerPath (via resolveDockerPathLocked),
+// so the reported source always matches the resolution ResolveDockerPath would
+// give for the current cache state — including the MCP-2744 stat-probe override
+// during the negative-TTL window. Never returns the resolved path — only the
+// branch — so callers (telemetry) cannot leak it.
 func ResolveDockerSource(logger *zap.Logger) string {
 	dockerPathMu.Lock()
 	defer dockerPathMu.Unlock()
-
-	if dockerPathHasResult {
-		if dockerPathErr == nil {
-			return sourceOrAbsent(dockerPathSource)
-		}
-		if !dockerPathExpires.IsZero() && time.Now().Before(dockerPathExpires) {
-			return DockerSourceAbsent
-		}
-	}
-
-	path, source, err := resolveDockerPathUncached(logger)
-	dockerPath = path
-	dockerPathSource = source
-	dockerPathErr = err
-	dockerPathHasResult = true
-	if err != nil {
-		dockerPathExpires = time.Now().Add(dockerPathNegativeTTL)
+	if _, err := resolveDockerPathLocked(logger); err != nil {
 		return DockerSourceAbsent
 	}
-	dockerPathExpires = time.Time{}
-	return sourceOrAbsent(source)
+	return sourceOrAbsent(dockerPathSource)
 }
 
 // sourceOrAbsent normalizes an empty source string to DockerSourceAbsent so the

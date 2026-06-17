@@ -393,6 +393,46 @@ func TestResolveDockerSource_StatProbeUpgradeReportsBundled(t *testing.T) {
 		"source must upgrade to bundled when the stat probe overrides the cached negative")
 }
 
+// TestResolveDockerSource_NegativeTTLProbeOverride is the Codex round-4
+// regression guard: ResolveDockerSource must apply the same well-known-path
+// stat-probe override that ResolveDockerPath does during the negative-TTL
+// window. Before the shared-resolver refactor, ResolveDockerSource returned
+// "absent" off the cached negative without ever probing, so docker_cli_source
+// reported the wrong source while ResolveDockerPath returned the bundled path.
+func TestResolveDockerSource_NegativeTTLProbeOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	// FIRST resolution fails everywhere → caches a LIVE negative (default TTL).
+	prevPaths := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return nil }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prevPaths })
+
+	t.Setenv("PATH", t.TempDir())
+	shellDir := t.TempDir()
+	t.Setenv("SHELL", writeFakeShell(t, shellDir, ""))
+
+	_, err := ResolveDockerPath(nil)
+	require.Error(t, err, "first call should cache a live negative")
+
+	// Docker now appears at a well-known path. The very next ResolveDockerSource
+	// call must run the stat probe (not honor the cached "absent") and report
+	// bundled — without any TTL expiry.
+	dockerDir := t.TempDir()
+	want := writeFakeDocker(t, dockerDir)
+	wellKnownDockerPathsFn = func() []string { return []string{want} }
+
+	require.Equal(t, DockerSourceBundled, ResolveDockerSource(nil),
+		"ResolveDockerSource must apply the stat-probe override during the negative-TTL window")
+	// And ResolveDockerPath agrees (cache was upgraded to a permanent success).
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
 func TestMinimalEnv_DropsSecrets(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
 	t.Setenv("GITHUB_TOKEN", "ghp_dummy_test_token_1234567890abcdef")
