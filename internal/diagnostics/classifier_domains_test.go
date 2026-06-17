@@ -128,6 +128,32 @@ func TestClassify_Docker_IsolationSpawn(t *testing.T) {
 			want: DockerOCIRuntime,
 		},
 		{
+			// Bare "exec format error" WITH the isolation hint → OCI (wrong-arch
+			// image under docker isolation).
+			name: "bare_exec_format_isolated",
+			err:  errors.New("stdio transport (docker_isolation=true): recent stderr: exec format error"),
+			hint: ClassifierHints{Transport: "stdio", DockerIsolated: true},
+			want: DockerOCIRuntime,
+		},
+		{
+			// Bare "exec format error" WITHOUT the isolation hint must stay
+			// STDIO-classified (a non-docker wrong-arch host binary), NOT a
+			// Docker code. Codex round-5 regression.
+			name: "bare_exec_format_no_hint_stays_stdio",
+			err:  errors.New("failed to spawn stdio server: recent stderr: exec format error"),
+			hint: ClassifierHints{Transport: "stdio"},
+			want: STDIOSpawnExecFormat,
+		},
+		{
+			// A real docker OCI error that lacks the hint but carries "oci
+			// runtime" context still classifies as OCI (not STDIO), via the
+			// classifyDocker fallback.
+			name: "oci_context_no_hint",
+			err:  errors.New("oci runtime create failed: exec format error"),
+			hint: ClassifierHints{Transport: "stdio"},
+			want: DockerOCIRuntime,
+		},
+		{
 			// Same ENOENT string WITHOUT the isolation hint stays a plain stdio
 			// spawn failure — no false DOCKER attribution for host stdio servers.
 			name: "non_containerized_enoent",

@@ -52,6 +52,16 @@ func seedSTDIO() {
 		DocsURL: docsURL(STDIOSpawnEACCES),
 	})
 	register(CatalogEntry{
+		Code:        STDIOSpawnExecFormat,
+		Severity:    SeverityError,
+		UserMessage: "The configured command is the wrong CPU architecture or not an executable (exec format error). Install a build that matches this machine.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Check the binary's architecture", Command: "file <command-path>"},
+			{Type: FixStepLink, Label: "Install a matching build", URL: docsURL(STDIOSpawnExecFormat)},
+		},
+		DocsURL: docsURL(STDIOSpawnExecFormat),
+	})
+	register(CatalogEntry{
 		Code:        STDIOExitNonzero,
 		Severity:    SeverityError,
 		UserMessage: "The stdio server process exited with a non-zero status before handshake completed.",

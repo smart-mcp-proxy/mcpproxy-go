@@ -8,8 +8,13 @@ package diagnostics
 
 // STDIO domain — stdio-transport MCP server failures.
 const (
-	STDIOSpawnENOENT          Code = "MCPX_STDIO_SPAWN_ENOENT"
-	STDIOSpawnEACCES          Code = "MCPX_STDIO_SPAWN_EACCES"
+	STDIOSpawnENOENT Code = "MCPX_STDIO_SPAWN_ENOENT"
+	STDIOSpawnEACCES Code = "MCPX_STDIO_SPAWN_EACCES"
+	// STDIOSpawnExecFormat: the stdio binary exists but is the wrong CPU
+	// architecture / not an executable format (ENOEXEC — "exec format error").
+	// Distinct from a Docker/OCI exec-format failure, which is
+	// MCPX_DOCKER_OCI_RUNTIME under the docker-isolation hint.
+	STDIOSpawnExecFormat      Code = "MCPX_STDIO_SPAWN_EXEC_FORMAT"
 	STDIOExitNonzero          Code = "MCPX_STDIO_EXIT_NONZERO"
 	STDIOExitBeforeInitialize Code = "MCPX_STDIO_EXIT_BEFORE_INITIALIZE"
 	STDIOHandshakeTimeout     Code = "MCPX_STDIO_HANDSHAKE_TIMEOUT"

@@ -129,9 +129,12 @@ func classifyDocker(err error, _ ClassifierHints) Code {
 		strings.Contains(msg, "docker: not found"),
 		strings.Contains(msg, `"docker": executable file not found`):
 		return DockerCLINotFound
-	// OCI runtime / architecture-mismatch failures from `docker run`.
+	// OCI runtime failures from `docker run`. NOTE: a BARE "exec format error"
+	// is intentionally NOT matched here — a non-docker, wrong-architecture host
+	// stdio binary emits the same string and must stay STDIO-classified. The
+	// docker-isolated path routes bare "exec format error" via the hinted
+	// classifyDockerIsolatedSpawn; here we require real OCI/runc context.
 	case strings.Contains(msg, "oci runtime"),
-		strings.Contains(msg, "exec format error"),
 		strings.Contains(msg, "runc"):
 		return DockerOCIRuntime
 	}
@@ -240,6 +243,9 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 		if errors.Is(execErr.Err, syscall.EACCES) {
 			return STDIOSpawnEACCES
 		}
+		if errors.Is(execErr.Err, syscall.ENOEXEC) {
+			return STDIOSpawnExecFormat
+		}
 	}
 
 	// exec.ExitError — process started but exited non-zero during handshake.
@@ -266,6 +272,13 @@ func classifyStdio(err error, hints ClassifierHints) Code {
 		msg := err.Error()
 		lmsg := strings.ToLower(msg)
 		switch {
+		// Wrong-arch / non-executable host binary (ENOEXEC). Guarded against
+		// docker OCI context ("oci runtime"/"runc") so a real containerized
+		// exec-format failure still falls through to classifyDocker → OCI; a
+		// BARE "exec format error" is a host stdio problem, not a Docker one.
+		case strings.Contains(lmsg, "exec format error") &&
+			!strings.Contains(lmsg, "oci runtime") && !strings.Contains(lmsg, "runc"):
+			return STDIOSpawnExecFormat
 		case strings.Contains(lmsg, "no such file or directory"),
 			strings.Contains(lmsg, "executable file not found"),
 			strings.Contains(lmsg, "command not found"):
