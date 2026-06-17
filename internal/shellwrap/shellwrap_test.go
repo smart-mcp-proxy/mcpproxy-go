@@ -294,6 +294,64 @@ func TestResolveDockerPath_WellKnownPathFallback(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestResolveDockerSource reports which resolution branch found docker so the
+// telemetry layer can emit the coarse #696 fleet signal (path/bundled/
+// login_shell/absent) — never the path string itself.
+func TestResolveDockerSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixtures")
+	}
+
+	t.Run("path", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		dir := t.TempDir()
+		writeFakeDocker(t, dir)
+		t.Setenv("PATH", dir)
+		t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+		assert.Equal(t, DockerSourcePath, ResolveDockerSource(nil))
+	})
+
+	t.Run("bundled", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		dockerDir := t.TempDir()
+		want := writeFakeDocker(t, dockerDir)
+		t.Setenv("PATH", t.TempDir()) // ambient excludes docker
+		prev := wellKnownDockerPathsFn
+		wellKnownDockerPathsFn = func() []string { return []string{want} }
+		t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+		t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+		assert.Equal(t, DockerSourceBundled, ResolveDockerSource(nil))
+	})
+
+	t.Run("login_shell", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		dockerDir := t.TempDir()
+		dockerPath := writeFakeDocker(t, dockerDir)
+		t.Setenv("PATH", t.TempDir())
+		prev := wellKnownDockerPathsFn
+		wellKnownDockerPathsFn = func() []string { return nil }
+		t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+		shellDir := t.TempDir()
+		t.Setenv("SHELL", writeFakeShell(t, shellDir, dockerPath))
+		assert.Equal(t, DockerSourceLoginShell, ResolveDockerSource(nil))
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		t.Setenv("PATH", t.TempDir())
+		prev := wellKnownDockerPathsFn
+		wellKnownDockerPathsFn = func() []string { return nil }
+		t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+		shellDir := t.TempDir()
+		t.Setenv("SHELL", writeFakeShell(t, shellDir, ""))
+		assert.Equal(t, DockerSourceAbsent, ResolveDockerSource(nil))
+	})
+}
+
 func TestMinimalEnv_DropsSecrets(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
 	t.Setenv("GITHUB_TOKEN", "ghp_dummy_test_token_1234567890abcdef")

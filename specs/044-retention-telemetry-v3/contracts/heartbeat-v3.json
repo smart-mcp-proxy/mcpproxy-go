@@ -72,7 +72,24 @@
       "required": ["has_ci_env", "has_cloud_ide_env", "is_container", "has_tty", "has_display"],
       "additionalProperties": false,
       "description": "Booleans only. The payload builder self-check MUST reject any non-boolean value here."
+    },
+    "feature_flags": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Passthrough of the v2/v3 feature_flags object. Only the schema-v5 (MCP-2745) docker-isolation additions are enumerated here; older fields pass through.",
+      "properties": {
+        "docker_isolation_enabled": {
+          "type": "boolean",
+          "description": "Schema v5 (MCP-2745): global docker_isolation.enabled flag. Distinguishes 'isolation on, 0 matching servers' from 'isolation off'."
+        },
+        "docker_cli_source": {
+          "type": "string",
+          "enum": ["path", "bundled", "login_shell", "absent"],
+          "description": "Schema v5 (MCP-2745): how the docker CLI was resolved (the #696 fleet signal). Fixed enum — NEVER the path string."
+        }
+      }
     }
   },
-  "additionalProperties": true
+  "additionalProperties": true,
+  "$comment": "Schema v5 (MCP-2745) extends this forward-compatibly: feature_flags.docker_isolation_enabled + feature_flags.docker_cli_source, and three new error_code_counts_24h rows MCPX_DOCKER_CLI_NOT_FOUND / MCPX_DOCKER_EXEC_NOT_FOUND / MCPX_DOCKER_OCI_RUNTIME. Existing v3/v4 consumers ignore them."
 }

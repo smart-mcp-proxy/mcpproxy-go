@@ -119,6 +119,20 @@ func classifyDocker(err error, _ ClassifierHints) Code {
 		strings.Contains(msg, "docker") && strings.Contains(msg, "image") && strings.Contains(msg, "pull") && strings.Contains(msg, "fail"),
 		strings.Contains(msg, "manifest unknown"):
 		return DockerImagePullFailed
+	// docker CLI unresolved (#696). These shapes are unambiguous about the
+	// docker BINARY being missing, so they classify even without the
+	// DockerIsolated hint (e.g. shellwrap's resolution-failure error).
+	case strings.Contains(msg, "docker not found in path"),
+		strings.Contains(msg, "docker not found in login shell"),
+		strings.Contains(msg, "docker: command not found"),
+		strings.Contains(msg, "docker: not found"),
+		strings.Contains(msg, `"docker": executable file not found`):
+		return DockerCLINotFound
+	// OCI runtime / architecture-mismatch failures from `docker run`.
+	case strings.Contains(msg, "oci runtime"),
+		strings.Contains(msg, "exec format error"),
+		strings.Contains(msg, "runc"):
+		return DockerOCIRuntime
 	}
 	return ""
 }
@@ -155,8 +169,62 @@ func classifyQuarantine(err error, _ ClassifierHints) Code {
 	return ""
 }
 
+// classifyDockerIsolatedSpawn maps a spawn/exec failure on a Docker-isolated
+// server to a specific DOCKER code. Returns "" when the error is not a
+// recognised docker-isolation failure (caller falls through to generic stdio
+// handling).
+//
+// Case order is load-bearing:
+//  1. The docker BINARY itself is missing (#696) — must win even though its
+//     message also contains "command not found" / "executable file not found".
+//  2. The in-container interpreter is missing — real docker output nests this
+//     inside an "OCI runtime create failed: … exec: \"x\": executable file not
+//     found" string, so it must be checked BEFORE the generic OCI case below.
+//  3. Any other OCI runtime failure (exec format error / runc).
+func classifyDockerIsolatedSpawn(err error) Code {
+	// Host couldn't even start the docker binary (direct exec path).
+	var execErr *exec.Error
+	if errors.As(err, &execErr) && errors.Is(execErr.Err, syscall.ENOENT) &&
+		strings.Contains(strings.ToLower(execErr.Name), "docker") {
+		return DockerCLINotFound
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	// (1) docker binary unresolved: shellwrap resolution failure, or the shell
+	// / Go exec layer reporting `docker` itself missing.
+	case strings.Contains(msg, `"docker": executable file not found`),
+		strings.Contains(msg, "docker: command not found"),
+		strings.Contains(msg, "docker: not found"),
+		strings.Contains(msg, "docker not found in path"),
+		strings.Contains(msg, "docker not found in login shell"):
+		return DockerCLINotFound
+	// (2) in-container interpreter missing (image lacks uvx/node/python/…).
+	case strings.Contains(msg, "executable file not found"),
+		strings.Contains(msg, "no such file or directory"),
+		strings.Contains(msg, "command not found"):
+		return DockerExecNotFound
+	// (3) other OCI runtime failures (arch mismatch, runc start failure).
+	case strings.Contains(msg, "oci runtime"),
+		strings.Contains(msg, "exec format error"),
+		strings.Contains(msg, "runc"):
+		return DockerOCIRuntime
+	}
+	return ""
+}
+
 // classifyStdio handles os/exec spawn errors and handshake failures.
 func classifyStdio(err error, hints ClassifierHints) Code {
+	// Docker-isolated servers run `docker run …` over the stdio transport, so
+	// ENOENT-class failures here are docker-specific (#696 CLI missing, or an
+	// image/interpreter mismatch) rather than a plain host-binary miss. Resolve
+	// those to DOCKER codes before the generic stdio matching below.
+	if hints.DockerIsolated {
+		if c := classifyDockerIsolatedSpawn(err); c != "" {
+			return c
+		}
+	}
+
 	var execErr *exec.Error
 	if errors.As(err, &execErr) {
 		// exec.Error wraps os.PathError which wraps syscall.Errno; ENOENT/EACCES

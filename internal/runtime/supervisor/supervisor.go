@@ -3,6 +3,7 @@ package supervisor
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,14 +23,15 @@ import (
 // classifyAndAttach converts a raw connection error into a DiagnosticError and
 // stores it on the server status. Called from the supervisor's reconcile and
 // event paths. Spec 044.
-func classifyAndAttach(status *stateview.ServerStatus, err error, transport string) {
+func classifyAndAttach(status *stateview.ServerStatus, err error, transport string, dockerIsolated bool) {
 	if err == nil {
 		status.Diagnostic = nil
 		return
 	}
 	code := diagnostics.Classify(err, diagnostics.ClassifierHints{
-		Transport: transport,
-		ServerID:  status.Name,
+		Transport:      transport,
+		ServerID:       status.Name,
+		DockerIsolated: dockerIsolated,
 	})
 	if code == "" {
 		// Classify always returns at least UnknownUnclassified for non-nil err,
@@ -50,6 +52,34 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, transport stri
 		ServerID:   status.Name,
 		DetectedAt: time.Now(),
 	}
+}
+
+// usesDockerIsolation reports whether the given server would be launched
+// through Docker isolation, so the classifier can attribute spawn/exec failures
+// to DOCKER codes (#696 CLI missing, in-container interpreter missing) rather
+// than a generic stdio ENOENT. This is a side-effect-free mirror of
+// core.IsolationManager.ShouldIsolate (internal/upstream/core/isolation.go) —
+// it is only a classifier hint, so faithfulness matters more than sharing the
+// (logging) implementation.
+func (s *Supervisor) usesDockerIsolation(srv *config.ServerConfig) bool {
+	if srv == nil || srv.Command == "" {
+		return false
+	}
+	snap := s.configSvc.Current()
+	if snap == nil || snap.Config == nil || snap.Config.DockerIsolation == nil ||
+		!snap.Config.DockerIsolation.Enabled {
+		return false
+	}
+	// Per-server explicit opt-out wins over the global enable.
+	if srv.Isolation != nil && srv.Isolation.Enabled != nil && !*srv.Isolation.Enabled {
+		return false
+	}
+	// Servers already running docker themselves are not double-isolated.
+	cmdBase := filepath.Base(srv.Command)
+	if cmdBase == "docker" || strings.Contains(srv.Command, "docker") {
+		return false
+	}
+	return true
 }
 
 // Supervisor manages the desired vs actual state reconciliation for upstream servers.
@@ -680,7 +710,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				if state.Config != nil {
 					transport = transportpkg.DetermineTransportType(state.Config)
 				}
-				classifyAndAttach(status, state.ConnectionInfo.LastError, transport)
+				classifyAndAttach(status, state.ConnectionInfo.LastError, transport, s.usesDockerIsolation(state.Config))
 				// Spec 044 Phase H: notify telemetry counter store.
 				if status.Diagnostic != nil {
 					s.callbackMu.RLock()
@@ -978,7 +1008,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						if status.Config != nil {
 							transport = transportpkg.DetermineTransportType(status.Config)
 						}
-						classifyAndAttach(status, connInfo.LastError, transport)
+						classifyAndAttach(status, connInfo.LastError, transport, s.usesDockerIsolation(status.Config))
 						// Spec 044 Phase H: notify telemetry counter store.
 						if status.Diagnostic != nil {
 							s.callbackMu.RLock()

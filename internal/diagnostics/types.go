@@ -67,6 +67,12 @@ type DiagnosticError struct {
 type ClassifierHints struct {
 	Transport string // "stdio", "http", "sse", "docker", etc.
 	ServerID  string
+	// DockerIsolated is true when the failing server is launched through Docker
+	// isolation (`docker run …` over the stdio transport). It lets the
+	// classifier route ENOENT-class spawn failures to DOCKER codes (CLI missing
+	// per #696, in-container interpreter missing) instead of a generic
+	// MCPX_STDIO_SPAWN_ENOENT. See classifyDockerIsolatedSpawn.
+	DockerIsolated bool
 }
 
 // FixRequest is the input to a registered fixer.

@@ -291,6 +291,7 @@ func (h *hookStats) GetRoutingMode() string            { return "retrieve_tools"
 func (h *hookStats) IsQuarantineEnabled() bool         { return false }
 func (h *hookStats) IsDockerAvailable() bool           { return false }
 func (h *hookStats) GetDockerIsolatedServerCount() int { return 0 }
+func (h *hookStats) GetDockerCLISource() string        { return "absent" }
 
 // TestSendHeartbeat_RechecksOptOutBeforeTransmit covers Codex fix #2: a heartbeat
 // already in flight when the opt-out latch flips must NOT transmit a usage

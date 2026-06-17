@@ -292,6 +292,34 @@ func seedDOCKER() {
 		},
 		DocsURL: docsURL(DockerSnapAppArmor),
 	})
+	register(CatalogEntry{
+		Code:        DockerCLINotFound,
+		Severity:    SeverityError,
+		UserMessage: "Docker isolation is enabled but the `docker` command could not be found. Install Docker, or add its CLI to your PATH.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Check docker is on PATH", Command: "docker --version"},
+			{Type: FixStepLink, Label: "Install Docker / enable the CLI", URL: docsURL(DockerCLINotFound)},
+		},
+		DocsURL: docsURL(DockerCLINotFound),
+	})
+	register(CatalogEntry{
+		Code:        DockerExecNotFound,
+		Severity:    SeverityError,
+		UserMessage: "The Docker image is missing the interpreter this server needs (e.g. the image has no `uvx`/`node`). Pick an image that includes it.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Choosing a Docker isolation image", URL: docsURL(DockerExecNotFound)},
+		},
+		DocsURL: docsURL(DockerExecNotFound),
+	})
+	register(CatalogEntry{
+		Code:        DockerOCIRuntime,
+		Severity:    SeverityError,
+		UserMessage: "The Docker container failed to start (OCI runtime error). This is often an image/CPU architecture mismatch.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Troubleshooting OCI runtime errors", URL: docsURL(DockerOCIRuntime)},
+		},
+		DocsURL: docsURL(DockerOCIRuntime),
+	})
 }
 
 // --- CONFIG --------------------------------------------------------------

@@ -81,6 +81,26 @@ func TestBuildFeatureFlagSnapshotFromConfig(t *testing.T) {
 	}
 }
 
+func TestBuildFeatureFlagSnapshotDockerIsolationEnabled(t *testing.T) {
+	// Enabled global docker isolation surfaces as true.
+	cfg := &config.Config{DockerIsolation: &config.DockerIsolationConfig{Enabled: true}}
+	if snap := BuildFeatureFlagSnapshot(cfg); !snap.DockerIsolationEnabled {
+		t.Error("DockerIsolationEnabled should be true when cfg.DockerIsolation.Enabled is true")
+	}
+
+	// Disabled global docker isolation surfaces as false.
+	cfgOff := &config.Config{DockerIsolation: &config.DockerIsolationConfig{Enabled: false}}
+	if snap := BuildFeatureFlagSnapshot(cfgOff); snap.DockerIsolationEnabled {
+		t.Error("DockerIsolationEnabled should be false when cfg.DockerIsolation.Enabled is false")
+	}
+
+	// Nil DockerIsolation must not panic and reports false.
+	cfgNil := &config.Config{}
+	if snap := BuildFeatureFlagSnapshot(cfgNil); snap.DockerIsolationEnabled {
+		t.Error("DockerIsolationEnabled should be false when cfg.DockerIsolation is nil")
+	}
+}
+
 func TestBuildFeatureFlagSnapshotNilFeatures(t *testing.T) {
 	// When cfg.Features is nil, EnableWebUI should fall back to false rather
 	// than panic. Guards against a nil-pointer deref in the emitter.
