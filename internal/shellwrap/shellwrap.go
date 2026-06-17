@@ -245,6 +245,11 @@ func ResolveDockerPath(logger *zap.Logger) (string, error) {
 		!dockerPathExpires.IsZero() && time.Now().Before(dockerPathExpires) {
 		if p := probeWellKnownDocker(logger); p != "" {
 			dockerPath = p
+			// The override resolves via the well-known-path probe, so the
+			// source is "bundled". Must be set here too, else a stale "absent"
+			// from the prior failed resolution leaks into docker_cli_source
+			// telemetry on the next ResolveDockerSource call (schema v5).
+			dockerPathSource = DockerSourceBundled
 			dockerPathErr = nil
 			dockerPathExpires = time.Time{}
 			return p, nil
