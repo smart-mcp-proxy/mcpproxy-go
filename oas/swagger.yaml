@@ -66,6 +66,14 @@ components:
           $ref: '#/components/schemas/secureenv.EnvConfig'
         features:
           $ref: '#/components/schemas/config.FeatureFlags'
+        forward_proxy_env:
+          description: |-
+            ForwardProxyEnv opts in to forwarding the ambient HTTP(S)/ALL/NO/FTP proxy
+            environment variables to spawned stdio upstream servers (MCP-2769). OFF by
+            default: proxy URLs commonly embed credentials (http://user:pass@proxy), so
+            forwarding them to every upstream is a credential-leak risk. When enabled,
+            values are forwarded with their userinfo (credentials) redacted.
+          type: boolean
         health_check_interval:
           description: |-
             Discovery & health-check cadence (spec 074, #608). Both are *Duration
@@ -2496,6 +2504,15 @@ components:
           type: object
         enhance_path:
           description: Enable PATH enhancement for Launchd scenarios
+          type: boolean
+        forward_proxy_env:
+          description: |-
+            ForwardProxyEnv opts in to forwarding the ambient HTTP(S)/ALL/NO/FTP proxy
+            environment variables to spawned upstream servers (MCP-2769). It is OFF by
+            default and deliberately kept out of the AllowedSystemVars default list:
+            proxy URLs frequently carry credentials (http://user:pass@proxy), so
+            forwarding them to every stdio upstream is a credential-leak risk. When
+            enabled, values are forwarded with their userinfo (credentials) redacted.
           type: boolean
         inherit_system_safe:
           type: boolean

@@ -182,6 +182,10 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 		// Create a copy of the config to avoid modifying the original
 		envConfigCopy := *envConfig
 		envConfigCopy.EnhancePath = true
+		// MCP-2769: opt-in proxy env forwarding to spawned stdio upstreams.
+		if globalConfig != nil {
+			envConfigCopy.ForwardProxyEnv = globalConfig.ForwardProxyEnv
+		}
 		envConfig = &envConfigCopy
 	}
 

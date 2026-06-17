@@ -728,6 +728,39 @@ See [Docker Recovery Documentation](docker-recovery-phase3.md) for complete deta
 - Locale: all `LC_*` variables (e.g., `LC_ALL`, `LC_CTYPE`, …)
 - Custom additions: `custom_vars` merged on top
 
+> **Proxy variables are never inherited by default.** `HTTP_PROXY`, `HTTPS_PROXY`,
+> `NO_PROXY`, `ALL_PROXY`, and `FTP_PROXY` are deliberately excluded from the
+> default allow-list because proxy URLs commonly embed credentials
+> (`http://user:pass@proxy`). To forward them to upstream stdio servers, opt in
+> with `forward_proxy_env` (see below).
+
+### Proxy Environment Forwarding
+
+```json
+{
+  "forward_proxy_env": true
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `forward_proxy_env` | boolean | `false` | Forward ambient proxy environment variables to spawned stdio upstream servers, with credentials redacted |
+
+When `forward_proxy_env` is `true`, mcpproxy forwards the proxy variables present
+in its own environment (`HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`,
+`NO_PROXY`/`no_proxy`, `ALL_PROXY`/`all_proxy`, `FTP_PROXY`/`ftp_proxy` — both
+spellings are recognized) to each spawned stdio upstream. Any userinfo
+(`user:password@`) is **stripped** from the value before forwarding, so
+credentials never reach upstream servers while the proxy host/port is preserved.
+An explicitly configured proxy value (via `custom_vars` or a server's `env`)
+always takes precedence and suppresses forwarding of the ambient value, including
+the other-cased alias.
+
+> **macOS GUI/launchd note:** when launched from the Dock/Launchpad or the login
+> item, mcpproxy inherits a minimal environment that may not contain your proxy
+> variables. In that case set the proxy explicitly under `custom_vars` or a
+> server's `env` block.
+
 ---
 
 ## Routing Mode

@@ -431,3 +431,43 @@ func TestWildcardMatching(t *testing.T) {
 		}
 	}
 }
+
+// TestProxyForwardingWiring verifies that the global ForwardProxyEnv flag is
+// threaded through to the per-server secure environment manager (MCP-2769):
+// proxy vars only reach a spawned stdio upstream when opted in, and credentials
+// are redacted on the way.
+func TestProxyForwardingWiring(t *testing.T) {
+	t.Setenv("HTTPS_PROXY", "http://user:pass@proxy.example.com:8080")
+
+	serverConfig := &config.ServerConfig{
+		Name:    "test-server",
+		Command: "echo",
+		Args:    []string{"test"},
+		Enabled: true,
+	}
+	logger := zap.NewNop()
+
+	buildEnvMap := func(forward bool) map[string]string {
+		cfg := config.DefaultConfig()
+		cfg.ForwardProxyEnv = forward
+		client, err := managed.NewClient("test-id", serverConfig, logger, nil, cfg, nil, secret.NewResolver())
+		require.NoError(t, err)
+		envMap := make(map[string]string)
+		for _, envVar := range client.GetEnvManager().(*secureenv.Manager).BuildSecureEnvironment() {
+			if parts := strings.SplitN(envVar, "=", 2); len(parts) == 2 {
+				envMap[parts[0]] = parts[1]
+			}
+		}
+		return envMap
+	}
+
+	// Disabled (default): proxy must not be forwarded.
+	if _, ok := buildEnvMap(false)["HTTPS_PROXY"]; ok {
+		t.Error("HTTPS_PROXY forwarded to upstream without ForwardProxyEnv opt-in")
+	}
+
+	// Enabled: proxy forwarded with credentials redacted.
+	if got := buildEnvMap(true)["HTTPS_PROXY"]; got != "http://proxy.example.com:8080" {
+		t.Errorf("HTTPS_PROXY = %q, want redacted http://proxy.example.com:8080", got)
+	}
+}

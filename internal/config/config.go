@@ -130,6 +130,13 @@ type Config struct {
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
 
+	// ForwardProxyEnv opts in to forwarding the ambient HTTP(S)/ALL/NO/FTP proxy
+	// environment variables to spawned stdio upstream servers (MCP-2769). OFF by
+	// default: proxy URLs commonly embed credentials (http://user:pass@proxy), so
+	// forwarding them to every upstream is a credential-leak risk. When enabled,
+	// values are forwarded with their userinfo (credentials) redacted.
+	ForwardProxyEnv bool `json:"forward_proxy_env,omitempty" mapstructure:"forward-proxy-env"`
+
 	// Logging configuration
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 

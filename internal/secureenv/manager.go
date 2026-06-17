@@ -1,6 +1,7 @@
 package secureenv
 
 import (
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -24,6 +25,13 @@ type EnvConfig struct {
 	AllowedSystemVars []string          `json:"allowed_system_vars"`
 	CustomVars        map[string]string `json:"custom_vars"`
 	EnhancePath       bool              `json:"enhance_path"` // Enable PATH enhancement for Launchd scenarios
+	// ForwardProxyEnv opts in to forwarding the ambient HTTP(S)/ALL/NO/FTP proxy
+	// environment variables to spawned upstream servers (MCP-2769). It is OFF by
+	// default and deliberately kept out of the AllowedSystemVars default list:
+	// proxy URLs frequently carry credentials (http://user:pass@proxy), so
+	// forwarding them to every stdio upstream is a credential-leak risk. When
+	// enabled, values are forwarded with their userinfo (credentials) redacted.
+	ForwardProxyEnv bool `json:"forward_proxy_env,omitempty"`
 }
 
 // PathDiscovery contains auto-discovered paths for common tools
@@ -272,7 +280,91 @@ func (m *Manager) BuildSecureEnvironment() []string {
 		envVars = m.ensureComprehensivePath(envVars)
 	}
 
+	// Forward ambient proxy variables only when explicitly opted in (MCP-2769),
+	// with credentials redacted. Done last so an explicitly-configured proxy
+	// value (custom/server env) always wins over the ambient one.
+	if m.config.ForwardProxyEnv {
+		envVars = appendForwardedProxyEnv(envVars)
+	}
+
 	return envVars
+}
+
+// proxyEnvGroups lists the proxy environment variables that ForwardProxyEnv
+// forwards, grouped by logical variable. HTTP clients treat the upper- and
+// lower-case spellings as aliases, so each group is handled atomically: if
+// either spelling is already set (via custom/server env), neither is forwarded
+// from the ambient environment.
+var proxyEnvGroups = [][]string{
+	{"HTTP_PROXY", "http_proxy"},
+	{"HTTPS_PROXY", "https_proxy"},
+	{"ALL_PROXY", "all_proxy"},
+	{"NO_PROXY", "no_proxy"},
+	{"FTP_PROXY", "ftp_proxy"},
+}
+
+// appendForwardedProxyEnv appends the ambient proxy variables to envVars with
+// credentials redacted. An already-present spelling (case-insensitive within a
+// group) suppresses forwarding of the whole group so explicit configuration is
+// never overridden.
+func appendForwardedProxyEnv(envVars []string) []string {
+	present := make(map[string]struct{}, len(envVars))
+	for _, ev := range envVars {
+		if i := strings.IndexByte(ev, '='); i > 0 {
+			present[ev[:i]] = struct{}{}
+		}
+	}
+
+	for _, group := range proxyEnvGroups {
+		if anyProxyKeyPresent(present, group) {
+			continue
+		}
+		for _, key := range group {
+			if val, ok := os.LookupEnv(key); ok && val != "" {
+				envVars = append(envVars, key+"="+redactProxyCredentials(val))
+			}
+		}
+	}
+	return envVars
+}
+
+func anyProxyKeyPresent(present map[string]struct{}, group []string) bool {
+	for _, key := range group {
+		if _, ok := present[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// redactProxyCredentials strips any userinfo (user:password) from a proxy URL
+// so credentials are never forwarded to upstream servers, while preserving the
+// proxy host/port so the proxy remains functional. Non-URL values (e.g. the
+// host list in NO_PROXY) and unparseable values are returned unchanged.
+func redactProxyCredentials(value string) string {
+	if value == "" {
+		return value
+	}
+	// Scheme-qualified values (http://user:pass@host) parse with Userinfo set.
+	if u, err := url.Parse(value); err == nil && u.User != nil {
+		u.User = nil
+		return u.String()
+	}
+	// Schemeless values (user:pass@host:8080) are misread by url.Parse — it
+	// treats "user" as the scheme, leaving Userinfo nil, so the value would be
+	// forwarded with credentials intact. Re-parse with a dummy scheme so the
+	// userinfo is recognized as part of the authority, then strip the scheme we
+	// added. The "://" guard avoids touching already-schemed values, and
+	// requiring an "@" keeps non-URL values (e.g. NO_PROXY host lists) untouched.
+	// An "@" that lives in a path rather than the authority (e.g. host/path@x)
+	// leaves Userinfo nil under url.Parse, so it is correctly left intact.
+	if !strings.Contains(value, "://") && strings.Contains(value, "@") {
+		if u, err := url.Parse("http://" + value); err == nil && u.User != nil {
+			u.User = nil
+			return strings.TrimPrefix(u.String(), "http://")
+		}
+	}
+	return value
 }
 
 // ensureComprehensivePath ensures PATH includes all discovered tool paths
