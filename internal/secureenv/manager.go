@@ -342,6 +342,10 @@ func anyProxyKeyPresent(present map[string]struct{}, group []string) bool {
 // proxy host/port so the proxy remains functional. Non-URL values (e.g. the
 // host list in NO_PROXY) and unparseable values are returned unchanged.
 func redactProxyCredentials(value string) string {
+	// Surrounding whitespace would make url.Parse error (leading space) or
+	// otherwise fall through, forwarding a credentialed value verbatim. Trim it
+	// first; whitespace is never meaningful in a proxy URL.
+	value = strings.TrimSpace(value)
 	if value == "" {
 		return value
 	}

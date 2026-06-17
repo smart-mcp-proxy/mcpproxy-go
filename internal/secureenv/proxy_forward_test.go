@@ -36,6 +36,11 @@ func TestRedactProxyCredentials(t *testing.T) {
 		{"schemeless user only", "user@proxy.example.com:3128", "proxy.example.com:3128"},
 		{"schemeless no userinfo", "proxy.example.com:8080", "proxy.example.com:8080"},
 		{"schemeless at-in-path not stripped", "proxy.example.com:8080/path@x", "proxy.example.com:8080/path@x"},
+		// Whitespace-wrapped credentialed URLs would otherwise make url.Parse
+		// error and fall through, forwarding creds verbatim (PR #704 non-blocking
+		// review note). Surrounding whitespace is trimmed before redaction.
+		{"whitespace-wrapped scheme creds", "  http://user:pass@proxy.example.com:8080  ", "http://proxy.example.com:8080"},
+		{"whitespace-wrapped schemeless creds", "\tuser:pass@proxy.example.com:8080\n", "proxy.example.com:8080"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
