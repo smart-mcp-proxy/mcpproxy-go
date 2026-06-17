@@ -2596,6 +2596,16 @@ func (r *Runtime) IsDockerAvailable() bool {
 	return r.dockerProbeResult
 }
 
+// GetDockerCLISource returns the coarse, fixed-enum branch that resolved the
+// docker CLI — "path" | "bundled" | "login_shell" | "absent" (implements
+// telemetry.RuntimeStats, schema v5 / MCP-2745). This is the direct #696 fleet
+// signal (docker installed but not on the spawn PATH). It delegates to
+// shellwrap.ResolveDockerSource, which shares the process-wide docker-path
+// cache, so this is cheap on the heartbeat path. NEVER returns the path itself.
+func (r *Runtime) GetDockerCLISource() string {
+	return shellwrap.ResolveDockerSource(r.logger)
+}
+
 // GetDockerIsolatedServerCount returns how many currently-configured servers
 // the runtime actually wraps in a Docker container (implements
 // telemetry.RuntimeStats, schema v3).

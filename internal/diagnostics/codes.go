@@ -8,8 +8,13 @@ package diagnostics
 
 // STDIO domain — stdio-transport MCP server failures.
 const (
-	STDIOSpawnENOENT          Code = "MCPX_STDIO_SPAWN_ENOENT"
-	STDIOSpawnEACCES          Code = "MCPX_STDIO_SPAWN_EACCES"
+	STDIOSpawnENOENT Code = "MCPX_STDIO_SPAWN_ENOENT"
+	STDIOSpawnEACCES Code = "MCPX_STDIO_SPAWN_EACCES"
+	// STDIOSpawnExecFormat: the stdio binary exists but is the wrong CPU
+	// architecture / not an executable format (ENOEXEC — "exec format error").
+	// Distinct from a Docker/OCI exec-format failure, which is
+	// MCPX_DOCKER_OCI_RUNTIME under the docker-isolation hint.
+	STDIOSpawnExecFormat      Code = "MCPX_STDIO_SPAWN_EXEC_FORMAT"
 	STDIOExitNonzero          Code = "MCPX_STDIO_EXIT_NONZERO"
 	STDIOExitBeforeInitialize Code = "MCPX_STDIO_EXIT_BEFORE_INITIALIZE"
 	STDIOHandshakeTimeout     Code = "MCPX_STDIO_HANDSHAKE_TIMEOUT"
@@ -51,6 +56,17 @@ const (
 	DockerImagePullFailed Code = "MCPX_DOCKER_IMAGE_PULL_FAILED"
 	DockerNoPermission    Code = "MCPX_DOCKER_NO_PERMISSION"
 	DockerSnapAppArmor    Code = "MCPX_DOCKER_SNAP_APPARMOR"
+	// DockerCLINotFound: isolation was requested but the `docker` binary could
+	// not be resolved on the spawn PATH (issue #696 — Docker Desktop installed
+	// without the admin-gated CLI shim, or a LaunchAgent's minimal PATH).
+	DockerCLINotFound Code = "MCPX_DOCKER_CLI_NOT_FOUND"
+	// DockerExecNotFound: the container started but its entrypoint interpreter
+	// is missing from the image (e.g. `uvx` absent in `python:3.11`). Distinct
+	// from a HOST stdio ENOENT, which is MCPX_STDIO_SPAWN_ENOENT.
+	DockerExecNotFound Code = "MCPX_DOCKER_EXEC_NOT_FOUND"
+	// DockerOCIRuntime: the OCI runtime (runc) failed to start the container —
+	// e.g. an `exec format error` (image/host architecture mismatch).
+	DockerOCIRuntime Code = "MCPX_DOCKER_OCI_RUNTIME"
 )
 
 // CONFIG domain — configuration parsing and validation failures.

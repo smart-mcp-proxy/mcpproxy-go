@@ -144,7 +144,7 @@ func TestPayloadHasNoForbiddenSubstrings(t *testing.T) {
 	// Sanity check: the payload should still contain the legitimate fields,
 	// otherwise we've over-redacted.
 	for _, required := range []string{
-		`"schema_version":4`,
+		`"schema_version":5`,
 		`"surface_requests"`,
 		`"builtin_tool_calls"`,
 		`"upstream_tool_call_count_bucket"`,
@@ -381,5 +381,52 @@ func TestPayloadV4_OnboardingDoesNotLeakUserStrings(t *testing.T) {
 	// Verify the documented enum value still reaches the wire.
 	if !strings.Contains(js, `"claude-code"`) {
 		t.Errorf("expected fixed-enum client ID 'claude-code' to reach payload, got:\n%s", js)
+	}
+}
+
+// TestPayloadV5_DockerCLISourceIsEnumOnly is the Spec MCP-2745 privacy canary
+// for the #696 docker-CLI-resolution signal. docker_cli_source must ONLY ever
+// carry one of the four fixed-enum branch labels — never the resolved path,
+// host, or any user string. The source of truth (shellwrap.ResolveDockerSource)
+// already constrains the value to these enums; this test pins the contract at
+// the wire and fails loudly if a future change widens the field.
+func TestPayloadV5_DockerCLISourceIsEnumOnly(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("CI", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
+	cfg := &config.Config{
+		DockerIsolation: &config.DockerIsolationConfig{Enabled: true},
+		Telemetry: &config.TelemetryConfig{
+			AnonymousID:          "550e8400-e29b-41d4-a716-446655440000",
+			AnonymousIDCreatedAt: "2026-04-10T12:00:00Z",
+		},
+	}
+
+	for _, src := range []string{"path", "bundled", "login_shell", "absent"} {
+		t.Run(src, func(t *testing.T) {
+			svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+			svc.SetRuntimeStats(&mockRuntimeStats{dockerAvailable: true, dockerCLISource: src})
+
+			payload := svc.BuildPayload()
+			data, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			js := string(data)
+
+			if !strings.Contains(js, `"docker_cli_source":"`+src+`"`) {
+				t.Errorf("expected docker_cli_source=%q on the wire, got:\n%s", src, js)
+			}
+			// A path or URL slipping into the enum would be a privacy breach.
+			for _, forbidden := range []string{"/Users/", "/home/", "/Applications/", `C:\\`, ".docker", "http://", "https://"} {
+				if strings.Contains(js, forbidden) {
+					t.Errorf("PRIVACY VIOLATION: docker_cli_source leaked %q\npayload:\n%s", forbidden, js)
+				}
+			}
+			if err := ScanForPII(data); err != nil {
+				t.Errorf("v5 payload with docker_cli_source=%q should pass ScanForPII: %v", src, err)
+			}
+		})
 	}
 }

@@ -4,7 +4,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 3** (`schema_version: 3` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 5** (`schema_version: 5` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -22,8 +22,14 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `feature_flags.docker_available` | `true` | Fraction of installs with a reachable Docker daemon (schema v3) |
 | `server_protocol_counts` | `{"stdio":3,"http":2,"sse":0,"streamable_http":1,"auto":0}` | Ratio of remote-HTTP vs local-stdio upstreams (schema v3) |
 | `server_docker_isolated_count` | `2` | How many configured servers the runtime actually wraps in Docker isolation (schema v3) |
+| `feature_flags.docker_isolation_enabled` | `true` | Whether global Docker isolation is turned on (schema v5). Lets us tell "isolation on, 0 matching servers" apart from "isolation off" |
+| `feature_flags.docker_cli_source` | `bundled` | How the `docker` CLI was located — fixed enum `path` / `bundled` / `login_shell` / `absent` (schema v5). The direct signal for "Docker installed but not on the spawn PATH" (issue #696). **Never** the path string itself |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
+
+The `docker_cli_source` field is likewise a **fixed enum** (`path`, `bundled`, `login_shell`, `absent`); the resolved path is never transmitted.
+
+Docker isolation failures surface in `error_code_counts_24h` via three stable diagnostic codes (schema v5): `MCPX_DOCKER_CLI_NOT_FOUND` (isolation requested but the `docker` binary is unresolved — issue #696), `MCPX_DOCKER_EXEC_NOT_FOUND` (the image lacks the interpreter the server needs, e.g. `uvx` missing in `python:3.11`), and `MCPX_DOCKER_OCI_RUNTIME` (OCI runtime / architecture-mismatch failures).
 
 ## What is NOT collected
 

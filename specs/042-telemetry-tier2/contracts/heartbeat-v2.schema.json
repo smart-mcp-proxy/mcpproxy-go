@@ -3,6 +3,7 @@
   "$id": "https://mcpproxy.app/schemas/telemetry/heartbeat-v2.json",
   "title": "MCPProxy Telemetry Heartbeat v2",
   "description": "Anonymous telemetry payload sent once per 24 hours from mcpproxy installs. Purely additive over v1: v1 fields are preserved.",
+  "$comment": "Frozen v2 snapshot. Later schema versions extend feature_flags forward-compatibly without appearing here: v3 added docker_available/server_protocol_counts, v5 (MCP-2745) added feature_flags.docker_isolation_enabled + feature_flags.docker_cli_source (enum path|bundled|login_shell|absent). See specs/044-retention-telemetry-v3/contracts/heartbeat-v3.json for the current shape.",
   "type": "object",
   "required": [
     "schema_version",

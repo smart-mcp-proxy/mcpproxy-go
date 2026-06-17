@@ -23,6 +23,7 @@ type mockRuntimeStats struct {
 	quarantine            bool
 	dockerAvailable       bool
 	dockerIsolatedServers int
+	dockerCLISource       string
 }
 
 func (m *mockRuntimeStats) GetServerCount() int          { return m.serverCount }
@@ -34,6 +35,7 @@ func (m *mockRuntimeStats) IsDockerAvailable() bool      { return m.dockerAvaila
 func (m *mockRuntimeStats) GetDockerIsolatedServerCount() int {
 	return m.dockerIsolatedServers
 }
+func (m *mockRuntimeStats) GetDockerCLISource() string { return m.dockerCLISource }
 
 func TestHeartbeatSend(t *testing.T) {
 	// Clear env vars that would disable telemetry (GitHub Actions sets CI=true).
@@ -300,20 +302,20 @@ func TestEnsureAnonymousID(t *testing.T) {
 	}
 }
 
-// TestSchemaVersionV4 verifies that HeartbeatPayload carries schema_version=4
-// once the Spec 046 onboarding fields ship. This is a tripwire against
-// accidental downgrades.
-func TestSchemaVersionV4(t *testing.T) {
-	if SchemaVersion != 4 {
-		t.Fatalf("SchemaVersion = %d, want 4", SchemaVersion)
+// TestSchemaVersionV5 verifies that HeartbeatPayload carries schema_version=5
+// once the MCP-2745 docker-isolation visibility fields ship. This is a tripwire
+// against accidental downgrades.
+func TestSchemaVersionV5(t *testing.T) {
+	if SchemaVersion != 5 {
+		t.Fatalf("SchemaVersion = %d, want 5", SchemaVersion)
 	}
 
 	cfg := &config.Config{}
 	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
 	svc.SetRuntimeStats(&mockRuntimeStats{})
 	payload := svc.BuildPayload()
-	if payload.SchemaVersion != 4 {
-		t.Errorf("payload.SchemaVersion = %d, want 4", payload.SchemaVersion)
+	if payload.SchemaVersion != 5 {
+		t.Errorf("payload.SchemaVersion = %d, want 5", payload.SchemaVersion)
 	}
 }
 
@@ -342,6 +344,26 @@ func TestV3PayloadDockerAvailable(t *testing.T) {
 	}
 	if !p2.FeatureFlags.DockerAvailable {
 		t.Error("DockerAvailable should be true when runtime reports true")
+	}
+}
+
+// TestV5PayloadDockerCLISource verifies the telemetry service forwards the
+// runtime GetDockerCLISource() resolution branch into
+// feature_flags.docker_cli_source (the #696 fleet signal).
+func TestV5PayloadDockerCLISource(t *testing.T) {
+	cfg := &config.Config{DockerIsolation: &config.DockerIsolationConfig{Enabled: true}}
+
+	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
+	svc.SetRuntimeStats(&mockRuntimeStats{dockerAvailable: true, dockerCLISource: "bundled"})
+	p := svc.BuildPayload()
+	if p.FeatureFlags == nil {
+		t.Fatal("FeatureFlags nil")
+	}
+	if p.FeatureFlags.DockerCLISource != "bundled" {
+		t.Errorf("DockerCLISource = %q, want %q", p.FeatureFlags.DockerCLISource, "bundled")
+	}
+	if !p.FeatureFlags.DockerIsolationEnabled {
+		t.Error("DockerIsolationEnabled should be true when cfg enables global isolation")
 	}
 }
 
@@ -453,8 +475,8 @@ func TestAnonymousIDStable_V2ToV3(t *testing.T) {
 	if p1.AnonymousID != p2.AnonymousID {
 		t.Errorf("anonymous_id drifted between builds: %q vs %q", p1.AnonymousID, p2.AnonymousID)
 	}
-	// SchemaVersion is 4 after spec 046's onboarding-funnel additions.
-	if p1.SchemaVersion != 4 {
-		t.Errorf("schema_version = %d, want 4 (spec 046 onboarding funnel)", p1.SchemaVersion)
+	// SchemaVersion is 5 after MCP-2745's docker-isolation visibility additions.
+	if p1.SchemaVersion != 5 {
+		t.Errorf("schema_version = %d, want 5 (MCP-2745 docker telemetry)", p1.SchemaVersion)
 	}
 }

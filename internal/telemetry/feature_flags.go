@@ -26,6 +26,20 @@ type FeatureFlagSnapshot struct {
 	// BuildFeatureFlagSnapshot) so the snapshot helper stays side-effect-free
 	// and doesn't shell out to `docker info`.
 	DockerAvailable bool `json:"docker_available"`
+
+	// Schema v5 (MCP-2745): DockerIsolationEnabled is the global
+	// docker_isolation.enabled flag. Set by BuildFeatureFlagSnapshot (pure,
+	// config-only). Together with DockerCLISource it lets the dashboard tell
+	// "isolation on, 0 matching servers" apart from "isolation off".
+	DockerIsolationEnabled bool `json:"docker_isolation_enabled"`
+
+	// Schema v5 (MCP-2745): DockerCLISource is the coarse, fixed-enum branch
+	// that resolved the `docker` CLI — one of "path" | "bundled" |
+	// "login_shell" | "absent". This is the direct #696 fleet signal (docker
+	// installed but not on the spawn PATH). NEVER the path string itself.
+	// Populated by the telemetry service at heartbeat time (the resolution is a
+	// runtime concern) — mirrors DockerAvailable.
+	DockerCLISource string `json:"docker_cli_source,omitempty"`
 }
 
 // protocolKeys is the canonical fixed-enum set of protocol labels emitted by
@@ -120,6 +134,12 @@ func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 
 	if cfg.SensitiveDataDetection != nil {
 		snap.SensitiveDataDetectionEnabled = cfg.SensitiveDataDetection.IsEnabled()
+	}
+
+	// Schema v5 (MCP-2745): global docker isolation toggle. Nil-guarded so a
+	// config without the block reports false rather than panicking.
+	if cfg.DockerIsolation != nil {
+		snap.DockerIsolationEnabled = cfg.DockerIsolation.Enabled
 	}
 
 	// Derive OAuth provider types from upstream server URLs.

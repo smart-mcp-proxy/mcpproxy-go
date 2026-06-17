@@ -294,6 +294,145 @@ func TestResolveDockerPath_WellKnownPathFallback(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// TestResolveDockerSource reports which resolution branch found docker so the
+// telemetry layer can emit the coarse #696 fleet signal (path/bundled/
+// login_shell/absent) — never the path string itself.
+func TestResolveDockerSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixtures")
+	}
+
+	t.Run("path", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		dir := t.TempDir()
+		writeFakeDocker(t, dir)
+		t.Setenv("PATH", dir)
+		t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+		assert.Equal(t, DockerSourcePath, ResolveDockerSource(nil))
+	})
+
+	t.Run("bundled", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		dockerDir := t.TempDir()
+		want := writeFakeDocker(t, dockerDir)
+		t.Setenv("PATH", t.TempDir()) // ambient excludes docker
+		prev := wellKnownDockerPathsFn
+		wellKnownDockerPathsFn = func() []string { return []string{want} }
+		t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+		t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
+		assert.Equal(t, DockerSourceBundled, ResolveDockerSource(nil))
+	})
+
+	t.Run("login_shell", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		dockerDir := t.TempDir()
+		dockerPath := writeFakeDocker(t, dockerDir)
+		t.Setenv("PATH", t.TempDir())
+		prev := wellKnownDockerPathsFn
+		wellKnownDockerPathsFn = func() []string { return nil }
+		t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+		shellDir := t.TempDir()
+		t.Setenv("SHELL", writeFakeShell(t, shellDir, dockerPath))
+		assert.Equal(t, DockerSourceLoginShell, ResolveDockerSource(nil))
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		resetDockerPathCacheForTest()
+		t.Cleanup(resetDockerPathCacheForTest)
+		t.Setenv("PATH", t.TempDir())
+		prev := wellKnownDockerPathsFn
+		wellKnownDockerPathsFn = func() []string { return nil }
+		t.Cleanup(func() { wellKnownDockerPathsFn = prev })
+		shellDir := t.TempDir()
+		t.Setenv("SHELL", writeFakeShell(t, shellDir, ""))
+		assert.Equal(t, DockerSourceAbsent, ResolveDockerSource(nil))
+	})
+}
+
+// TestResolveDockerSource_StatProbeUpgradeReportsBundled is the regression
+// guard for the MCP-2744 cache-upgrade path: when a live cached NEGATIVE is
+// overridden by the well-known-path stat probe, the cached source must be
+// upgraded to "bundled" too — otherwise the stale "absent" leaks into the
+// schema-v5 docker_cli_source telemetry even though docker WAS resolved.
+func TestResolveDockerSource_StatProbeUpgradeReportsBundled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	// FIRST resolution fails everywhere → caches a live negative whose source
+	// is "absent". Keep the negative TTL at its default so it stays live.
+	prevPaths := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return nil }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prevPaths })
+
+	t.Setenv("PATH", t.TempDir())
+	shellDir := t.TempDir()
+	t.Setenv("SHELL", writeFakeShell(t, shellDir, ""))
+
+	_, err := ResolveDockerPath(nil)
+	require.Error(t, err, "first call should cache a negative (docker absent everywhere)")
+	require.Equal(t, DockerSourceAbsent, ResolveDockerSource(nil), "cached negative reports absent")
+
+	// Docker now appears at a well-known path. The stat-probe override must
+	// upgrade BOTH the path and the source on the next call.
+	dockerDir := t.TempDir()
+	want := writeFakeDocker(t, dockerDir)
+	wellKnownDockerPathsFn = func() []string { return []string{want} }
+
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err, "stat probe must override the live negative")
+	require.Equal(t, want, got)
+	// The bug: this returned "absent" before the fix because the upgrade path
+	// never updated dockerPathSource.
+	require.Equal(t, DockerSourceBundled, ResolveDockerSource(nil),
+		"source must upgrade to bundled when the stat probe overrides the cached negative")
+}
+
+// TestResolveDockerSource_NegativeTTLProbeOverride is the Codex round-4
+// regression guard: ResolveDockerSource must apply the same well-known-path
+// stat-probe override that ResolveDockerPath does during the negative-TTL
+// window. Before the shared-resolver refactor, ResolveDockerSource returned
+// "absent" off the cached negative without ever probing, so docker_cli_source
+// reported the wrong source while ResolveDockerPath returned the bundled path.
+func TestResolveDockerSource_NegativeTTLProbeOverride(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only fixture")
+	}
+	resetDockerPathCacheForTest()
+	t.Cleanup(resetDockerPathCacheForTest)
+
+	// FIRST resolution fails everywhere → caches a LIVE negative (default TTL).
+	prevPaths := wellKnownDockerPathsFn
+	wellKnownDockerPathsFn = func() []string { return nil }
+	t.Cleanup(func() { wellKnownDockerPathsFn = prevPaths })
+
+	t.Setenv("PATH", t.TempDir())
+	shellDir := t.TempDir()
+	t.Setenv("SHELL", writeFakeShell(t, shellDir, ""))
+
+	_, err := ResolveDockerPath(nil)
+	require.Error(t, err, "first call should cache a live negative")
+
+	// Docker now appears at a well-known path. The very next ResolveDockerSource
+	// call must run the stat probe (not honor the cached "absent") and report
+	// bundled — without any TTL expiry.
+	dockerDir := t.TempDir()
+	want := writeFakeDocker(t, dockerDir)
+	wellKnownDockerPathsFn = func() []string { return []string{want} }
+
+	require.Equal(t, DockerSourceBundled, ResolveDockerSource(nil),
+		"ResolveDockerSource must apply the stat-probe override during the negative-TTL window")
+	// And ResolveDockerPath agrees (cache was upgraded to a permanent success).
+	got, err := ResolveDockerPath(nil)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+}
+
 func TestMinimalEnv_DropsSecrets(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIA_test_dummy_value_00000000")
 	t.Setenv("GITHUB_TOKEN", "ghp_dummy_test_token_1234567890abcdef")

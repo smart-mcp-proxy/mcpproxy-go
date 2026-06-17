@@ -30,7 +30,14 @@ import (
 // connected_client_count, connected_client_ids, wizard_engaged,
 // wizard_connect_step, wizard_server_step. Forward-compatible: existing
 // v3 consumers ignore the new fields.
-const SchemaVersion = 4
+//
+// v5 (schema bump from 4): adds docker-isolation visibility per MCP-2745 —
+// feature_flags.docker_isolation_enabled, feature_flags.docker_cli_source
+// (4-way enum: path|bundled|login_shell|absent, the #696 fleet signal), and
+// three new diagnostics codes surfaced via error_code_counts_24h
+// (MCPX_DOCKER_CLI_NOT_FOUND / MCPX_DOCKER_EXEC_NOT_FOUND /
+// MCPX_DOCKER_OCI_RUNTIME). Additive only — v3/v4 consumers ignore them.
+const SchemaVersion = 5
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -167,6 +174,11 @@ type RuntimeStats interface {
 	// GetDockerIsolatedServerCount returns how many currently-configured
 	// servers the runtime is actually wrapping in a Docker container.
 	GetDockerIsolatedServerCount() int
+	// GetDockerCLISource returns the coarse, fixed-enum branch that resolved
+	// the docker CLI — "path" | "bundled" | "login_shell" | "absent" (schema
+	// v5, MCP-2745). Implementations should memoize the resolution (it shares
+	// the shellwrap docker-path cache) and NEVER return the path string.
+	GetDockerCLISource() string
 }
 
 // Service manages anonymous telemetry heartbeats and feedback submission.
@@ -561,6 +573,10 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	payload.FeatureFlags = BuildFeatureFlagSnapshot(s.config)
 	if s.stats != nil && payload.FeatureFlags != nil {
 		payload.FeatureFlags.DockerAvailable = s.stats.IsDockerAvailable()
+		// Schema v5 (MCP-2745): coarse docker-CLI resolution branch (the #696
+		// fleet signal). Resolution is a runtime concern, so it is spliced in
+		// here rather than in the side-effect-free BuildFeatureFlagSnapshot.
+		payload.FeatureFlags.DockerCLISource = s.stats.GetDockerCLISource()
 	}
 
 	// Schema v3: fixed-key per-protocol counter over cfg.Servers. Logs
