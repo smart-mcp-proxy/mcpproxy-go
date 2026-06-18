@@ -261,16 +261,41 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
 			}
 		}
-	} else {
+	} else if isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun; isDirectDockerRun {
+		// USER-SUPPLIED `docker run …` upstream launched via the launcher path
+		// (config.Command IS `docker`). Reuse the SAME resolve→spawn decision as the
+		// isolation path and the stdio path (resolveDockerSpawn) so this entrypoint
+		// also direct-execs the resolved ABSOLUTE docker binary instead of
+		// shell-wrapping bare `docker`, and gets the docker bundle dir prepended to
+		// the child PATH (#715 / MCP-2881). Before this it always shell-wrapped bare
+		// `docker` with no PATH augmentation, so a registry pull of an uncached image
+		// could fail with `docker-credential-desktop … not found in $PATH`.
 		argsToWrap := args
-		isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun
-		if isDirectDockerRun && len(c.config.Env) > 0 {
+		if len(c.config.Env) > 0 {
 			argsToWrap = c.injectEnvVarsIntoDockerArgs(args, c.config.Env)
 		}
-		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, argsToWrap)
-		if isDirectDockerRun && cidFile != "" {
-			finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+
+		var dockerShellWrapped bool
+		var dockerDir string
+		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.resolveDockerSpawn(argsToWrap)
+
+		// Prepend the docker bundle dir to the child PATH so the spawned docker can
+		// exec its sibling credential helper / tooling on a registry pull (#715).
+		// No-op when docker did not resolve to an absolute path.
+		envVars = prependDockerDirToPath(envVars, dockerDir)
+
+		// Insert --cidfile via the helper that matches how we spawn: args-based on
+		// the direct-exec path, string-based on the login-shell fallback.
+		if cidFile != "" {
+			if dockerShellWrapped {
+				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			} else {
+				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
+			}
 		}
+	} else {
+		// Plain (non-docker) launcher command. Shell-wrap for login-env inheritance.
+		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
 	}
 
 	cmd := exec.Command(finalCommand, finalArgs...)
