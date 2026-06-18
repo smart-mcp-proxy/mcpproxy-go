@@ -90,7 +90,7 @@ func TestSetupDockerIsolationExecsResolvedBinaryDirectly(t *testing.T) {
 	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
 
 	c := newIsolatedTestClient()
-	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, args, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	assert.False(t, shellWrapped, "verified absolute executable must NOT shell-wrap the spawn")
 	assert.Equal(t, fakeDocker, cmd,
@@ -117,7 +117,7 @@ func TestSetupDockerIsolationUsesResolvedAbsolutePath(t *testing.T) {
 	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
 
 	c := newIsolatedTestClient()
-	cmd, _, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, _, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	assert.False(t, shellWrapped)
 	assert.Equal(t, fakeDocker, cmd,
@@ -139,7 +139,7 @@ func TestSetupDockerIsolationShellWrapsNonAbsoluteResolved(t *testing.T) {
 	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return "docker", nil }
 
 	c := newIsolatedTestClient()
-	cmd, shellArgs, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, shellArgs, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.True(t, shellWrapped, "a non-absolute resolved value must be shell-wrapped, not direct-exec'd")
 	assert.NotEqual(t, "docker", cmd, "must not direct-exec a bare command name")
@@ -160,7 +160,7 @@ func TestSetupDockerIsolationShellWrapsNonExecutableResolved(t *testing.T) {
 	}
 
 	c := newIsolatedTestClient()
-	_, shellArgs, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	_, shellArgs, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.True(t, shellWrapped, "a non-existent absolute path must be shell-wrapped, not direct-exec'd")
 	require.NotEmpty(t, shellArgs)
@@ -181,7 +181,7 @@ func TestSetupDockerIsolationCidfileInsertionWithAbsolutePath(t *testing.T) {
 	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
 
 	c := newIsolatedTestClient()
-	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, args, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 	require.False(t, shellWrapped)
 	require.Equal(t, fakeDocker, cmd)
 
@@ -240,7 +240,7 @@ func TestSetupDockerIsolationFallsBackToBareDocker(t *testing.T) {
 	}
 
 	c := newIsolatedTestClient()
-	_, shellArgs, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	_, shellArgs, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.True(t, shellWrapped, "on resolution failure the spawn must be shell-wrapped")
 	require.NotEmpty(t, shellArgs)
@@ -269,7 +269,7 @@ func TestSetupDockerIsolationShellWrapsWhenDaemonEnvMissingNonDarwin(t *testing.
 	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
 
 	c := newIsolatedTestClient()
-	cmd, shellArgs, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, shellArgs, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.True(t, shellWrapped,
 		"non-Darwin with no DOCKER_HOST in env must keep the login-shell wrap to inherit rc-file DOCKER_*")
@@ -298,7 +298,7 @@ func TestSetupDockerIsolationDirectExecsWhenDockerHostInEnv(t *testing.T) {
 	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
 
 	c := newIsolatedTestClient()
-	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, args, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	assert.False(t, shellWrapped,
 		"DOCKER_HOST in os.Environ() guarantees daemon config — direct-exec is safe off macOS")
@@ -330,7 +330,7 @@ func TestResolveDockerSpawnUserSuppliedDockerRunDirectExec(t *testing.T) {
 	// flags into the docker run argv before deciding how to spawn.
 	argsToWrap := c.injectEnvVarsIntoDockerArgs(c.config.Args, c.config.Env)
 
-	cmd, args, shellWrapped := c.resolveDockerSpawn(argsToWrap)
+	cmd, args, shellWrapped, _ := c.resolveDockerSpawn(argsToWrap)
 
 	assert.False(t, shellWrapped, "verified absolute docker must direct-exec, not shell-wrap")
 	assert.Equal(t, fakeDocker, cmd,
@@ -368,7 +368,7 @@ func TestResolveDockerSpawnUserSuppliedFallsBackToShellWrap(t *testing.T) {
 	c := newUserSuppliedDockerTestClient()
 	argsToWrap := c.injectEnvVarsIntoDockerArgs(c.config.Args, c.config.Env)
 
-	cmd, shellArgs, shellWrapped := c.resolveDockerSpawn(argsToWrap)
+	cmd, shellArgs, shellWrapped, _ := c.resolveDockerSpawn(argsToWrap)
 
 	require.True(t, shellWrapped, "on resolution failure the user docker spawn must be shell-wrapped")
 	assert.NotEqual(t, cmdDocker, cmd, "shell-wrap fallback exec's the login shell, not bare 'docker'")

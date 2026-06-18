@@ -248,7 +248,12 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 
 	if c.isolationManager != nil && c.isolationManager.ShouldIsolate(c.config) {
 		var dockerShellWrapped bool
-		finalCommand, finalArgs, dockerShellWrapped = c.setupDockerIsolation(c.config.Command, args)
+		var dockerDir string
+		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.setupDockerIsolation(c.config.Command, args)
+		// Prepend the docker bundle dir to the child PATH so the spawned docker
+		// can exec its sibling credential helper / tooling on a registry pull
+		// (#715). No-op when docker did not resolve to an absolute path.
+		envVars = prependDockerDirToPath(envVars, dockerDir)
 		if cidFile != "" {
 			if dockerShellWrapped {
 				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)

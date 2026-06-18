@@ -18,12 +18,22 @@ import (
 var resolveDockerBinary = shellwrap.ResolveDockerPath
 
 // setupDockerIsolation configures Docker isolation for the MCP server process.
-// Returns the docker command, arguments, and whether the returned command was
-// wrapped in the user's login shell. shellWrapped governs how the caller
-// inserts --cidfile: a direct-exec spawn (shellWrapped == false) uses the
-// args-based insertCidfileIntoDockerArgs, while the login-shell fallback
-// (shellWrapped == true) uses the string-based insertCidfileIntoShellDockerCommand.
-func (c *Client) setupDockerIsolation(command string, args []string) (dockerCommand string, dockerArgs []string, shellWrapped bool) {
+// Returns the docker command, arguments, whether the returned command was
+// wrapped in the user's login shell, and the docker binary's bundle directory
+// (empty unless docker resolved to a verified absolute executable).
+//
+// shellWrapped governs how the caller inserts --cidfile: a direct-exec spawn
+// (shellWrapped == false) uses the args-based insertCidfileIntoDockerArgs, while
+// the login-shell fallback (shellWrapped == true) uses the string-based
+// insertCidfileIntoShellDockerCommand.
+//
+// dockerDir is the directory of the resolved absolute docker binary (e.g.
+// /Applications/Docker.app/Contents/Resources/bin). The caller must prepend it
+// to the child PATH (prependDockerDirToPath) so the spawned docker can exec its
+// sibling tooling — most importantly the docker-credential-* helper named by
+// ~/.docker/config.json's credsStore, which Docker Desktop installs into the
+// same bundle dir and which docker shells out to for every registry op (#715).
+func (c *Client) setupDockerIsolation(command string, args []string) (dockerCommand string, dockerArgs []string, shellWrapped bool, dockerDir string) {
 	// Detect the runtime type from the command
 	runtimeType := c.isolationManager.DetectRuntimeType(command)
 	c.logger.Debug("Detected runtime type for Docker isolation",
@@ -38,7 +48,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 			zap.String("server", c.config.Name),
 			zap.Error(err))
 		shellCmd, shellArgs := c.wrapWithUserShell(command, args)
-		return shellCmd, shellArgs, true
+		return shellCmd, shellArgs, true, ""
 	}
 
 	// Extract container name from Docker args for tracking
@@ -95,6 +105,14 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 // the login-shell fallback (shellWrapped == true) uses the string-based
 // insertCidfileIntoShellDockerCommand.
 //
+// dockerDir is the directory of the resolved absolute docker binary (empty
+// unless docker resolved to a verified absolute executable). The caller must
+// prepend it to the child PATH (prependDockerDirToPath) so the spawned docker
+// can exec its sibling tooling — most importantly the docker-credential-*
+// helper named by ~/.docker/config.json's credsStore, which Docker Desktop
+// installs into the same bundle dir and which docker shells out to for every
+// registry op (#715 / MCP-2877).
+//
 // CRITICAL FIX (#696 / MCP-2744 / MCP-2753 / MCP-2868): resolve `docker` to an
 // ABSOLUTE path and exec it DIRECTLY — no login-shell wrap. Docker Desktop
 // installed the default way on macOS (without the optional, admin-gated "install
@@ -133,7 +151,7 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 // When we fall back to the shell wrap we still prefer the resolved absolute path
 // as the wrapped command (it sidesteps the login shell's PATH re-derivation),
 // dropping to bare "docker" only when resolution failed.
-func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, dockerArgs []string, shellWrapped bool) {
+func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, dockerArgs []string, shellWrapped bool, dockerDir string) {
 	resolved, resErr := resolveDockerBinary(c.logger)
 	switch {
 	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
@@ -145,7 +163,7 @@ func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, d
 			zap.String("server", c.config.Name),
 			zap.String("docker_path", resolved),
 			zap.Bool("shell_wrapped", false))
-		return resolved, finalArgs, false
+		return resolved, finalArgs, false, filepath.Dir(resolved)
 	case resErr != nil:
 		c.logger.Warn("Could not resolve docker to an absolute path; falling back to bare 'docker' via login shell (isolated server may fail if docker is not on the spawn PATH)",
 			zap.String("server", c.config.Name),
@@ -164,8 +182,14 @@ func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, d
 	}
 
 	dockerBin := cmdDocker
+	// Seed the bundle dir for PATH augmentation whenever docker resolved to a
+	// verified absolute executable — even though we keep the login-shell wrap
+	// here. It is harmless on the shell-wrap path and still helps if the login
+	// shell preserves the inherited PATH (#715).
+	var resolvedDir string
 	if isDirectExecutable(resolved) {
 		dockerBin = resolved
+		resolvedDir = filepath.Dir(resolved)
 	}
 	// INFO: the login-shell fallback is the ONLY path that can produce #696's
 	// `command not found: docker`, so surface that we took it (and whether we at
@@ -176,7 +200,47 @@ func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, d
 		zap.Bool("docker_resolved", isDirectExecutable(resolved)),
 		zap.Bool("shell_wrapped", true))
 	shellCmd, shellArgs := c.wrapWithUserShell(dockerBin, finalArgs)
-	return shellCmd, shellArgs, true
+	return shellCmd, shellArgs, true, resolvedDir
+}
+
+// prependDockerDirToPath returns env with dockerDir prepended to its PATH entry
+// so a spawned docker can resolve the sibling binaries it depends on — the
+// docker-credential-* helper named by ~/.docker/config.json's credsStore,
+// docker-compose, docker-buildx — which Docker Desktop installs into the same
+// bundle dir as the docker CLI but which mcpproxy's sanitized PATH omits (#715).
+//
+// dockerDir is prepended (existing entries preserved) and deduped: if it is
+// already present anywhere on PATH the env is returned unchanged. An empty
+// dockerDir (docker not resolved to an absolute path) is a no-op. The input
+// slice is never mutated. os.PathListSeparator keeps it correct on Windows.
+func prependDockerDirToPath(env []string, dockerDir string) []string {
+	if dockerDir == "" {
+		return env
+	}
+	for i, kv := range env {
+		name, val, ok := strings.Cut(kv, "=")
+		if !ok || name != "PATH" {
+			continue
+		}
+		// Dedup: leave PATH untouched if the bundle dir is already on it.
+		for _, p := range filepath.SplitList(val) {
+			if p == dockerDir {
+				return env
+			}
+		}
+		out := make([]string, len(env))
+		copy(out, env)
+		if val == "" {
+			out[i] = "PATH=" + dockerDir
+		} else {
+			out[i] = "PATH=" + dockerDir + string(os.PathListSeparator) + val
+		}
+		return out
+	}
+	// No PATH entry present — add one so docker still finds its bundle dir.
+	out := make([]string, len(env), len(env)+1)
+	copy(out, env)
+	return append(out, "PATH="+dockerDir)
 }
 
 // isDirectExecutable reports whether path is safe to hand to exec directly

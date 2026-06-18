@@ -277,6 +277,26 @@ docker stats
   succeeds. A `false` value with `docker_path: ""` means the CLI could not be
   resolved on the spawn path.
 
+**`error getting credentials … docker-credential-desktop … not found in $PATH` on macOS (image not yet cached):**
+- Docker Desktop's default `~/.docker/config.json` sets `"credsStore": "desktop"`,
+  so `docker` shells out to `docker-credential-desktop` for **every** registry
+  operation — even an anonymous pull of a public image. That helper lives in the
+  **same bundle dir** as the docker CLI
+  (`/Applications/Docker.app/Contents/Resources/bin/`), which mcpproxy's
+  sanitized spawn `PATH` omits. When the isolation image isn't cached locally,
+  the pull invokes the helper and fails; a pre-pulled image sidesteps it because
+  `docker run` then performs no registry op (which is why direct-exec alone
+  looked complete on cached images — issue #715 / MCP-2877).
+- mcpproxy now **prepends the resolved docker binary's bundle dir to the child
+  `PATH`** whenever `docker` resolves to an absolute path, so the spawned docker
+  can exec its sibling tooling (`docker-credential-*`, `docker-compose`,
+  `docker-buildx`) exactly as it would from a normal Docker Desktop shell. This
+  is applied on every docker spawn path (isolated uvx/npx servers and
+  user-supplied `docker run …` upstreams) and is a no-op when `docker` did not
+  resolve to an absolute path. If you still see this error, confirm the helper
+  exists at the bundle path above, or pre-pull the image with
+  `docker pull <image>`.
+
 ## Security Considerations
 
 Docker isolation provides strong security boundaries but consider:
