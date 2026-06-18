@@ -146,8 +146,14 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		// back to a login-shell wrap. dockerShellWrapped selects the matching
 		// cidfile helper.
 		var dockerShellWrapped bool
-		finalCommand, finalArgs, dockerShellWrapped = c.setupDockerIsolation(c.config.Command, args)
+		var dockerDir string
+		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.setupDockerIsolation(c.config.Command, args)
 		c.isDockerCommand = true
+
+		// Prepend the docker bundle dir to the child PATH so the spawned docker
+		// can exec its sibling credential helper / tooling on a registry pull
+		// (#715). No-op when docker did not resolve to an absolute path.
+		envVars = prependDockerDirToPath(envVars, dockerDir)
 
 		// Add cidfile to the Docker command if we have one
 		if cidFile != "" {
@@ -177,7 +183,13 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		}
 
 		var dockerShellWrapped bool
-		finalCommand, finalArgs, dockerShellWrapped = c.resolveDockerSpawn(argsToWrap)
+		var dockerDir string
+		finalCommand, finalArgs, dockerShellWrapped, dockerDir = c.resolveDockerSpawn(argsToWrap)
+
+		// Prepend the docker bundle dir to the child PATH so the spawned docker
+		// can exec its sibling credential helper / tooling on a registry pull
+		// (#715). No-op when docker did not resolve to an absolute path.
+		envVars = prependDockerDirToPath(envVars, dockerDir)
 
 		// Insert --cidfile via the helper that matches how we spawn: args-based on
 		// the direct-exec path, string-based on the login-shell fallback.

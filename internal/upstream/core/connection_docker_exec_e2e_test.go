@@ -69,7 +69,7 @@ func TestE2E_DockerSpawnExecsAbsoluteBundlePath(t *testing.T) {
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
 
 	c := newIsolatedTestClient()
-	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, args, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 	require.False(t, shellWrapped, "#696: bundle-resolved docker must be direct-exec'd")
 
 	// Exec it exactly as connection_stdio would (exec.CommandContext(cmd, args...)).

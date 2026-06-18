@@ -42,7 +42,7 @@ func TestSpawnDecisionIsObservable_DirectExec(t *testing.T) {
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
 
 	c, recorded := newObservedIsolatedClient(t)
-	_, _, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	_, _, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 	require.False(t, shellWrapped)
 
 	entries := recorded.FilterMessage("Docker spawn: direct-exec of resolved docker binary").All()
@@ -63,7 +63,7 @@ func TestSpawnDecisionIsObservable_ShellWrapFallback(t *testing.T) {
 	}
 
 	c, recorded := newObservedIsolatedClient(t)
-	_, _, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	_, _, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 	require.True(t, shellWrapped)
 
 	entries := recorded.FilterMessage("Docker spawn: login-shell wrap fallback").All()
@@ -122,7 +122,7 @@ func TestIntegration_DockerOnlyAtBundlePath_DirectExecs(t *testing.T) {
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
 
 	c := newIsolatedTestClient()
-	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, args, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.False(t, shellWrapped,
 		"#696: docker resolved at the bundle path MUST be direct-exec'd, not shell-wrapped with bare docker")
@@ -154,7 +154,7 @@ func TestIntegration_DockerOnPath_DirectExecs(t *testing.T) {
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
 
 	c := newIsolatedTestClient()
-	cmd, args, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	cmd, args, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.False(t, shellWrapped, "docker on PATH must resolve to an absolute path and direct-exec")
 	assert.Equal(t, pathDocker, cmd, "spawn must exec the LookPath-resolved absolute path, got %q", cmd)
@@ -183,7 +183,7 @@ func TestIntegration_DockerUnresolvable_FallsBackToBareDocker(t *testing.T) {
 	t.Setenv("SHELL", "/nonexistent/shell-must-not-be-invoked")
 
 	c := newIsolatedTestClient()
-	_, shellArgs, shellWrapped := c.setupDockerIsolation(c.config.Command, c.config.Args)
+	_, shellArgs, shellWrapped, _ := c.setupDockerIsolation(c.config.Command, c.config.Args)
 
 	require.True(t, shellWrapped, "unresolvable docker must fall back to the login-shell wrap")
 	require.NotEmpty(t, shellArgs)
