@@ -3,10 +3,12 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
@@ -14,6 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 )
+
+// denyingReader returns a permission-denied PathError for every read, simulating
+// a macOS App-Data (TCC) block without a real OS denial (Spec 075).
+func denyingReader(path string) ([]byte, error) {
+	return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EPERM}
+}
 
 func TestHandleConnectClient_OpenCodeAdoptedAlreadyExistsReturns200(t *testing.T) {
 	logger := zap.NewNop().Sugar()
@@ -77,6 +85,170 @@ func TestHandleConnectClient_OpenCodeMissingConfigReturns400(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.False(t, resp.Success)
 	assert.Contains(t, resp.Error, "does not exist")
+}
+
+// TestHandleGetConnectStatus_IncludesAccessStateUnknown asserts the overall
+// GET /connect payload is additive: each entry carries access_state, set to
+// "unknown" by the content-read-free overall status (Spec 075 T025, contract).
+func TestHandleGetConnectStatus_IncludesAccessStateUnknown(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", home))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    []connect.ClientStatus `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.Success)
+	require.NotEmpty(t, resp.Data)
+	for _, st := range resp.Data {
+		assert.Equal(t, "unknown", st.AccessState, "overall status must not content-read client %s", st.ID)
+		assert.Empty(t, st.Remediation)
+	}
+}
+
+// TestHandleGetConnectClientStatus_Connected asserts the on-demand per-client
+// route resolves access_state=accessible and connected=true after a real
+// connect (Spec 075 T025, contract GET /connect/{client}).
+func TestHandleGetConnectClientStatus_Connected(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
+	srv.SetConnectService(svc)
+
+	_, err := svc.Connect("claude-code", "mcpproxy", false)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    connect.ClientStatus `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.Success)
+	assert.Equal(t, "claude-code", resp.Data.ID)
+	assert.True(t, resp.Data.Connected)
+	assert.Equal(t, "accessible", resp.Data.AccessState)
+}
+
+// TestHandleGetConnectClientStatus_Absent asserts the on-demand route reports
+// access_state=absent for a client with no config file present.
+func TestHandleGetConnectClientStatus_Absent(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", home))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    connect.ClientStatus `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.Success)
+	assert.False(t, resp.Data.Connected)
+	assert.Equal(t, "absent", resp.Data.AccessState)
+}
+
+// TestHandleGetConnectClientStatus_UnknownClient asserts an unknown client id
+// yields 404 (not a 200 with an empty body).
+func TestHandleGetConnectClientStatus_UnknownClient(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	srv.SetConnectService(connect.NewServiceWithHome("127.0.0.1:8080", "", t.TempDir()))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/not-a-real-client", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestHandleGetConnectClientStatus_DeniedSurfacesRemediation asserts that a
+// macOS App-Data block on the on-demand read resolves access_state=denied and
+// carries remediation text in the 200 body (Spec 075 contract).
+func TestHandleGetConnectClientStatus_DeniedSurfacesRemediation(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+
+	// Config must stat-exist so the on-demand content read is attempted; the
+	// injected reader then denies it.
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{}`), 0o644))
+
+	svc := connect.NewServiceWithReader("127.0.0.1:8080", "", home, denyingReader)
+	srv.SetConnectService(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Success bool                 `json:"success"`
+		Data    connect.ClientStatus `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.Success)
+	assert.False(t, resp.Data.Connected, "denied must not read as plain not-connected")
+	assert.Equal(t, "denied", resp.Data.AccessState)
+	assert.Contains(t, resp.Data.Remediation, "tccutil reset SystemPolicyAppData")
+}
+
+// TestHandleConnectClient_DeniedReturnsRemediation asserts a permission-denied
+// write surfaces remediation in the HTTP error body, distinct from a generic
+// 400 or a 404 not-found (Spec 075 contract POST /connect/{client}).
+func TestHandleConnectClient_DeniedReturnsRemediation(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+	svc := connect.NewServiceWithReader("127.0.0.1:8080", "", home, denyingReader)
+	srv.SetConnectService(svc)
+
+	body, _ := json.Marshal(ConnectRequest{ServerName: "mcpproxy", Force: false})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.False(t, resp.Success)
+	assert.Contains(t, resp.Error, "tccutil reset SystemPolicyAppData")
 }
 
 func TestHandleConnectClient_TrueConflictStillReturns409(t *testing.T) {

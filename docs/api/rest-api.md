@@ -651,14 +651,50 @@ additive-compatible and gains two fields:
 |-------|------|---------|
 | `exists` | bool | Config file present (metadata only). |
 | `connected` | bool | mcpproxy registered in the config. Authoritative **only** when `access_state == "accessible"`; `false`/unresolved in the overall listing. |
-| `access_state` | string | `"unknown"` in the overall listing (not content-checked); resolved to `"accessible"`, `"absent"`, or `"malformed"` by an on-demand single-client read. |
-| `remediation` | string | Present only when access is denied (populated by later stories). |
+| `access_state` | string | `"unknown"` in the overall listing (not content-checked); resolved to `"accessible"`, `"absent"`, `"malformed"`, or `"denied"` by an on-demand single-client read. |
+| `remediation` | string | Present only when `access_state == "denied"`; carries the actionable fix text (App Data toggle + `tccutil reset` command). |
 
 A client that is installed but not yet content-checked reads as
 `exists=true, connected=false, access_state="unknown"`. Resolving `connected`
-requires an explicit per-client read (connect/disconnect, or the CLI
-`mcpproxy connect` command), which is the only place a privacy prompt may
-legitimately appear.
+requires an explicit per-client read (the per-client status route below,
+connect/disconnect, or the CLI `mcpproxy connect` command), which is the only
+place a privacy prompt may legitimately appear.
+
+#### GET /api/v1/connect/{client}
+
+On-demand single-client status. Reads the one client's config **at request
+time** and returns a full `ClientStatus` with `access_state` resolved to
+`accessible | absent | malformed | denied` and `connected` set accordingly.
+This is the sole Connect endpoint that opens a client config file, so on macOS
+it is the only place an App-Data privacy prompt may legitimately appear (scoped
+to this user action). Unknown client → `404`. A denial is reported **in-band**
+(`200` with `access_state="denied"` + `remediation`), not as an HTTP error.
+
+```bash
+curl "http://127.0.0.1:8080/api/v1/connect/claude-desktop?apikey=your-api-key"
+```
+
+#### POST/DELETE /api/v1/connect/{client}
+
+Connect/disconnect are unchanged except that a permission-denied config access
+now returns **`403 Forbidden`** whose error body carries the remediation text
+(distinct from a generic `400` or a `404` not-found).
+
+##### macOS App Data privacy & Connect
+
+On macOS, client configs (Claude Desktop, Cursor, VS Code, …) live under another
+app's container, gated by the **Privacy & Security ▸ App Data** TCC permission.
+If mcpproxy is denied, an on-demand read returns `access_state="denied"` with
+remediation. Fix it by enabling mcpproxy under **System Settings ▸ Privacy &
+Security ▸ App Data**, or reset the decision and retry:
+
+```bash
+tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy
+# dev builds: com.smartmcpproxy.mcpproxy.dev
+```
+
+The overall `GET /api/v1/connect` listing never triggers this prompt (it is
+content-read-free); only the per-client read above can.
 
 ### Real-time Updates
 
