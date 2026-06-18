@@ -157,11 +157,18 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
 			}
 		}
-	} else {
-		// For direct docker commands, inject env vars as -e flags before shell wrapping
+	} else if isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun; isDirectDockerRun {
+		// USER-SUPPLIED `docker run …` upstream (config.Command IS `docker`).
+		// Inject env vars as -e flags, then reuse the SAME resolve→spawn decision
+		// as the isolation path (resolveDockerSpawn) so this path also direct-execs
+		// the resolved ABSOLUTE docker binary instead of shell-wrapping bare
+		// `docker` — the GH #696 / MCP-2868 fix. Previously this branch always
+		// called wrapWithUserShell("docker", …), which failed with
+		// `command not found: docker` on a default Docker Desktop macOS install.
+		c.isDockerCommand = true
+
 		argsToWrap := args
-		isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun
-		if isDirectDockerRun && len(c.config.Env) > 0 {
+		if len(c.config.Env) > 0 {
 			argsToWrap = c.injectEnvVarsIntoDockerArgs(args, c.config.Env)
 			c.logger.Debug("Injected env vars into direct docker command",
 				zap.String("server", c.config.Name),
@@ -169,20 +176,25 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				zap.Strings("modified_args", shellwrap.RedactDockerArgs(argsToWrap)))
 		}
 
-		// Use shell wrapping for environment inheritance
-		// This fixes issues when mcpproxy is launched via Launchd and doesn't inherit
-		// user's shell environment (like PATH customizations from .bashrc, .zshrc, etc.)
-		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, argsToWrap)
-		c.isDockerCommand = false
+		var dockerShellWrapped bool
+		finalCommand, finalArgs, dockerShellWrapped = c.resolveDockerSpawn(argsToWrap)
 
-		// Handle explicit docker commands
-		if isDirectDockerRun {
-			c.isDockerCommand = true
-			if cidFile != "" {
-				// For shell-wrapped Docker commands, we need to modify the shell command string
+		// Insert --cidfile via the helper that matches how we spawn: args-based on
+		// the direct-exec path, string-based on the login-shell fallback.
+		if cidFile != "" {
+			if dockerShellWrapped {
 				finalArgs = c.insertCidfileIntoShellDockerCommand(finalArgs, cidFile)
+			} else {
+				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
 			}
 		}
+	} else {
+		// Plain (non-docker) stdio command. Use shell wrapping for environment
+		// inheritance. This fixes issues when mcpproxy is launched via Launchd and
+		// doesn't inherit the user's shell environment (PATH customizations from
+		// .bashrc, .zshrc, etc.).
+		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
+		c.isDockerCommand = false
 	}
 
 	// Upstream transport with working directory support and process group management

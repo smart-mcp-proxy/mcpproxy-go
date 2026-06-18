@@ -69,44 +69,71 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 			zap.String("container_command", containerCommand))
 	}
 
-	// CRITICAL FIX (#696 / MCP-2744 / MCP-2753): resolve `docker` to an ABSOLUTE
-	// path and exec it DIRECTLY — no login-shell wrap. Docker Desktop installed
-	// the default way on macOS (without the optional, admin-gated "install CLI
-	// tools" step) leaves the docker CLI only inside the app bundle at
-	// /Applications/Docker.app/Contents/Resources/bin/docker, which is NOT on
-	// any standard PATH dir nor on the (often unreliable) login-shell PATH a
-	// LaunchAgent captures.
-	//
-	// #697 resolved the absolute path but still routed the spawn through
-	// `$SHELL -l -c "<docker> run …"`. There the absolute path is only a token
-	// inside the -c string: the login shell re-derives $PATH from rc files and
-	// can drop the bundle dir, so the bug persisted. Exec'ing the absolute path
-	// directly (mirroring newDockerCmd's exec.CommandContext(dockerBin, …))
-	// bypasses PATH entirely.
-	//
-	// Two preconditions gate the direct-exec:
-	//
-	//  1. The resolved value must be a VERIFIED absolute executable
-	//     (isDirectExecutable). ResolveDockerPath's last resort runs
-	//     `command -v docker` in the login shell, which can emit a shell
-	//     function name, an alias, or a bare command name rather than a real
-	//     binary path; direct-exec'ing that would fail with "no such file".
-	//
-	//  2. The docker daemon-config env (DOCKER_HOST/DOCKER_CONTEXT) must be
-	//     guaranteed in the spawn env WITHOUT the login shell
-	//     (dockerDaemonEnvGuaranteed). Dropping the `$SHELL -l` wrap also drops
-	//     rc-file env inheritance. On macOS the startup hydration (MCP-2751)
-	//     already captured DOCKER_* from the login shell into os.Environ(), and
-	//     secureenv forwards them — but that hydration is Darwin-only. On Linux
-	//     a rootless/remote daemon whose DOCKER_HOST lives only in .profile would
-	//     be lost by direct-exec (the regression #699 kept the shell wrap to
-	//     avoid). So on non-Darwin we only direct-exec when DOCKER_HOST/
-	//     DOCKER_CONTEXT are already in os.Environ(); otherwise we keep the
-	//     login-shell wrap so `docker run` still finds the daemon.
-	//
-	// When we fall back to the shell wrap we still prefer the resolved absolute
-	// path as the wrapped command (it sidesteps the login shell's PATH
-	// re-derivation), dropping to bare "docker" only when resolution failed.
+	// Resolve `docker` to an absolute path and decide between a direct-exec and a
+	// login-shell wrap. Shared with the user-supplied `docker run` path
+	// (connectStdio) via resolveDockerSpawn so both spawn paths behave identically
+	// (#696 / MCP-2868).
+	return c.resolveDockerSpawn(finalArgs)
+}
+
+// resolveDockerSpawn decides how to spawn `docker` given the fully built docker
+// run argv (finalArgs, beginning with the "run" token). It resolves `docker` to
+// an absolute path and, when safe, returns that absolute path for a DIRECT exec
+// (shellWrapped == false); otherwise it returns a login-shell wrap
+// (shellWrapped == true). It is shared by BOTH docker spawn paths:
+//
+//   - setupDockerIsolation — uvx/npx servers wrapped INTO `docker run` by the
+//     isolation manager (isolation-injection path).
+//   - connectStdio's user-supplied `docker run` branch — upstreams whose config
+//     Command IS `docker` (GH #696 / MCP-2868). Before this extraction that path
+//     shell-wrapped bare `docker`, so on a default Docker Desktop macOS install
+//     (docker CLI only inside the app bundle, not on the login-shell PATH) it
+//     failed with `zsh:1: command not found: docker`.
+//
+// shellWrapped governs how the caller inserts --cidfile: a direct-exec spawn
+// (shellWrapped == false) uses the args-based insertCidfileIntoDockerArgs, while
+// the login-shell fallback (shellWrapped == true) uses the string-based
+// insertCidfileIntoShellDockerCommand.
+//
+// CRITICAL FIX (#696 / MCP-2744 / MCP-2753 / MCP-2868): resolve `docker` to an
+// ABSOLUTE path and exec it DIRECTLY — no login-shell wrap. Docker Desktop
+// installed the default way on macOS (without the optional, admin-gated "install
+// CLI tools" step) leaves the docker CLI only inside the app bundle at
+// /Applications/Docker.app/Contents/Resources/bin/docker, which is NOT on any
+// standard PATH dir nor on the (often unreliable) login-shell PATH a LaunchAgent
+// captures.
+//
+// #697 resolved the absolute path but still routed the spawn through
+// `$SHELL -l -c "<docker> run …"`. There the absolute path is only a token
+// inside the -c string: the login shell re-derives $PATH from rc files and can
+// drop the bundle dir, so the bug persisted. Exec'ing the absolute path directly
+// (mirroring newDockerCmd's exec.CommandContext(dockerBin, …)) bypasses PATH
+// entirely.
+//
+// Two preconditions gate the direct-exec:
+//
+//  1. The resolved value must be a VERIFIED absolute executable
+//     (isDirectExecutable). ResolveDockerPath's last resort runs
+//     `command -v docker` in the login shell, which can emit a shell function
+//     name, an alias, or a bare command name rather than a real binary path;
+//     direct-exec'ing that would fail with "no such file".
+//
+//  2. The docker daemon-config env (DOCKER_HOST/DOCKER_CONTEXT) must be
+//     guaranteed in the spawn env WITHOUT the login shell
+//     (dockerDaemonEnvGuaranteed). Dropping the `$SHELL -l` wrap also drops
+//     rc-file env inheritance. On macOS the startup hydration (MCP-2751) already
+//     captured DOCKER_* from the login shell into os.Environ(), and secureenv
+//     forwards them — but that hydration is Darwin-only. On Linux a
+//     rootless/remote daemon whose DOCKER_HOST lives only in .profile would be
+//     lost by direct-exec (the regression #699 kept the shell wrap to avoid). So
+//     on non-Darwin we only direct-exec when DOCKER_HOST/DOCKER_CONTEXT are
+//     already in os.Environ(); otherwise we keep the login-shell wrap so
+//     `docker run` still finds the daemon.
+//
+// When we fall back to the shell wrap we still prefer the resolved absolute path
+// as the wrapped command (it sidesteps the login shell's PATH re-derivation),
+// dropping to bare "docker" only when resolution failed.
+func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, dockerArgs []string, shellWrapped bool) {
 	resolved, resErr := resolveDockerBinary(c.logger)
 	switch {
 	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():

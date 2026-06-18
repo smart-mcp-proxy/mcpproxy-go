@@ -252,9 +252,11 @@ docker stats
   admin-gated "install CLI tools" step. When mcpproxy is launched from a
   LaunchAgent / tray, the captured login-shell `PATH` may omit this directory.
 - mcpproxy resolves the `docker` binary to its **absolute path** and then
-  **exec's it directly** (no login-shell wrap) when spawning an isolated server,
-  so the spawn bypasses `PATH` entirely and works even without the CLI-tools
-  step. (The enhanced spawn `PATH` still includes the bundle bin dir as a
+  **exec's it directly** (no login-shell wrap) when spawning a Docker upstream —
+  both servers that mcpproxy *isolates* into `docker run` (uvx/npx) and upstreams
+  whose config `command` **is** `docker` (a user-supplied `docker run …`) — so
+  the spawn bypasses `PATH` entirely and works even without the CLI-tools step.
+  (The enhanced spawn `PATH` still includes the bundle bin dir as a
   belt-and-suspenders measure.) Earlier builds resolved the absolute path but
   still routed the spawn through `$SHELL -l -c "<docker> run …"`, where the
   login shell re-derived `PATH` from rc files and could drop the bundle dir —

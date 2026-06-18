@@ -27,6 +27,23 @@ func newIsolatedTestClient() *Client {
 	}
 }
 
+// newUserSuppliedDockerTestClient builds a Client whose config Command IS
+// `docker` (a user-supplied `docker run …` upstream, as opposed to a uvx/npx
+// server wrapped INTO docker by the isolation manager). This is the GH #696 /
+// MCP-2868 path.
+func newUserSuppliedDockerTestClient() *Client {
+	return &Client{
+		config: &config.ServerConfig{
+			Name:    "user-docker-server",
+			Command: "docker",
+			Args:    []string{"run", "-i", "--rm", "mcp/example"},
+			Env:     map[string]string{"SLACK_TOKEN": "xoxb-secret"},
+		},
+		logger:           zap.NewNop(),
+		isolationManager: NewIsolationManager(config.DefaultDockerIsolationConfig()),
+	}
+}
+
 // forceDockerDaemonEnvGOOS overrides the GOOS the daemon-env guard sees, so the
 // Darwin (env-guaranteed-by-hydration) and non-Darwin branches can both be
 // exercised on a single CI host. Restored on cleanup.
@@ -288,6 +305,81 @@ func TestSetupDockerIsolationDirectExecsWhenDockerHostInEnv(t *testing.T) {
 	assert.Equal(t, fakeDocker, cmd)
 	require.NotEmpty(t, args)
 	assert.Equal(t, cmdRun, args[0])
+}
+
+// TestResolveDockerSpawnUserSuppliedDockerRunDirectExec is the MCP-2868
+// root-cause assertion. A USER-SUPPLIED `docker run` upstream (config.Command IS
+// `docker`) must reuse the SAME resolve→direct-exec decision as the
+// isolation-injection path. With docker resolved to a verified absolute
+// executable and the daemon env guaranteed (macOS), the spawn must direct-exec
+// the ABSOLUTE docker path (no `$SHELL -l -c` wrap), carry the injected
+// `-e KEY=VALUE` env flags, and accept an args-based cidfile insertion. Before
+// this fix the user path shell-wrapped bare `docker`, producing GH #696's
+// `zsh:1: command not found: docker` on a default Docker Desktop macOS install
+// (docker CLI only inside the app bundle, not on the login-shell PATH).
+func TestResolveDockerSpawnUserSuppliedDockerRunDirectExec(t *testing.T) {
+	fakeDocker := writeFakeDockerExecutable(t)
+	forceDockerDaemonEnvGOOS(t, osDarwin) // daemon env guaranteed via startup hydration
+
+	orig := resolveDockerBinary
+	t.Cleanup(func() { resolveDockerBinary = orig })
+	resolveDockerBinary = func(_ *zap.Logger) (string, error) { return fakeDocker, nil }
+
+	c := newUserSuppliedDockerTestClient()
+	// Mimic connectStdio's user-supplied docker branch: inject env vars as -e
+	// flags into the docker run argv before deciding how to spawn.
+	argsToWrap := c.injectEnvVarsIntoDockerArgs(c.config.Args, c.config.Env)
+
+	cmd, args, shellWrapped := c.resolveDockerSpawn(argsToWrap)
+
+	assert.False(t, shellWrapped, "verified absolute docker must direct-exec, not shell-wrap")
+	assert.Equal(t, fakeDocker, cmd,
+		"user docker must be exec'd by its resolved absolute path, not bare 'docker', got: %s", cmd)
+	require.NotEmpty(t, args)
+	assert.Equal(t, cmdRun, args[0],
+		"first arg must be the raw 'run' token (not a shell -c string), got: %v", args)
+	// The injected -e env flag must survive into the docker run argv.
+	assert.Subset(t, args, []string{"-e", "SLACK_TOKEN=xoxb-secret"},
+		"injected -e env flags must be present in the direct-exec argv, got: %v", args)
+	for _, a := range args {
+		assert.NotContains(t, a, " run ",
+			"args must be raw argv tokens, not a single shell command string, got: %v", args)
+	}
+
+	// On the direct-exec path the caller inserts --cidfile via the args-based
+	// helper (right after the "run" token).
+	withCid := c.insertCidfileIntoDockerArgs(args, "/tmp/cid.txt")
+	require.GreaterOrEqual(t, len(withCid), 3)
+	assert.Equal(t, []string{cmdRun, "--cidfile", "/tmp/cid.txt"}, withCid[:3],
+		"cidfile must be inserted right after 'run' on the direct-exec path, got: %v", withCid)
+}
+
+// TestResolveDockerSpawnUserSuppliedFallsBackToShellWrap verifies the
+// resolution-failure fallback for a user-supplied `docker run`: the spawn must
+// shell-wrap bare `docker` (preserving login-shell PATH resolution as a last
+// resort) and the cidfile is inserted via the string-based helper.
+func TestResolveDockerSpawnUserSuppliedFallsBackToShellWrap(t *testing.T) {
+	orig := resolveDockerBinary
+	t.Cleanup(func() { resolveDockerBinary = orig })
+	resolveDockerBinary = func(_ *zap.Logger) (string, error) {
+		return "", fmt.Errorf("docker not found")
+	}
+
+	c := newUserSuppliedDockerTestClient()
+	argsToWrap := c.injectEnvVarsIntoDockerArgs(c.config.Args, c.config.Env)
+
+	cmd, shellArgs, shellWrapped := c.resolveDockerSpawn(argsToWrap)
+
+	require.True(t, shellWrapped, "on resolution failure the user docker spawn must be shell-wrapped")
+	assert.NotEqual(t, cmdDocker, cmd, "shell-wrap fallback exec's the login shell, not bare 'docker'")
+	require.NotEmpty(t, shellArgs)
+	cmdStr := shellArgs[len(shellArgs)-1]
+	assert.True(t, strings.HasPrefix(cmdStr, "docker run"),
+		"on resolution failure the spawn must fall back to bare 'docker', got: %s", cmdStr)
+	// The real command string still carries the actual env value (redaction is a
+	// log-only concern, not a spawn concern).
+	assert.Contains(t, cmdStr, "-e SLACK_TOKEN=xoxb-secret",
+		"injected -e env flag must survive into the shell command string, got: %s", cmdStr)
 }
 
 // TestDockerDaemonEnvGuaranteed unit-tests the gate directly.
