@@ -110,6 +110,14 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	resolved, resErr := resolveDockerBinary(c.logger)
 	switch {
 	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
+		// INFO (not Debug): make the spawn decision observable in main.log so a
+		// field report like #696 ("docker installed but not on PATH") can be
+		// triaged from one line — which docker binary was chosen and that it was
+		// exec'd DIRECTLY rather than shell-wrapped with bare `docker`.
+		c.logger.Info("Docker spawn: direct-exec of resolved docker binary",
+			zap.String("server", c.config.Name),
+			zap.String("docker_path", resolved),
+			zap.Bool("shell_wrapped", false))
 		return resolved, finalArgs, false
 	case resErr != nil:
 		c.logger.Warn("Could not resolve docker to an absolute path; falling back to bare 'docker' via login shell (isolated server may fail if docker is not on the spawn PATH)",
@@ -132,6 +140,14 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 	if isDirectExecutable(resolved) {
 		dockerBin = resolved
 	}
+	// INFO: the login-shell fallback is the ONLY path that can produce #696's
+	// `command not found: docker`, so surface that we took it (and whether we at
+	// least wrap the resolved absolute path vs. bare `docker`).
+	c.logger.Info("Docker spawn: login-shell wrap fallback",
+		zap.String("server", c.config.Name),
+		zap.String("docker_command", dockerBin),
+		zap.Bool("docker_resolved", isDirectExecutable(resolved)),
+		zap.Bool("shell_wrapped", true))
 	shellCmd, shellArgs := c.wrapWithUserShell(dockerBin, finalArgs)
 	return shellCmd, shellArgs, true
 }
