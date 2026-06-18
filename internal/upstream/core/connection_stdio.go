@@ -280,8 +280,16 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		// was launched and whether Docker isolation was in effect) so
 		// users can tell from one log line whether to look at the host
 		// command or the Docker layer.
+		//
+		// Report the RESOLVED command actually exec'd (finalCommand), not
+		// c.config.Command. For a Docker-isolated server config.Command is
+		// always "docker", so reporting it made a successful direct-exec of an
+		// absolute path (e.g. /Applications/Docker.app/.../docker, #696) look
+		// identical in the error to a bare-`docker` spawn — actively
+		// misdirecting diagnosis. finalCommand is the real argv[0]: an absolute
+		// path on direct-exec, or the login shell on the shell-wrap fallback.
 		return fmt.Errorf("stdio transport (command=%q, docker_isolation=%t): %w",
-			c.config.Command, c.isDockerCommand, err)
+			finalCommand, c.isDockerCommand, err)
 	}
 
 	// CRITICAL FIX: Extract underlying process from mcp-go transport for lifecycle management
