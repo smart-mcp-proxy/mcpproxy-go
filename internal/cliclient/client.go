@@ -19,10 +19,11 @@ import (
 
 // Client provides HTTP API access for CLI commands.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
-	logger     *zap.SugaredLogger
+	baseURL     string
+	apiKey      string
+	bearerToken string
+	httpClient  *http.Client
+	logger      *zap.SugaredLogger
 }
 
 // clientVersion holds the build-time version reported in X-MCPProxy-Client.
@@ -146,6 +147,16 @@ func NewClientWithAPIKey(endpoint, apiKey string, logger *zap.SugaredLogger) *Cl
 	}
 }
 
+// NewClientWithBearer creates a CLI HTTP client that authenticates with a JWT
+// Bearer token. The server edition user/JWT endpoints (e.g. the per-user
+// credential broker surfaces, spec 074) sit behind session-or-Bearer auth
+// rather than the API-key group, so callers must present a user token.
+func NewClientWithBearer(endpoint, bearerToken string, logger *zap.SugaredLogger) *Client {
+	c := NewClientWithAPIKey(endpoint, "", logger)
+	c.bearerToken = bearerToken
+	return c
+}
+
 // DoRaw performs a raw HTTP request to the API and returns the response.
 // The caller is responsible for closing the response body.
 // The body parameter can be nil for methods that don't require a request body.
@@ -174,6 +185,9 @@ func (c *Client) prepareRequest(ctx context.Context, req *http.Request) {
 	}
 	if c.apiKey != "" {
 		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	if c.bearerToken != "" && req.Header.Get("Authorization") == "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
 	}
 }
 
