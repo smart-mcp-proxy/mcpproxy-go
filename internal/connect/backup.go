@@ -10,6 +10,11 @@ import (
 
 // backupFile creates a timestamped backup of the given file.
 // Returns the backup path, or empty string if the source file does not exist.
+//
+// All failure paths wrap their OS cause with %w, so a permission denial here
+// (e.g. macOS TCC App-Data) preserves fs.ErrPermission up the call chain and is
+// classified into a typed *AccessError by the Connect/Disconnect boundary
+// (Spec 075 FR-004, see Service.asAccessError).
 func backupFile(path string) (string, error) {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {

@@ -3,9 +3,7 @@ package connect
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
 	"regexp"
@@ -22,7 +20,7 @@ const (
 	accessAccessible = "accessible" // config read and parsed successfully
 	accessAbsent     = "absent"     // config file does not exist (not installed)
 	accessMalformed  = "malformed"  // config read but contents unparseable
-	// accessDenied ("denied", macOS TCC App-Data) is added in US2.
+	accessDenied     = "denied"     // blocked by OS permission (macOS TCC App-Data)
 )
 
 // ConnectResult describes the outcome of a connect or disconnect operation.
@@ -237,25 +235,27 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 
 	name, found, outcome := s.entryAccess(*c, cfgPath)
 	status.AccessState = outcome
-	if outcome == accessAccessible && found {
+	switch {
+	case outcome == accessAccessible && found:
 		status.Connected = true
 		status.ServerName = name
+	case outcome == accessDenied:
+		// A macOS App-Data block must surface as actionable remediation, not as
+		// a plain "not connected" (Spec 075 FR-004).
+		status.Remediation = remediationText(c.Name)
 	}
 	return status, nil
 }
 
 // entryAccess reads the client config exactly once via the seam, then reports
 // the registered server name (if any), whether mcpproxy is connected, and the
-// access outcome. US1 classifies accessible/absent/malformed; US2 refines a
-// permission denial (currently surfaced as accessUnknown) into accessDenied.
+// access outcome classified strictly from the error class (Spec 075 FR-011):
+// a read error maps to absent/denied/malformed via classifyAccess, and a parse
+// failure on otherwise-readable bytes maps to malformed.
 func (s *Service) entryAccess(client ClientDef, cfgPath string) (name string, found bool, outcome string) {
 	raw, err := s.read(cfgPath)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "", false, accessAbsent
-		}
-		// US1: unclassified read error. US2 maps fs.ErrPermission -> denied.
-		return "", false, accessUnknown
+		return "", false, classifyAccess(err)
 	}
 	name, found, parsedOK := s.findEntryFromBytes(client, raw)
 	if !parsedOK {
@@ -292,10 +292,17 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 
 	mcpURL := s.mcpURL()
 
+	var res *ConnectResult
+	var err error
 	if client.Format == "toml" {
-		return s.connectTOML(client, cfgPath, serverName, mcpURL, force)
+		res, err = s.connectTOML(client, cfgPath, serverName, mcpURL, force)
+	} else {
+		res, err = s.connectJSON(client, cfgPath, serverName, mcpURL, force)
 	}
-	return s.connectJSON(client, cfgPath, serverName, mcpURL, force)
+	// A permission denial anywhere in the read/backup/write chain (the errors
+	// preserve their OS cause via %w) surfaces as a typed *AccessError with
+	// remediation; other errors keep their existing semantics (Spec 075 FR-004).
+	return res, s.asAccessError(client, cfgPath, err)
 }
 
 // Disconnect removes the MCPProxy entry from the specified client's configuration.
@@ -317,10 +324,14 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
+	var res *ConnectResult
+	var err error
 	if client.Format == "toml" {
-		return s.disconnectTOML(client, cfgPath, serverName)
+		res, err = s.disconnectTOML(client, cfgPath, serverName)
+	} else {
+		res, err = s.disconnectJSON(client, cfgPath, serverName)
 	}
-	return s.disconnectJSON(client, cfgPath, serverName)
+	return res, s.asAccessError(client, cfgPath, err)
 }
 
 // ---------- JSON helpers ----------
