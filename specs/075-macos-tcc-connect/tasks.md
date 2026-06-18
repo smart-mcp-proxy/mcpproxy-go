@@ -22,7 +22,7 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 **Purpose**: The access-classification primitive every story depends on. MUST complete before US1–US3.
 
 - [ ] T003 [P] Add a content-read seam to `internal/connect`: a `Service`-held `readFile func(string) ([]byte, error)` (default `os.ReadFile`) and a `NewServiceWithReader`/test setter, mirroring the existing `homeDir` override, so tests can inject a permission-denied error. File: `internal/connect/connect.go`.
-- [ ] T004 Pin the diagnostics package/registration point for the doctor check: inspect `internal/diagnostics/registry.go` and `internal/management/diagnostics.go`, document in tasks.md which registry the new macOS check registers into and the existing check-result type to reuse.
+- [x] T004 Pin the diagnostics package/registration point for the doctor check. **Decision:** the runtime doctor is `internal/management` `service.Doctor()` (`diagnostics.go`), which builds `contracts.Diagnostics`; the macOS App-Data check appends an actionable warning string to its `RuntimeWarnings []string` (rendered by `mcpproxy doctor` as the "⚠️ Runtime Warnings" section and counted in `TotalIssues`). The static `internal/diagnostics` registry is an error-CODE catalog (classification metadata), not a runtime-check registry, so it is NOT used. The build-tagged check lives in `internal/management/tcc_appdata_{darwin,other}.go` with a pure, cross-platform translator in `tcc_appdata.go`.
 
 ---
 
@@ -69,11 +69,11 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 **Independent Test**: On darwin with an injected denial → warn + remediation; darwin with access OK → pass; non-darwin → check absent/no-op.
 
-- [ ] T020 [P] [US3] Write failing test `internal/connect/...` or diagnostics test for a `Service` helper `DetectAppDataDenial() (denied bool, remediation string)`: inject reader returning EPERM on an existing (stat-true) client → denied=true + remediation; reader OK → denied=false; no installed clients → denied=false (no false positive).
-- [ ] T021 [P] [US3] Write failing test `tcc_appdata_test.go` (build-tagged darwin) asserting the diagnostics check returns warn when `DetectAppDataDenial` reports denied, and pass otherwise; plus a `!darwin` test asserting the check is not registered / is a no-op.
-- [ ] T022 [US3] Implement `Service.DetectAppDataDenial()` in `internal/connect/access.go`: iterate clients, for the first that `os.Stat`-exists, attempt a content read via the seam; if `classifyAccess`==denied return (true, remediation); else (false, "").
-- [ ] T023 [US3] Implement `internal/<diagnostics-pkg>/tcc_appdata_darwin.go` (`//go:build darwin`): a check that calls `DetectAppDataDenial` and emits warn+remediation; register it in the registry pinned in T004. Add `tcc_appdata_other.go` (`//go:build !darwin`) no-op stub.
-- [ ] T024 [US3] Run `go test ./internal/connect/... ./internal/<diagnostics-pkg>/... -run 'AppData|TCC|Denial' -race` → green. Build & smoke `./mcpproxy doctor` on darwin.
+- [x] T020 [P] [US3] Write failing test `internal/connect/...` or diagnostics test for a `Service` helper `DetectAppDataDenial() (denied bool, remediation string)`: inject reader returning EPERM on an existing (stat-true) client → denied=true + remediation; reader OK → denied=false; no installed clients → denied=false (no false positive).
+- [x] T021 [P] [US3] Write failing test `tcc_appdata_test.go` (build-tagged darwin) asserting the diagnostics check returns warn when `DetectAppDataDenial` reports denied, and pass otherwise; plus a `!darwin` test asserting the check is not registered / is a no-op.
+- [x] T022 [US3] Implement `Service.DetectAppDataDenial()` in `internal/connect/access.go`: iterate clients, for the first that `os.Stat`-exists, attempt a content read via the seam; if `classifyAccess`==denied return (true, remediation); else (false, "").
+- [x] T023 [US3] Implement `internal/<diagnostics-pkg>/tcc_appdata_darwin.go` (`//go:build darwin`): a check that calls `DetectAppDataDenial` and emits warn+remediation; register it in the registry pinned in T004. Add `tcc_appdata_other.go` (`//go:build !darwin`) no-op stub.
+- [x] T024 [US3] Run `go test ./internal/connect/... ./internal/<diagnostics-pkg>/... -run 'AppData|TCC|Denial' -race` → green. Build & smoke `./mcpproxy doctor` on darwin.
 
 **Checkpoint**: Doctor surfaces persisted denials with a one-command fix. SC-005 satisfied.
 

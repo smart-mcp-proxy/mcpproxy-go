@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 )
 
 // AccessOutcome classifies an attempt to read or write a client config file
@@ -107,4 +108,37 @@ func (s *Service) asAccessError(client *ClientDef, path string, err error) error
 		return s.newAccessError(client, path, err)
 	}
 	return err
+}
+
+// DetectAppDataDenial probes installed client configs for a persisted macOS
+// App-Data (TCC) permission denial, for the doctor diagnostic (Spec 075 US3,
+// FR-007/008). It walks the supported clients and, for the first whose config
+// file exists (os.Stat metadata only), performs a single content read through the
+// seam; if that read classifies as accessDenied it reports the denial with the
+// canonical, one-command remediation. It returns (false, "") when no installed
+// client config is permission-denied — including when none are installed — so the
+// check never raises a false positive on a machine that simply has no clients or
+// has granted access (FR-008, T022).
+//
+// Unlike GetAllStatus this DOES read content: the doctor command is an explicit
+// user action, the one place a macOS App-Data prompt may legitimately appear.
+func (s *Service) DetectAppDataDenial() (denied bool, remediation string) {
+	for _, c := range GetAllClients() {
+		if !c.Supported {
+			continue
+		}
+		cfgPath := ConfigPath(c.ID, s.homeDir)
+		if cfgPath == "" {
+			continue
+		}
+		// Metadata-only existence gate: never read a config that is not installed,
+		// so a brand-new machine produces no read and no false positive.
+		if _, err := os.Stat(cfgPath); err != nil {
+			continue
+		}
+		if _, _, outcome := s.entryAccess(c, cfgPath); outcome == accessDenied {
+			return true, remediationText(c.Name)
+		}
+	}
+	return false, ""
 }
