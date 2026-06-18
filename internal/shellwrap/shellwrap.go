@@ -106,11 +106,13 @@ func WrapWithUserShell(logger *zap.Logger, command string, args []string) (shell
 	commandString := strings.Join(parts, " ")
 
 	if logger != nil {
+		// Redact secret env values (`-e KEY=VALUE`) before logging — docker-command
+		// upstreams inject Slack/Jira tokens here and debug logs are written to disk.
 		logger.Debug("shellwrap: wrapping command with user login shell",
 			zap.String("original_command", command),
-			zap.Strings("original_args", args),
+			zap.Strings("original_args", RedactDockerArgs(args)),
 			zap.String("shell", shell),
-			zap.String("wrapped_command", commandString))
+			zap.String("wrapped_command", RedactDockerCommandString(commandString)))
 	}
 
 	isBash := isBashLikeShell(shell)
