@@ -112,6 +112,8 @@ including rug-pulls — set `auto_approve_tool_changes: true`:
 > that server — a later malicious description/schema change is silently approved.
 > Only enable it for servers you fully control.
 
+> **REST API:** `auto_approve_tool_changes` round-trips through the server REST API. `GET /api/v1/servers` includes it on each server object (omitted when unset — the tri-state nil is preserved so the Web UI can tell "never set" from an explicit `false`), and `POST`/`PATCH /api/v1/servers/{id}` accept it. As a tri-state `*bool`, omitting it on `PATCH` leaves the stored value unchanged; sending an explicit `false` clears a prior `true`. The value is persisted to BBolt so it survives a save/restart.
+
 ### Auto-Approve Behavior
 
 Tools are automatically approved (no manual review needed) when:
@@ -248,7 +250,7 @@ curl -H "X-API-Key: your-key" \
 1. Open the MCPProxy dashboard
 2. Click on a server in the server list
 3. Navigate to the **Tools** tab in the server detail view
-4. Review changed (and any residual pending) tools and click **Approve** or **Approve All**
+4. Review pending and changed tools and click **Approve** or **Approve All**
 
 Each quarantined tool also offers a **Block** button (and the banner a **Block
 All**) next to Approve. Blocking rejects the tool: it leaves the quarantine list
@@ -256,12 +258,14 @@ and is disabled in the tools list, so AI agents can neither see nor call it.
 Blocking is reversible — re-enable the tool later with its toggle in the tools
 list (or `mcpproxy tools enable <server:tool>`).
 
-The server detail view's **Tool Quarantine** banner is shown only when a tool's
-status is `changed` (a rug-pull). Once a change has surfaced, any residual
-`pending` tools are listed alongside it so they can be cleared in the same pass.
-Freshly-`pending` baseline tools do **not** raise the banner on their own:
-approving the **server** (lifting the server-level Security Quarantine) promotes
-its baseline `pending` tools to `approved`. While the server-level **Security
+The server detail view's **Tool Quarantine** banner surfaces every `pending`
+(new, never-approved) or `changed` (rug-pull) tool while the server itself is
+**not** quarantined. Both are genuinely blocked by the backend until the
+operator acts, and the server list page counts them (`pending_count +
+changed_count`), so the banner and the count agree. The banner carries a short,
+dismissible hint noting that pending tools come from tool-level quarantine and
+can be auto-approved by setting `skip_quarantine: true` (per-server) or
+`quarantine_enabled: false` (global). While the server-level **Security
 Quarantine** banner is showing, the Tool-Quarantine banner is suppressed
 entirely — the operator approves the server first, and the two banners never
 appear at once.

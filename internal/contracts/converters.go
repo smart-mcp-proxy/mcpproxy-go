@@ -33,6 +33,9 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		// can show a server's origin. Empty for manually-configured servers.
 		SourceRegistryID:         cfg.SourceRegistryID,
 		SourceRegistryProvenance: cfg.SourceRegistryProvenance,
+		// MCP-2940: surface the per-server auto-approve intent (tri-state *bool)
+		// so the Web UI toggle reflects the persisted value.
+		AutoApproveToolChanges: cfg.AutoApproveToolChanges,
 	}
 
 	// Convert OAuth config if present
@@ -176,6 +179,13 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		}
 		if quarantined, ok := generic["quarantined"].(bool); ok {
 			server.Quarantined = quarantined
+		}
+		// MCP-2940: tri-state *bool — only set the pointer when the key is
+		// present so an unset flag stays nil (the Web UI distinguishes unset
+		// from an explicit false).
+		if autoApprove, ok := generic["auto_approve_tool_changes"].(bool); ok {
+			v := autoApprove
+			server.AutoApproveToolChanges = &v
 		}
 		if connected, ok := generic["connected"].(bool); ok {
 			server.Connected = connected

@@ -1710,6 +1710,67 @@ func (c *Client) ApproveTools(ctx context.Context, serverName string, toolNames 
 	return apiResp.Data.Approved, nil
 }
 
+// BlockTools blocks specific tools or all pending/changed tools for a server
+// (Spec 032). Block atomically approves AND disables the tool so it is never
+// left in the approved+enabled state — mirroring the Web UI "Block" action.
+func (c *Client) BlockTools(ctx context.Context, serverName string, toolNames []string, blockAll bool) (int, error) {
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/block", c.baseURL, serverName)
+
+	reqBody := struct {
+		Tools    []string `json:"tools,omitempty"`
+		BlockAll bool     `json:"block_all,omitempty"`
+	}{
+		Tools:    toolNames,
+		BlockAll: blockAll,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.prepareRequest(ctx, req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to call block tools API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(respBytes))
+	}
+
+	var apiResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Blocked int `json:"blocked"`
+		} `json:"data"`
+		Error     string `json:"error"`
+		RequestID string `json:"request_id"`
+	}
+
+	if err := json.Unmarshal(respBytes, &apiResp); err != nil {
+		return 0, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if !apiResp.Success {
+		return 0, parseAPIError(apiResp.Error, apiResp.RequestID)
+	}
+
+	return apiResp.Data.Blocked, nil
+}
+
 // ListRegistries returns the MCP server registries known to the daemon
 // (spec 070). Mirrors GetServers: GET /api/v1/registries → data.registries.
 func (c *Client) ListRegistries(ctx context.Context) ([]map[string]interface{}, error) {

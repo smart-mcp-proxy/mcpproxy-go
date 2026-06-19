@@ -185,10 +185,11 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		ReconnectOnUse:      serverConfig.ReconnectOnUse,
 		LauncherWaitTimeout: serverConfig.LauncherWaitTimeout,
 		// Fix: Include all nested config fields to prevent data loss (Issue #239, #240)
-		Isolation:     serverConfig.Isolation,
-		OAuth:         serverConfig.OAuth,
-		EnabledTools:  serverConfig.EnabledTools,
-		DisabledTools: serverConfig.DisabledTools,
+		Isolation:              serverConfig.Isolation,
+		OAuth:                  serverConfig.OAuth,
+		EnabledTools:           serverConfig.EnabledTools,
+		DisabledTools:          serverConfig.DisabledTools,
+		AutoApproveToolChanges: serverConfig.AutoApproveToolChanges, // MCP-2940: persist so REST/UI toggle survives save/restart
 
 		SourceRegistryID:         serverConfig.SourceRegistryID,
 		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,

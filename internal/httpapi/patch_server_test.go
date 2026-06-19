@@ -23,6 +23,14 @@ type mockPatchServerController struct {
 	apiKey          string
 	existingServer  *config.ServerConfig
 	capturedUpdates *config.ServerConfig
+	allServers      []map[string]interface{}
+}
+
+// GetAllServers feeds the legacy GET /api/v1/servers path (used when no
+// management service is wired). Returning generic maps lets us assert how
+// the handler projects server-status fields into the JSON response.
+func (m *mockPatchServerController) GetAllServers() ([]map[string]interface{}, error) {
+	return m.allServers, nil
 }
 
 func (m *mockPatchServerController) GetCurrentConfig() any {
@@ -443,6 +451,115 @@ func TestHandleConvertConfigToSecret_ValidationErrors(t *testing.T) {
 			assert.Nil(t, mockCtrl.capturedUpdates, "validation errors must not call UpdateServer")
 		})
 	}
+}
+
+// TestHandlePatchServer_AutoApproveToolChanges covers the MCP-2940 gap: the
+// REST PATCH layer must accept and persist the per-server
+// auto_approve_tool_changes flag (a tri-state *bool added to ServerConfig in
+// MCP-2930). Mirrors the *bool nil-preserve semantics — omitting the field on
+// PATCH must not clobber a previously-set value, while an explicit value
+// (including false) must round-trip.
+func TestHandlePatchServer_AutoApproveToolChanges(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	boolPtr := func(b bool) *bool { return &b }
+
+	newServer := func() *config.ServerConfig {
+		return &config.ServerConfig{
+			Name:        "github",
+			Protocol:    "stdio",
+			Command:     "npx",
+			Enabled:     true,
+			Quarantined: false,
+		}
+	}
+
+	patch := func(t *testing.T, existing *config.ServerConfig, body string) *config.ServerConfig {
+		t.Helper()
+		mockCtrl := &mockPatchServerController{apiKey: "test-key", existingServer: existing}
+		srv := NewServer(mockCtrl, logger, nil)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates, "UpdateServer should have been called")
+		return mockCtrl.capturedUpdates
+	}
+
+	t.Run("explicit true sets the pointer", func(t *testing.T) {
+		updates := patch(t, newServer(), `{"auto_approve_tool_changes":true}`)
+		require.NotNil(t, updates.AutoApproveToolChanges, "pointer must be set when the request provides it")
+		assert.True(t, *updates.AutoApproveToolChanges, "value must reflect the request (true)")
+	})
+
+	t.Run("omitting preserves nil existing", func(t *testing.T) {
+		existing := newServer() // AutoApproveToolChanges is nil
+		updates := patch(t, existing, `{"args":["new-arg"]}`)
+		assert.Nil(t, updates.AutoApproveToolChanges,
+			"omitting the field must preserve the unset (nil) existing value")
+	})
+
+	t.Run("omitting preserves a prior true", func(t *testing.T) {
+		existing := newServer()
+		existing.AutoApproveToolChanges = boolPtr(true)
+		updates := patch(t, existing, `{"args":["new-arg"]}`)
+		require.NotNil(t, updates.AutoApproveToolChanges,
+			"omitting the field must preserve the existing pointer")
+		assert.True(t, *updates.AutoApproveToolChanges, "prior true must be preserved")
+	})
+
+	t.Run("explicit false overrides a prior true", func(t *testing.T) {
+		existing := newServer()
+		existing.AutoApproveToolChanges = boolPtr(true)
+		updates := patch(t, existing, `{"auto_approve_tool_changes":false}`)
+		require.NotNil(t, updates.AutoApproveToolChanges,
+			"explicit false must set the pointer, not leave it nil")
+		assert.False(t, *updates.AutoApproveToolChanges, "explicit false must override the prior true")
+	})
+}
+
+// TestHandleGetServers_ExposesAutoApproveToolChanges verifies the GET
+// /api/v1/servers payload surfaces auto_approve_tool_changes so the Web UI
+// toggle can reflect the persisted value (MCP-2940). Exercises the legacy
+// projection path (ConvertGenericServersToTyped) via a generic server map.
+func TestHandleGetServers_ExposesAutoApproveToolChanges(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		allServers: []map[string]interface{}{
+			{
+				"id":                        "github",
+				"name":                      "github",
+				"enabled":                   true,
+				"quarantined":               false,
+				"auto_approve_tool_changes": true,
+			},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var resp struct {
+		Data struct {
+			Servers []struct {
+				Name                   string `json:"name"`
+				AutoApproveToolChanges *bool  `json:"auto_approve_tool_changes"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Servers, 1)
+	require.NotNil(t, resp.Data.Servers[0].AutoApproveToolChanges,
+		"auto_approve_tool_changes must appear in the GET payload")
+	assert.True(t, *resp.Data.Servers[0].AutoApproveToolChanges)
 }
 
 // TestHandleConvertConfigToSecret_ServerNotFound verifies the 404 path

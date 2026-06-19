@@ -670,6 +670,74 @@ echo "exit: $?"   # non-zero if any failed
 
 ---
 
+### `mcpproxy tools approve [<server:tool>...]`
+
+Approve tools pending tool-level quarantine (Spec 032), clearing `pending` /
+`changed` tools for use without the Web UI or MCP. Requires daemon.
+
+**Usage:**
+```bash
+mcpproxy tools approve <server:tool> [<server:tool>...]
+mcpproxy tools approve --server <name> <tool> [<tool>...]
+mcpproxy tools approve --server <name> --all
+```
+
+**Flags:**
+- `-s, --server <name>` - Scope bare tool names to this server (required with `--all`)
+- `--all` - Approve every pending/changed tool for `--server`
+
+**Examples:**
+```bash
+mcpproxy tools approve github:create_issue
+mcpproxy tools approve github:create_issue github:list_repos
+mcpproxy tools approve --server github create_issue list_repos
+mcpproxy tools approve --server github --all
+mcpproxy tools approve --server github --all -o json
+```
+
+**Behavior:**
+- Targets are either `<server>:<tool>` pairs (the colon form wins) or bare tool
+  names scoped via `--server`; bare names without `--server` are rejected
+- Targets are grouped per server; each server group is processed independently
+- `--all` requires `--server` and cannot be combined with explicit targets
+- Prints `OK <server>: approved N tool(s)` per server group; exits non-zero if
+  any server group failed
+- `-o json|yaml` (or `MCPPROXY_OUTPUT`) emits a structured per-server result array
+
+---
+
+### `mcpproxy tools reject [<server:tool>...]`
+
+Reject (block) tools pending tool-level quarantine (Spec 032). Reject maps to
+the **block** action: the tool is atomically approved **and** disabled (hidden),
+so it is never left in the approved+enabled state — mirroring the Web UI "Block"
+button. Requires daemon.
+
+**Usage:**
+```bash
+mcpproxy tools reject <server:tool> [<server:tool>...]
+mcpproxy tools reject --server <name> <tool> [<tool>...]
+mcpproxy tools reject --server <name> --all
+```
+
+**Flags:**
+- `-s, --server <name>` - Scope bare tool names to this server (required with `--all`)
+- `--all` - Reject every pending/changed tool for `--server`
+
+**Examples:**
+```bash
+mcpproxy tools reject github:delete_repo
+mcpproxy tools reject --server github delete_repo force_push
+mcpproxy tools reject --server github --all
+```
+
+**Behavior:**
+- Same target parsing, per-server grouping, exit-code, and output-format
+  semantics as `tools approve`
+- Prints `OK <server>: blocked N tool(s)` per server group
+
+---
+
 ## Exit Codes
 
 - `0` - Success

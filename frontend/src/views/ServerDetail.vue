@@ -340,6 +340,26 @@
                 <div class="text-sm">
                   {{ quarantinedTools.length }} tool(s) require approval before they can be used by AI agents.
                 </div>
+                <!-- MCP-2917: subtle, dismissible hint explaining where pending
+                     tools come from and how to opt out of tool-level approval. -->
+                <div
+                  v-if="!quarantineHintDismissed"
+                  data-test="quarantine-hint"
+                  class="text-xs opacity-70 mt-1 flex items-start gap-1"
+                >
+                  <span>
+                    Pending tools come from tool-level quarantine. To approve them automatically, set
+                    <code class="text-[11px]">skip_quarantine: true</code> for this server or
+                    <code class="text-[11px]">quarantine_enabled: false</code> globally.
+                  </span>
+                  <button
+                    type="button"
+                    data-test="quarantine-hint-dismiss"
+                    @click="quarantineHintDismissed = true"
+                    class="btn btn-ghost btn-xs px-1 -mt-0.5"
+                    aria-label="Dismiss hint"
+                  >✕</button>
+                </div>
               </div>
               <div class="flex items-center gap-2">
                 <button
@@ -1324,15 +1344,19 @@ const selectedToolSchema = ref<Tool | null>(null)
 // Tool quarantine (Spec 032)
 const toolApprovals = ref<ToolApproval[]>([])
 const approvalLoading = ref(false)
+// MCP-2917: the Tool-Quarantine banner carries a one-line hint about how to
+// auto-approve pending tools; let the operator dismiss it for the session.
+const quarantineHintDismissed = ref(false)
 const toolToggleLoading = ref<Record<string, boolean>>({})
 // Single in-flight flag for the bulk Enable All / Disable All buttons so
 // they're mutually exclusive with each other and with any per-tool toggle.
 const bulkToolToggleLoading = ref(false)
 
-// MCP-2101 (Spec 032): the Tool-Quarantine banner / list keys off `changed`
-// (rug-pull) tools, NOT freshly-`pending` baseline tools, and is suppressed
-// entirely while the server-level Security Quarantine banner is showing.
-// See selectQuarantinedTools for the trust-model rationale.
+// MCP-2917 (Spec 032): the Tool-Quarantine banner / list surfaces every
+// `pending` (awaiting first approval) or `changed` (rug-pull) tool while the
+// server itself is NOT quarantined (both are blocked by the backend until the
+// operator acts), and is suppressed entirely while the server-level Security
+// Quarantine banner is showing. See selectQuarantinedTools for the rationale.
 const quarantinedTools = computed(() => {
   return selectQuarantinedTools(toolApprovals.value, server.value?.quarantined ?? false)
 })
