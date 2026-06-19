@@ -115,8 +115,16 @@ func TestAutoApproveToolChanges_RoundTrip_SaveLoad(t *testing.T) {
 
 	t.Run("legacy skip_quarantine file normalizes on load", func(t *testing.T) {
 		path := filepath.Join(dir, "legacy.json")
-		legacy := `{"listen":"127.0.0.1:8080","data_dir":"` + dir + `","mcpServers":[{"name":"srv","protocol":"stdio","command":"npx","enabled":true,"skip_quarantine":true}]}`
-		require.NoError(t, os.WriteFile(path, []byte(legacy), 0600))
+		// Build via the config struct + json.Marshal so the temp dir (which contains
+		// backslashes on Windows) is escaped correctly in the JSON file.
+		legacyCfg := DefaultConfig()
+		legacyCfg.DataDir = dir
+		legacyCfg.Servers = []*ServerConfig{
+			{Name: "srv", Protocol: "stdio", Command: "npx", Enabled: true, SkipQuarantine: true},
+		}
+		legacyBytes, err := json.Marshal(legacyCfg)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, legacyBytes, 0600))
 
 		loaded, err := LoadFromFile(path)
 		require.NoError(t, err)
