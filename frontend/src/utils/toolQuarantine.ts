@@ -2,28 +2,33 @@ import type { ToolApproval } from '@/types'
 
 /**
  * Selects the tools that warrant the per-server Tool-Quarantine banner / list
- * (Spec 032, parent MCP-2081, MCP-2101).
+ * (Spec 032, parent MCP-2916, MCP-2917).
  *
- * Trust model (confirmed on MCP-2081): when an operator approves a *server*
- * (lifting the server-level Security Quarantine), the backend promotes that
- * server's baseline `pending` tools to `approved`. A freshly-`pending` baseline
- * tool is therefore NOT a reason to nag the operator with a tool-level banner —
- * only a `changed` tool (a rug-pull) is.
+ * On a live, NON-quarantined server a `pending` (new, never-approved) tool is
+ * genuinely blocked by the backend (`checkToolApprovals` → `BlockedTools`) and
+ * the Servers page already counts it (`pending_count + changed_count`). The
+ * banner must therefore surface both `pending` and `changed` tools so the
+ * operator can approve them; banner and count must agree. Pending tools come
+ * from tool-level quarantine and can be auto-approved by setting
+ * `skip_quarantine: true` (per-server) or `quarantine_enabled: false` (global).
  *
  * Rules:
  *  - While the server is quarantined, suppress the tool banner entirely. The
  *    server-level Security Quarantine banner already covers it and the operator
  *    must approve the server first — never show two banners at once.
- *  - Otherwise the banner keys off `status === 'changed'`. Only once a change
- *    has surfaced do we also include any residual `pending` tools so the
- *    operator can clear them in the same approval pass.
+ *  - Otherwise surface every tool that is `pending` (awaiting first approval) or
+ *    `changed` (a rug-pull), since both are blocked until the operator acts.
+ *
+ * Note: this intentionally reverses the MCP-2101 "don't nag on a pending
+ * baseline" behavior for non-quarantined servers. That trust model assumed
+ * approving the server would promote pending→approved, but a server can be
+ * non-quarantined (e.g. `skip_quarantine`) while its tools stay pending and
+ * blocked, leaving the operator no way to approve them.
  */
 export function selectQuarantinedTools(
   toolApprovals: ToolApproval[],
   serverQuarantined: boolean,
 ): ToolApproval[] {
   if (serverQuarantined) return []
-  const hasChanged = toolApprovals.some((t) => t.status === 'changed')
-  if (!hasChanged) return []
   return toolApprovals.filter((t) => t.status === 'changed' || t.status === 'pending')
 }

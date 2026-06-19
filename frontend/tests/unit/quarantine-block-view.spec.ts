@@ -25,8 +25,8 @@ vi.mock('@/services/api', () => {
           ],
         })
       ),
-      // selectQuarantinedTools only surfaces the list when ≥1 tool is "changed"
-      // (a rug-pull review); a pending tool then rides along.
+      // selectQuarantinedTools surfaces both "changed" (rug-pull) and "pending"
+      // tools on a non-quarantined server (MCP-2917); a "changed" tool here.
       getToolApprovals: vi.fn(() =>
         ok({
           tools: [
