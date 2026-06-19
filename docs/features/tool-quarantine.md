@@ -29,19 +29,44 @@ This hash is compared against previously approved hashes to detect changes.
 | `pending` | New tool, never approved | No | No |
 | `changed` | Hash differs from approved hash | No | No |
 
+### Trust-baseline model
+
+A **trusted** server is one that is *not* under server-level quarantine
+(`quarantined: false`) — whether you added it that way, loaded it from config,
+or approved it out of quarantine. When a trusted server is discovered and it has
+**no prior tool-approval baseline**, its current toolset is treated as that
+baseline: every current tool auto-approves (status `approved`,
+`approved_by: "auto-baseline"`) rather than stranding as `pending`. Approving a
+server *is* trusting the tools it ships with.
+
+Once the baseline exists, tool-level quarantine guards against later changes:
+
+- An existing approved tool whose hash later changes → `changed` (rug pull) → blocked.
+- A genuinely-new tool that appears *after* the baseline → `pending` → blocked.
+
+A **quarantined** server (`quarantined: true`) is the exception: none of its
+tools auto-approve — they all stay `pending` until you approve the server, which
+then promotes them to the baseline.
+
 ### Detection Flow
 
 ```
 Server connects → Tools discovered → For each tool:
-  ├─ No existing record → Status: "pending" (new tool)
-  ├─ Hash matches approved hash → Status: "approved" (unchanged)
-  └─ Hash differs from approved hash → Status: "changed" (rug pull detected)
+  ├─ Quarantine disabled / per-server auto-approve  → Status: "approved" (auto)
+  ├─ Trusted server, no baseline yet (this pass IS the baseline)
+  │                                                 → Status: "approved" (auto-baseline)
+  ├─ No existing record, baseline already exists    → Status: "pending"  (new tool)
+  ├─ Hash matches approved hash                      → Status: "approved" (unchanged)
+  └─ Hash differs from approved hash                 → Status: "changed"  (rug pull detected)
 ```
 
 When a tool is `pending` or `changed`, it is:
 - **Blocked from the search index** (not returned by `retrieve_tools`)
 - **Blocked from execution** (tool calls return an error)
 - **Visible in the management UI** for review
+
+Index visibility and callability are driven by the **same stored status**, so a
+tool is never indexed/visible while being uncallable (or vice versa).
 
 ## Configuration
 
@@ -61,7 +86,10 @@ Tool-level quarantine is enabled by default. To disable:
 
 ### Per-Server Auto-Approve
 
-Trust specific servers by skipping per-server tool-change review:
+By default a trusted server's baseline auto-approves, but **post-baseline
+changes and additions are still reviewed** (`changed` / `pending`). To opt a
+server out of that review entirely — auto-approving every change and addition,
+including rug-pulls — set `auto_approve_tool_changes: true`:
 
 ```json
 {
@@ -69,7 +97,7 @@ Trust specific servers by skipping per-server tool-change review:
     {
       "name": "trusted-internal-server",
       "command": "my-mcp-server",
-      "skip_quarantine": true
+      "auto_approve_tool_changes": true
     }
   ]
 }
@@ -77,19 +105,31 @@ Trust specific servers by skipping per-server tool-change review:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `skip_quarantine` | boolean | `false` | Skip tool-level quarantine for this server (auto-approve new tools). The current active per-server control. |
-| `auto_approve_tool_changes` | boolean (tri-state) | unset | Successor to `skip_quarantine`. Accepted by config now; a legacy `skip_quarantine: true` is migrated onto it on load **only when it is unset**, so an explicit `auto_approve_tool_changes: false` overrides a legacy `skip_quarantine: true`. |
+| `auto_approve_tool_changes` | boolean (tri-state) | unset (= `false`) | Auto-approve **all** post-baseline tool changes AND additions for this server, disabling per-server rug-pull protection. The active per-server control. |
+| `skip_quarantine` | boolean | `false` | **Deprecated** — superseded by `auto_approve_tool_changes`. A legacy `skip_quarantine: true` is migrated onto `auto_approve_tool_changes` on load **only when the latter is unset**, so an explicit `auto_approve_tool_changes: false` overrides a legacy `skip_quarantine: true`. |
 
-> **Note — rollout:** `auto_approve_tool_changes` is config-plumbed but its **enforcement is not yet wired** — runtime auto-approval is still governed by `skip_quarantine`. The new flag becomes the active control (and gains the richer rug-pull / trust-baseline behavior) in an upcoming release. Existing `skip_quarantine` configs are unaffected and are migrated onto the new key automatically. To auto-approve a server today, set `skip_quarantine: true`.
-
-When the active control is enabled for a server, new tools from it are automatically approved.
+> **Security:** `auto_approve_tool_changes: true` turns off rug-pull detection for
+> that server — a later malicious description/schema change is silently approved.
+> Only enable it for servers you fully control.
 
 ### Auto-Approve Behavior
 
 Tools are automatically approved (no manual review needed) when:
-- `quarantine_enabled` is `false` globally
-- The server has `skip_quarantine: true` (the active per-server control; `auto_approve_tool_changes` becomes active in an upcoming release)
-- The auto-approval is recorded with `approved_by: "auto"` in the approval record
+- `quarantine_enabled` is `false` globally, or the server still carries the
+  deprecated `skip_quarantine: true` — recorded with `approved_by: "auto"`.
+- A **trusted server establishes its baseline** (first discovery with no prior
+  baseline, or migrating already-stranded `pending` tools whose hash is
+  unchanged) — recorded with `approved_by: "auto-baseline"`.
+- The server has `auto_approve_tool_changes: true` and a post-baseline change or
+  addition occurs — recorded with `approved_by: "auto-approve-changes"`.
+
+#### Migrating existing installs
+
+Earlier releases stranded trusted-server tools as `pending`. On upgrade, the
+next discovery pass on a trusted server with no approved baseline promotes those
+stranded `pending` records (whose stored hash matches the live tool) to
+`approved` automatically — no user action required. A `changed` (rug-pull)
+record is **never** cleared by this migration.
 
 ## Managing Tool Approvals
 
@@ -279,7 +319,7 @@ Tool quarantine events are recorded in the activity log:
 | Event | Description |
 |-------|-------------|
 | `tool_discovered` | New tool found, pending approval |
-| `tool_auto_approved` | New tool automatically approved (trusted server) |
+| `tool_auto_approved` | Tool automatically approved (quarantine off, baseline trust, or `auto_approve_tool_changes`) |
 | `tool_approved` | Tool manually approved by user |
 | `tool_description_changed` | Tool description/schema changed since approval |
 
@@ -309,7 +349,7 @@ Tool-level quarantine is a separate system from [server-level quarantine](./secu
 | **Scope** | Entire server | Individual tools |
 | **Trigger** | Server added via AI client | Tool description/schema changes |
 | **Detection** | Manual review | SHA256 hash comparison |
-| **Config** | `quarantined: true/false` on server | `quarantine_enabled` global + `skip_quarantine` per-server (successor `auto_approve_tool_changes` not yet enforced) |
+| **Config** | `quarantined: true/false` on server | `quarantine_enabled` global + `auto_approve_tool_changes` per-server (deprecates `skip_quarantine`) |
 | **Approval** | `POST /servers/{name}/unquarantine` | `POST /servers/{name}/tools/approve` |
 
 Both systems work together: a quarantined server's tools are never indexed regardless of tool approval status.
@@ -317,7 +357,7 @@ Both systems work together: a quarantined server's tools are never indexed regar
 ## Best Practices
 
 1. **Review changed tools carefully**: A `changed` status may indicate a rug pull attack where a malicious server silently modifies tool descriptions
-2. **Use `skip_quarantine` for internal servers**: If you control the MCP server and trust it, skip quarantine to avoid manual approval on every update (the successor key `auto_approve_tool_changes` becomes the active control in an upcoming release)
+2. **Use `auto_approve_tool_changes` sparingly**: A trusted server's baseline is already auto-approved; only set `auto_approve_tool_changes: true` for servers you fully control where you also want post-baseline changes/additions approved without review (this disables rug-pull protection for that server). The deprecated `skip_quarantine: true` is migrated onto this key automatically.
 3. **Monitor the doctor output**: Run `mcpproxy doctor` regularly to check for pending tools
 4. **Export descriptions for audit**: Use the export API to keep records of approved tool descriptions
 5. **Check activity logs**: Monitor `tool_description_changed` events for unexpected changes

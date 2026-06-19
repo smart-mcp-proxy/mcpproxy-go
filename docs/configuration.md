@@ -839,8 +839,8 @@ Per-server tool-change auto-approval is configured on the server entry:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `skip_quarantine` | boolean | `false` | Skip tool-level quarantine for this server (auto-approve new tools). The current active per-server control. |
-| `auto_approve_tool_changes` | boolean (tri-state) | unset | Successor to `skip_quarantine`. Accepted by config now; a legacy `skip_quarantine: true` is migrated onto it on load **only when it is unset** (an explicit `false` overrides the legacy flag). **Enforcement is not yet wired** — `skip_quarantine` remains the active control until an upcoming release. |
+| `auto_approve_tool_changes` | boolean (tri-state) | unset (= `false`) | Auto-approve **all** post-baseline tool changes AND additions for this server (disables per-server rug-pull protection). The active per-server control. A trusted server's *baseline* is auto-approved regardless of this flag. |
+| `skip_quarantine` | boolean | `false` | **Deprecated** — superseded by `auto_approve_tool_changes`. A legacy `skip_quarantine: true` is migrated onto `auto_approve_tool_changes` on load **only when it is unset** (an explicit `false` overrides the legacy flag). |
 
 See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 

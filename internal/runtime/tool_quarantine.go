@@ -103,6 +103,15 @@ const (
 	ReasonDescriptionMatch  TransitionReason = "description_match"
 	ReasonUserApprove       TransitionReason = "user_approve"
 	ReasonAutoApprove       TransitionReason = "auto_approve"
+	// ReasonBaselineTrust marks promotion of a never-reviewed (pending) tool to
+	// approved because the server is trusted (non-quarantined) and has no prior
+	// approved baseline yet — the current toolset IS the baseline (MCP-2931).
+	ReasonBaselineTrust TransitionReason = "baseline_trust"
+	// ReasonAutoApproveChanges marks promotion driven by the explicit per-server
+	// auto_approve_tool_changes flag (MCP-2931/MCP-2930). It is the ONLY reason,
+	// besides explicit user action, that may clear a changed (rug-pull) record —
+	// because the operator opted into auto-approving changes for that server.
+	ReasonAutoApproveChanges TransitionReason = "auto_approve_changes"
 )
 
 // assertToolApprovalInvariant checks that a state transition is valid according
@@ -123,7 +132,8 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 	case storage.ToolApprovalStatusChanged:
 		switch reason {
 		case ReasonHashMatch, ReasonDescriptionRevert, ReasonFormulaMigration,
-			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove:
+			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,
+			ReasonAutoApproveChanges:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: changed→approved with reason %q "+
@@ -131,7 +141,7 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 		}
 	case storage.ToolApprovalStatusPending:
 		switch reason {
-		case ReasonUserApprove, ReasonAutoApprove:
+		case ReasonUserApprove, ReasonAutoApprove, ReasonBaselineTrust, ReasonAutoApproveChanges:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: pending→approved with reason %q "+
@@ -183,10 +193,16 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 
 	serverSkipped := false
 	serverQuarantined := false
+	autoApproveChanges := false
 	for _, sc := range cfg.Servers {
 		if sc.Name == serverName {
 			serverSkipped = sc.IsQuarantineSkipped()
 			serverQuarantined = sc.Quarantined
+			// Per-server opt-in to auto-approve post-baseline changes AND
+			// additions (MCP-2931). Note: a legacy skip_quarantine:true is
+			// migrated onto this flag at config load (MCP-2930), so it also
+			// reads true for skip_quarantine servers.
+			autoApproveChanges = sc.IsAutoApproveToolChanges()
 			break
 		}
 	}
@@ -201,6 +217,25 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	// Changed tools (rug pull) are always blocked when globalEnabled is true (line ~438).
 	enforceNewTools := globalEnabled && !serverSkipped
 	enforceQuarantine := globalEnabled && !serverSkipped && serverQuarantined
+
+	// Trust-baseline model (MCP-2931): a trusted (non-quarantined) server whose
+	// tools have NEVER been approved before treats its CURRENT toolset as the
+	// baseline — every current tool is auto-approved instead of stranded as
+	// pending. A record in approved OR changed state proves a prior baseline
+	// exists (changed implies the tool was approved once, then mutated), so its
+	// presence disqualifies the baseline pass and post-baseline review resumes.
+	// Detection is snapshotted BEFORE the loop so promoting tools mid-pass does
+	// not flip the decision.
+	serverHasBaseline := false
+	if priorRecords, listErr := r.storageManager.ListToolApprovals(serverName); listErr == nil {
+		for _, rec := range priorRecords {
+			if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
+				serverHasBaseline = true
+				break
+			}
+		}
+	}
+	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
 	result := &ToolApprovalResult{
 		BlockedTools: make(map[string]bool),
@@ -271,9 +306,24 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 
 		if err != nil {
-			// No existing record - this is a new tool.
-			if !enforceNewTools {
-				// Quarantine disabled or server has skip_quarantine - auto-approve
+			// No existing record - this is a new tool. Decide whether it
+			// auto-approves and under which provenance label:
+			//   - "auto"               quarantine disabled globally or skip_quarantine
+			//   - "auto-baseline"      trusted server establishing its baseline (MCP-2931 #1)
+			//   - "auto-approve-changes" trusted server, post-baseline addition, operator opted in (MCP-2931 #3)
+			// Otherwise the tool is pending and blocked until reviewed (MCP-2931 #2).
+			autoApprove := false
+			approvedBy := ""
+			switch {
+			case !enforceNewTools:
+				autoApprove, approvedBy = true, "auto"
+			case isBaselinePass:
+				autoApprove, approvedBy = true, "auto-baseline"
+			case autoApproveChanges:
+				autoApprove, approvedBy = true, "auto-approve-changes"
+			}
+
+			if autoApprove {
 				now := time.Now().UTC()
 				record := &storage.ToolApprovalRecord{
 					ServerName:          serverName,
@@ -282,7 +332,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					ApprovedHash:        currentHash,
 					HashSchemaVersion:   storage.OutputSchemaHashSchemaVersion,
 					Status:              storage.ToolApprovalStatusApproved,
-					ApprovedBy:          "auto",
+					ApprovedBy:          approvedBy,
 					ApprovedAt:          now,
 					CurrentDescription:  tool.Description,
 					CurrentSchema:       schemaJSON,
@@ -293,13 +343,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					r.logger.Error("Failed to save auto-approved tool record",
 						zap.String("server", serverName),
 						zap.String("tool", toolName),
+						zap.String("approved_by", approvedBy),
 						zap.Error(saveErr))
 					continue
 				}
 
-				r.logger.Info("New tool discovered, auto-approved (quarantine disabled or server skipped)",
+				r.logger.Info("New tool discovered, auto-approved",
 					zap.String("server", serverName),
-					zap.String("tool", toolName))
+					zap.String("tool", toolName),
+					zap.String("approved_by", approvedBy))
 
 				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
 					"", tool.Description, "", schemaJSON)
@@ -307,9 +359,10 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				continue
 			}
 
-			// Quarantine enabled — new tool requires user review before use.
-			// This applies to ALL servers (including trusted ones) to prevent
-			// injection attacks via new tool additions on compromised servers.
+			// Quarantine enabled, no baseline exemption — new tool requires user
+			// review before use. This applies to trusted servers post-baseline
+			// (and always to quarantined ones) to prevent injection attacks via
+			// new tool additions on compromised servers.
 			record := &storage.ToolApprovalRecord{
 				ServerName:          serverName,
 				ToolName:            toolName,
@@ -388,11 +441,67 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 		}
 
 		if existing.Status == storage.ToolApprovalStatusPending {
-			// Still pending - update current info
+			// Capture whether the stored hash still matches the live tool BEFORE
+			// we overwrite CurrentHash — the baseline migration (MCP-2931 #4)
+			// only promotes a stranded pending record that is unchanged since it
+			// was recorded.
+			priorHashMatches := existing.CurrentHash == currentHash
+
+			// Update current info to the live snapshot.
 			existing.CurrentHash = currentHash
 			existing.CurrentDescription = tool.Description
 			existing.CurrentSchema = schemaJSON
 			existing.CurrentOutputSchema = outputSchemaJSON
+
+			// Decide whether this pending record is promoted to approved:
+			//   - baseline migration: trusted server, no prior baseline, hash unchanged (MCP-2931 #4)
+			//   - auto_approve_tool_changes: operator opted in (MCP-2931 #3)
+			promote := false
+			var promoteReason TransitionReason
+			var promoteBy string
+			switch {
+			case isBaselinePass && priorHashMatches:
+				promote, promoteReason, promoteBy = true, ReasonBaselineTrust, "auto-baseline"
+			case autoApproveChanges:
+				promote, promoteReason, promoteBy = true, ReasonAutoApproveChanges, "auto-approve-changes"
+			}
+
+			if promote {
+				if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, promoteReason); invErr != nil {
+					// Refuse to promote on an invariant violation — keep blocked.
+					if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+						r.logger.Debug("Failed to update pending tool approval",
+							zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
+					}
+					if enforceNewTools {
+						result.BlockedTools[toolName] = true
+						result.PendingCount++
+					}
+					continue
+				}
+				existing.Status = storage.ToolApprovalStatusApproved
+				existing.ApprovedHash = currentHash
+				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.ApprovedAt = time.Now().UTC()
+				existing.ApprovedBy = promoteBy
+				existing.PreviousDescription = ""
+				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
+				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+					r.logger.Error("Failed to promote pending tool approval",
+						zap.String("server", serverName), zap.String("tool", toolName),
+						zap.String("approved_by", promoteBy), zap.Error(saveErr))
+					continue
+				}
+				r.logger.Info("Pending tool promoted to approved",
+					zap.String("server", serverName), zap.String("tool", toolName),
+					zap.String("approved_by", promoteBy))
+				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
+					"", tool.Description, "", schemaJSON)
+				continue
+			}
+
+			// Stays pending — persist the updated current info.
 			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 				r.logger.Debug("Failed to update pending tool approval",
 					zap.String("server", serverName),
@@ -400,7 +509,14 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					zap.Error(saveErr))
 			}
 
-			if enforceQuarantine {
+			// Two-gate consistency (MCP-2931 #5): block from the index whenever
+			// the stored status is pending and quarantine is enforced, matching
+			// the call-time gate (internal/server/mcp.go) which blocks on stored
+			// pending status regardless of whether the SERVER is quarantined.
+			// Previously this only blocked when the server itself was quarantined
+			// (enforceQuarantine), so a post-baseline pending tool on a trusted
+			// server was indexed/visible but uncallable.
+			if enforceNewTools {
 				result.BlockedTools[toolName] = true
 				result.PendingCount++
 			}
@@ -433,6 +549,36 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 					r.logger.Info("Changed tool restored (reverted to previous description)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
+				}
+				continue
+			}
+			// auto_approve_tool_changes (MCP-2931 #3): the operator opted into
+			// auto-approving changes for this server, so a still-changed record is
+			// re-baselined to its current snapshot instead of staying blocked.
+			if autoApproveChanges {
+				if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonAutoApproveChanges); invErr != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
+				existing.Status = storage.ToolApprovalStatusApproved
+				existing.ApprovedHash = currentHash
+				existing.CurrentHash = currentHash
+				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.ApprovedAt = time.Now().UTC()
+				existing.ApprovedBy = "auto-approve-changes"
+				existing.CurrentDescription = tool.Description
+				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
+				existing.PreviousDescription = ""
+				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
+				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
+					r.logger.Info("Changed tool auto-approved (auto_approve_tool_changes enabled)",
+						zap.String("server", serverName),
+						zap.String("tool", toolName))
+					r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
+						"", tool.Description, "", schemaJSON)
 				}
 				continue
 			}
@@ -585,7 +731,43 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				continue
 			}
 
-			// Hash differs AND description differs - genuine tool change (rug pull)
+			// Hash differs AND description differs - genuine tool change (rug pull).
+			// auto_approve_tool_changes (MCP-2931 #3): when the operator opted into
+			// auto-approving changes for this server, re-baseline to the current
+			// snapshot instead of flagging it changed — so no `changed` ever surfaces.
+			if autoApproveChanges {
+				if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonAutoApproveChanges); invErr != nil {
+					result.BlockedTools[toolName] = true
+					result.ChangedCount++
+					continue
+				}
+				existing.Status = storage.ToolApprovalStatusApproved
+				existing.ApprovedHash = currentHash
+				existing.CurrentHash = currentHash
+				existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+				existing.ApprovedAt = time.Now().UTC()
+				existing.ApprovedBy = "auto-approve-changes"
+				existing.CurrentDescription = tool.Description
+				existing.CurrentSchema = schemaJSON
+				existing.CurrentOutputSchema = outputSchemaJSON
+				existing.PreviousDescription = ""
+				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
+				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+					r.logger.Error("Failed to auto-approve changed tool",
+						zap.String("server", serverName),
+						zap.String("tool", toolName),
+						zap.Error(saveErr))
+					continue
+				}
+				r.logger.Info("Tool change auto-approved (auto_approve_tool_changes enabled)",
+					zap.String("server", serverName),
+					zap.String("tool", toolName))
+				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
+					"", tool.Description, "", schemaJSON)
+				continue
+			}
+
 			oldDesc := existing.CurrentDescription
 			oldSchema := existing.CurrentSchema
 			oldOutputSchema := existing.CurrentOutputSchema
