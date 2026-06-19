@@ -54,12 +54,16 @@ type CatalogEntry struct {
 // DiagnosticError is the runtime record attached to a server's stateview snapshot
 // while the server has an active failure.
 type DiagnosticError struct {
-	Code       Code      `json:"code"`
-	Severity   Severity  `json:"severity"`
-	Cause      string    `json:"cause,omitempty"`
-	CauseType  string    `json:"cause_type,omitempty"`
-	ServerID   string    `json:"server_id"`
-	DetectedAt time.Time `json:"detected_at"`
+	Code     Code     `json:"code"`
+	Severity Severity `json:"severity"`
+	Cause    string   `json:"cause,omitempty"`
+	// Remediation is an optional runtime-aware, context-specific user message
+	// that overrides the static CatalogEntry.UserMessage when present (MCP-2909).
+	// Empty when the generic catalog message is sufficient.
+	Remediation string    `json:"remediation,omitempty"`
+	CauseType   string    `json:"cause_type,omitempty"`
+	ServerID    string    `json:"server_id"`
+	DetectedAt  time.Time `json:"detected_at"`
 }
 
 // ClassifierHints lets callers nudge the classifier when context is known
@@ -73,6 +77,25 @@ type ClassifierHints struct {
 	// per #696, in-container interpreter missing) instead of a generic
 	// MCPX_STDIO_SPAWN_ENOENT. See classifyDockerIsolatedSpawn.
 	DockerIsolated bool
+
+	// The fields below enrich the DockerExecNotFound remediation with
+	// per-server context (MCP-2909). They are diagnostics-only — they never
+	// change classification, only the user-facing message produced by
+	// RuntimeAwareRemediation.
+
+	// DockerCommand is the configured stdio command for a Docker-isolated
+	// server (e.g. "uvx", "npx"). The detected runtime type is derived from it.
+	// Empty when unknown or for non-isolated servers.
+	DockerCommand string
+
+	// DockerImageOverride is the per-server isolation.image override, if any.
+	// When set, the DockerExecNotFound remediation flags it as the likely
+	// culprit (a stock image that lacks the runtime interpreter).
+	DockerImageOverride string
+
+	// DockerDefaultImages is the global default_images map (runtime → image).
+	// Used to name the recommended image for the detected runtime.
+	DockerDefaultImages map[string]string
 }
 
 // FixRequest is the input to a registered fixer.
