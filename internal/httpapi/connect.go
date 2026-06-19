@@ -91,6 +91,7 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
+// @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     409    {object} contracts.ErrorResponse "Already connected (use force=true)"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client} [post]
@@ -157,6 +158,7 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 // @Param       body   body   ConnectRequest false "Optional parameters (server_name)"
 // @Success     200    {object} contracts.APIResponse "ConnectResult"
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
+// @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client or entry not found"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client} [delete]
