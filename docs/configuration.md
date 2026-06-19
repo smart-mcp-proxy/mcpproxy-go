@@ -856,7 +856,7 @@ Per-server tool-change auto-approval is configured on the server entry:
 | `auto_approve_tool_changes` | boolean (tri-state) | unset (= `false`) | Auto-approve **all** post-baseline tool changes AND additions for this server (disables per-server rug-pull protection). The active per-server control. A trusted server's *baseline* is auto-approved regardless of this flag. |
 | `skip_quarantine` | boolean | `false` | **Deprecated** — superseded by `auto_approve_tool_changes`. A legacy `skip_quarantine: true` is migrated onto `auto_approve_tool_changes` on load **only when it is unset** (an explicit `false` overrides the legacy flag). |
 
-See [Tool Quarantine](features/tool-quarantine.md) for complete details.
+See [Trust-Baseline Quarantine Model](features/trust-baseline.md) for the complete security model, and [Tool Quarantine](features/tool-quarantine.md) for tool-level quarantine details.
 
 ---
 

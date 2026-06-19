@@ -358,6 +358,8 @@ Tool-level quarantine is a separate system from [server-level quarantine](./secu
 
 Both systems work together: a quarantined server's tools are never indexed regardless of tool approval status.
 
+The [Trust-Baseline Quarantine Model](./trust-baseline.md) document explains how server approval establishes baseline trust while preserving ongoing rug-pull protection.
+
 ## Best Practices
 
 1. **Review changed tools carefully**: A `changed` status may indicate a rug pull attack where a malicious server silently modifies tool descriptions
