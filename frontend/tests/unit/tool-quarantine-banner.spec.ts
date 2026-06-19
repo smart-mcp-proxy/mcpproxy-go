@@ -2,14 +2,19 @@ import { describe, it, expect } from 'vitest'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import type { ToolApproval } from '@/types'
 
-// MCP-2101 (Spec 032, parent MCP-2081): the per-server Tool-Quarantine banner
-// must stop nagging for freshly-`pending` baseline tools and must never show
+// MCP-2917 (Spec 032, parent MCP-2916): the per-server Tool-Quarantine banner
+// must surface BOTH `pending` (new, never-approved) and `changed` (rug-pull)
+// tools whenever the server itself is NOT quarantined, and must never show
 // alongside the server-level Security Quarantine banner.
 //
-// Trust model (confirmed on MCP-2081): approving a *server* promotes its
-// baseline `pending` tools to `approved` on the backend. So a baseline
-// `pending` tool is NOT a reason to surface a tool-level banner — only a
-// `changed` tool (a rug-pull) is.
+// This intentionally reverses the MCP-2101 "don't nag on a pending baseline"
+// behavior for non-quarantined servers: on a live, non-quarantined server a
+// `pending` tool is genuinely BLOCKED by the backend (checkToolApprovals →
+// BlockedTools) and the Servers page already counts it (pending_count +
+// changed_count). The banner and the count must agree, so the operator gets
+// the Approve/Block buttons to clear pending tools. While the server is still
+// quarantined the server-level banner covers everything, so we suppress the
+// tool-level banner to avoid two banners at once.
 
 function approval(over: Partial<ToolApproval>): ToolApproval {
   return {
@@ -22,11 +27,10 @@ function approval(over: Partial<ToolApproval>): ToolApproval {
   }
 }
 
-describe('selectQuarantinedTools (MCP-2101)', () => {
+describe('selectQuarantinedTools (MCP-2917)', () => {
   it('suppresses the tool banner entirely while the server is quarantined', () => {
-    // Even a rug-pull `changed` tool must not surface a SECOND banner while the
-    // server-level Security Quarantine banner is up — operator approves the
-    // server first, then the backend promotes baseline pending→approved.
+    // The server-level Security Quarantine banner already covers it and the
+    // operator must approve the server first — never show two banners at once.
     const tools = [
       approval({ tool_name: 'a', status: 'changed' }),
       approval({ tool_name: 'b', status: 'pending' }),
@@ -34,15 +38,17 @@ describe('selectQuarantinedTools (MCP-2101)', () => {
     expect(selectQuarantinedTools(tools, true)).toEqual([])
   })
 
-  it('does NOT surface freshly-pending baseline tools (the core fix)', () => {
-    // Not quarantined, no changed tool → baseline `pending` tools alone must
-    // not raise the banner. Pre-fix this returned the pending tools.
-    const tools = [
-      approval({ tool_name: 'a', status: 'pending' }),
-      approval({ tool_name: 'b', status: 'pending' }),
-      approval({ tool_name: 'c', status: 'approved' }),
-    ]
-    expect(selectQuarantinedTools(tools, false)).toEqual([])
+  it('surfaces freshly-pending tools on a non-quarantined server (the core fix)', () => {
+    // Regression for MCP-2917: an all-`pending`, not-quarantined server used to
+    // hide the banner (the old `hasChanged` early-return) even though every
+    // tool is genuinely blocked. Now they must surface for approval.
+    const a = approval({ tool_name: 'a', status: 'pending' })
+    const b = approval({ tool_name: 'b', status: 'pending' })
+    const tools = [a, b, approval({ tool_name: 'c', status: 'approved' })]
+    const result = selectQuarantinedTools(tools, false)
+    expect(result).toContain(a)
+    expect(result).toContain(b)
+    expect(result).not.toContainEqual(approval({ tool_name: 'c', status: 'approved' }))
   })
 
   it('surfaces a `changed` (rug-pull) tool when the server is not quarantined', () => {
@@ -51,7 +57,7 @@ describe('selectQuarantinedTools (MCP-2101)', () => {
     expect(selectQuarantinedTools(tools, false)).toEqual([changed])
   })
 
-  it('once a change has surfaced, also includes residual pending tools', () => {
+  it('surfaces both pending and changed tools together when not quarantined', () => {
     const changed = approval({ tool_name: 'rugpull', status: 'changed' })
     const pending = approval({ tool_name: 'leftover', status: 'pending' })
     const tools = [changed, pending, approval({ tool_name: 'fine', status: 'approved' })]
