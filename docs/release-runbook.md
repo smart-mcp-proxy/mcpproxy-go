@@ -121,17 +121,74 @@ fails the whole release job.
 
 The release workflow fails in `sign-windows` because the SignPath approver did
 not click "Approve" inside 60 minutes. All other artifacts (macOS DMGs, Linux
-tarballs, release notes) are already built. Do **not** re-tag — use the retry
-workflow:
+tarballs, release notes) are already built. Do **not** re-tag.
 
-1. Open the failed Release run, copy the run ID from the URL.
-2. Actions → **Retry Sign & Release** → Run workflow with:
-   - `tag`: `vX.Y.Z`
-   - `run_id`: the failed run's ID
-3. This workflow (`retry-sign-release.yml`) re-downloads the unsigned EXEs,
-   resubmits to SignPath, and creates the GitHub Release from the original
-   artifacts + the freshly signed installers.
-4. Click **Approve** in SignPath as soon as the resubmission email arrives.
+#### When the SignPath approval times out
+
+> **Observed during v0.41.2 (2026-06-18):** Three out of four signing attempts
+> timed out at exactly `01:01:14`. All three failures shared the same root cause:
+> approving the wrong (stale) request, or approving too late after the poll
+> backoff had grown to 20-minute intervals. Only the attempt approved at ~3.5
+> minutes into the rerun succeeded.
+
+Follow these steps exactly to avoid a repeat:
+
+**Step 1 — Trigger the rerun on the original Release run:**
+
+```bash
+gh run rerun <failed-release-run-id> --failed
+```
+
+This re-runs only the failed jobs (`sign-windows` plus all downstream:
+`release`, `update-homebrew`, `publish-linux-repos`, etc.) through the complete
+primary pipeline. **Each rerun submits a brand-new signing request to SignPath.**
+
+Do **not** reach for the "Retry Sign & Release" workflow — it has a known bug;
+see the Option B warning below.
+
+**Step 2 — In SignPath, reject every stale `WaitingForApproval` request first.**
+
+Multiple failed reruns each leave a separate `WaitingForApproval` request in
+the queue. Approving a stale one does nothing for the live job — the action
+polls by signing request ID, not by policy. **Reject / cancel every old request
+before approving the newest one** so only one request is pending.
+
+**Step 3 — Approve the newest request within the first ~5–10 minutes.**
+
+The SignPath GitHub Action uses a growing poll backoff:
+
+```
+~few sec → 1 min → 3 min → 5 min → 11 min → 20 min → 20 min (repeating)
+```
+
+Once polling reaches 20-minute intervals, an approval that lands at, e.g., 48
+minutes still times out at the 60-min budget boundary. Approve as soon as the
+SignPath notification email arrives — do not delay to check logs or do other
+work first.
+
+**Step 4 — Confirm the approval was caught in the job log.**
+
+In the `sign-windows` job → "Submit to SignPath for signing" step: look for the
+transition from `WaitingForApproval` to **"Prepare signed installer"**. If the
+step stays at `WaitingForApproval` past the next poll cycle, the approval landed
+too late — trigger another rerun and approve faster.
+
+> **SLSA provenance note:** The `.intoto.jsonl` attestation is regenerated on
+> `gh run rerun --failed`. If the SLSA generator job fails on the retry path,
+> re-run it manually before closing the release.
+
+**Option B — Retry Sign & Release workflow (`retry-sign-release.yml`):**
+
+> ⚠️ **Known bug ([MCP-2905](/MCP/issues/MCP-2905)):** The retry workflow uses
+> stale artifact download patterns that produce an **incomplete** release
+> (~6 assets instead of ~27 — no tarballs, no .deb/.rpm, no Homebrew bump, no
+> apt/rpm republish). **Do not use it until
+> [MCP-2905](/MCP/issues/MCP-2905) is fixed.**
+>
+> Use `gh run rerun --failed` on the original release run (Step 1 above)
+> instead. If the original run's artifacts have expired (>90-day retention),
+> cut a new patch tag from `main` to re-run the full pipeline from scratch
+> rather than using the broken retry workflow.
 
 **Watch items:**
 
