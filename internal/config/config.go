@@ -324,13 +324,17 @@ type ServerConfig struct {
 	// migrated to auto_approve_tool_changes:true only when the new field is unset
 	// (see normalizeServerQuarantineFlags).
 	SkipQuarantine bool `json:"skip_quarantine,omitempty" mapstructure:"skip-quarantine"` // Deprecated: use auto_approve_tool_changes
-	// AutoApproveToolChanges auto-approves tool changes/additions for this server,
-	// disabling per-server rug-pull protection (MCP-2930). Supersedes skip_quarantine.
+	// AutoApproveToolChanges is the per-server intent to auto-approve tool
+	// changes/additions (disabling per-server rug-pull protection). Supersedes
+	// skip_quarantine. MCP-2930 only ACCEPTS, persists, and migrates this flag — it
+	// is NOT yet consulted at runtime; auto-approval is still governed by
+	// SkipQuarantine until the trust-baseline behavior change (MCP-2931) migrates the
+	// runtime consumers onto it.
 	// Tri-state pointer (mirrors QuarantineEnabled): nil = unset (inherit/migrate
 	// from legacy skip_quarantine), explicit true/false = honored as-is so an
 	// explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
 	// Read via IsAutoApproveToolChanges().
-	AutoApproveToolChanges *bool            `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Auto-approve tool changes/additions for this server (disables per-server rug-pull protection)
+	AutoApproveToolChanges *bool            `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Per-server intent to auto-approve tool changes/additions. Accepted/persisted by MCP-2930; runtime enforcement lands in MCP-2931 (until then SkipQuarantine governs behavior)
 	Shared                 bool             `json:"shared,omitempty" mapstructure:"shared"`                                       // Server edition: shared with all users
 	Created                time.Time        `json:"created" mapstructure:"created"`
 	Updated                time.Time        `json:"updated,omitempty" mapstructure:"updated"`
@@ -1285,12 +1289,14 @@ func (sc *ServerConfig) IsQuarantineSkipped() bool {
 	return sc.SkipQuarantine
 }
 
-// IsAutoApproveToolChanges reports whether tool changes/additions for this server
-// are auto-approved (disabling per-server rug-pull protection). Mirrors
-// IsQuarantineSkipped (and IsQuarantineEnabled's *bool handling): an unset field
-// (nil) is false. The legacy skip_quarantine field is migrated into this field at
-// config load (see normalizeServerQuarantineFlags) only when it is unset, so an
-// explicit value always wins. MCP-2930.
+// IsAutoApproveToolChanges reports the configured per-server intent to auto-approve
+// tool changes/additions (disabling per-server rug-pull protection). It is provided
+// for the runtime consumers that adopt it in MCP-2931 and is NOT yet consulted at
+// runtime — SkipQuarantine / IsQuarantineSkipped still governs behavior until then.
+// Mirrors IsQuarantineEnabled's *bool handling: an unset field (nil) is false; the
+// legacy skip_quarantine is migrated into this field at config load
+// (see normalizeServerQuarantineFlags) only when it is unset, so an explicit value
+// always wins. MCP-2930.
 func (sc *ServerConfig) IsAutoApproveToolChanges() bool {
 	return sc.AutoApproveToolChanges != nil && *sc.AutoApproveToolChanges
 }
