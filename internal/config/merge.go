@@ -528,19 +528,18 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	}
 
 	dst := &ServerConfig{
-		Name:                   src.Name,
-		URL:                    src.URL,
-		Protocol:               src.Protocol,
-		Command:                src.Command,
-		WorkingDir:             src.WorkingDir,
-		Enabled:                src.Enabled,
-		Quarantined:            src.Quarantined,
-		SkipQuarantine:         src.SkipQuarantine,
-		AutoApproveToolChanges: src.AutoApproveToolChanges,
-		Shared:                 src.Shared,
-		Created:                src.Created,
-		Updated:                src.Updated,
-		LauncherWaitTimeout:    src.LauncherWaitTimeout,
+		Name:                src.Name,
+		URL:                 src.URL,
+		Protocol:            src.Protocol,
+		Command:             src.Command,
+		WorkingDir:          src.WorkingDir,
+		Enabled:             src.Enabled,
+		Quarantined:         src.Quarantined,
+		SkipQuarantine:      src.SkipQuarantine,
+		Shared:              src.Shared,
+		Created:             src.Created,
+		Updated:             src.Updated,
+		LauncherWaitTimeout: src.LauncherWaitTimeout,
 	}
 
 	// Copy slices
@@ -561,6 +560,12 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		for k, v := range src.Headers {
 			dst.Headers[k] = v
 		}
+	}
+
+	// Copy *bool by value (not pointer) to avoid shared state (MCP-2930)
+	if src.AutoApproveToolChanges != nil {
+		autoApprove := *src.AutoApproveToolChanges
+		dst.AutoApproveToolChanges = &autoApprove
 	}
 
 	// Copy nested structs

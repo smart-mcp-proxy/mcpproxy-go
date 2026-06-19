@@ -61,7 +61,7 @@ Tool-level quarantine is enabled by default. To disable:
 
 ### Per-Server Auto-Approve
 
-Trust specific servers by auto-approving their tool changes/additions:
+Trust specific servers by skipping per-server tool-change review:
 
 ```json
 {
@@ -69,7 +69,7 @@ Trust specific servers by auto-approving their tool changes/additions:
     {
       "name": "trusted-internal-server",
       "command": "my-mcp-server",
-      "auto_approve_tool_changes": true
+      "skip_quarantine": true
     }
   ]
 }
@@ -77,16 +77,18 @@ Trust specific servers by auto-approving their tool changes/additions:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_approve_tool_changes` | boolean | `false` | Auto-approve tool changes/additions for this server (disables per-server rug-pull protection) |
-| `skip_quarantine` | boolean | `false` | **Deprecated** — renamed to `auto_approve_tool_changes`. Still parsed for back-compat; a legacy `skip_quarantine: true` is automatically migrated to `auto_approve_tool_changes: true` on config load when the new field is unset. |
+| `skip_quarantine` | boolean | `false` | Skip tool-level quarantine for this server (auto-approve new tools). The current active per-server control. |
+| `auto_approve_tool_changes` | boolean (tri-state) | unset | Successor to `skip_quarantine`. Accepted by config now; a legacy `skip_quarantine: true` is migrated onto it on load **only when it is unset**, so an explicit `auto_approve_tool_changes: false` overrides a legacy `skip_quarantine: true`. |
 
-When `auto_approve_tool_changes` is `true`, new tools from this server are automatically approved.
+> **Note — rollout:** `auto_approve_tool_changes` is config-plumbed but its **enforcement is not yet wired** — runtime auto-approval is still governed by `skip_quarantine`. The new flag becomes the active control (and gains the richer rug-pull / trust-baseline behavior) in an upcoming release. Existing `skip_quarantine` configs are unaffected and are migrated onto the new key automatically. To auto-approve a server today, set `skip_quarantine: true`.
+
+When the active control is enabled for a server, new tools from it are automatically approved.
 
 ### Auto-Approve Behavior
 
 Tools are automatically approved (no manual review needed) when:
 - `quarantine_enabled` is `false` globally
-- The server has `auto_approve_tool_changes: true` (or the deprecated `skip_quarantine: true`)
+- The server has `skip_quarantine: true` (the active per-server control; `auto_approve_tool_changes` becomes active in an upcoming release)
 - The auto-approval is recorded with `approved_by: "auto"` in the approval record
 
 ## Managing Tool Approvals
@@ -307,7 +309,7 @@ Tool-level quarantine is a separate system from [server-level quarantine](./secu
 | **Scope** | Entire server | Individual tools |
 | **Trigger** | Server added via AI client | Tool description/schema changes |
 | **Detection** | Manual review | SHA256 hash comparison |
-| **Config** | `quarantined: true/false` on server | `quarantine_enabled` global + `auto_approve_tool_changes` per-server |
+| **Config** | `quarantined: true/false` on server | `quarantine_enabled` global + `skip_quarantine` per-server (successor `auto_approve_tool_changes` not yet enforced) |
 | **Approval** | `POST /servers/{name}/unquarantine` | `POST /servers/{name}/tools/approve` |
 
 Both systems work together: a quarantined server's tools are never indexed regardless of tool approval status.
@@ -315,7 +317,7 @@ Both systems work together: a quarantined server's tools are never indexed regar
 ## Best Practices
 
 1. **Review changed tools carefully**: A `changed` status may indicate a rug pull attack where a malicious server silently modifies tool descriptions
-2. **Use `auto_approve_tool_changes` for internal servers**: If you control the MCP server and trust it, auto-approve tool changes to avoid manual approval on every update
+2. **Use `skip_quarantine` for internal servers**: If you control the MCP server and trust it, skip quarantine to avoid manual approval on every update (the successor key `auto_approve_tool_changes` becomes the active control in an upcoming release)
 3. **Monitor the doctor output**: Run `mcpproxy doctor` regularly to check for pending tools
 4. **Export descriptions for audit**: Use the export API to keep records of approved tool descriptions
 5. **Check activity logs**: Monitor `tool_description_changed` events for unexpected changes

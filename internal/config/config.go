@@ -321,12 +321,16 @@ type ServerConfig struct {
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
 	// SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
 	// Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
-	// migrated to auto_approve_tool_changes:true when the new field is unset
+	// migrated to auto_approve_tool_changes:true only when the new field is unset
 	// (see normalizeServerQuarantineFlags).
 	SkipQuarantine bool `json:"skip_quarantine,omitempty" mapstructure:"skip-quarantine"` // Deprecated: use auto_approve_tool_changes
 	// AutoApproveToolChanges auto-approves tool changes/additions for this server,
 	// disabling per-server rug-pull protection (MCP-2930). Supersedes skip_quarantine.
-	AutoApproveToolChanges bool             `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Auto-approve tool changes/additions for this server (disables per-server rug-pull protection)
+	// Tri-state pointer (mirrors QuarantineEnabled): nil = unset (inherit/migrate
+	// from legacy skip_quarantine), explicit true/false = honored as-is so an
+	// explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
+	// Read via IsAutoApproveToolChanges().
+	AutoApproveToolChanges *bool            `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Auto-approve tool changes/additions for this server (disables per-server rug-pull protection)
 	Shared                 bool             `json:"shared,omitempty" mapstructure:"shared"`                                       // Server edition: shared with all users
 	Created                time.Time        `json:"created" mapstructure:"created"`
 	Updated                time.Time        `json:"updated,omitempty" mapstructure:"updated"`
@@ -801,9 +805,10 @@ func normalizeRegistryProvenanceValues(cfg *Config) {
 // normalizeServerQuarantineFlags migrates the deprecated per-server
 // skip_quarantine flag onto its successor auto_approve_tool_changes (MCP-2930).
 // A legacy skip_quarantine:true is mapped to auto_approve_tool_changes:true only
-// when the new field is unset, so an explicit new-field value always wins. The
-// legacy field is left untouched for back-compat. Idempotent and nil-safe; runs
-// on every load/hot-reload via initializeRegistries.
+// when the new field is unset (nil), so an explicit new-field value — including an
+// explicit false — always wins over the legacy flag. The legacy field is left
+// untouched for back-compat. Idempotent and nil-safe; runs on every load/hot-reload
+// via initializeRegistries.
 func normalizeServerQuarantineFlags(cfg *Config) {
 	if cfg == nil {
 		return
@@ -812,8 +817,9 @@ func normalizeServerQuarantineFlags(cfg *Config) {
 		if s == nil {
 			continue
 		}
-		if s.SkipQuarantine && !s.AutoApproveToolChanges {
-			s.AutoApproveToolChanges = true
+		if s.SkipQuarantine && s.AutoApproveToolChanges == nil {
+			migrated := true
+			s.AutoApproveToolChanges = &migrated
 		}
 	}
 }
@@ -1281,11 +1287,12 @@ func (sc *ServerConfig) IsQuarantineSkipped() bool {
 
 // IsAutoApproveToolChanges reports whether tool changes/additions for this server
 // are auto-approved (disabling per-server rug-pull protection). Mirrors
-// IsQuarantineSkipped. The legacy skip_quarantine field is migrated into this
-// field at config load (see normalizeServerQuarantineFlags), so callers read the
-// new field exclusively. MCP-2930.
+// IsQuarantineSkipped (and IsQuarantineEnabled's *bool handling): an unset field
+// (nil) is false. The legacy skip_quarantine field is migrated into this field at
+// config load (see normalizeServerQuarantineFlags) only when it is unset, so an
+// explicit value always wins. MCP-2930.
 func (sc *ServerConfig) IsAutoApproveToolChanges() bool {
-	return sc.AutoApproveToolChanges
+	return sc.AutoApproveToolChanges != nil && *sc.AutoApproveToolChanges
 }
 
 // IsToolAllowedByConfig reports whether toolName passes the server's static

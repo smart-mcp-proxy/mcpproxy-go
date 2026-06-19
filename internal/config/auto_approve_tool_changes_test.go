@@ -10,17 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestServerConfig_IsAutoApproveToolChanges mirrors IsQuarantineSkipped: the
-// accessor simply reflects the new field (MCP-2930).
+// TestServerConfig_IsAutoApproveToolChanges mirrors IsQuarantineSkipped /
+// IsQuarantineEnabled: the accessor reflects the tri-state *bool field, treating
+// unset (nil) as false (MCP-2930).
 func TestServerConfig_IsAutoApproveToolChanges(t *testing.T) {
 	tests := []struct {
 		name     string
 		config   ServerConfig
 		expected bool
 	}{
-		{name: "default false", config: ServerConfig{}, expected: false},
-		{name: "explicit true", config: ServerConfig{AutoApproveToolChanges: true}, expected: true},
-		{name: "explicit false", config: ServerConfig{AutoApproveToolChanges: false}, expected: false},
+		{name: "unset (nil) is false", config: ServerConfig{}, expected: false},
+		{name: "explicit true", config: ServerConfig{AutoApproveToolChanges: boolPtr(true)}, expected: true},
+		{name: "explicit false", config: ServerConfig{AutoApproveToolChanges: boolPtr(false)}, expected: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -30,59 +31,81 @@ func TestServerConfig_IsAutoApproveToolChanges(t *testing.T) {
 }
 
 // TestServerConfig_AutoApproveToolChanges_JSONSerialization verifies the new
-// field round-trips through JSON and omits when false.
+// tri-state field distinguishes unset / explicit-true / explicit-false through
+// JSON and omits when unset.
 func TestServerConfig_AutoApproveToolChanges_JSONSerialization(t *testing.T) {
-	serverJSON := `{"name": "test", "auto_approve_tool_changes": true, "enabled": true}`
-	var sc ServerConfig
-	require.NoError(t, json.Unmarshal([]byte(serverJSON), &sc))
-	assert.True(t, sc.AutoApproveToolChanges)
-	assert.True(t, sc.IsAutoApproveToolChanges())
+	// Explicit true.
+	var scTrue ServerConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"t","auto_approve_tool_changes":true,"enabled":true}`), &scTrue))
+	require.NotNil(t, scTrue.AutoApproveToolChanges)
+	assert.True(t, *scTrue.AutoApproveToolChanges)
+	assert.True(t, scTrue.IsAutoApproveToolChanges())
 
-	// Omitted defaults to false.
-	var sc2 ServerConfig
-	require.NoError(t, json.Unmarshal([]byte(`{"name": "test", "enabled": true}`), &sc2))
-	assert.False(t, sc2.AutoApproveToolChanges)
-	assert.False(t, sc2.IsAutoApproveToolChanges())
+	// Explicit false is distinguishable from unset (non-nil pointer to false).
+	var scFalse ServerConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"t","auto_approve_tool_changes":false,"enabled":true}`), &scFalse))
+	require.NotNil(t, scFalse.AutoApproveToolChanges)
+	assert.False(t, *scFalse.AutoApproveToolChanges)
+	assert.False(t, scFalse.IsAutoApproveToolChanges())
 
-	// false omits from marshalled output (omitempty).
-	out, err := json.Marshal(ServerConfig{Name: "test"})
+	// Omitted => nil (unset).
+	var scUnset ServerConfig
+	require.NoError(t, json.Unmarshal([]byte(`{"name":"t","enabled":true}`), &scUnset))
+	assert.Nil(t, scUnset.AutoApproveToolChanges)
+	assert.False(t, scUnset.IsAutoApproveToolChanges())
+
+	// nil omits from marshalled output (omitempty); explicit false is emitted.
+	outUnset, err := json.Marshal(ServerConfig{Name: "t"})
 	require.NoError(t, err)
-	assert.NotContains(t, string(out), "auto_approve_tool_changes")
+	assert.NotContains(t, string(outUnset), "auto_approve_tool_changes")
+	outFalse, err := json.Marshal(ServerConfig{Name: "t", AutoApproveToolChanges: boolPtr(false)})
+	require.NoError(t, err)
+	assert.Contains(t, string(outFalse), `"auto_approve_tool_changes":false`)
 }
 
 // TestNormalizeServerQuarantineFlags covers the legacy skip_quarantine ->
-// auto_approve_tool_changes migration (MCP-2930).
+// auto_approve_tool_changes migration, including that an explicit new-field value
+// (even false) always wins over the legacy flag (MCP-2930).
 func TestNormalizeServerQuarantineFlags(t *testing.T) {
 	t.Run("legacy skip_quarantine true maps when new field unset", func(t *testing.T) {
-		cfg := &Config{Servers: []*ServerConfig{
-			{Name: "legacy", SkipQuarantine: true},
-		}}
+		cfg := &Config{Servers: []*ServerConfig{{Name: "legacy", SkipQuarantine: true}}}
 		normalizeServerQuarantineFlags(cfg)
-		assert.True(t, cfg.Servers[0].AutoApproveToolChanges, "legacy true should map to new field")
+		assert.True(t, cfg.Servers[0].IsAutoApproveToolChanges(), "legacy true should map to new field")
 	})
 
-	t.Run("explicit new field wins over legacy", func(t *testing.T) {
-		// New field already true, legacy false: stays true.
+	t.Run("explicit new field true wins over legacy false", func(t *testing.T) {
 		cfg := &Config{Servers: []*ServerConfig{
-			{Name: "new", SkipQuarantine: false, AutoApproveToolChanges: true},
+			{Name: "new", SkipQuarantine: false, AutoApproveToolChanges: boolPtr(true)},
 		}}
 		normalizeServerQuarantineFlags(cfg)
-		assert.True(t, cfg.Servers[0].AutoApproveToolChanges)
+		assert.True(t, cfg.Servers[0].IsAutoApproveToolChanges())
 	})
 
-	t.Run("new field already set is not clobbered by legacy", func(t *testing.T) {
-		// Both set true: idempotent, stays true.
+	t.Run("explicit new field false wins over legacy true (regression: explicit-false honored)", func(t *testing.T) {
+		// The crux: a user who sets skip_quarantine:true AND auto_approve_tool_changes:false
+		// must keep auto-approval OFF. A plain bool could not express this.
 		cfg := &Config{Servers: []*ServerConfig{
-			{Name: "both", SkipQuarantine: true, AutoApproveToolChanges: true},
+			{Name: "override-off", SkipQuarantine: true, AutoApproveToolChanges: boolPtr(false)},
 		}}
 		normalizeServerQuarantineFlags(cfg)
-		assert.True(t, cfg.Servers[0].AutoApproveToolChanges)
+		require.NotNil(t, cfg.Servers[0].AutoApproveToolChanges)
+		assert.False(t, *cfg.Servers[0].AutoApproveToolChanges, "explicit false must not be clobbered by legacy true")
+		assert.False(t, cfg.Servers[0].IsAutoApproveToolChanges())
 	})
 
-	t.Run("neither set stays false", func(t *testing.T) {
+	t.Run("both legacy and new true is idempotent", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{
+			{Name: "both", SkipQuarantine: true, AutoApproveToolChanges: boolPtr(true)},
+		}}
+		normalizeServerQuarantineFlags(cfg)
+		assert.True(t, cfg.Servers[0].IsAutoApproveToolChanges())
+	})
+
+	t.Run("neither set stays unset/false", func(t *testing.T) {
 		cfg := &Config{Servers: []*ServerConfig{{Name: "none"}}}
 		normalizeServerQuarantineFlags(cfg)
-		assert.False(t, cfg.Servers[0].AutoApproveToolChanges)
+		assert.Nil(t, cfg.Servers[0].AutoApproveToolChanges)
+		assert.False(t, cfg.Servers[0].IsAutoApproveToolChanges())
 	})
 
 	t.Run("nil config and nil server are safe", func(t *testing.T) {
@@ -93,17 +116,17 @@ func TestNormalizeServerQuarantineFlags(t *testing.T) {
 }
 
 // TestAutoApproveToolChanges_RoundTrip_SaveLoad verifies the field survives a
-// SaveConfig -> LoadFromFile round-trip, and that a legacy config file is
-// normalized on load.
+// SaveConfig -> LoadFromFile round-trip (including explicit false), and that a
+// legacy config file is normalized on load.
 func TestAutoApproveToolChanges_RoundTrip_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
 
-	t.Run("new field round-trips", func(t *testing.T) {
+	t.Run("new field true round-trips", func(t *testing.T) {
 		path := filepath.Join(dir, "new.json")
 		cfg := DefaultConfig()
 		cfg.DataDir = dir
 		cfg.Servers = []*ServerConfig{
-			{Name: "srv", Protocol: "stdio", Command: "npx", Enabled: true, AutoApproveToolChanges: true},
+			{Name: "srv", Protocol: "stdio", Command: "npx", Enabled: true, AutoApproveToolChanges: boolPtr(true)},
 		}
 		require.NoError(t, SaveConfig(cfg, path))
 
@@ -111,6 +134,22 @@ func TestAutoApproveToolChanges_RoundTrip_SaveLoad(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, loaded.Servers, 1)
 		assert.True(t, loaded.Servers[0].IsAutoApproveToolChanges())
+	})
+
+	t.Run("explicit false round-trips and is not migrated", func(t *testing.T) {
+		path := filepath.Join(dir, "false.json")
+		cfg := DefaultConfig()
+		cfg.DataDir = dir
+		cfg.Servers = []*ServerConfig{
+			{Name: "srv", Protocol: "stdio", Command: "npx", Enabled: true, SkipQuarantine: true, AutoApproveToolChanges: boolPtr(false)},
+		}
+		require.NoError(t, SaveConfig(cfg, path))
+
+		loaded, err := LoadFromFile(path)
+		require.NoError(t, err)
+		require.Len(t, loaded.Servers, 1)
+		require.NotNil(t, loaded.Servers[0].AutoApproveToolChanges)
+		assert.False(t, loaded.Servers[0].IsAutoApproveToolChanges(), "explicit false survives load + normalize")
 	})
 
 	t.Run("legacy skip_quarantine file normalizes on load", func(t *testing.T) {

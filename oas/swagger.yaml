@@ -649,6 +649,10 @@ components:
           description: |-
             AutoApproveToolChanges auto-approves tool changes/additions for this server,
             disabling per-server rug-pull protection (MCP-2930). Supersedes skip_quarantine.
+            Tri-state pointer (mirrors QuarantineEnabled): nil = unset (inherit/migrate
+            from legacy skip_quarantine), explicit true/false = honored as-is so an
+            explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
+            Read via IsAutoApproveToolChanges().
           type: boolean
         command:
           type: string
@@ -720,7 +724,7 @@ components:
           description: |-
             SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
             Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
-            migrated to auto_approve_tool_changes:true when the new field is unset
+            migrated to auto_approve_tool_changes:true only when the new field is unset
             (see normalizeServerQuarantineFlags).
           type: boolean
         source_registry_id:
