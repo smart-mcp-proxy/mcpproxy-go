@@ -22,7 +22,7 @@
       <!-- Client list -->
       <div v-else class="space-y-2">
         <div
-          v-for="client in clients"
+          v-for="client in mergedClients"
           :key="client.id"
           class="flex items-center justify-between p-3 rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors"
         >
@@ -91,6 +91,7 @@
 import { ref, reactive, computed, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
+import { useOnboardingStore } from '@/stores/onboarding'
 import type { ClientStatus } from '@/types'
 
 interface Props {
@@ -104,6 +105,7 @@ interface Emits {
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
 const systemStore = useSystemStore()
+const onboarding = useOnboardingStore()
 
 const clients = ref<ClientStatus[]>([])
 const error = ref<string | null>(null)
@@ -114,10 +116,22 @@ const loading = reactive({
   clients: {} as Record<string, boolean>,
 })
 
+// MCP-2952: `GET /api/v1/connect` is stat-only (#706/MCP-2829) and reports
+// connected=false for every client. Merge the content-resolved
+// connected_client_ids (fetched on open via onboarding.fetchState) so already
+// connected clients render Disconnect instead of a fresh Connect button.
+// Derived (not mutated) so refreshes stay correct.
+const mergedClients = computed<ClientStatus[]>(() => {
+  const connectedIds = new Set(onboarding.connectedClientIds)
+  return clients.value.map(c =>
+    c.connected || !connectedIds.has(c.id) ? c : { ...c, connected: true }
+  )
+})
+
 const connectableClients = computed(() =>
   // Bridge clients (e.g. Claude Desktop) can be connected even without an
   // existing config file — Connect creates it.
-  clients.value.filter(c => c.supported && (c.exists || c.bridge) && !c.connected)
+  mergedClients.value.filter(c => c.supported && (c.exists || c.bridge) && !c.connected)
 )
 
 const allConnected = computed(() =>
@@ -226,10 +240,13 @@ function close() {
   emit('close')
 }
 
-// Fetch client list when modal opens
+// Fetch client list when modal opens. Also refresh the onboarding state so
+// connected_client_ids is current — this is the wizard-scoped, #706-safe path
+// that already content-resolves connections (MCP-2952).
 watch(() => props.show, (newVal) => {
   if (newVal) {
     fetchClients()
+    void onboarding.fetchState()
     resultMessage.value = ''
   }
 })
