@@ -23,16 +23,13 @@ import (
 // classifyAndAttach converts a raw connection error into a DiagnosticError and
 // stores it on the server status. Called from the supervisor's reconcile and
 // event paths. Spec 044.
-func classifyAndAttach(status *stateview.ServerStatus, err error, transport string, dockerIsolated bool) {
+func classifyAndAttach(status *stateview.ServerStatus, err error, hints diagnostics.ClassifierHints) {
 	if err == nil {
 		status.Diagnostic = nil
 		return
 	}
-	code := diagnostics.Classify(err, diagnostics.ClassifierHints{
-		Transport:      transport,
-		ServerID:       status.Name,
-		DockerIsolated: dockerIsolated,
-	})
+	hints.ServerID = status.Name
+	code := diagnostics.Classify(err, hints)
 	if code == "" {
 		// Classify always returns at least UnknownUnclassified for non-nil err,
 		// so reaching here means a logic regression. Defensive fallback keeps
@@ -46,12 +43,40 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, transport stri
 		msg = msg[:maxCause] + "..."
 	}
 	status.Diagnostic = &diagnostics.DiagnosticError{
-		Code:       code,
-		Severity:   entry.Severity,
-		Cause:      msg,
-		ServerID:   status.Name,
-		DetectedAt: time.Now(),
+		Code:     code,
+		Severity: entry.Severity,
+		Cause:    msg,
+		// MCP-2909: runtime-aware override of the static catalog message when
+		// context (detected runtime + recommended image + override culprit) is
+		// available; empty otherwise so the generic UserMessage is used.
+		Remediation: diagnostics.RuntimeAwareRemediation(code, hints),
+		ServerID:    status.Name,
+		DetectedAt:  time.Now(),
 	}
+}
+
+// classifierHints builds the diagnostics.ClassifierHints for a server's failure,
+// including the Docker-isolation enrichment context (MCP-2909) the
+// DockerExecNotFound remediation needs: the configured command (→ detected
+// runtime), the per-server isolation.image override (likely culprit), and the
+// global default_images map (→ recommended image). The enrichment fields are
+// only populated for Docker-isolated servers; they are inert for every other
+// code.
+func (s *Supervisor) classifierHints(srv *config.ServerConfig, transport string) diagnostics.ClassifierHints {
+	hints := diagnostics.ClassifierHints{
+		Transport:      transport,
+		DockerIsolated: s.usesDockerIsolation(srv),
+	}
+	if hints.DockerIsolated && srv != nil {
+		hints.DockerCommand = srv.Command
+		if srv.Isolation != nil {
+			hints.DockerImageOverride = srv.Isolation.Image
+		}
+		if snap := s.configSvc.Current(); snap != nil && snap.Config != nil && snap.Config.DockerIsolation != nil {
+			hints.DockerDefaultImages = snap.Config.DockerIsolation.DefaultImages
+		}
+	}
+	return hints
 }
 
 // usesDockerIsolation reports whether the given server would be launched
@@ -710,7 +735,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				if state.Config != nil {
 					transport = transportpkg.DetermineTransportType(state.Config)
 				}
-				classifyAndAttach(status, state.ConnectionInfo.LastError, transport, s.usesDockerIsolation(state.Config))
+				classifyAndAttach(status, state.ConnectionInfo.LastError, s.classifierHints(state.Config, transport))
 				// Spec 044 Phase H: notify telemetry counter store.
 				if status.Diagnostic != nil {
 					s.callbackMu.RLock()
@@ -1008,7 +1033,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 						if status.Config != nil {
 							transport = transportpkg.DetermineTransportType(status.Config)
 						}
-						classifyAndAttach(status, connInfo.LastError, transport, s.usesDockerIsolation(status.Config))
+						classifyAndAttach(status, connInfo.LastError, s.classifierHints(status.Config, transport))
 						// Spec 044 Phase H: notify telemetry counter store.
 						if status.Diagnostic != nil {
 							s.callbackMu.RLock()

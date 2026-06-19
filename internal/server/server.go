@@ -902,7 +902,14 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				"detected_at": d.DetectedAt,
 			}
 			if entry, ok := diagnostics.Get(d.Code); ok {
-				diagMap["user_message"] = entry.UserMessage
+				// MCP-2909: prefer the runtime-aware remediation when present so
+				// the user sees the detected runtime + recommended image instead
+				// of the generic catalog message.
+				if d.Remediation != "" {
+					diagMap["user_message"] = d.Remediation
+				} else {
+					diagMap["user_message"] = entry.UserMessage
+				}
 				diagMap["fix_steps"] = entry.FixSteps
 				diagMap["docs_url"] = entry.DocsURL
 			}

@@ -68,6 +68,7 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 
 - [`MCPX_DOCKER_DAEMON_DOWN`](MCPX_DOCKER_DAEMON_DOWN.md) — daemon unreachable
 - [`MCPX_DOCKER_IMAGE_PULL_FAILED`](MCPX_DOCKER_IMAGE_PULL_FAILED.md) — pull failed
+- [`MCPX_DOCKER_EXEC_NOT_FOUND`](MCPX_DOCKER_EXEC_NOT_FOUND.md) — image missing the runtime interpreter (e.g. no `uvx`)
 - [`MCPX_DOCKER_NO_PERMISSION`](MCPX_DOCKER_NO_PERMISSION.md) — socket permission denied
 - [`MCPX_DOCKER_SNAP_APPARMOR`](MCPX_DOCKER_SNAP_APPARMOR.md) — snap Docker AppArmor block
 
