@@ -157,6 +157,12 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 		diag.DockerStatus = s.checkDockerDaemon()
 	}
 
+	// macOS App-Data (TCC) denial probe (Spec 075 US3): surface a persisted denial
+	// to read MCP client configs as an actionable runtime warning. No-op off darwin.
+	if warning, ok := appDataDenialWarning(); ok {
+		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
+	}
+
 	// Calculate total issues
 	diag.TotalIssues = len(diag.UpstreamErrors) + len(diag.OAuthRequired) +
 		len(diag.OAuthIssues) + len(diag.MissingSecrets) + len(diag.RuntimeWarnings)
