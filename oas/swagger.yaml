@@ -2341,10 +2341,13 @@ components:
           additionalProperties:
             type: string
           description: |-
-            Rename maps OriginalName → new name. Applied after parsing so the
+            Rename maps a server name → new name. Applied after parsing so the
             caller can disambiguate cross-source name collisions (Spec 046 v2 —
-            e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys not present in the
-            imported set are ignored.
+            e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys are matched against
+            either the raw source name (OriginalName) or the sanitized name shown
+            in the preview (Server.Name); these differ for names that need
+            sanitizing (e.g. "Figma Desktop" → "Figma_Desktop"). Keys not present
+            in the imported set are ignored.
           type: object
         server_names:
           description: 'Optional: import only these servers'
