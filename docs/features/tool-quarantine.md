@@ -232,6 +232,16 @@ appear at once.
 
 The server list page shows a quarantine badge with the count of pending/changed tools for each server.
 
+The server detail view's **Configuration** tab carries an **Auto-approve tool
+changes** toggle (a **Tool-change approval** card) bound to the per-server
+`auto_approve_tool_changes` flag. It is **OFF by default (protected)**; a ⚠️ hint
+beneath it explains that enabling it disables rug-pull protection for that
+server — future tool description/schema changes and newly added tools are then
+trusted automatically instead of held for review. Toggling persists through the
+existing `PATCH /api/v1/servers/{id}` path. (As noted under
+[Per-Server Auto-Approve](#per-server-auto-approve), the runtime enforcement of
+this flag rolls out in an upcoming release.)
+
 ### Doctor Command
 
 The `mcpproxy doctor` command includes a "Tools Pending Quarantine Approval" section:

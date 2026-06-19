@@ -705,6 +705,60 @@
               </div>
             </div>
 
+            <!-- Tool-change approval (rug-pull protection) — MCP-2932.
+                 Bound to the per-server `auto_approve_tool_changes` config flag
+                 (MCP-2930). OFF by default = protected: a tool whose
+                 description/schema changes, or a newly-added tool, is held for
+                 review before AI agents can use it. ON trusts those changes
+                 automatically, disabling rug-pull protection for this server. -->
+            <div class="card bg-base-100 shadow-sm" data-test="auto-approve-card">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Tool-change approval</h3>
+                <label class="flex items-center gap-3 mt-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-test="auto-approve-tool-changes"
+                    :checked="autoApproveToolChanges"
+                    @change="toggleAutoApproveToolChanges"
+                    class="toggle toggle-sm toggle-warning"
+                    :disabled="kvPatchInFlight"
+                  />
+                  <span class="text-sm font-medium">Auto-approve tool changes</span>
+                </label>
+                <!-- Rug-pull warning sits directly beneath the toggle. Always
+                     visible so the trade-off is clear before enabling; it
+                     escalates to an alert once the protection is actually off. -->
+                <div
+                  v-if="autoApproveToolChanges"
+                  data-test="auto-approve-warning"
+                  role="alert"
+                  class="alert alert-warning mt-2 py-2 text-sm"
+                >
+                  <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span>
+                    Rug-pull protection is <strong>disabled</strong> for this server.
+                    Future changes to a tool's description or schema — and newly
+                    added tools — are trusted automatically instead of held for review.
+                  </span>
+                </div>
+                <p
+                  v-else
+                  data-test="auto-approve-warning"
+                  class="text-xs text-base-content/60 mt-2 flex items-start gap-1.5"
+                >
+                  <span aria-hidden="true">⚠️</span>
+                  <span>
+                    Enabling this <strong>disables rug-pull protection</strong>: changed
+                    tool descriptions/schemas and newly added tools will be trusted
+                    automatically instead of held for review. Protected (default) is
+                    recommended.
+                  </span>
+                </p>
+              </div>
+            </div>
+
             <!-- Connection (HTTP/SSE) -->
             <div v-if="server.url" class="card bg-base-100 shadow-sm">
               <div class="card-body py-4">
@@ -2615,6 +2669,27 @@ async function patchServerDiff(patch: Record<string, unknown>, action: string): 
 
 function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
   return scope === 'header' ? 'headers' : 'env'
+}
+
+// MCP-2932: per-server "Auto-approve tool changes" toggle. Absent/undefined on
+// the status payload is treated as OFF (protected) — see the Server type note.
+const autoApproveToolChanges = computed(() => server.value?.auto_approve_tool_changes ?? false)
+
+async function toggleAutoApproveToolChanges(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  // Persist through the existing PATCH /api/v1/servers/{id} path. The backend
+  // auto-approves changed/added tools on the next discovery pass for this
+  // server (MCP-2931); patchServerDiff surfaces the success toast.
+  const ok = await patchServerDiff(
+    { auto_approve_tool_changes: checked },
+    checked ? 'Auto-approve tool changes enabled' : 'Auto-approve tool changes disabled'
+  )
+  // On failure, snap the checkbox back to the persisted value: patchServerDiff
+  // refetches servers on success, so the bound computed already reflects truth;
+  // an explicit no-op here keeps the control consistent with `server`.
+  if (!ok && event.target) {
+    ;(event.target as HTMLInputElement).checked = autoApproveToolChanges.value
+  }
 }
 
 async function saveEdit(scope: 'header' | 'env', k: string, val: string) {
