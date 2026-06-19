@@ -1821,6 +1821,15 @@ components:
         authenticated:
           description: OAuth authentication status
           type: boolean
+        auto_approve_tool_changes:
+          description: |-
+            AutoApproveToolChanges mirrors config.ServerConfig.AutoApproveToolChanges
+            (MCP-2930): the per-server intent to auto-approve new/changed tools past
+            the trust baseline. Tri-state *bool — nil means "never set" (omitted from
+            the payload), so the Web UI toggle (MCP-2932) can distinguish unset from
+            an explicit false. Read-only on the GET path; PATCH/POST accept it via
+            AddServerRequest.
+          type: boolean
         command:
           type: string
         connected:
@@ -2242,6 +2251,15 @@ components:
             type: string
           type: array
           uniqueItems: false
+        auto_approve_tool_changes:
+          description: |-
+            AutoApproveToolChanges is the per-server intent to auto-approve
+            new/changed tools past the trust baseline (MCP-2930). Tri-state *bool:
+            a nil pointer means "leave unchanged" on PATCH; a present value
+            (including false) is applied. Mirrors config.ServerConfig's *bool
+            semantics — do NOT collapse to a plain bool, or an omitted field would
+            silently reset a previously-set value.
+          type: boolean
         command:
           type: string
         enabled:

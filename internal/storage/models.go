@@ -83,25 +83,32 @@ const OutputSchemaHashSchemaVersion = 3
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
-	ID                  string                  `json:"id"`
-	Name                string                  `json:"name"`
-	URL                 string                  `json:"url,omitempty"`
-	Protocol            string                  `json:"protocol,omitempty"` // stdio, http, sse, streamable-http, auto
-	Command             string                  `json:"command,omitempty"`
-	Args                []string                `json:"args,omitempty"`
-	WorkingDir          string                  `json:"working_dir,omitempty"` // Working directory for stdio servers
-	Env                 map[string]string       `json:"env,omitempty"`
-	Headers             map[string]string       `json:"headers,omitempty"` // For HTTP authentication
-	OAuth               *config.OAuthConfig     `json:"oauth,omitempty"`   // OAuth configuration
-	Enabled             bool                    `json:"enabled"`
-	Quarantined         bool                    `json:"quarantined"` // Security quarantine status
-	Created             time.Time               `json:"created"`
-	Updated             time.Time               `json:"updated"`
-	Isolation           *config.IsolationConfig `json:"isolation,omitempty"`             // Per-server isolation settings
-	ReconnectOnUse      bool                    `json:"reconnect_on_use,omitempty"`      // Attempt reconnection on tool call
-	LauncherWaitTimeout config.Duration         `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
-	EnabledTools        []string                `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
-	DisabledTools       []string                `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
+	ID             string                  `json:"id"`
+	Name           string                  `json:"name"`
+	URL            string                  `json:"url,omitempty"`
+	Protocol       string                  `json:"protocol,omitempty"` // stdio, http, sse, streamable-http, auto
+	Command        string                  `json:"command,omitempty"`
+	Args           []string                `json:"args,omitempty"`
+	WorkingDir     string                  `json:"working_dir,omitempty"` // Working directory for stdio servers
+	Env            map[string]string       `json:"env,omitempty"`
+	Headers        map[string]string       `json:"headers,omitempty"` // For HTTP authentication
+	OAuth          *config.OAuthConfig     `json:"oauth,omitempty"`   // OAuth configuration
+	Enabled        bool                    `json:"enabled"`
+	Quarantined    bool                    `json:"quarantined"` // Security quarantine status
+	Created        time.Time               `json:"created"`
+	Updated        time.Time               `json:"updated"`
+	Isolation      *config.IsolationConfig `json:"isolation,omitempty"`        // Per-server isolation settings
+	ReconnectOnUse bool                    `json:"reconnect_on_use,omitempty"` // Attempt reconnection on tool call
+	// AutoApproveToolChanges (MCP-2930/MCP-2940) is the per-server intent to
+	// auto-approve new/changed tools past the trust baseline. Tri-state *bool.
+	// Persisted to BBolt because SaveConfiguration rebuilds the JSON config's
+	// server list from these records — a field absent here is wiped on the
+	// next mutation, so REST/UI toggling (MCP-2932) and runtime enforcement
+	// (MCP-2931) would not survive a save/restart without it.
+	AutoApproveToolChanges *bool           `json:"auto_approve_tool_changes,omitempty"`
+	LauncherWaitTimeout    config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
+	EnabledTools           []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
+	DisabledTools          []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
 	// MCP-866: persist a server's registry origin + provenance so the
 	// approval/quarantine view and the custom-origin skip_quarantine guard
 	// survive a restart.

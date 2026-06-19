@@ -82,6 +82,8 @@ Trust specific servers by skipping per-server tool-change review:
 
 > **Note — rollout:** `auto_approve_tool_changes` is config-plumbed but its **enforcement is not yet wired** — runtime auto-approval is still governed by `skip_quarantine`. The new flag becomes the active control (and gains the richer rug-pull / trust-baseline behavior) in an upcoming release. Existing `skip_quarantine` configs are unaffected and are migrated onto the new key automatically. To auto-approve a server today, set `skip_quarantine: true`.
 
+> **REST API:** `auto_approve_tool_changes` round-trips through the server REST API. `GET /api/v1/servers` includes it on each server object (omitted when unset — the tri-state nil is preserved so the Web UI can tell "never set" from an explicit `false`), and `POST`/`PATCH /api/v1/servers/{id}` accept it. As a tri-state `*bool`, omitting it on `PATCH` leaves the stored value unchanged; sending an explicit `false` clears a prior `true`. The value is persisted to BBolt so it survives a save/restart.
+
 When the active control is enabled for a server, new tools from it are automatically approved.
 
 ### Auto-Approve Behavior

@@ -200,6 +200,43 @@ func TestConvertServerConfig_SourceRegistry(t *testing.T) {
 	assert.Empty(t, manual.SourceRegistryProvenance)
 }
 
+// TestConvertGenericServersToTyped_AutoApproveToolChanges verifies the
+// per-server auto_approve_tool_changes flag (MCP-2940) survives the
+// generic-map fallback projection so the Web UI toggle can read it. A server
+// that never set the flag must leave the pointer nil (tri-state), not coerce
+// to false.
+func TestConvertGenericServersToTyped_AutoApproveToolChanges(t *testing.T) {
+	genericServers := []map[string]interface{}{
+		{"id": "on", "name": "on", "enabled": true, "auto_approve_tool_changes": true},
+		{"id": "off", "name": "off", "enabled": true, "auto_approve_tool_changes": false},
+		{"id": "unset", "name": "unset", "enabled": true},
+	}
+
+	servers := ConvertGenericServersToTyped(genericServers)
+	require.Len(t, servers, 3)
+
+	require.NotNil(t, servers[0].AutoApproveToolChanges)
+	assert.True(t, *servers[0].AutoApproveToolChanges)
+
+	require.NotNil(t, servers[1].AutoApproveToolChanges)
+	assert.False(t, *servers[1].AutoApproveToolChanges)
+
+	assert.Nil(t, servers[2].AutoApproveToolChanges, "unset flag must stay nil, not coerce to false")
+}
+
+// TestConvertServerConfig_AutoApproveToolChanges verifies the direct
+// config→contracts mapper carries the auto_approve_tool_changes pointer.
+func TestConvertServerConfig_AutoApproveToolChanges(t *testing.T) {
+	on := true
+	cfg := &config.ServerConfig{Name: "on", Enabled: true, AutoApproveToolChanges: &on}
+	server := ConvertServerConfig(cfg, "ready", true, 0, false)
+	require.NotNil(t, server.AutoApproveToolChanges)
+	assert.True(t, *server.AutoApproveToolChanges)
+
+	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, "ready", true, 0, false)
+	assert.Nil(t, unset.AutoApproveToolChanges)
+}
+
 // TestConvertGenericServersToTyped_NoOAuth verifies servers without OAuth have nil OAuth field
 func TestConvertGenericServersToTyped_NoOAuth(t *testing.T) {
 	genericServers := []map[string]interface{}{
