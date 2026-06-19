@@ -752,6 +752,7 @@ func (s *Server) setupRoutes() {
 
 		// Client connect/disconnect
 		r.Get("/connect", s.handleGetConnectStatus)
+		r.Get("/connect/{client}", s.handleGetConnectClientStatus)
 		r.Post("/connect/{client}", s.handleConnectClient)
 		r.Delete("/connect/{client}", s.handleDisconnectClient)
 

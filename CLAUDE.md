@@ -117,6 +117,8 @@ Env vars: `MCPPROXY_LISTEN`, `MCPPROXY_API_KEY`, `MCPPROXY_DEBUG`, `MCPPROXY_TEL
 
 All server responses include a unified `health` field: `level` (healthy|degraded|unhealthy), `admin_state` (enabled|disabled|quarantined), plus `summary`/`detail`/`action`.
 
+**Connect payload (Spec 075)**: `GET /api/v1/connect` is content-read-free (stat-only; no macOS App-Data prompt) — each `ClientStatus` carries `access_state="unknown"`. `GET /api/v1/connect/{client}` resolves it on-demand to `accessible|absent|malformed|denied` (+ `remediation` when denied); a denied connect/disconnect returns `403` with remediation. See [docs/api/rest-api.md](docs/api/rest-api.md#connect-client-wizard).
+
 ## Security Model
 
 - **Localhost-only by default** (`127.0.0.1:8080`); **API key always required** (auto-generated and persisted if not provided).

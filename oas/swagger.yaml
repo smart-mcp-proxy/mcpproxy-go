@@ -3357,6 +3357,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Permission denied (macOS App-Data block)
         "404":
           content:
             application/json:
@@ -3373,6 +3379,46 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Disconnect MCPProxy from a client
+      tags:
+      - connect
+    get:
+      description: |-
+        Resolves one client's status by reading its config file on demand.
+        This is the only Connect endpoint that opens a client config file, so
+        on macOS it is the sole place an App-Data privacy prompt may legitimately
+        appear (scoped to this user action). Resolves access_state to
+        accessible|absent|denied|malformed and populates remediation when denied.
+      parameters:
+      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
+          codex, gemini, opencode)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: ClientStatus
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown client
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get a single client's connection status (on-demand)
       tags:
       - connect
     post:
@@ -3406,6 +3452,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Permission denied (macOS App-Data block)
         "404":
           content:
             application/json:

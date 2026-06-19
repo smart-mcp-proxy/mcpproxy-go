@@ -81,11 +81,11 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T025 [P] Map new `ClientStatus` fields (`access_state`, `remediation`) into the REST response in `internal/httpapi/connect.go`; ensure GET `/connect` payload is additive only. Confirm/append a per-client GET `/connect/{client}` on-demand status route per contracts (or document that connect/disconnect carry the denied error).
-- [ ] T026 [P] Run the existing Connect REST contract/integration tests and `./scripts/test-api-e2e.sh`; confirm no regression (SC-006).
-- [ ] T027 [P] Run CI linter locally: `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml internal/connect/... internal/httpapi/... internal/<diagnostics-pkg>/...` → 0 issues (Constitution V; CI uses v2).
-- [ ] T028 [P] Docs: add a short macOS "App Data privacy & Connect" note (cause + `tccutil reset` remediation) to the Connect/troubleshooting docs and update CLAUDE.md REST-payload notes for the new fields (Constitution VI).
-- [ ] T029 Full verification: `go build ./cmd/mcpproxy && go build -tags server ./cmd/mcpproxy && go test -race ./internal/connect/... ./internal/httpapi/... ./internal/<diagnostics-pkg>/...`. Update execution_log.md.
+- [x] T025 [P] Map new `ClientStatus` fields (`access_state`, `remediation`) into the REST response in `internal/httpapi/connect.go`; ensure GET `/connect` payload is additive only. Confirm/append a per-client GET `/connect/{client}` on-demand status route per contracts (or document that connect/disconnect carry the denied error). DONE: GET `/connect` already serializes the additive fields (`unknown`); added `GET /connect/{client}` on-demand route (`handleGetConnectClientStatus` → `GetStatus`, 404 unknown, denied reported in-band) and mapped denied connect/disconnect `*AccessError` → `403` with remediation.
+- [x] T026 [P] Run the existing Connect REST contract/integration tests and `./scripts/test-api-e2e.sh`; confirm no regression (SC-006). DONE: `test-api-e2e.sh` 65/65 PASS; new REST tests in `connect_test.go` green.
+- [x] T027 [P] Run CI linter locally: `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml internal/connect/... internal/httpapi/...` → 0 issues (Constitution V; CI uses v2). DONE: 0 issues. (diagnostics-pkg doctor check is separate issue MCP-2831, not yet on main.)
+- [x] T028 [P] Docs: add a short macOS "App Data privacy & Connect" note (cause + `tccutil reset` remediation) to the Connect/troubleshooting docs and update CLAUDE.md REST-payload notes for the new fields (Constitution VI). DONE: `docs/api/rest-api.md` Connect section + CLAUDE.md REST note.
+- [x] T029 Full verification: `go build ./cmd/mcpproxy && go build -tags server ./cmd/mcpproxy && go test -race ./internal/connect/... ./internal/httpapi/...`. DONE: both editions build; race tests green; `make swagger` regenerated `oas/`.
 - [ ] T030 [P] (Optional, separable) Frontend: render the `unknown`/`denied` tri-state + remediation banner in the Connect view (`frontend/src/`), verified via the Playwright sweep in CLAUDE.md. Not required for backend MVP.
 
 ---
