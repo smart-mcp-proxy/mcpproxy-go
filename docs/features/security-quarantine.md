@@ -175,7 +175,7 @@ In addition to server-level quarantine, MCPProxy provides **tool-level quarantin
 See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 - SHA256 hash-based tool approval
 - CLI commands: `mcpproxy upstream inspect` and `mcpproxy upstream approve`
-- Configuration: `quarantine_enabled` and `skip_quarantine`
+- Configuration: `quarantine_enabled` and `skip_quarantine` (successor key `auto_approve_tool_changes` is accepted but not yet enforced)
 - REST API endpoints for tool approval management
 
 ### Block (approve + disable)
@@ -215,7 +215,7 @@ When `quarantine_enabled` is `false`:
 
 An explicit `quarantined` field in an add-server request still wins over
 the default, so client code can always override on a per-server basis.
-Per-server `skip_quarantine: true` continues to apply at the tool level.
+Per-server `skip_quarantine: true` continues to apply at the tool level (its successor `auto_approve_tool_changes` becomes the active control in an upcoming release).
 
 Warning: Disabling quarantine exposes your system to Tool Poisoning
 Attacks. Only do this on machines where every MCP server you connect to

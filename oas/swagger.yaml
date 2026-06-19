@@ -645,6 +645,19 @@ components:
             type: string
           type: array
           uniqueItems: false
+        auto_approve_tool_changes:
+          description: |-
+            AutoApproveToolChanges is the per-server intent to auto-approve tool
+            changes/additions (disabling per-server rug-pull protection). Supersedes
+            skip_quarantine. MCP-2930 only ACCEPTS, persists, and migrates this flag — it
+            is NOT yet consulted at runtime; auto-approval is still governed by
+            SkipQuarantine until the trust-baseline behavior change (MCP-2931) migrates the
+            runtime consumers onto it.
+            Tri-state pointer (mirrors QuarantineEnabled): nil = unset (inherit/migrate
+            from legacy skip_quarantine), explicit true/false = honored as-is so an
+            explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
+            Read via IsAutoApproveToolChanges().
+          type: boolean
         command:
           type: string
         created:
@@ -712,7 +725,11 @@ components:
           description: 'Server edition: shared with all users'
           type: boolean
         skip_quarantine:
-          description: Skip tool-level quarantine for this server
+          description: |-
+            SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
+            Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
+            migrated to auto_approve_tool_changes:true only when the new field is unset
+            (see normalizeServerQuarantineFlags).
           type: boolean
         source_registry_id:
           description: |-

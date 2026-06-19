@@ -121,7 +121,7 @@ All server responses include a unified `health` field: `level` (healthy|degraded
 
 - **Localhost-only by default** (`127.0.0.1:8080`); **API key always required** (auto-generated and persisted if not provided).
 - **Agent tokens**: scoped credentials for AI agents (`mcp_agt_` prefix, HMAC-SHA256 hashed). See [docs/features/agent-tokens.md](docs/features/agent-tokens.md).
-- **Quarantine**: new servers quarantined until approved; Tool Poisoning Attack (TPA) detection on descriptions. **Tool-level quarantine (Spec 032)**: SHA-256 hashes detect new ("pending") and changed ("changed", rug-pull) tools. Config: `quarantine_enabled` (global), `skip_quarantine` (per-server). See [docs/features/security-quarantine.md](docs/features/security-quarantine.md).
+- **Quarantine**: new servers quarantined until approved; Tool Poisoning Attack (TPA) detection on descriptions. **Tool-level quarantine (Spec 032)**: SHA-256 hashes detect new ("pending") and changed ("changed", rug-pull) tools. Config: `quarantine_enabled` (global), `skip_quarantine` (per-server; successor `auto_approve_tool_changes` plumbed but not yet enforced — MCP-2930/2931). See [docs/features/security-quarantine.md](docs/features/security-quarantine.md).
 - **`require_mcp_auth`**: when enabled, `/mcp` rejects unauthenticated requests (default off, for back-compat).
 - **Sensitive-data detection** (`internal/security/`): scans tool args/responses for secrets (cloud creds, private keys, API tokens, DB strings, Luhn-validated cards, sensitive file paths, high-entropy strings). On by default; integrates with the activity log. Config under `sensitive_data_detection`. See [docs/features/sensitive-data-detection.md](docs/features/sensitive-data-detection.md).
 

@@ -228,26 +228,29 @@ func TestSaveServerSyncPreservesNilFields(t *testing.T) {
 func TestSaveServerSyncFieldCoverage(t *testing.T) {
 	// List of ServerConfig fields that ARE expected to be copied
 	expectedFields := map[string]bool{
-		"Name":                true,
-		"URL":                 true,
-		"Protocol":            true,
-		"Command":             true,
-		"Args":                true,
-		"WorkingDir":          true,
-		"Env":                 true,
-		"Headers":             true,
-		"OAuth":               true,
-		"Enabled":             true,
-		"Quarantined":         true,
-		"Created":             true,
-		"Updated":             true, // Updated is set by saveServerSync, not copied
-		"Isolation":           true,
-		"Shared":              true, // Server-edition-only: persisted in JSON config, not in BBolt
-		"SkipQuarantine":      true, // Spec 032: runtime-only field, not persisted to BBolt
-		"ReconnectOnUse":      true, // Spec 354: persisted to BBolt for on-demand reconnection
-		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
-		"EnabledTools":        true, // feat/config-tool-allowlist: persisted to BBolt
-		"DisabledTools":       true, // feat/config-tool-allowlist: persisted to BBolt
+		"Name":           true,
+		"URL":            true,
+		"Protocol":       true,
+		"Command":        true,
+		"Args":           true,
+		"WorkingDir":     true,
+		"Env":            true,
+		"Headers":        true,
+		"OAuth":          true,
+		"Enabled":        true,
+		"Quarantined":    true,
+		"Created":        true,
+		"Updated":        true, // Updated is set by saveServerSync, not copied
+		"Isolation":      true,
+		"Shared":         true, // Server-edition-only: persisted in JSON config, not in BBolt
+		"SkipQuarantine": true, // Spec 032: runtime-only field, not persisted to BBolt
+		// MCP-2930: successor to SkipQuarantine; lives in the JSON config (auto-approve
+		// tool changes), not persisted to the BBolt UpstreamRecord.
+		"AutoApproveToolChanges": true,
+		"ReconnectOnUse":         true, // Spec 354: persisted to BBolt for on-demand reconnection
+		"LauncherWaitTimeout":    true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
+		"EnabledTools":           true, // feat/config-tool-allowlist: persisted to BBolt
+		"DisabledTools":          true, // feat/config-tool-allowlist: persisted to BBolt
 		// MCP-866: persisted to BBolt so a server's registry origin/provenance
 		// (and the custom-origin skip_quarantine guard) survive a restart.
 		"SourceRegistryID":         true,
@@ -292,6 +295,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		}
 		if fieldName == "SkipQuarantine" {
 			// Spec 032: runtime-only field, not persisted to BBolt
+			continue
+		}
+		if fieldName == "AutoApproveToolChanges" {
+			// MCP-2930: successor to SkipQuarantine; JSON-config field, not persisted to BBolt
 			continue
 		}
 		if fieldName == "AuthBroker" {
