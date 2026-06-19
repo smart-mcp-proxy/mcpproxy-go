@@ -823,6 +823,20 @@ SHA256 hash-based tool approval system that detects changes to tool descriptions
 |-------|------|---------|-------------|
 | `quarantine_enabled` | boolean | `true` | Enable tool-level quarantine globally |
 
+These are **two independent systems**: the global toggle turns tool-level quarantine
+on/off for **all** servers; the per-server field controls auto-approval for a
+**single** server while the global toggle is on.
+
+- `quarantine_enabled: false` globally disables tool-level quarantine entirely —
+  no tool is ever `pending` or `changed`, regardless of per-server settings.
+- `quarantine_enabled: true` (default) with `auto_approve_tool_changes: false`
+  (default) = full tool-level quarantine: new tools are `pending`, changed tools
+  are `changed`, both need manual approval.
+- `quarantine_enabled: true` with `auto_approve_tool_changes: true` on a server =
+  that server's post-baseline changes and additions are auto-approved (no rug-pull
+  protection for that server). The baseline itself is always auto-approved for
+  trusted servers regardless of this flag.
+
 Per-server tool-change auto-approval is configured on the server entry:
 
 ```json
@@ -831,7 +845,7 @@ Per-server tool-change auto-approval is configured on the server entry:
     {
       "name": "trusted-server",
       "command": "my-server",
-      "skip_quarantine": true
+      "auto_approve_tool_changes": true
     }
   ]
 }

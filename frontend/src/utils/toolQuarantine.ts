@@ -10,7 +10,7 @@ import type { ToolApproval } from '@/types'
  * banner must therefore surface both `pending` and `changed` tools so the
  * operator can approve them; banner and count must agree. Pending tools come
  * from tool-level quarantine and can be auto-approved by setting
- * `skip_quarantine: true` (per-server) or `quarantine_enabled: false` (global).
+ * `auto_approve_tool_changes: true` (per-server) or `quarantine_enabled: false` (global).
  *
  * Rules:
  *  - While the server is quarantined, suppress the tool banner entirely. The
@@ -22,8 +22,8 @@ import type { ToolApproval } from '@/types'
  * Note: this intentionally reverses the MCP-2101 "don't nag on a pending
  * baseline" behavior for non-quarantined servers. That trust model assumed
  * approving the server would promote pending→approved, but a server can be
- * non-quarantined (e.g. `skip_quarantine`) while its tools stay pending and
- * blocked, leaving the operator no way to approve them.
+ * non-quarantined while its tools stay pending and blocked, leaving the
+ * operator no way to approve them.
  */
 export function selectQuarantinedTools(
   toolApprovals: ToolApproval[],

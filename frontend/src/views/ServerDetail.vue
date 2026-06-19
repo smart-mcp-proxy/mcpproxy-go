@@ -348,8 +348,8 @@
                   class="text-xs opacity-70 mt-1 flex items-start gap-1"
                 >
                   <span>
-                    Pending tools come from tool-level quarantine. To approve them automatically, set
-                    <code class="text-[11px]">skip_quarantine: true</code> for this server or
+                    Pending tools come from tool-level quarantine — new tools added after the server was already trusted. To approve them automatically, set
+                    <code class="text-[11px]">auto_approve_tool_changes: true</code> for this server or
                     <code class="text-[11px]">quarantine_enabled: false</code> globally.
                   </span>
                   <button
