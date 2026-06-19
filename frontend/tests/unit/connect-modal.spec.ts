@@ -9,6 +9,7 @@ vi.mock('@/services/api', () => ({
     getConnectStatus: vi.fn(),
     connectClient: vi.fn(),
     disconnectClient: vi.fn(),
+    getOnboardingState: vi.fn(),
   },
 }))
 
@@ -21,6 +22,10 @@ describe('ConnectModal', () => {
     ;(api.getConnectStatus as any).mockReset()
     ;(api.connectClient as any).mockReset()
     ;(api.disconnectClient as any).mockReset()
+    ;(api.getOnboardingState as any).mockReset()
+    // Default: no content-resolved connections (most tests exercise the
+    // stat-only listing only). Individual tests override as needed.
+    ;(api.getOnboardingState as any).mockResolvedValue({ success: true, data: null })
   })
 
   it('renders an OpenCode row', async () => {
@@ -199,5 +204,68 @@ describe('ConnectModal', () => {
     await flushPromises()
 
     expect(disconnectSpy).toHaveBeenCalledWith('opencode', 'proxy-alt')
+  })
+
+  // MCP-2952: GetAllStatus() is stat-only (#706) and always reports
+  // connected=false. The wizard/modal must merge the content-resolved
+  // connected_client_ids from the onboarding state so already-connected
+  // clients render Disconnect, not a fresh Connect button.
+  it('renders Disconnect for a client present in connected_client_ids despite connected=false', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          config_path: '/Users/test/.codex/config.toml',
+          exists: true,
+          connected: false, // stat-only listing never sets this
+          supported: true,
+          icon: 'codex',
+        },
+        {
+          id: 'cursor',
+          name: 'Cursor',
+          config_path: '/Users/test/.cursor/mcp.json',
+          exists: true,
+          connected: false, // genuinely not connected
+          supported: true,
+          icon: 'cursor',
+        },
+      ],
+    })
+    ;(api.getOnboardingState as any).mockResolvedValue({
+      success: true,
+      data: {
+        has_connected_client: true,
+        has_configured_server: false,
+        connected_client_count: 1,
+        connected_client_ids: ['codex'],
+        configured_server_count: 0,
+        state: { engaged: false },
+        should_show_wizard: true,
+        first_mcp_client_ever: false,
+        mcp_clients_seen_ever: [],
+        incomplete_tab_count: 0,
+      },
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // codex resolved as connected -> Disconnect button.
+    const codexRow = wrapper.find('button.btn-ghost.text-error')
+    expect(codexRow.exists()).toBe(true)
+    expect(codexRow.text()).toContain('Disconnect')
+
+    // cursor is genuinely not connected -> Connect button still offered.
+    const connectButtons = wrapper.findAll('button.btn-primary.btn-xs')
+    expect(connectButtons.length).toBe(1)
+    expect(connectButtons[0].text()).toContain('Connect')
   })
 })

@@ -657,18 +657,30 @@ const modalSizing = computed(() => ({
 // --- Client sort: detected → pinned trio → others -----------------------
 const PINNED_TRIO: readonly string[] = ['claude-code', 'codex', 'gemini']
 
+// MCP-2952: the `GET /api/v1/connect` listing is stat-only (#706/MCP-2829) and
+// always reports connected=false. Merge the content-resolved
+// connected_client_ids the wizard already fetched via onboarding.fetchState()
+// so connected clients render the Connected badge instead of a Connect button.
+// Derived (not mutated) so polling refreshes stay correct.
+const mergedClients = computed<ClientStatus[]>(() => {
+  const connectedIds = new Set(onboarding.connectedClientIds)
+  return clients.value.map(c =>
+    c.connected || !connectedIds.has(c.id) ? c : { ...c, connected: true }
+  )
+})
+
 const detectedClients = computed(() =>
-  clients.value.filter(c => c.exists)
+  mergedClients.value.filter(c => c.exists)
 )
 const pinnedClients = computed(() =>
   PINNED_TRIO
-    .map(id => clients.value.find(c => c.id === id))
+    .map(id => mergedClients.value.find(c => c.id === id))
     .filter((c): c is ClientStatus => !!c && !c.exists)
 )
 const moreClients = computed(() => {
   const detectedIds = new Set(detectedClients.value.map(c => c.id))
   const pinnedIds = new Set(pinnedClients.value.map(c => c.id))
-  return clients.value.filter(c => !detectedIds.has(c.id) && !pinnedIds.has(c.id))
+  return mergedClients.value.filter(c => !detectedIds.has(c.id) && !pinnedIds.has(c.id))
 })
 
 const serverCountLabel = computed(() => {

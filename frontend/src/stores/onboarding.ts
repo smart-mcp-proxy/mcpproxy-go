@@ -40,6 +40,13 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   const mcpClientsSeenEver = computed<string[]>(() => state.value?.mcp_clients_seen_ever ?? [])
   const incompleteTabCount = computed(() => state.value?.incomplete_tab_count ?? 0)
 
+  // MCP-2952 — content-resolved IDs of clients currently wired to MCPProxy.
+  // GetAllStatus()/`GET /api/v1/connect` is stat-only (#706/MCP-2829) and
+  // reports connected=false for every client, so the Connect wizard merges
+  // these IDs (already fetched with the onboarding state) to mark connected
+  // clients without triggering new content reads.
+  const connectedClientIds = computed<string[]>(() => state.value?.connected_client_ids ?? [])
+
   // v1 visibleSteps kept for back-compat with any remaining caller. The v2
   // wizard renders a fixed three-tab surface and ignores this value.
   const visibleSteps = computed<Array<'connect' | 'server'>>(() => {
@@ -161,6 +168,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
     firstMCPClientEver,
     mcpClientsSeenEver,
     incompleteTabCount,
+    connectedClientIds,
     visibleSteps,
     fetchState,
     mark,
