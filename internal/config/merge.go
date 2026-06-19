@@ -528,18 +528,19 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	}
 
 	dst := &ServerConfig{
-		Name:                src.Name,
-		URL:                 src.URL,
-		Protocol:            src.Protocol,
-		Command:             src.Command,
-		WorkingDir:          src.WorkingDir,
-		Enabled:             src.Enabled,
-		Quarantined:         src.Quarantined,
-		SkipQuarantine:      src.SkipQuarantine,
-		Shared:              src.Shared,
-		Created:             src.Created,
-		Updated:             src.Updated,
-		LauncherWaitTimeout: src.LauncherWaitTimeout,
+		Name:                   src.Name,
+		URL:                    src.URL,
+		Protocol:               src.Protocol,
+		Command:                src.Command,
+		WorkingDir:             src.WorkingDir,
+		Enabled:                src.Enabled,
+		Quarantined:            src.Quarantined,
+		SkipQuarantine:         src.SkipQuarantine,
+		AutoApproveToolChanges: src.AutoApproveToolChanges,
+		Shared:                 src.Shared,
+		Created:                src.Created,
+		Updated:                src.Updated,
+		LauncherWaitTimeout:    src.LauncherWaitTimeout,
 	}
 
 	// Copy slices

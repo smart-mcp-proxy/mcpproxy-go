@@ -308,23 +308,30 @@ type LogConfig struct {
 
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
-	Name           string            `json:"name,omitempty" mapstructure:"name"`
-	URL            string            `json:"url,omitempty" mapstructure:"url"`
-	Protocol       string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
-	Command        string            `json:"command,omitempty" mapstructure:"command"`
-	Args           []string          `json:"args,omitempty" mapstructure:"args"`
-	WorkingDir     string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
-	Env            map[string]string `json:"env,omitempty" mapstructure:"env"`
-	Headers        map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
-	OAuth          *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
-	Enabled        bool              `json:"enabled" mapstructure:"enabled"`
-	Quarantined    bool              `json:"quarantined" mapstructure:"quarantined"`                   // Security quarantine status
-	SkipQuarantine bool              `json:"skip_quarantine,omitempty" mapstructure:"skip-quarantine"` // Skip tool-level quarantine for this server
-	Shared         bool              `json:"shared,omitempty" mapstructure:"shared"`                   // Server edition: shared with all users
-	Created        time.Time         `json:"created" mapstructure:"created"`
-	Updated        time.Time         `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation      *IsolationConfig  `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
-	ReconnectOnUse bool              `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+	Name        string            `json:"name,omitempty" mapstructure:"name"`
+	URL         string            `json:"url,omitempty" mapstructure:"url"`
+	Protocol    string            `json:"protocol,omitempty" mapstructure:"protocol"` // stdio, http, sse, streamable-http, auto
+	Command     string            `json:"command,omitempty" mapstructure:"command"`
+	Args        []string          `json:"args,omitempty" mapstructure:"args"`
+	WorkingDir  string            `json:"working_dir,omitempty" mapstructure:"working_dir"` // Working directory for stdio servers
+	Env         map[string]string `json:"env,omitempty" mapstructure:"env"`
+	Headers     map[string]string `json:"headers,omitempty" mapstructure:"headers"` // For HTTP servers
+	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
+	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
+	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+	// SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
+	// Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
+	// migrated to auto_approve_tool_changes:true when the new field is unset
+	// (see normalizeServerQuarantineFlags).
+	SkipQuarantine bool `json:"skip_quarantine,omitempty" mapstructure:"skip-quarantine"` // Deprecated: use auto_approve_tool_changes
+	// AutoApproveToolChanges auto-approves tool changes/additions for this server,
+	// disabling per-server rug-pull protection (MCP-2930). Supersedes skip_quarantine.
+	AutoApproveToolChanges bool             `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Auto-approve tool changes/additions for this server (disables per-server rug-pull protection)
+	Shared                 bool             `json:"shared,omitempty" mapstructure:"shared"`                                       // Server edition: shared with all users
+	Created                time.Time        `json:"created" mapstructure:"created"`
+	Updated                time.Time        `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation              *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
+	ReconnectOnUse         bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
 
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
@@ -791,6 +798,26 @@ func normalizeRegistryProvenanceValues(cfg *Config) {
 	}
 }
 
+// normalizeServerQuarantineFlags migrates the deprecated per-server
+// skip_quarantine flag onto its successor auto_approve_tool_changes (MCP-2930).
+// A legacy skip_quarantine:true is mapped to auto_approve_tool_changes:true only
+// when the new field is unset, so an explicit new-field value always wins. The
+// legacy field is left untouched for back-compat. Idempotent and nil-safe; runs
+// on every load/hot-reload via initializeRegistries.
+func normalizeServerQuarantineFlags(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	for _, s := range cfg.Servers {
+		if s == nil {
+			continue
+		}
+		if s.SkipQuarantine && !s.AutoApproveToolChanges {
+			s.AutoApproveToolChanges = true
+		}
+	}
+}
+
 // RegistryEntry represents a registry in the configuration
 type RegistryEntry struct {
 	ID          string      `json:"id"`
@@ -1250,6 +1277,15 @@ func (c *Config) DefaultQuarantineForNewServer() bool {
 // IsQuarantineSkipped returns whether this server should skip tool-level quarantine.
 func (sc *ServerConfig) IsQuarantineSkipped() bool {
 	return sc.SkipQuarantine
+}
+
+// IsAutoApproveToolChanges reports whether tool changes/additions for this server
+// are auto-approved (disabling per-server rug-pull protection). Mirrors
+// IsQuarantineSkipped. The legacy skip_quarantine field is migrated into this
+// field at config load (see normalizeServerQuarantineFlags), so callers read the
+// new field exclusively. MCP-2930.
+func (sc *ServerConfig) IsAutoApproveToolChanges() bool {
+	return sc.AutoApproveToolChanges
 }
 
 // IsToolAllowedByConfig reports whether toolName passes the server's static

@@ -823,7 +823,7 @@ SHA256 hash-based tool approval system that detects changes to tool descriptions
 |-------|------|---------|-------------|
 | `quarantine_enabled` | boolean | `true` | Enable tool-level quarantine globally |
 
-Per-server quarantine skip is configured on the server entry:
+Per-server tool-change auto-approval is configured on the server entry:
 
 ```json
 {
@@ -831,7 +831,7 @@ Per-server quarantine skip is configured on the server entry:
     {
       "name": "trusted-server",
       "command": "my-server",
-      "skip_quarantine": true
+      "auto_approve_tool_changes": true
     }
   ]
 }
@@ -839,7 +839,8 @@ Per-server quarantine skip is configured on the server entry:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `skip_quarantine` | boolean | `false` | Skip tool-level quarantine for this server (auto-approve new tools) |
+| `auto_approve_tool_changes` | boolean | `false` | Auto-approve tool changes/additions for this server (disables per-server rug-pull protection) |
+| `skip_quarantine` | boolean | `false` | **Deprecated** — renamed to `auto_approve_tool_changes`. Still parsed for back-compat; a legacy `skip_quarantine: true` is automatically migrated to `auto_approve_tool_changes: true` on config load when the new field is unset. |
 
 See [Tool Quarantine](features/tool-quarantine.md) for complete details.
 
