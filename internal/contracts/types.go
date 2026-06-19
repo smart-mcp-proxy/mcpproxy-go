@@ -41,19 +41,26 @@ type Server struct {
 	// IsolationDefaults exposes the resolved baseline values that
 	// would apply when no per-server override is set. Populated on
 	// list/get responses; never consumed on PATCH requests.
-	IsolationDefaults *IsolationDefaults   `json:"isolation_defaults,omitempty"`
-	Authenticated     bool                 `json:"authenticated"`                  // OAuth authentication status
-	OAuthStatus       string               `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
-	TokenExpiresAt    *time.Time           `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
-	ToolListTokenSize int                  `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
-	ShouldRetry       bool                 `json:"should_retry,omitempty"`
-	RetryCount        int                  `json:"retry_count,omitempty"`
-	LastRetryTime     *time.Time           `json:"last_retry_time,omitempty"`
-	UserLoggedOut     bool                 `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
-	Health            *HealthStatus        `json:"health,omitempty"`           // Unified health status calculated by the backend
-	Quarantine        *QuarantineStats     `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
-	ReconnectOnUse    bool                 `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
-	SecurityScan      *SecurityScanSummary `json:"security_scan,omitempty"`    // Latest security scan results summary
+	IsolationDefaults *IsolationDefaults `json:"isolation_defaults,omitempty"`
+	Authenticated     bool               `json:"authenticated"`                  // OAuth authentication status
+	OAuthStatus       string             `json:"oauth_status,omitempty"`         // OAuth status: "authenticated", "expired", "error", "none"
+	TokenExpiresAt    *time.Time         `json:"token_expires_at,omitempty"`     // When the OAuth token expires (ISO 8601)
+	ToolListTokenSize int                `json:"tool_list_token_size,omitempty"` // Token size for this server's tools
+	ShouldRetry       bool               `json:"should_retry,omitempty"`
+	RetryCount        int                `json:"retry_count,omitempty"`
+	LastRetryTime     *time.Time         `json:"last_retry_time,omitempty"`
+	UserLoggedOut     bool               `json:"user_logged_out,omitempty"`  // True if user explicitly logged out (prevents auto-reconnection)
+	Health            *HealthStatus      `json:"health,omitempty"`           // Unified health status calculated by the backend
+	Quarantine        *QuarantineStats   `json:"quarantine,omitempty"`       // Tool quarantine metrics for this server
+	ReconnectOnUse    bool               `json:"reconnect_on_use,omitempty"` // Attempt reconnection when a tool call targets this disconnected server
+	// AutoApproveToolChanges mirrors config.ServerConfig.AutoApproveToolChanges
+	// (MCP-2930): the per-server intent to auto-approve new/changed tools past
+	// the trust baseline. Tri-state *bool — nil means "never set" (omitted from
+	// the payload), so the Web UI toggle (MCP-2932) can distinguish unset from
+	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
+	// AddServerRequest.
+	AutoApproveToolChanges *bool                `json:"auto_approve_tool_changes,omitempty"`
+	SecurityScan           *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
 	// Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error
 	// has been classified by internal/diagnostics. Healthy servers omit

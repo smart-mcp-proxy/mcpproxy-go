@@ -231,6 +231,7 @@ mask string.
   "protocol": "http",
   "enabled": true,
   "quarantined": false,
+  "auto_approve_tool_changes": true,
   "isolation": {"enabled": true, "image": "node:20"}
 }
 ```
@@ -258,8 +259,11 @@ curl -X PATCH -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
 
 - Empty string `""` is **set-to-empty**, NOT delete. JSON Merge Patch is
   explicit about this — only the JSON `null` token deletes.
-- Boolean fields (`enabled`, `quarantined`, `reconnect_on_use`) use
-  pointer-style semantics: absent = preserve, present = explicit value.
+- Boolean fields (`enabled`, `quarantined`, `reconnect_on_use`,
+  `auto_approve_tool_changes`) use pointer-style semantics: absent = preserve,
+  present = explicit value. `auto_approve_tool_changes` is tri-state — it is
+  omitted entirely from `GET /api/v1/servers` responses when never set, so a
+  client can distinguish "unset" from an explicit `false`.
 
 #### POST /api/v1/servers/{name}/config-to-secret
 

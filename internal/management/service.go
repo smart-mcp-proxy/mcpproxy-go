@@ -478,6 +478,14 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.ReconnectOnUse = reconnectOnUse
 		}
 
+		// MCP-2940: project the per-server auto-approve intent. Tri-state
+		// *bool — only set the pointer when the key is present so an unset
+		// flag stays nil and the Web UI toggle can tell unset from false.
+		if autoApprove, ok := srvRaw["auto_approve_tool_changes"].(bool); ok {
+			v := autoApprove
+			srv.AutoApproveToolChanges = &v
+		}
+
 		// Extract unified health status
 		if health, ok := srvRaw["health"].(*contracts.HealthStatus); ok {
 			srv.Health = health
