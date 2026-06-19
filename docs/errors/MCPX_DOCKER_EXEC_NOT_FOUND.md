@@ -74,7 +74,7 @@ docker run --rm <image> which uvx   # or: node, npx, python3 …
 
 ## Related
 
-- [Docker Isolation](../docker-isolation.md)
+- [Docker Isolation](../features/docker-isolation.md)
 - [`MCPX_DOCKER_IMAGE_PULL_FAILED`](MCPX_DOCKER_IMAGE_PULL_FAILED.md)
 - [`MCPX_DOCKER_DAEMON_DOWN`](MCPX_DOCKER_DAEMON_DOWN.md)
 </content>
