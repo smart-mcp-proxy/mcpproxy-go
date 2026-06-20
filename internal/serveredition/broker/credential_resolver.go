@@ -137,13 +137,14 @@ func (e *PolicyDeniedError) Error() string {
 
 // ResolverDeps are the collaborators a CredentialResolver needs. Store and
 // Exchanger are required for token-exchange upstreams; Connectors is required
-// only for oauth_connect upstreams. Policy and Logger are optional.
+// only for oauth_connect upstreams. Policy, Logger, and Audit are optional.
 type ResolverDeps struct {
 	Store            CredentialStore
 	Exchanger        Exchanger
 	Connectors       ConnectorProvider
 	Policy           PolicyHook
 	Logger           *zap.Logger
+	Audit            AuditSink
 	RefreshThreshold time.Duration
 }
 
@@ -166,9 +167,19 @@ type CredentialResolver struct {
 	conns     ConnectorProvider
 	policy    PolicyHook
 	logger    *zap.Logger
+	audit     AuditSink
 
 	refreshThreshold time.Duration
 	group            singleflight.Group
+}
+
+// acquisition is the internal result of the per-(user,server) acquire flight. It
+// carries the resolved credential (nil on failure) and the audit action that the
+// flight performed (acquire / refresh / inject / connect) so Resolve can emit a
+// single, correctly-classified audit event for the whole resolution.
+type acquisition struct {
+	cred   *UpstreamCredential
+	action string
 }
 
 // NewCredentialResolver constructs a resolver from its dependencies, applying
@@ -182,6 +193,10 @@ func NewCredentialResolver(deps ResolverDeps) *CredentialResolver {
 	if policy == nil {
 		policy = allowAllPolicy{}
 	}
+	auditSink := deps.Audit
+	if auditSink == nil {
+		auditSink = nopAuditSink{}
+	}
 	threshold := deps.RefreshThreshold
 	if threshold <= 0 {
 		threshold = defaultRefreshThreshold
@@ -192,6 +207,7 @@ func NewCredentialResolver(deps ResolverDeps) *CredentialResolver {
 		conns:            deps.Connectors,
 		policy:           policy,
 		logger:           logger.Named("credential-resolver"),
+		audit:            auditSink,
 		refreshThreshold: threshold,
 	}
 }
@@ -207,7 +223,12 @@ func (r *CredentialResolver) Resolve(ctx context.Context, userID string, server 
 	if server == nil || server.AuthBroker == nil {
 		return nil, ErrBrokerNotConfigured
 	}
+
+	method := auditMethodForMode(server.AuthBroker.Mode)
 	if r.store == nil || !r.store.Enabled() {
+		// A brokered upstream whose store is disabled: a genuine injection attempt
+		// that cannot proceed — audit it so the operator sees why injection failed.
+		r.emitAudit(ctx, userID, server.Name, method, AuditActionInject, ErrStoreDisabled)
 		return nil, ErrStoreDisabled
 	}
 
@@ -226,13 +247,23 @@ func (r *CredentialResolver) Resolve(ctx context.Context, userID string, server 
 	v, err, _ := r.group.Do(flightKey, func() (interface{}, error) {
 		return r.acquire(context.WithoutCancel(ctx), userID, serverKey, server)
 	})
+
+	// Recover the action the flight performed so the audit event is classified
+	// correctly (acquire / refresh / inject / connect) regardless of outcome.
+	action := AuditActionInject
+	if acq, ok := v.(*acquisition); ok && acq != nil && acq.action != "" {
+		action = acq.action
+	}
 	if err != nil {
+		r.emitAudit(ctx, userID, server.Name, method, action, err)
 		return nil, err
 	}
-	cred, ok := v.(*UpstreamCredential)
-	if !ok || cred == nil {
+	acq, _ := v.(*acquisition)
+	if acq == nil || acq.cred == nil {
+		r.emitAudit(ctx, userID, server.Name, method, action, ErrNoCredential)
 		return nil, ErrNoCredential
 	}
+	cred := acq.cred
 
 	// Policy-decision seam: evaluated per call, before the credential is handed
 	// to the caller (FR-015). Default hook allows everything.
@@ -243,12 +274,51 @@ func (r *CredentialResolver) Resolve(ctx context.Context, userID string, server 
 		Credential: cred,
 	})
 	if perr != nil {
-		return nil, fmt.Errorf("credential resolver: policy evaluation failed: %w", perr)
+		wrapped := fmt.Errorf("credential resolver: policy evaluation failed: %w", perr)
+		r.emitAudit(ctx, userID, server.Name, method, AuditActionInject, wrapped)
+		return nil, wrapped
 	}
 	if !decision.Allow {
-		return nil, &PolicyDeniedError{ServerName: server.Name, Reason: decision.Reason}
+		denied := &PolicyDeniedError{ServerName: server.Name, Reason: decision.Reason}
+		r.emitAudit(ctx, userID, server.Name, method, AuditActionInject, denied)
+		return nil, denied
 	}
+
+	r.emitAudit(ctx, userID, server.Name, method, action, nil)
 	return cred, nil
+}
+
+// emitAudit records one secret-free credential-brokering audit event. A nil err
+// is a success; any other err is recorded as a failure with a secret-free reason
+// drawn from the broker's (secret-free) sentinel/actionable errors (FR-028/029).
+func (r *CredentialResolver) emitAudit(ctx context.Context, userID, serverName, method, action string, err error) {
+	ev := AuditEvent{
+		UserID:     userID,
+		ServerName: serverName,
+		Method:     method,
+		Action:     action,
+		Outcome:    AuditOutcomeSuccess,
+		RequestID:  auditRequestID(ctx),
+	}
+	if err != nil {
+		ev.Outcome = AuditOutcomeFailure
+		ev.Reason = auditReason(err)
+	}
+	r.audit.RecordBrokerEvent(ctx, ev)
+}
+
+// auditReason renders a secret-free failure reason. NotConnectedError carries a
+// purpose-built Reason; all other broker errors are deliberately coarse and
+// secret-free, so their Error() text is safe to record.
+func auditReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var nc *NotConnectedError
+	if errors.As(err, &nc) && nc.Reason != "" {
+		return nc.Reason
+	}
+	return err.Error()
 }
 
 // acquire runs the per-user-only ordering for a single (user, server). It is
@@ -258,7 +328,7 @@ func (r *CredentialResolver) Resolve(ctx context.Context, userID string, server 
 // not trigger a redundant double acquisition. The Exchanger (T4) and Connector
 // (T5) persist their results into the store themselves, so the resolver never
 // calls store.Put — it only reads the cache via store.Get.
-func (r *CredentialResolver) acquire(ctx context.Context, userID, serverKey string, server *config.ServerConfig) (*UpstreamCredential, error) {
+func (r *CredentialResolver) acquire(ctx context.Context, userID, serverKey string, server *config.ServerConfig) (*acquisition, error) {
 	cfg := server.AuthBroker
 
 	// 1. Serve a still-valid, not-near-expiry cached credential directly.
@@ -267,30 +337,39 @@ func (r *CredentialResolver) acquire(ctx context.Context, userID, serverKey stri
 	switch {
 	case hasCache:
 		if cached.IsValid() && !cached.ExpiresWithin(r.refreshThreshold) {
-			return cached, nil
+			// No new acquisition: an existing valid credential is used for injection.
+			return &acquisition{cred: cached, action: AuditActionInject}, nil
 		}
 		// Stale / near-expiry: renewed by the per-mode path below.
 	case errors.Is(err, ErrNotFound):
 		// No cache: acquired by the per-mode path below.
 	default:
 		// Unexpected store error (not "missing"): surface it.
-		return nil, fmt.Errorf("credential resolver: load cached credential: %w", err)
+		return &acquisition{action: AuditActionInject},
+			fmt.Errorf("credential resolver: load cached credential: %w", err)
 	}
 
 	switch cfg.Mode {
 	case config.AuthBrokerModeTokenExchange, config.AuthBrokerModeEntraOBO:
 		// 2. Token-exchange / OBO: the first-acquisition and refresh paths are
 		// identical (re-mint from the stored IdP subject token), so a single
-		// Exchange call covers both the cache-miss and near-expiry cases.
-		if r.exchanger == nil {
-			return nil, fmt.Errorf("credential resolver: no token exchanger configured for mode %q", cfg.Mode)
+		// Exchange call covers both the cache-miss and near-expiry cases. A
+		// near-expiry cache hit is a refresh; a cache miss is a first acquisition.
+		action := AuditActionAcquire
+		if hasCache {
+			action = AuditActionRefresh
 		}
-		return r.exchanger.Exchange(ctx, userID, serverKey, cfg)
+		if r.exchanger == nil {
+			return &acquisition{action: action},
+				fmt.Errorf("credential resolver: no token exchanger configured for mode %q", cfg.Mode)
+		}
+		cred, xerr := r.exchanger.Exchange(ctx, userID, serverKey, cfg)
+		return &acquisition{cred: cred, action: action}, xerr
 
 	case config.AuthBrokerModeOAuthConnect:
 		conn, cerr := r.connectorFor(server)
 		if cerr != nil {
-			return nil, cerr
+			return &acquisition{action: AuditActionConnect}, cerr
 		}
 		// A cached connect-flow credential means the user already connected:
 		// renew transparently via the stored refresh token. Only when that
@@ -298,11 +377,12 @@ func (r *CredentialResolver) acquire(ctx context.Context, userID, serverKey stri
 		if hasCache && cached.RefreshToken != "" {
 			refreshed, rerr := conn.Refresh(ctx, userID)
 			if rerr == nil {
-				return refreshed, nil
+				return &acquisition{cred: refreshed, action: AuditActionRefresh}, nil
 			}
 			r.logger.Warn("connect-flow credential refresh failed; user must reconnect",
 				zap.String("server", server.Name), zap.Error(rerr))
-			return nil, r.notConnected(conn, server, userID, "stored credential expired and refresh failed; reconnect required")
+			return &acquisition{action: AuditActionRefresh},
+				r.notConnected(conn, server, userID, "stored credential expired and refresh failed; reconnect required")
 		}
 		// 3. Never connected, or connected without a usable refresh token and now
 		// expired — both require (re)consent through the connect flow.
@@ -310,11 +390,11 @@ func (r *CredentialResolver) acquire(ctx context.Context, userID, serverKey stri
 		if hasCache {
 			reason = "stored credential expired; reconnect required"
 		}
-		return nil, r.notConnected(conn, server, userID, reason)
+		return &acquisition{action: AuditActionConnect}, r.notConnected(conn, server, userID, reason)
 
 	default:
 		// 4. No recognised acquisition strategy and no per-user credential.
-		return nil, ErrNoCredential
+		return &acquisition{action: AuditActionAcquire}, ErrNoCredential
 	}
 }
 

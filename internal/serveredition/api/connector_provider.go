@@ -26,20 +26,23 @@ import (
 type connectorProvider struct {
 	store  broker.CredentialStore
 	logger *zap.Logger
+	audit  broker.AuditSink // connect-flow audit sink (spec 074 T10); nil = no-op
 
 	mu      sync.Mutex
 	baseURL string // gateway public origin, e.g. "https://gw.example.com"
 	cache   map[string]*broker.OAuthConnector
 }
 
-// newConnectorProvider constructs an empty provider.
-func newConnectorProvider(store broker.CredentialStore, logger *zap.Logger) *connectorProvider {
+// newConnectorProvider constructs an empty provider. A nil audit sink disables
+// connect-flow audit emission.
+func newConnectorProvider(store broker.CredentialStore, logger *zap.Logger, audit broker.AuditSink) *connectorProvider {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	return &connectorProvider{
 		store:  store,
 		logger: logger,
+		audit:  audit,
 		cache:  make(map[string]*broker.OAuthConnector),
 	}
 }
@@ -88,7 +91,7 @@ func (p *connectorProvider) connector(server *config.ServerConfig) (*broker.OAut
 		RedirectURI:           p.callbackURLLocked(server.Name),
 		Resource:              ab.Resource,
 	}
-	conn, err := broker.NewOAuthConnector(p.store, cfg, p.logger)
+	conn, err := broker.NewOAuthConnector(p.store, cfg, p.logger, p.audit)
 	if err != nil {
 		return nil, err
 	}

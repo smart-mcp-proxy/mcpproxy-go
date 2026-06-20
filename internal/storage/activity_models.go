@@ -33,6 +33,10 @@ const (
 	ActivityTypeToolQuarantineChange ActivityType = "tool_quarantine_change"
 	// ActivityTypeSecurityScan represents a security scan event (Spec 039)
 	ActivityTypeSecurityScan ActivityType = "security_scan"
+	// ActivityTypeCredentialBroker represents a per-user credential brokering
+	// event: acquisition, refresh, injection, or connect (Spec 074 T10). It
+	// carries attribution (UserID, ServerName) and never any token/secret value.
+	ActivityTypeCredentialBroker ActivityType = "credential_broker"
 )
 
 // ValidActivityTypes is the list of all valid activity types for filtering (Spec 024)
@@ -47,6 +51,7 @@ var ValidActivityTypes = []string{
 	string(ActivityTypeConfigChange),
 	string(ActivityTypeToolQuarantineChange),
 	string(ActivityTypeSecurityScan),
+	string(ActivityTypeCredentialBroker),
 }
 
 // ActivitySource indicates how the activity was triggered

@@ -49,7 +49,7 @@ func newConnectorTestStore(t *testing.T) CredentialStore {
 
 func newTestConnector(t *testing.T, cfg ConnectorConfig) *OAuthConnector {
 	t.Helper()
-	c, err := NewOAuthConnector(newConnectorTestStore(t), cfg, zap.NewNop())
+	c, err := NewOAuthConnector(newConnectorTestStore(t), cfg, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("NewOAuthConnector: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestOAuthConnector_Complete_StoresEncryptedToken(t *testing.T) {
 	m := newMockTokenServer(t)
 	cfg := connectorTestConfig(m.srv.URL)
 	store := newConnectorTestStore(t)
-	c, err := NewOAuthConnector(store, cfg, zap.NewNop())
+	c, err := NewOAuthConnector(store, cfg, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatalf("NewOAuthConnector: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestOAuthConnector_Complete_StoresEncryptedToken(t *testing.T) {
 func TestOAuthConnector_Complete_InvalidState(t *testing.T) {
 	m := newMockTokenServer(t)
 	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	if _, err := c.Complete(context.Background(), "bogus-state", "code"); err == nil {
 		t.Fatal("expected error for unknown state")
@@ -234,7 +234,7 @@ func TestOAuthConnector_Complete_InvalidState(t *testing.T) {
 func TestOAuthConnector_Complete_ExpiredState(t *testing.T) {
 	m := newMockTokenServer(t)
 	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	base := time.Now()
 	c.now = func() time.Time { return base }
@@ -255,7 +255,7 @@ func TestOAuthConnector_Complete_ExpiredState(t *testing.T) {
 
 func TestOAuthConnector_Complete_StateIsOneTime(t *testing.T) {
 	m := newMockTokenServer(t)
-	c, _ := NewOAuthConnector(newConnectorTestStore(t), connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(newConnectorTestStore(t), connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	_, state, _ := c.BuildAuthorizationURL("user-alice")
 	if _, err := c.Complete(context.Background(), state, "code"); err != nil {
@@ -269,7 +269,7 @@ func TestOAuthConnector_Complete_StateIsOneTime(t *testing.T) {
 func TestOAuthConnector_Deny_StoresNothing(t *testing.T) {
 	m := newMockTokenServer(t)
 	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	_, state, _ := c.BuildAuthorizationURL("user-alice")
 	if err := c.Deny(state, "access_denied"); err != nil {
@@ -292,7 +292,7 @@ func TestOAuthConnector_Refresh(t *testing.T) {
 	m.accessToken = "refreshed-access-token"
 	m.refreshToken = "" // emulate AS that does not rotate the refresh token
 	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	// Seed an existing connect-flow credential with a refresh token.
 	seed := &UpstreamCredential{
@@ -340,7 +340,7 @@ func TestOAuthConnector_Refresh(t *testing.T) {
 func TestOAuthConnector_Refresh_NoRefreshToken(t *testing.T) {
 	m := newMockTokenServer(t)
 	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	seed := &UpstreamCredential{AccessToken: "at", ObtainedVia: "connect_flow"} // no refresh token
 	if err := store.Put("user-alice", c.ServerKey(), seed); err != nil {
@@ -355,7 +355,7 @@ func TestOAuthConnector_Complete_TokenEndpointError(t *testing.T) {
 	m := newMockTokenServer(t)
 	m.status = http.StatusBadRequest
 	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop())
+	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
 
 	_, state, _ := c.BuildAuthorizationURL("user-alice")
 	if _, err := c.Complete(context.Background(), state, "code"); err == nil {
@@ -379,7 +379,7 @@ func TestNewOAuthConnector_Validation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := base
 			mutate(&cfg)
-			if _, err := NewOAuthConnector(store, cfg, zap.NewNop()); err == nil {
+			if _, err := NewOAuthConnector(store, cfg, zap.NewNop(), nil); err == nil {
 				t.Errorf("expected validation error for %s", name)
 			}
 		})
