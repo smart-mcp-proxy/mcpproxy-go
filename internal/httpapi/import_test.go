@@ -214,6 +214,61 @@ func TestImportServersJSON_WithServerNamesFilter(t *testing.T) {
 	}
 }
 
+// TestRunImport_ConflictRenameSanitizableName covers the latent mismatch widened
+// by #729 (MCP-3003): after #729, ImportedServer.OriginalName carries the raw
+// source name ("Figma Desktop") while the wizard keys its conflict-rename map by
+// the sanitized preview name ("Figma_Desktop"). The rename map must resolve when
+// keyed by EITHER the raw OriginalName (CLI/documented contract) or the sanitized
+// Server.Name (Web UI wizard), otherwise the conflict rename is silently dropped.
+func TestRunImport_ConflictRenameSanitizableName(t *testing.T) {
+	const content = `{
+		"mcpServers": {
+			"Figma Desktop": {"command": "figma-mcp"}
+		},
+		"globalShortcut": "Ctrl+M"
+	}`
+
+	tests := []struct {
+		name     string
+		renameBy string // map key the caller used
+	}{
+		{name: "wizard keys by sanitized Server.Name", renameBy: "Figma_Desktop"},
+		{name: "CLI keys by raw OriginalName", renameBy: "Figma Desktop"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger := zap.NewNop().Sugar()
+			mock := &mockImportController{apiKey: "test-key"}
+			server := NewServer(mock, logger, nil)
+
+			req := httptest.NewRequest("POST", "/api/v1/servers/import/path", http.NoBody)
+			req.Header.Set("X-API-Key", "test-key")
+
+			const want = "Figma_Desktop_claude_desktop"
+			rename := map[string]string{tt.renameBy: want}
+
+			resp, err := server.runImport(req, []byte(content), "claude-desktop", nil, true, rename)
+			if err != nil {
+				t.Fatalf("runImport returned error: %v", err)
+			}
+			if len(resp.Imported) != 1 {
+				t.Fatalf("expected 1 imported server, got %d", len(resp.Imported))
+			}
+			got := resp.Imported[0]
+			// OriginalName remains the raw source name (post-#729 contract).
+			if got.OriginalName != "Figma Desktop" {
+				t.Errorf("OriginalName = %q, want %q", got.OriginalName, "Figma Desktop")
+			}
+			// The conflict rename must have been applied regardless of which key
+			// the caller used.
+			if got.Name != want {
+				t.Errorf("renamed Server.Name = %q, want %q (rename keyed by %q was dropped)", got.Name, want, tt.renameBy)
+			}
+		})
+	}
+}
+
 func TestImportServers_FileUpload(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 	mock := &mockImportController{apiKey: "test-key"}
