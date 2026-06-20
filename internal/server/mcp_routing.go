@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -22,6 +23,28 @@ const (
 	// Using double underscore to avoid conflicts with single underscores in tool names.
 	DirectModeToolSeparator = "__"
 )
+
+// safeTruncateBytes returns the largest cut length <= limit at which s can be
+// sliced without splitting a multi-byte UTF-8 rune. Direct-mode truncation uses
+// a raw byte budget (ToolResponseLimit); cutting at the raw offset can land in
+// the middle of a multi-byte character and emit invalid UTF-8 in the forwarded
+// TextContent, which downstream JSON encoders/clients reject or render as a
+// replacement char. Callers must ensure limit < len(s) (i.e. truncation is
+// actually needed) before calling.
+func safeTruncateBytes(s string, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	if limit >= len(s) {
+		return len(s)
+	}
+	// Back up to the start of the rune that straddles the cut point.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return cut
+}
 
 // ParseDirectToolName parses a direct mode tool name (serverName__toolName) into server and tool components.
 // Splits on the FIRST occurrence of "__" only, so tool names containing "__" are preserved.
@@ -210,7 +233,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 				case mcp.TextContent:
 					txt := tc.Text
 					if limit > 0 && len(txt) > limit {
-						txt = txt[:limit]
+						txt = txt[:safeTruncateBytes(txt, limit)]
 						truncated = true
 					}
 					tc.Text = txt
