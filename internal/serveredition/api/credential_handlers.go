@@ -278,13 +278,15 @@ func (h *CredentialHandlers) callback(w http.ResponseWriter, r *http.Request) {
 	state := q.Get("state")
 
 	// Authorization-server-side error (e.g. user denied consent).
-	// The AS error code is coerced to a fixed label for the audit sink so the
-	// activity log never captures a raw upstream error string (FR-029).
+	// The raw asErr query value is fully AS-controlled and may embed secrets or
+	// echoed input, so the coerced label is the ONLY form ever written to the
+	// audit sink, the application log, or reflected back into the browser
+	// redirect (FR-029 / SC-005).
 	if asErr := q.Get("error"); asErr != "" {
 		auditReason := sanitizeCallbackError(asErr)
 		_ = conn.Deny(state, auditReason)
-		h.logger.Infow("brokered credential connect denied", "server", srv.Name, "reason", asErr)
-		http.Redirect(w, r, credentialConnectRedirect(srv.Name, asErr), http.StatusFound)
+		h.logger.Infow("brokered credential connect denied", "server", srv.Name, "reason", auditReason)
+		http.Redirect(w, r, credentialConnectRedirect(srv.Name, auditReason), http.StatusFound)
 		return
 	}
 
