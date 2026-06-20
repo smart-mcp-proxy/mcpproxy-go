@@ -793,6 +793,11 @@ export interface ImportResponse {
 // API returns a flat array of ClientStatus objects in the data field
 export type ConnectStatusResponse = ClientStatus[]
 
+// AccessState classifies a per-client config content access (Spec 075). The
+// stat-only overall listing leaves it 'unknown' (no eager read); the on-demand
+// per-client GET / connect / disconnect paths resolve it to one of the others.
+export type AccessState = 'unknown' | 'accessible' | 'absent' | 'denied' | 'malformed'
+
 export interface ClientStatus {
   id: string
   name: string
@@ -805,6 +810,11 @@ export interface ClientStatus {
   bridge?: boolean
   icon: string
   server_name?: string
+  // Spec 075 (additive): per-client content access classification and, when
+  // access_state === 'denied', actionable remediation text (the macOS App-Data
+  // privacy fix including the exact tccutil reset command).
+  access_state?: AccessState
+  remediation?: string
 }
 
 export interface ConnectResult {

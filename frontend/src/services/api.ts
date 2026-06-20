@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -1139,6 +1139,17 @@ class APIService {
   // Connect feature (client registration)
   async getConnectStatus(): Promise<APIResponse<ConnectStatusResponse>> {
     return this.request<ConnectStatusResponse>('/api/v1/connect')
+  }
+
+  // Spec 075: resolve a single client's status on demand. This is the only
+  // Connect call that reads a client config file's contents (to classify
+  // access_state), so on macOS it is the sole place an App-Data privacy prompt
+  // may legitimately appear — and it is always scoped to an explicit user
+  // action ("Check access"), never the passive listing. Returns 200 with the
+  // resolved access_state (accessible|absent|denied|malformed) and, when
+  // denied, the remediation text.
+  async getConnectClientStatus(clientId: string): Promise<APIResponse<ClientStatus>> {
+    return this.request<ClientStatus>(`/api/v1/connect/${encodeURIComponent(clientId)}`)
   }
 
   async connectClient(clientId: string, serverName = 'mcpproxy', force = false): Promise<APIResponse<ConnectResult>> {
