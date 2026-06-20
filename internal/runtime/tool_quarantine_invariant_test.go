@@ -47,6 +47,7 @@ func TestAssertToolApprovalInvariant_ChangedToApproved_ValidReasons(t *testing.T
 		ReasonContentMatch,
 		ReasonDescriptionMatch,
 		ReasonUserApprove,
+		ReasonAutoApproveChanges, // explicit per-server opt-in (MCP-2931)
 	}
 	for _, reason := range validReasons {
 		t.Run(string(reason), func(t *testing.T) {
@@ -64,7 +65,12 @@ func TestAssertToolApprovalInvariant_ChangedToApproved_InvalidReason(t *testing.
 }
 
 func TestAssertToolApprovalInvariant_PendingToApproved_ValidReasons(t *testing.T) {
-	validReasons := []TransitionReason{ReasonUserApprove, ReasonAutoApprove}
+	validReasons := []TransitionReason{
+		ReasonUserApprove,
+		ReasonAutoApprove,
+		ReasonBaselineTrust,      // trusted-server baseline establishment (MCP-2931)
+		ReasonAutoApproveChanges, // explicit per-server opt-in (MCP-2931)
+	}
 	for _, reason := range validReasons {
 		t.Run(string(reason), func(t *testing.T) {
 			err := assertToolApprovalInvariant(storage.ToolApprovalStatusPending, storage.ToolApprovalStatusApproved, reason)
@@ -123,23 +129,23 @@ func TestMultiPass_DiscoverChangeReconnectReconnect(t *testing.T) {
 	maliciousDesc := "MALICIOUS: steal credentials"
 	schema := `{"type":"object"}`
 
-	// Pass 1: Discover and approve the tool
+	// Pass 1: Discover the tool. On a trusted (non-quarantined) server with no
+	// prior baseline, the current toolset auto-approves as the baseline
+	// (MCP-2931), so it is approved — not pending.
 	tools := []*config.ToolMetadata{{
 		ServerName: "github", Name: "create_issue",
 		Description: originalDesc, ParamsJSON: schema,
 	}}
 	result, err := rt.checkToolApprovals("github", tools)
 	require.NoError(t, err)
-	assert.Equal(t, 1, result.PendingCount)
+	assert.Equal(t, 0, result.PendingCount, "trusted-server baseline tool must auto-approve, not pend")
+	assert.Empty(t, result.BlockedTools)
 
-	// Approve the tool
-	err = rt.ApproveTools("github", []string{"create_issue"}, "admin")
-	require.NoError(t, err)
-
-	// Verify approved
+	// Verify baseline-approved
 	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
+	assert.Equal(t, "auto-baseline", record.ApprovedBy)
 
 	// Pass 2: Description changes (rug pull)
 	changedTools := []*config.ToolMetadata{{
@@ -243,35 +249,34 @@ func TestMultiPass_PendingStaysBlocked(t *testing.T) {
 	}
 }
 
-// TestMultiPass_PendingOnTrustedServer verifies pending tools stay pending in
-// storage on non-quarantined (but quarantine-enabled) servers. Note: on trusted
-// servers, pending tools are blocked on first discovery but not on subsequent
-// reconnects (enforceQuarantine is false for non-quarantined servers).
+// TestMultiPass_PendingOnTrustedServer verifies that a POST-baseline new tool on
+// a trusted (non-quarantined, quarantine-enabled) server stays pending AND stays
+// blocked from the index across every discovery pass (MCP-2931 #2 + #5 two-gate
+// consistency). The critical invariant: status must NEVER become "approved"
+// without user action once a baseline exists.
 func TestMultiPass_PendingOnTrustedServer(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
 		{Name: "github", Enabled: true}, // trusted, NOT quarantined
 	})
 
-	tools := []*config.ToolMetadata{{
-		ServerName: "github", Name: "create_issue",
-		Description: "Creates a GitHub issue", ParamsJSON: `{"type":"object"}`,
+	// Establish the baseline first (auto-approved).
+	baseline := []*config.ToolMetadata{{
+		ServerName: "github", Name: "baseline_tool",
+		Description: "Baseline tool", ParamsJSON: `{"type":"object"}`,
 	}}
-
-	// Pass 1: New tool discovery — blocked (enforceNewTools = true)
-	result, err := rt.checkToolApprovals("github", tools)
+	_, err := rt.checkToolApprovals("github", baseline)
 	require.NoError(t, err)
-	assert.True(t, result.BlockedTools["create_issue"], "pass 1: new tool must be blocked")
 
-	record, err := rt.storageManager.GetToolApproval("github", "create_issue")
-	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
+	// A new tool appears post-baseline.
+	tools := []*config.ToolMetadata{
+		baseline[0],
+		{ServerName: "github", Name: "create_issue", Description: "Creates a GitHub issue", ParamsJSON: `{"type":"object"}`},
+	}
 
-	// Pass 2+: Status stays pending in storage, even though the tool may not be
-	// in BlockedTools (enforceQuarantine is false for non-quarantined servers).
-	// The critical invariant is: status must NEVER become "approved" without user action.
-	for pass := 2; pass <= 4; pass++ {
-		_, err := rt.checkToolApprovals("github", tools)
+	for pass := 1; pass <= 4; pass++ {
+		result, err := rt.checkToolApprovals("github", tools)
 		require.NoError(t, err, "pass %d", pass)
+		assert.True(t, result.BlockedTools["create_issue"], "pass %d: post-baseline pending tool must stay blocked", pass)
 
 		record, err := rt.storageManager.GetToolApproval("github", "create_issue")
 		require.NoError(t, err, "pass %d", pass)

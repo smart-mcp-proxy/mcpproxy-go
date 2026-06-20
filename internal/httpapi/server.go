@@ -752,6 +752,7 @@ func (s *Server) setupRoutes() {
 
 		// Client connect/disconnect
 		r.Get("/connect", s.handleGetConnectStatus)
+		r.Get("/connect/{client}", s.handleGetConnectClientStatus)
 		r.Post("/connect/{client}", s.handleConnectClient)
 		r.Delete("/connect/{client}", s.handleDisconnectClient)
 
@@ -1326,6 +1327,13 @@ type AddServerRequest struct {
 	Enabled        *bool              `json:"enabled,omitempty"`
 	Quarantined    *bool              `json:"quarantined,omitempty"`
 	ReconnectOnUse *bool              `json:"reconnect_on_use,omitempty"`
+	// AutoApproveToolChanges is the per-server intent to auto-approve
+	// new/changed tools past the trust baseline (MCP-2930). Tri-state *bool:
+	// a nil pointer means "leave unchanged" on PATCH; a present value
+	// (including false) is applied. Mirrors config.ServerConfig's *bool
+	// semantics — do NOT collapse to a plain bool, or an omitted field would
+	// silently reset a previously-set value.
+	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1449,6 +1457,11 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ReconnectOnUse != nil {
 		serverConfig.ReconnectOnUse = *req.ReconnectOnUse
+	}
+	// MCP-2940: carry the per-server auto-approve intent through on create.
+	// *bool nil-preserve semantics: only set when the caller provided it.
+	if req.AutoApproveToolChanges != nil {
+		serverConfig.AutoApproveToolChanges = req.AutoApproveToolChanges
 	}
 
 	// Add server via controller
@@ -1638,6 +1651,17 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.ReconnectOnUse = existingSrv.ReconnectOnUse
+	}
+	// MCP-2940: auto_approve_tool_changes is a tri-state *bool, so unlike the
+	// non-pointer bools above we preserve the EXISTING POINTER (which may be
+	// nil = "never set") when the request omits the field — collapsing to a
+	// plain bool here would erase the unset/false distinction the trust-baseline
+	// logic (MCP-2931) relies on.
+	if req.AutoApproveToolChanges != nil {
+		updates.AutoApproveToolChanges = req.AutoApproveToolChanges
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
 	}
 	if req.Isolation != nil {
 		updates.Isolation = req.Isolation.toConfig()

@@ -1,6 +1,7 @@
 package configimport
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -315,5 +316,87 @@ func TestImport_DuplicateWithinSameImport(t *testing.T) {
 	// Both should be imported since they have different names
 	if result.Summary.Imported != 2 {
 		t.Errorf("Summary.Imported = %d, want 2", result.Summary.Imported)
+	}
+}
+
+// TestImport_FilterMatchesSanitizedName reproduces the two-step preview -> import
+// flow used by the Web UI for a server whose name needs sanitizing (a space).
+// The preview surfaces the sanitized name ("Figma_Desktop"), so the actual
+// import call carries that sanitized name in ServerNames. The filter must match
+// it; previously it compared against the un-sanitized "Figma Desktop" and the
+// server was silently dropped ("0 servers added").
+func TestImport_FilterMatchesSanitizedName(t *testing.T) {
+	now := time.Date(2026, 1, 17, 12, 0, 0, 0, time.UTC)
+	content := []byte(`{
+		"mcpServers": {
+			"Figma Desktop": {
+				"url": "http://127.0.0.1:3845/mcp"
+			}
+		}
+	}`)
+
+	// Step 1: preview (no filter) — this is what the UI shows as "Will import 1".
+	preview, err := Import(content, &ImportOptions{Now: now})
+	if err != nil {
+		t.Fatalf("preview Import() error = %v", err)
+	}
+	if preview.Summary.Imported != 1 {
+		t.Fatalf("preview Summary.Imported = %d, want 1", preview.Summary.Imported)
+	}
+	previewedName := preview.Imported[0].Server.Name
+	if previewedName != "Figma_Desktop" {
+		t.Fatalf("previewed server name = %q, want %q", previewedName, "Figma_Desktop")
+	}
+
+	// OriginalName must carry the raw source name (the httpapi rename map keys
+	// off it), not the sanitized name.
+	if got := preview.Imported[0].OriginalName; got != "Figma Desktop" {
+		t.Errorf("preview OriginalName = %q, want %q", got, "Figma Desktop")
+	}
+
+	// Step 2a: Web UI path — filter by the sanitized name the UI selected.
+	// Step 2b: CLI path — filter by the raw source name passed to `--server`.
+	// Both must import the server.
+	for _, tc := range []struct {
+		name   string
+		filter string
+	}{
+		{"webui_sanitized_name", previewedName}, // "Figma_Desktop"
+		{"cli_raw_name", "Figma Desktop"},       // verbatim --server value
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := Import(content, &ImportOptions{
+				ServerNames: []string{tc.filter},
+				Now:         now,
+			})
+			if err != nil {
+				t.Fatalf("Import() error = %v", err)
+			}
+
+			if result.Summary.Imported != 1 {
+				t.Errorf("Summary.Imported = %d, want 1 (regression: server dropped despite filter match on %q)", result.Summary.Imported, tc.filter)
+			}
+			if result.Summary.Skipped != 0 {
+				t.Errorf("Summary.Skipped = %d, want 0", result.Summary.Skipped)
+			}
+			// No spurious "requested server not found" warning.
+			for _, w := range result.Warnings {
+				if w == fmt.Sprintf("requested server '%s' not found in config", tc.filter) {
+					t.Errorf("unexpected not-found warning for filter %q", tc.filter)
+				}
+			}
+			if len(result.Imported) != 1 {
+				t.Fatalf("len(Imported) = %d, want 1", len(result.Imported))
+			}
+			if result.Imported[0].Server.Name != "Figma_Desktop" {
+				t.Errorf("imported server name = %q, want %q", result.Imported[0].Server.Name, "Figma_Desktop")
+			}
+			if result.Imported[0].OriginalName != "Figma Desktop" {
+				t.Errorf("imported OriginalName = %q, want %q", result.Imported[0].OriginalName, "Figma Desktop")
+			}
+			if result.Imported[0].Server.URL != "http://127.0.0.1:3845/mcp" {
+				t.Errorf("imported server URL = %q, want the Figma URL", result.Imported[0].Server.URL)
+			}
+		})
 	}
 }

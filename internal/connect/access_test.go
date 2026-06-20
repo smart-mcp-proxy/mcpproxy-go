@@ -156,3 +156,70 @@ func TestConnectDenied_ReturnsAccessError(t *testing.T) {
 		t.Error("unknown-client error must not be an *AccessError")
 	}
 }
+
+// installClientConfig makes a supported client appear installed by writing a
+// config file at its resolved path under the (test-isolated) home dir.
+func installClientConfig(t *testing.T, homeDir, clientID, body string) {
+	t.Helper()
+	cfgPath := ConfigPath(clientID, homeDir)
+	if cfgPath == "" {
+		t.Fatalf("no config path for %s", clientID)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestDetectAppDataDenial covers the doctor probe (Spec 075 US3, T020): an
+// installed client whose content read is permission-denied reports a denial with
+// remediation; a clean read does not; and no installed clients yields neither a
+// denial nor any content read (no false positive).
+func TestDetectAppDataDenial(t *testing.T) {
+	t.Run("denied when an installed client config read is EPERM", func(t *testing.T) {
+		svc, homeDir := testService(t)
+		installClientConfig(t, homeDir, "claude-code", `{"mcpServers":{}}`)
+		svc.setReadFile(epermReader)
+
+		denied, remediation := svc.DetectAppDataDenial()
+		if !denied {
+			t.Fatal("expected denied=true for an EPERM content read on an installed client")
+		}
+		if !strings.Contains(remediation, "tccutil reset SystemPolicyAppData") {
+			t.Errorf("remediation must carry the exact reset command, got %q", remediation)
+		}
+		if !strings.Contains(remediation, bundleIDProd) {
+			t.Errorf("remediation must name the prod bundle id, got %q", remediation)
+		}
+	})
+
+	t.Run("not denied when installed configs read cleanly", func(t *testing.T) {
+		svc, homeDir := testService(t)
+		installClientConfig(t, homeDir, "claude-code", `{"mcpServers":{}}`)
+		svc.setReadFile(func(string) ([]byte, error) {
+			return []byte(`{"mcpServers":{}}`), nil
+		})
+
+		denied, remediation := svc.DetectAppDataDenial()
+		if denied || remediation != "" {
+			t.Fatalf("clean read must not be a denial, got denied=%v remediation=%q", denied, remediation)
+		}
+	})
+
+	t.Run("no false positive when no clients are installed", func(t *testing.T) {
+		svc, _ := testService(t)
+		// Fresh isolated home: nothing stat-exists, so a denial-returning reader
+		// must never be consulted.
+		svc.setReadFile(func(path string) ([]byte, error) {
+			t.Errorf("reader must not be called when no client config exists; read %s", path)
+			return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EPERM}
+		})
+
+		denied, remediation := svc.DetectAppDataDenial()
+		if denied || remediation != "" {
+			t.Fatalf("no installed clients must yield no denial, got denied=%v remediation=%q", denied, remediation)
+		}
+	})
+}

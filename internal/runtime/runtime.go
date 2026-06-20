@@ -1912,6 +1912,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["reconnect_on_use"] = true
 		}
 
+		// MCP-2940: surface the per-server auto-approve intent so the REST GET
+		// payload (and SSE servers.changed embed) can drive the Web UI toggle.
+		// Tri-state *bool — only emit the key when set so the projection stays
+		// nil for servers that never configured it.
+		if serverStatus.Config != nil && serverStatus.Config.AutoApproveToolChanges != nil {
+			serverMap["auto_approve_tool_changes"] = *serverStatus.Config.AutoApproveToolChanges
+		}
+
 		// MCP-901: carry registry provenance through to the REST/SSE projection
 		// so the approval/quarantine view can show a server's origin. Empty for
 		// manually-configured servers.
@@ -1934,7 +1942,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 				"detected_at": d.DetectedAt,
 			}
 			if entry, ok := diagnostics.Get(d.Code); ok {
-				diagMap["user_message"] = entry.UserMessage
+				// MCP-2909: prefer the runtime-aware remediation when present so
+				// the user sees the detected runtime + recommended image instead
+				// of the generic catalog message.
+				if d.Remediation != "" {
+					diagMap["user_message"] = d.Remediation
+				} else {
+					diagMap["user_message"] = entry.UserMessage
+				}
 				diagMap["fix_steps"] = entry.FixSteps
 				diagMap["docs_url"] = entry.DocsURL
 			}
@@ -2069,6 +2084,12 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		}
 		if srv.SourceRegistryProvenance != "" {
 			serverInfo["source_registry_provenance"] = srv.SourceRegistryProvenance
+		}
+
+		// MCP-2940: per-server auto-approve intent in parity with the
+		// StateView path. Tri-state *bool — only emit when set.
+		if srv.AutoApproveToolChanges != nil {
+			serverInfo["auto_approve_tool_changes"] = *srv.AutoApproveToolChanges
 		}
 
 		// Try to get connection status

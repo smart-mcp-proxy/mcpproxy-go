@@ -73,33 +73,50 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 
 	// Step 4: Process each parsed server
 	for _, parsed := range parsedServers {
-		foundServers[parsed.Name] = true
+		originalName := parsed.Name
 
-		// Check filter
-		if filterSet != nil && !filterSet[parsed.Name] {
+		// Resolve the effective (sanitized) name BEFORE filtering and dedup.
+		// The Web UI's two-step flow surfaces the sanitized name in the preview,
+		// so its server_names filter carries the sanitized name; the CLI's
+		// --server flag carries the raw source name verbatim. We must match
+		// either and track both, otherwise a name that needs sanitizing (e.g.
+		// "Figma Desktop" -> "Figma_Desktop") gets silently dropped on whichever
+		// path doesn't happen to match.
+		effectiveName, _ := SanitizeServerName(originalName)
+		nameUnsanitizable := effectiveName == ""
+		if nameUnsanitizable {
+			effectiveName = originalName
+		}
+
+		foundServers[originalName] = true
+		foundServers[effectiveName] = true
+
+		// Check filter against either the raw source name (CLI --server) or the
+		// sanitized name the Web UI selected from the preview.
+		if filterSet != nil && !filterSet[originalName] && !filterSet[effectiveName] {
 			result.Skipped = append(result.Skipped, SkippedServer{
-				Name:   parsed.Name,
+				Name:   effectiveName,
 				Reason: "filtered_out",
 			})
 			continue
 		}
 
-		// Validate server name
-		if err := ValidServerName(parsed.Name); err != nil {
-			// Try to sanitize
-			sanitized, _ := SanitizeServerName(parsed.Name)
-			if sanitized == "" {
-				result.Failed = append(result.Failed, FailedServer{
-					Name:    parsed.Name,
-					Error:   "invalid_name",
-					Details: err.Error(),
-				})
-				continue
-			}
-			// Use sanitized name with warning
-			result.Warnings = append(result.Warnings, fmt.Sprintf("server '%s' renamed to '%s' due to invalid characters", parsed.Name, sanitized))
-			parsed.Name = sanitized
+		// Now that we know this server was selected, fail it if its name could
+		// not be sanitized into anything valid.
+		if nameUnsanitizable {
+			result.Failed = append(result.Failed, FailedServer{
+				Name:    originalName,
+				Error:   "invalid_name",
+				Details: ValidServerName(originalName).Error(),
+			})
+			continue
 		}
+
+		// Emit a rename warning when sanitization changed the name.
+		if effectiveName != originalName {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("server '%s' renamed to '%s' due to invalid characters", originalName, effectiveName))
+		}
+		parsed.Name = effectiveName
 
 		// Check for duplicates
 		if existingSet[parsed.Name] {
@@ -122,7 +139,7 @@ func Import(content []byte, opts *ImportOptions) (*ImportResult, error) {
 		imported := &ImportedServer{
 			Server:        serverConfig,
 			SourceFormat:  parsed.SourceFormat,
-			OriginalName:  parsed.Name,
+			OriginalName:  originalName,
 			FieldsSkipped: skipped,
 			Warnings:      warnings,
 		}

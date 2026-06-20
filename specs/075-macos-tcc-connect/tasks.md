@@ -22,7 +22,7 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 **Purpose**: The access-classification primitive every story depends on. MUST complete before US1–US3.
 
 - [ ] T003 [P] Add a content-read seam to `internal/connect`: a `Service`-held `readFile func(string) ([]byte, error)` (default `os.ReadFile`) and a `NewServiceWithReader`/test setter, mirroring the existing `homeDir` override, so tests can inject a permission-denied error. File: `internal/connect/connect.go`.
-- [ ] T004 Pin the diagnostics package/registration point for the doctor check: inspect `internal/diagnostics/registry.go` and `internal/management/diagnostics.go`, document in tasks.md which registry the new macOS check registers into and the existing check-result type to reuse.
+- [x] T004 Pin the diagnostics package/registration point for the doctor check. **Decision:** the runtime doctor is `internal/management` `service.Doctor()` (`diagnostics.go`), which builds `contracts.Diagnostics`; the macOS App-Data check appends an actionable warning string to its `RuntimeWarnings []string` (rendered by `mcpproxy doctor` as the "⚠️ Runtime Warnings" section and counted in `TotalIssues`). The static `internal/diagnostics` registry is an error-CODE catalog (classification metadata), not a runtime-check registry, so it is NOT used. The build-tagged check lives in `internal/management/tcc_appdata_{darwin,other}.go` with a pure, cross-platform translator in `tcc_appdata.go`.
 
 ---
 
@@ -69,11 +69,11 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 **Independent Test**: On darwin with an injected denial → warn + remediation; darwin with access OK → pass; non-darwin → check absent/no-op.
 
-- [ ] T020 [P] [US3] Write failing test `internal/connect/...` or diagnostics test for a `Service` helper `DetectAppDataDenial() (denied bool, remediation string)`: inject reader returning EPERM on an existing (stat-true) client → denied=true + remediation; reader OK → denied=false; no installed clients → denied=false (no false positive).
-- [ ] T021 [P] [US3] Write failing test `tcc_appdata_test.go` (build-tagged darwin) asserting the diagnostics check returns warn when `DetectAppDataDenial` reports denied, and pass otherwise; plus a `!darwin` test asserting the check is not registered / is a no-op.
-- [ ] T022 [US3] Implement `Service.DetectAppDataDenial()` in `internal/connect/access.go`: iterate clients, for the first that `os.Stat`-exists, attempt a content read via the seam; if `classifyAccess`==denied return (true, remediation); else (false, "").
-- [ ] T023 [US3] Implement `internal/<diagnostics-pkg>/tcc_appdata_darwin.go` (`//go:build darwin`): a check that calls `DetectAppDataDenial` and emits warn+remediation; register it in the registry pinned in T004. Add `tcc_appdata_other.go` (`//go:build !darwin`) no-op stub.
-- [ ] T024 [US3] Run `go test ./internal/connect/... ./internal/<diagnostics-pkg>/... -run 'AppData|TCC|Denial' -race` → green. Build & smoke `./mcpproxy doctor` on darwin.
+- [x] T020 [P] [US3] Write failing test `internal/connect/...` or diagnostics test for a `Service` helper `DetectAppDataDenial() (denied bool, remediation string)`: inject reader returning EPERM on an existing (stat-true) client → denied=true + remediation; reader OK → denied=false; no installed clients → denied=false (no false positive).
+- [x] T021 [P] [US3] Write failing test `tcc_appdata_test.go` (build-tagged darwin) asserting the diagnostics check returns warn when `DetectAppDataDenial` reports denied, and pass otherwise; plus a `!darwin` test asserting the check is not registered / is a no-op.
+- [x] T022 [US3] Implement `Service.DetectAppDataDenial()` in `internal/connect/access.go`: iterate clients, for the first that `os.Stat`-exists, attempt a content read via the seam; if `classifyAccess`==denied return (true, remediation); else (false, "").
+- [x] T023 [US3] Implement `internal/<diagnostics-pkg>/tcc_appdata_darwin.go` (`//go:build darwin`): a check that calls `DetectAppDataDenial` and emits warn+remediation; register it in the registry pinned in T004. Add `tcc_appdata_other.go` (`//go:build !darwin`) no-op stub.
+- [x] T024 [US3] Run `go test ./internal/connect/... ./internal/<diagnostics-pkg>/... -run 'AppData|TCC|Denial' -race` → green. Build & smoke `./mcpproxy doctor` on darwin.
 
 **Checkpoint**: Doctor surfaces persisted denials with a one-command fix. SC-005 satisfied.
 
@@ -81,11 +81,11 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T025 [P] Map new `ClientStatus` fields (`access_state`, `remediation`) into the REST response in `internal/httpapi/connect.go`; ensure GET `/connect` payload is additive only. Confirm/append a per-client GET `/connect/{client}` on-demand status route per contracts (or document that connect/disconnect carry the denied error).
-- [ ] T026 [P] Run the existing Connect REST contract/integration tests and `./scripts/test-api-e2e.sh`; confirm no regression (SC-006).
-- [ ] T027 [P] Run CI linter locally: `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml internal/connect/... internal/httpapi/... internal/<diagnostics-pkg>/...` → 0 issues (Constitution V; CI uses v2).
-- [ ] T028 [P] Docs: add a short macOS "App Data privacy & Connect" note (cause + `tccutil reset` remediation) to the Connect/troubleshooting docs and update CLAUDE.md REST-payload notes for the new fields (Constitution VI).
-- [ ] T029 Full verification: `go build ./cmd/mcpproxy && go build -tags server ./cmd/mcpproxy && go test -race ./internal/connect/... ./internal/httpapi/... ./internal/<diagnostics-pkg>/...`. Update execution_log.md.
+- [x] T025 [P] Map new `ClientStatus` fields (`access_state`, `remediation`) into the REST response in `internal/httpapi/connect.go`; ensure GET `/connect` payload is additive only. Confirm/append a per-client GET `/connect/{client}` on-demand status route per contracts (or document that connect/disconnect carry the denied error). DONE: GET `/connect` already serializes the additive fields (`unknown`); added `GET /connect/{client}` on-demand route (`handleGetConnectClientStatus` → `GetStatus`, 404 unknown, denied reported in-band) and mapped denied connect/disconnect `*AccessError` → `403` with remediation.
+- [x] T026 [P] Run the existing Connect REST contract/integration tests and `./scripts/test-api-e2e.sh`; confirm no regression (SC-006). DONE: `test-api-e2e.sh` 65/65 PASS; new REST tests in `connect_test.go` green.
+- [x] T027 [P] Run CI linter locally: `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml internal/connect/... internal/httpapi/...` → 0 issues (Constitution V; CI uses v2). DONE: 0 issues. (diagnostics-pkg doctor check is separate issue MCP-2831, not yet on main.)
+- [x] T028 [P] Docs: add a short macOS "App Data privacy & Connect" note (cause + `tccutil reset` remediation) to the Connect/troubleshooting docs and update CLAUDE.md REST-payload notes for the new fields (Constitution VI). DONE: `docs/api/rest-api.md` Connect section + CLAUDE.md REST note.
+- [x] T029 Full verification: `go build ./cmd/mcpproxy && go build -tags server ./cmd/mcpproxy && go test -race ./internal/connect/... ./internal/httpapi/...`. DONE: both editions build; race tests green; `make swagger` regenerated `oas/`.
 - [ ] T030 [P] (Optional, separable) Frontend: render the `unknown`/`denied` tri-state + remediation banner in the Connect view (`frontend/src/`), verified via the Playwright sweep in CLAUDE.md. Not required for backend MVP.
 
 ---

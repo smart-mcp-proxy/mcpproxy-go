@@ -562,6 +562,12 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		}
 	}
 
+	// Copy *bool by value (not pointer) to avoid shared state (MCP-2930)
+	if src.AutoApproveToolChanges != nil {
+		autoApprove := *src.AutoApproveToolChanges
+		dst.AutoApproveToolChanges = &autoApprove
+	}
+
 	// Copy nested structs
 	dst.Isolation = copyIsolationConfig(src.Isolation)
 	dst.OAuth = copyOAuthConfig(src.OAuth)

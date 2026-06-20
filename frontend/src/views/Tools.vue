@@ -185,6 +185,24 @@
           <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
           Disable selected
         </button>
+        <button
+          @click="batchApproval('approve')"
+          :disabled="batchLoading || !hasApprovableSelection"
+          class="btn btn-sm btn-primary"
+          data-test="batch-approve"
+        >
+          <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
+          Approve
+        </button>
+        <button
+          @click="batchApproval('reject')"
+          :disabled="batchLoading || !hasApprovableSelection"
+          class="btn btn-sm btn-error"
+          data-test="batch-reject"
+        >
+          <span v-if="batchLoading" class="loading loading-spinner loading-xs"></span>
+          Reject
+        </button>
         <button @click="selectedKeys.clear()" class="btn btn-sm btn-ghost ml-auto">
           Clear selection
         </button>
@@ -450,6 +468,9 @@ import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
 import api from '@/services/api'
+import { useSystemStore } from '@/stores/system'
+
+const systemStore = useSystemStore()
 
 // ---- State ----
 const allTools = ref<GlobalTool[]>([])
@@ -565,6 +586,76 @@ async function batchEnable(enabled: boolean) {
   batchLoading.value = false
 
   // Refresh to get authoritative server state
+  await loadTools()
+}
+
+// ---- Batch approve / reject (multi-server fan-out) ----
+// A tool is "approvable" when it is awaiting a decision: pending (brand-new) or
+// changed (rug-pull). Already-approved tools are silently skipped so the action
+// never errors when a mixed selection includes them.
+function isApprovable(tool: GlobalTool): boolean {
+  return tool.approval_status === 'pending' || tool.approval_status === 'changed'
+}
+
+const hasApprovableSelection = computed(() =>
+  allTools.value.some(t => selectedKeys.value.has(toolKey(t)) && isApprovable(t))
+)
+
+async function batchApproval(action: 'approve' | 'reject') {
+  if (batchLoading.value || !hasApprovableSelection.value) return
+  batchLoading.value = true
+  batchResult.value = null
+
+  // Group the approvable tools in the selection by server, then fan out one
+  // call per server — the page spans multiple servers but each approve/block
+  // endpoint is per-server.
+  const byServer = new Map<string, string[]>()
+  for (const tool of allTools.value) {
+    if (!selectedKeys.value.has(toolKey(tool)) || !isApprovable(tool)) continue
+    const names = byServer.get(tool.server_name) || []
+    names.push(tool.name)
+    byServer.set(tool.server_name, names)
+  }
+
+  let toolCount = 0
+  byServer.forEach(names => { toolCount += names.length })
+
+  const failedServers: string[] = []
+  await Promise.all(
+    Array.from(byServer.entries()).map(async ([server, names]) => {
+      try {
+        const resp = action === 'approve'
+          ? await api.approveTools(server, names)
+          : await api.blockTools(server, names)
+        if (!resp.success) {
+          failedServers.push(`${server} (${resp.error || 'failed'})`)
+        }
+      } catch (err) {
+        failedServers.push(`${server} (${err instanceof Error ? err.message : 'failed'})`)
+      }
+    })
+  )
+
+  const verb = action === 'approve' ? 'Approved' : 'Rejected'
+  const okServers = byServer.size - failedServers.length
+  if (failedServers.length === 0) {
+    systemStore.addToast({
+      type: 'success',
+      title: `${verb} tools`,
+      message: `${verb} ${toolCount} tool${toolCount === 1 ? '' : 's'} across ${byServer.size} server${byServer.size === 1 ? '' : 's'}`,
+    })
+  } else {
+    systemStore.addToast({
+      type: 'error',
+      title: `${verb} with errors`,
+      message: `${okServers} of ${byServer.size} server${byServer.size === 1 ? '' : 's'} succeeded. Failed: ${failedServers.join(', ')}`,
+    })
+  }
+
+  selectedKeys.value.clear()
+  batchLoading.value = false
+
+  // Refresh to get authoritative approval state + stats.
   await loadTools()
 }
 
@@ -797,7 +888,7 @@ const toolsHints = computed<Hint[]>(() => [
           'Search by tool name, description, or server',
           'Filter by status, risk level, or approval state',
           'Sort any column to find stale or unused tools',
-          'Select multiple tools for batch enable/disable',
+          'Select multiple tools for batch enable/disable, or batch approve/reject across servers',
         ],
       },
       {

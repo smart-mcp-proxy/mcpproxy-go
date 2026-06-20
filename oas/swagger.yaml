@@ -645,6 +645,19 @@ components:
             type: string
           type: array
           uniqueItems: false
+        auto_approve_tool_changes:
+          description: |-
+            AutoApproveToolChanges is the per-server intent to auto-approve tool
+            changes/additions (disabling per-server rug-pull protection). Supersedes
+            skip_quarantine. MCP-2930 only ACCEPTS, persists, and migrates this flag — it
+            is NOT yet consulted at runtime; auto-approval is still governed by
+            SkipQuarantine until the trust-baseline behavior change (MCP-2931) migrates the
+            runtime consumers onto it.
+            Tri-state pointer (mirrors QuarantineEnabled): nil = unset (inherit/migrate
+            from legacy skip_quarantine), explicit true/false = honored as-is so an
+            explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
+            Read via IsAutoApproveToolChanges().
+          type: boolean
         command:
           type: string
         created:
@@ -712,7 +725,11 @@ components:
           description: 'Server edition: shared with all users'
           type: boolean
         skip_quarantine:
-          description: Skip tool-level quarantine for this server
+          description: |-
+            SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
+            Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
+            migrated to auto_approve_tool_changes:true only when the new field is unset
+            (see normalizeServerQuarantineFlags).
           type: boolean
         source_registry_id:
           description: |-
@@ -1804,6 +1821,15 @@ components:
         authenticated:
           description: OAuth authentication status
           type: boolean
+        auto_approve_tool_changes:
+          description: |-
+            AutoApproveToolChanges mirrors config.ServerConfig.AutoApproveToolChanges
+            (MCP-2930): the per-server intent to auto-approve new/changed tools past
+            the trust baseline. Tri-state *bool — nil means "never set" (omitted from
+            the payload), so the Web UI toggle (MCP-2932) can distinguish unset from
+            an explicit false. Read-only on the GET path; PATCH/POST accept it via
+            AddServerRequest.
+          type: boolean
         command:
           type: string
         connected:
@@ -2225,6 +2251,15 @@ components:
             type: string
           type: array
           uniqueItems: false
+        auto_approve_tool_changes:
+          description: |-
+            AutoApproveToolChanges is the per-server intent to auto-approve
+            new/changed tools past the trust baseline (MCP-2930). Tri-state *bool:
+            a nil pointer means "leave unchanged" on PATCH; a present value
+            (including false) is applied. Mirrors config.ServerConfig's *bool
+            semantics — do NOT collapse to a plain bool, or an omitted field would
+            silently reset a previously-set value.
+          type: boolean
         command:
           type: string
         enabled:
@@ -2306,10 +2341,13 @@ components:
           additionalProperties:
             type: string
           description: |-
-            Rename maps OriginalName → new name. Applied after parsing so the
+            Rename maps a server name → new name. Applied after parsing so the
             caller can disambiguate cross-source name collisions (Spec 046 v2 —
-            e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys not present in the
-            imported set are ignored.
+            e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys are matched against
+            either the raw source name (OriginalName) or the sanitized name shown
+            in the preview (Server.Name); these differ for names that need
+            sanitizing (e.g. "Figma Desktop" → "Figma_Desktop"). Keys not present
+            in the imported set are ignored.
           type: object
         server_names:
           description: 'Optional: import only these servers'
@@ -3322,6 +3360,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Permission denied (macOS App-Data block)
         "404":
           content:
             application/json:
@@ -3338,6 +3382,46 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Disconnect MCPProxy from a client
+      tags:
+      - connect
+    get:
+      description: |-
+        Resolves one client's status by reading its config file on demand.
+        This is the only Connect endpoint that opens a client config file, so
+        on macOS it is the sole place an App-Data privacy prompt may legitimately
+        appear (scoped to this user action). Resolves access_state to
+        accessible|absent|denied|malformed and populates remediation when denied.
+      parameters:
+      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
+          codex, gemini, opencode)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: ClientStatus
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown client
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get a single client's connection status (on-demand)
       tags:
       - connect
     post:
@@ -3371,6 +3455,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Permission denied (macOS App-Data block)
         "404":
           content:
             application/json:

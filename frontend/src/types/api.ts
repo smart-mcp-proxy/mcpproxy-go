@@ -160,6 +160,12 @@ export interface Server {
   protocol: 'http' | 'stdio' | 'streamable-http'
   enabled: boolean
   quarantined: boolean
+  // Per-server intent to auto-approve tool changes/additions (MCP-2930).
+  // When true, rug-pull protection is disabled for this server: changed and
+  // newly-added tools are trusted automatically instead of held for review.
+  // Optional because the REST status payload only includes it once the
+  // backend exposes the flag; absent/undefined is treated as OFF (protected).
+  auto_approve_tool_changes?: boolean
   connected: boolean
   connecting: boolean
   authenticated?: boolean

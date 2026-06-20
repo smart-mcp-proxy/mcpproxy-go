@@ -97,6 +97,7 @@ type OAuthConnector struct {
 	serverKey string
 	client    *http.Client
 	logger    *zap.Logger
+	audit     AuditSink
 
 	mu      sync.Mutex
 	pending map[string]*pendingFlow
@@ -107,13 +108,17 @@ type OAuthConnector struct {
 }
 
 // NewOAuthConnector builds a connector for one upstream. It returns an error if
-// the configuration is missing fields required to run a connect flow.
-func NewOAuthConnector(store CredentialStore, cfg ConnectorConfig, logger *zap.Logger) (*OAuthConnector, error) {
+// the configuration is missing fields required to run a connect flow. A nil
+// audit sink disables audit emission (no-op).
+func NewOAuthConnector(store CredentialStore, cfg ConnectorConfig, logger *zap.Logger, audit AuditSink) (*OAuthConnector, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	if logger == nil {
 		logger = zap.NewNop()
+	}
+	if audit == nil {
+		audit = nopAuditSink{}
 	}
 	return &OAuthConnector{
 		store:     store,
@@ -121,10 +126,31 @@ func NewOAuthConnector(store CredentialStore, cfg ConnectorConfig, logger *zap.L
 		serverKey: oauth.GenerateServerKey(cfg.ServerName, cfg.ServerURL),
 		client:    &http.Client{Timeout: 30 * time.Second},
 		logger:    logger.Named("oauth-connector").With(zap.String("server", cfg.ServerName)),
+		audit:     audit,
 		pending:   make(map[string]*pendingFlow),
 		now:       time.Now,
 		stateTTL:  defaultStateTTL,
 	}, nil
+}
+
+// emitConnect records a secret-free connect-flow audit event (spec 074 T10). An
+// empty reason marks success; a non-empty reason marks failure. The reason is a
+// fixed, coarse label chosen by the caller — never a raw upstream error body —
+// so the audit log never captures secret material (FR-029).
+func (c *OAuthConnector) emitConnect(ctx context.Context, userID, reason string) {
+	ev := AuditEvent{
+		UserID:     userID,
+		ServerName: c.cfg.ServerName,
+		Method:     AuditMethodConnect,
+		Action:     AuditActionConnect,
+		Outcome:    AuditOutcomeSuccess,
+		RequestID:  auditRequestID(ctx),
+	}
+	if reason != "" {
+		ev.Outcome = AuditOutcomeFailure
+		ev.Reason = reason
+	}
+	c.audit.RecordBrokerEvent(ctx, ev)
 }
 
 // ServerKey returns the store key this connector persists credentials under.
@@ -184,9 +210,12 @@ func (c *OAuthConnector) BuildAuthorizationURL(userID string) (authURL, state st
 func (c *OAuthConnector) Complete(ctx context.Context, state, code string) (*UpstreamCredential, error) {
 	flow, err := c.consume(state)
 	if err != nil {
+		// State unknown/expired: the user is not yet identified for attribution.
+		c.emitConnect(ctx, "", "invalid or expired state")
 		return nil, err
 	}
 	if code == "" {
+		c.emitConnect(ctx, flow.userID, "missing authorization code")
 		return nil, fmt.Errorf("oauth connector: empty authorization code")
 	}
 
@@ -199,15 +228,18 @@ func (c *OAuthConnector) Complete(ctx context.Context, state, code string) (*Ups
 	}
 	tok, err := c.postToken(ctx, form)
 	if err != nil {
+		c.emitConnect(ctx, flow.userID, "token endpoint exchange failed")
 		return nil, err
 	}
 
 	cred := c.credentialFromToken(tok, "")
 	if err := c.store.Put(flow.userID, c.serverKey, cred); err != nil {
+		c.emitConnect(ctx, flow.userID, "credential persistence failed")
 		return nil, fmt.Errorf("oauth connector: persist credential: %w", err)
 	}
 	c.logger.Info("stored per-user upstream credential via connect flow",
 		zap.String("user_id", flow.userID))
+	c.emitConnect(ctx, flow.userID, "")
 	return cred, nil
 }
 
@@ -215,9 +247,15 @@ func (c *OAuthConnector) Complete(ctx context.Context, state, code string) (*Ups
 // error=access_denied). It clears the pending flow and stores nothing.
 func (c *OAuthConnector) Deny(state, reason string) error {
 	c.mu.Lock()
+	var userID string
+	if f, ok := c.pending[state]; ok {
+		userID = f.userID
+	}
 	delete(c.pending, state)
 	c.mu.Unlock()
 	c.logger.Info("connect flow denied by user", zap.String("reason", reason))
+	// reason is the AS-supplied error code (e.g. "access_denied") — secret-free.
+	c.emitConnect(context.Background(), userID, "connect denied: "+reason)
 	return nil
 }
 

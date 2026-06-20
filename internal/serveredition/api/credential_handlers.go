@@ -44,15 +44,17 @@ type CredentialHandlers struct {
 }
 
 // NewCredentialHandlers builds the handlers over a credential store and the set
-// of shared servers (only those carrying an auth_broker block are brokered).
-func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config.ServerConfig, logger *zap.SugaredLogger) *CredentialHandlers {
+// of shared servers (only those carrying an auth_broker block are brokered). The
+// audit sink (spec 074 T10) records per-user connect-flow events to the activity
+// log; a nil sink disables audit emission.
+func NewCredentialHandlers(store broker.CredentialStore, sharedServers []*config.ServerConfig, audit broker.AuditSink, logger *zap.SugaredLogger) *CredentialHandlers {
 	if logger == nil {
 		logger = zap.NewNop().Sugar()
 	}
 	return &CredentialHandlers{
 		store:         store,
 		brokerServers: sharedServers,
-		connectors:    newConnectorProvider(store, logger.Desugar()),
+		connectors:    newConnectorProvider(store, logger.Desugar(), audit),
 		logger:        logger,
 	}
 }
@@ -276,8 +278,11 @@ func (h *CredentialHandlers) callback(w http.ResponseWriter, r *http.Request) {
 	state := q.Get("state")
 
 	// Authorization-server-side error (e.g. user denied consent).
+	// The AS error code is coerced to a fixed label for the audit sink so the
+	// activity log never captures a raw upstream error string (FR-029).
 	if asErr := q.Get("error"); asErr != "" {
-		_ = conn.Deny(state, asErr)
+		auditReason := sanitizeCallbackError(asErr)
+		_ = conn.Deny(state, auditReason)
 		h.logger.Infow("brokered credential connect denied", "server", srv.Name, "reason", asErr)
 		http.Redirect(w, r, credentialConnectRedirect(srv.Name, asErr), http.StatusFound)
 		return
@@ -335,6 +340,33 @@ func (h *CredentialHandlers) brokerServerByName(name string) *config.ServerConfi
 		}
 	}
 	return nil
+}
+
+// sanitizeCallbackError coerces a raw OAuth authorization-server error code into
+// a fixed, secret-free label suitable for the audit sink (FR-029). Unknown error
+// codes map to the generic "authorization_denied" label rather than leaking the
+// upstream's error string.
+func sanitizeCallbackError(err string) string {
+	switch err {
+	case "access_denied":
+		return "access_denied"
+	case "invalid_scope":
+		return "invalid_scope"
+	case "server_error":
+		return "server_error"
+	case "temporarily_unavailable":
+		return "temporarily_unavailable"
+	case "interaction_required":
+		return "interaction_required"
+	case "login_required":
+		return "login_required"
+	case "account_selection_required":
+		return "account_selection_required"
+	case "consent_required":
+		return "consent_required"
+	default:
+		return "authorization_denied"
+	}
 }
 
 // credentialConnectRedirect builds the post-callback Web UI redirect, tagging

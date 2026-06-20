@@ -902,7 +902,14 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 				"detected_at": d.DetectedAt,
 			}
 			if entry, ok := diagnostics.Get(d.Code); ok {
-				diagMap["user_message"] = entry.UserMessage
+				// MCP-2909: prefer the runtime-aware remediation when present so
+				// the user sees the detected runtime + recommended image instead
+				// of the generic catalog message.
+				if d.Remediation != "" {
+					diagMap["user_message"] = d.Remediation
+				} else {
+					diagMap["user_message"] = entry.UserMessage
+				}
 				diagMap["fix_steps"] = entry.FixSteps
 				diagMap["docs_url"] = entry.DocsURL
 			}
@@ -1164,6 +1171,16 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	existing.Enabled = updates.Enabled
 	existing.Quarantined = updates.Quarantined
 	existing.ReconnectOnUse = updates.ReconnectOnUse
+
+	// AutoApproveToolChanges is a tri-state *bool (MCP-2940): nil means
+	// "leave unchanged" so callers that don't touch it (e.g. config-to-secret)
+	// don't reset it. A non-nil pointer (including a pointer to false) is
+	// applied. The PATCH handler preserves the existing pointer when the
+	// request omits the field, so this nil-guard is the second half of the
+	// nil-preserve contract.
+	if updates.AutoApproveToolChanges != nil {
+		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
+	}
 
 	// Isolation is PATCH-semantic: nil means "leave unchanged"; a
 	// present struct means "replace". Within the struct, the caller

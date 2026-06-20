@@ -163,6 +163,52 @@ func TestListServers(t *testing.T) {
 		assert.Empty(t, byName["manual"].SourceRegistryProvenance)
 	})
 
+	// MCP-2940: auto_approve_tool_changes must be projected onto contracts.Server
+	// so the Web UI toggle (MCP-2932) can reflect the persisted per-server value.
+	t.Run("auto_approve_tool_changes projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":                        "auto-on",
+				"name":                      "auto-on",
+				"enabled":                   true,
+				"auto_approve_tool_changes": true,
+			},
+			{
+				"id":                        "auto-off",
+				"name":                      "auto-off",
+				"enabled":                   true,
+				"auto_approve_tool_changes": false,
+			},
+			{
+				"id":      "unset",
+				"name":    "unset",
+				"enabled": true,
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 3)
+
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "auto-on")
+		require.NotNil(t, byName["auto-on"].AutoApproveToolChanges)
+		assert.True(t, *byName["auto-on"].AutoApproveToolChanges)
+
+		require.Contains(t, byName, "auto-off")
+		require.NotNil(t, byName["auto-off"].AutoApproveToolChanges)
+		assert.False(t, *byName["auto-off"].AutoApproveToolChanges)
+
+		require.Contains(t, byName, "unset")
+		assert.Nil(t, byName["unset"].AutoApproveToolChanges,
+			"a server that never set the flag must omit it (nil), not coerce to false")
+	})
+
 	// T094: Test that TotalTools only counts enabled servers' tools (Issue #285 fix)
 	t.Run("TotalTools excludes disabled servers", func(t *testing.T) {
 		runtime := newMockRuntime()

@@ -168,6 +168,88 @@ func TestSaveServerSyncPreservesAllFields(t *testing.T) {
 	t.Log("All ServerConfig fields are correctly preserved in saveServerSync")
 }
 
+// TestAutoApproveToolChangesRoundTrip verifies the per-server
+// auto_approve_tool_changes flag (MCP-2940) survives a Save → Get / List
+// cycle through BBolt. This is the persistence half of the feature: without
+// it, SaveConfiguration (which rebuilds the JSON config from these records)
+// would wipe a REST/UI-set toggle on the next mutation. Tri-state *bool — an
+// unset flag must stay nil, an explicit false must round-trip as false.
+func TestAutoApproveToolChangesRoundTrip(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "async_ops_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	logger := zaptest.NewLogger(t).Sugar()
+	manager, err := NewManager(tmpDir, logger)
+	if err != nil {
+		t.Fatalf("Failed to create storage manager: %v", err)
+	}
+	defer manager.Close()
+
+	boolPtr := func(b bool) *bool { return &b }
+	cases := []struct {
+		name string
+		flag *bool
+	}{
+		{"auto-on", boolPtr(true)},
+		{"auto-off", boolPtr(false)},
+		{"unset", nil},
+	}
+
+	for _, tc := range cases {
+		sc := &config.ServerConfig{
+			Name:                   tc.name,
+			URL:                    "https://example.com/mcp",
+			Protocol:               "http",
+			Enabled:                true,
+			Created:                time.Now(),
+			AutoApproveToolChanges: tc.flag,
+		}
+		if err := manager.SaveUpstreamServer(sc); err != nil {
+			t.Fatalf("[%s] SaveUpstreamServer: %v", tc.name, err)
+		}
+	}
+
+	for _, tc := range cases {
+		got, err := manager.GetUpstreamServer(tc.name)
+		if err != nil {
+			t.Fatalf("[%s] GetUpstreamServer: %v", tc.name, err)
+		}
+		if !reflect.DeepEqual(got.AutoApproveToolChanges, tc.flag) {
+			t.Errorf("[%s] Get: AutoApproveToolChanges = %v, want %v",
+				tc.name, derefBool(got.AutoApproveToolChanges), derefBool(tc.flag))
+		}
+	}
+
+	listed, err := manager.ListUpstreamServers()
+	if err != nil {
+		t.Fatalf("ListUpstreamServers: %v", err)
+	}
+	byName := map[string]*config.ServerConfig{}
+	for _, s := range listed {
+		byName[s.Name] = s
+	}
+	for _, tc := range cases {
+		s, ok := byName[tc.name]
+		if !ok {
+			t.Fatalf("[%s] missing from ListUpstreamServers", tc.name)
+		}
+		if !reflect.DeepEqual(s.AutoApproveToolChanges, tc.flag) {
+			t.Errorf("[%s] List: AutoApproveToolChanges = %v, want %v",
+				tc.name, derefBool(s.AutoApproveToolChanges), derefBool(tc.flag))
+		}
+	}
+}
+
+func derefBool(b *bool) interface{} {
+	if b == nil {
+		return nil
+	}
+	return *b
+}
+
 // TestSaveServerSyncPreservesNilFields verifies that nil nested configs remain nil after save.
 func TestSaveServerSyncPreservesNilFields(t *testing.T) {
 	// Create a temp database using the Manager pattern
@@ -228,26 +310,30 @@ func TestSaveServerSyncPreservesNilFields(t *testing.T) {
 func TestSaveServerSyncFieldCoverage(t *testing.T) {
 	// List of ServerConfig fields that ARE expected to be copied
 	expectedFields := map[string]bool{
-		"Name":                true,
-		"URL":                 true,
-		"Protocol":            true,
-		"Command":             true,
-		"Args":                true,
-		"WorkingDir":          true,
-		"Env":                 true,
-		"Headers":             true,
-		"OAuth":               true,
-		"Enabled":             true,
-		"Quarantined":         true,
-		"Created":             true,
-		"Updated":             true, // Updated is set by saveServerSync, not copied
-		"Isolation":           true,
-		"Shared":              true, // Server-edition-only: persisted in JSON config, not in BBolt
-		"SkipQuarantine":      true, // Spec 032: runtime-only field, not persisted to BBolt
-		"ReconnectOnUse":      true, // Spec 354: persisted to BBolt for on-demand reconnection
-		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
-		"EnabledTools":        true, // feat/config-tool-allowlist: persisted to BBolt
-		"DisabledTools":       true, // feat/config-tool-allowlist: persisted to BBolt
+		"Name":           true,
+		"URL":            true,
+		"Protocol":       true,
+		"Command":        true,
+		"Args":           true,
+		"WorkingDir":     true,
+		"Env":            true,
+		"Headers":        true,
+		"OAuth":          true,
+		"Enabled":        true,
+		"Quarantined":    true,
+		"Created":        true,
+		"Updated":        true, // Updated is set by saveServerSync, not copied
+		"Isolation":      true,
+		"Shared":         true, // Server-edition-only: persisted in JSON config, not in BBolt
+		"SkipQuarantine": true, // Spec 032: runtime-only field, not persisted to BBolt
+		// MCP-2930/MCP-2940: successor to SkipQuarantine; persisted to BBolt
+		// because SaveConfiguration rebuilds the JSON config's server list from
+		// these records — without it the REST/UI toggle would be wiped on save.
+		"AutoApproveToolChanges": true,
+		"ReconnectOnUse":         true, // Spec 354: persisted to BBolt for on-demand reconnection
+		"LauncherWaitTimeout":    true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
+		"EnabledTools":           true, // feat/config-tool-allowlist: persisted to BBolt
+		"DisabledTools":          true, // feat/config-tool-allowlist: persisted to BBolt
 		// MCP-866: persisted to BBolt so a server's registry origin/provenance
 		// (and the custom-origin skip_quarantine guard) survive a restart.
 		"SourceRegistryID":         true,

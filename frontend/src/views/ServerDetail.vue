@@ -340,6 +340,26 @@
                 <div class="text-sm">
                   {{ quarantinedTools.length }} tool(s) require approval before they can be used by AI agents.
                 </div>
+                <!-- MCP-2917: subtle, dismissible hint explaining where pending
+                     tools come from and how to opt out of tool-level approval. -->
+                <div
+                  v-if="!quarantineHintDismissed"
+                  data-test="quarantine-hint"
+                  class="text-xs opacity-70 mt-1 flex items-start gap-1"
+                >
+                  <span>
+                    Pending tools come from tool-level quarantine. To approve them automatically, set
+                    <code class="text-[11px]">skip_quarantine: true</code> for this server or
+                    <code class="text-[11px]">quarantine_enabled: false</code> globally.
+                  </span>
+                  <button
+                    type="button"
+                    data-test="quarantine-hint-dismiss"
+                    @click="quarantineHintDismissed = true"
+                    class="btn btn-ghost btn-xs px-1 -mt-0.5"
+                    aria-label="Dismiss hint"
+                  >✕</button>
+                </div>
               </div>
               <div class="flex items-center gap-2">
                 <button
@@ -682,6 +702,60 @@
                     </span>
                   </dd>
                 </dl>
+              </div>
+            </div>
+
+            <!-- Tool-change approval (rug-pull protection) — MCP-2932.
+                 Bound to the per-server `auto_approve_tool_changes` config flag
+                 (MCP-2930). OFF by default = protected: a tool whose
+                 description/schema changes, or a newly-added tool, is held for
+                 review before AI agents can use it. ON trusts those changes
+                 automatically, disabling rug-pull protection for this server. -->
+            <div class="card bg-base-100 shadow-sm" data-test="auto-approve-card">
+              <div class="card-body py-4">
+                <h3 class="card-title text-base">Tool-change approval</h3>
+                <label class="flex items-center gap-3 mt-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    data-test="auto-approve-tool-changes"
+                    :checked="autoApproveToolChanges"
+                    @change="toggleAutoApproveToolChanges"
+                    class="toggle toggle-sm toggle-warning"
+                    :disabled="kvPatchInFlight"
+                  />
+                  <span class="text-sm font-medium">Auto-approve tool changes</span>
+                </label>
+                <!-- Rug-pull warning sits directly beneath the toggle. Always
+                     visible so the trade-off is clear before enabling; it
+                     escalates to an alert once the protection is actually off. -->
+                <div
+                  v-if="autoApproveToolChanges"
+                  data-test="auto-approve-warning"
+                  role="alert"
+                  class="alert alert-warning mt-2 py-2 text-sm"
+                >
+                  <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <span>
+                    Rug-pull protection is <strong>disabled</strong> for this server.
+                    Future changes to a tool's description or schema — and newly
+                    added tools — are trusted automatically instead of held for review.
+                  </span>
+                </div>
+                <p
+                  v-else
+                  data-test="auto-approve-warning"
+                  class="text-xs text-base-content/60 mt-2 flex items-start gap-1.5"
+                >
+                  <span aria-hidden="true">⚠️</span>
+                  <span>
+                    Enabling this <strong>disables rug-pull protection</strong>: changed
+                    tool descriptions/schemas and newly added tools will be trusted
+                    automatically instead of held for review. Protected (default) is
+                    recommended.
+                  </span>
+                </p>
               </div>
             </div>
 
@@ -1324,15 +1398,19 @@ const selectedToolSchema = ref<Tool | null>(null)
 // Tool quarantine (Spec 032)
 const toolApprovals = ref<ToolApproval[]>([])
 const approvalLoading = ref(false)
+// MCP-2917: the Tool-Quarantine banner carries a one-line hint about how to
+// auto-approve pending tools; let the operator dismiss it for the session.
+const quarantineHintDismissed = ref(false)
 const toolToggleLoading = ref<Record<string, boolean>>({})
 // Single in-flight flag for the bulk Enable All / Disable All buttons so
 // they're mutually exclusive with each other and with any per-tool toggle.
 const bulkToolToggleLoading = ref(false)
 
-// MCP-2101 (Spec 032): the Tool-Quarantine banner / list keys off `changed`
-// (rug-pull) tools, NOT freshly-`pending` baseline tools, and is suppressed
-// entirely while the server-level Security Quarantine banner is showing.
-// See selectQuarantinedTools for the trust-model rationale.
+// MCP-2917 (Spec 032): the Tool-Quarantine banner / list surfaces every
+// `pending` (awaiting first approval) or `changed` (rug-pull) tool while the
+// server itself is NOT quarantined (both are blocked by the backend until the
+// operator acts), and is suppressed entirely while the server-level Security
+// Quarantine banner is showing. See selectQuarantinedTools for the rationale.
 const quarantinedTools = computed(() => {
   return selectQuarantinedTools(toolApprovals.value, server.value?.quarantined ?? false)
 })
@@ -2591,6 +2669,27 @@ async function patchServerDiff(patch: Record<string, unknown>, action: string): 
 
 function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
   return scope === 'header' ? 'headers' : 'env'
+}
+
+// MCP-2932: per-server "Auto-approve tool changes" toggle. Absent/undefined on
+// the status payload is treated as OFF (protected) — see the Server type note.
+const autoApproveToolChanges = computed(() => server.value?.auto_approve_tool_changes ?? false)
+
+async function toggleAutoApproveToolChanges(event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  // Persist through the existing PATCH /api/v1/servers/{id} path. The backend
+  // auto-approves changed/added tools on the next discovery pass for this
+  // server (MCP-2931); patchServerDiff surfaces the success toast.
+  const ok = await patchServerDiff(
+    { auto_approve_tool_changes: checked },
+    checked ? 'Auto-approve tool changes enabled' : 'Auto-approve tool changes disabled'
+  )
+  // On failure, snap the checkbox back to the persisted value: patchServerDiff
+  // refetches servers on success, so the bound computed already reflects truth;
+  // an explicit no-op here keeps the control consistent with `server`.
+  if (!ok && event.target) {
+    ;(event.target as HTMLInputElement).checked = autoApproveToolChanges.value
+  }
 }
 
 async function saveEdit(scope: 'header' | 'env', k: string, val: string) {

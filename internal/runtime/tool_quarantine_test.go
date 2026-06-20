@@ -235,14 +235,25 @@ func TestCheckToolApprovals_PerServerSkip_AutoApproved(t *testing.T) {
 }
 
 func TestCheckToolApprovals_TrustedServer_NewToolPending(t *testing.T) {
-	// When quarantine is globally enabled, new tools from trusted (non-quarantined)
-	// servers should still require approval. This prevents injection via new tool
-	// additions on compromised servers.
+	// Trust-baseline model (MCP-2931): a trusted (non-quarantined) server's
+	// CURRENT toolset auto-approves as the baseline, but a NEW tool that appears
+	// AFTER the baseline still requires review. This keeps injection protection
+	// against new tool additions on a compromised server while no longer
+	// stranding the legitimately-trusted baseline.
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
 		{Name: "github", Enabled: true}, // trusted, NOT quarantined
 	})
 
+	// Establish the baseline with the server's initial tool.
+	baseline := []*config.ToolMetadata{
+		{ServerName: "github", Name: "create_issue", Description: "Creates issues", ParamsJSON: `{"type":"object"}`},
+	}
+	_, err := rt.checkToolApprovals("github", baseline)
+	require.NoError(t, err)
+
+	// A new tool appears after the baseline (server already has approved records).
 	tools := []*config.ToolMetadata{
+		baseline[0],
 		{
 			ServerName:  "github",
 			Name:        "new_malicious_tool",
@@ -254,7 +265,7 @@ func TestCheckToolApprovals_TrustedServer_NewToolPending(t *testing.T) {
 
 	result, err := rt.checkToolApprovals("github", tools)
 	require.NoError(t, err)
-	assert.Equal(t, 1, result.PendingCount, "New tool on trusted server should be pending when quarantine enabled")
+	assert.Equal(t, 1, result.PendingCount, "post-baseline new tool on trusted server should be pending")
 	assert.True(t, result.BlockedTools["new_malicious_tool"], "New tool should be blocked until approved")
 
 	// Verify storage record

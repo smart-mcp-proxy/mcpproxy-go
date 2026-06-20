@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -208,4 +209,74 @@ func TestClassify_Quarantine_ToolChanged(t *testing.T) {
 	if got := Classify(err, ClassifierHints{}); got != QuarantineToolChanged {
 		t.Errorf("Classify(tool_changed) = %q, want %q", got, QuarantineToolChanged)
 	}
+}
+
+// --- RUNTIME-AWARE REMEDIATION (MCP-2909) -----------------------------------
+
+// TestRuntimeAwareRemediation_DockerExecNotFound covers the field-report case
+// (ElevenLabs / uvx / per-server image override): a `uvx` server pinned to a
+// stock `python:3.11` image fails at exec time because that image has no `uvx`.
+// The enriched DockerExecNotFound remediation must name the detected runtime,
+// the recommended runtime-default image, and flag the per-server override as the
+// likely culprit when it differs from the default.
+func TestRuntimeAwareRemediation_DockerExecNotFound(t *testing.T) {
+	const uvImage = "ghcr.io/astral-sh/uv:python3.13-bookworm-slim"
+	defaults := map[string]string{
+		"uvx":  uvImage,
+		"pipx": uvImage,
+		"npx":  "node:22",
+	}
+
+	t.Run("uvx_on_bare_python_override", func(t *testing.T) {
+		msg := RuntimeAwareRemediation(DockerExecNotFound, ClassifierHints{
+			DockerCommand:       "uvx",
+			DockerImageOverride: "python:3.11",
+			DockerDefaultImages: defaults,
+		})
+		// Must name the detected runtime.
+		if !strings.Contains(msg, "uvx") {
+			t.Errorf("message must name the runtime 'uvx'; got: %q", msg)
+		}
+		// Must name the recommended image.
+		if !strings.Contains(msg, uvImage) {
+			t.Errorf("message must name recommended image %q; got: %q", uvImage, msg)
+		}
+		// Must flag the per-server override as the culprit.
+		if !strings.Contains(msg, "python:3.11") {
+			t.Errorf("message must name the failing override image 'python:3.11'; got: %q", msg)
+		}
+		if !strings.Contains(strings.ToLower(msg), "override") {
+			t.Errorf("message must flag the per-server override; got: %q", msg)
+		}
+	})
+
+	t.Run("npx_no_override_still_names_runtime_and_image", func(t *testing.T) {
+		msg := RuntimeAwareRemediation(DockerExecNotFound, ClassifierHints{
+			DockerCommand:       "npx",
+			DockerDefaultImages: defaults,
+		})
+		if !strings.Contains(msg, "npx") {
+			t.Errorf("message must name the runtime 'npx'; got: %q", msg)
+		}
+		if !strings.Contains(msg, "node:22") {
+			t.Errorf("message must name recommended image 'node:22'; got: %q", msg)
+		}
+	})
+
+	t.Run("no_enrichment_without_command", func(t *testing.T) {
+		if msg := RuntimeAwareRemediation(DockerExecNotFound, ClassifierHints{
+			DockerDefaultImages: defaults,
+		}); msg != "" {
+			t.Errorf("no docker command → empty enrichment (fall back to static catalog); got: %q", msg)
+		}
+	})
+
+	t.Run("no_enrichment_for_other_codes", func(t *testing.T) {
+		if msg := RuntimeAwareRemediation(DockerCLINotFound, ClassifierHints{
+			DockerCommand:       "uvx",
+			DockerDefaultImages: defaults,
+		}); msg != "" {
+			t.Errorf("only DockerExecNotFound is enriched; got: %q", msg)
+		}
+	})
 }

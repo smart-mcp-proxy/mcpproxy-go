@@ -3,6 +3,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +26,27 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/broker"
 )
+
+// testRecordingSink captures broker audit events for test assertions.
+type testRecordingSink struct {
+	mu     sync.Mutex
+	events []broker.AuditEvent
+}
+
+func (s *testRecordingSink) RecordBrokerEvent(_ context.Context, ev broker.AuditEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, ev)
+}
+
+func (s *testRecordingSink) last() broker.AuditEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.events) == 0 {
+		return broker.AuditEvent{}
+	}
+	return s.events[len(s.events)-1]
+}
 
 const testUserB = "01HTEST00000000000000USERB"
 
@@ -93,7 +116,7 @@ func TestCredentialsList_RedactsSecrets(t *testing.T) {
 		ObtainedVia:  "token_exchange",
 	}))
 
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
@@ -130,7 +153,7 @@ func TestCredentialsList_Statuses(t *testing.T) {
 		Type: "oauth2", AccessToken: "b", ExpiresAt: time.Now().Add(-time.Hour),
 	}))
 
-	h := NewCredentialHandlers(store, []*config.ServerConfig{connected, expired, fresh}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{connected, expired, fresh}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
@@ -164,7 +187,7 @@ func TestCredentialsList_StoreDisabled(t *testing.T) {
 	require.False(t, store.Enabled())
 
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials", http.NoBody)
@@ -186,7 +209,7 @@ func TestCredentialsDelete_Removes(t *testing.T) {
 		Type: "oauth2", AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour),
 	}))
 
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/user/credentials/shared-gh", http.NoBody)
@@ -201,7 +224,7 @@ func TestCredentialsDelete_Removes(t *testing.T) {
 func TestCredentialsDelete_UnknownServer404(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/v1/user/credentials/does-not-exist", http.NoBody)
@@ -219,7 +242,7 @@ func TestCredentials_CrossUserIsolation(t *testing.T) {
 		Type: "oauth2", AccessToken: "B-SECRET", ExpiresAt: time.Now().Add(time.Hour),
 	}))
 
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	// Act as user A.
 	r := credRouter(h, auth.UserContext(testUserID, "a@example.com", "A", "google"))
 
@@ -248,7 +271,7 @@ func TestCredentials_CrossUserIsolation(t *testing.T) {
 func TestCredentialsConnect_Redirects(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
@@ -270,7 +293,7 @@ func TestCredentialsConnect_Redirects(t *testing.T) {
 func TestCredentialsConnect_NonConnectMode400(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("xchg-srv", config.AuthBrokerModeTokenExchange)
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/xchg-srv/connect", http.NoBody)
@@ -292,7 +315,7 @@ func TestCredentialsConnectCallback_StoresCredential(t *testing.T) {
 	srv.AuthBroker.TokenEndpoint = ts.URL
 	sk := serverKeyFor(srv)
 
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	// Step 1: connect → capture state from the redirect.
@@ -325,7 +348,8 @@ func TestCredentialsCallback_DeniedByUpstream(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
 	sk := serverKeyFor(srv)
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	sink := &testRecordingSink{}
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, sink, zap.NewNop().Sugar())
 	r := credRouter(h, defaultAuthContext())
 
 	// Begin a flow to register a state.
@@ -345,12 +369,49 @@ func TestCredentialsCallback_DeniedByUpstream(t *testing.T) {
 	require.Equal(t, http.StatusFound, cbW.Code)
 	_, err := store.Get(testUserID, sk)
 	assert.ErrorIs(t, err, broker.ErrNotFound)
+
+	// FR-029: audit event carries a coerced, secret-free reason — the known
+	// access_denied code passes through the sanitizer unchanged. Deny prepends
+	// "connect denied: " so the full reason is "connect denied: access_denied".
+	ev := sink.last()
+	assert.Equal(t, "connect denied: access_denied", ev.Reason)
+	assert.Equal(t, broker.AuditOutcomeFailure, ev.Outcome)
+}
+
+func TestCredentialsCallback_Denied_UnknownErrorCoerced(t *testing.T) {
+	store := credTestStore(t)
+	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
+	sink := &testRecordingSink{}
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, sink, zap.NewNop().Sugar())
+	r := credRouter(h, defaultAuthContext())
+
+	// Begin a flow to register a state.
+	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
+	connReq.Host = "gw.example.com"
+	connW := httptest.NewRecorder()
+	r.ServeHTTP(connW, connReq)
+	require.Equal(t, http.StatusFound, connW.Code)
+	loc, _ := url.Parse(connW.Header().Get("Location"))
+	state := loc.Query().Get("state")
+
+	// An arbitrary/non-standard error code — must be coerced to the generic label.
+	cbURL := "/api/v1/user/credentials/connect-srv/callback?error=some_arbitrary_upstream_error&state=" + url.QueryEscape(state)
+	cbReq := httptest.NewRequest(http.MethodGet, cbURL, http.NoBody)
+	cbW := httptest.NewRecorder()
+	r.ServeHTTP(cbW, cbReq)
+	require.Equal(t, http.StatusFound, cbW.Code)
+
+	// FR-029: the audit reason must be the generic coerced label, not the raw
+	// upstream error string. Deny prepends "connect denied: ".
+	ev := sink.last()
+	assert.Equal(t, "connect denied: authorization_denied", ev.Reason)
+	assert.Equal(t, broker.AuditOutcomeFailure, ev.Outcome)
 }
 
 func TestCredentials_Unauthenticated(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)
-	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, zap.NewNop().Sugar())
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, nil, zap.NewNop().Sugar())
 	// Empty auth context → unauthenticated.
 	r := credRouter(h, &auth.AuthContext{})
 

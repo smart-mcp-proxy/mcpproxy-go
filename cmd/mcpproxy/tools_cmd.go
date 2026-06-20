@@ -193,6 +193,8 @@ func init() {
 	toolsCmd.AddCommand(toolsListCmd)
 	toolsCmd.AddCommand(toolsEnableCmd)
 	toolsCmd.AddCommand(toolsDisableCmd)
+	toolsCmd.AddCommand(newToolsApproveCmd())
+	toolsCmd.AddCommand(newToolsRejectCmd())
 
 	initToolsFlags()
 }

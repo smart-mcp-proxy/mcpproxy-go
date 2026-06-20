@@ -164,10 +164,13 @@ type ImportFromPathRequest struct {
 	Path        string   `json:"path"`                   // File path to import from
 	Format      string   `json:"format,omitempty"`       // Optional format hint
 	ServerNames []string `json:"server_names,omitempty"` // Optional: import only these servers
-	// Rename maps OriginalName → new name. Applied after parsing so the
+	// Rename maps a server name → new name. Applied after parsing so the
 	// caller can disambiguate cross-source name collisions (Spec 046 v2 —
-	// e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys not present in the
-	// imported set are ignored.
+	// e.g. "mcpproxy" → "mcpproxy_claude_code"). Keys are matched against
+	// either the raw source name (OriginalName) or the sanitized name shown
+	// in the preview (Server.Name); these differ for names that need
+	// sanitizing (e.g. "Figma Desktop" → "Figma_Desktop"). Keys not present
+	// in the imported set are ignored.
 	Rename map[string]string `json:"rename,omitempty"`
 }
 
@@ -392,13 +395,21 @@ func (s *Server) runImport(r *http.Request, content []byte, formatHint string, s
 		return nil, err
 	}
 
-	// Spec 046 v2: apply caller-supplied renames before persisting. Keyed
-	// by OriginalName so the caller doesn't need to know the parser's name-
-	// sanitization rules. Server.Name is rewritten in place; OriginalName is
-	// preserved on the response so the caller can reconcile the mapping.
+	// Spec 046 v2: apply caller-supplied renames before persisting. The CLI and
+	// the documented contract key the map by OriginalName (the raw source name),
+	// while the Web UI wizard keys it by the sanitized preview name it shows the
+	// user (Server.Name). After #729 those diverge for names that need
+	// sanitizing (e.g. "Figma Desktop" -> "Figma_Desktop"), so match either key
+	// to keep the conflict rename resolving on both paths (MCP-3003). Server.Name
+	// is rewritten in place; OriginalName is preserved on the response so the
+	// caller can reconcile the mapping.
 	if len(rename) > 0 {
 		for i := range result.Imported {
-			if newName, ok := rename[result.Imported[i].OriginalName]; ok && newName != "" {
+			newName, ok := rename[result.Imported[i].OriginalName]
+			if !ok {
+				newName, ok = rename[result.Imported[i].Server.Name]
+			}
+			if ok && newName != "" {
 				result.Imported[i].Server.Name = newName
 			}
 		}
