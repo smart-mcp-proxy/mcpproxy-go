@@ -408,6 +408,43 @@ func TestCredentialsCallback_Denied_UnknownErrorCoerced(t *testing.T) {
 	assert.Equal(t, broker.AuditOutcomeFailure, ev.Outcome)
 }
 
+// TestCredentialsCallback_Denied_RedirectSanitized proves the callback's
+// browser redirect never reflects a raw, AS-controlled error string. The
+// upstream authorization server fully controls the ?error= query value, so a
+// hostile/misconfigured AS could embed secrets or echoed input there; the
+// redirect's credential_error must carry only the coerced label (FR-029/SC-005).
+func TestCredentialsCallback_Denied_RedirectSanitized(t *testing.T) {
+	store := credTestStore(t)
+	srv := brokerHTTPServer("connect-srv", config.AuthBrokerModeOAuthConnect)
+	sink := &testRecordingSink{}
+	h := NewCredentialHandlers(store, []*config.ServerConfig{srv}, sink, zap.NewNop().Sugar())
+	r := credRouter(h, defaultAuthContext())
+
+	// Begin a flow to register a state.
+	connReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/credentials/connect-srv/connect", http.NoBody)
+	connReq.Host = "gw.example.com"
+	connW := httptest.NewRecorder()
+	r.ServeHTTP(connW, connReq)
+	require.Equal(t, http.StatusFound, connW.Code)
+	loc, _ := url.Parse(connW.Header().Get("Location"))
+	state := loc.Query().Get("state")
+
+	const leak = "leaked_secret_AKIAIOSFODNN7EXAMPLE"
+	cbURL := "/api/v1/user/credentials/connect-srv/callback?error=" + url.QueryEscape(leak) + "&state=" + url.QueryEscape(state)
+	cbReq := httptest.NewRequest(http.MethodGet, cbURL, http.NoBody)
+	cbW := httptest.NewRecorder()
+	r.ServeHTTP(cbW, cbReq)
+	require.Equal(t, http.StatusFound, cbW.Code)
+
+	redirect, err := url.Parse(cbW.Header().Get("Location"))
+	require.NoError(t, err)
+	gotErr := redirect.Query().Get("credential_error")
+	assert.Equal(t, "authorization_denied", gotErr,
+		"redirect must carry the coerced label, not the raw upstream error")
+	assert.NotContains(t, cbW.Header().Get("Location"), leak,
+		"redirect must not reflect the raw AS-controlled error string")
+}
+
 func TestCredentials_Unauthenticated(t *testing.T) {
 	store := credTestStore(t)
 	srv := brokerHTTPServer("shared-gh", config.AuthBrokerModeTokenExchange)

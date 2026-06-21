@@ -331,7 +331,7 @@ func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*oauth
 		return nil, fmt.Errorf("oauth connector: read token response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("oauth connector: token endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, sanitizedTokenEndpointError(resp.StatusCode, body)
 	}
 
 	var tok oauthTokenResponse
@@ -342,6 +342,35 @@ func (c *OAuthConnector) postToken(ctx context.Context, form url.Values) (*oauth
 		return nil, fmt.Errorf("oauth connector: token response missing access_token")
 	}
 	return &tok, nil
+}
+
+// rfc6749TokenErrorCodes is the closed set of error codes a token endpoint may
+// legitimately return per RFC 6749 §5.2. Any value outside this set is treated
+// as untrusted AS-controlled free text (which could echo secrets or caller
+// input) and is dropped rather than surfaced.
+var rfc6749TokenErrorCodes = map[string]struct{}{
+	"invalid_request":        {},
+	"invalid_client":         {},
+	"invalid_grant":          {},
+	"unauthorized_client":    {},
+	"unsupported_grant_type": {},
+	"invalid_scope":          {},
+}
+
+// sanitizedTokenEndpointError maps a non-200 token-endpoint response onto a safe
+// error that names only the HTTP status and, when present, an allowlisted OAuth
+// error code. The raw response body and error_description are deliberately
+// dropped: a malicious or misconfigured authorization server can embed access
+// tokens, refresh tokens, client details, or echoed request data there, and
+// that error string is logged on the connect and refresh paths (FR-029 /
+// SC-005). This mirrors the RFC 8693 exchanger's sanitizedError.
+func sanitizedTokenEndpointError(status int, body []byte) error {
+	var te tokenErrorResponse
+	_ = json.Unmarshal(body, &te)
+	if _, ok := rfc6749TokenErrorCodes[te.ErrorCode]; ok {
+		return fmt.Errorf("oauth connector: token endpoint returned %d, error %q", status, te.ErrorCode)
+	}
+	return fmt.Errorf("oauth connector: token endpoint returned %d", status)
 }
 
 // credentialFromToken maps a token response into a stored UpstreamCredential.
