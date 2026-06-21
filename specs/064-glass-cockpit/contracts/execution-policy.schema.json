@@ -2,9 +2,77 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mcpproxy.app/specs/064-glass-cockpit/execution-policy.schema.json",
   "title": "Glass Cockpit executionPolicy (attached to a Paperclip issue)",
-  "description": "The gate configuration the cockpit attaches to issues. Mirrors Paperclip's IssueExecutionStage model (stage types: review|approval). Gate 2 (per-spec design) and Gate 3 (pre-merge) are 'approval' stages with a user participant; the adversarial review (FR-011) is a 'review' stage with the Critic agent participant placed before the user gate.",
+  "description": "The gate configuration the cockpit attaches to issues. Mirrors Paperclip's IssueExecutionStage model (stage types: review|approval). Gate 2 (per-spec design) and Gate 3 (pre-merge) are 'approval' stages with a user participant; the adversarial review (FR-011) is a 'review' stage with the Critic agent participant placed before the user gate. A 'review' stage MAY additionally carry a 'liveness' block (the Reviewer-Liveness Contract, FR-014a) describing health-based, model-diverse reviewer failover; see $defs/reviewerLiveness.",
   "type": "object",
   "required": ["mode", "stages"],
+  "$defs": {
+    "participant": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["user", "agent"] },
+        "userId": { "type": "string", "description": "Required when type=user (the board)." },
+        "agentId": { "type": "string", "description": "Required when type=agent (e.g. the Gemini Critic)." },
+        "modelFamily": {
+          "type": "string",
+          "description": "Optional provider/model family of an agent participant (e.g. 'openai', 'moonshot', 'gemini', 'glm'). Used by the Reviewer-Liveness Contract to enforce the same-family exclusion: a fallback reviewer must not share the primary reviewer's family (FR-011 model diversity)."
+        }
+      }
+    },
+    "reviewerLiveness": {
+      "type": "object",
+      "description": "Reviewer-Liveness Contract — health-based, model-diverse reviewer failover for a 'review' stage (FR-014a). Codifies the MCP-3066 shell backstop (~/.mcpproxy-gatekeeper/bin/ensure-pr-gates.sh: classify_stall + route_fallback) as a first-class contract. The shipped scripts remain the source of truth; values here mirror them. When this block is omitted, the stage runs a single reviewer (participants[0]) with no failover, so pre-existing policies validate and behave unchanged.",
+      "required": ["roster"],
+      "additionalProperties": false,
+      "properties": {
+        "slaMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 120,
+          "description": "T — minutes the primary reviewer may be silent on the CURRENT head before the stage is classed a silent stall (classify_stall mode1) and a fallback becomes eligible. Default 120 (2h), matching the shell backstop SLA."
+        },
+        "maxFallbacksPerHead": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 1,
+          "description": "N — at most this many fallback hops are triggered per head SHA; the budget resets when the PR head moves. Default 1, mirroring the per-head marker state/fallback-<pr>-<sha>."
+        },
+        "maxHops": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 2,
+          "description": "Cumulative fallback hops across the roster before escalating to escalateTo. Default 2, mirroring the hop ledger state/fallback-<pr>.hops -> escalate_ceo."
+        },
+        "escalateTo": {
+          "$ref": "#/$defs/participant",
+          "description": "Who receives the escalation issue once maxHops is exhausted (the shell backstop's escalate_ceo; normally the CEO agent)."
+        },
+        "failoverStallModes": {
+          "type": "array",
+          "uniqueItems": true,
+          "default": ["silent", "stale_ci_pending"],
+          "description": "Which classify_stall outcomes make a fallback eligible. 'silent' = no verdict past the SLA on a green head (mode1); 'stale_ci_pending' = a request_changes whose only reason is pending/not-green CI on a now-green head (mode2). 'substantive' is intentionally NOT a permitted value: a substantive request_changes on the current head is a mandatory fence (mode3) and is NEVER routed around.",
+          "items": { "type": "string", "enum": ["silent", "stale_ci_pending"] }
+        },
+        "roster": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered, model-diverse fallback chain tried in sequence when the primary reviewer (the stage's participants[0]) stalls. Reviewers sharing the primary's modelFamily MUST be excluded (the backstop drops the gpt-5.5 'Critic' because the primary CodexReviewer is also gpt-5.5). The same-family exclusion is a cross-entity invariant enforced by the contract test, not by this schema.",
+          "items": {
+            "type": "object",
+            "required": ["agentId", "modelFamily"],
+            "additionalProperties": false,
+            "properties": {
+              "agentId": { "type": "string", "description": "Paperclip agent id of the fallback reviewer." },
+              "name": { "type": "string", "description": "Human-readable reviewer name, e.g. 'KimiReviewer'." },
+              "model": { "type": "string", "description": "Concrete model id, e.g. 'kimi-k2', 'gemini-2.5', 'glm-4.7'." },
+              "modelFamily": { "type": "string", "description": "Provider/model family for the same-family exclusion (e.g. 'moonshot', 'gemini', 'glm')." }
+            }
+          }
+        }
+      }
+    }
+  },
   "properties": {
     "mode": {
       "type": "string",
@@ -29,15 +97,11 @@
           "participants": {
             "type": "array",
             "minItems": 1,
-            "items": {
-              "type": "object",
-              "required": ["type"],
-              "properties": {
-                "type": { "type": "string", "enum": ["user", "agent"] },
-                "userId": { "type": "string", "description": "Required when type=user (the board)." },
-                "agentId": { "type": "string", "description": "Required when type=agent (e.g. the Gemini Critic)." }
-              }
-            }
+            "items": { "$ref": "#/$defs/participant" }
+          },
+          "liveness": {
+            "$ref": "#/$defs/reviewerLiveness",
+            "description": "Optional Reviewer-Liveness Contract; meaningful only on a 'review' stage. See $defs/reviewerLiveness."
           }
         }
       }
@@ -54,6 +118,29 @@
     {
       "mode": "normal",
       "stages": [
+        { "type": "approval", "label": "Pre-merge", "participants": [ { "type": "user", "userId": "local-board" } ] }
+      ]
+    },
+    {
+      "mode": "normal",
+      "stages": [
+        {
+          "type": "review",
+          "label": "Adversarial review with liveness failover",
+          "participants": [ { "type": "agent", "agentId": "5b94562c", "modelFamily": "openai" } ],
+          "liveness": {
+            "slaMinutes": 120,
+            "maxFallbacksPerHead": 1,
+            "maxHops": 2,
+            "escalateTo": { "type": "agent", "agentId": "2dbf9388" },
+            "failoverStallModes": ["silent", "stale_ci_pending"],
+            "roster": [
+              { "agentId": "fdaa1d4c", "name": "KimiReviewer", "model": "kimi-k2", "modelFamily": "moonshot" },
+              { "agentId": "d89dd1db", "name": "GeminiCritic", "model": "gemini-2.5", "modelFamily": "gemini" },
+              { "agentId": "caf2df03", "name": "GLMReviewer", "model": "glm-4.7", "modelFamily": "glm" }
+            ]
+          }
+        },
         { "type": "approval", "label": "Pre-merge", "participants": [ { "type": "user", "userId": "local-board" } ] }
       ]
     }
