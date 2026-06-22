@@ -1705,6 +1705,36 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 
 // startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
 // It supports both TCP (for browsers) and Unix socket/named pipe (for tray) listeners
+// registerHTTPHandlers forwards the REST API, SSE events, health endpoints,
+// and the observability /metrics endpoint from the outer http.ServeMux to the
+// httpapi chi router (httpAPIServer).
+//
+// MCP-3135: /metrics is registered on the chi router (httpapi.setupRoutes), but
+// the outer mux must explicitly forward it — otherwise GET /metrics returns 404
+// even when metrics are enabled. The forward is gated on metrics actually being
+// enabled so a disabled deployment keeps /metrics unrouted (404).
+func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Handler) {
+	mux.Handle("/api/", httpAPIServer)
+	mux.Handle("/events", httpAPIServer)
+
+	// Mount health endpoints directly on main mux at root level
+	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
+	for _, endpoint := range healthEndpoints {
+		mux.Handle(endpoint, httpAPIServer)
+	}
+
+	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
+	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+
+	// MCP-32/MCP-3135: forward /metrics to the chi router only when the
+	// Prometheus exporter is enabled. Without this the handler registered in
+	// httpapi.setupRoutes is unreachable through the outer mux.
+	if s.observability != nil && s.observability.Metrics() != nil {
+		mux.Handle("/metrics", httpAPIServer)
+		s.logger.Info("Registered metrics endpoint", zap.String("endpoint", "/metrics"))
+	}
+}
+
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
 	cfg := s.runtime.Config()
 	if cfg == nil {
@@ -1937,17 +1967,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 	// Wire server edition multi-user OAuth (no-op in personal edition)
 	wireServerEditionOAuth(s, httpAPIServer)
-	mux.Handle("/api/", httpAPIServer)
-	mux.Handle("/events", httpAPIServer)
 
-	// Mount health endpoints directly on main mux at root level
-	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
-	for _, endpoint := range healthEndpoints {
-		mux.Handle(endpoint, httpAPIServer)
-	}
-
-	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
-	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+	// Forward REST API, events, health, and (MCP-32) /metrics onto the outer
+	// mux. Extracted so the routing is unit-testable (MCP-3135 regression).
+	s.registerHTTPHandlers(mux, httpAPIServer)
 
 	// Debug / profiling endpoints (API-key gated). Block & mutex profiles
 	// default to off; we enable them when the route is hit so the running
