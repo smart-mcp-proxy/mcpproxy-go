@@ -931,6 +931,19 @@ the `registries` array only to **add your own** custom source:
 | `protocol` | string | Registry protocol type |
 | `count` | number/string | Number of servers in registry (auto-populated) |
 
+**SSRF guard (`allow_private_registry_fetch`).** Because the daemon fetches the
+URL you configure, registry fetches refuse any host that is — or resolves to — a
+non-routable address (loopback, RFC1918/CGNAT private, link-local including the
+`169.254.169.254` cloud-metadata endpoint). This bounds CWE-918 request forgery
+against internal services. Set this top-level flag to `true` **only** if you
+intentionally run a trusted registry mirror on an internal/private address:
+
+```json
+{ "allow_private_registry_fetch": true }
+```
+
+Default `false` (secure). See [Registries Documentation](registries.md#adding-your-own-registry-source).
+
 **Default Registries** (shipped built-in, no configuration required):
 - `official` — Official MCP Registry (`modelcontextprotocol/registry`): primary, zero-config aggregator
 - `reference` — Reference Servers (`builtin/reference`): curated `@modelcontextprotocol` servers, shipped in-binary so the basics work offline

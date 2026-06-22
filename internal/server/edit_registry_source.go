@@ -143,6 +143,10 @@ func editRegistrySourceInConfig(cfg *config.Config, req *EditRegistrySourceReque
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			return config.RegistryEntry{}, nil, fmt.Errorf("%w: %q (must be an https URL)", ErrInvalidRegistryURL, rawURL)
 		}
+		// SSRF fail-fast (CWE-918) — same literal-IP guard as add-source.
+		if err := registries.ValidateRegistrySourceURL(rawURL); err != nil {
+			return config.RegistryEntry{}, nil, fmt.Errorf("%w: %v", ErrInvalidRegistryURL, err)
+		}
 		updated.URL = rawURL
 		// Re-derive the servers URL from the new base unless the caller also
 		// supplied an explicit one below.
@@ -151,6 +155,10 @@ func editRegistrySourceInConfig(cfg *config.Config, req *EditRegistrySourceReque
 		}
 	}
 	if serversURL := strings.TrimSpace(req.ServersURL); serversURL != "" {
+		// An explicit servers-collection URL is also a fetch target — guard it.
+		if err := registries.ValidateRegistrySourceURL(serversURL); err != nil {
+			return config.RegistryEntry{}, nil, fmt.Errorf("%w: %v", ErrInvalidRegistryURL, err)
+		}
 		updated.ServersURL = serversURL
 	}
 	// A custom registry stays "custom" — the merge recomputes provenance from the

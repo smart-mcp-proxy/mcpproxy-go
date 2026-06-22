@@ -18,6 +18,16 @@ components:
         activity_retention_days:
           description: Activity logging settings (RFC-003)
           type: integer
+        allow_private_registry_fetch:
+          description: |-
+            AllowPrivateRegistryFetch opts out of the registry SSRF guard (MCP-1076,
+            CWE-918). By default (false) registry fetches refuse any host that is — or
+            resolves to — a non-routable address (loopback, RFC1918/CGNAT private,
+            link-local incl. the 169.254.169.254 cloud-metadata endpoint), so a
+            malicious or typo'd registry source cannot turn the daemon into a
+            request-forgery vector against internal services. Set true ONLY when you
+            intentionally run a trusted registry mirror on an internal/private address.
+          type: boolean
         allow_server_add:
           type: boolean
         allow_server_remove:
