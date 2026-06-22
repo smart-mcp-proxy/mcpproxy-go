@@ -428,6 +428,16 @@ components:
           description: MB
           type: integer
       type: object
+    config.MetricsExporterConfig:
+      description: |-
+        Metrics gates the Prometheus /metrics scrape endpoint (MCP-32). Disabled
+        by default — operators opt in for k8s/enterprise deployments.
+      properties:
+        enabled:
+          description: Enabled exposes /metrics on the existing HTTP listener when
+            true.
+          type: boolean
+      type: object
     config.OAuthConfig:
       description: OAuth configuration (keep even when empty to signal OAuth requirement)
       properties:
@@ -454,6 +464,10 @@ components:
       description: 'Observability settings (Spec 069): usage aggregate cache/persistence
         cadence.'
       properties:
+        metrics:
+          $ref: '#/components/schemas/config.MetricsExporterConfig'
+        tracing:
+          $ref: '#/components/schemas/config.TracingExporterConfig'
         usage_cache_ttl:
           description: |-
             UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
@@ -817,6 +831,28 @@ components:
         encoding:
           description: Default encoding (e.g., "cl100k_base")
           type: string
+      type: object
+    config.TracingExporterConfig:
+      description: |-
+        Tracing gates the OpenTelemetry OTLP trace exporter (MCP-32). Disabled by
+        default.
+      properties:
+        enabled:
+          description: Enabled turns on OTLP trace export for tool calls and upstream
+            hops.
+          type: boolean
+        endpoint:
+          description: |-
+            Endpoint is the collector address as host:port (no scheme), e.g.
+            "localhost:4318" for http or "localhost:4317" for grpc.
+          type: string
+        protocol:
+          description: 'Protocol selects the OTLP transport: "http" or "grpc".'
+          type: string
+        sample_rate:
+          description: SampleRate is the head-based trace sampling ratio in [0,1].
+            Default 0.1.
+          type: number
       type: object
     configimport.FailedServer:
       properties:

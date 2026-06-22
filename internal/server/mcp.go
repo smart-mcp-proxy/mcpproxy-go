@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
@@ -42,6 +43,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.opentelemetry.io/otel/attribute"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -145,6 +148,52 @@ type MCPProxyServer struct {
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64
+
+	// MCP-32: observability manager for tool-call metrics + OTLP tracing. Nil
+	// when observability is disabled; all use sites must nil-guard.
+	observability *observability.Manager
+}
+
+// SetObservability wires the observability manager used to record tool-call
+// metrics and OTLP spans (MCP-32). Safe to call with nil to leave disabled.
+func (p *MCPProxyServer) SetObservability(obs *observability.Manager) {
+	p.observability = obs
+}
+
+// startToolCallSpan opens an OTLP span for a tool call (and its upstream hop)
+// when tracing is enabled, returning the (possibly unchanged) context and a
+// span that may be nil. The returned context carries the span so the upstream
+// invocation is parented correctly.
+func (p *MCPProxyServer) startToolCallSpan(ctx context.Context, serverName, toolName, profileSlug string) (context.Context, oteltrace.Span) {
+	if p.observability == nil || p.observability.Tracing() == nil {
+		return ctx, nil
+	}
+	ctx, span := p.observability.Tracing().TraceToolCall(ctx, serverName, toolName)
+	if extra := editionToolCallAttributes(ctx, profileSlug); len(extra) > 0 {
+		span.SetAttributes(extra...)
+	}
+	return ctx, span
+}
+
+// finishToolCall records tool-call latency/outcome metrics and closes the span
+// (MCP-32). span may be nil.
+func (p *MCPProxyServer) finishToolCall(span oteltrace.Span, serverName, toolName string, duration time.Duration, callErr error) {
+	status := observability.StatusSuccess
+	if callErr != nil {
+		status = observability.StatusError
+	}
+	if p.observability != nil && p.observability.Metrics() != nil {
+		p.observability.Metrics().RecordToolCall(serverName, toolName, status, duration)
+	}
+	if span != nil {
+		if callErr != nil {
+			span.SetAttributes(
+				attribute.String("error", "true"),
+				attribute.String("error.message", callErr.Error()),
+			)
+		}
+		span.End()
+	}
 }
 
 // NewMCPProxyServer creates a new MCP proxy server
@@ -1757,10 +1806,14 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Emit activity started event with determined source
 	p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 
-	// Call tool via upstream manager — use original args without auth metadata
+	// Call tool via upstream manager — use original args without auth metadata.
+	// MCP-32: wrap with an OTLP span (tool call + upstream hop) and record
+	// tool-call latency/outcome metrics. No-ops when observability is disabled.
+	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
-	result, err := p.upstreamManager.CallTool(ctx, toolName, args)
+	result, err := p.upstreamManager.CallTool(callCtx, toolName, args)
 	duration := time.Since(startTime)
+	p.finishToolCall(toolSpan, serverName, actualToolName, duration, err)
 
 	p.logger.Debug("handleCallToolVariant: upstream call completed",
 		zap.String("tool_name", toolName),

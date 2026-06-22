@@ -49,3 +49,63 @@ func TestObservabilityConfig_PreservesUserValues(t *testing.T) {
 	assert.Equal(t, 2*time.Second, cfg.Observability.UsageCacheTTL.Duration())
 	assert.Equal(t, 60*time.Second, cfg.Observability.UsagePersistInterval.Duration())
 }
+
+// MCP-32: Prometheus + OTLP exporters are config-gated and OFF by default.
+
+func TestDefaultObservabilityConfig_ExportersOffByDefault(t *testing.T) {
+	o := DefaultObservabilityConfig()
+	require.NotNil(t, o.Metrics, "metrics sub-config should be present")
+	assert.False(t, o.Metrics.Enabled, "Prometheus /metrics must be disabled by default")
+
+	require.NotNil(t, o.Tracing, "tracing sub-config should be present")
+	assert.False(t, o.Tracing.Enabled, "OTLP tracing must be disabled by default")
+	// Sane transport defaults are pre-filled so enabling is a one-line change.
+	assert.Equal(t, "http", o.Tracing.Protocol)
+	assert.NotEmpty(t, o.Tracing.Endpoint)
+	assert.InDelta(t, 0.1, o.Tracing.SampleRate, 1e-9)
+}
+
+func TestValidate_FillsExporterSubConfigs(t *testing.T) {
+	// A config whose observability block omits the exporter sub-objects gets
+	// them filled (disabled) on Validate, so downstream wiring never nil-panics.
+	cfg := DefaultConfig()
+	cfg.Observability = &ObservabilityConfig{
+		UsageCacheTTL:        Duration(5 * time.Second),
+		UsagePersistInterval: Duration(30 * time.Second),
+	}
+	require.NoError(t, cfg.Validate())
+	require.NotNil(t, cfg.Observability.Metrics)
+	require.NotNil(t, cfg.Observability.Tracing)
+	assert.False(t, cfg.Observability.Metrics.Enabled)
+	assert.False(t, cfg.Observability.Tracing.Enabled)
+}
+
+func TestValidate_RepairsTracingProtocolAndSampleRate(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Observability.Tracing = &TracingExporterConfig{
+		Enabled:    true,
+		Protocol:   "carrier-pigeon", // unsupported -> repaired to http
+		SampleRate: 5.0,              // out of [0,1] -> clamped to default
+	}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "http", cfg.Observability.Tracing.Protocol)
+	assert.InDelta(t, 0.1, cfg.Observability.Tracing.SampleRate, 1e-9)
+	// A missing endpoint is filled so the exporter can construct.
+	assert.NotEmpty(t, cfg.Observability.Tracing.Endpoint)
+}
+
+func TestValidate_PreservesValidTracingExporter(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Observability.Metrics = &MetricsExporterConfig{Enabled: true}
+	cfg.Observability.Tracing = &TracingExporterConfig{
+		Enabled:    true,
+		Protocol:   "grpc",
+		Endpoint:   "otel-collector:4317",
+		SampleRate: 0.5,
+	}
+	require.NoError(t, cfg.Validate())
+	assert.True(t, cfg.Observability.Metrics.Enabled)
+	assert.Equal(t, "grpc", cfg.Observability.Tracing.Protocol)
+	assert.Equal(t, "otel-collector:4317", cfg.Observability.Tracing.Endpoint)
+	assert.InDelta(t, 0.5, cfg.Observability.Tracing.SampleRate, 1e-9)
+}
