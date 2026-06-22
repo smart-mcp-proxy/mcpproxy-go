@@ -46,12 +46,15 @@ const (
 
 // Tool is a single tool definition the benchmark scores token cost over. It
 // matches the shape of both the Spec 065 corpus snapshot and the embedded
-// proxy-tool fixture.
+// proxy-tool fixture. Schema is optional: the committed corpus snapshot is
+// description-only (nil schema), while the live run (live.go) populates it with
+// each tool's full JSON input schema for the exact-token headline.
 type Tool struct {
-	ToolID      string `json:"tool_id"`
-	Server      string `json:"server"`
-	Name        string `json:"tool"`
-	Description string `json:"description"`
+	ToolID      string          `json:"tool_id"`
+	Server      string          `json:"server"`
+	Name        string          `json:"tool"`
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
 }
 
 // Corpus is a frozen, versioned set of tool definitions.
@@ -111,10 +114,35 @@ func (t *Tokenizer) CountTool(tl Tool) int {
 	return t.Count(tl.Name + "\n" + tl.Description)
 }
 
+// CountToolWithSchema returns the context-token cost of a tool definition
+// INCLUDING its JSON input schema (name + description + schema). This is the
+// authoritative per-tool context cost an agent actually pays. A tool with no
+// schema counts identically to CountTool, so mixing schema-bearing (live) and
+// schemaless tools in one report is well-defined. Used by the live run, where
+// both the baseline upstream tools AND the proxy management tools carry their
+// real schemas — counting schemas on BOTH sides is what keeps the headline
+// savings honest rather than overstated.
+func (t *Tokenizer) CountToolWithSchema(tl Tool) int {
+	s := tl.Name + "\n" + tl.Description
+	if len(tl.Schema) > 0 {
+		s += "\n" + string(tl.Schema)
+	}
+	return t.Count(s)
+}
+
 func (t *Tokenizer) countTools(tools []Tool) int {
 	total := 0
 	for _, tl := range tools {
 		total += t.CountTool(tl)
+	}
+	return total
+}
+
+// countToolsWithSchema sums CountToolWithSchema over tools.
+func (t *Tokenizer) countToolsWithSchema(tools []Tool) int {
+	total := 0
+	for _, tl := range tools {
+		total += t.CountToolWithSchema(tl)
 	}
 	return total
 }

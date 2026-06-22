@@ -94,19 +94,45 @@ corpus size alongside a percentage. Reproduce with `go run ./bench/cmd/bench`.
 - **`cl100k_base` ≠ the pinned model's tokenizer.** Pinning the exact tokenizer
   for the headline model is tracked as a follow-up (see "Roadmap").
 
+## Live run — full schemas + accuracy + latency
+
+The live run boots mcpproxy over the Spec 065 reference-server config and
+measures the three headline claims against a *running* proxy. Everything here is
+still deterministic and LLM-free.
+
+```bash
+# 1. Boot the reproducible substrate (proxy + 7 no-auth reference servers)
+docker compose -f bench/docker-compose.yml up --build -d
+
+# 2. Score against the running proxy (writes bench/results/live_report.json)
+go run ./bench/cmd/bench -live -proxy http://127.0.0.1:8092 -api-key eval-corpus-snapshot
+```
+
+What it adds over the offline token run:
+
+- **Exact token number (full schemas).** Pulls `GET /api/v1/tools` for the
+  upstream tools *with their full JSON input schemas* and counts them against
+  the proxy modes — whose management-tool schemas come from the same live
+  builders as the offline run (`server.ProxyModeToolDefs`). Because schemas are
+  counted on **both** sides, the savings is authoritative.
+  - **Safety valve (MCP-3161):** if any proxy tool is missing a schema, counting
+    the baseline's schemas alone would *overstate* savings, so the run
+    **withholds the headline %** and reports raw token totals only
+    (`authoritative_headline: false`). Never quote a withheld run.
+- **Accuracy.** Replays `retrieval_golden_v1.json` through the proxy's BM25
+  search (`GET /api/v1/index/search`) and scores **Recall@{1,3,5,10}, MRR,
+  nDCG@10, MAP** against the graded labels. Deterministic (BM25), so a single
+  run is reported (`runs_averaged: 1`). Metric field names mirror the Spec 065
+  `score-report.schema.json` `retrieval` block.
+- **Latency.** Client-measured per-query search latency (p50/p95/p99/max) vs.
+  the one-shot cost of loading all tools. Measured client-side on purpose: the
+  server's `SearchToolsResponse.took` field is currently a `"0ms"` stub.
+
 ## What is scoped but not yet built (follow-ups)
 
 These require decisions and/or other roles, so they are tracked as child issues
 rather than landed here:
 
-- **Live run with full schemas + accuracy + latency** — boot mcpproxy over the
-  Spec 065 `snapshot-servers.config.json` (see `docker-compose.yml`), pull
-  `GET /api/v1/tools` for exact schemas, and:
-  - **Accuracy**: replay the Spec 065 retrieval golden set
-    (`retrieval_golden_v1.json`) through `retrieve_tools` and score Recall@k /
-    MRR / nDCG (deterministic, no LLM) — reuses the D1 scorer.
-  - **Latency**: measure proxy-side `retrieve_tools` search latency vs. the
-    fixed cost of loading all tools.
 - **End-to-end task success with a pinned LLM** — requires a pinned model + an
   LLM-call budget; this is the only part that costs spend.
 - **CI publish-on-release-tag → public static dashboard** — Release/DevOps lane.
@@ -123,11 +149,13 @@ rather than landed here:
   `internal/server.ProxyModeToolDefs`). No hand-maintained fixture — the
   benchmark cannot drift from the tools the proxy actually serves.
 
-## Reproducible live run (skeleton)
+## Reproducible live run
 
 `docker-compose.yml` boots mcpproxy over the frozen reference-server config so
-the corpus and live tool list are reproducible across machines. Wiring the live
-accuracy/latency scorers into it is the follow-up above.
+the corpus and live tool list are reproducible across machines. The live
+accuracy/latency/full-schema scorers attach to it via `-live` (see "Live run"
+above). Pin the upstream-server images before publishing headline numbers
+(image drift can change the tool corpus).
 
 ## Reviewer contact
 

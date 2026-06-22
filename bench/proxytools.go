@@ -34,6 +34,7 @@ func ProxyToolsForMode(mode string) []Tool {
 			ToolID:      "mcpproxy:" + d.Name,
 			Name:        d.Name,
 			Description: d.Description,
+			Schema:      d.Schema,
 		})
 	}
 	return out
