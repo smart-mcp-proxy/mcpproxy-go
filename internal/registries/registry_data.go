@@ -59,6 +59,11 @@ func SetRegistriesFromConfig(cfg *config.Config) {
 	}
 
 	registryList = merged
+
+	// Propagate the SSRF allow-policy (MCP-1076): off by default, opt-in via the
+	// user's allow_private_registry_fetch flag. Done here so every config load /
+	// hot-reload keeps the dial-time guard in sync with current config.
+	SetAllowPrivateRegistryFetch(cfg != nil && cfg.AllowPrivateRegistryFetch)
 }
 
 // IsTrusted reports whether this is an official, shipped-by-default registry.

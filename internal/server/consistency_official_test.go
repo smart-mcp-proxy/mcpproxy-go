@@ -58,6 +58,8 @@ func startOfficialTestRegistry(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	registries.SetRegistriesFromConfig(&config.Config{
+		// Loopback httptest registry; opt past the SSRF guard (MCP-1076).
+		AllowPrivateRegistryFetch: true,
 		Registries: []config.RegistryEntry{
 			{ID: "officialreg", Name: "officialreg", ServersURL: srv.URL, Protocol: "modelcontextprotocol/registry"},
 		},

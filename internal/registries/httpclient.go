@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -50,12 +51,21 @@ func sharedRegistryClient() *http.Client {
 	return registryHTTPClient
 }
 
-// buildRegistryClient constructs the tuned registry HTTP client.
+// buildRegistryClient constructs the tuned registry HTTP client. Its dialer
+// carries the SSRF Control hook (registryDialControl), so every connection is
+// checked against the blocked-range policy at the moment it dials the resolved
+// IP — the authoritative CWE-918 guard that also closes the DNS-rebinding window
+// a parse-time host check alone cannot.
 func buildRegistryClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 20
 	transport.MaxIdleConnsPerHost = 10
 	transport.IdleConnTimeout = 90 * time.Second
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   registryDialControl,
+	}).DialContext
 	return &http.Client{
 		Timeout:   registryRequestTimeout,
 		Transport: transport,
@@ -79,6 +89,14 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 	// scheme (file://, gopher://, …).
 	safeURL, err := validateRegistryURL(reqURL, reg)
 	if err != nil {
+		return nil, err
+	}
+
+	// Application-layer SSRF guard: resolve the target host and reject if it
+	// lands in a blocked range. This holds even with an HTTP(S)_PROXY set, where
+	// the dialer connects to the proxy and the dial-time Control never sees the
+	// real target host (CodeQL go/request-forgery — proxy bypass).
+	if err := guardRegistryTargetHost(ctx, safeURL); err != nil {
 		return nil, err
 	}
 
@@ -179,6 +197,14 @@ func validateRegistryURL(reqURL string, reg *RegistryEntry) (string, error) {
 	}
 	if u.Host == "" {
 		return "", fmt.Errorf("registry request URL has no host")
+	}
+	// SSRF pre-flight (CWE-918): reject a literal-IP host in a blocked
+	// (loopback/private/link-local/metadata) range before the request is built.
+	// This is defense-in-depth alongside the authoritative dial-time guard
+	// (registryDialControl), which also covers hostnames resolving into those
+	// ranges. Relaxed by the allow_private_registry_fetch config opt-in.
+	if err := hostLiteralBlocked(u.Host, registryAllowPrivateFetch.Load()); err != nil {
+		return "", err
 	}
 	// Pin to the configured registry host so a tainted cursor/path cannot
 	// redirect the request elsewhere.

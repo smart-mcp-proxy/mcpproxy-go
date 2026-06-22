@@ -32,6 +32,28 @@ func TestBuildRegistrySourceEntry_RejectsNonHTTPS(t *testing.T) {
 	}
 }
 
+// TestBuildRegistrySourceEntry_RejectsSSRFLiteralIP is the add-source SSRF
+// fail-fast (MCP-1076 / CWE-918): an https source whose host is a literal IP in
+// a blocked range (loopback, private, link-local/metadata) is refused up front
+// with the stable invalid_registry_url code. Public hostnames are unaffected.
+func TestBuildRegistrySourceEntry_RejectsSSRFLiteralIP(t *testing.T) {
+	for _, bad := range []string{
+		"https://169.254.169.254/v0.1/servers", // cloud metadata endpoint
+		"https://127.0.0.1/v0.1/servers",       // loopback
+		"https://10.0.0.5/",                    // RFC1918 private
+		"https://192.168.1.1/",                 // RFC1918 private
+		"https://[::1]/v0.1/servers",           // IPv6 loopback
+	} {
+		_, err := buildRegistrySourceEntry(bad, "", "", "")
+		require.Errorf(t, err, "must reject SSRF target %q", bad)
+		assert.Truef(t, errors.Is(err, ErrInvalidRegistryURL), "want ErrInvalidRegistryURL for %q, got %v", bad, err)
+	}
+	// A public hostname source is still accepted.
+	if _, err := buildRegistrySourceEntry("https://registry.acme.example/", "", "", ""); err != nil {
+		t.Errorf("public hostname source rejected: %v", err)
+	}
+}
+
 func TestBuildRegistrySourceEntry_HonorsExplicitIDNameAndServersURL(t *testing.T) {
 	entry, err := buildRegistrySourceEntry("https://acme.example/v0.1/servers", "modelcontextprotocol/registry", "acme", "Acme Corp")
 	require.NoError(t, err)

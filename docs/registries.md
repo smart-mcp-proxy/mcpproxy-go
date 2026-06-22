@@ -74,6 +74,26 @@ The ID is derived from the host when omitted; `--protocol` defaults to
 This requires a running daemon — the registry list is updated copy-on-write on the
 runtime config snapshot and persisted to `mcp_config.json`.
 
+**SSRF guard (CWE-918).** Because the daemon fetches a URL you supply, registry
+fetches are constrained so a malicious or typo'd source cannot turn the daemon
+into a request-forgery vector against internal services:
+
+- The URL must be `http`/`https` (add-source/edit require `https`).
+- A source whose host is a **literal IP in a non-routable range** — loopback
+  (`127.0.0.0/8`, `::1`), RFC1918 private (`10/8`, `172.16/12`, `192.168/16`),
+  IPv6 unique-local (`fc00::/7`), RFC6598 CGNAT (`100.64/10`), or link-local
+  including the cloud metadata endpoint `169.254.169.254` — is **rejected up
+  front** with `invalid_registry_url`.
+- Hostname sources are allowed at add time and re-checked before every fetch by
+  an **application-layer resolution check** (resolve the target host, reject if
+  any resolved IP is non-routable) *and* at **dial time** (validate the actual
+  IP before connect). The dial check alone is bypassable when an
+  `HTTP_PROXY`/`HTTPS_PROXY` is configured — the transport then dials the proxy,
+  not the target — so the application-layer check is what holds in the proxy
+  case; the dial check remains defense-in-depth for the direct path and DNS
+  rebinding. The official protocol's cursor-follow pagination is also pinned to
+  the configured host so a hostile `nextCursor` cannot redirect the request.
+
 Equivalent surfaces:
 
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.

@@ -177,6 +177,15 @@ type Config struct {
 	// beyond the add-source rejection.
 	RegistriesLocked bool `json:"registries_locked,omitempty" mapstructure:"registries-locked"`
 
+	// AllowPrivateRegistryFetch opts out of the registry SSRF guard (MCP-1076,
+	// CWE-918). By default (false) registry fetches refuse any host that is — or
+	// resolves to — a non-routable address (loopback, RFC1918/CGNAT private,
+	// link-local incl. the 169.254.169.254 cloud-metadata endpoint), so a
+	// malicious or typo'd registry source cannot turn the daemon into a
+	// request-forgery vector against internal services. Set true ONLY when you
+	// intentionally run a trusted registry mirror on an internal/private address.
+	AllowPrivateRegistryFetch bool `json:"allow_private_registry_fetch,omitempty" mapstructure:"allow-private-registry-fetch"`
+
 	// Deprecated: Features flags are unused and have no runtime effect. Kept for backward compatibility.
 	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
 
