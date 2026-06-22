@@ -152,7 +152,10 @@ var bundledScanners = []*ScannerPlugin{
 		Description: "Comprehensive vulnerability scanner for filesystem, dependencies, and container images. Detects known CVEs and misconfigurations.",
 		License:     "Apache-2.0",
 		Homepage:    "https://trivy.dev",
-		DockerImage: "ghcr.io/aquasecurity/trivy:latest",
+		// Our wrapper pre-caches the vuln DB at image build time (MCP-2150),
+		// eliminating the ~96 MiB first-run download that raced the timeout.
+		// Rebuilt weekly via scanner-images.yml to keep the DB current.
+		DockerImage: "ghcr.io/smart-mcp-proxy/scanner-trivy:latest",
 		Inputs:      []string{"source", "container_image"},
 		Outputs:     []string{"sarif"},
 		RequiredEnv: nil,
@@ -163,7 +166,7 @@ var bundledScanners = []*ScannerPlugin{
 		// daemon/containerd/podman and falls back to pulling from the remote
 		// registry (network is enabled), so no docker socket mount is required.
 		ImageCommand: []string{"image", "--format", "sarif", "{{IMAGE}}"},
-		Timeout:      "300s", // First run downloads vuln DB (~90MB)
-		NetworkReq:   true,   // Needs to download vulnerability database
+		Timeout:      "120s", // DB is pre-cached; network only needed for image pulls
+		NetworkReq:   true,   // Required for `trivy image` pulling remote container images
 	},
 }
