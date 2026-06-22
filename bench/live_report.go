@@ -22,19 +22,23 @@ type LiveModeResult struct {
 // LiveTokenReport is the exact-token comparison from a live proxy, with the
 // baseline upstream tools counted WITH their full JSON input schemas.
 //
-// AuthoritativeHeadline gates the savings percentage: it is only true when the
-// proxy management tools were ALSO counted with their schemas. Counting schemas
-// on the baseline but not the proxy side overstates savings — the exact error
-// corrected in MCP-3161 — so when proxy schemas are absent the savings ratio is
-// withheld and only raw token totals are reported.
+// AuthoritativeHeadline gates the savings percentage: it is only true when
+// schemas were counted on BOTH sides — the proxy management tools carry schemas
+// (ProxySchemasCounted) AND the baseline upstream tools carry schemas
+// (BaselineSchemasCounted). Counting schemas on one side only overstates or
+// distorts savings — the exact error corrected in MCP-3161 — so when either side
+// is schema-less the savings ratio is withheld and only raw token totals are
+// reported. BaselineSchemasCounted also guards against a /api/v1/tools response
+// that silently dropped upstream schemas (MCP-3167).
 type LiveTokenReport struct {
-	Encoding              string           `json:"encoding"`
-	UpstreamTools         int              `json:"upstream_tools"`
-	BaselineTokens        int              `json:"baseline_tokens"`
-	Modes                 []LiveModeResult `json:"modes"`
-	ProxySchemasCounted   bool             `json:"proxy_schemas_counted"`
-	AuthoritativeHeadline bool             `json:"authoritative_headline"`
-	Notes                 []string         `json:"notes"`
+	Encoding               string           `json:"encoding"`
+	UpstreamTools          int              `json:"upstream_tools"`
+	BaselineTokens         int              `json:"baseline_tokens"`
+	Modes                  []LiveModeResult `json:"modes"`
+	ProxySchemasCounted    bool             `json:"proxy_schemas_counted"`
+	BaselineSchemasCounted bool             `json:"baseline_schemas_counted"`
+	AuthoritativeHeadline  bool             `json:"authoritative_headline"`
+	Notes                  []string         `json:"notes"`
 }
 
 // LatencyReport summarizes proxy-side retrieve_tools search latency versus the
@@ -123,28 +127,38 @@ func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet) (*LiveR
 
 // buildTokenReport counts the baseline upstream tools WITH schemas against each
 // proxy routing mode (rt = retrieve_tools, ce = code_execution), also counted
-// with schemas. The headline savings is only emitted when EVERY proxy tool
-// carries a schema; otherwise counting schemas on the baseline alone would
-// overstate savings (MCP-3161), so the ratio is withheld and only raw token
-// totals are reported.
+// with schemas. The headline savings is only emitted when schemas were counted
+// on BOTH sides: every proxy tool carries a schema AND the baseline upstream
+// tools actually carry schemas. Counting schemas on only one side overstates (or
+// distorts) savings — the exact error corrected in MCP-3161 — so otherwise the
+// ratio is withheld and only raw token totals are reported. The baseline guard
+// also catches a silently schema-less /api/v1/tools response (MCP-3167): if the
+// management endpoint drops upstream schemas, no upstream tool has one and the
+// headline is withheld rather than claiming a full-schema baseline it never had.
 func buildTokenReport(tk *Tokenizer, upstream, rt, ce []Tool) *LiveTokenReport {
 	baseTokens := tk.countToolsWithSchema(upstream)
 
 	proxySchemasCounted := allHaveSchema(rt) && allHaveSchema(ce)
+	// A correct full-schema baseline has schemas on at least some upstream tools.
+	// Requiring ALL would wrongly fail on legitimately parameter-less tools, so
+	// "any" is the signal that schemas were not systematically dropped.
+	baselineSchemasCounted := anyHaveSchema(upstream)
+	authoritative := proxySchemasCounted && baselineSchemasCounted
 
 	rep := &LiveTokenReport{
-		Encoding:            tk.encoding,
-		UpstreamTools:       len(upstream),
-		BaselineTokens:      baseTokens,
-		ProxySchemasCounted: proxySchemasCounted,
+		Encoding:               tk.encoding,
+		UpstreamTools:          len(upstream),
+		BaselineTokens:         baseTokens,
+		ProxySchemasCounted:    proxySchemasCounted,
+		BaselineSchemasCounted: baselineSchemasCounted,
 		Modes: []LiveModeResult{
 			{Mode: ModeBaseline, ContextTools: len(upstream), Tokens: baseTokens},
 			{Mode: ModeRetrieveTools, ContextTools: len(rt), Tokens: tk.countToolsWithSchema(rt)},
 			{Mode: ModeCodeExecution, ContextTools: len(ce), Tokens: tk.countToolsWithSchema(ce)},
 		},
 	}
-	rep.AuthoritativeHeadline = proxySchemasCounted
-	if proxySchemasCounted {
+	rep.AuthoritativeHeadline = authoritative
+	if authoritative {
 		for i := range rep.Modes {
 			m := &rep.Modes[i]
 			if m.Mode != ModeBaseline && baseTokens > 0 {
@@ -154,12 +168,28 @@ func buildTokenReport(tk *Tokenizer, upstream, rt, ce []Tool) *LiveTokenReport {
 		rep.Notes = []string{
 			"Baseline counts upstream tools with full JSON input schemas from GET /api/v1/tools; proxy modes count the management tools with their schemas. Headline savings is authoritative.",
 		}
+	} else if !baselineSchemasCounted {
+		rep.Notes = []string{
+			"HEADLINE SAVINGS WITHHELD: no upstream baseline tool carried a JSON input schema, so the baseline is NOT the required full-schema token count — typically the /api/v1/tools response dropped upstream schemas (MCP-3167). Reporting savings now would compare a schema-less baseline against schema-counted proxy tools and DISTORT the reduction. Token totals are shown for transparency; the authoritative headline lands once the management endpoint emits upstream schemas.",
+		}
 	} else {
 		rep.Notes = []string{
 			"HEADLINE SAVINGS WITHHELD: the baseline upstream tools are counted with full schemas, but the proxy management tools (proxy_tools_v1.json) are description-only. Reporting savings now would count schemas on one side only and OVERSTATE the reduction — the exact error corrected in MCP-3161. Token totals are shown for transparency; the authoritative headline lands once proxy-tool schemas are captured live via MCP tools/list.",
 		}
 	}
 	return rep
+}
+
+// anyHaveSchema reports whether at least one tool carries a non-empty schema.
+// Used to detect a systematically schema-less baseline (every schema dropped)
+// versus a corpus that merely contains some parameter-less tools.
+func anyHaveSchema(tools []Tool) bool {
+	for _, t := range tools {
+		if len(t.Schema) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func allHaveSchema(tools []Tool) bool {

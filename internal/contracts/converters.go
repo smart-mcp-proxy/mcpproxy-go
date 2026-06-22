@@ -374,8 +374,14 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 			tool.Usage = usage
 		}
 
-		// Extract schema
-		if schema, ok := generic["schema"].(map[string]interface{}); ok {
+		// Extract schema. Every generic-map producer (runtime.GetServerTools,
+		// server.GetServerTools, mcp.go) emits the upstream input schema under the
+		// "inputSchema" key, so that is the authoritative source; "schema" is kept
+		// as a legacy fallback. Reading only "schema" silently dropped every schema
+		// from the /api/v1/tools response (MCP-3132/MCP-3167).
+		if schema, ok := generic["inputSchema"].(map[string]interface{}); ok {
+			tool.Schema = schema
+		} else if schema, ok := generic["schema"].(map[string]interface{}); ok {
 			tool.Schema = schema
 		}
 

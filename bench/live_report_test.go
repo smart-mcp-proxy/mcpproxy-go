@@ -132,3 +132,34 @@ func TestBuildTokenReportWithholdsWhenProxySchemasMissing(t *testing.T) {
 		t.Error("baseline tokens should still be reported for transparency")
 	}
 }
+
+// TestBuildTokenReportWithholdsWhenBaselineSchemasMissing guards the other half
+// of the MCP-3161 valve: if the baseline upstream tools were counted WITHOUT
+// schemas (e.g. the /api/v1/tools converter dropped them), the headline must be
+// withheld even when the proxy management tools do carry schemas — otherwise the
+// report falsely claims a full-schema baseline (MCP-3132/MCP-3167).
+func TestBuildTokenReportWithholdsWhenBaselineSchemasMissing(t *testing.T) {
+	tk, err := NewTokenizer(DefaultEncoding)
+	if err != nil {
+		t.Fatalf("tokenizer: %v", err)
+	}
+	upstreamSchemaless := []Tool{{Name: "big", Description: "d"}} // schema dropped
+	rt := []Tool{{Name: "retrieve_tools", Description: "d", Schema: json.RawMessage(`{"type":"object"}`)}}
+	ce := []Tool{{Name: "code_execution", Description: "d", Schema: json.RawMessage(`{"type":"object"}`)}}
+
+	rep := buildTokenReport(tk, upstreamSchemaless, rt, ce)
+	if rep.AuthoritativeHeadline {
+		t.Error("headline must be withheld when the baseline upstream tools carry no schemas")
+	}
+	if rep.BaselineSchemasCounted {
+		t.Error("BaselineSchemasCounted must be false when no upstream tool has a schema")
+	}
+	for _, m := range rep.Modes {
+		if m.SavingsRatio != 0 {
+			t.Errorf("savings ratio must be withheld (0), got %v for %q", m.SavingsRatio, m.Mode)
+		}
+	}
+	if rep.BaselineTokens <= 0 {
+		t.Error("baseline tokens should still be reported for transparency")
+	}
+}
