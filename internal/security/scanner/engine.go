@@ -477,6 +477,16 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		}
 	}
 
+	// Pass the server URL to scanners that support live MCP endpoint scanning
+	// (e.g., ramparts). When MCP_SERVER_URL is set, the entrypoint runs
+	// `ramparts scan <URL>` instead of the stdio replay shim, giving richer
+	// analysis (tools, resources, AND prompts from the live server).
+	if s.ID == "ramparts" && req.ScanContext != nil && req.ScanContext.SourceMethod == "url" {
+		if _, exists := env["MCP_SERVER_URL"]; !exists && req.ScanContext.SourcePath != "" {
+			env["MCP_SERVER_URL"] = req.ScanContext.SourcePath
+		}
+	}
+
 	// Log which env keys are being passed (redact values for security)
 	envKeys := make([]string, 0, len(env))
 	for k := range env {

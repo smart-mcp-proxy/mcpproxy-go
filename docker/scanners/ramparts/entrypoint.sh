@@ -30,6 +30,12 @@ REPLAY="${MCP_REPLAY:-/usr/local/bin/mcp-replay.py}"
 REPORT="$REPORT_DIR/results.json"
 RAMPARTS_STDERR="$REPORT_DIR/ramparts.stderr"
 
+# When MCP_SERVER_URL is set, scan the live MCP endpoint directly (HTTP/SSE
+# servers). Otherwise replay the captured tool definitions over stdio (stdio
+# servers). The URL target lets Ramparts enumerate tools, resources, AND prompts
+# from the live server, giving richer analysis than the replay shim alone.
+TARGET="${MCP_SERVER_URL:-stdio:python3:$REPLAY}"
+
 # fail_closed marks the scan as FAILED. The Go scanner runner ignores the
 # container exit code (docker.go RunScanner returns nil for a non-zero exit),
 # so a non-zero exit alone is NOT enough — it reads whatever report file exists.
@@ -52,7 +58,11 @@ fail_closed() {
 # the Ramparts JSON shape ({security_issues{...}, yara_results[]}) directly.
 # Ramparts may exit non-zero to signal findings/offline-LLM, so capture the code
 # rather than abort; the gate below is the report's shape, not the bare exit.
-ramparts scan "stdio:python3:$REPLAY" \
+#
+# When MCP_SERVER_URL is set, the target is a live HTTP/SSE endpoint and the
+# container needs network access (NetworkReq: true in the scanner registry).
+# Otherwise the target is the stdio replay shim (offline, no network needed).
+ramparts scan "$TARGET" \
   --format json \
   > "$REPORT" 2>"$RAMPARTS_STDERR"
 rc=$?

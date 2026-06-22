@@ -92,23 +92,24 @@ var bundledScanners = []*ScannerPlugin{
 		ID:          "ramparts",
 		Name:        "Ramparts MCP Scanner",
 		Vendor:      "Javelin (getjavelin.com)",
-		Description: "Rust-based MCP security scanner with YARA rules. Detects tool poisoning, SQL injection, command injection, path traversal, secrets leakage, and prompt injection. Runs fully offline: v0.8.x scans a live MCP endpoint, so MCPProxy replays the captured tool definitions to it over stdio (the upstream is never re-executed).",
+		Description: "Rust-based MCP security scanner with YARA rules. Detects tool poisoning, SQL injection, command injection, path traversal, secrets leakage, and prompt injection. For stdio servers, MCPProxy replays captured tool definitions over stdio (the upstream is never re-executed). For HTTP/SSE servers, MCPProxy passes the server URL so Ramparts scans the live endpoint directly.",
 		License:     "Proprietary",
 		Homepage:    "https://github.com/getjavelin/ramparts",
 		DockerImage: "ghcr.io/smart-mcp-proxy/scanner-ramparts:latest",
-		Inputs:      []string{"source"},
+		Inputs:      []string{"source", "mcp_connection"},
 		Outputs:     []string{"sarif"},
 		RequiredEnv: nil,
 		OptionalEnv: nil,
 		// Uses entrypoint.sh. v0.8.x dropped directory scanning: the entrypoint
 		// runs `ramparts scan stdio:python3:/usr/local/bin/mcp-replay.py` against
-		// a static shim that replays /scan/source/tools.json over MCP. See
-		// docker/scanners/ramparts/entrypoint.sh + mcp-replay.py.
+		// a static shim that replays /scan/source/tools.json over MCP, OR
+		// `ramparts scan <URL>` against a live HTTP/SSE endpoint when
+		// MCP_SERVER_URL is set. See docker/scanners/ramparts/entrypoint.sh.
 		Command: nil,
 		Timeout: "120s",
-		// YARA analysis is fully offline and the replay shim is local-only, so no
-		// container network is required (LLM-backed analysis remains out of scope).
-		NetworkReq: false,
+		// Network is required when scanning a live HTTP/SSE endpoint via URL.
+		// The stdio replay shim path remains offline (no network needed).
+		NetworkReq: true,
 	},
 	{
 		ID:          "semgrep-mcp",

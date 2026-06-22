@@ -33,10 +33,10 @@ func TestRegistryListBundledScanners(t *testing.T) {
 
 // TestRampartsV08Invariants guards the v0.8.x URL/stdio scanning contract
 // (MCP-2422). Ramparts dropped directory scanning, so the registry entry must
-// run via the entrypoint (Command nil) and needs no container network — the
-// stdio replay shim is local-only and YARA runs offline. A regression here
-// (e.g. someone restoring a CLI Command or flipping NetworkReq back to true)
-// would silently break offline scanning or re-introduce a stale invocation.
+// run via the entrypoint (Command nil) and declare both source and mcp_connection
+// inputs. Network is required because the container may need to reach a live
+// HTTP/SSE endpoint when MCP_SERVER_URL is set (the stdio replay shim path
+// remains offline — it's the container's network mode, not a per-invocation toggle).
 func TestRampartsV08Invariants(t *testing.T) {
 	r := NewRegistry(t.TempDir(), zap.NewNop())
 
@@ -47,14 +47,30 @@ func TestRampartsV08Invariants(t *testing.T) {
 	if s.Command != nil {
 		t.Errorf("ramparts Command should be nil (entrypoint-driven), got %v", s.Command)
 	}
-	if s.NetworkReq {
-		t.Errorf("ramparts should not require network: replay shim is local and YARA is offline")
+	if !s.NetworkReq {
+		t.Errorf("ramparts requires network for live URL scanning (MCP_SERVER_URL mode)")
 	}
 	if s.InProcess {
 		t.Errorf("ramparts is a Docker-backed scanner, should not be InProcess")
 	}
 	if s.DockerImage == "" {
 		t.Errorf("ramparts must declare a Docker image")
+	}
+	hasMCPConnection := false
+	hasSource := false
+	for _, in := range s.Inputs {
+		if in == "mcp_connection" {
+			hasMCPConnection = true
+		}
+		if in == "source" {
+			hasSource = true
+		}
+	}
+	if !hasMCPConnection {
+		t.Errorf("ramparts must declare mcp_connection input for live URL scanning")
+	}
+	if !hasSource {
+		t.Errorf("ramparts must declare source input for stdio replay scanning")
 	}
 }
 
