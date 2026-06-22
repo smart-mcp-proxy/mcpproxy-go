@@ -560,17 +560,23 @@ func (s *Server) setupRoutes() {
 		_, _ = w.Write([]byte(`{"ready":false}`))
 	}
 
-	// Observability endpoints (registered first to avoid conflicts)
+	// Observability /metrics endpoint (MCP-32). Independent of the health
+	// endpoints below: enabling metrics must not change readiness semantics.
 	if s.observability != nil {
-		if health := s.observability.Health(); health != nil {
-			s.router.Get("/healthz", health.HealthzHandler())
-			s.router.Get("/readyz", health.ReadyzHandler())
-		}
 		if metrics := s.observability.Metrics(); metrics != nil {
 			s.router.Handle("/metrics", metrics.Handler())
 		}
+	}
+
+	// Health and readiness endpoints. The observability health manager only
+	// takes over when it is actually enabled; otherwise the controller-backed
+	// handlers remain authoritative. A config-gated feature (metrics/tracing)
+	// must be a no-op for readiness when health is not enabled (MCP-32).
+	if s.observability != nil && s.observability.Health() != nil {
+		health := s.observability.Health()
+		s.router.Get("/healthz", health.HealthzHandler())
+		s.router.Get("/readyz", health.ReadyzHandler())
 	} else {
-		// Register custom health endpoints only if observability is not available
 		for _, path := range []string{"/livez", "/healthz", "/health"} {
 			s.router.Get(path, livenessHandler)
 		}

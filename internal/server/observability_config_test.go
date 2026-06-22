@@ -31,6 +31,19 @@ func TestBuildObservabilityConfig_DefaultConfigOff(t *testing.T) {
 	assert.False(t, out.Tracing.Enabled)
 }
 
+// MCP-32 regression: the observability health manager is never wired (its
+// readiness is vacuous), so /readyz stays controller-backed even with metrics on.
+func TestBuildObservabilityConfig_HealthAlwaysDisabled(t *testing.T) {
+	off := buildObservabilityConfig(config.DefaultConfig())
+	assert.False(t, off.Health.Enabled, "health manager must stay off (metrics off)")
+
+	cfg := config.DefaultConfig()
+	cfg.Observability.Metrics = &config.MetricsExporterConfig{Enabled: true}
+	on := buildObservabilityConfig(cfg)
+	assert.True(t, on.Metrics.Enabled)
+	assert.False(t, on.Health.Enabled, "health manager must stay off even with metrics on")
+}
+
 func TestBuildObservabilityConfig_EnablesAndMapsTracing(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Observability.Metrics = &config.MetricsExporterConfig{Enabled: true}

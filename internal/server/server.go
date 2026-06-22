@@ -101,6 +101,10 @@ func buildObservabilityConfig(cfg *config.Config) observability.Config {
 	// DefaultConfig enables metrics; flip to opt-in per the MCP-32 directive.
 	out.Metrics.Enabled = false
 	out.Tracing.Enabled = false
+	// The observability package's health manager is out of scope for MCP-32 and
+	// its readiness is vacuous (no registered checkers). Keep the existing
+	// controller-backed /healthz and /readyz authoritative in all cases.
+	out.Health.Enabled = false
 
 	obs := cfg.Observability
 	if obs == nil {
