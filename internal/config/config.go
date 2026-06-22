@@ -953,7 +953,8 @@ func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
 	return c.StrictServerValidation
 }
 
-// ObservabilityConfig controls the Spec 069 usage aggregate cadence.
+// ObservabilityConfig controls the Spec 069 usage aggregate cadence plus the
+// MCP-32 metrics/tracing exporters.
 type ObservabilityConfig struct {
 	// UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
 	// wide windows (FR-005). Default 5s.
@@ -961,6 +962,56 @@ type ObservabilityConfig struct {
 	// UsagePersistInterval is how often the actor-owned usage aggregate snapshot
 	// is flushed to storage. Default 30s.
 	UsagePersistInterval Duration `json:"usage_persist_interval,omitempty" mapstructure:"usage-persist-interval" swaggertype:"string"`
+
+	// Metrics gates the Prometheus /metrics scrape endpoint (MCP-32). Disabled
+	// by default — operators opt in for k8s/enterprise deployments.
+	Metrics *MetricsExporterConfig `json:"metrics,omitempty" mapstructure:"metrics"`
+	// Tracing gates the OpenTelemetry OTLP trace exporter (MCP-32). Disabled by
+	// default.
+	Tracing *TracingExporterConfig `json:"tracing,omitempty" mapstructure:"tracing"`
+}
+
+// MetricsExporterConfig controls the Prometheus /metrics endpoint (MCP-32).
+type MetricsExporterConfig struct {
+	// Enabled exposes /metrics on the existing HTTP listener when true.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+}
+
+// TracingExporterConfig controls the OpenTelemetry OTLP trace exporter (MCP-32).
+type TracingExporterConfig struct {
+	// Enabled turns on OTLP trace export for tool calls and upstream hops.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	// Protocol selects the OTLP transport: "http" or "grpc".
+	Protocol string `json:"protocol,omitempty" mapstructure:"protocol"`
+	// Endpoint is the collector address as host:port (no scheme), e.g.
+	// "localhost:4318" for http or "localhost:4317" for grpc.
+	Endpoint string `json:"endpoint,omitempty" mapstructure:"endpoint"`
+	// SampleRate is the head-based trace sampling ratio in [0,1]. Default 0.1.
+	SampleRate float64 `json:"sample_rate,omitempty" mapstructure:"sample-rate"`
+}
+
+// Default OTLP transport values shared by defaults and validation repair.
+const (
+	defaultTracingProtocol   = "http"
+	defaultTracingHTTPEnd    = "localhost:4318"
+	defaultTracingGRPCEnd    = "localhost:4317"
+	defaultTracingSampleRate = 0.1
+)
+
+// DefaultMetricsExporterConfig returns the default (disabled) metrics exporter.
+func DefaultMetricsExporterConfig() *MetricsExporterConfig {
+	return &MetricsExporterConfig{Enabled: false}
+}
+
+// DefaultTracingExporterConfig returns the default (disabled) tracing exporter
+// with sane transport defaults pre-filled.
+func DefaultTracingExporterConfig() *TracingExporterConfig {
+	return &TracingExporterConfig{
+		Enabled:    false,
+		Protocol:   defaultTracingProtocol,
+		Endpoint:   defaultTracingHTTPEnd,
+		SampleRate: defaultTracingSampleRate,
+	}
 }
 
 // DefaultObservabilityConfig returns the default observability configuration.
@@ -968,6 +1019,8 @@ func DefaultObservabilityConfig() *ObservabilityConfig {
 	return &ObservabilityConfig{
 		UsageCacheTTL:        Duration(5 * time.Second),
 		UsagePersistInterval: Duration(30 * time.Second),
+		Metrics:              DefaultMetricsExporterConfig(),
+		Tracing:              DefaultTracingExporterConfig(),
 	}
 }
 
@@ -1696,6 +1749,28 @@ func (c *Config) Validate() error {
 	}
 	if c.Observability.UsagePersistInterval.Duration() <= 0 {
 		c.Observability.UsagePersistInterval = Duration(30 * time.Second)
+	}
+	// MCP-32 exporters: fill missing sub-configs (disabled) and repair invalid
+	// tracing transport so the OTLP exporter can always construct when enabled.
+	if c.Observability.Metrics == nil {
+		c.Observability.Metrics = DefaultMetricsExporterConfig()
+	}
+	if c.Observability.Tracing == nil {
+		c.Observability.Tracing = DefaultTracingExporterConfig()
+	}
+	tr := c.Observability.Tracing
+	if tr.Protocol != defaultTracingProtocol && tr.Protocol != "grpc" {
+		tr.Protocol = defaultTracingProtocol
+	}
+	if tr.Endpoint == "" {
+		if tr.Protocol == "grpc" {
+			tr.Endpoint = defaultTracingGRPCEnd
+		} else {
+			tr.Endpoint = defaultTracingHTTPEnd
+		}
+	}
+	if tr.SampleRate < 0 || tr.SampleRate > 1 {
+		tr.SampleRate = defaultTracingSampleRate
 	}
 
 	return nil

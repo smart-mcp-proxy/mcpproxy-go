@@ -81,11 +81,41 @@ type Server struct {
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
 	shutdownSignal string
+
+	// MCP-32: observability manager (Prometheus /metrics + OTLP tracing).
+	// Nil when disabled; config-gated and off by default.
+	observability *observability.Manager
 }
 
 // NewServer creates a new server instance
 func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	return NewServerWithConfigPath(cfg, "", logger)
+}
+
+// buildObservabilityConfig maps the file-level observability config (MCP-32)
+// onto the observability package config. Exporters are OFF unless explicitly
+// enabled. Health checks remain on (cheap, internal). Defensive against a nil
+// observability block.
+func buildObservabilityConfig(cfg *config.Config) observability.Config {
+	out := observability.DefaultConfig("mcpproxy", httpapi.GetBuildVersion())
+	// DefaultConfig enables metrics; flip to opt-in per the MCP-32 directive.
+	out.Metrics.Enabled = false
+	out.Tracing.Enabled = false
+
+	obs := cfg.Observability
+	if obs == nil {
+		return out
+	}
+	if obs.Metrics != nil {
+		out.Metrics.Enabled = obs.Metrics.Enabled
+	}
+	if obs.Tracing != nil {
+		out.Tracing.Enabled = obs.Tracing.Enabled
+		out.Tracing.Protocol = obs.Tracing.Protocol
+		out.Tracing.OTLPEndpoint = obs.Tracing.Endpoint
+		out.Tracing.SampleRate = obs.Tracing.SampleRate
+	}
+	return out
 }
 
 // NewServerWithConfigPath creates a new server instance with explicit config path tracking
@@ -102,15 +132,18 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize telemetry service with build version and edition (Spec 036)
 	rt.SetTelemetry(httpapi.GetBuildVersion(), httpapi.GetEdition())
 
-	// Initialize observability manager for metrics (FR-011: OAuth refresh metrics)
-	obsConfig := observability.DefaultConfig("mcpproxy", httpapi.GetBuildVersion())
+	// Initialize observability manager (MCP-32): Prometheus /metrics + OTLP
+	// tracing, config-gated and OFF by default. OAuth refresh metrics (Spec 023,
+	// FR-011) are wired here too when metrics are enabled.
+	obsConfig := buildObservabilityConfig(cfg)
 	obsManager, err := observability.NewManager(logger.Sugar(), &obsConfig)
 	if err != nil {
-		logger.Warn("Failed to create observability manager, metrics will be disabled", zap.Error(err))
+		logger.Warn("Failed to create observability manager, metrics/tracing will be disabled", zap.Error(err))
+		obsManager = nil
 	} else if obsManager.Metrics() != nil {
 		// Wire up metrics recorder to RefreshManager for OAuth refresh metrics
 		rt.SetRefreshMetricsRecorder(obsManager.Metrics())
-		logger.Info("OAuth refresh metrics enabled")
+		logger.Info("Prometheus metrics enabled", zap.String("endpoint", "/metrics"))
 	}
 
 	// Initialize management service and set it on runtime
@@ -126,10 +159,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	rt.SetManagementService(mgmtService)
 
 	server := &Server{
-		logger:   logger,
-		runtime:  rt,
-		statusCh: make(chan interface{}, 10),
-		eventsCh: rt.SubscribeEvents(),
+		logger:        logger,
+		runtime:       rt,
+		statusCh:      make(chan interface{}, 10),
+		eventsCh:      rt.SubscribeEvents(),
+		observability: obsManager,
 	}
 
 	mcpProxy := NewMCPProxyServer(
@@ -143,6 +177,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		cfg.DebugSearch,
 		cfg,
 	)
+	// MCP-32: give the MCP proxy access to observability for tool-call metrics
+	// and OTLP spans.
+	mcpProxy.SetObservability(obsManager)
 
 	server.mcpProxy = mcpProxy
 
@@ -531,6 +568,16 @@ func (s *Server) Shutdown() error {
 
 	if s.eventsCh != nil {
 		s.runtime.UnsubscribeEvents(s.eventsCh)
+	}
+
+	// MCP-32: flush and shut down the OTLP tracer provider so buffered spans
+	// are exported before exit.
+	if s.observability != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.observability.Close(ctx); err != nil {
+			s.logger.Warn("Failed to close observability manager", zap.Error(err))
+		}
+		cancel()
 	}
 
 	s.logger.Info("Shutting down MCP proxy server...")
@@ -1374,6 +1421,11 @@ func (s *Server) StartServer(ctx context.Context) error {
 
 	s.serverCtx, s.serverCancel = context.WithCancel(ctx)
 
+	// MCP-32: project runtime events onto Prometheus metrics while running.
+	if s.observability != nil && s.observability.Metrics() != nil {
+		go s.runMetricsBridge(s.serverCtx, s.observability.Metrics())
+	}
+
 	go func() {
 		var serverError error
 
@@ -1790,9 +1842,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/v1/tool_code", mcpHandler)
 	mux.Handle("/v1/tool-code", mcpHandler) // Alias for python client
 
-	// API v1 endpoints with chi router for REST API and SSE
-	// TODO: Add observability manager integration
-	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), nil)
+	// API v1 endpoints with chi router for REST API and SSE.
+	// MCP-32: pass the observability manager so /metrics is served (and HTTP
+	// request metrics/tracing middleware applied) when enabled.
+	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()

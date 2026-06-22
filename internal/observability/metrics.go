@@ -43,6 +43,9 @@ type MetricsManager struct {
 	// OAuth refresh metrics (Spec 023)
 	oauthRefreshTotal    *prometheus.CounterVec
 	oauthRefreshDuration *prometheus.HistogramVec
+
+	// Quarantine event metrics (MCP-32)
+	quarantineEvents *prometheus.CounterVec
 }
 
 // NewMetricsManager creates a new metrics manager
@@ -221,6 +224,16 @@ func (mm *MetricsManager) initMetrics() {
 		},
 		[]string{"server", "result"},
 	)
+
+	// Quarantine event metrics (MCP-32)
+	// scope: "server" | "tool"; action: e.g. quarantined/lifted/pending/changed/approved.
+	mm.quarantineEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "mcpproxy_quarantine_events_total",
+			Help: "Total number of quarantine state changes",
+		},
+		[]string{"scope", "action"},
+	)
 }
 
 // registerMetrics registers all metrics with the registry
@@ -249,6 +262,8 @@ func (mm *MetricsManager) registerMetrics() {
 		// OAuth refresh metrics (Spec 023)
 		mm.oauthRefreshTotal,
 		mm.oauthRefreshDuration,
+		// Quarantine event metrics (MCP-32)
+		mm.quarantineEvents,
 	)
 
 	// Also register Go runtime metrics
@@ -399,4 +414,11 @@ func (mm *MetricsManager) RecordOAuthRefresh(server, result string) {
 // Result should be one of: "success", "failed_network", "failed_invalid_grant", "failed_other".
 func (mm *MetricsManager) RecordOAuthRefreshDuration(server, result string, duration time.Duration) {
 	mm.oauthRefreshDuration.WithLabelValues(server, result).Observe(duration.Seconds())
+}
+
+// RecordQuarantineEvent records a quarantine state change (MCP-32).
+// scope is "server" or "tool"; action describes the transition (e.g.
+// quarantined, lifted, pending, changed, approved).
+func (mm *MetricsManager) RecordQuarantineEvent(scope, action string) {
+	mm.quarantineEvents.WithLabelValues(scope, action).Inc()
 }
