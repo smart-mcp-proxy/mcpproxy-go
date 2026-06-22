@@ -92,6 +92,14 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 		return nil, err
 	}
 
+	// Application-layer SSRF guard: resolve the target host and reject if it
+	// lands in a blocked range. This holds even with an HTTP(S)_PROXY set, where
+	// the dialer connects to the proxy and the dial-time Control never sees the
+	// real target host (CodeQL go/request-forgery — proxy bypass).
+	if err := guardRegistryTargetHost(ctx, safeURL); err != nil {
+		return nil, err
+	}
+
 	client := sharedRegistryClient()
 
 	var lastErr error

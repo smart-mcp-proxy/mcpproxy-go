@@ -84,11 +84,15 @@ into a request-forgery vector against internal services:
   IPv6 unique-local (`fc00::/7`), RFC6598 CGNAT (`100.64/10`), or link-local
   including the cloud metadata endpoint `169.254.169.254` — is **rejected up
   front** with `invalid_registry_url`.
-- Hostname sources are allowed at add time and re-checked at **dial time**: if a
-  hostname resolves into any blocked range (or is repointed there later via DNS
-  rebinding), the fetch is refused before it connects. The official protocol's
-  cursor-follow pagination is also pinned to the configured host so a hostile
-  `nextCursor` cannot redirect the request.
+- Hostname sources are allowed at add time and re-checked before every fetch by
+  an **application-layer resolution check** (resolve the target host, reject if
+  any resolved IP is non-routable) *and* at **dial time** (validate the actual
+  IP before connect). The dial check alone is bypassable when an
+  `HTTP_PROXY`/`HTTPS_PROXY` is configured — the transport then dials the proxy,
+  not the target — so the application-layer check is what holds in the proxy
+  case; the dial check remains defense-in-depth for the direct path and DNS
+  rebinding. The official protocol's cursor-follow pagination is also pinned to
+  the configured host so a hostile `nextCursor` cannot redirect the request.
 
 Equivalent surfaces:
 

@@ -1,6 +1,7 @@
 package registries
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -9,6 +10,20 @@ import (
 	"sync/atomic"
 	"syscall"
 )
+
+// registryResolveHost resolves a hostname to its IPs. A package var so tests can
+// simulate a hostname resolving into a blocked range without real DNS.
+var registryResolveHost = func(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, len(addrs))
+	for i := range addrs {
+		ips[i] = addrs[i].IP
+	}
+	return ips, nil
+}
 
 // ErrBlockedRegistryHost is returned when a registry URL targets — or resolves
 // to — a non-routable / internal address. It bounds CWE-918 (request forgery):
@@ -122,6 +137,50 @@ func registryDialControl(_, address string, _ syscall.RawConn) error {
 	ip := net.ParseIP(host)
 	if isBlockedIP(ip) {
 		return fmt.Errorf("%w: %s", ErrBlockedRegistryHost, address)
+	}
+	return nil
+}
+
+// guardRegistryTargetHost is the application-layer SSRF guard: it resolves the
+// registry TARGET host and rejects the fetch if ANY resolved address is in a
+// blocked range. Unlike registryDialControl, it runs BEFORE the request and is
+// independent of the transport, so it holds even when an HTTP(S)_PROXY is set —
+// in which case the dialer connects to the proxy and the dial-time Control only
+// ever sees the proxy's IP, never the real target (the proxy resolves the host
+// itself). The dial-time guard remains as defense-in-depth for the direct
+// (no-proxy) path. Caveats: a literal-IP host is already covered by
+// validateRegistryURL; a DNS lookup failure is left to the request to surface
+// (fail-open on resolver error so a flaky resolver does not break every fetch —
+// the dial guard still covers the no-proxy path). Relaxed by the
+// allow_private_registry_fetch opt-in.
+func guardRegistryTargetHost(ctx context.Context, reqURL string) error {
+	if registryAllowPrivateFetch.Load() {
+		return nil
+	}
+	u, err := url.Parse(reqURL)
+	if err != nil {
+		return fmt.Errorf("invalid request URL: %w", err)
+	}
+	host := u.Hostname() // strips the port and unbrackets an IPv6 literal
+	if host == "" {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		// Literal IP — already validated pre-flight; re-check defensively.
+		if isBlockedIP(ip) {
+			return fmt.Errorf("%w: %s", ErrBlockedRegistryHost, ip)
+		}
+		return nil
+	}
+	ips, err := registryResolveHost(ctx, host)
+	if err != nil {
+		// Resolution failed — let the request itself surface the failure.
+		return nil //nolint:nilerr // fail-open on lookup error; dial guard covers no-proxy
+	}
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			return fmt.Errorf("%w: host %q resolves to %s", ErrBlockedRegistryHost, host, ip)
+		}
 	}
 	return nil
 }

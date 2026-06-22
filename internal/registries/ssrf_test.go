@@ -166,3 +166,68 @@ func TestRegistryGet_BlocksLoopbackWhenGuardActive(t *testing.T) {
 		t.Errorf("guarded fetch reached the endpoint %d time(s), want 0", hits)
 	}
 }
+
+// TestRegistryGet_BlocksPrivateResolvingHostThroughProxy is the proxy-bypass
+// regression (CodexReviewer round 2): with an HTTP(S)_PROXY configured the
+// transport dials the proxy, so the dial-time Control only validates the
+// proxy IP. A public-looking hostname that RESOLVES into a blocked range must
+// still be refused — by the application-layer guard that runs before the
+// request, independent of the transport/proxy.
+func TestRegistryGet_BlocksPrivateResolvingHostThroughProxy(t *testing.T) {
+	withGuardActive(t)
+	// A proxy is set, so absent the app-layer guard the request would be sent to
+	// the proxy (TEST-NET-3, RFC5737) rather than blocked.
+	t.Setenv("HTTP_PROXY", "http://203.0.113.9:8080")
+	t.Setenv("HTTPS_PROXY", "http://203.0.113.9:8080")
+
+	// Simulate a benign-looking hostname resolving to the cloud metadata IP.
+	orig := registryResolveHost
+	registryResolveHost = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("169.254.169.254")}, nil
+	}
+	t.Cleanup(func() { registryResolveHost = orig })
+
+	reg := &RegistryEntry{ID: "evil", Name: "Evil", ServersURL: "https://registry.evil.example/v0.1/servers", Protocol: protocolOfficial}
+	_, err := registryGet(context.Background(), reg, "https://registry.evil.example/v0.1/servers")
+	if !errors.Is(err, ErrBlockedRegistryHost) {
+		t.Fatalf("private-resolving host through proxy = %v, want ErrBlockedRegistryHost", err)
+	}
+}
+
+// TestGuardRegistryTargetHost covers the resolution predicate directly: a host
+// resolving to ANY blocked IP is rejected; an all-public resolution passes; the
+// opt-in bypass and a literal public IP are allowed.
+func TestGuardRegistryTargetHost(t *testing.T) {
+	withGuardActive(t)
+	orig := registryResolveHost
+	t.Cleanup(func() { registryResolveHost = orig })
+
+	// Mixed public + private resolution → blocked (any blocked IP rejects).
+	registryResolveHost = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34"), net.ParseIP("10.0.0.5")}, nil
+	}
+	if err := guardRegistryTargetHost(context.Background(), "https://reg.example/x"); !errors.Is(err, ErrBlockedRegistryHost) {
+		t.Errorf("mixed public+private resolution = %v, want blocked", err)
+	}
+
+	// All-public resolution → allowed.
+	registryResolveHost = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+	if err := guardRegistryTargetHost(context.Background(), "https://reg.example/x"); err != nil {
+		t.Errorf("all-public resolution = %v, want nil", err)
+	}
+
+	// Resolver error → fail-open (dial guard still covers the no-proxy path).
+	registryResolveHost = func(_ context.Context, _ string) ([]net.IP, error) {
+		return nil, errors.New("nxdomain")
+	}
+	if err := guardRegistryTargetHost(context.Background(), "https://reg.example/x"); err != nil {
+		t.Errorf("resolver error = %v, want nil (fail-open)", err)
+	}
+
+	// Literal public IP → allowed without resolution.
+	if err := guardRegistryTargetHost(context.Background(), "https://8.8.8.8/x"); err != nil {
+		t.Errorf("public literal IP = %v, want nil", err)
+	}
+}
