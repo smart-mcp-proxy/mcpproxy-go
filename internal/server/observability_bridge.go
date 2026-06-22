@@ -18,6 +18,7 @@ func (s *Server) runMetricsBridge(ctx context.Context, mm *observability.Metrics
 		return
 	}
 	events := s.runtime.SubscribeEvents()
+	defer s.runtime.UnsubscribeEvents(events)
 	s.logger.Info("Observability metrics bridge started")
 	for {
 		select {
