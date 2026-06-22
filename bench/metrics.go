@@ -151,18 +151,38 @@ func AveragePrecision(ranked []string, labels []Label) float64 {
 // returns the ranked tool IDs (most relevant first), limited to `limit`.
 type SearchFunc func(query string, limit int) (ranked []string, err error)
 
-// RetrievalMetrics is the aggregated retrieval-quality report over a golden
-// set. Field names mirror the Spec 065 score-report.schema.json `retrieval`
-// block so the report can be emitted to that contract.
+// RetrievalMetricValues holds the aggregated metric numbers. It is the
+// `retrieval.metrics` object of the Spec 065 score-report.schema.json contract.
+type RetrievalMetricValues struct {
+	RecallAt map[int]float64 `json:"recall_at"`
+	MRR      float64         `json:"mrr"`
+	NDCGAt10 float64         `json:"ndcg_at_10"`
+	MAP      float64         `json:"map"`
+}
+
+// RetrievalGate is the `retrieval.gate` object of the score-report contract.
+//
+// A standalone live run has no stored baseline to regress against, so the gate
+// cannot fail by construction: Passed is true and Metric/Tolerance are empty.
+// Regression gating against a committed baseline is the CI lane's job (MCP-3133)
+// — that run fills Metric/Tolerance and can set Passed=false.
+type RetrievalGate struct {
+	Passed    bool    `json:"passed"`
+	Metric    string  `json:"metric,omitempty"`
+	Tolerance float64 `json:"tolerance,omitempty"`
+}
+
+// RetrievalMetrics is the aggregated retrieval-quality report over a golden set.
+// Its JSON shape IS the Spec 065 score-report.schema.json `retrieval` block
+// (nested `metrics` + `gate`), so a live report's retrieval payload validates
+// against that contract directly.
 type RetrievalMetrics struct {
-	CorpusVersion string          `json:"corpus_version"`
-	GoldenVersion string          `json:"golden_version,omitempty"`
-	RunsAveraged  int             `json:"runs_averaged"`
-	QueryCount    int             `json:"query_count"`
-	RecallAt      map[int]float64 `json:"recall_at"`
-	MRR           float64         `json:"mrr"`
-	NDCGAt10      float64         `json:"ndcg_at_10"`
-	MAP           float64         `json:"map"`
+	CorpusVersion string                `json:"corpus_version"`
+	GoldenVersion string                `json:"golden_version,omitempty"`
+	RunsAveraged  int                   `json:"runs_averaged"`
+	QueryCount    int                   `json:"query_count,omitempty"`
+	Metrics       RetrievalMetricValues `json:"metrics"`
+	Gate          RetrievalGate         `json:"gate"`
 }
 
 // ScoreRetrieval replays every golden query through search and aggregates
@@ -204,9 +224,14 @@ func ScoreRetrieval(golden *GoldenSet, search SearchFunc, ks []int) (*RetrievalM
 		CorpusVersion: golden.CorpusVersion,
 		RunsAveraged:  1,
 		QueryCount:    len(golden.Queries),
-		RecallAt:      recallAt,
-		MRR:           mrrSum / n,
-		NDCGAt10:      ndcgSum / n,
-		MAP:           mapSum / n,
+		Metrics: RetrievalMetricValues{
+			RecallAt: recallAt,
+			MRR:      mrrSum / n,
+			NDCGAt10: ndcgSum / n,
+			MAP:      mapSum / n,
+		},
+		// No baseline compared in a standalone live run, so the regression gate
+		// cannot fail (see RetrievalGate). CI fills this in against a baseline.
+		Gate: RetrievalGate{Passed: true},
 	}, nil
 }

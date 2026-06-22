@@ -122,8 +122,11 @@ What it adds over the offline token run:
 - **Accuracy.** Replays `retrieval_golden_v1.json` through the proxy's BM25
   search (`GET /api/v1/index/search`) and scores **Recall@{1,3,5,10}, MRR,
   nDCG@10, MAP** against the graded labels. Deterministic (BM25), so a single
-  run is reported (`runs_averaged: 1`). Metric field names mirror the Spec 065
-  `score-report.schema.json` `retrieval` block.
+  run is reported (`runs_averaged: 1`). The emitted `retrieval` block **conforms
+  to** the Spec 065 `score-report.schema.json` shape — nested `metrics` + `gate`
+  (verified by a schema-validation test). A standalone live run has no stored
+  baseline to regress against, so `gate.passed` is `true` by construction;
+  CI regression-gating against a committed baseline is the MCP-3133 lane.
 - **Latency.** Client-measured per-query search latency (p50/p95/p99/max) vs.
   the one-shot cost of loading all tools. Measured client-side on purpose: the
   server's `SearchToolsResponse.took` field is currently a `"0ms"` stub.

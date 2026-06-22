@@ -103,12 +103,15 @@ func TestScoreRetrieval(t *testing.T) {
 	}
 	// Recall@1: q1=1/3, q2=1 -> mean = (0.3333+1)/2 = 0.66667
 	wantR1 := (1.0/3.0 + 1.0) / 2.0
-	if !almostEqual(m.RecallAt[1], wantR1) {
-		t.Errorf("mean Recall@1 = %v, want %v", m.RecallAt[1], wantR1)
+	if !almostEqual(m.Metrics.RecallAt[1], wantR1) {
+		t.Errorf("mean Recall@1 = %v, want %v", m.Metrics.RecallAt[1], wantR1)
 	}
 	// MRR: q1=1.0, q2=1.0 -> 1.0
-	if !almostEqual(m.MRR, 1.0) {
-		t.Errorf("MRR = %v, want 1.0", m.MRR)
+	if !almostEqual(m.Metrics.MRR, 1.0) {
+		t.Errorf("MRR = %v, want 1.0", m.Metrics.MRR)
+	}
+	if !m.Gate.Passed {
+		t.Error("Gate.Passed should be true for a baseline-free run")
 	}
 	if m.QueryCount != 2 {
 		t.Errorf("QueryCount = %d, want 2", m.QueryCount)

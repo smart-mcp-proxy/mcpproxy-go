@@ -104,7 +104,7 @@ func runLive(proxy, apiKey, goldenPath, outDir string) {
 	}
 	r := report.Retrieval
 	fmt.Fprintf(os.Stdout, "  accuracy (%d queries): Recall@1=%.3f Recall@5=%.3f MRR=%.3f nDCG@10=%.3f MAP=%.3f\n",
-		r.QueryCount, r.RecallAt[1], r.RecallAt[5], r.MRR, r.NDCGAt10, r.MAP)
+		r.QueryCount, r.Metrics.RecallAt[1], r.Metrics.RecallAt[5], r.Metrics.MRR, r.Metrics.NDCGAt10, r.Metrics.MAP)
 	l := report.Latency
 	fmt.Fprintf(os.Stdout, "  latency (%d searches): p50=%.1fms p95=%.1fms p99=%.1fms max=%.1fms; load-all-tools=%.1fms\n",
 		l.Samples, l.P50ms, l.P95ms, l.P99ms, l.MaxMs, l.LoadAllToolsMs)

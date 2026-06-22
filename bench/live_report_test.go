@@ -98,7 +98,7 @@ func TestRunLiveAuthoritativeHeadline(t *testing.T) {
 		}
 	}
 	// Accuracy: perfect ranking for the one query.
-	if rep.Retrieval == nil || rep.Retrieval.RecallAt[1] != 1.0 {
+	if rep.Retrieval == nil || rep.Retrieval.Metrics.RecallAt[1] != 1.0 {
 		t.Errorf("expected Recall@1=1.0, got %+v", rep.Retrieval)
 	}
 	// Latency populated.
