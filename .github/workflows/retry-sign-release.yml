@@ -399,7 +399,7 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     environment: production
-    if: github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    if: github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-')
 
     steps:
       - name: Checkout tap repository
@@ -585,7 +585,7 @@ jobs:
   # Publish signed apt/yum repositories to Cloudflare R2 (mirrors release.yml)
   publish-linux-repos:
     needs: [release]
-    if: github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    if: github.repository == 'smart-mcp-proxy/mcpproxy-go' && !contains(inputs.tag, '-')
     runs-on: ubuntu-latest
     environment: production
 
