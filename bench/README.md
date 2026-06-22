@@ -13,10 +13,18 @@ wired to upstream MCP tools.
 | Mode | What the agent sees in context | mcpproxy server |
 |------|--------------------------------|-----------------|
 | `baseline` | Every upstream tool definition, loaded directly | (no proxy discovery) |
-| `retrieve_tools` | `retrieve_tools` + `call_tool_read/write/destructive` + `read_cache`; tools found on demand via BM25 | `callToolServer` |
-| `code_execution` | `code_execution` + `retrieve_tools`; many tools orchestrated from sandboxed JS in one round-trip | `codeExecServer` |
+| `retrieve_tools` | `retrieve_tools` + `call_tool_read/write/destructive` + `read_cache` + `code_execution` + management tools; tools found on demand via BM25 | `callToolServer` |
+| `code_execution` | `code_execution` + `retrieve_tools` + management tools; many tools orchestrated from sandboxed JS in one round-trip | `codeExecServer` |
 
-(Mode → exposed tools mirrors `internal/server/mcp.go`.)
+Both proxy modes also append the shared **management tool set** —
+`upstream_servers`, `quarantine_security`, `search_servers`, `list_registries`
+— that the live routing-mode servers expose. These count against the proxy
+context cost: omitting them undercounts that cost and inflates the savings.
+
+The per-mode catalog is **derived directly from the live tool builders**
+(`buildCallToolModeTools` / `buildCodeExecModeTools` in
+`internal/server/mcp_routing.go`, via `server.ProxyModeToolDefs`), so it can
+never drift from production.
 
 ## What ships today (deterministic, offline)
 
@@ -33,6 +41,23 @@ reports the savings of each proxy mode versus the baseline. Output: a
 `report.json` and a self-contained `dashboard.html` in `bench/results/`
 (gitignored).
 
+#### Current deterministic result
+
+Over the 45-tool Spec 065 reference corpus, counting **tool name + description
+only** (schemas excluded uniformly — see limitations), `cl100k_base`:
+
+| Mode | Context tools | Tokens | Savings vs. baseline |
+|------|---------------|--------|----------------------|
+| `baseline` | 45 | 1730 | — |
+| `retrieve_tools` | 10 | 1431 | **~17%** |
+| `code_execution` | 6 | 986 | **~43%** |
+
+These are deliberately modest: the proxy context here is the *full* per-mode
+tool set (discovery + call-tool variants + management tools), and the corpus is
+small. Savings grow toward the asymptote as the upstream tool count rises (the
+baseline grows linearly while the proxy context stays fixed) — always quote the
+corpus size alongside a percentage. Reproduce with `go run ./bench/cmd/bench`.
+
 ### Scoring rubric — token reduction
 
 - **Tool universe**: the frozen Spec 065 snapshot
@@ -43,6 +68,11 @@ reports the savings of each proxy mode versus the baseline. Output: a
   (already a repo dependency). It is a **model-agnostic estimator**; exact
   counts for a specific pinned model (e.g. Claude) will differ, but the
   *relative* savings between modes are stable.
+- **Proxy-mode tools**: the *complete* per-mode catalog, derived from the live
+  server builders — discovery, the call-tool variants, `code_execution`, **and
+  the shared management tool set** (`upstream_servers`, `quarantine_security`,
+  `search_servers`, `list_registries`). Nothing the agent actually sees is
+  dropped from the proxy cost.
 - **Cost of a tool**: `name + "\n" + description`. JSON input schemas are
   excluded **uniformly** across all modes (the committed corpus snapshot does
   not carry schemas).
@@ -50,10 +80,13 @@ reports the savings of each proxy mode versus the baseline. Output: a
 
 ### Known limitations (read before quoting a number)
 
-- **Schemas excluded → conservative.** Upstream tools carry far larger input
-  schemas than mcpproxy's handful of proxy tools, so excluding schemas
-  *understates* the baseline and therefore *understates* the savings. The live
-  run below adds full schemas for the exact headline number.
+- **Schemas excluded — direction is not clean.** Input schemas are dropped from
+  *both* sides. The 45 baseline tools lose their schemas, but so do the proxy
+  modes' management tools (e.g. `upstream_servers` carries a large multi-field
+  schema). So the name+description-only number is **not** unambiguously
+  conservative — it is its own well-defined metric. The live run below adds full
+  schemas from `GET /api/v1/tools` for the exact headline number; quote that for
+  marketing, not this offline estimate.
 - **Savings scale with tool count.** The 45-tool reference corpus is small; real
   deployments expose hundreds–thousands of tools, where the baseline grows
   linearly and the proxy context stays fixed, so savings approach the asymptote.
@@ -84,8 +117,11 @@ rather than landed here:
   (`specs/065-evaluation-foundation/datasets/`), generated from 7 permissively
   reachable no-auth reference servers (filesystem, git, memory, sqlite, fetch,
   time, sequential-thinking).
-- Proxy tool definitions: `bench/proxy_tools_v1.json`, captured verbatim from
-  `internal/server/mcp.go` (provenance recorded in the file).
+- Proxy + management tool definitions: derived at run time from the live server
+  tool builders (`internal/server/mcp_routing.go` →
+  `buildCallToolModeTools` / `buildCodeExecModeTools`, exposed via
+  `internal/server.ProxyModeToolDefs`). No hand-maintained fixture — the
+  benchmark cannot drift from the tools the proxy actually serves.
 
 ## Reproducible live run (skeleton)
 

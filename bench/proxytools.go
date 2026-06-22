@@ -1,53 +1,40 @@
 package bench
 
 import (
-	_ "embed"
-	"encoding/json"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
 )
 
-//go:embed proxy_tools_v1.json
-var proxyToolsJSON []byte
-
-// proxyTool is a built-in mcpproxy tool definition plus the routing modes that
-// expose it in the agent's context.
-type proxyTool struct {
-	ToolID      string   `json:"tool_id"`
-	Name        string   `json:"tool"`
-	Description string   `json:"description"`
-	Modes       []string `json:"modes"`
-}
-
-type proxyToolFixture struct {
-	Version string      `json:"version"`
-	Tools   []proxyTool `json:"tools"`
-}
-
-var proxyTools proxyToolFixture
-
-func init() {
-	if err := json.Unmarshal(proxyToolsJSON, &proxyTools); err != nil {
-		// The fixture is embedded at build time; a parse failure is a build/test
-		// bug, not a runtime condition.
-		panic("bench: invalid embedded proxy_tools_v1.json: " + err.Error())
-	}
-}
-
-// ProxyToolsForMode returns the built-in proxy tool definitions that occupy the
-// agent's context window in the given routing mode. Provenance for each
-// definition is in proxy_tools_v1.json (captured from internal/server/mcp.go).
+// ProxyToolsForMode returns the built-in mcpproxy proxy + management tool
+// definitions that occupy the agent's context window in the given routing mode.
+//
+// The catalog is derived directly from the live server tool builders
+// (internal/server.ProxyModeToolDefs → buildCallToolModeTools /
+// buildCodeExecModeTools in internal/server/mcp_routing.go). This is the single
+// source of truth: both routing modes append the shared management tool set
+// (upstream_servers, quarantine_security, search_servers, list_registries), so
+// deriving from the builders guarantees the benchmark counts the real per-mode
+// context cost and can never drift from production by re-introducing the
+// undercount that inflated the headline savings (MCP-3161).
 func ProxyToolsForMode(mode string) []Tool {
-	var out []Tool
-	for _, pt := range proxyTools.Tools {
-		for _, m := range pt.Modes {
-			if m == mode {
-				out = append(out, Tool{
-					ToolID:      pt.ToolID,
-					Name:        pt.Name,
-					Description: pt.Description,
-				})
-				break
-			}
-		}
+	var routingMode string
+	switch mode {
+	case ModeCodeExecution:
+		routingMode = config.RoutingModeCodeExecution
+	case ModeRetrieveTools:
+		routingMode = config.RoutingModeRetrieveTools
+	default:
+		return nil
+	}
+
+	defs := server.ProxyModeToolDefs(routingMode)
+	out := make([]Tool, 0, len(defs))
+	for _, d := range defs {
+		out = append(out, Tool{
+			ToolID:      "mcpproxy:" + d.Name,
+			Name:        d.Name,
+			Description: d.Description,
+		})
 	}
 	return out
 }

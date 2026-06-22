@@ -70,6 +70,27 @@ func TestProxyToolsForMode(t *testing.T) {
 	if !hasCodeExec || !hasRetrieve {
 		t.Errorf("code_execution mode must expose code_execution + retrieve_tools, got %v", toolNames(ce))
 	}
+
+	// Both routing modes append the shared management tool set
+	// (internal/server/mcp_routing.go buildManagementTools). Omitting these
+	// undercounts the proxy-mode context cost and overstates the savings
+	// (MCP-3161 / Codex finding on PR #747). Assert they are present so the
+	// benchmark catalog can never silently drop them again.
+	mgmt := []string{"upstream_servers", "quarantine_security", "search_servers", "list_registries"}
+	for _, mode := range []string{ModeRetrieveTools, ModeCodeExecution} {
+		got := map[string]bool{}
+		for _, tl := range ProxyToolsForMode(mode) {
+			got[tl.Name] = true
+			if tl.Description == "" {
+				t.Errorf("mode %s: tool %q has empty description", mode, tl.Name)
+			}
+		}
+		for _, name := range mgmt {
+			if !got[name] {
+				t.Errorf("mode %s: missing management tool %q (proxy context cost undercounted)", mode, name)
+			}
+		}
+	}
 }
 
 func TestComputeReport_SavingsAreReal(t *testing.T) {

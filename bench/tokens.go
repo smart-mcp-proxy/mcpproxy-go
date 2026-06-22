@@ -101,11 +101,12 @@ func (t *Tokenizer) Count(text string) int {
 //
 // It counts the tool name and description only. Input JSON schemas are excluded
 // uniformly across every mode because the committed Spec 065 corpus snapshot
-// does not carry schemas. This is deliberately conservative for the headline
-// claim: upstream tools carry far larger schemas than mcpproxy's handful of
-// proxy tools, so excluding schemas *understates* the baseline and therefore
-// understates the measured savings. The live docker-compose run (README.md)
-// adds full schemas from GET /api/v1/tools for the exact headline number.
+// does not carry schemas. Schemas are dropped from BOTH sides — the baseline's
+// upstream tools and the proxy modes' management tools (e.g. upstream_servers
+// carries a large multi-field schema) — so this is a well-defined
+// name+description-only metric, not an unambiguously conservative one. The live
+// docker-compose run (README.md) adds full schemas from GET /api/v1/tools for
+// the exact headline number.
 func (t *Tokenizer) CountTool(tl Tool) int {
 	return t.Count(tl.Name + "\n" + tl.Description)
 }
@@ -164,7 +165,8 @@ func ComputeReport(tk *Tokenizer, corpus *Corpus) *Report {
 		},
 		Notes: []string{
 			"Token counts use the tiktoken " + tk.encoding + " encoding as a reproducible, model-agnostic estimator; exact counts for a pinned model may differ.",
-			"Counts tool name + description only; JSON input schemas are excluded uniformly, which understates the baseline and is therefore conservative for the savings claim.",
+			"Proxy-mode tools are the full per-mode catalog derived from the live server builders (internal/server.ProxyModeToolDefs), including the shared management tool set (upstream_servers, quarantine_security, search_servers, list_registries).",
+			"Counts tool name + description only; JSON input schemas are excluded uniformly from both the baseline and the proxy modes, so this is a name+description-only metric (not unambiguously conservative). See bench/README.md for the live run with full schemas.",
 			"Corpus is the frozen Spec 065 snapshot (specs/065-evaluation-foundation/datasets/corpus_v1.tools.json); see bench/README.md for the live run with full schemas.",
 		},
 	}
