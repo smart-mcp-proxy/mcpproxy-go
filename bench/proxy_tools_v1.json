@@ -1,6 +1,6 @@
 {
   "__doc__": "Frozen snapshot of the mcpproxy built-in proxy tool definitions that occupy the agent's context window in each routing mode. These are the static per-mode context cost the benchmark scores against the baseline (all upstream tools loaded directly).",
-  "provenance": "internal/server/mcp.go registerTools()/buildCallToolVariantTool() — retrieve_tools (mcp.go:561), call_tool_read/write/destructive variant descriptions (mcp.go:490-528), read_cache (mcp.go:605), code_execution (mcp.go:675). Captured verbatim at origin/main 89f06b5c.",
+  "provenance": "internal/server/mcp.go registerTools()/buildCallToolVariantTool() — retrieve_tools, call_tool_read/write/destructive variant descriptions, read_cache, code_execution. Descriptions captured verbatim at origin/main 89f06b5c. Line numbers omitted (they drift with unrelated edits; grep the function names to locate them).",
   "version": "proxy_v1",
   "tools": [
     {

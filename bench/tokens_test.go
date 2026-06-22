@@ -1,6 +1,9 @@
 package bench
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -141,6 +144,47 @@ func TestComputeReport_BaselineMonotonic(t *testing.T) {
 	}
 	if baseOf(big) <= baseOf(small) {
 		t.Errorf("more tools must mean more baseline tokens: %d <= %d", baseOf(big), baseOf(small))
+	}
+}
+
+func TestWriteReports_SmokeTest(t *testing.T) {
+	tk := newTestTokenizer(t)
+	corpus := &Corpus{Version: "test", Tools: []Tool{
+		{ToolID: "a:1", Server: "a", Name: "tool_a", Description: "does something"},
+	}}
+	rep := ComputeReport(tk, corpus)
+
+	dir := t.TempDir()
+	jsonPath, htmlPath, err := rep.WriteReports(dir)
+	if err != nil {
+		t.Fatalf("WriteReports: %v", err)
+	}
+
+	// JSON must parse back to a Report with the right corpus version.
+	data, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatalf("read json: %v", err)
+	}
+	var got Report
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal json: %v", err)
+	}
+	if got.CorpusVersion != "test" {
+		t.Errorf("corpus version = %q, want %q", got.CorpusVersion, "test")
+	}
+
+	// HTML must be non-empty and contain the mode names.
+	html, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read html: %v", err)
+	}
+	if len(html) < 100 {
+		t.Fatalf("dashboard.html too short (%d bytes)", len(html))
+	}
+	for _, mode := range []string{ModeBaseline, ModeRetrieveTools, ModeCodeExecution} {
+		if !bytes.Contains(html, []byte(mode)) {
+			t.Errorf("dashboard.html missing mode %q", mode)
+		}
 	}
 }
 
