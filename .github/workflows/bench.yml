@@ -131,13 +131,28 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+      # Bootstrap: create the Cloudflare Pages project if it does not yet exist.
+      # Idempotent — fails silently (continue-on-error) when the project already
+      # exists (Cloudflare error 8000007). Requires Pages:Edit scope on the token.
+      # If the token is deploy-only, create the project once manually in the
+      # Cloudflare dashboard (name: mcpproxy-bench, production branch: main) and
+      # this step will harmlessly fail every run thereafter.
+      - name: Create Cloudflare Pages project (if missing)
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create mcpproxy-bench --production-branch=main
+
       # Publish to Cloudflare Pages (mcpproxy-bench project).
-      # On first deploy, wrangler auto-creates the project; subsequent deploys
-      # update it. The Pages URL will be mcpproxy-bench.pages.dev (or a custom
-      # domain such as bench.mcpproxy.app once configured in Cloudflare).
+      # --commit-dirty=true: bench results are written into the working tree during
+      # the run and never committed to git, so wrangler would otherwise reject the
+      # dirty-tree check. The Pages URL will be mcpproxy-bench.pages.dev (or a
+      # custom domain such as bench.mcpproxy.app once configured in Cloudflare).
       - name: Deploy benchmark dashboard to Cloudflare Pages
         uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy bench/results --project-name=mcpproxy-bench
+          command: pages deploy bench/results --project-name=mcpproxy-bench --commit-dirty=true
