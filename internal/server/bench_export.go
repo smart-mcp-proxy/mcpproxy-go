@@ -1,6 +1,8 @@
 package server
 
 import (
+	"encoding/json"
+
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
@@ -8,7 +10,8 @@ import (
 )
 
 // BenchProxyToolDef is a static built-in proxy/management tool definition
-// (name + description) exposed for the in-repo benchmark harness (bench/).
+// (name + description + JSON input schema) exposed for the in-repo benchmark
+// harness (bench/).
 //
 // The benchmark scores the per-mode context cost an agent pays for mcpproxy's
 // own tools. That cost MUST reflect every tool the live routing-mode servers
@@ -16,9 +19,16 @@ import (
 // quarantine_security, search_servers, list_registries) that both modes append
 // via buildManagementTools — or the benchmark overstates the token savings
 // (MCP-3161 / Codex finding on PR #747).
+//
+// Schema is the exact JSON input schema the proxy advertises via tools/list,
+// captured from the live builder. The benchmark's exact-token headline counts
+// schemas on BOTH the baseline upstream tools and these proxy tools; omitting
+// the proxy schemas while counting the baseline's would overstate savings (the
+// MCP-3161 error), so Schema makes the headline honest without drift.
 type BenchProxyToolDef struct {
 	Name        string
 	Description string
+	Schema      json.RawMessage
 }
 
 // ProxyModeToolDefs returns the static built-in proxy + management tool
@@ -48,10 +58,17 @@ func ProxyModeToolDefs(routingMode string) []BenchProxyToolDef {
 
 	defs := make([]BenchProxyToolDef, 0, len(serverTools))
 	for _, st := range serverTools {
-		defs = append(defs, BenchProxyToolDef{
+		def := BenchProxyToolDef{
 			Name:        st.Tool.Name,
 			Description: st.Tool.Description,
-		})
+		}
+		// InputSchema marshals to the exact {"type":"object","properties":...}
+		// an agent receives via tools/list. A marshal failure leaves Schema nil
+		// (the benchmark then withholds the headline rather than undercount).
+		if raw, err := json.Marshal(st.Tool.InputSchema); err == nil {
+			def.Schema = raw
+		}
+		defs = append(defs, def)
 	}
 	return defs
 }

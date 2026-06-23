@@ -256,3 +256,47 @@ func TestConvertGenericServersToTyped_NoOAuth(t *testing.T) {
 	require.Len(t, servers, 1)
 	assert.Nil(t, servers[0].OAuth, "Servers without OAuth config should have nil OAuth field")
 }
+
+// TestConvertGenericToolsToTyped_PreservesInputSchema asserts the management
+// tool-list conversion keeps the upstream input schema. Every producer of the
+// generic tool map emits the schema under the "inputSchema" key (e.g.
+// internal/runtime/runtime.go:2141 GetServerTools, internal/server/server.go:2367),
+// so a converter that only reads "schema" silently drops every schema on the
+// /api/v1/tools response. Regression guard for MCP-3132/MCP-3167: without real
+// schemas the live benchmark baseline is no longer a full-schema token count.
+func TestConvertGenericToolsToTyped_PreservesInputSchema(t *testing.T) {
+	inputSchema := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{"type": "string"},
+		},
+	}
+	generic := []map[string]interface{}{
+		{
+			"name":        "read_file",
+			"server_name": "fs",
+			"description": "Read a file",
+			"inputSchema": inputSchema, // key the runtime/server map builders actually emit
+		},
+	}
+
+	typed := ConvertGenericToolsToTyped(generic)
+
+	require.Len(t, typed, 1)
+	assert.Equal(t, inputSchema, typed[0].Schema, "input schema must survive conversion to the /api/v1/tools response")
+}
+
+// TestConvertGenericToolsToTyped_SchemaLegacyFallback keeps the historical
+// "schema" key working so any in-process caller that still emits it is not
+// regressed by the inputSchema fix.
+func TestConvertGenericToolsToTyped_SchemaLegacyFallback(t *testing.T) {
+	schema := map[string]interface{}{"type": "object"}
+	generic := []map[string]interface{}{
+		{"name": "t", "server_name": "s", "description": "d", "schema": schema},
+	}
+
+	typed := ConvertGenericToolsToTyped(generic)
+
+	require.Len(t, typed, 1)
+	assert.Equal(t, schema, typed[0].Schema, "legacy schema key must still be honored")
+}
