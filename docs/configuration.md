@@ -942,6 +942,15 @@ intentionally run a trusted registry mirror on an internal/private address:
 { "allow_private_registry_fetch": true }
 ```
 
+> ⚠️ **The opt-out is blanket (all-or-nothing).** Setting it `true` lifts the
+> guard for **every** non-routable range at once — loopback, RFC1918/CGNAT
+> private, link-local **and** the `169.254.169.254` cloud-metadata endpoint.
+> There is no way to allow only loopback: enabling it for a localhost dev
+> registry also re-opens the cloud-metadata SSRF vector (e.g.
+> `registry add-source https://169.254.169.254/...` will then succeed). Enable
+> it only for trusted local/dev use, ideally on hosts with no cloud-metadata
+> exposure. The flag takes effect only on daemon (re)start / config reload.
+
 Default `false` (secure). See [Registries Documentation](registries.md#adding-your-own-registry-source).
 
 **Default Registries** (shipped built-in, no configuration required):

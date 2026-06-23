@@ -94,6 +94,15 @@ into a request-forgery vector against internal services:
   rebinding. The official protocol's cursor-follow pagination is also pinned to
   the configured host so a hostile `nextCursor` cannot redirect the request.
 
+The top-level `allow_private_registry_fetch` flag (default `false`) is a **blanket
+opt-out**: setting it `true` disables this guard for **every** non-routable range
+at once — loopback, RFC1918/CGNAT private, link-local **and** the
+`169.254.169.254` cloud-metadata endpoint. It cannot be scoped to loopback only,
+so enabling it for a localhost dev registry also re-opens the cloud-metadata SSRF
+vector; enable it only for trusted local/dev use, ideally on hosts with no
+cloud-metadata exposure. The change takes effect on daemon (re)start / config
+reload. See [Configuration](configuration.md#registries).
+
 Equivalent surfaces:
 
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
