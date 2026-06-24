@@ -430,6 +430,11 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 		}
 	}
 
+	// Profiles v2 (Spec 057, T1): reconcile per-profile indexes against the
+	// current config — build new profiles, rebuild those whose membership changed
+	// and drop removed ones. Unchanged profiles are left untouched.
+	r.reconcileProfileIndexes()
+
 	r.logger.Info("Successfully indexed tools", zap.Int("count", len(tools)))
 	return nil
 }
@@ -552,7 +557,12 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 			zap.Error(err))
 		// Filter out blocked tools before full batch index
 		allowedTools := filterBlockedTools(newTools, approvalResult.BlockedTools)
-		return r.indexManager.BatchIndexTools(allowedTools)
+		if err := r.indexManager.BatchIndexTools(allowedTools); err != nil {
+			return err
+		}
+		// The shared index changed for this server; refresh dependent profiles.
+		r.reindexAffectedProfiles(serverName)
+		return nil
 	}
 
 	// Build maps for efficient lookup
@@ -697,6 +707,15 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
 			return fmt.Errorf("failed to re-index modified tools: %w", err)
 		}
+	}
+
+	// If the shared index changed for this server, refresh the per-profile indexes
+	// that include it (Profiles v2, Spec 057). Profiles without this server are
+	// untouched. Skipped when nothing changed to avoid churn on idle sweeps.
+	changed := len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 ||
+		len(approvalResult.BlockedTools) > 0
+	if changed {
+		r.reindexAffectedProfiles(serverName)
 	}
 
 	return nil
@@ -1119,6 +1138,8 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 			} else {
 				r.logger.Info("Removed disabled server tools from search index",
 					zap.String("server", serverName))
+				// Refresh per-profile indexes that include this now-disabled server.
+				r.reindexAffectedProfiles(serverName)
 			}
 		}
 
@@ -1157,6 +1178,8 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 		} else {
 			r.logger.Info("Removed quarantined server tools from index",
 				zap.String("server", serverName))
+			// Refresh per-profile indexes that include this now-quarantined server.
+			r.reindexAffectedProfiles(serverName)
 		}
 	}
 

@@ -2,6 +2,7 @@ package index
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -32,14 +33,24 @@ type ToolDocument struct {
 	SearchableText   string `json:"searchable_text"` // Combined searchable content
 }
 
-// NewBleveIndex creates a new Bleve index
+// NewBleveIndex creates (or opens) the shared default Bleve index at
+// <dataDir>/index.bleve.
 func NewBleveIndex(dataDir string, logger *zap.Logger) (*BleveIndex, error) {
-	indexPath := filepath.Join(dataDir, "index.bleve")
+	return newBleveIndexAt(filepath.Join(dataDir, "index.bleve"), logger)
+}
 
+// newBleveIndexAt opens an existing Bleve index at indexPath, or creates one if
+// it does not yet exist. The parent directory is created as needed so callers
+// may nest a per-profile index under the shared index dir
+// (<dataDir>/index.bleve/<slug>/) without pre-creating it.
+func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) {
 	// Try to open existing index
 	index, err := bleve.Open(indexPath)
 	if err != nil {
 		// If index doesn't exist, create a new one
+		if mkErr := os.MkdirAll(filepath.Dir(indexPath), 0o755); mkErr != nil {
+			return nil, fmt.Errorf("failed to create index parent dir: %w", mkErr)
+		}
 		logger.Info("Creating new Bleve index", zap.String("path", indexPath))
 		index, err = createBleveIndex(indexPath)
 		if err != nil {
@@ -288,6 +299,28 @@ func (b *BleveIndex) GetDocumentCount() (uint64, error) {
 	return b.index.DocCount()
 }
 
+// DeleteAll removes every document from the index, leaving an empty index in
+// place. Used to rebuild a per-profile index from scratch without recreating
+// its on-disk directory.
+func (b *BleveIndex) DeleteAll() error {
+	query := bleve.NewMatchAllQuery()
+	searchReq := bleve.NewSearchRequest(query)
+	searchReq.Size = 100000 // generous upper bound on indexed tools
+	searchResult, err := b.index.Search(searchReq)
+	if err != nil {
+		return fmt.Errorf("failed to enumerate documents for delete-all: %w", err)
+	}
+
+	batch := b.index.NewBatch()
+	for _, hit := range searchResult.Hits {
+		batch.Delete(hit.ID)
+	}
+	if batch.Size() == 0 {
+		return nil
+	}
+	return b.index.Batch(batch)
+}
+
 // Batch operations for efficiency
 
 // BatchIndex indexes multiple tools in a single batch
@@ -309,14 +342,15 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 			toolMeta.ParamsJSON)
 
 		doc := &ToolDocument{
-			ToolName:       toolName,
-			FullToolName:   toolMeta.Name,
-			ServerName:     toolMeta.ServerName,
-			Description:    toolMeta.Description,
-			ParamsJSON:     toolMeta.ParamsJSON,
-			Hash:           toolMeta.Hash,
-			Tags:           "",
-			SearchableText: searchableText,
+			ToolName:         toolName,
+			FullToolName:     toolMeta.Name,
+			ServerName:       toolMeta.ServerName,
+			Description:      toolMeta.Description,
+			ParamsJSON:       toolMeta.ParamsJSON,
+			OutputSchemaJSON: toolMeta.OutputSchemaJSON,
+			Hash:             toolMeta.Hash,
+			Tags:             "",
+			SearchableText:   searchableText,
 		}
 
 		docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
@@ -351,7 +385,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	// Create search request with high limit to get all tools
 	searchReq := bleve.NewSearchRequest(query)
 	searchReq.Size = 10000 // Maximum tools per server
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
 
 	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
 
@@ -364,11 +398,12 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	var tools []*config.ToolMetadata
 	for _, hit := range searchResult.Hits {
 		toolMeta := &config.ToolMetadata{
-			Name:        getStringField(hit.Fields, "full_tool_name"),
-			ServerName:  getStringField(hit.Fields, "server_name"),
-			Description: getStringField(hit.Fields, "description"),
-			ParamsJSON:  getStringField(hit.Fields, "params_json"),
-			Hash:        getStringField(hit.Fields, "hash"),
+			Name:             getStringField(hit.Fields, "full_tool_name"),
+			ServerName:       getStringField(hit.Fields, "server_name"),
+			Description:      getStringField(hit.Fields, "description"),
+			ParamsJSON:       getStringField(hit.Fields, "params_json"),
+			OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
+			Hash:             getStringField(hit.Fields, "hash"),
 		}
 		tools = append(tools, toolMeta)
 	}

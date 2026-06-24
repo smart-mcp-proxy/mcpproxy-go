@@ -18,6 +18,15 @@ type ProfileConfig struct {
 // alphanumeric start, then up to 62 more of [a-z0-9_-] — max 63 chars total.
 var profileSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 
+// IsValidProfileSlug reports whether name is a valid, filesystem-safe profile
+// slug (FR-007): a lowercase-alphanumeric start followed by up to 62 more of
+// [a-z0-9_-] (1-63 chars total). Callers that map a slug onto a directory path
+// (e.g. per-profile Bleve indexes) use this as a defense-in-depth guard against
+// path traversal, in addition to ValidateProfiles' load-time enforcement.
+func IsValidProfileSlug(name string) bool {
+	return profileSlugPattern.MatchString(name)
+}
+
 // reservedProfileSlugs are URL path segments that collide with existing /mcp
 // routes (/mcp/code, /mcp/call) or the /mcp/p prefix itself, plus "all"
 // reserved for a future explicit all-servers profile (FR-007).
