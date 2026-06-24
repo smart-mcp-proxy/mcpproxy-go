@@ -176,6 +176,38 @@ Server scoping is enforced at two levels:
 1. **Tool discovery** (`retrieve_tools`) — only returns tools from allowed servers
 2. **Tool execution** (`call_tool_*`) — blocks calls to out-of-scope servers
 
+## Profile Pinning
+
+A [profile](../../docs/architecture.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
+
+```bash
+# This token can ONLY ever see/use the "research" profile
+mcpproxy token create \
+  --name research-agent \
+  --servers "*" \
+  --permissions read \
+  --profile-pin research
+```
+
+Server-side enforcement (no client cooperation required):
+
+- **`set_profile("other")` is rejected** — a pinned token cannot switch its session to a different profile (switching to its own pinned profile, or clearing, is allowed).
+- **`/mcp/p/<other>` returns `403`** — connecting to any profile URL other than the pinned one is forbidden; the pinned profile's own URL works.
+- **The pin is the highest-precedence resolver source**, above an explicit `/mcp/p/<slug>` URL scope and above a session `set_profile` selection.
+
+Resolution precedence (highest wins):
+
+```
+1. agent-token profile_pin   (server-enforced; this section)
+2. /mcp/p/<slug> URL scope    (per-request override)
+3. set_profile session state  (base /mcp endpoint default for the session)
+4. none                        (no profile filtering — all allowed servers)
+```
+
+**Validation & config changes**: the pinned slug must name a configured profile at creation time (creation is rejected otherwise). If the profile is later removed from the configuration, requests are **warn-skipped** rather than hard-failed — the pin still blocks switching away, so the token can never silently widen its scope, but profile filtering falls through to the next precedence tier. Pinning composes with server scoping and permission tiers: a request must satisfy **all** of them.
+
+The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile Pin field), and is preserved across `token regenerate`.
+
 ## Managing Tokens
 
 ### List All Tokens
@@ -304,3 +336,4 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--servers` | Yes | — | Comma-separated server names or `"*"` |
 | `--permissions` | Yes | — | Comma-separated: `read`, `write`, `destructive` |
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
+| `--profile-pin` | No | — | Pin the token to a single profile (see [Profile Pinning](#profile-pinning)) |

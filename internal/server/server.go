@@ -275,6 +275,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				TokenPrefix:    agentToken.TokenPrefix,
 				AllowedServers: agentToken.AllowedServers,
 				Permissions:    agentToken.Permissions,
+				ProfilePin:     agentToken.ProfilePin,
 			}
 			ctx := auth.WithAuthContext(r.Context(), authCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -1678,6 +1679,19 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 		slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 		slug = strings.Trim(slug, "/")
+
+		// Profiles v2 T3: a profile-pinned agent token may only operate within its
+		// pinned profile. A request to any other /mcp/p/<slug> is forbidden (403),
+		// regardless of whether that slug is a real profile. Auth has already run
+		// (mcpAuthMiddleware wraps this handler), so the pin is on the context.
+		if pin := profilePinFromContext(r.Context()); pin != "" && pin != slug {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": fmt.Sprintf("agent token is pinned to profile '%s' and cannot access profile '%s'", pin, slug),
+			})
+			return
+		}
 
 		// Look up profile by slug (lock-free snapshot).
 		var found *config.ProfileConfig

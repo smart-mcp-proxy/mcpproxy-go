@@ -115,14 +115,23 @@ func (m *mockTokenStore) RegenerateAgentToken(name string, _ string, _ []byte) (
 
 type mockTokenController struct {
 	baseController
-	apiKey  string
-	servers []string
+	apiKey   string
+	servers  []string
+	profiles []string
 }
 
 func (m *mockTokenController) GetCurrentConfig() interface{} {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
+}
+
+func (m *mockTokenController) GetConfig() (*config.Config, error) {
+	cfg := &config.Config{APIKey: m.apiKey}
+	for _, name := range m.profiles {
+		cfg.Profiles = append(cfg.Profiles, config.ProfileConfig{Name: name})
+	}
+	return cfg, nil
 }
 
 func (m *mockTokenController) GetAllServers() ([]map[string]interface{}, error) {
@@ -150,6 +159,21 @@ func newTestTokenServer(t *testing.T, store *mockTokenStore, servers []string) *
 	// Use a temp dir for HMAC key
 	dataDir := t.TempDir()
 	srv.SetTokenStore(store, dataDir)
+	return srv
+}
+
+// newTestTokenServerWithProfiles is like newTestTokenServer but also configures
+// the controller's known profiles (for profile_pin validation tests).
+func newTestTokenServerWithProfiles(t *testing.T, store *mockTokenStore, servers, profiles []string) *Server {
+	t.Helper()
+	logger := zap.NewNop().Sugar()
+	ctrl := &mockTokenController{
+		apiKey:   "test-api-key",
+		servers:  servers,
+		profiles: profiles,
+	}
+	srv := NewServer(ctrl, logger, nil)
+	srv.SetTokenStore(store, t.TempDir())
 	return srv
 }
 
@@ -218,6 +242,55 @@ func TestCreateToken_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, stored)
 	assert.Equal(t, "my-agent", stored.Name)
+}
+
+func TestCreateToken_ProfilePin(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServerWithProfiles(t, store, []string{"server1"}, []string{"research", "deploy"})
+
+	body := createTokenRequest{
+		Name:           "pinned-agent",
+		AllowedServers: []string{"server1"},
+		Permissions:    []string{"read"},
+		ProfilePin:     "research",
+	}
+
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens", body)
+	require.Equal(t, http.StatusCreated, w.Code, "expected 201; body=%s", w.Body.String())
+
+	var resp createTokenResponse
+	decodeSuccess(t, w, &resp)
+	assert.Equal(t, "research", resp.ProfilePin, "profile_pin must be echoed on create")
+
+	// Stored record carries the pin.
+	stored, err := store.GetAgentTokenByName("pinned-agent")
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	assert.Equal(t, "research", stored.ProfilePin)
+
+	// GET surfaces the pin.
+	g := doRequest(t, srv, http.MethodGet, "/api/v1/tokens/pinned-agent", nil)
+	require.Equal(t, http.StatusOK, g.Code)
+	var info tokenInfoResponse
+	decodeSuccess(t, g, &info)
+	assert.Equal(t, "research", info.ProfilePin, "profile_pin must be surfaced on read")
+}
+
+func TestCreateToken_ProfilePinUnknownRejected(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServerWithProfiles(t, store, []string{"server1"}, []string{"research"})
+
+	body := createTokenRequest{
+		Name:        "bad-pin",
+		Permissions: []string{"read"},
+		ProfilePin:  "ghost",
+	}
+
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens", body)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "unknown profile_pin must be rejected at creation")
+
+	_, err := store.GetAgentTokenByName("bad-pin")
+	require.NoError(t, err)
 }
 
 func TestCreateToken_DefaultPermissions(t *testing.T) {
