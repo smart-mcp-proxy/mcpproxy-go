@@ -58,6 +58,10 @@ func (d Duration) Duration() time.Duration {
 const (
 	defaultHealthCheckInterval   = 30 * time.Second
 	defaultToolDiscoveryInterval = 5 * time.Minute
+	// defaultInitTimeout is the deadline applied to a stdio/HTTP upstream's MCP
+	// `initialize` handshake when no per-server or global override is set
+	// (MCP-3322 / GH #760). It preserves the historical ~30s behaviour.
+	defaultInitTimeout = 30 * time.Second
 )
 
 // resolveInterval applies the per-server → global → default precedence for an
@@ -97,6 +101,23 @@ func (c *Config) ResolveToolDiscoveryInterval(sc *ServerConfig) time.Duration {
 	return resolveInterval(server, c.ToolDiscoveryInterval, defaultToolDiscoveryInterval)
 }
 
+// ResolveInitTimeout resolves the effective MCP `initialize` handshake deadline
+// for a server: per-server override → global → 30s default (MCP-3322 / GH #760).
+// Unlike the discovery intervals, a resolved value <= 0 maps to the default
+// rather than "disabled" — a zero/negative connect deadline would let a stuck
+// upstream hang the connect path forever, so we always keep a real ceiling.
+func (c *Config) ResolveInitTimeout(sc *ServerConfig) time.Duration {
+	var server *Duration
+	if sc != nil {
+		server = sc.InitTimeout
+	}
+	resolved := resolveInterval(server, c.InitTimeout, defaultInitTimeout)
+	if resolved <= 0 {
+		return defaultInitTimeout
+	}
+	return resolved
+}
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen       string `json:"listen" mapstructure:"listen"`
@@ -126,6 +147,15 @@ type Config struct {
 	// in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health-check-interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool-discovery-interval" swaggertype:"string"`
+
+	// InitTimeout is the global default deadline for an upstream's MCP
+	// `initialize` handshake (MCP-3322 / GH #760). *Duration tri-state: nil =
+	// inherit the built-in 30s default; a positive value = that deadline. A
+	// per-server InitTimeout overrides this. Resolved by ResolveInitTimeout;
+	// validated to {0} ∪ [1s, 30m] in Validate(). Servers doing legitimate
+	// first-run warmup (cache/index build) before answering `initialize` can
+	// raise this so they are not killed mid-startup.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -366,6 +396,14 @@ type ServerConfig struct {
 	// cadence in this iteration (see spec 074 plan §C).
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health_check_interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool_discovery_interval" swaggertype:"string"`
+
+	// InitTimeout overrides the global init_timeout for this server's MCP
+	// `initialize` handshake deadline (MCP-3322 / GH #760). *Duration tri-state:
+	// nil = inherit the global value (or 30s default), positive = that deadline.
+	// Resolved by Config.ResolveInitTimeout; validated to {0} ∪ [1s, 30m]. Raise
+	// this for upstreams that do legitimate first-run warmup (e.g. caching many
+	// channels/users) before responding to `initialize`.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init_timeout" swaggertype:"string"`
 
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
@@ -1455,6 +1493,9 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	}
 
 	// Validate global discovery/health-check intervals (spec 074, FR-008).
+	if e := validateIntervalBound("init_timeout", c.InitTimeout, time.Second, 30*time.Minute); e != nil {
+		errors = append(errors, *e)
+	}
 	if e := validateIntervalBound("health_check_interval", c.HealthCheckInterval, 5*time.Second, time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
@@ -1576,6 +1617,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, *e)
 		}
 		if e := validateIntervalBound(fieldPrefix+".tool_discovery_interval", server.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+			errors = append(errors, *e)
+		}
+		// MCP-3322: per-server MCP `initialize` handshake deadline override.
+		if e := validateIntervalBound(fieldPrefix+".init_timeout", server.InitTimeout, time.Second, 30*time.Minute); e != nil {
 			errors = append(errors, *e)
 		}
 	}

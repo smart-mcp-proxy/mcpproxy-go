@@ -1928,6 +1928,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["auto_approve_tool_changes"] = *serverStatus.Config.AutoApproveToolChanges
 		}
 
+		// MCP-3322: surface the per-server init_timeout override so the REST GET
+		// payload (and SSE servers.changed embed) can read it back. Emitted as a
+		// duration string (e.g. "2m0s"); omitted when unset so the projection
+		// stays nil for servers that inherit the global default.
+		if serverStatus.Config != nil && serverStatus.Config.InitTimeout != nil {
+			serverMap["init_timeout"] = serverStatus.Config.InitTimeout.Duration().String()
+		}
+
 		// MCP-901: carry registry provenance through to the REST/SSE projection
 		// so the approval/quarantine view can show a server's origin. Empty for
 		// manually-configured servers.

@@ -93,6 +93,16 @@ components:
             so an unset key behaves exactly as before this feature (SC-005). Validated
             in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
           type: string
+        init_timeout:
+          description: |-
+            InitTimeout is the global default deadline for an upstream's MCP
+            `initialize` handshake (MCP-3322 / GH #760). *Duration tri-state: nil =
+            inherit the built-in 30s default; a positive value = that deadline. A
+            per-server InitTimeout overrides this. Resolved by ResolveInitTimeout;
+            validated to {0} ∪ [1s, 30m] in Validate(). Servers doing legitimate
+            first-run warmup (cache/index build) before answering `initialize` can
+            raise this so they are not killed mid-startup.
+          type: string
         instructions:
           description: |-
             Instructions text returned in the MCP initialize response to guide AI agents.
@@ -720,6 +730,15 @@ components:
             ToolDiscoveryInterval is accepted/validated and round-trips for
             forward-compat, but the periodic index sweep is governed by the global
             cadence in this iteration (see spec 074 plan §C).
+          type: string
+        init_timeout:
+          description: |-
+            InitTimeout overrides the global init_timeout for this server's MCP
+            `initialize` handshake deadline (MCP-3322 / GH #760). *Duration tri-state:
+            nil = inherit the global value (or 30s default), positive = that deadline.
+            Resolved by Config.ResolveInitTimeout; validated to {0} ∪ [1s, 30m]. Raise
+            this for upstreams that do legitimate first-run warmup (e.g. caching many
+            channels/users) before responding to `initialize`.
           type: string
         isolation:
           $ref: '#/components/schemas/config.IsolationConfig'
@@ -1904,6 +1923,14 @@ components:
           $ref: '#/components/schemas/contracts.HealthStatus'
         id:
           type: string
+        init_timeout:
+          description: |-
+            InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
+            the per-server MCP `initialize` handshake deadline override. Serialized as
+            a duration string (e.g. "120s"); nil/omitted means "inherit the global
+            default". Surfaced on the GET path so clients can read back a configured
+            override; PATCH/POST accept it via AddServerRequest.
+          type: string
         isolation:
           $ref: '#/components/schemas/contracts.IsolationConfig'
         isolation_defaults:
@@ -2318,6 +2345,13 @@ components:
           additionalProperties:
             type: string
           type: object
+        init_timeout:
+          description: |-
+            InitTimeout is the per-server MCP `initialize` handshake deadline override
+            (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
+            pointer means "leave unchanged" on PATCH; a present value is applied.
+            Mirrors config.ServerConfig.InitTimeout's *Duration tri-state.
+          type: string
         isolation:
           $ref: '#/components/schemas/httpapi.IsolationRequest'
         name:

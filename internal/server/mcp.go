@@ -753,6 +753,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
 			),
+			mcp.WithString("init_timeout",
+				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -3817,6 +3820,17 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// MCP-3322: optional per-server init_timeout (handshake deadline) override.
+	var initTimeout *config.Duration
+	if its := request.GetString("init_timeout", ""); its != "" {
+		d, perr := time.ParseDuration(its)
+		if perr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid init_timeout %q: %v (expected a duration like '120s' or '3m')", its, perr)), nil
+		}
+		v := config.Duration(d)
+		initTimeout = &v
+	}
+
 	serverConfig := &config.ServerConfig{
 		Name:        name,
 		URL:         url,
@@ -3831,6 +3845,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Created:     time.Now(),
 		Isolation:   isolation,
 		OAuth:       oauth,
+		InitTimeout: initTimeout,
 	}
 
 	// Save to storage
@@ -4321,6 +4336,17 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 			patch.Isolation = &isolation
 		}
+	}
+
+	// MCP-3322: per-server init_timeout (handshake deadline) override. Parse the
+	// duration string and set the pointer; MergeServerConfig applies it.
+	if its := request.GetString("init_timeout", ""); its != "" {
+		d, perr := time.ParseDuration(its)
+		if perr != nil {
+			return nil, opts, fmt.Errorf("invalid init_timeout %q: %v (expected a duration like '120s' or '3m')", its, perr)
+		}
+		v := config.Duration(d)
+		patch.InitTimeout = &v
 	}
 
 	// Handle oauth JSON string - deep merge for nested config
