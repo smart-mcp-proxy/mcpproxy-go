@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -505,4 +506,98 @@ func createTestDeFiLlamaTools() []*config.ToolMetadata {
 	}
 
 	return tools
+}
+
+// TestBleveIndex_GetToolsByServer_BeyondPageCap verifies that GetToolsByServer
+// returns every tool of a server even when the server exposes more tools than a
+// single search page can hold. Regression for MCP-3319: the prior single-search
+// implementation hard-capped at 10000 hits, silently dropping the overflow.
+func TestBleveIndex_GetToolsByServer_BeyondPageCap(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	// Shrink the page size so the test can exercise the pagination loop with a
+	// small, fast corpus instead of indexing >10k docs.
+	bleveIndex.searchPageSize = 3
+
+	// Index 7 tools for one server (spans 3 pages: 3 + 3 + 1) plus an unrelated
+	// server to confirm the term filter is preserved across pages.
+	const total = 7
+	tools := make([]*config.ToolMetadata, 0, total+1)
+	for i := 0; i < total; i++ {
+		tools = append(tools, &config.ToolMetadata{
+			Name:        fmt.Sprintf("paged:tool_%02d", i),
+			ServerName:  "paged",
+			Description: fmt.Sprintf("Paged tool %d", i),
+			Hash:        fmt.Sprintf("hash_%02d", i),
+		})
+	}
+	tools = append(tools, &config.ToolMetadata{
+		Name:        "other:tool_x",
+		ServerName:  "other",
+		Description: "Other tool",
+		Hash:        "hash_other",
+	})
+
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	got, err := bleveIndex.GetToolsByServer("paged")
+	require.NoError(t, err)
+	assert.Len(t, got, total, "all tools across every page must be returned")
+
+	names := make(map[string]bool, len(got))
+	for _, tm := range got {
+		assert.Equal(t, "paged", tm.ServerName)
+		names[tm.Name] = true
+	}
+	for i := 0; i < total; i++ {
+		assert.True(t, names[fmt.Sprintf("paged:tool_%02d", i)],
+			"tool_%02d missing from paginated result", i)
+	}
+}
+
+// TestBleveIndex_DeleteAll_BeyondPageCap verifies that DeleteAll clears every
+// document even when the index holds more docs than a single search page.
+// Regression for MCP-3319: the prior single-search implementation deleted only
+// the first 100000 docs, leaving stale docs beyond the cap.
+func TestBleveIndex_DeleteAll_BeyondPageCap(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	bleveIndex.searchPageSize = 3
+
+	// Index 10 docs (spans multiple pages of size 3).
+	const total = 10
+	tools := make([]*config.ToolMetadata, 0, total)
+	for i := 0; i < total; i++ {
+		tools = append(tools, &config.ToolMetadata{
+			Name:        fmt.Sprintf("srv:tool_%02d", i),
+			ServerName:  "srv",
+			Description: fmt.Sprintf("Tool %d", i),
+			Hash:        fmt.Sprintf("h_%02d", i),
+		})
+	}
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	count, err := bleveIndex.GetDocumentCount()
+	require.NoError(t, err)
+	require.Equal(t, uint64(total), count)
+
+	require.NoError(t, bleveIndex.DeleteAll())
+
+	count, err = bleveIndex.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), count, "DeleteAll must remove every document across all pages")
 }
