@@ -46,36 +46,42 @@ Model → Agent: code_execution({code: "...", input: {...}})
 Implement conditional branching, loops, and error handling that would require multiple model invocations.
 
 ```javascript
-// Conditional logic
-const user = call_tool('github', 'get_user', {username: input.username});
-if (!user.ok) {
-  return {error: 'User not found'};
-}
-
-// Loop with accumulation
-const results = [];
-for (const repoName of input.repos) {
-  const repo = call_tool('github', 'get_repo', {name: repoName});
-  if (repo.ok) {
-    results.push(repo.result);
+// Wrap the body in an IIFE so early-exit `return`s are legal — a bare
+// top-level `return` is a SyntaxError. The IIFE's value is the result.
+(() => {
+  // Conditional logic
+  const user = call_tool('github', 'get_user', {username: input.username});
+  if (!user.ok) {
+    return {error: 'User not found'};
   }
-}
-return {repos: results, count: results.length};
+
+  // Loop with accumulation
+  const results = [];
+  for (const repoName of input.repos) {
+    const repo = call_tool('github', 'get_repo', {name: repoName});
+    if (repo.ok) {
+      results.push(repo.result);
+    }
+  }
+  return {repos: results, count: results.length};
+})();
 ```
 
 ### 3. Data Transformation
 Transform, filter, and aggregate data from multiple tool calls before returning results.
 
 ```javascript
-const repos = call_tool('github', 'list_repos', {user: input.username});
-if (!repos.ok) return repos;
+(() => {
+  const repos = call_tool('github', 'list_repos', {user: input.username});
+  if (!repos.ok) return repos;
 
-// Filter and transform
-const activeRepos = repos.result
-  .filter(r => !r.archived && r.pushed_at > input.since)
-  .map(r => ({name: r.name, stars: r.stargazers_count, language: r.language}));
+  // Filter and transform
+  const activeRepos = repos.result
+    .filter(r => !r.archived && r.pushed_at > input.since)
+    .map(r => ({name: r.name, stars: r.stargazers_count, language: r.language}));
 
-return {repos: activeRepos, total: activeRepos.length};
+  return {repos: activeRepos, total: activeRepos.length};
+})();
 ```
 
 ## How It Works
@@ -232,11 +238,12 @@ The `code_execution` tool will appear in the tools list when an LLM agent connec
 ```json
 {
   "name": "code_execution",
-  "description": "Execute JavaScript code that orchestrates multiple upstream MCP tools...",
+  "description": "Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools...",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "code": {"type": "string", "description": "JavaScript source code..."},
+      "code": {"type": "string", "description": "JavaScript or TypeScript source code..."},
+      "language": {"type": "string", "enum": ["javascript", "typescript"], "description": "Source language; defaults to javascript. TypeScript types are stripped before execution (GA, Spec 033 FR-001)."},
       "input": {"type": "object", "description": "Input data accessible as global input variable..."},
       "options": {"type": "object", "description": "Execution options..."}
     },
@@ -250,85 +257,95 @@ The `code_execution` tool will appear in the tools list when an LLM agent connec
 ### Pattern 1: Sequential Tool Calls
 
 ```javascript
-// Fetch user, then fetch their repos
-const userRes = call_tool('github', 'get_user', {username: input.username});
-if (!userRes.ok) {
-  return {error: userRes.error.message};
-}
+// Wrap the body in an IIFE so early-exit `return`s are legal — a bare
+// top-level `return` is a SyntaxError. The IIFE's value is the result.
+(() => {
+  // Fetch user, then fetch their repos
+  const userRes = call_tool('github', 'get_user', {username: input.username});
+  if (!userRes.ok) {
+    return {error: userRes.error.message};
+  }
 
-const reposRes = call_tool('github', 'list_repos', {user: input.username});
-if (!reposRes.ok) {
-  return {error: reposRes.error.message};
-}
+  const reposRes = call_tool('github', 'list_repos', {user: input.username});
+  if (!reposRes.ok) {
+    return {error: reposRes.error.message};
+  }
 
-return {
-  user: userRes.result,
-  repos: reposRes.result,
-  repo_count: reposRes.result.length
-};
+  return {
+    user: userRes.result,
+    repos: reposRes.result,
+    repo_count: reposRes.result.length
+  };
+})();
 ```
 
 ### Pattern 2: Conditional Logic
 
 ```javascript
-// Try primary server, fallback to secondary
-let result = call_tool('primary-db', 'query', {sql: input.query});
+(() => {
+  // Try primary server, fallback to secondary
+  let result = call_tool('primary-db', 'query', {sql: input.query});
 
-if (!result.ok) {
-  // Primary failed, try backup
-  result = call_tool('backup-db', 'query', {sql: input.query});
-}
+  if (!result.ok) {
+    // Primary failed, try backup
+    result = call_tool('backup-db', 'query', {sql: input.query});
+  }
 
-return result.ok ? result.result : {error: 'Both databases unavailable'};
+  return result.ok ? result.result : {error: 'Both databases unavailable'};
+})();
 ```
 
 ### Pattern 3: Loop with Aggregation
 
 ```javascript
-// Fetch details for multiple items
-const results = [];
-const errors = [];
+(() => {
+  // Fetch details for multiple items
+  const results = [];
+  const errors = [];
 
-for (const id of input.ids) {
-  const res = call_tool('api-server', 'get_item', {id});
+  for (const id of input.ids) {
+    const res = call_tool('api-server', 'get_item', {id});
 
-  if (res.ok) {
-    results.push(res.result);
-  } else {
-    errors.push({id, error: res.error});
+    if (res.ok) {
+      results.push(res.result);
+    } else {
+      errors.push({id, error: res.error});
+    }
   }
-}
 
-return {
-  success: results,
-  failed: errors,
-  success_count: results.length,
-  error_count: errors.length
-};
+  return {
+    success: results,
+    failed: errors,
+    success_count: results.length,
+    error_count: errors.length
+  };
+})();
 ```
 
 ### Pattern 4: Data Transformation
 
 ```javascript
-// Get repos and compute statistics
-const reposRes = call_tool('github', 'list_repos', {user: input.username});
-if (!reposRes.ok) return reposRes;
+(() => {
+  // Get repos and compute statistics
+  const reposRes = call_tool('github', 'list_repos', {user: input.username});
+  if (!reposRes.ok) return reposRes;
 
-const repos = reposRes.result;
-const totalStars = repos.reduce((sum, r) => sum + (r.stargazers_count ?? 0), 0);
-const languages = {};
+  const repos = reposRes.result;
+  const totalStars = repos.reduce((sum, r) => sum + (r.stargazers_count ?? 0), 0);
+  const languages = {};
 
-for (const repo of repos) {
-  const lang = repo.language ?? 'Unknown';
-  languages[lang] = (languages[lang] ?? 0) + 1;
-}
+  for (const repo of repos) {
+    const lang = repo.language ?? 'Unknown';
+    languages[lang] = (languages[lang] ?? 0) + 1;
+  }
 
-return {
-  total_repos: repos.length,
-  total_stars: totalStars,
-  avg_stars: Math.round(totalStars / repos.length),
-  languages
-};
+  return {
+    total_repos: repos.length,
+    total_stars: totalStars,
+    avg_stars: Math.round(totalStars / repos.length),
+    languages
+  };
+})();
 ```
 
 ## Error Handling
@@ -348,12 +365,14 @@ code_execution({code: "throw new Error('Something went wrong')"})
 ### Tool Call Errors
 
 ```javascript
-// Tool returns error - handled in JavaScript
-var res = call_tool('github', 'get_user', {username: 'nonexistent-user-12345'});
-if (!res.ok) {
-  return {error: 'User not found: ' + res.error.message};
-}
-return res.result;
+(() => {
+  // Tool returns error - handled in JavaScript
+  var res = call_tool('github', 'get_user', {username: 'nonexistent-user-12345'});
+  if (!res.ok) {
+    return {error: 'User not found: ' + res.error.message};
+  }
+  return res.result;
+})();
 ```
 
 ### Timeout Errors
@@ -440,16 +459,20 @@ mcpproxy code exec --language typescript \
 
 ### 2. Handle Errors Gracefully
 ```javascript
-// Bad: Assumes success
-var user = call_tool('github', 'get_user', {username: input.username});
-return user.result.name;  // Crashes if user.ok is false
+// Bad: Assumes success (and a bare top-level `return` is itself a SyntaxError)
+(() => {
+  var user = call_tool('github', 'get_user', {username: input.username});
+  return user.result.name;  // Crashes if user.ok is false
+})();
 
-// Good: Checks response
-var user = call_tool('github', 'get_user', {username: input.username});
-if (!user.ok) {
-  return {error: user.error.message};
-}
-return {name: user.result.name};
+// Good: Checks response, early-exit returns kept legal inside the IIFE
+(() => {
+  var user = call_tool('github', 'get_user', {username: input.username});
+  if (!user.ok) {
+    return {error: user.error.message};
+  }
+  return {name: user.result.name};
+})();
 ```
 
 ### 3. Set Appropriate Timeouts
