@@ -316,6 +316,10 @@ struct TrayMenu: View {
             openWebUI()
         }
 
+        Button("Install server…") {
+            openWebUI(path: "repositories")
+        }
+
         Button("Open Config File") {
             openConfigFile()
         }
@@ -481,10 +485,16 @@ struct TrayMenu: View {
     }
 
     private func openWebUI(path: String = "") {
-        let baseURLString = appState.webUIBaseURL
-        if let url = URL(string: "\(baseURLString)/ui/\(path)") {
+        if let url = TrayMenu.webUIURL(base: appState.webUIBaseURL, path: path) {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// Build the Web UI deep-link URL from a base and a path under `/ui/`.
+    /// Pure so it can be unit-tested without driving the SwiftUI view
+    /// (e.g. the "Install server…" → `repositories` marketplace deep-link).
+    static func webUIURL(base: String, path: String = "") -> URL? {
+        URL(string: "\(base)/ui/\(path)")
     }
 
     private func openConfigFile() {
