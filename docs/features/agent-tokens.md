@@ -178,7 +178,7 @@ Server scoping is enforced at two levels:
 
 ## Profile Pinning
 
-A [profile](../../docs/architecture.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
+A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.
 
 ```bash
 # This token can ONLY ever see/use the "research" profile
