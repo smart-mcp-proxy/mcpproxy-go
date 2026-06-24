@@ -14,10 +14,19 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
+// defaultSearchPageSize is the page size used when paginating full-coverage
+// scans (GetToolsByServer, DeleteAll). It is a generous upper bound on the
+// number of docs in a single page; pagination loops over as many pages as
+// needed, so total coverage is never bounded by this value (MCP-3319).
+const defaultSearchPageSize = 10000
+
 // BleveIndex wraps Bleve index operations
 type BleveIndex struct {
 	index  bleve.Index
 	logger *zap.Logger
+	// searchPageSize bounds a single search page during paginated full scans.
+	// Defaults to defaultSearchPageSize; overridable in tests.
+	searchPageSize int
 }
 
 // ToolDocument represents a tool document in the index
@@ -61,8 +70,9 @@ func newBleveIndexAt(indexPath string, logger *zap.Logger) (*BleveIndex, error) 
 	}
 
 	return &BleveIndex{
-		index:  index,
-		logger: logger,
+		index:          index,
+		logger:         logger,
+		searchPageSize: defaultSearchPageSize,
 	}, nil
 }
 
@@ -304,21 +314,29 @@ func (b *BleveIndex) GetDocumentCount() (uint64, error) {
 // its on-disk directory.
 func (b *BleveIndex) DeleteAll() error {
 	query := bleve.NewMatchAllQuery()
-	searchReq := bleve.NewSearchRequest(query)
-	searchReq.Size = 100000 // generous upper bound on indexed tools
-	searchResult, err := b.index.Search(searchReq)
-	if err != nil {
-		return fmt.Errorf("failed to enumerate documents for delete-all: %w", err)
-	}
+	// Delete in pages until the index is empty. Each iteration enumerates a
+	// page from offset 0 and deletes exactly those docs, so the next search
+	// surfaces the following page — no From offset bookkeeping, and coverage is
+	// not bounded by a single search page (MCP-3319).
+	for {
+		searchReq := bleve.NewSearchRequest(query)
+		searchReq.Size = b.searchPageSize
+		searchResult, err := b.index.Search(searchReq)
+		if err != nil {
+			return fmt.Errorf("failed to enumerate documents for delete-all: %w", err)
+		}
+		if len(searchResult.Hits) == 0 {
+			return nil
+		}
 
-	batch := b.index.NewBatch()
-	for _, hit := range searchResult.Hits {
-		batch.Delete(hit.ID)
+		batch := b.index.NewBatch()
+		for _, hit := range searchResult.Hits {
+			batch.Delete(hit.ID)
+		}
+		if err := b.index.Batch(batch); err != nil {
+			return fmt.Errorf("failed to delete documents for delete-all: %w", err)
+		}
 	}
-	if batch.Size() == 0 {
-		return nil
-	}
-	return b.index.Batch(batch)
 }
 
 // Batch operations for efficiency
@@ -382,30 +400,40 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	query := bleve.NewTermQuery(serverName)
 	query.SetField("server_name")
 
-	// Create search request with high limit to get all tools
-	searchReq := bleve.NewSearchRequest(query)
-	searchReq.Size = 10000 // Maximum tools per server
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
+	fields := []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
 
 	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
 
-	searchResult, err := b.index.Search(searchReq)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query tools by server: %w", err)
-	}
-
-	// Convert results to ToolMetadata
+	// Paginate so a server exposing more than one search page of tools is fully
+	// covered — a single capped search would silently drop the overflow
+	// (MCP-3319). A short final page (fewer hits than the page size) ends the loop.
 	var tools []*config.ToolMetadata
-	for _, hit := range searchResult.Hits {
-		toolMeta := &config.ToolMetadata{
-			Name:             getStringField(hit.Fields, "full_tool_name"),
-			ServerName:       getStringField(hit.Fields, "server_name"),
-			Description:      getStringField(hit.Fields, "description"),
-			ParamsJSON:       getStringField(hit.Fields, "params_json"),
-			OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
-			Hash:             getStringField(hit.Fields, "hash"),
+	for from := 0; ; from += b.searchPageSize {
+		searchReq := bleve.NewSearchRequest(query)
+		searchReq.From = from
+		searchReq.Size = b.searchPageSize
+		searchReq.Fields = fields
+
+		searchResult, err := b.index.Search(searchReq)
+		if err != nil {
+			return nil, fmt.Errorf("failed to query tools by server: %w", err)
 		}
-		tools = append(tools, toolMeta)
+
+		for _, hit := range searchResult.Hits {
+			toolMeta := &config.ToolMetadata{
+				Name:             getStringField(hit.Fields, "full_tool_name"),
+				ServerName:       getStringField(hit.Fields, "server_name"),
+				Description:      getStringField(hit.Fields, "description"),
+				ParamsJSON:       getStringField(hit.Fields, "params_json"),
+				OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
+				Hash:             getStringField(hit.Fields, "hash"),
+			}
+			tools = append(tools, toolMeta)
+		}
+
+		if len(searchResult.Hits) < b.searchPageSize {
+			break
+		}
 	}
 
 	b.logger.Debug("Found tools for server",
