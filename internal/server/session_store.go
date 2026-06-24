@@ -17,7 +17,13 @@ type SessionInfo struct {
 
 // SessionStore manages MCP session information
 type SessionStore struct {
-	sessions       map[string]*SessionInfo
+	sessions map[string]*SessionInfo
+	// activeProfiles holds the per-session active profile slug selected via the
+	// set_profile MCP tool (Profiles v2 T2). Kept orthogonal to sessions so a
+	// re-initialize (SetSession) never clobbers a live selection. Cleared on
+	// session close (RemoveSession) — covering both the OnUnregisterSession hook
+	// and the background inactivity cleanup, which both call RemoveSession.
+	activeProfiles map[string]string
 	mu             sync.RWMutex
 	logger         *zap.Logger
 	storageManager *storage.Manager
@@ -26,8 +32,9 @@ type SessionStore struct {
 // NewSessionStore creates a new session store
 func NewSessionStore(logger *zap.Logger) *SessionStore {
 	return &SessionStore{
-		sessions: make(map[string]*SessionInfo),
-		logger:   logger,
+		sessions:       make(map[string]*SessionInfo),
+		activeProfiles: make(map[string]string),
+		logger:         logger,
 	}
 }
 
@@ -94,6 +101,7 @@ func (s *SessionStore) RemoveSession(sessionID string) {
 	defer s.mu.Unlock()
 
 	delete(s.sessions, sessionID)
+	delete(s.activeProfiles, sessionID)
 
 	// Close session in storage if available
 	if s.storageManager != nil {
@@ -135,6 +143,32 @@ func (s *SessionStore) UpdateActivity(sessionID string) {
 	if s.storageManager != nil {
 		_ = s.storageManager.UpdateSessionActivity(sessionID)
 	}
+}
+
+// SetActiveProfile records the active profile slug for a session (Profiles v2
+// T2, set_profile). An empty slug clears the selection (back to all-servers).
+func (s *SessionStore) SetActiveProfile(sessionID, profileSlug string) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if profileSlug == "" {
+		delete(s.activeProfiles, sessionID)
+		return
+	}
+	s.activeProfiles[sessionID] = profileSlug
+}
+
+// GetActiveProfile returns the active profile slug for a session, or "" when the
+// session has no active profile selection.
+func (s *SessionStore) GetActiveProfile(sessionID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.activeProfiles[sessionID]
 }
 
 // Count returns the number of active sessions

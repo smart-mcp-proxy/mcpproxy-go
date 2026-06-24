@@ -329,6 +329,7 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
 	)
+	tools = append(tools, p.setProfileServerTool())
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeCodeExecution),
@@ -394,6 +395,10 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		Tool:    retrieveToolsTool,
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),
 	})
+
+	// set_profile — Profiles v2 (T2): also available in call-tool mode (/mcp/call,
+	// and /mcp/p/<slug> which is served by this same server instance).
+	tools = append(tools, p.setProfileServerTool())
 
 	// call_tool_read / call_tool_write / call_tool_destructive — all three
 	// built from the shared helper in mcp.go so schema stays in sync across
