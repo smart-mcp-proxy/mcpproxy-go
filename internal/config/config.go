@@ -452,7 +452,7 @@ type DockerIsolationConfig struct {
 // IsolationConfig represents per-server isolation settings
 type IsolationConfig struct {
 	Enabled     *bool          `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global; legacy, superseded by Mode)
-	Mode        *IsolationMode `json:"mode,omitempty" mapstructure:"mode"`                   // Per-server isolation mode override: "docker" | "sandbox" | "none" (nil = inherit global; MCP-34.2)
+	Mode        *IsolationMode `json:"mode,omitempty" mapstructure:"mode"`                   // Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2). Unset per-server inherits the global mode; unset globally falls back to the legacy "enabled" flag (true ⇒ docker, false ⇒ none)
 	Image       string         `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
 	NetworkMode string         `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
 	ExtraArgs   []string       `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server

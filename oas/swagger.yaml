@@ -281,8 +281,9 @@ components:
           description: Memory limit for containers
           type: string
         mode:
-          description: 'Per-server isolation mode override: "docker" | "sandbox" |
-            "none" (nil = inherit global; MCP-34.2)'
+          description: 'Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2).
+            Unset per-server inherits the global mode; unset globally falls back to
+            the legacy "enabled" flag (true ⇒ docker, false ⇒ none)'
           type: string
           x-enum-varnames:
           - IsolationModeDocker
@@ -413,8 +414,9 @@ components:
           type: string
       type: object
     config.IsolationMode:
-      description: 'Per-server isolation mode override: "docker" | "sandbox" | "none"
-        (nil = inherit global; MCP-34.2)'
+      description: 'Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2). Unset
+        per-server inherits the global mode; unset globally falls back to the legacy
+        "enabled" flag (true ⇒ docker, false ⇒ none)'
       type: string
       x-enum-varnames:
       - IsolationModeDocker
