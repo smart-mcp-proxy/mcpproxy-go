@@ -141,6 +141,41 @@ func TestManager_RebuildProfileFromShared_IsolatesOtherProfiles(t *testing.T) {
 	assert.Equal(t, uint64(3), betaCountAfter, "beta doc-count must be unchanged")
 }
 
+// TestManager_RebuildProfileFromShared_PreservesOutputSchema is a regression
+// guard (CodexReviewer on PR #756): the profile rebuild path must not drop
+// OutputSchemaJSON. The shared index is populated via BatchIndexTools (the real
+// indexing path), then a profile is rebuilt from it; the field must survive
+// both the read (GetToolsByServer) and the write (BatchIndex) and be returned by
+// the profile's search results — the exact path retrieve_tools uses.
+func TestManager_RebuildProfileFromShared_PreservesOutputSchema(t *testing.T) {
+	dataDir := t.TempDir()
+	m, err := NewManager(dataDir, zap.NewNop())
+	require.NoError(t, err)
+	defer m.Close()
+
+	const outputSchema = `{"type":"object","properties":{"result":{"type":"string"}}}`
+	tool := toolFor("s1", "schematool")
+	tool.OutputSchemaJSON = outputSchema
+
+	require.NoError(t, m.BatchIndexTools([]*config.ToolMetadata{tool}))
+	require.NoError(t, m.RebuildProfileFromShared("alpha", []string{"s1"}))
+
+	alpha, err := m.ForProfile("alpha")
+	require.NoError(t, err)
+
+	// Via GetToolsByServer on the profile index.
+	got, err := alpha.GetToolsByServer("s1")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, outputSchema, got[0].OutputSchemaJSON, "output schema must survive profile rebuild (GetToolsByServer)")
+
+	// Via search on the profile index (what retrieve_tools consumes).
+	results, err := alpha.SearchTools("schematool", 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	assert.Equal(t, outputSchema, results[0].Tool.OutputSchemaJSON, "output schema must survive profile rebuild (SearchTools)")
+}
+
 // TestManager_DropProfile_RemovesDir verifies that deleting a profile drops its
 // on-disk index directory and that a later ForProfile recreates it empty.
 func TestManager_DropProfile_RemovesDir(t *testing.T) {

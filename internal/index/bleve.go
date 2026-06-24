@@ -342,14 +342,15 @@ func (b *BleveIndex) BatchIndex(tools []*config.ToolMetadata) error {
 			toolMeta.ParamsJSON)
 
 		doc := &ToolDocument{
-			ToolName:       toolName,
-			FullToolName:   toolMeta.Name,
-			ServerName:     toolMeta.ServerName,
-			Description:    toolMeta.Description,
-			ParamsJSON:     toolMeta.ParamsJSON,
-			Hash:           toolMeta.Hash,
-			Tags:           "",
-			SearchableText: searchableText,
+			ToolName:         toolName,
+			FullToolName:     toolMeta.Name,
+			ServerName:       toolMeta.ServerName,
+			Description:      toolMeta.Description,
+			ParamsJSON:       toolMeta.ParamsJSON,
+			OutputSchemaJSON: toolMeta.OutputSchemaJSON,
+			Hash:             toolMeta.Hash,
+			Tags:             "",
+			SearchableText:   searchableText,
 		}
 
 		docID := fmt.Sprintf("%s:%s", toolMeta.ServerName, toolName)
@@ -384,7 +385,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	// Create search request with high limit to get all tools
 	searchReq := bleve.NewSearchRequest(query)
 	searchReq.Size = 10000 // Maximum tools per server
-	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "hash"}
+	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
 
 	b.logger.Debug("Querying tools by server", zap.String("server", serverName))
 
@@ -397,11 +398,12 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 	var tools []*config.ToolMetadata
 	for _, hit := range searchResult.Hits {
 		toolMeta := &config.ToolMetadata{
-			Name:        getStringField(hit.Fields, "full_tool_name"),
-			ServerName:  getStringField(hit.Fields, "server_name"),
-			Description: getStringField(hit.Fields, "description"),
-			ParamsJSON:  getStringField(hit.Fields, "params_json"),
-			Hash:        getStringField(hit.Fields, "hash"),
+			Name:             getStringField(hit.Fields, "full_tool_name"),
+			ServerName:       getStringField(hit.Fields, "server_name"),
+			Description:      getStringField(hit.Fields, "description"),
+			ParamsJSON:       getStringField(hit.Fields, "params_json"),
+			OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
+			Hash:             getStringField(hit.Fields, "hash"),
 		}
 		tools = append(tools, toolMeta)
 	}
