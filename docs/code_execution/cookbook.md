@@ -1,8 +1,13 @@
 # Code Execution — Orchestration Cookbook
 
-Copy‑pasteable **TypeScript** recipes for orchestrating multiple upstream MCP
-tools in a single `code_execution` call. Each recipe shows the pattern, the
-multi‑call sequence it replaces, and the token/latency it saves.
+**TypeScript** recipes for orchestrating multiple upstream MCP tools in a
+single `code_execution` call. Each recipe shows the pattern, the multi‑call
+sequence it replaces, and the token/latency it saves. Treat them as
+**templates to adapt**, not literal paste‑and‑run scripts: swap the placeholder
+server/tool names (`crm`, `orders`, `github`, `slack`, …) for your own. The
+leading `// language:` / `// input:` lines are annotations — the executed
+*code* is the body below them; `language` and `input` are separate
+`code_execution` tool parameters.
 
 TypeScript code execution is **generally available** (GA) — it shipped in
 preview in v0.45.0 and graduates to GA in v0.46.0 (MCP-38, roadmap #15). See the
@@ -231,7 +236,7 @@ last.ok
 **⚠️ No wall‑clock backoff.** The sandbox has no `setTimeout`, so retries are
 *immediate*. That is the right behaviour for transient races, but it will **not**
 help a server that needs seconds to recover. For true exponential backoff, let
-the failure return to the agent and retry across turns, or push the retry into
+the failure surface to the agent and retry across turns, or push the retry into
 the upstream tool. Do **not** busy‑wait — it burns the `timeout_ms` budget and
 the CPU for nothing.
 
