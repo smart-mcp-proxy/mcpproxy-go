@@ -819,8 +819,15 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 	return searchResults, nil
 }
 
-// OpenWebUI opens the web control panel in the default browser
+// OpenWebUI opens the web control panel in the default browser.
 func (c *Client) OpenWebUI() error {
+	return c.OpenWebUIPath("")
+}
+
+// OpenWebUIPath opens the web control panel in the default browser at the given
+// path under the resolved web UI base (e.g. "repositories" for the marketplace
+// deep-link). An empty path opens the base control panel, matching OpenWebUI.
+func (c *Client) OpenWebUIPath(path string) error {
 	// Get the actual web UI URL from the /api/v1/info endpoint
 	// This ensures we use the correct HTTP URL even when connected via socket
 	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
@@ -839,6 +846,13 @@ func (c *Client) OpenWebUI() error {
 	webUIURL, ok := resp.Data["web_ui_url"].(string)
 	if !ok || webUIURL == "" {
 		return fmt.Errorf("web_ui_url not found in server info")
+	}
+
+	// Append the requested deep-link path (preserving any query string such as
+	// the apikey the core may already include in web_ui_url).
+	webUIURL, err = appendWebUIPath(webUIURL, path)
+	if err != nil {
+		return fmt.Errorf("failed to build web UI URL: %w", err)
 	}
 
 	// Add API key if not using socket communication
@@ -885,6 +899,27 @@ func (c *Client) OpenWebUI() error {
 	default:
 		return fmt.Errorf("unsupported OS for OpenWebUI: %s", runtime.GOOS)
 	}
+}
+
+// appendWebUIPath joins a relative path onto a resolved web UI base URL,
+// preserving any existing query string (e.g. an apikey already embedded by the
+// core). An empty path returns the base URL unchanged.
+func appendWebUIPath(webUIURL, path string) (string, error) {
+	if path == "" {
+		return webUIURL, nil
+	}
+
+	u, err := url.Parse(webUIURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid web UI URL %q: %w", webUIURL, err)
+	}
+
+	if !strings.HasSuffix(u.Path, "/") {
+		u.Path += "/"
+	}
+	u.Path += strings.TrimPrefix(path, "/")
+
+	return u.String(), nil
 }
 
 // makeRequest makes an HTTP request to the API with enhanced error handling and retry logic

@@ -64,3 +64,66 @@ func TestClientGetServers_LogsZeroServersOnlyOnStateChange(t *testing.T) {
 	assert.Equal(t, 2, recorded.FilterMessage("API returned zero upstream servers").Len())
 	assert.Equal(t, 1, recorded.FilterMessage("Server state changed").Len())
 }
+
+func TestAppendWebUIPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		webUIURL  string
+		path      string
+		want      string
+		expectErr bool
+	}{
+		{
+			name:     "empty path returns base unchanged",
+			webUIURL: "http://127.0.0.1:8080/ui/",
+			path:     "",
+			want:     "http://127.0.0.1:8080/ui/",
+		},
+		{
+			name:     "appends path to trailing-slash base",
+			webUIURL: "http://127.0.0.1:8080/ui/",
+			path:     "repositories",
+			want:     "http://127.0.0.1:8080/ui/repositories",
+		},
+		{
+			name:     "appends path when base lacks trailing slash",
+			webUIURL: "http://127.0.0.1:8080/ui",
+			path:     "repositories",
+			want:     "http://127.0.0.1:8080/ui/repositories",
+		},
+		{
+			name:     "leading slash on path is normalized",
+			webUIURL: "http://127.0.0.1:8080/ui/",
+			path:     "/repositories",
+			want:     "http://127.0.0.1:8080/ui/repositories",
+		},
+		{
+			name:     "preserves existing query string (apikey)",
+			webUIURL: "http://127.0.0.1:8080/ui/?apikey=secret",
+			path:     "repositories",
+			want:     "http://127.0.0.1:8080/ui/repositories?apikey=secret",
+		},
+		{
+			name:      "invalid URL returns error",
+			webUIURL:  "ht tp://bad url",
+			path:      "repositories",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := appendWebUIPath(tt.webUIURL, tt.path)
+			if tt.expectErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

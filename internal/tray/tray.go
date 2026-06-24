@@ -93,10 +93,13 @@ type ServerInterface interface {
 // App represents the system tray application
 type App struct {
 	server    ServerInterface
-	apiClient interface{ OpenWebUI() error } // API client for web UI access (optional)
-	logger    *zap.SugaredLogger
-	version   string
-	shutdown  func()
+	apiClient interface {
+		OpenWebUI() error
+		OpenWebUIPath(path string) error
+	} // API client for web UI access (optional)
+	logger   *zap.SugaredLogger
+	version  string
+	shutdown func()
 
 	connectionState   ConnectionState
 	connectionStateMu sync.RWMutex
@@ -128,11 +131,11 @@ type App struct {
 	autostartItem    *systray.MenuItem
 
 	// Update notification menu item (hidden until update is available)
-	updateMenuItem     *systray.MenuItem
-	updateAvailable    bool
-	latestVersion      string
-	latestReleaseURL   string
-	updateCheckMu      sync.RWMutex
+	updateMenuItem   *systray.MenuItem
+	updateAvailable  bool
+	latestVersion    string
+	latestReleaseURL string
+	updateCheckMu    sync.RWMutex
 
 	// Config path for opening from menu
 	configPath string
@@ -161,7 +164,10 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 }
 
 // NewWithAPIClient creates a new tray application with an API client for web UI access
-func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+func NewWithAPIClient(server ServerInterface, apiClient interface {
+	OpenWebUI() error
+	OpenWebUIPath(path string) error
+}, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
 		server:          server,
 		apiClient:       apiClient,
@@ -574,8 +580,12 @@ func (a *App) onReady() {
 
 	// Add Web Control Panel menu item if API client is available
 	var openWebUIItem *systray.MenuItem
+	var installServerItem *systray.MenuItem
 	if a.apiClient != nil {
 		openWebUIItem = systray.AddMenuItem("Open Web Control Panel", "Open the web control panel in your browser")
+		// Deep-link into the Web UI marketplace (Repositories.vue) to browse
+		// and install MCP servers (MCP-37a).
+		installServerItem = systray.AddMenuItem("Install server…", "Browse and install MCP servers in the web UI marketplace")
 	}
 	systray.AddSeparator()
 
@@ -737,6 +747,20 @@ func (a *App) onReady() {
 				select {
 				case <-openWebUIItem.ClickedCh:
 					a.handleOpenWebUI()
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// --- Install Server Click Handler (deep-link to the marketplace) ---
+	if installServerItem != nil {
+		go func() {
+			for {
+				select {
+				case <-installServerItem.ClickedCh:
+					a.handleInstallServer()
 				case <-a.ctx.Done():
 					return
 				}
@@ -1765,6 +1789,23 @@ func (a *App) handleOpenWebUI() {
 		a.logger.Error("Failed to open web control panel", zap.Error(err))
 	} else {
 		a.logger.Info("Successfully opened web control panel")
+	}
+}
+
+// handleInstallServer deep-links to the Web UI marketplace (Repositories.vue)
+// so users can browse and install MCP servers (MCP-37a).
+func (a *App) handleInstallServer() {
+	if a.apiClient == nil {
+		a.logger.Warn("API client not available, cannot open marketplace")
+		return
+	}
+
+	a.logger.Info("Opening server marketplace from tray menu")
+
+	if err := a.apiClient.OpenWebUIPath("repositories"); err != nil {
+		a.logger.Error("Failed to open server marketplace", zap.Error(err))
+	} else {
+		a.logger.Info("Successfully opened server marketplace")
 	}
 }
 
