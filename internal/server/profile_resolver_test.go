@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
@@ -74,6 +75,63 @@ func TestResolveActiveProfile_Precedence(t *testing.T) {
 	require.Equal(t, "", name)
 	require.Nil(t, scope)
 	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-1"), "stale selection should be cleared")
+}
+
+// TestProfilePinFromContext reads the agent-token profile_pin off the auth
+// context (Profiles v2 T3). Non-agent contexts and unpinned tokens yield "".
+func TestProfilePinFromContext(t *testing.T) {
+	// No auth context at all.
+	require.Equal(t, "", profilePinFromContext(context.Background()))
+
+	// Agent token with a pin.
+	pinned := auth.WithAuthContext(context.Background(),
+		&auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "research"})
+	require.Equal(t, "research", profilePinFromContext(pinned))
+
+	// Agent token without a pin.
+	unpinned := auth.WithAuthContext(context.Background(),
+		&auth.AuthContext{Type: auth.AuthTypeAgent})
+	require.Equal(t, "", profilePinFromContext(unpinned))
+
+	// Admin context never carries a pin even if the field is set.
+	admin := auth.WithAuthContext(context.Background(),
+		&auth.AuthContext{Type: auth.AuthTypeAdmin, ProfilePin: "research"})
+	require.Equal(t, "", profilePinFromContext(admin))
+}
+
+// TestResolveActiveProfile_PinHighestPrecedence verifies that a token
+// profile_pin is the highest-precedence resolver source: it wins over an
+// explicit URL scope and over a session set_profile selection (Profiles v2 T3).
+func TestResolveActiveProfile_PinHighestPrecedence(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "research", Servers: []string{"research-srv"}},
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	p := &MCPProxyServer{config: cfg, sessionStore: NewSessionStore(zap.NewNop())}
+
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	base := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-pin"})
+
+	// Pin to "research" via the auth context.
+	pinned := auth.WithAuthContext(base,
+		&auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "research"})
+
+	// Even with a conflicting session selection AND a conflicting URL scope, the
+	// pin wins.
+	p.sessionStore.SetActiveProfile("sess-pin", "deploy")
+	pinned = profile.WithProfileScope(pinned, profile.NewProfileScope("deploy", []string{"deploy-srv"}))
+
+	name, scope := p.resolveActiveProfile(pinned)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.True(t, scope.Allows("research-srv"))
+	require.False(t, scope.Allows("deploy-srv"))
 }
 
 // TestSessionStore_ActiveProfileLifecycle verifies the per-session profile map

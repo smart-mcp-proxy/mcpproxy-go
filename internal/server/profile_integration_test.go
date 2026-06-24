@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -614,6 +615,88 @@ func TestProfile_SetProfileUnknown(t *testing.T) {
 	_, _, isErr, text := env.callSetProfile(ctx, c, "nonexistent")
 	assert.True(t, isErr, "set_profile with an unknown slug must error")
 	assert.Contains(t, text, "unknown profile 'nonexistent'", "error must name the bad slug: %s", text)
+}
+
+// ---------------------------------------------------------------------------
+// Profiles v2 (T3): per-agent-token profile_pin — server-side URL enforcement
+// ---------------------------------------------------------------------------
+
+// mintPinnedToken creates a stored agent token pinned to the given profile and
+// returns its raw secret. It uses the same HMAC key path the auth middleware
+// reads, so the minted token validates end-to-end.
+func (e *profileTestEnv) mintPinnedToken(name, pin string) string {
+	e.t.Helper()
+	cfg := e.proxyServer.runtime.Config()
+	hmacKey, err := auth.GetOrCreateHMACKey(cfg.DataDir)
+	require.NoError(e.t, err)
+	rawToken, err := auth.GenerateToken()
+	require.NoError(e.t, err)
+	require.NoError(e.t, e.proxyServer.runtime.StorageManager().CreateAgentToken(auth.AgentToken{
+		Name:           name,
+		AllowedServers: []string{"*"},
+		Permissions:    []string{"read"},
+		ExpiresAt:      time.Now().Add(24 * time.Hour),
+		ProfilePin:     pin,
+	}, rawToken, hmacKey))
+	return rawToken
+}
+
+// TestProfile_PinnedTokenURLEnforcement verifies the T3 server-side guard: an
+// agent token pinned to "research" is rejected with 403 at /mcp/p/deploy, but
+// reaches its own /mcp/p/research endpoint.
+func TestProfile_PinnedTokenURLEnforcement(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("pinned-research", "research")
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	const initBody = `{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`
+
+	post := func(slug string) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp/p/"+slug, strings.NewReader(initBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	// Different profile → 403 with a pin-naming error.
+	resp := post("deploy")
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode, "pinned token must be 403 on a non-pinned profile URL")
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	errMsg, _ := body["error"].(string)
+	assert.Contains(t, errMsg, "pinned to profile 'research'", "403 error must name the pin: %s", errMsg)
+
+	// Its own pinned profile → route matched, not forbidden.
+	resp2 := post("research")
+	defer resp2.Body.Close()
+	assert.NotEqual(t, http.StatusForbidden, resp2.StatusCode,
+		"pinned token must reach its own profile URL; got %d", resp2.StatusCode)
+}
+
+// TestProfile_UnpinnedTokenUnaffected verifies an unpinned agent token can reach
+// any profile URL (no T3 enforcement applied).
+func TestProfile_UnpinnedTokenUnaffected(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("free-agent", "") // empty pin = unpinned
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	const initBody = `{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`
+
+	for _, slug := range []string{"research", "deploy"} {
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp/p/"+slug, strings.NewReader(initBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.NotEqual(t, http.StatusForbidden, resp.StatusCode,
+			"unpinned token must not be forbidden at /mcp/p/%s; got %d", slug, resp.StatusCode)
+	}
 }
 
 // ---------------------------------------------------------------------------
