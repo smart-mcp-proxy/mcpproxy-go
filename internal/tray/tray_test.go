@@ -24,6 +24,8 @@ type MockServerInterface struct {
 	configPath                string
 	reloadConfigurationCalled bool
 	suggestedAddress          string
+	profiles                  []ProfileInfo
+	activeProfile             string
 }
 
 func NewMockServer() *MockServerInterface {
@@ -164,6 +166,19 @@ func (m *MockServerInterface) GetLogDir() string {
 func (m *MockServerInterface) TriggerOAuthLogin(serverName string) error {
 	// Simulate successful trigger without doing anything
 	_ = serverName
+	return nil
+}
+
+func (m *MockServerInterface) GetProfiles() ([]ProfileInfo, error) {
+	return m.profiles, nil
+}
+
+func (m *MockServerInterface) GetActiveProfile() (string, error) {
+	return m.activeProfile, nil
+}
+
+func (m *MockServerInterface) SetActiveProfile(name string) error {
+	m.activeProfile = name
 	return nil
 }
 

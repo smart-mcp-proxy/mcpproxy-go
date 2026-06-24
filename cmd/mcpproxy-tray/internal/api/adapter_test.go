@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
 
 // =============================================================================
@@ -21,11 +23,13 @@ type MockClient struct {
 	enableErr            error
 	quarantineErr        error
 	oauthErr             error
-	enabledServers       map[string]bool   // tracks enable/disable calls
-	quarantinedServers   map[string]bool   // tracks quarantine calls
-	unquarantinedServers []string          // tracks unquarantine calls
-	oauthTriggered       []string          // tracks OAuth login calls
+	enabledServers       map[string]bool // tracks enable/disable calls
+	quarantinedServers   map[string]bool // tracks quarantine calls
+	unquarantinedServers []string        // tracks unquarantine calls
+	oauthTriggered       []string        // tracks OAuth login calls
 	statusCh             chan StatusUpdate
+	profiles             []tray.ProfileInfo // Profiles v2 T5
+	activeProfile        string             // Profiles v2 T5
 }
 
 func NewMockClient() *MockClient {
@@ -85,6 +89,46 @@ func (m *MockClient) TriggerOAuthLogin(serverName string) error {
 
 func (m *MockClient) StatusChannel() <-chan StatusUpdate {
 	return m.statusCh
+}
+
+func (m *MockClient) GetProfiles() ([]tray.ProfileInfo, error) {
+	return m.profiles, nil
+}
+
+func (m *MockClient) GetActiveProfile() (string, error) {
+	return m.activeProfile, nil
+}
+
+func (m *MockClient) SetActiveProfile(name string) error {
+	m.activeProfile = name
+	return nil
+}
+
+// TestServerAdapterProfileDelegation verifies the adapter forwards the profile
+// switcher calls (Profiles v2 T5) to the underlying client.
+func TestServerAdapterProfileDelegation(t *testing.T) {
+	mock := NewMockClient()
+	mock.profiles = []tray.ProfileInfo{
+		{Name: "research", ToolCount: 3},
+		{Name: "deploy", ToolCount: 2},
+	}
+	mock.activeProfile = "research"
+	adapter := NewServerAdapter(mock)
+
+	profiles, err := adapter.GetProfiles()
+	require.NoError(t, err)
+	require.Len(t, profiles, 2)
+	assert.Equal(t, "research", profiles[0].Name)
+	assert.Equal(t, 3, profiles[0].ToolCount)
+
+	active, err := adapter.GetActiveProfile()
+	require.NoError(t, err)
+	assert.Equal(t, "research", active)
+
+	require.NoError(t, adapter.SetActiveProfile("deploy"))
+	active, err = adapter.GetActiveProfile()
+	require.NoError(t, err)
+	assert.Equal(t, "deploy", active)
 }
 
 // =============================================================================

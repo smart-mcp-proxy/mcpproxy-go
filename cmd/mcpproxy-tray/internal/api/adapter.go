@@ -8,6 +8,7 @@ import (
 	"runtime"
 
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
 
 // ClientInterface defines the methods required by ServerAdapter from the API client.
@@ -20,6 +21,9 @@ type ClientInterface interface {
 	UnquarantineServer(serverName string) error
 	TriggerOAuthLogin(serverName string) error
 	StatusChannel() <-chan StatusUpdate
+	GetProfiles() ([]tray.ProfileInfo, error)
+	GetActiveProfile() (string, error)
+	SetActiveProfile(name string) error
 }
 
 // isServerHealthy returns true if the server is considered healthy.
@@ -122,7 +126,7 @@ func (a *ServerAdapter) GetStatus() interface{} {
 
 	// Fallback to empty if we couldn't get it
 	if listenAddr == "" {
-		listenAddr = ""  // Empty means tray will show "Status: Running" without address
+		listenAddr = "" // Empty means tray will show "Status: Running" without address
 	}
 
 	servers, serverErr := a.client.GetServers()
@@ -184,6 +188,21 @@ func (a *ServerAdapter) StatusChannel() <-chan interface{} {
 // EventsChannel returns nil as the remote API does not yet proxy runtime events.
 func (a *ServerAdapter) EventsChannel() <-chan internalRuntime.Event {
 	return nil
+}
+
+// GetProfiles returns the configured profiles for the tray switcher (Profiles v2 T5).
+func (a *ServerAdapter) GetProfiles() ([]tray.ProfileInfo, error) {
+	return a.client.GetProfiles()
+}
+
+// GetActiveProfile returns the server-level default active profile (empty = all servers).
+func (a *ServerAdapter) GetActiveProfile() (string, error) {
+	return a.client.GetActiveProfile()
+}
+
+// SetActiveProfile sets the server-level default active profile (empty clears it).
+func (a *ServerAdapter) SetActiveProfile(name string) error {
+	return a.client.SetActiveProfile(name)
 }
 
 // GetQuarantinedServers returns quarantined servers
