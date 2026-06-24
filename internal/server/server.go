@@ -2593,6 +2593,15 @@ func (s *Server) NotifySecretsChanged(ctx context.Context, operation, secretName
 	return s.runtime.NotifySecretsChanged(ctx, operation, secretName)
 }
 
+// EmitActiveProfileChanged broadcasts an active_profile.changed event so UI
+// surfaces (Web UI, tray) reflect a default-profile switch made by another
+// client (Profiles v2 T2/T5). The REST handler invokes this via an optional
+// capability assertion, so adding it here does not widen the httpapi
+// ServerController interface.
+func (s *Server) EmitActiveProfileChanged(profile string) {
+	s.runtime.EmitActiveProfileChanged(profile)
+}
+
 // GetCurrentConfig returns the current configuration
 func (s *Server) GetCurrentConfig() interface{} {
 	return s.runtime.GetCurrentConfig()

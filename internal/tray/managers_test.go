@@ -6,8 +6,52 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
+
+func TestProfileMenuTitle(t *testing.T) {
+	require.Equal(t, "Profile: All servers", profileMenuTitle(""))
+	require.Equal(t, "Profile: research", profileMenuTitle("research"))
+}
+
+func TestProfileSetChanged(t *testing.T) {
+	m := NewMenuManager(nil, nil, nil, zap.NewNop().Sugar())
+
+	// With no rendered items yet, any set is considered changed (forces the
+	// initial build).
+	require.True(t, m.profileSetChanged([]string{"a"}))
+
+	// Mark a rendered set (the map value is irrelevant to the comparison).
+	m.profileMenuItems[""] = nil
+	m.latestProfileNames = []string{"a", "b"}
+
+	require.True(t, m.profileSetChanged([]string{"a"}), "different length must rebuild")
+	require.False(t, m.profileSetChanged([]string{"a", "b"}), "identical set must not rebuild")
+	require.True(t, m.profileSetChanged([]string{"a", "c"}), "different member must rebuild")
+}
+
+// TestPerformSyncRefreshesProfiles verifies the sync loop consults the profile
+// getters (so a switch made by another client is reflected) without erroring
+// when the menu items are not backed by a live systray run loop.
+func TestPerformSyncRefreshesProfiles(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := NewMockServer()
+	mock.profiles = []ProfileInfo{{Name: "research", ToolCount: 3}}
+	mock.activeProfile = "research"
+
+	mm := NewMenuManager(nil, nil, nil, logger) // nil profileMenu → UpdateProfilesMenu no-ops safely
+	sm := NewSynchronizationManager(NewServerStateManager(mock, logger), mock, mm, logger)
+	sm.SetConnected(true)
+
+	require.NoError(t, sm.performSync())
+
+	active, err := mock.GetActiveProfile()
+	require.NoError(t, err)
+	require.Equal(t, "research", active)
+}
 
 func TestMenuSorting(t *testing.T) {
 
@@ -754,13 +798,13 @@ func TestConnectedCountHealthLevelOnly(t *testing.T) {
 // TestHealthActionMenuItemSelection tests that correct menu items are shown based on health.action
 func TestHealthActionMenuItemSelection(t *testing.T) {
 	testCases := []struct {
-		name               string
-		healthAction       string
-		expectedMenuItem   string
-		shouldShowLogin    bool
-		shouldShowSecret   bool
+		name                string
+		healthAction        string
+		expectedMenuItem    string
+		shouldShowLogin     bool
+		shouldShowSecret    bool
 		shouldShowConfigure bool
-		shouldShowRestart  bool
+		shouldShowRestart   bool
 	}{
 		{
 			name:             "login action shows Login Required",
@@ -775,9 +819,9 @@ func TestHealthActionMenuItemSelection(t *testing.T) {
 			shouldShowSecret: true,
 		},
 		{
-			name:               "configure action shows Configure",
-			healthAction:       "configure",
-			expectedMenuItem:   "⚠️ Configure",
+			name:                "configure action shows Configure",
+			healthAction:        "configure",
+			expectedMenuItem:    "⚠️ Configure",
 			shouldShowConfigure: true,
 		},
 		{

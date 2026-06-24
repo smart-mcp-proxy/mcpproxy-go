@@ -14,6 +14,10 @@ const (
 	EventTypeConfigSaved EventType = "config.saved"
 	// EventTypeSecretsChanged is emitted when secrets are added, updated, or deleted.
 	EventTypeSecretsChanged EventType = "secrets.changed"
+	// EventTypeActiveProfileChanged is emitted when the server-level default
+	// active profile changes (Profiles v2). UI surfaces (Web UI, tray) refetch
+	// GET /api/v1/profiles/active to reflect a switch made by another client.
+	EventTypeActiveProfileChanged EventType = "active_profile.changed"
 	// EventTypeOAuthTokenRefreshed is emitted when proactive token refresh succeeds.
 	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
 	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.

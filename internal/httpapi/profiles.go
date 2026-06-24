@@ -147,8 +147,18 @@ func (s *Server) handleSetActiveProfile(w http.ResponseWriter, r *http.Request) 
 	}
 
 	s.activeProfileMu.Lock()
+	changed := s.activeProfile != slug
 	s.activeProfile = slug
 	s.activeProfileMu.Unlock()
+
+	// Notify other clients (Web UI, tray) via SSE only on an actual change, so a
+	// switch made here is reflected everywhere (Profiles v2 T5). Emitted through
+	// an optional capability assertion to avoid widening ServerController.
+	if changed {
+		if emitter, ok := s.controller.(interface{ EmitActiveProfileChanged(string) }); ok {
+			emitter.EmitActiveProfileChanged(slug)
+		}
+	}
 
 	s.getRequestLogger(r).Infow("default active profile updated", "profile", slug)
 	s.writeSuccess(w, map[string]interface{}{"active_profile": slug})

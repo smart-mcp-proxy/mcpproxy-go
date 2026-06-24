@@ -46,6 +46,12 @@ final class AppState: ObservableObject {
     @Published var totalServers: Int = 0
     @Published var totalTools: Int = 0
 
+    // MARK: - Profiles (Profiles v2 T5)
+    /// Configured profiles for the tray profile switcher.
+    @Published var profiles: [ProfileSummary] = []
+    /// Server-level default active profile slug; empty means "all servers".
+    @Published var activeProfile: String = ""
+
     /// Set to true once the tray has received its first response from
     /// `/api/v1/servers`. Used by `statusSummary` to distinguish "haven't
     /// fetched yet" from "fetched and the list is genuinely empty", so the
