@@ -119,6 +119,9 @@ type UpstreamRecord struct {
 	// nil = inherit, pointer-to-0s = disabled, positive = interval.
 	HealthCheckInterval   *config.Duration `json:"health_check_interval,omitempty"`
 	ToolDiscoveryInterval *config.Duration `json:"tool_discovery_interval,omitempty"`
+	// MCP-3322: per-server MCP `initialize` handshake deadline override,
+	// persisted so a REST/UI/CLI-set init_timeout survives a restart.
+	InitTimeout *config.Duration `json:"init_timeout,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

@@ -1233,6 +1233,14 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
+	// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
+	// existing pointer when the request omits the field, so this nil-guard is
+	// the second half of the nil-preserve contract.
+	if updates.InitTimeout != nil {
+		existing.InitTimeout = updates.InitTimeout
+	}
+
 	// Isolation is PATCH-semantic: nil means "leave unchanged"; a
 	// present struct means "replace". Within the struct, the caller
 	// only populates fields they want to set (handled upstream by

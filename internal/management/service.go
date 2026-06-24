@@ -486,6 +486,19 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.AutoApproveToolChanges = &v
 		}
 
+		// MCP-3322: project the per-server init_timeout override. The runtime
+		// emits it as a duration string; accept a typed *config.Duration too in
+		// case the map was delivered without a JSON round-trip.
+		if its, ok := srvRaw["init_timeout"].(string); ok && its != "" {
+			if d, err := time.ParseDuration(its); err == nil {
+				v := config.Duration(d)
+				srv.InitTimeout = &v
+			}
+		} else if itd, ok := srvRaw["init_timeout"].(*config.Duration); ok && itd != nil {
+			v := *itd
+			srv.InitTimeout = &v
+		}
+
 		// Extract unified health status
 		if health, ok := srvRaw["health"].(*contracts.HealthStatus); ok {
 			srv.Health = health

@@ -319,6 +319,17 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.OAuth = newOAuth
 	}
 
+	// InitTimeout (MCP-3322): *Duration tri-state. A non-nil pointer in the
+	// patch sets/replaces the per-server override; nil leaves the base value
+	// (already carried by CopyServerConfig) untouched.
+	if patch.InitTimeout != nil {
+		it := *patch.InitTimeout
+		if diff != nil && (base.InitTimeout == nil || *base.InitTimeout != it) {
+			diff.Modified["init_timeout"] = FieldChange{Path: "init_timeout", From: base.InitTimeout, To: patch.InitTimeout}
+		}
+		merged.InitTimeout = &it
+	}
+
 	// Always update the Updated timestamp
 	merged.Updated = time.Now()
 
@@ -587,6 +598,10 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	if src.ToolDiscoveryInterval != nil {
 		td := *src.ToolDiscoveryInterval
 		dst.ToolDiscoveryInterval = &td
+	}
+	if src.InitTimeout != nil {
+		it := *src.InitTimeout
+		dst.InitTimeout = &it
 	}
 
 	// Copy the per-upstream auth-broker block by value (spec 074, server edition).
