@@ -15,7 +15,10 @@ annotations and omit `language`.
 > [api-reference.md](api-reference.md) for the full tool schema. This cookbook
 > assumes you know that `call_tool(server, tool, args)` returns
 > `{ ok: true, result }` or `{ ok: false, error }`, and that the script's
-> **last expression** (or an explicit `return`) becomes the result `value`.
+> **last expression** becomes the result `value`. A bare top‑level `return`
+> is a **SyntaxError** (`Illegal return statement`) — `return` is only legal
+> inside a function. To early‑exit, wrap the body in an IIFE (see the
+> sandbox‑contract table and Recipe 3).
 
 ## Table of Contents
 
@@ -60,6 +63,7 @@ the #1 source of surprises:
 | `input` global | ✅ | Your parameters. Type it with `as` or an `interface` for IDE‑grade safety. |
 | ES2020+ stdlib (`map`/`filter`/`reduce`, `JSON`, `Math`, `Date`) | ✅ | Use it freely for transforms and aggregation. |
 | `console.log` | ✅ | Goes to **server logs**, not the result. Use for debugging. |
+| Top‑level `return` | ❌ | `return` outside a function is a **SyntaxError** (`Illegal return statement`). The result is the script's **last expression**. To early‑exit, wrap the body in an IIFE: `(() => { … return x; })()`. |
 | `setTimeout` / `setInterval` | ❌ | **No wall‑clock sleep.** "Backoff" and "rate‑limit" recipes work by *bounding* and *chunking*, never by sleeping. |
 | `require` / `import` / `fetch` / `fs` | ❌ | No modules, no network, no filesystem. All I/O goes through `call_tool`. |
 | Concurrency | ❌ (sequential) | Tool calls run **one at a time** server‑side. "Fan‑out" saves *round‑trips*, not wall‑clock from parallelism. Be honest about this when estimating latency. |
@@ -141,21 +145,27 @@ step.
 ```typescript
 // language: "typescript"
 // input: { "email": "user@example.com" }
-const lookup = call_tool("crm", "find_customer", { email: input.email });
-if (!lookup.ok) return { stage: "find_customer", error: lookup.error.message };
+// Wrap the body in an IIFE so early‑exit `return`s are legal — a bare
+// top‑level `return` is a SyntaxError. The IIFE's value is the result.
+(() => {
+  const lookup = call_tool("crm", "find_customer", { email: input.email });
+  if (!lookup.ok) return { stage: "find_customer", error: lookup.error.message };
 
-const customerId: string = lookup.result.id;
-const orders = call_tool("orders", "list_orders", { customerId, limit: 10 });
-if (!orders.ok) return { stage: "list_orders", error: orders.error.message };
+  const customerId: string = lookup.result.id;
+  const orders = call_tool("orders", "list_orders", { customerId, limit: 10 });
+  if (!orders.ok) return { stage: "list_orders", error: orders.error.message };
 
-const latest = orders.result[0];
-const detail = call_tool("orders", "get_order", { orderId: latest.id });
+  const latest = orders.result[0];
+  const detail = call_tool("orders", "get_order", { orderId: latest.id });
 
-({ customerId, latestOrder: detail.ok ? detail.result : null });
+  return { customerId, latestOrder: detail.ok ? detail.result : null };
+})();
 ```
 
 **Replaces:** a 3‑hop "find → list → get" sequence that would otherwise be three
-model turns. The `stage` field makes failures self‑describing.
+model turns. The `stage` field makes failures self‑describing. The IIFE wrapper
+is the idiom for any recipe that needs an early `return` — `return` is illegal
+at the script's top level.
 
 ---
 
