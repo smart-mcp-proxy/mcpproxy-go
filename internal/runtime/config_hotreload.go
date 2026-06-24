@@ -152,6 +152,16 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "observability")
 	}
 
+	// Profiles (Spec 057 / Profiles v2 T1 — can be hot-reloaded). Profile
+	// add/remove/membership edits change the per-profile Bleve index set, so they
+	// must be tracked; ApplyConfig reconciles the per-profile indexes when this
+	// field changes without a server change (the server-change path already
+	// reconciles via the re-index pass). Untracked, a profiles-only edit would
+	// report "No configuration changes detected" and leave indexes stale.
+	if !reflect.DeepEqual(oldCfg.Profiles, newCfg.Profiles) {
+		result.ChangedFields = append(result.ChangedFields, "profiles")
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false

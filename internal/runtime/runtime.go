@@ -1302,6 +1302,7 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	cfgPathCopy := r.cfgPath
 	configCopy := *r.cfg // Make a copy to pass to async goroutine
 	serversChanged := contains(result.ChangedFields, "mcpServers")
+	profilesChanged := contains(result.ChangedFields, "profiles")
 	changedFieldsCopy := make([]string, len(result.ChangedFields))
 	copy(changedFieldsCopy, result.ChangedFields)
 
@@ -1360,6 +1361,15 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 				r.logger.Error("Failed to re-index tools after config apply", zap.Error(err))
 			}
 		}(&configCopy, appCtx)
+	} else if profilesChanged {
+		// Profiles v2 (Spec 057, T1): a profile-only edit (add/remove/membership)
+		// with no server change never reaches the re-index pass above, so reconcile
+		// the per-profile Bleve indexes directly against the already-current shared
+		// index. No re-discovery is needed — the shared index is unchanged. Done
+		// synchronously: the work is bounded (only new/changed/removed profiles) and
+		// keeps the post-apply index state observable to callers.
+		r.logger.Info("Profile configuration changed without server changes, reconciling per-profile indexes")
+		r.reconcileProfileIndexes()
 	}
 
 	return result, nil
