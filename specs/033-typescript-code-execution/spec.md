@@ -2,7 +2,7 @@
 
 **Feature Branch**: `033-typescript-code-execution`
 **Created**: 2026-03-10
-**Status**: Draft
+**Status**: GA (graduated from preview 2026-06-24, MCP-38 / roadmap #15; implemented in `internal/jsruntime/typescript.go`, esbuild `LoaderTS`, exposed via MCP `language` param, REST `/api/v1/code/exec`, and CLI `code exec --language typescript`)
 **Input**: User description: "Add TypeScript language support to MCPProxy's code_execution feature. When users submit TypeScript code (detected by .ts file hints, explicit language parameter, or TypeScript-specific syntax like type annotations), automatically transpile it to JavaScript using esbuild's Go API before executing in the goja sandbox. The transpilation should be transparent - users write TypeScript, it gets stripped to JS and executed. Add a language parameter to the code_execution MCP tool schema (values: 'javascript', 'typescript', default: 'javascript'). When language is 'typescript' or auto-detected, run esbuild transform first. Performance target: less than 5ms transpilation overhead."
 
 ## User Scenarios & Testing *(mandatory)*
