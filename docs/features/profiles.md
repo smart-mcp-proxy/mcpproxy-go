@@ -50,6 +50,33 @@ Error attribution:
 
 Tool-call activity records from profile URLs carry `metadata["profile"] = "<slug>"`. Records from `/mcp` omit this field.
 
+## Per-profile search index
+
+Each profile gets a physically separate Bleve index so switching profiles is fast and a config reload that changes one profile does not re-index the others.
+
+Layout under the data dir (`~/.mcpproxy/` by default):
+
+```
+index.bleve/                 # shared default index — all servers' tools (used by /mcp)
+index.bleve/profiles/<slug>/ # one index per profile — only that profile's servers' tools
+```
+
+Notes:
+
+- Per-profile indexes live under `index.bleve/profiles/` (not directly under `index.bleve/<slug>/`) so they never collide with Bleve's own internal files and `store/` subdirectory.
+- A per-profile index is a derived view: it is (re)built from the shared default index, so the shared index remains the source of truth and the allow-all fallback for `/mcp`.
+- `<slug>` is the validated profile name (`^[a-z0-9][a-z0-9_-]{0,62}$`), so the directory name is always filesystem-safe.
+
+Lifecycle:
+
+| Event | Effect |
+|-------|--------|
+| Profile added / first use | Its index is built lazily from the shared index. |
+| A member server's tools change | Only the profiles that include that server are rebuilt. |
+| Profile membership changes on reload | Only the affected profile is rebuilt; others are untouched. |
+| Profile removed from config | Its index directory is deleted (including orphans left by a prior run). |
+| Server disabled / quarantined | Profiles that include it are refreshed so its tools drop out. |
+
 ## Hot reload
 
 Profile changes take effect for new connections on the next config reload. In-flight sessions keep their snapshot.
