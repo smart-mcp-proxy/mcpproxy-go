@@ -2519,6 +2519,13 @@ components:
             preserves the existing value.
           type: string
       type: object
+    httpapi.SetActiveProfileRequest:
+      properties:
+        active_profile:
+          type: string
+        profile:
+          type: string
+      type: object
     management.BulkOperationResult:
       properties:
         errors:
@@ -3792,6 +3799,84 @@ paths:
       summary: Get onboarding wizard state and predicates (Spec 046)
       tags:
       - onboarding
+  /api/v1/profiles:
+    get:
+      description: List all configured profiles with their effective servers and indexed
+        tool count (Profiles v2). A profile scopes tool discovery and calls to a named
+        subset of upstream servers.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Profile list
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Configuration unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List configured profiles
+      tags:
+      - profiles
+  /api/v1/profiles/active:
+    get:
+      description: 'Get the server-level default active profile used by UI surfaces
+        (Web UI / tray). Empty string means "all servers". Note: within a live MCP
+        session, the set_profile tool selection takes precedence over this default.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Active profile
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the default active profile
+      tags:
+      - profiles
+    put:
+      description: Set the server-level default active profile for UI surfaces. The
+        slug must match a configured profile; pass an empty string to clear. This
+        does not affect live MCP sessions, which use the set_profile tool.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.SetActiveProfileRequest'
+        description: Profile slug to activate (empty clears)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Active profile updated
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request body
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown profile
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Set the default active profile
+      tags:
+      - profiles
   /api/v1/registries:
     get:
       description: Retrieves list of all MCP server registries that can be browsed
