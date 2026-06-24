@@ -484,6 +484,7 @@ return {name: user.result.name};
 
 ## Next Steps
 
+- **Cookbook**: See [cookbook.md](cookbook.md) for 10 TypeScript orchestration recipes (batch, fan-out, retry, pagination, rate-limit) with token/latency benchmarks
 - **Examples**: See [examples.md](examples.md) for 10+ working code samples
 - **API Reference**: See [api-reference.md](api-reference.md) for complete schema documentation
 - **Troubleshooting**: See [troubleshooting.md](troubleshooting.md) for common issues and solutions
