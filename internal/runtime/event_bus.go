@@ -353,6 +353,15 @@ func (r *Runtime) emitSecretsChanged(operation string, secretName string, extra 
 	r.publishEvent(newEvent(EventTypeSecretsChanged, payload))
 }
 
+// EmitActiveProfileChanged emits an event when the server-level default active
+// profile changes (Profiles v2). UI surfaces subscribe and refetch
+// GET /api/v1/profiles/active so a switch made by one client (Web UI, tray, CLI)
+// is reflected everywhere. An empty profile means "all servers".
+func (r *Runtime) EmitActiveProfileChanged(profile string) {
+	payload := map[string]any{"active_profile": profile}
+	r.publishEvent(newEvent(EventTypeActiveProfileChanged, payload))
+}
+
 // EmitOAuthTokenRefreshed emits an event when proactive token refresh succeeds.
 // This is used by the RefreshManager to notify subscribers of successful token refresh.
 func (r *Runtime) EmitOAuthTokenRefreshed(serverName string, expiresAt time.Time) {
