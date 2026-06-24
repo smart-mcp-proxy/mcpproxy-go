@@ -153,41 +153,75 @@ func (im *IsolationManager) GetDockerIsolationWarning(serverConfig *config.Serve
 	return ""
 }
 
-// ShouldIsolate determines if a server should be isolated based on global and server config
+// ShouldIsolate determines if a server should be isolated via Docker, based on
+// global and server config. It is the legacy boolean view of ResolveMode and
+// stays in lockstep with it: it returns true iff the resolved mode is "docker".
+// Callers that need to distinguish sandbox/none should call ResolveMode.
 func (im *IsolationManager) ShouldIsolate(serverConfig *config.ServerConfig) bool {
-	// Check if global isolation is disabled
-	if im.globalConfig == nil || !im.globalConfig.Enabled {
-		// If the user explicitly opted THIS server into isolation (via
-		// isolation.enabled: true), warn them once that the per-server
-		// setting is being ignored because the global flag is off. Silent
-		// short-circuits here are a common cause of confusion — telemetry
-		// shows many users configure per-server opt-ins and then wonder why
-		// nothing runs in a container.
+	return im.ResolveMode(serverConfig) == config.IsolationModeDocker
+}
+
+// ResolveMode resolves the effective isolation mode for a server (MCP-34.2),
+// combining the global config (with legacy Enabled⇒docker back-compat), an
+// optional per-server override, and structural gates.
+//
+// Precedence:
+//  1. A per-server explicit Mode wins outright (even over a disabled global) —
+//     mirroring how other per-server overrides (image, network) take priority.
+//  2. Otherwise, when the global mode resolves to none, per-server bool opt-ins
+//     are ignored (and warned about once), preserving the pre-mode behavior.
+//  3. When the global mode is active, a per-server bool opt-out (enabled:false)
+//     downgrades the server to none.
+//
+// Structural gates then apply to ALL non-none modes: HTTP servers (no command)
+// and servers that already invoke docker are never isolated.
+func (im *IsolationManager) ResolveMode(serverConfig *config.ServerConfig) config.IsolationMode {
+	mode := im.resolveConfiguredMode(serverConfig)
+	if mode == config.IsolationModeNone {
+		return config.IsolationModeNone
+	}
+
+	// Only isolate stdio servers (HTTP servers don't need a sandbox/container).
+	if serverConfig == nil || serverConfig.Command == "" {
+		return config.IsolationModeNone
+	}
+
+	// Skip isolation for servers that already invoke Docker — these are
+	// typically pre-configured containers, and wrapping them (in a container
+	// or a Landlock sandbox) would break their access to the Docker socket.
+	cmdName := filepath.Base(serverConfig.Command)
+	if cmdName == "docker" || strings.Contains(serverConfig.Command, "docker") {
+		return config.IsolationModeNone
+	}
+
+	return mode
+}
+
+// resolveConfiguredMode applies the global + per-server config precedence to
+// produce the desired mode, before the structural gates in ResolveMode.
+func (im *IsolationManager) resolveConfiguredMode(serverConfig *config.ServerConfig) config.IsolationMode {
+	globalMode := im.globalConfig.ResolvedMode() // nil-safe; returns none for nil
+
+	// (1) A per-server explicit Mode override wins outright.
+	if serverConfig != nil && serverConfig.Isolation != nil && serverConfig.Isolation.Mode != nil {
+		return *serverConfig.Isolation.Mode
+	}
+
+	// (2) Global isolation off: per-server bool opt-ins are ignored (warn once).
+	if globalMode == config.IsolationModeNone {
 		if im.hasExplicitPerServerOptIn(serverConfig) {
 			im.warnPerServerIgnoredOnce(serverConfig.Name)
 		}
-		return false
+		return config.IsolationModeNone
 	}
 
-	// Check if server has isolation config and it's explicitly disabled
-	// With *bool: nil means "inherit global", explicit false means "disabled"
-	if serverConfig.Isolation != nil && serverConfig.Isolation.Enabled != nil && !*serverConfig.Isolation.Enabled {
-		return false
+	// (3) Global isolation active: honor a per-server bool opt-out.
+	if serverConfig != nil && serverConfig.Isolation != nil &&
+		serverConfig.Isolation.Enabled != nil && !*serverConfig.Isolation.Enabled {
+		return config.IsolationModeNone
 	}
 
-	// Only isolate stdio servers (HTTP servers don't need Docker isolation)
-	if serverConfig.Command == "" {
-		return false
-	}
-
-	// Skip isolation for servers that are already using Docker
-	// These are typically pre-configured Docker containers that don't need additional isolation
-	cmdName := filepath.Base(serverConfig.Command)
-	if cmdName == "docker" || strings.Contains(serverConfig.Command, "docker") {
-		return false
-	}
-
-	return true
+	return globalMode
 }
 
 // hasExplicitPerServerOptIn returns true when the server config explicitly

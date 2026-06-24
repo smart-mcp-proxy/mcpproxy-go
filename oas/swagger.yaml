@@ -259,7 +259,8 @@ components:
           description: 'Mount shared cache volumes for faster restarts (default: true)'
           type: boolean
         enabled:
-          description: Global enable/disable for Docker isolation
+          description: Global enable/disable for Docker isolation (legacy; superseded
+            by Mode)
           type: boolean
         extra_args:
           description: Additional docker run arguments
@@ -279,6 +280,14 @@ components:
         memory_limit:
           description: Memory limit for containers
           type: string
+        mode:
+          description: 'Per-server isolation mode override: "docker" | "sandbox" |
+            "none" (nil = inherit global; MCP-34.2)'
+          type: string
+          x-enum-varnames:
+          - IsolationModeDocker
+          - IsolationModeSandbox
+          - IsolationModeNone
         network_mode:
           description: 'Docker network mode (default: bridge)'
           type: string
@@ -373,7 +382,8 @@ components:
       description: Per-server isolation settings
       properties:
         enabled:
-          description: Enable Docker isolation for this server (nil = inherit global)
+          description: Enable Docker isolation for this server (nil = inherit global;
+            legacy, superseded by Mode)
           type: boolean
         extra_args:
           description: Additional docker run arguments for this server
@@ -393,6 +403,8 @@ components:
         log_max_size:
           description: Maximum size of log files override
           type: string
+        mode:
+          $ref: '#/components/schemas/config.IsolationMode'
         network_mode:
           description: Custom network mode for this server
           type: string
@@ -400,6 +412,14 @@ components:
           description: Custom working directory in container
           type: string
       type: object
+    config.IsolationMode:
+      description: 'Per-server isolation mode override: "docker" | "sandbox" | "none"
+        (nil = inherit global; MCP-34.2)'
+      type: string
+      x-enum-varnames:
+      - IsolationModeDocker
+      - IsolationModeSandbox
+      - IsolationModeNone
     config.LogConfig:
       description: Logging configuration
       properties:
