@@ -523,6 +523,100 @@ func TestProfile_ActivityMetadata(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Profiles v2 (T2): set_profile session-scoped switching on the base /mcp endpoint
+// ---------------------------------------------------------------------------
+
+// callSetProfile invokes the set_profile tool and returns (active_profile,
+// servers, isError, rawText).
+func (e *profileTestEnv) callSetProfile(ctx context.Context, c *client.Client, slug string) (string, []string, bool, string) {
+	e.t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "set_profile"
+	req.Params.Arguments = map[string]interface{}{"profile": slug}
+	result, err := c.CallTool(ctx, req)
+	require.NoError(e.t, err)
+	text := extractText(result)
+	if result.IsError {
+		return "", nil, true, text
+	}
+	var resp struct {
+		ActiveProfile string   `json:"active_profile"`
+		Servers       []string `json:"servers"`
+	}
+	require.NoError(e.t, json.Unmarshal([]byte(text), &resp), "set_profile result must be JSON: %s", text)
+	return resp.ActiveProfile, resp.Servers, false, text
+}
+
+// TestProfile_SetProfileSessionScoped exercises the core T2 flow: a base /mcp
+// session selects a profile via set_profile, retrieve_tools is then scoped to
+// that profile (no re-index), switching swaps the scope, and clearing restores
+// all servers — all within one MCP session.
+func TestProfile_SetProfileSessionScoped(t *testing.T) {
+	env := newProfileTestEnv(t)
+	ctx := context.Background()
+
+	// Single base /mcp client → one stable MCP session across calls.
+	c := env.CreateProxyClient()
+	env.initClient(c)
+
+	// Switch to "research".
+	active, servers, isErr, text := env.callSetProfile(ctx, c, "research")
+	require.False(t, isErr, "set_profile(research) should succeed: %s", text)
+	assert.Equal(t, "research", active)
+	assert.Contains(t, servers, "research-srv")
+	assert.NotContains(t, servers, "deploy-srv")
+
+	// retrieve_tools on the SAME session is now scoped to research — no deploy tools.
+	names := env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	for _, n := range names {
+		assert.False(t, strings.Contains(n, "deploy_app") || strings.Contains(n, "rollback"),
+			"after set_profile(research), retrieve_tools must not return deploy tools; got: %v", names)
+	}
+
+	// Switch to "deploy" — scope swaps without re-index.
+	active, servers, isErr, _ = env.callSetProfile(ctx, c, "deploy")
+	require.False(t, isErr)
+	assert.Equal(t, "deploy", active)
+	assert.Contains(t, servers, "deploy-srv")
+	names = env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	for _, n := range names {
+		assert.False(t, strings.Contains(n, "search_papers") || strings.Contains(n, "fetch_article"),
+			"after set_profile(deploy), retrieve_tools must not return research tools; got: %v", names)
+	}
+
+	// Clear (empty slug) — back to all servers.
+	active, _, isErr, _ = env.callSetProfile(ctx, c, "")
+	require.False(t, isErr)
+	assert.Equal(t, "", active)
+	names = env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	hasResearch, hasDeploy := false, false
+	for _, n := range names {
+		if strings.Contains(n, "search_papers") || strings.Contains(n, "fetch_article") {
+			hasResearch = true
+		}
+		if strings.Contains(n, "deploy_app") || strings.Contains(n, "rollback") {
+			hasDeploy = true
+		}
+	}
+	assert.True(t, hasResearch && hasDeploy,
+		"after clearing the profile, retrieve_tools should see both servers; got: %v", names)
+}
+
+// TestProfile_SetProfileUnknown verifies set_profile rejects an unknown slug and
+// lists the available profiles.
+func TestProfile_SetProfileUnknown(t *testing.T) {
+	env := newProfileTestEnv(t)
+	ctx := context.Background()
+
+	c := env.CreateProxyClient()
+	env.initClient(c)
+
+	_, _, isErr, text := env.callSetProfile(ctx, c, "nonexistent")
+	assert.True(t, isErr, "set_profile with an unknown slug must error")
+	assert.Contains(t, text, "unknown profile 'nonexistent'", "error must name the bad slug: %s", text)
+}
+
+// ---------------------------------------------------------------------------
 // T020: Backward-compat — existing /mcp, /mcp/code, /mcp/call unaffected
 // ---------------------------------------------------------------------------
 

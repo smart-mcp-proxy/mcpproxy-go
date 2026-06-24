@@ -220,6 +220,13 @@ type Server struct {
 	// staleness is bounded.
 	usageCacheMu sync.Mutex
 	usageCache   map[string]usageCacheEntry
+
+	// activeProfile is the server-level default active profile surfaced to UI
+	// clients (Web UI / tray) via GET/PUT /api/v1/profiles/active (Profiles v2
+	// T2). Empty means "all servers". It is a UI-facing default and does not
+	// override a live MCP session's set_profile selection.
+	activeProfileMu sync.RWMutex
+	activeProfile   string
 }
 
 // usageCacheEntry is one cached usage response with its expiry.
@@ -606,6 +613,11 @@ func (s *Server) setupRoutes() {
 
 		// Routing mode endpoint
 		r.Get("/routing", s.handleGetRouting)
+
+		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
+		r.Get("/profiles", s.handleListProfiles)
+		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Put("/profiles/active", s.handleSetActiveProfile)
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
