@@ -220,6 +220,13 @@ type Server struct {
 	// staleness is bounded.
 	usageCacheMu sync.Mutex
 	usageCache   map[string]usageCacheEntry
+
+	// activeProfile is the server-level default active profile surfaced to UI
+	// clients (Web UI / tray) via GET/PUT /api/v1/profiles/active (Profiles v2
+	// T2). Empty means "all servers". It is a UI-facing default and does not
+	// override a live MCP session's set_profile selection.
+	activeProfileMu sync.RWMutex
+	activeProfile   string
 }
 
 // usageCacheEntry is one cached usage response with its expiry.
@@ -606,6 +613,11 @@ func (s *Server) setupRoutes() {
 
 		// Routing mode endpoint
 		r.Get("/routing", s.handleGetRouting)
+
+		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
+		r.Get("/profiles", s.handleListProfiles)
+		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Put("/profiles/active", s.handleSetActiveProfile)
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -1340,6 +1352,11 @@ type AddServerRequest struct {
 	// semantics — do NOT collapse to a plain bool, or an omitted field would
 	// silently reset a previously-set value.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// InitTimeout is the per-server MCP `initialize` handshake deadline override
+	// (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
+	// pointer means "leave unchanged" on PATCH; a present value is applied.
+	// Mirrors config.ServerConfig.InitTimeout's *Duration tri-state.
+	InitTimeout *config.Duration `json:"init_timeout,omitempty" swaggertype:"string"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1468,6 +1485,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// *bool nil-preserve semantics: only set when the caller provided it.
 	if req.AutoApproveToolChanges != nil {
 		serverConfig.AutoApproveToolChanges = req.AutoApproveToolChanges
+	}
+	// MCP-3322: carry the per-server init_timeout override through on create.
+	if req.InitTimeout != nil {
+		serverConfig.InitTimeout = req.InitTimeout
 	}
 
 	// Add server via controller
@@ -1668,6 +1689,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
+	}
+	// MCP-3322: init_timeout is a tri-state *Duration — preserve the existing
+	// pointer when the request omits it so an unrelated PATCH doesn't wipe a
+	// configured deadline.
+	if req.InitTimeout != nil {
+		updates.InitTimeout = req.InitTimeout
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.InitTimeout = existingSrv.InitTimeout
 	}
 	if req.Isolation != nil {
 		updates.Isolation = req.Isolation.toConfig()

@@ -286,6 +286,7 @@ Examples:
 	upstreamPatchHeaderRemove []string
 	upstreamPatchEnvs         []string
 	upstreamPatchEnvRemove    []string
+	upstreamPatchInitTimeout  string
 
 	// Import command flags
 	upstreamImportServer       string
@@ -361,6 +362,7 @@ func init() {
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchHeaderRemove, "header-remove", nil, "HTTP header name to delete (repeatable)")
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvs, "env", nil, "Environment variable to upsert in KEY=value format (repeatable)")
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvRemove, "env-remove", nil, "Environment variable name to delete (repeatable)")
+	upstreamPatchCmd.Flags().StringVar(&upstreamPatchInitTimeout, "init-timeout", "", "MCP initialize handshake deadline as a duration (e.g. '120s', '3m'); raise for upstreams that warm up before responding to initialize")
 
 	// Inspect command flags
 	upstreamInspectCmd.Flags().StringVar(&upstreamInspectTool, "tool", "", "Show details for a specific tool")
@@ -2075,9 +2077,18 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("server name is required")
 	}
 
+	initTimeout := strings.TrimSpace(upstreamPatchInitTimeout)
 	if len(upstreamPatchHeaders) == 0 && len(upstreamPatchHeaderRemove) == 0 &&
-		len(upstreamPatchEnvs) == 0 && len(upstreamPatchEnvRemove) == 0 {
-		return fmt.Errorf("at least one of --header / --header-remove / --env / --env-remove must be specified")
+		len(upstreamPatchEnvs) == 0 && len(upstreamPatchEnvRemove) == 0 && initTimeout == "" {
+		return fmt.Errorf("at least one of --header / --header-remove / --env / --env-remove / --init-timeout must be specified")
+	}
+
+	// Validate --init-timeout locally so we fail fast with a clear message
+	// before hitting the daemon (the backend re-validates the bounds).
+	if initTimeout != "" {
+		if _, perr := time.ParseDuration(initTimeout); perr != nil {
+			return fmt.Errorf("invalid --init-timeout %q: %v (expected a duration like '120s' or '3m')", initTimeout, perr)
+		}
 	}
 
 	headers := map[string]*string{}
@@ -2135,6 +2146,9 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	if len(envs) > 0 {
 		body["env"] = envs
 	}
+	if initTimeout != "" {
+		body["init_timeout"] = initTimeout
+	}
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -2175,6 +2189,9 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	}
 	if n := len(upstreamPatchEnvRemove); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d env var(s) removed", n))
+	}
+	if initTimeout != "" {
+		parts = append(parts, fmt.Sprintf("init_timeout=%s", initTimeout))
 	}
 	if len(parts) > 0 {
 		fmt.Printf(": %s", strings.Join(parts, ", "))

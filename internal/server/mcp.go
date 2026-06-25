@@ -24,7 +24,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/observability"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
@@ -517,17 +516,6 @@ func (p *MCPProxyServer) emitActivityInternalToolCall(internalToolName, targetSe
 	}
 }
 
-// profileSlugFromContext returns the active profile slug for a /mcp/p/<slug>
-// request, or "" when the request did not enter via a profile URL (Spec 057
-// FR-011). The slug is threaded into the activity emitter so it lands at the
-// top-level metadata["profile"], not nested under metadata.intent.
-func profileSlugFromContext(ctx context.Context) string {
-	if scope := profile.ProfileScopeFromContext(ctx); scope != nil {
-		return scope.Name
-	}
-	return ""
-}
-
 // buildCallToolVariantTool constructs the mcp.Tool definition for a single
 // call_tool_* variant (read/write/destructive). Factored out so both
 // registerTools and schema tests exercise the same builder.
@@ -637,6 +625,9 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
+
+	// set_profile - Profiles v2 (T2): switch the session's active profile
+	p.server.AddTool(buildSetProfileTool(), p.handleSetProfile)
 
 	// Intent-based tool variants (Spec 018)
 	// These replace the legacy call_tool with three operation-specific variants
@@ -761,6 +752,9 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			),
 			mcp.WithBoolean("enabled",
 				mcp.Description("Whether server should be enabled (default: true)"),
+			),
+			mcp.WithString("init_timeout",
+				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
 			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
@@ -1181,8 +1175,25 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		limit = 100
 	}
 
-	// Perform search using index manager
-	results, err := p.index.Search(query, limit)
+	// Profiles v2 (T2): resolve the effective profile (token pin > URL > session
+	// set_profile > none) and search the matching per-profile index when one is
+	// in effect. The per-profile index physically holds only that profile's
+	// servers' tools, so switching costs no re-index. The shared index remains
+	// the allow-all fallback; profileScope still post-filters as defense in depth
+	// (and covers the fallback path below).
+	profileName, profileScope := p.resolveActiveProfile(ctx)
+	searchIndex := p.index
+	if profileName != "" {
+		if pIdx, perr := p.index.ForProfile(profileName); perr == nil && pIdx != nil {
+			searchIndex = pIdx
+		} else if perr != nil {
+			p.logger.Warn("per-profile index unavailable; falling back to shared index with post-filter",
+				zap.String("profile", profileName), zap.Error(perr))
+		}
+	}
+
+	// Perform search using the resolved index manager
+	results, err := searchIndex.Search(query, limit)
 	if err != nil {
 		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
 		p.emitActivityInternalToolCall("retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
@@ -1196,8 +1207,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// want to repeat per result.
 	authCtx := auth.AuthContextFromContext(ctx)
 	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
-	// Spec 057: profile scope filter — independent of agent-scope (nil = allow all).
-	profileScope := profile.ProfileScopeFromContext(ctx)
+	// Spec 057 / Profiles v2: profileScope was resolved above (token pin > URL >
+	// session) and filters independently of agent-scope (nil = allow all).
 
 	// Spec 049: opt-in discovery of locked tools. When false (default) the
 	// behavior below is byte-for-byte identical to before — disabled tools are
@@ -1617,9 +1628,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s", toolName)), nil
 	}
 
-	// Spec 057: profile filter — runs independently of agent-scope so that
-	// unauthenticated /mcp/p/<slug> connections (AdminContext) are still filtered.
-	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil && !profileScope.Allows(serverName) {
+	// Spec 057 / Profiles v2: profile filter — runs independently of agent-scope
+	// so that unauthenticated /mcp/p/<slug> connections (AdminContext) are still
+	// filtered, and so a base /mcp session that ran set_profile is bounded too.
+	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil && !profileScope.Allows(serverName) {
 		errMsg := fmt.Sprintf("server '%s' is not in profile '%s'", serverName, profileScope.Name)
 		p.emitActivityPolicyDecision(serverName, actualToolName, getSessionID(), "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
@@ -1702,9 +1714,10 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// Generate requestID for activity tracking
 	requestID := fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, actualToolName)
 
-	// Spec 057 FR-011: profile slug for /mcp/p/<slug> calls, tagged on every
-	// activity record (success AND error paths) at top-level metadata["profile"].
-	profileSlug := profileSlugFromContext(ctx)
+	// Spec 057 FR-011 / Profiles v2: effective profile slug (token pin > URL >
+	// session set_profile) tagged on every activity record (success AND error
+	// paths) at top-level metadata["profile"].
+	profileSlug, _ := p.resolveActiveProfile(ctx)
 
 	// Spec 028: Inject auth identity into a separate copy for activity logging only.
 	// The original args must not be mutated — upstream servers reject unknown fields
@@ -2928,9 +2941,10 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		servers = filtered
 	}
 
-	// Spec 057 (FR-004): Filter servers to only those visible in the active profile.
-	// Independent of agent-scope so unauthenticated /mcp/p/<slug> connections are filtered.
-	if profileScope := profile.ProfileScopeFromContext(ctx); profileScope != nil {
+	// Spec 057 (FR-004) / Profiles v2: Filter servers to only those visible in the
+	// active profile (token pin > URL > session set_profile). Independent of
+	// agent-scope so unauthenticated /mcp/p/<slug> connections are filtered.
+	if _, profileScope := p.resolveActiveProfile(ctx); profileScope != nil {
 		var filtered []*config.ServerConfig
 		for _, s := range servers {
 			if profileScope.Allows(s.Name) {
@@ -3806,6 +3820,17 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
+	// MCP-3322: optional per-server init_timeout (handshake deadline) override.
+	var initTimeout *config.Duration
+	if its := request.GetString("init_timeout", ""); its != "" {
+		d, perr := time.ParseDuration(its)
+		if perr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid init_timeout %q: %v (expected a duration like '120s' or '3m')", its, perr)), nil
+		}
+		v := config.Duration(d)
+		initTimeout = &v
+	}
+
 	serverConfig := &config.ServerConfig{
 		Name:        name,
 		URL:         url,
@@ -3820,6 +3845,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Created:     time.Now(),
 		Isolation:   isolation,
 		OAuth:       oauth,
+		InitTimeout: initTimeout,
 	}
 
 	// Save to storage
@@ -4310,6 +4336,17 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 			}
 			patch.Isolation = &isolation
 		}
+	}
+
+	// MCP-3322: per-server init_timeout (handshake deadline) override. Parse the
+	// duration string and set the pointer; MergeServerConfig applies it.
+	if its := request.GetString("init_timeout", ""); its != "" {
+		d, perr := time.ParseDuration(its)
+		if perr != nil {
+			return nil, opts, fmt.Errorf("invalid init_timeout %q: %v (expected a duration like '120s' or '3m')", its, perr)
+		}
+		v := config.Duration(d)
+		patch.InitTimeout = &v
 	}
 
 	// Handle oauth JSON string - deep merge for nested config

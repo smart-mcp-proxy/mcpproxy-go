@@ -262,6 +262,25 @@ func (m *Manager) UsesDockerIsolation() bool {
 	return m.shouldEnableDockerRecovery()
 }
 
+// resolveConnectTimeout computes the deadline for an upstream's MCP `initialize`
+// handshake (MCP-3322 / GH #760). It resolves the per-server → global → 30s
+// default init_timeout via Config.ResolveInitTimeout. For Docker-isolated
+// servers — which may need to pull/install a package before answering
+// `initialize` — it keeps a 3-minute floor so a small init_timeout never
+// regresses the historical Docker grace period; a larger init_timeout still
+// wins. Un-isolated stdio servers (the bite in #760) now get the resolved
+// deadline instead of silently inheriting the caller's ~30s context.
+func (m *Manager) resolveConnectTimeout(serverConfig *config.ServerConfig, dockerIsolated bool) time.Duration {
+	timeout := 30 * time.Second
+	if gc := m.globalConfig.Load(); gc != nil {
+		timeout = gc.ResolveInitTimeout(serverConfig)
+	}
+	if dockerIsolated && timeout < 3*time.Minute {
+		timeout = 3 * time.Minute
+	}
+	return timeout
+}
+
 // SetLogConfig sets the logging configuration for upstream server loggers
 func (m *Manager) SetLogConfig(logConfig *config.LogConfig) {
 	m.mu.Lock()
@@ -446,8 +465,9 @@ func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error 
 			return nil
 		}
 
-		// Connect to server with timeout to prevent hanging
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Connect to server with the resolved init_timeout (MCP-3322) to prevent
+		// hanging while still honoring a per-server/global handshake deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.IsDockerIsolated()))
 		defer cancel()
 		if err := client.Connect(ctx); err != nil {
 			// Check if this is an OAuth error - don't fail AddServer for OAuth
@@ -1349,13 +1369,13 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 		go func(id string, c *managed.Client) {
 			defer wg.Done()
 
-			// Use a longer timeout for Docker-isolated servers that need package installation
-			connectCtx := ctx
-			if c.IsDockerIsolated() {
-				var cancel context.CancelFunc
-				connectCtx, cancel = context.WithTimeout(ctx, 3*time.Minute)
-				defer cancel()
-			}
+			// Apply the resolved init_timeout (MCP-3322) as the connect deadline.
+			// Previously only Docker-isolated servers were wrapped (3min) and
+			// un-isolated stdio servers silently inherited the caller's ~30s
+			// context — the #760 bite. resolveConnectTimeout keeps the 3min floor
+			// for Docker isolation while honoring a per-server/global override.
+			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.IsDockerIsolated()))
+			defer cancel()
 
 			if err := c.Connect(connectCtx); err != nil {
 				m.logger.Error("Failed to connect to upstream server",
@@ -1688,7 +1708,14 @@ func (m *Manager) RetryConnection(serverName string) error {
 
 	// Trigger connection attempt in background to avoid blocking
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		// Honor the resolved init_timeout (MCP-3322) on the post-OAuth retry too,
+		// with a 2-minute floor so this path never regresses below its historical
+		// grace period.
+		retryTimeout := m.resolveConnectTimeout(client.GetConfig(), client.IsDockerIsolated())
+		if retryTimeout < 2*time.Minute {
+			retryTimeout = 2 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), retryTimeout)
 		defer cancel()
 
 		// Important: Ensure a clean reconnect only if not already connected.

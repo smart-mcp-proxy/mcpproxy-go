@@ -2,12 +2,14 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -638,6 +640,63 @@ func (c *Client) TriggerOAuthLogin(serverName string) error {
 	return nil
 }
 
+// GetProfiles fetches the configured profiles (Profiles v2 T5) from
+// GET /api/v1/profiles for the tray profile switcher.
+func (c *Client) GetProfiles() ([]tray.ProfileInfo, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/profiles", nil)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	raw, ok := resp.Data["profiles"].([]interface{})
+	if !ok {
+		// No profiles configured is a valid, empty result.
+		return nil, nil
+	}
+
+	var result []tray.ProfileInfo
+	for _, p := range raw {
+		pm, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		result = append(result, tray.ProfileInfo{
+			Name:      getString(pm, "name"),
+			ToolCount: getInt(pm, "tool_count"),
+		})
+	}
+	return result, nil
+}
+
+// GetActiveProfile fetches the server-level default active profile from
+// GET /api/v1/profiles/active. An empty string means "all servers".
+func (c *Client) GetActiveProfile() (string, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/profiles/active", nil)
+	if err != nil {
+		return "", err
+	}
+	if !resp.Success {
+		return "", fmt.Errorf("API error: %s", resp.Error)
+	}
+	return getString(resp.Data, "active_profile"), nil
+}
+
+// SetActiveProfile sets the server-level default active profile via
+// PUT /api/v1/profiles/active. An empty name clears the selection (all servers).
+func (c *Client) SetActiveProfile(name string) error {
+	resp, err := c.makeRequest("PUT", "/api/v1/profiles/active", map[string]string{"profile": name})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("API error: %s", resp.Error)
+	}
+	return nil
+}
+
 // GetServerTools gets tools for a specific server
 func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
 	endpoint := fmt.Sprintf("/api/v1/servers/%s/tools", serverName)
@@ -887,8 +946,10 @@ func (c *Client) OpenWebUI() error {
 	}
 }
 
-// makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
-func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, error) {
+// makeRequest makes an HTTP request to the API with enhanced error handling and retry logic.
+// When body is non-nil it is JSON-encoded and sent as the request payload (e.g. PUT bodies);
+// nil yields a bodyless request, preserving every existing call site.
+func (c *Client) makeRequest(method, path string, body interface{}) (*Response, error) {
 	url, err := c.buildURL(path)
 	if err != nil {
 		return nil, err
@@ -896,8 +957,21 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 	maxRetries := 3
 	baseDelay := 1 * time.Second
 
+	var bodyBytes []byte
+	if body != nil {
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest(method, url, http.NoBody)
+		// Recreate the reader each attempt so retries resend the full body.
+		var bodyReader io.Reader = http.NoBody
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequest(method, url, bodyReader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}

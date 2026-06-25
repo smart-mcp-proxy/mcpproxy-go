@@ -42,7 +42,8 @@ type AgentToken struct {
 	CreatedAt      time.Time  `json:"created_at"`
 	LastUsedAt     *time.Time `json:"last_used_at,omitempty"`
 	Revoked        bool       `json:"revoked"`
-	UserID         string     `json:"user_id,omitempty"` // Owner user ID (server edition)
+	UserID         string     `json:"user_id,omitempty"`     // Owner user ID (server edition)
+	ProfilePin     string     `json:"profile_pin,omitempty"` // Profile this token is pinned to (Profiles v2 T3)
 }
 
 // IsExpired returns true if the token has passed its expiry time.

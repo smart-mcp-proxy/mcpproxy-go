@@ -44,6 +44,9 @@
 
       <!-- Right: Stats + Proxy Info -->
       <div class="hidden md:flex items-center space-x-3 shrink-0">
+        <!-- Profile switcher (Profiles v2 / MCP-3243) -->
+        <ProfileSwitcher />
+
         <!-- Servers -->
         <div class="flex items-center space-x-2 px-3 py-2 bg-base-200 rounded-lg text-sm">
           <div
@@ -137,6 +140,7 @@ import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import { useAuthStore } from '@/stores/auth'
 import AddServerModal from './AddServerModal.vue'
+import ProfileSwitcher from './ProfileSwitcher.vue'
 
 const router = useRouter()
 const systemStore = useSystemStore()

@@ -153,6 +153,32 @@ actor APIClient {
         try await postAction(path: "/api/v1/servers/\(id)/login")
     }
 
+    // MARK: - Profiles (Profiles v2 T5)
+
+    /// List configured profiles from `GET /api/v1/profiles`.
+    func profiles() async throws -> [ProfileSummary] {
+        let response: ProfilesListResponse = try await fetchWrapped(path: "/api/v1/profiles")
+        return response.profiles
+    }
+
+    /// Get the server-level default active profile from
+    /// `GET /api/v1/profiles/active`. An empty string means "all servers".
+    func activeProfile() async throws -> String {
+        let response: ActiveProfileResponse = try await fetchWrapped(path: "/api/v1/profiles/active")
+        return response.activeProfile
+    }
+
+    /// Set the server-level default active profile via
+    /// `PUT /api/v1/profiles/active`. An empty slug clears the selection.
+    func setActiveProfile(_ slug: String) async throws {
+        let bodyData = try JSONSerialization.data(withJSONObject: ["profile": slug])
+        let (data, response) = try await performRequest(path: "/api/v1/profiles/active", method: "PUT", body: bodyData)
+        if let errorResponse = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           !errorResponse.success, let message = errorResponse.error {
+            throw APIClientError.httpError(statusCode: response.statusCode, message: message)
+        }
+    }
+
     /// Quarantine a server via `POST /api/v1/servers/{id}/quarantine`.
     func quarantineServer(_ id: String) async throws {
         try await postAction(path: "/api/v1/servers/\(id)/quarantine")

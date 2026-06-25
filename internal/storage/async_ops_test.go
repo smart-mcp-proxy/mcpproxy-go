@@ -350,6 +350,9 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// through UpstreamRecord so REST/UI-set overrides survive a restart.
 		"HealthCheckInterval":   true,
 		"ToolDiscoveryInterval": true,
+		// MCP-3322: per-server init_timeout override; round-tripped through
+		// UpstreamRecord so REST/UI/CLI-set deadlines survive a restart.
+		"InitTimeout": true,
 	}
 
 	// Get all fields from ServerConfig

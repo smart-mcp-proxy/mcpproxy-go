@@ -237,6 +237,29 @@ func TestConvertServerConfig_AutoApproveToolChanges(t *testing.T) {
 	assert.Nil(t, unset.AutoApproveToolChanges)
 }
 
+// TestConvertServerConfig_InitTimeout verifies the per-server init_timeout
+// override (MCP-3322) round-trips through both the direct and generic-map
+// converters, and stays nil/omitted when unset.
+func TestConvertServerConfig_InitTimeout(t *testing.T) {
+	it := config.Duration(120 * time.Second)
+	cfg := &config.ServerConfig{Name: "slack", Enabled: true, InitTimeout: &it}
+	server := ConvertServerConfig(cfg, "ready", true, 0, false)
+	require.NotNil(t, server.InitTimeout)
+	assert.Equal(t, 120*time.Second, server.InitTimeout.Duration())
+
+	unset := ConvertServerConfig(&config.ServerConfig{Name: "unset", Enabled: true}, "ready", true, 0, false)
+	assert.Nil(t, unset.InitTimeout, "unset init_timeout must stay nil")
+
+	generic := ConvertGenericServersToTyped([]map[string]interface{}{
+		{"id": "slack", "name": "slack", "enabled": true, "init_timeout": "120s"},
+		{"id": "unset", "name": "unset", "enabled": true},
+	})
+	require.Len(t, generic, 2)
+	require.NotNil(t, generic[0].InitTimeout)
+	assert.Equal(t, 120*time.Second, generic[0].InitTimeout.Duration())
+	assert.Nil(t, generic[1].InitTimeout)
+}
+
 // TestConvertGenericServersToTyped_NoOAuth verifies servers without OAuth have nil OAuth field
 func TestConvertGenericServersToTyped_NoOAuth(t *testing.T) {
 	genericServers := []map[string]interface{}{

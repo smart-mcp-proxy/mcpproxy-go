@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -207,6 +208,33 @@ func TestListServers(t *testing.T) {
 		require.Contains(t, byName, "unset")
 		assert.Nil(t, byName["unset"].AutoApproveToolChanges,
 			"a server that never set the flag must omit it (nil), not coerce to false")
+	})
+
+	// MCP-3322: init_timeout must project from the runtime serverMap (a duration
+	// string) onto contracts.Server so a configured override round-trips through
+	// GET /api/v1/servers and `mcpproxy upstream list -o json`.
+	t.Run("init_timeout projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "warmup", "name": "warmup", "enabled": true, "init_timeout": "2m0s"},
+			{"id": "unset", "name": "unset", "enabled": true},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 2)
+
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "warmup")
+		require.NotNil(t, byName["warmup"].InitTimeout)
+		assert.Equal(t, 2*time.Minute, byName["warmup"].InitTimeout.Duration())
+
+		require.Contains(t, byName, "unset")
+		assert.Nil(t, byName["unset"].InitTimeout, "a server that never set init_timeout must omit it (nil)")
 	})
 
 	// T094: Test that TotalTools only counts enabled servers' tools (Issue #285 fix)

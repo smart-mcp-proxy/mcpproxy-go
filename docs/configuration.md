@@ -86,7 +86,8 @@ MCPProxy looks for configuration in these locations (in order):
 {
   "tools_limit": 15,
   "tool_response_limit": 20000,
-  "call_tool_timeout": "2m"
+  "call_tool_timeout": "2m",
+  "init_timeout": "30s"
 }
 ```
 
@@ -95,6 +96,7 @@ MCPProxy looks for configuration in these locations (in order):
 | `tools_limit` | integer | `15` | Maximum number of tools to return per request (1-1000) |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool responses (0 = unlimited) |
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
+| `init_timeout` | duration | `"30s"` | Deadline for an upstream's MCP `initialize` handshake (e.g. `"30s"`, `"120s"`, `"3m"`). Raise this for servers that do legitimate first-run warmup — building a cache/index or prefetching — before they answer `initialize`, so they are not killed mid-startup. Global default; can be overridden per server (see [Server Fields](#server-fields)). Range: `1s`–`30m`; `"0s"`/unset uses the 30s default. |
 
 ### Discovery & Health Checks
 
@@ -208,6 +210,7 @@ the proxy.
 | `launcher_wait_timeout` | duration | No | When `command` is set together with an HTTP/SSE `url`, how long mcpproxy waits for that URL to become reachable after spawning the child (e.g. `"15s"`, default `"30s"`) |
 | `health_check_interval` | duration | No | Per-server override for the global [`health_check_interval`](#discovery--health-checks). `"0s"` disables the liveness probe for this server only. Range: `5s`–`1h`. Omit to inherit the global value. |
 | `tool_discovery_interval` | duration | No | Per-server override for the global [`tool_discovery_interval`](#discovery--health-checks). Overrides the global/default cadence for this server only; `"0s"` disables the periodic tool-discovery sweep for this server (connect-time and reactive `list_changed` discovery still run). Range: `30s`–`24h`. Omit to inherit the global value. |
+| `init_timeout` | duration | No | Per-server override for the global [`init_timeout`](#search--tool-limits) — the MCP `initialize` handshake deadline. Raise it for an upstream that warms up (caches/indexes data) before responding to `initialize` (e.g. `"120s"`, `"3m"`); without it such a server is killed mid-startup and, with `docker run --rm`, retries forever. Range: `1s`–`30m`. Omit to inherit the global value (30s default). Settable via the `upstream_servers` tool and `mcpproxy upstream patch --init-timeout`. |
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |

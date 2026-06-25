@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -256,6 +256,26 @@ class APIService {
   // Routing mode endpoint
   async getRouting(): Promise<APIResponse<RoutingInfo>> {
     return this.request<RoutingInfo>('/api/v1/routing')
+  }
+
+  // Profiles v2 (MCP-3243 / T4) — consume the REST surface from MCP-3241.
+  // List configured profiles with their effective servers + indexed tool count.
+  async getProfiles(): Promise<APIResponse<ListProfilesResponse>> {
+    return this.request<ListProfilesResponse>('/api/v1/profiles')
+  }
+
+  // Read the server-level default active profile (empty string = all servers).
+  async getActiveProfile(): Promise<APIResponse<ActiveProfileResponse>> {
+    return this.request<ActiveProfileResponse>('/api/v1/profiles/active')
+  }
+
+  // Set the server-level default active profile. Pass an empty string to clear
+  // (back to all servers); a non-empty slug must match a configured profile.
+  async setActiveProfile(profile: string): Promise<APIResponse<ActiveProfileResponse>> {
+    return this.request<ActiveProfileResponse>('/api/v1/profiles/active', {
+      method: 'PUT',
+      body: JSON.stringify({ profile }),
+    })
   }
 
   // Server endpoints

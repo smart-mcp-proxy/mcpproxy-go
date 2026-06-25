@@ -275,6 +275,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				TokenPrefix:    agentToken.TokenPrefix,
 				AllowedServers: agentToken.AllowedServers,
 				Permissions:    agentToken.Permissions,
+				ProfilePin:     agentToken.ProfilePin,
 			}
 			ctx := auth.WithAuthContext(r.Context(), authCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -1233,6 +1234,14 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
+	// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
+	// existing pointer when the request omits the field, so this nil-guard is
+	// the second half of the nil-preserve contract.
+	if updates.InitTimeout != nil {
+		existing.InitTimeout = updates.InitTimeout
+	}
+
 	// Isolation is PATCH-semantic: nil means "leave unchanged"; a
 	// present struct means "replace". Within the struct, the caller
 	// only populates fields they want to set (handled upstream by
@@ -1670,6 +1679,19 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 		slug := strings.TrimPrefix(r.URL.Path, "/mcp/p/")
 		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 		slug = strings.Trim(slug, "/")
+
+		// Profiles v2 T3: a profile-pinned agent token may only operate within its
+		// pinned profile. A request to any other /mcp/p/<slug> is forbidden (403),
+		// regardless of whether that slug is a real profile. Auth has already run
+		// (mcpAuthMiddleware wraps this handler), so the pin is on the context.
+		if pin := profilePinFromContext(r.Context()); pin != "" && pin != slug {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": fmt.Sprintf("agent token is pinned to profile '%s' and cannot access profile '%s'", pin, slug),
+			})
+			return
+		}
 
 		// Look up profile by slug (lock-free snapshot).
 		var found *config.ProfileConfig
@@ -2569,6 +2591,15 @@ func (s *Server) GetSecretResolver() *secret.Resolver {
 // NotifySecretsChanged notifies the runtime that secrets have changed
 func (s *Server) NotifySecretsChanged(ctx context.Context, operation, secretName string) error {
 	return s.runtime.NotifySecretsChanged(ctx, operation, secretName)
+}
+
+// EmitActiveProfileChanged broadcasts an active_profile.changed event so UI
+// surfaces (Web UI, tray) reflect a default-profile switch made by another
+// client (Profiles v2 T2/T5). The REST handler invokes this via an optional
+// capability assertion, so adding it here does not widen the httpapi
+// ServerController interface.
+func (s *Server) EmitActiveProfileChanged(profile string) {
+	s.runtime.EmitActiveProfileChanged(profile)
 }
 
 // GetCurrentConfig returns the current configuration
