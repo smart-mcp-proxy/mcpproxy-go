@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
 
@@ -296,6 +297,14 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	} else {
 		// Plain (non-docker) launcher command. Shell-wrap for login-env inheritance.
 		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
+
+		// Native sandbox isolation (MCP-34.3): mirror connectStdio — re-exec the
+		// shell-wrapped command through the sandbox wrapper when mode is "sandbox".
+		if c.isolationManager != nil && c.isolationManager.ResolveMode(c.config) == config.IsolationModeSandbox {
+			var extraEnv []string
+			finalCommand, finalArgs, extraEnv = c.wrapWithSandbox(finalCommand, finalArgs)
+			envVars = append(envVars, extraEnv...)
+		}
 	}
 
 	cmd := exec.Command(finalCommand, finalArgs...)

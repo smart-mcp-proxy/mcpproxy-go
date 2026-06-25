@@ -54,6 +54,15 @@ func handledAccessFS(abi int) uint64 {
 	return h
 }
 
+// Available reports whether the native sandbox primitive (Landlock) can be
+// enforced on this kernel right now. It lets callers log an honest diagnostic
+// ("sandbox requested but kernel lacks Landlock; running degraded") and lets
+// tests skip enforcement assertions on kernels without Landlock.
+func Available() bool {
+	abi, err := landlockABI()
+	return err == nil && abi >= 1
+}
+
 // Apply confines the current process per spec. On success the calling process
 // — and every process it subsequently execs — can only touch the filesystem
 // subtrees in the allowlist, under the supplied rlimits. The restriction is
