@@ -155,3 +155,6 @@ tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/
 - Config changes: update both storage and file system; the file watcher hot-reloads.
 - **macOS tray dev** (build / replace / verify with `mcpproxy-ui-test`): [docs/development/macos-tray.md](docs/development/macos-tray.md).
 - **Windows installer**: [docs/github-actions-windows-wix-research.md](docs/github-actions-windows-wix-research.md). **Prerelease** (`next` branch + `v*-rc.*` tags, opt-in, off stable channels): [docs/prerelease-builds.md](docs/prerelease-builds.md).
+
+## Recent Changes
+- 076-deterministic-tool-scanner: Added Go 1.24 + stdlib only for detection (`unicode`, `unicode/utf8`, `encoding/base64`, `encoding/hex`, `regexp`); `golang.org/x/text/unicode/norm` (already an indirect dep via x/text) for NFKC; existing `internal/security/patterns/`, `internal/security/scanner/`, `internal/runtime/tool_quarantine.go`. No new third-party dependency.
