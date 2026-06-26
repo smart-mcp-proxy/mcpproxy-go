@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect/checks"
 )
 
 // inProcessTPAScannerID is the bundled, Docker-less scanner that analyzes a
@@ -92,7 +94,7 @@ type toolDef struct {
 // inProcessToolScan parses an exported tools.json document and returns findings
 // from the TPA heuristics plus any secrets embedded in tool descriptions. It is
 // a pure function (no Docker, no network) so it works for remote servers.
-func inProcessToolScan(toolsJSON []byte, scannerID string) []ScanFinding {
+func inProcessToolScan(toolsJSON []byte, serverName, scannerID string) []ScanFinding {
 	var doc struct {
 		Tools []toolDef `json:"tools"`
 	}
@@ -152,7 +154,70 @@ func inProcessToolScan(toolsJSON []byte, scannerID string) []ScanFinding {
 		}
 	}
 
+	// Spec-076 offline detect.Engine: the structural soft checks (prompt-injection
+	// directives, capability mismatch, embedded secrets) run alongside the legacy
+	// phrase/secret heuristics above. Findings convert 1:1 to ScanFinding.
+	findings = append(findings, detectEngineFindings(doc.Tools, serverName, scannerID)...)
+
 	return findings
+}
+
+// detectEngineFindings runs the Spec-076 offline detect.Engine over the server's
+// tool set and converts each detect.Finding 1:1 into a ScanFinding. The engine
+// builds a RegistryView from the whole tool set so cross-tool checks can reason
+// about what this scan can see.
+//
+// NOTE (Spec-076 US1/US2 coordination): this wiring is the single shared
+// integration point between US1's hard checks (#770) and US2's soft checks. This
+// branch registers the three US2 SOFT checks; when the two land, the Checks slice
+// below is the merge point — combine into the full six-check set.
+func detectEngineFindings(tools []toolDef, serverName, scannerID string) []ScanFinding {
+	views := make([]detect.ToolView, 0, len(tools))
+	for _, t := range tools {
+		views = append(views, detect.ToolView{
+			Server:      serverName,
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		})
+	}
+
+	engine := detect.NewEngine(detect.Options{
+		ScannerID: scannerID,
+		Checks: []detect.Check{
+			&checks.DirectiveImperative{},
+			&checks.CapabilityMismatch{},
+			&checks.EmbeddedSecret{},
+		},
+	})
+	result := engine.Scan(detect.NewRegistryView(views))
+
+	out := make([]ScanFinding, 0, len(result.Findings))
+	for _, f := range result.Findings {
+		out = append(out, detectFindingToScanFinding(f))
+	}
+	return out
+}
+
+// detectFindingToScanFinding maps a self-contained detect.Finding onto the
+// scanner's ScanFinding. detect deliberately mirrors the scanner's severity /
+// threat-level / threat-type vocabulary strings, so the copy is verbatim. The
+// additive Confidence/Signals fields are carried through.
+func detectFindingToScanFinding(f detect.Finding) ScanFinding {
+	return ScanFinding{
+		RuleID:      f.RuleID,
+		Severity:    f.Severity,
+		Category:    f.Category,
+		ThreatType:  f.ThreatType,
+		ThreatLevel: f.ThreatLevel,
+		Title:       f.Title,
+		Description: f.Description,
+		Location:    f.Location,
+		Scanner:     f.Scanner,
+		Evidence:    f.Evidence,
+		Confidence:  f.Confidence,
+		Signals:     f.Signals,
+	}
 }
 
 // runInProcessScanner executes a Docker-less, built-in scanner in Go. It reads
@@ -192,7 +257,7 @@ func (e *Engine) runInProcessScanner(s *ScannerPlugin, req ScanRequest) (*ScanRe
 		return nil, logs, fmt.Errorf("in-process scanner %s: could not read exported tool definitions (%s): %w", s.ID, toolsPath, err)
 	}
 
-	findings := inProcessToolScan(data, s.ID)
+	findings := inProcessToolScan(data, req.ServerName, s.ID)
 	// Findings already carry threat_type/threat_level; this is a no-op safety
 	// net consistent with how Docker scanner output is normalized.
 	ClassifyAllFindings(findings)
