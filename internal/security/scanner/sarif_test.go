@@ -286,6 +286,56 @@ func TestCalculateRiskScore(t *testing.T) {
 	}
 }
 
+// TestCalculateRiskScoreConsensusRaisesScore proves Spec-076 FR-006 / SC-007:
+// independent signals on one tool ADD to the risk score instead of being
+// collapsed, so a tool flagged by several checks scores higher than one flagged
+// by a single check (consensus is visible). The deterministic scanner emits ONE
+// ScanFinding per tool carrying every contributing check in Signals; the score
+// must weigh that finding by its signal count.
+func TestCalculateRiskScoreConsensusRaisesScore(t *testing.T) {
+	single := []ScanFinding{{
+		RuleID:      "detect.unicode.hidden",
+		Location:    "srv:tool_a",
+		ThreatLevel: ThreatLevelWarning,
+		Signals:     []string{"unicode.hidden"},
+	}}
+	consensus := []ScanFinding{{
+		RuleID:      "detect.unicode.hidden",
+		Location:    "srv:tool_a",
+		ThreatLevel: ThreatLevelWarning,
+		Signals:     []string{"unicode.hidden", "directive.imperative", "capability.mismatch"},
+	}}
+
+	singleScore := CalculateRiskScore(single)
+	consensusScore := CalculateRiskScore(consensus)
+
+	// single: 1 signal → warning count 1 → 6*log2(2)=6
+	if singleScore != 6 {
+		t.Errorf("single-signal score = %d, want 6", singleScore)
+	}
+	// consensus: 3 signals → warning count 3 → 6*log2(4)=12
+	if consensusScore != 12 {
+		t.Errorf("consensus score = %d, want 12", consensusScore)
+	}
+	if consensusScore <= singleScore {
+		t.Errorf("consensus score %d must exceed single-signal score %d", consensusScore, singleScore)
+	}
+}
+
+// TestCalculateRiskScoreCrossScannerDedupRetained guards that the consensus
+// change does NOT break the legitimate cross-scanner de-duplication: the same
+// finding (rule_id+location) reported by multiple scanners with no per-signal
+// data still counts once. Only independent signals WITHIN a finding add.
+func TestCalculateRiskScoreCrossScannerDedupRetained(t *testing.T) {
+	findings := []ScanFinding{
+		{RuleID: "MCP-TP-003", Location: "tool:add_numbers", ThreatLevel: ThreatLevelDangerous, Scanner: "scanner-a"},
+		{RuleID: "MCP-TP-003", Location: "tool:add_numbers", ThreatLevel: ThreatLevelDangerous, Scanner: "scanner-b"},
+	}
+	if got := CalculateRiskScore(findings); got != 25 {
+		t.Errorf("cross-scanner duplicate score = %d, want 25 (deduped to one dangerous)", got)
+	}
+}
+
 func TestSummarizeFindings(t *testing.T) {
 	findings := []ScanFinding{
 		{Severity: SeverityCritical},

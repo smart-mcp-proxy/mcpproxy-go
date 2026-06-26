@@ -2072,6 +2072,25 @@ func printFindingsList(findings []interface{}) {
 			}
 		}
 
+		// Deterministic-scanner transparency (Spec 076 US4): the combined
+		// confidence and the independent checks that contributed to this
+		// finding, so an operator can see WHY a tool was flagged and that
+		// agreement among checks raised its score.
+		if conf, ok := finding["confidence"].(float64); ok && conf > 0 {
+			fmt.Printf("         Confidence: %.2f\n", conf)
+		}
+		if rawSignals, ok := finding["signals"].([]interface{}); ok && len(rawSignals) > 0 {
+			names := make([]string, 0, len(rawSignals))
+			for _, s := range rawSignals {
+				if name, ok := s.(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+			if len(names) > 0 {
+				fmt.Println("         Signals:  " + strings.Join(names, ", "))
+			}
+		}
+
 		// Package info
 		if pkg != "" {
 			pkgLine := "         Package:  " + pkg

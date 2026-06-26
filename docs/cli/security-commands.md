@@ -498,7 +498,13 @@ The `Scanners: X run, Y failed (names) of Z` line surfaces per-scanner failures 
 
 - `risk_score` — composite 0-100 score
 - `summary` — severity counts (`critical`, `high`, `medium`, `low`, `info`, `dangerous`, `warnings`, `info_level`, `total`)
-- `findings` — normalized findings across all scanners
+- `findings` — normalized findings across all scanners. Findings from the
+  deterministic tool-scanner (Spec 076) additionally carry `confidence` (0.0–1.0
+  combined confidence) and `signals` (the independent check IDs that fired, e.g.
+  `unicode.hidden`, `directive.imperative`). When several independent checks
+  agree on one tool, that agreement **adds** to the composite `risk_score`
+  rather than being collapsed — the table report renders these as `Confidence:`
+  and `Signals:` lines under the finding.
 - `reports` — per-scanner raw results (also includes SARIF when `?include_sarif=true` is passed to the REST endpoint)
 - `scanner_statuses` — per-scanner execution records, each with `scanner_id`, `status`, `started_at`, `completed_at`, `duration_ms` (wall-clock execution time in milliseconds), `findings_count`, and `error`
 - `scan_context` — source method, source path, scanned file list
