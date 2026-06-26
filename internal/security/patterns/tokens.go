@@ -310,5 +310,6 @@ func bearerTokenPattern() *Pattern {
 		WithCategory(CategoryAuthToken).
 		WithSeverity(SeverityMedium).
 		WithDescription("Bearer authentication token").
+		WithConfidence(0.3). // broad/generic matcher → low confidence (Spec 076 T015)
 		Build()
 }

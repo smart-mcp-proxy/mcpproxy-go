@@ -42,6 +42,45 @@ type Pattern struct {
 	validator     func(match string) bool
 	normalizer    func(match string) string // Normalizes match before known example lookup
 	knownExamples map[string]bool
+	confidence    float64 // explicit per-pattern confidence; 0 = derive from Severity
+}
+
+// confidenceExample is the confidence assigned to a documented example/placeholder
+// value (e.g. an AWS doc key like AKIA…EXAMPLE). Near-zero so a placeholder is
+// never treated as a live secret (Spec 076, FR-012 false-positive control).
+const confidenceExample = 0.1
+
+// severityConfidence maps a pattern severity to a default 0.0–1.0 confidence.
+// Validated/high-distinctiveness matchers (critical) sit at the top; broad,
+// entropy-only matchers (low) sit at the bottom. Monotonic by design.
+func severityConfidence(s Severity) float64 {
+	switch s {
+	case SeverityCritical:
+		return 0.9
+	case SeverityHigh:
+		return 0.7
+	case SeverityMedium:
+		return 0.4
+	case SeverityLow:
+		return 0.2
+	default:
+		return 0.4
+	}
+}
+
+// ConfidenceFor returns the 0.0–1.0 confidence that a given match is a genuine
+// sensitive value (Spec 076 T015). A documented example collapses to
+// confidenceExample; an explicit WithConfidence wins over the severity default;
+// otherwise the severity-derived default applies. This is purely additive — it
+// does not change Match/IsValid/IsKnownExample behavior or any existing caller.
+func (p *Pattern) ConfidenceFor(match string) float64 {
+	if p.IsKnownExample(match) {
+		return confidenceExample
+	}
+	if p.confidence > 0 {
+		return p.confidence
+	}
+	return severityConfidence(p.Severity)
 }
 
 // Match finds all matches in the given content
@@ -159,6 +198,14 @@ func (b *PatternBuilder) WithKnownExamples(examples ...string) *PatternBuilder {
 // WithNormalizer sets a function to normalize matches before known example lookup
 func (b *PatternBuilder) WithNormalizer(normalizer func(string) string) *PatternBuilder {
 	b.pattern.normalizer = normalizer
+	return b
+}
+
+// WithConfidence sets an explicit per-pattern confidence (0.0–1.0), overriding
+// the severity-derived default. Used to mark validated matchers (e.g. Luhn cards)
+// as high and broad/generic matchers as low (Spec 076 T015).
+func (b *PatternBuilder) WithConfidence(c float64) *PatternBuilder {
+	b.pattern.confidence = c
 	return b
 }
 
