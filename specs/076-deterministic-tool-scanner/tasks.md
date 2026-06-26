@@ -41,10 +41,10 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 **Independent test**: Offline fixtures per attack class produce a hard finding; clean equivalents produce none (`go test ./internal/security/detect/checks/...`).
 
-- [ ] T009 [P] [US1] Write `internal/security/detect/checks/unicode_hidden_test.go` (MUST-flag zero-width/bidi/tag-block/PUA; escalate ≥3 classes or decoded tag-message; MUST-NOT-flag plain ASCII and ordinary accented Unicode); then implement `unicode_hidden.go` running on RAW text (FR-007).
-- [ ] T010 [P] [US1] Write `internal/security/detect/checks/shadowing_test.go` (MUST-flag cross-server tool reference and same-name collision via `RegistryView`; MUST-NOT-flag a tool referencing its own name); then implement `shadowing.go`.
-- [ ] T011 [P] [US1] Write `internal/security/detect/checks/payload_decoded_test.go` (MUST-flag base64/hex that DECODES to `curl|sh`/`chmod`/`rm -rf`/raw IP:port with decoded evidence; MUST-NOT-flag base64 of benign data) per FR-008; then implement `payload_decoded.go`.
-- [ ] T012 [US1] Register the three hard checks in the engine and wire `internal/security/scanner/inprocess.go` so `tpa-descriptions` delegates to `detect.Engine` (feeding a `RegistryView`, rendering findings); keep all CLI/REST/MCP entry points unchanged (FR-015). Update `inprocess_test.go` / `e2e_tpa_smoke_test.go` expectations to the new finding shape.
+- [x] T009 [P] [US1] Write `internal/security/detect/checks/unicode_hidden_test.go` (MUST-flag zero-width/bidi/tag-block/PUA; escalate ≥3 classes or decoded tag-message; MUST-NOT-flag plain ASCII and ordinary accented Unicode); then implement `unicode_hidden.go` running on RAW text (FR-007).
+- [x] T010 [P] [US1] Write `internal/security/detect/checks/shadowing_test.go` (MUST-flag cross-server tool reference and same-name collision via `RegistryView`; MUST-NOT-flag a tool referencing its own name); then implement `shadowing.go`.
+- [x] T011 [P] [US1] Write `internal/security/detect/checks/payload_decoded_test.go` (MUST-flag base64/hex that DECODES to `curl|sh`/`chmod`/`rm -rf`/raw IP:port with decoded evidence; MUST-NOT-flag base64 of benign data) per FR-008; then implement `payload_decoded.go`.
+- [x] T012 [US1] Register the three hard checks in the engine and wire `internal/security/scanner/inprocess.go` so `tpa-descriptions` delegates to `detect.Engine` (feeding a `RegistryView`, rendering findings); keep all CLI/REST/MCP entry points unchanged (FR-015). Update `inprocess_test.go` / `e2e_tpa_smoke_test.go` expectations to the new finding shape.
 
 **Checkpoint**: US1 is a usable MVP — structural attacks are caught and quarantined offline.
 
