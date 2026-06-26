@@ -18,7 +18,7 @@ func NewEngine(opts Options) *Engine
 func (e *Engine) Scan(reg RegistryView) Result
 
 type Result struct {
-    Findings []scanner.ScanFinding // existing type, now with Confidence + Signals
+    Findings []Finding // self-contained; converts 1:1 to scanner.ScanFinding
     Coverage Coverage
 }
 
@@ -28,6 +28,15 @@ type Coverage struct {
     FailedCheckIDs []string
 }
 ```
+
+> **Import-cycle note (T1 design decision).** `Result.Findings` is `[]detect.Finding`,
+> not `[]scanner.ScanFinding`. The scanner wiring (T012) imports `detect` to delegate
+> `tpa-descriptions`, so `detect` must NOT back-import `scanner` (that would form a
+> cycle). `detect` is therefore self-contained: `Finding` carries the same fields and
+> the same vocabulary string values (severity / threat level / threat type) as
+> `scanner.ScanFinding`, and the scanner layer converts `detect.Finding` →
+> `scanner.ScanFinding` (whose additive `Confidence` + `Signals` fields already exist).
+> The no-back-import invariant is enforced by the offline import-guard test.
 
 ### Guarantees (contract tests)
 

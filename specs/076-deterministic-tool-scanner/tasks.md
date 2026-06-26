@@ -17,8 +17,8 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 **Purpose**: Scaffold the new package and the shared types every check depends on.
 
-- [ ] T001 Create the `internal/security/detect/` package with doc.go describing the offline, deterministic, recover-isolated contract (per `contracts/detect-engine.md`).
-- [ ] T002 [P] Add the import-guard test `internal/security/detect/imports_test.go` asserting the package imports no `net`, `os/exec`, filesystem, or HTTP/Docker client (enforces FR-001 offline guarantee). It will fail until the package exists; keep it as the standing offline gate.
+- [X] T001 Create the `internal/security/detect/` package with doc.go describing the offline, deterministic, recover-isolated contract (per `contracts/detect-engine.md`).
+- [X] T002 [P] Add the import-guard test `internal/security/detect/imports_test.go` asserting the package imports no `net`, `os/exec`, filesystem, or HTTP/Docker client (enforces FR-001 offline guarantee). It will fail until the package exists; keep it as the standing offline gate.
 
 ---
 
@@ -26,12 +26,12 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 **Purpose**: Core types, normalization, position classifier, engine skeleton, and the additive report fields. Everything below blocks all user stories.
 
-- [ ] T003 [P] Define core types in `internal/security/detect/signal.go`: `Tier` (TierHard/TierSoft), `Signal`, `Check` interface, `ToolView`, `RegistryView` (with `ToolsByName`/`ToolNames` indexes), per `data-model.md`. Include `Confidence` clamping and `Evidence` length cap helpers.
-- [ ] T004 Add additive fields `Confidence float64` and `Signals []string` to `ScanFinding` in `internal/security/scanner/types.go`; write `types_test.go` asserting JSON round-trip keeps them (omitempty) and existing consumers are unaffected.
-- [ ] T005 [P] Write `internal/security/detect/normalize_test.go` (TDD) covering NFKC, zero-width strip, lowercase, whitespace-collapse, light stemming, and the "don't disclose" vs "do not tell" equivalence; then implement `normalize.go`.
-- [ ] T006 [P] Write `internal/security/detect/position_test.go` (TDD) for the instruction-vs-example classifier (discount after "such as/e.g./example", inside quotes, in "detects/flags …" lists; keep imperative-position confidence); then implement `position.go`.
-- [ ] T007 Implement the engine skeleton in `internal/security/detect/engine.go`: registers checks, builds a `RegistryView` once per scan, runs each `Check.Inspect` under `recover()`, records `Coverage{ChecksRun,ChecksFailed,FailedCheckIDs}`; write `engine_test.go` asserting determinism + totality (a panicking fake check is isolated, scan still returns) per the contract guarantees.
-- [ ] T008 Implement `internal/security/detect/aggregate.go`: signals → `ScanFinding` with tier semantics (any hard → dangerous/quarantine; soft-only severity = distinct-CheckID count 1→low/2→medium/3+→high), combined confidence (independent signals add, cap 1.0), and `Signals` list; write `aggregate_test.go` for the severity ladder and consensus-raises-confidence (FR-005, FR-006, FR-010).
+- [X] T003 [P] Define core types in `internal/security/detect/signal.go`: `Tier` (TierHard/TierSoft), `Signal`, `Check` interface, `ToolView`, `RegistryView` (with `ToolsByName`/`ToolNames` indexes), per `data-model.md`. Include `Confidence` clamping and `Evidence` length cap helpers.
+- [X] T004 Add additive fields `Confidence float64` and `Signals []string` to `ScanFinding` in `internal/security/scanner/types.go`; write `types_test.go` asserting JSON round-trip keeps them (omitempty) and existing consumers are unaffected.
+- [X] T005 [P] Write `internal/security/detect/normalize_test.go` (TDD) covering NFKC, zero-width strip, lowercase, whitespace-collapse, light stemming, and the "don't disclose" vs "do not tell" equivalence; then implement `normalize.go`.
+- [X] T006 [P] Write `internal/security/detect/position_test.go` (TDD) for the instruction-vs-example classifier (discount after "such as/e.g./example", inside quotes, in "detects/flags …" lists; keep imperative-position confidence); then implement `position.go`.
+- [X] T007 Implement the engine skeleton in `internal/security/detect/engine.go`: registers checks, builds a `RegistryView` once per scan, runs each `Check.Inspect` under `recover()`, records `Coverage{ChecksRun,ChecksFailed,FailedCheckIDs}`; write `engine_test.go` asserting determinism + totality (a panicking fake check is isolated, scan still returns) per the contract guarantees.
+- [X] T008 Implement `internal/security/detect/aggregate.go`: signals → `ScanFinding` with tier semantics (any hard → dangerous/quarantine; soft-only severity = distinct-CheckID count 1→low/2→medium/3+→high), combined confidence (independent signals add, cap 1.0), and `Signals` list; write `aggregate_test.go` for the severity ladder and consensus-raises-confidence (FR-005, FR-006, FR-010).
 
 ---
 
