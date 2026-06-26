@@ -64,6 +64,6 @@ stdin/stdout pass straight through with no intervening multiplexer.
 | **Linux** (no Landlock) | Degraded → runs unconfined, logged |
 | **macOS / Windows** | Documented **no-op** → effective `none` (Landlock is Linux-only) |
 
-See also: [docs/docker-isolation.md](../docker-isolation.md) for the Docker mode,
-and [docs/development/sandbox-spike-mcp-34.md](../development/sandbox-spike-mcp-34.md)
-for the mechanism spike.
+See also: [Docker Isolation](/features/docker-isolation) for the Docker mode, and
+the [non-Docker sandbox spike](/development/sandbox-spike-mcp-34) for the
+mechanism evaluation.
