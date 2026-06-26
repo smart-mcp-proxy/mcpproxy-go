@@ -241,6 +241,63 @@ func TestPrintFindingsListSkipsEmptyFields(t *testing.T) {
 	}
 }
 
+// TestPrintFindingsListRendersConfidenceAndSignals verifies Spec-076 US4
+// (FR-010 / SC-007): the CLI surfaces each finding's combined confidence and
+// the deterministic checks that contributed to it, so an operator can see WHY a
+// tool was flagged.
+func TestPrintFindingsListRendersConfidenceAndSignals(t *testing.T) {
+	out := captureStdout(t, func() {
+		printFindingsList([]interface{}{
+			map[string]interface{}{
+				"severity":     "high",
+				"rule_id":      "detect.unicode.hidden",
+				"title":        "Hidden Unicode in tool description",
+				"location":     "srv:exfiltrate",
+				"scanner":      "tpa-descriptions",
+				"threat_level": "dangerous",
+				"threat_type":  "tool_poisoning",
+				"confidence":   0.92,
+				"signals":      []interface{}{"unicode.hidden", "directive.imperative"},
+			},
+		})
+	})
+
+	wants := []string{
+		"Confidence:",
+		"0.92",
+		"Signals:",
+		"unicode.hidden",
+		"directive.imperative",
+	}
+	for _, w := range wants {
+		if !strings.Contains(out, w) {
+			t.Errorf("output missing %q\n--- output ---\n%s", w, out)
+		}
+	}
+}
+
+// TestPrintFindingsListSkipsConfidenceWhenAbsent ensures plain CVE-style
+// findings (no deterministic-scanner data) do not grow a noisy empty
+// "Confidence:"/"Signals:" row.
+func TestPrintFindingsListSkipsConfidenceWhenAbsent(t *testing.T) {
+	out := captureStdout(t, func() {
+		printFindingsList([]interface{}{
+			map[string]interface{}{
+				"severity": "high",
+				"rule_id":  "CVE-2024-0001",
+				"title":    "CVE-2024-0001",
+				"location": "node_modules/foo/index.js",
+			},
+		})
+	})
+	if strings.Contains(out, "Confidence:") {
+		t.Errorf("expected no 'Confidence:' row when confidence is absent; got:\n%s", out)
+	}
+	if strings.Contains(out, "Signals:") {
+		t.Errorf("expected no 'Signals:' row when signals are absent; got:\n%s", out)
+	}
+}
+
 // TestPrintScanContextSection verifies that the scan-context block renders
 // the source method, container, and file/tool counts. This is the signal
 // users need to triage a finding (e.g. is "tools.json:85" from a real Docker

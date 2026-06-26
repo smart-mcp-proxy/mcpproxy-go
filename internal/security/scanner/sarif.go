@@ -253,12 +253,20 @@ func categorizeFromRule(ruleID string, props map[string]any, rules map[string]SA
 //
 // This uses logarithmic diminishing returns so duplicate findings from multiple
 // scanners don't inflate the score, while still reflecting cumulative risk.
-// Findings are deduplicated by (rule_id + location) before scoring.
+// Identical findings reported by several scanners (same rule_id + location) are
+// deduplicated before scoring.
 //
-// Formula per category: category_score = weight * log2(1 + unique_count)
-//   - Dangerous: weight 25 (1 finding=25, 2=40, 4=58, 8=72, cap 80)
-//   - Warning:   weight 6  (1 finding=6,  2=10, 4=15, 8=18, cap 25)
-//   - Info:      weight 2  (1 finding=2,  2=3,  4=5,  8=6,  cap 10)
+// Spec 076 (FR-006, SC-007) — consensus is additive: the deterministic scanner
+// emits ONE finding per tool whose Signals list every independent check that
+// fired. A finding contributes its consensus weight (the count of distinct
+// contributing signals, min 1) to its category, so a tool flagged by several
+// checks raises the score instead of being collapsed to one. Findings from
+// scanners that emit no per-signal data weigh 1, so legacy scoring is unchanged.
+//
+// Formula per category: category_score = weight * log2(1 + weighted_count)
+//   - Dangerous: weight 25 (1=25, 2=40, 4=58, 8=72, cap 80)
+//   - Warning:   weight 6  (1=6,  2=10, 4=15, 8=18, cap 25)
+//   - Info:      weight 2  (1=2,  2=3,  4=5,  8=6,  cap 10)
 //
 // Note: This score is an experimental heuristic. There is no industry standard
 // for aggregating multi-scanner MCP security findings into a single number.
@@ -282,24 +290,28 @@ func CalculateRiskScore(findings []ScanFinding) int {
 			seen[key] = true
 		}
 
+		// Consensus weight: independent signals on one tool ADD to the score
+		// (FR-006). A single-signal or signal-less finding weighs 1.
+		weight := consensusWeight(f)
+
 		switch f.ThreatLevel {
 		case ThreatLevelDangerous:
-			dangerousCount++
+			dangerousCount += weight
 		case ThreatLevelWarning:
-			warningCount++
+			warningCount += weight
 		case ThreatLevelInfo:
-			infoCount++
+			infoCount += weight
 		default:
 			// Unclassified: use severity as fallback
 			switch f.Severity {
 			case SeverityCritical:
-				dangerousCount++
+				dangerousCount += weight
 			case SeverityHigh:
-				warningCount++
+				warningCount += weight
 			case SeverityMedium:
-				warningCount++
+				warningCount += weight
 			case SeverityLow:
-				infoCount++
+				infoCount += weight
 			}
 		}
 	}
@@ -325,6 +337,19 @@ func CalculateRiskScore(findings []ScanFinding) int {
 		score = 100
 	}
 	return score
+}
+
+// consensusWeight returns how much a single (deduplicated) finding contributes
+// to its risk category. The deterministic scanner (Spec 076) aggregates every
+// independent check that fired on a tool into one finding's Signals list, so a
+// finding flagged by N distinct checks weighs N — agreement raises the score
+// rather than being collapsed (FR-006). Findings with zero or one signal — and
+// every legacy scanner finding, which carries none — weigh 1.
+func consensusWeight(f ScanFinding) int {
+	if n := len(f.Signals); n > 1 {
+		return n
+	}
+	return 1
 }
 
 // SummarizeFindings produces a ReportSummary from findings
