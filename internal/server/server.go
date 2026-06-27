@@ -2919,6 +2919,26 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 	return nil, fmt.Errorf("server tools not available")
 }
 
+// GetAllServerTools implements scanner's optional allServerToolsProvider: it
+// returns every configured server's current tool definitions, keyed by server
+// name, so a scan can build a cross-server snapshot for the shadowing check.
+// Best-effort: servers that error or expose no tools are skipped, never fatal.
+func (p *configServerInfoProvider) GetAllServerTools() (map[string][]map[string]interface{}, error) {
+	cfg := p.currentConfig()
+	if cfg == nil || p.server == nil {
+		return nil, nil
+	}
+	all := make(map[string][]map[string]interface{}, len(cfg.Servers))
+	for _, sc := range cfg.Servers {
+		tools, err := p.server.GetServerTools(sc.Name)
+		if err != nil || len(tools) == 0 {
+			continue
+		}
+		all[sc.Name] = tools
+	}
+	return all, nil
+}
+
 // EnsureConnected attempts to connect a disconnected server so tool definitions
 // can be retrieved for security scanning. For quarantined servers, grants a
 // temporary inspection exemption so the supervisor allows the connection.

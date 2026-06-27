@@ -85,6 +85,16 @@ type ServerInfoProvider interface {
 	IsConnected(serverName string) bool
 }
 
+// allServerToolsProvider is an OPTIONAL capability a ServerInfoProvider may also
+// implement: enumerate every known server's current tool definitions, keyed by
+// server name. The Service uses it to build the cross-server snapshot that lets
+// the deterministic shadowing.cross_server check (Spec 076) detect impersonation
+// across servers. Providers that don't implement it simply contribute no peers
+// (cross-server shadowing is then inert, but every other check is unaffected).
+type allServerToolsProvider interface {
+	GetAllServerTools() (map[string][]map[string]interface{}, error)
+}
+
 // ServerUnquarantiner performs the full unquarantine workflow for a server.
 // Implementations are expected to:
 //   - Clear the quarantined flag in storage and persist config
@@ -671,6 +681,24 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			serverInfo = info
 			scanCtx.ServerProtocol = info.Protocol
 			scanCtx.ServerCommand = info.Command
+		}
+	}
+
+	// Cross-server snapshot for the in-process tpa-descriptions scanner so its
+	// shadowing.cross_server check can detect impersonation across servers
+	// (Spec 076 FR-003). Best-effort: a provider without the capability, or an
+	// error, just yields no peers and leaves cross-server shadowing inert.
+	if prov, ok := s.serverInfo.(allServerToolsProvider); ok {
+		if all, err := prov.GetAllServerTools(); err == nil && len(all) > 0 {
+			peers := make(map[string][]map[string]interface{}, len(all))
+			for name, tools := range all {
+				if name != serverName && len(tools) > 0 {
+					peers[name] = tools
+				}
+			}
+			if len(peers) > 0 {
+				req.PeerTools = peers
+			}
 		}
 	}
 
