@@ -85,11 +85,15 @@ var tpaRules = []tpaRule{
 
 // toolDef is the subset of an MCP tool definition the in-process scanner needs.
 // Tools are exported by service.exportToolDefinitions as MCP tools/list output:
-// {"tools": [ {"name": ..., "description": ..., "inputSchema": {...}} ]}.
+// {"tools": [ {"name": ..., "description": ..., "inputSchema": {...}, "outputSchema": {...}} ]}.
+// Both schemas are scanned: Spec 076 FR-001 operates on
+// name+description+inputSchema+outputSchema, since a TPA payload can hide in the
+// output schema's field names/descriptions just as easily as the input schema.
 type toolDef struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	OutputSchema json.RawMessage `json:"outputSchema"`
 }
 
 // inProcessToolScan parses an exported tools.json document and returns findings
@@ -125,11 +129,14 @@ func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string
 
 	for _, tool := range doc.Tools {
 		location := "tool:" + tool.Name
-		// Scan the description plus the serialized input schema — TPA payloads
-		// hide in either.
+		// Scan the description plus the serialized input AND output schemas — TPA
+		// payloads hide in any of them (Spec 076 FR-001).
 		text := tool.Description
 		if len(tool.InputSchema) > 0 {
 			text += " " + string(tool.InputSchema)
+		}
+		if len(tool.OutputSchema) > 0 {
+			text += " " + string(tool.OutputSchema)
 		}
 		lower := strings.ToLower(text)
 
@@ -224,10 +231,11 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 // its owning server.
 func toolView(server string, t toolDef) detect.ToolView {
 	return detect.ToolView{
-		Server:      server,
-		Name:        t.Name,
-		Description: t.Description,
-		InputSchema: t.InputSchema,
+		Server:       server,
+		Name:         t.Name,
+		Description:  t.Description,
+		InputSchema:  t.InputSchema,
+		OutputSchema: t.OutputSchema,
 	}
 }
 
