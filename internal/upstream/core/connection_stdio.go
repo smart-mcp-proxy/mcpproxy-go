@@ -207,6 +207,17 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		// .bashrc, .zshrc, etc.).
 		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
 		c.isDockerCommand = false
+
+		// Native sandbox isolation (MCP-34.3): when the resolved mode is
+		// "sandbox", re-exec the shell-wrapped command through the mcpproxy
+		// sandbox wrapper, which applies Landlock + rlimits before exec. Stdin/
+		// stdout passthrough is preserved (no mux). Non-Linux / unavailable
+		// kernels degrade to unconfined inside wrapWithSandbox.
+		if c.isolationManager != nil && c.isolationManager.ResolveMode(c.config) == config.IsolationModeSandbox {
+			var extraEnv []string
+			finalCommand, finalArgs, extraEnv = c.wrapWithSandbox(finalCommand, finalArgs)
+			envVars = append(envVars, extraEnv...)
+		}
 	}
 
 	// Upstream transport with working directory support and process group management
