@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -103,7 +104,10 @@ type toolDef struct {
 // detection remain here until US2 lands detect's directive.imperative and
 // secret.embedded checks, at which point this function fully delegates. Running
 // both side-by-side keeps the MVP from regressing any existing coverage.
-func inProcessToolScan(toolsJSON []byte, serverName, scannerID string) []ScanFinding {
+// peerTools maps a peer server's name to its current tool definitions. It feeds
+// the cross-server shadowing check a real multi-server RegistryView; nil/empty
+// means only the scanned server's tools are in view (no cross-server detection).
+func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string][]toolDef, scannerID string) []ScanFinding {
 	var doc struct {
 		Tools []toolDef `json:"tools"`
 	}
@@ -112,7 +116,7 @@ func inProcessToolScan(toolsJSON []byte, serverName, scannerID string) []ScanFin
 	}
 
 	// Delegate the structural checks to the offline detect.Engine first.
-	findings := detectEngineFindings(doc.Tools, serverName, scannerID)
+	findings := detectEngineFindings(doc.Tools, serverName, peerTools, scannerID)
 
 	// Default detector (built-in patterns) for embedded-secret detection in
 	// descriptions. nil config → DefaultSensitiveDataDetectionConfig, which
@@ -168,19 +172,30 @@ func inProcessToolScan(toolsJSON []byte, serverName, scannerID string) []ScanFin
 	return findings
 }
 
-// detectEngineFindings runs the Spec-076 offline detect.Engine over the server's
-// tool set and converts each detect.Finding 1:1 into a ScanFinding. The engine
-// builds a RegistryView from the whole tool set so cross-tool checks (shadowing)
-// can reason about collisions/references within what this scan can see.
-func detectEngineFindings(tools []toolDef, serverName, scannerID string) []ScanFinding {
+// detectEngineFindings runs the Spec-076 offline detect.Engine over the scanned
+// server's tools PLUS every peer server's tools, then converts each
+// detect.Finding 1:1 into a ScanFinding. Building the RegistryView from a real
+// cross-server snapshot — each ToolView tagged with its TRUE owning server — is
+// what lets shadowing.cross_server fire end-to-end (it only emits when a
+// collision/reference points at a *different* server). Findings are filtered to
+// the scanned server so a peer's own issues aren't reported under this scan.
+func detectEngineFindings(tools []toolDef, serverName string, peerTools map[string][]toolDef, scannerID string) []ScanFinding {
 	views := make([]detect.ToolView, 0, len(tools))
 	for _, t := range tools {
-		views = append(views, detect.ToolView{
-			Server:      serverName,
-			Name:        t.Name,
-			Description: t.Description,
-			InputSchema: t.InputSchema,
-		})
+		views = append(views, toolView(serverName, t))
+	}
+	// Deterministic peer ordering keeps findings stable across runs.
+	peerNames := make([]string, 0, len(peerTools))
+	for name := range peerTools {
+		if name != serverName {
+			peerNames = append(peerNames, name)
+		}
+	}
+	sort.Strings(peerNames)
+	for _, name := range peerNames {
+		for _, t := range peerTools[name] {
+			views = append(views, toolView(name, t))
+		}
 	}
 
 	engine := detect.NewEngine(detect.Options{
@@ -193,9 +208,48 @@ func detectEngineFindings(tools []toolDef, serverName, scannerID string) []ScanF
 	})
 	result := engine.Scan(detect.NewRegistryView(views))
 
+	prefix := serverName + ":"
 	out := make([]ScanFinding, 0, len(result.Findings))
 	for _, f := range result.Findings {
+		// Only report findings on the server being scanned; peers are context.
+		if !strings.HasPrefix(f.Location, prefix) {
+			continue
+		}
 		out = append(out, detectFindingToScanFinding(f))
+	}
+	return out
+}
+
+// toolView projects a parsed tool definition onto a detect.ToolView tagged with
+// its owning server.
+func toolView(server string, t toolDef) detect.ToolView {
+	return detect.ToolView{
+		Server:      server,
+		Name:        t.Name,
+		Description: t.Description,
+		InputSchema: t.InputSchema,
+	}
+}
+
+// peerToolDefs converts the cross-server snapshot carried on a ScanRequest
+// (MCP tools/list maps, keyed by server) into the toolDef form the detect
+// engine wiring consumes. Malformed entries for a server are skipped, never
+// fatal — the scan degrades to fewer peers rather than failing.
+func peerToolDefs(peers map[string][]map[string]interface{}) map[string][]toolDef {
+	if len(peers) == 0 {
+		return nil
+	}
+	out := make(map[string][]toolDef, len(peers))
+	for server, tools := range peers {
+		raw, err := json.Marshal(tools)
+		if err != nil {
+			continue
+		}
+		var defs []toolDef
+		if err := json.Unmarshal(raw, &defs); err != nil {
+			continue
+		}
+		out[server] = defs
 	}
 	return out
 }
@@ -258,7 +312,7 @@ func (e *Engine) runInProcessScanner(s *ScannerPlugin, req ScanRequest) (*ScanRe
 		return nil, logs, fmt.Errorf("in-process scanner %s: could not read exported tool definitions (%s): %w", s.ID, toolsPath, err)
 	}
 
-	findings := inProcessToolScan(data, req.ServerName, s.ID)
+	findings := inProcessToolScan(data, req.ServerName, peerToolDefs(req.PeerTools), s.ID)
 	// Findings already carry threat_type/threat_level; this is a no-op safety
 	// net consistent with how Docker scanner output is normalized.
 	ClassifyAllFindings(findings)
