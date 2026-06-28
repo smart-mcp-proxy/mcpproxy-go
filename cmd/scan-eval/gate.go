@@ -95,18 +95,25 @@ type gateMetrics struct {
 	GatedMalicious int              `json:"gated_malicious"`
 	GatedDetected  int              `json:"gated_detected"`
 	OverallRecall  float64          `json:"overall_recall"`
-	BenignTotal    int              `json:"benign_total"`
-	FalsePositives int              `json:"false_positives"`
-	FPRate         float64          `json:"fp_rate"`
-	Precision      float64          `json:"precision"`
-	F1             float64          `json:"f1"`
+	// FP rate is gated over the HARD-NEGATIVE set only (Spec 076 SC-002): clean
+	// benign entries must not dilute it, or growing the corpus could mask a
+	// hard-negative regression. BenignTotal/BenignFalsePositives are reported for
+	// transparency (SC-003 expects zero FP across benign + hard-negatives), but
+	// only FPRate (hard-negative) feeds the gate decision.
+	HardNegatives         int     `json:"hard_negatives"`
+	HardNegFalsePositives int     `json:"hard_negative_false_positives"`
+	FPRate                float64 `json:"fp_rate"` // hard-neg FP / hard-neg total (SC-002, gated)
+	BenignTotal           int     `json:"benign_total"`
+	BenignFalsePositives  int     `json:"benign_false_positives"`
+	Precision             float64 `json:"precision"`
+	F1                    float64 `json:"f1"`
 }
 
 // evaluateGateCorpus runs the detect engine over every entry and tallies recall
-// (over categories whose checks are registered), false-positive rate over all
-// benign samples, precision, and F1. Each entry is scanned in a RegistryView of
-// its own tool plus its declared peers, so shadowing fires deterministically and
-// entries never cross-contaminate one another.
+// (over categories whose checks are registered), the false-positive rate over
+// the HARD-NEGATIVE set (Spec 076 SC-002), precision, and F1. Each entry is
+// scanned in a RegistryView of its own tool plus its declared peers, so
+// shadowing fires deterministically and entries never cross-contaminate.
 func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 	engine := detect.NewEngine(detect.Options{Checks: checkList})
 
@@ -130,7 +137,8 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 	cats := map[string]*catTally{}
 	order := []string{}
 
-	var gatedMal, gatedDet, benignTotal, falsePos, truePos int
+	var gatedMal, gatedDet, truePos int
+	var benignTotal, benignFP, hardNegTotal, hardNegFP int
 
 	for i := range c.Entries {
 		e := c.Entries[i]
@@ -158,18 +166,27 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 		default: // benign / hard_negative
 			benignTotal++
 			if flagged {
-				falsePos++
+				benignFP++
+			}
+			// SC-002 gates the FP rate on the hard-negative set specifically.
+			if e.Category == "hard_negative" {
+				hardNegTotal++
+				if flagged {
+					hardNegFP++
+				}
 			}
 		}
 	}
 
 	m := gateMetrics{
-		Corpus:         c.Version,
-		Checks:         sortedCheckIDs(checkList),
-		GatedMalicious: gatedMal,
-		GatedDetected:  gatedDet,
-		BenignTotal:    benignTotal,
-		FalsePositives: falsePos,
+		Corpus:                c.Version,
+		Checks:                sortedCheckIDs(checkList),
+		GatedMalicious:        gatedMal,
+		GatedDetected:         gatedDet,
+		HardNegatives:         hardNegTotal,
+		HardNegFalsePositives: hardNegFP,
+		BenignTotal:           benignTotal,
+		BenignFalsePositives:  benignFP,
 	}
 	for _, cat := range order {
 		ct := cats[cat]
@@ -182,8 +199,8 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 		})
 	}
 	m.OverallRecall = ratio(gatedDet, gatedMal)
-	m.FPRate = ratio(falsePos, benignTotal)
-	m.Precision = ratio(truePos, truePos+falsePos)
+	m.FPRate = ratio(hardNegFP, hardNegTotal)
+	m.Precision = ratio(truePos, truePos+benignFP)
 	if m.Precision+m.OverallRecall > 0 {
 		m.F1 = 2 * m.Precision * m.OverallRecall / (m.Precision + m.OverallRecall)
 	}
@@ -243,6 +260,10 @@ func runGate(c *gateCorpus, minRecall, maxFP float64, stdout, stderr io.Writer) 
 
 	if m.GatedMalicious == 0 {
 		fmt.Fprintln(stderr, "error: no malicious samples in a gated category — the gate would be vacuous")
+		return exitConfigError
+	}
+	if m.HardNegatives == 0 {
+		fmt.Fprintln(stderr, "error: no hard-negative samples — the FP gate (SC-002) would be vacuous")
 		return exitConfigError
 	}
 

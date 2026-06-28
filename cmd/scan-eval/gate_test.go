@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,11 +99,66 @@ func TestEvaluateGateCorpus_DetectsAndExcludesUngated(t *testing.T) {
 	if m.OverallRecall != 1.0 {
 		t.Errorf("overall gated recall = %v, want 1.0", m.OverallRecall)
 	}
-	if m.FalsePositives != 0 {
-		t.Errorf("false positives = %d, want 0 (benign + hard-negatives must not fire)", m.FalsePositives)
+	// gateFixture has 2 hard-negatives + 1 clean benign; none must fire.
+	if m.HardNegatives != 2 {
+		t.Errorf("hard_negatives = %d, want 2", m.HardNegatives)
+	}
+	if m.HardNegFalsePositives != 0 || m.BenignFalsePositives != 0 {
+		t.Errorf("false positives must be 0, got hard-neg=%d benign=%d", m.HardNegFalsePositives, m.BenignFalsePositives)
 	}
 	if m.FPRate != 0.0 {
 		t.Errorf("FP rate = %v, want 0", m.FPRate)
+	}
+}
+
+// TestGateFP_HardNegativeDenominatorOnly proves the gated fp_rate is measured
+// over the hard-negative set ONLY (Spec 076 SC-002), so growing the clean-benign
+// corpus cannot dilute it and mask a hard-negative regression.
+func TestGateFP_HardNegativeDenominatorOnly(t *testing.T) {
+	hardNeg := func(id, desc string) gateEntry {
+		return gateEntry{ID: id, Label: "benign", Category: "hard_negative", Server: "s",
+			Tool: gateTool{Name: id, Description: desc}}
+	}
+	benign := func(id string) gateEntry {
+		return gateEntry{ID: id, Label: "benign", Category: "benign", Server: "s",
+			Tool: gateTool{Name: id, Description: "Ordinary benign tool that does nothing suspicious."}}
+	}
+
+	// One gated malicious (keeps the gate non-vacuous), two clean hard-negatives,
+	// and one hard-negative the engine flags (a hidden zero-width char) = exactly
+	// one hard-negative false positive out of three.
+	base := &gateCorpus{Version: "t", Entries: []gateEntry{
+		{ID: "m1", Label: "malicious", Category: "unicode_smuggling", Server: "evil",
+			Tool: gateTool{Name: "add_numbers", Description: "Adds." + zeroWidthSpace + " hidden."}},
+		hardNeg("hn_clean1", "Ordinary benign tool number one."),
+		hardNeg("hn_clean2", "Ordinary benign tool number two."),
+		hardNeg("hn_fp", "Looks benign but smuggles."+zeroWidthSpace+" oops."),
+	}}
+
+	m1 := evaluateGateCorpus(base, gateChecks())
+	if m1.HardNegatives != 3 {
+		t.Fatalf("hard_negatives = %d, want 3", m1.HardNegatives)
+	}
+	if m1.HardNegFalsePositives != 1 {
+		t.Fatalf("hard-neg false positives = %d, want 1", m1.HardNegFalsePositives)
+	}
+	want := 1.0 / 3.0
+	if m1.FPRate != want {
+		t.Fatalf("fp_rate = %v, want %v (hard-negative denominator)", m1.FPRate, want)
+	}
+
+	// Add 20 clean benign entries — the gated fp_rate MUST NOT move (the old
+	// benign+hard_negative denominator would dilute it to 1/23).
+	withBenign := &gateCorpus{Version: "t", Entries: append([]gateEntry{}, base.Entries...)}
+	for i := 0; i < 20; i++ {
+		withBenign.Entries = append(withBenign.Entries, benign(fmt.Sprintf("bn_%d", i)))
+	}
+	m2 := evaluateGateCorpus(withBenign, gateChecks())
+	if m2.HardNegatives != 3 {
+		t.Errorf("hard_negatives changed to %d after benign growth, want 3", m2.HardNegatives)
+	}
+	if m2.FPRate != m1.FPRate {
+		t.Errorf("fp_rate diluted by benign growth: %v -> %v (must be hard-negative-only)", m1.FPRate, m2.FPRate)
 	}
 }
 

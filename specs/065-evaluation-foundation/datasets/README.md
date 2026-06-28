@@ -148,8 +148,12 @@ go run ./cmd/scan-eval \
 ```
 
 It prints per-category recall/precision/FP/F1 JSON and exits non-zero on a
-breach. CI runs exactly this as a **blocking** step in the `security-d2` job of
-`.github/workflows/eval.yml` (Spec 076 FR-013, SC-006).
+breach. The gated `fp_rate` is measured over the **hard-negative set only** (Spec
+076 SC-002) — clean-benign entries are reported (`benign_total` /
+`benign_false_positives`) for transparency but never dilute the gate, so growing
+the benign corpus can't mask a hard-negative regression. CI runs exactly this as
+a **blocking** step in the `security-d2` job of `.github/workflows/eval.yml`
+(Spec 076 FR-013, SC-006).
 
 ## CI regression gate (Spec 065 / C1)
 
