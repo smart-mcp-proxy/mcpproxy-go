@@ -18,6 +18,7 @@ of a `*_v1.*` file** (CN-002, FR-012).
 | `retrieval_golden_v1.json` | 47 graded queries → tool(s), relevance 0\|1\|2, ≥8 hard-negatives (FR-001); R-C (queries never name the tool) | no (dataset) | yes |
 | `baseline_v1.json` | Reference Recall@k/MRR/nDCG@10/MAP + Recall@5 tolerance — the CI regression anchor (FR-009). `security` section filled by D2 (CN-004) | no (dataset) | yes |
 | `security_corpus_v1.json` | D2 labeled security regression corpus (per-detector P/R/F1/FPR) | no (dataset) | yes |
+| `detect_corpus_v1.json` | Spec-076 labeled corpus for the offline `detect.Engine` gate (per-category recall/FP; carries server/tool/peer fields the engine needs) | no (dataset) | yes |
 | score reports (`report.json` / `.html`) | Per-run output | no | **no** (CN-003 — stay local) |
 
 ---
@@ -107,6 +108,52 @@ text from them is vendored into this repo:
 - **`mcp-injection-experiments`** — LICENSE unconfirmed (research.md R-A); where it
   inspired a pattern, the corresponding entry was rewritten from scratch and
   labeled `self-authored`. The corpus test rejects any entry sourced from these.
+
+### `detect_corpus_v1.json` (Spec 076 — offline detect-engine gate)
+
+A second labeled corpus, distinct from `security_corpus_v1.json`, built for the
+Spec-076 offline `internal/security/detect` engine. Where the D2 corpus is
+description-only (it feeds the `sensitive-data` detector), this corpus carries
+the full `ToolView` fields the structural checks need — `server`, `tool.{name,
+description,input_schema}`, and cross-server `peers` so the `shadowing` check can
+fire deterministically. Validated by `detect_corpus_test.go` in this directory
+and scored by `cmd/scan-eval --gate`.
+
+**Composition (32 entries):**
+
+| Label | Category | Count | Mapped check | Gated today? |
+|-------|----------|-------|--------------|--------------|
+| malicious | `unicode_smuggling` | 6 | `unicode.hidden` | yes (US1) |
+| malicious | `decoded_payload` | 6 | `payload.decoded` | yes (US1) |
+| malicious | `shadowing` | 4 | `shadowing.cross_server` | yes (US1) |
+| malicious | `capability_mismatch` | 2 | `capability.mismatch` | **no** — US2 check; reported, not enforced |
+| benign | `hard_negative` (attack-resembling) | 9 | — | — |
+| benign | `benign` (clean base rate) | 5 | — | — |
+
+A category is only **gated** (counted toward the recall floor) when its check is
+registered in the engine. `capability_mismatch` samples are present so the gate
+begins enforcing them automatically the moment the US2 `capability.mismatch`
+check is registered — no corpus change required. Hard-negative ids are
+`hn_<category>_…` so a false positive maps back to the attack it mimics.
+
+Every entry is `self-authored` (redistributable), so the same license guard in
+`detect_corpus_test.go` keeps this corpus clean of restricted sources.
+
+**Run the gate locally (pure Go, offline, no mcp-eval needed):**
+
+```bash
+go run ./cmd/scan-eval \
+  --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
+  --gate --min-recall 0.90 --max-fp 0.05
+```
+
+It prints per-category recall/precision/FP/F1 JSON and exits non-zero on a
+breach. The gated `fp_rate` is measured over the **hard-negative set only** (Spec
+076 SC-002) — clean-benign entries are reported (`benign_total` /
+`benign_false_positives`) for transparency but never dilute the gate, so growing
+the benign corpus can't mask a hard-negative regression. CI runs exactly this as
+a **blocking** step in the `security-d2` job of `.github/workflows/eval.yml`
+(Spec 076 FR-013, SC-006).
 
 ## CI regression gate (Spec 065 / C1)
 
