@@ -56,10 +56,10 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 **Independent test**: Hard-negative corpus entries stay unflagged-as-dangerous; matching malicious entries are caught.
 
-- [ ] T013 [P] [US2] Write `internal/security/detect/checks/directive_imperative_test.go` (MUST-flag `<IMPORTANT>`/"before using this tool"/"do not tell the user"/"ignore previous instructions" and variants over NORMALIZED text; MUST-NOT-flag example-position usage) per FR-009; then implement `directive_imperative.go` using regex families + the position classifier.
-- [ ] T014 [P] [US2] Write `internal/security/detect/checks/capability_mismatch_test.go` (MUST-flag a math/string tool that reads `~/.ssh` or has an unexplained data-sink param like "sidenote"; MUST-NOT-flag a file tool that legitimately reads files); then implement `capability_mismatch.go` (declared-vs-implied + unused-param heuristic).
-- [ ] T015 [P] [US2] Add a per-match confidence to `internal/security/patterns/` matchers (validated card/Luhn → high; entropy-only → low) without changing existing call sites' behavior; update the patterns tests.
-- [ ] T016 [US2] Write `internal/security/detect/checks/embedded_secret_test.go`; then implement `embedded_secret.go` wrapping `patterns/` with confidence, register all three soft checks in the engine.
+- [x] T013 [P] [US2] Write `internal/security/detect/checks/directive_imperative_test.go` (MUST-flag `<IMPORTANT>`/"before using this tool"/"do not tell the user"/"ignore previous instructions" and variants over NORMALIZED text; MUST-NOT-flag example-position usage) per FR-009; then implement `directive_imperative.go` using regex families + the position classifier.
+- [x] T014 [P] [US2] Write `internal/security/detect/checks/capability_mismatch_test.go` (MUST-flag a math/string tool that reads `~/.ssh` or has an unexplained data-sink param like "sidenote"; MUST-NOT-flag a file tool that legitimately reads files); then implement `capability_mismatch.go` (declared-vs-implied + unused-param heuristic).
+- [x] T015 [P] [US2] Add a per-match confidence to `internal/security/patterns/` matchers (validated card/Luhn → high; entropy-only → low) without changing existing call sites' behavior; update the patterns tests.
+- [x] T016 [US2] Write `internal/security/detect/checks/embedded_secret_test.go`; then implement `embedded_secret.go` wrapping `patterns/` with confidence, register all three soft checks in the engine.
 
 **Checkpoint**: US1 + US2 — full six-check detector with FP discrimination.
 
@@ -71,9 +71,9 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 **Independent test**: `scan-eval --gate` exits non-zero when recall < 0.90 or hard-negative FP > 5%.
 
-- [ ] T017 [P] [US3] Expand the labeled corpus in `specs/065-evaluation-foundation/datasets/` with new categories (unicode_smuggling, decoded_payload, capability_mismatch, shadowing) and additional hard-negatives; author original equivalents where external licensing is unclear (FR-014). Update the dataset README + counts.
-- [ ] T018 [US3] Add `--gate --min-recall --max-fp` mode to `cmd/scan-eval/` that runs the new `detect.Engine` over the corpus, prints per-category recall/precision/FP/F1 JSON, and exits non-zero on breach; write `cmd/scan-eval` test for the gate exit logic.
-- [ ] T019 [US3] Wire the gate into the existing CI test workflow (`.github/workflows/…`) as a blocking step `scan-eval --gate --min-recall 0.90 --max-fp 0.05` (FR-013, SC-006).
+- [x] T017 [P] [US3] Expand the labeled corpus in `specs/065-evaluation-foundation/datasets/` with new categories (unicode_smuggling, decoded_payload, capability_mismatch, shadowing) and additional hard-negatives; author original equivalents where external licensing is unclear (FR-014). Update the dataset README + counts.
+- [x] T018 [US3] Add `--gate --min-recall --max-fp` mode to `cmd/scan-eval/` that runs the new `detect.Engine` over the corpus, prints per-category recall/precision/FP/F1 JSON, and exits non-zero on breach; write `cmd/scan-eval` test for the gate exit logic.
+- [x] T019 [US3] Wire the gate into the existing CI test workflow (`.github/workflows/…`) as a blocking step `scan-eval --gate --min-recall 0.90 --max-fp 0.05` (FR-013, SC-006).
 
 **Checkpoint**: reliability is enforced; recall ≥ 0.90 / FP ≤ 5% proven by the gate.
 
@@ -94,7 +94,7 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T022 [P] Document the six checks, the two-tier model, and the eval gate in `docs/features/` (extend security-quarantine.md / sensitive-data-detection.md or add tool-scanner.md); note offline/no-egress guarantee.
+- [x] T022 [P] Document the six checks, the two-tier model, and the eval gate in `docs/features/` (extend security-quarantine.md / sensitive-data-detection.md or add tool-scanner.md); note offline/no-egress guarantee.
 - [ ] T023 [P] Run `gofmt`/`goimports` and `golangci-lint run --config .github/.golangci.yml ./internal/security/... ./cmd/scan-eval/...`; fix findings.
 - [ ] T024 Full verification: `go test -race ./internal/security/... ./cmd/scan-eval/...`, `./scripts/test-api-e2e.sh`, and the corpus gate; confirm SC-001…SC-007 and update the spec checklist.
 
