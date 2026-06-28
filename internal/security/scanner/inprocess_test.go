@@ -37,8 +37,11 @@ func TestInProcessToolScan_DetectsHiddenInstructions(t *testing.T) {
 	// Must classify as a dangerous tool-poisoning threat and reference the tool.
 	var gotPoisoning bool
 	for _, f := range findings {
-		if f.Location != "tool:get_weather" {
-			t.Errorf("finding location = %q, want tool:get_weather", f.Location)
+		// Legacy heuristics locate as "tool:NAME"; the Spec-076 detect.Engine
+		// (incl. the US2 directive.imperative soft check, which also fires on this
+		// poisoned text) locates as "server:tool". Both must reference the tool.
+		if !strings.HasSuffix(f.Location, "get_weather") {
+			t.Errorf("finding location = %q, want a reference to get_weather", f.Location)
 		}
 		if f.Scanner != "tpa-descriptions" {
 			t.Errorf("finding scanner = %q, want tpa-descriptions", f.Scanner)

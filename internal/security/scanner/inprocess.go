@@ -208,9 +208,14 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 	engine := detect.NewEngine(detect.Options{
 		ScannerID: scannerID,
 		Checks: []detect.Check{
+			// US1 hard checks (#770).
 			&checks.UnicodeHidden{},
 			&checks.Shadowing{},
 			&checks.PayloadDecoded{},
+			// US2 soft checks (MCP-3577).
+			&checks.DirectiveImperative{},
+			&checks.CapabilityMismatch{},
+			&checks.EmbeddedSecret{},
 		},
 	})
 	result := engine.Scan(detect.NewRegistryView(views))
