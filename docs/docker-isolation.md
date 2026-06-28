@@ -1,6 +1,8 @@
-# Docker Security Isolation
+# Security Isolation (Docker · Sandbox · None)
 
-MCPProxy provides Docker isolation for stdio MCP servers to enhance security by running each server in its own isolated container.
+MCPProxy can confine stdio MCP servers so a malicious or buggy server cannot freely touch the host. There are **three isolation modes** — `docker`, `sandbox`, and `none` — selected by `docker_isolation.mode` (global) or `isolation.mode` (per-server). This document covers all three; most of it describes the **Docker** mode (the default and most capable), with the **Sandbox** mode and the **scanner behaviour under each mode** in [Isolation Modes](#isolation-modes) below.
+
+> **Naming note:** the global config key is still `docker_isolation` for backward compatibility, but its `mode` field selects any of the three modes — it is not Docker-only.
 
 > **New installs:** Docker isolation is turned on automatically when mcpproxy creates its initial `mcp_config.json` and a Docker daemon is reachable (`docker info` responds within 2 seconds). If Docker isn't available at first run, isolation stays off so stdio servers still work — you can enable it later from the **Security** page in the Web UI or by editing the config below.
 >
@@ -25,6 +27,58 @@ Docker isolation automatically wraps stdio-based MCP servers in Docker container
 - **Network Isolation**: Configurable network modes for security
 - **Resource Limits**: Memory and CPU limits prevent resource exhaustion
 - **Automatic Runtime Detection**: Maps commands to appropriate Docker images
+
+## Isolation Modes
+
+MCPProxy resolves an **isolation mode** for every stdio server. Set it globally with `docker_isolation.mode` and override per-server with `isolation.mode`:
+
+| Mode | What it does | Where it works | uid/gid drop |
+|------|--------------|----------------|--------------|
+| `docker` | Wraps the server in a Docker container (process/FS/network isolation, resource limits). The default and most capable mode. | Any host with a working Docker daemon. | Yes (container user) |
+| `sandbox` | Runs the server **natively** under a Linux [Landlock](https://docs.kernel.org/userspace-api/landlock.html) filesystem allowlist + `setrlimit` resource caps — **no Docker required**. For hosts where Docker isolation is unavailable or broken (e.g. snap-docker + AppArmor). | Linux 5.13+ only (Landlock). Best-effort downgrade across ABI 1–5. macOS/Windows: documented no-op ⇒ behaves like `none`. | **No** — see [Honest limitations](#honest-limitations) |
+| `none` | No confinement; the server runs directly on the host. | Everywhere. | n/a |
+
+```json
+{
+  "docker_isolation": {
+    "mode": "sandbox"
+  },
+  "mcpServers": [
+    { "name": "trusted-local", "command": "uvx", "args": ["x"], "isolation": { "mode": "none" } }
+  ]
+}
+```
+
+### Back-compat with the legacy `enabled` flag
+
+The older boolean `docker_isolation.enabled` (and per-server `isolation.enabled`) still works and is mapped to a mode:
+
+- an explicit `mode` always wins;
+- otherwise `enabled: true` ⇒ `docker`, `enabled: false` ⇒ `none`;
+- a missing/`nil` isolation config ⇒ `none`.
+
+Per-server precedence: explicit per-server `mode` → per-server legacy `enabled` → global `mode` → global legacy `enabled`. A per-server `mode` (e.g. `none` for a trusted server) overrides the global gate.
+
+### Sandbox mode (Landlock)
+
+`sandbox` mode confines a stdio server **without Docker** by applying a Linux Landlock LSM ruleset (a writable-path allowlist) plus `setrlimit` resource caps to the process before it `exec`s, then preserving the raw stdin/stdout JSON-RPC pipes. It is unaffected by `kernel.apparmor_restrict_unprivileged_userns=1` (it needs no user namespaces), which is exactly why it works where bubblewrap/userns-based sandboxes are blocked. See the spike write-up in [docs/development/sandbox-spike-mcp-34.md](development/sandbox-spike-mcp-34.md) for the mechanism comparison and PoC.
+
+### Scanner behaviour under each mode (MCP-34.4)
+
+The security **scanner plugins** (Spec 039) are Docker-based. Under a non-Docker isolation mode they cannot run, so MCPProxy **degrades cleanly and surfaces it** rather than failing silently:
+
+| Mode | Docker scanner plugins | In-process scanner (`tpa-descriptions`) | Scan result for a server with only Docker scanners |
+|------|------------------------|------------------------------------------|----------------------------------------------------|
+| `docker` | Run normally | Runs | As scanned |
+| `sandbox` / `none` | **Skipped** with an honest, mode-specific reason pointing at [`MCPX_DOCKER_SNAP_APPARMOR`](errors/MCPX_DOCKER_SNAP_APPARMOR.md) | **Still runs** | `security_scan.status: "degraded"` (a low/zero risk score from incomplete coverage is not reported as a trustworthy all-clear) |
+
+This is **decision D3 option (b)** from the [MCP-34 spike](development/sandbox-spike-mcp-34.md#recommendation-for-the-d3-scanner-question): clean, surfaced degradation. A native (non-Docker) scanner runtime — option (a) — is a larger follow-up and is not yet implemented. To run the full Docker-based scanner fleet, use `mode: docker` on a host with a working Docker daemon, or replace snap-docker with a distro Docker package (see the error doc).
+
+The skip is also logged at startup:
+
+```
+WARN  Isolation mode runs no Docker for scanner plugins; Docker-based scanners will be skipped …  {"isolation_mode": "sandbox"}
+```
 
 ## Configuration
 
@@ -296,6 +350,34 @@ docker stats
   resolve to an absolute path. If you still see this error, confirm the helper
   exists at the bundle path above, or pre-pull the image with
   `docker pull <image>`.
+
+## Snap-docker (AppArmor) failure mode
+
+On Ubuntu hosts where Docker is installed via **snap**, AppArmor's profile transition fights the security flags the scanner sandbox requires (`--security-opt no-new-privileges` + a pinned AppArmor profile), so in-container commands fail with *operation not permitted*. This is the original driver for non-Docker `sandbox` mode. Symptoms, root cause, and fixes are documented in [`docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md`](errors/MCPX_DOCKER_SNAP_APPARMOR.md). The related systemd/snap-confine variant for *upstream* docker servers is detected by `mcpproxy doctor` (issue #457).
+
+Your options on such a host:
+
+1. Replace snap Docker with a distro/upstream Docker package (full Docker mode works).
+2. Set `docker_isolation.mode: "sandbox"` — stdio servers are confined natively with Landlock; Docker-based scanners degrade cleanly (see [Scanner behaviour](#scanner-behaviour-under-each-mode-mcp-344)).
+3. Set `security.scanner_disable_no_new_privileges: true` to drop the `no-new-privileges` flag from scanner containers (weakens scanner hardening; prefer 1 or 2).
+
+## Honest limitations
+
+`sandbox` mode is deliberately scoped. Known limitations:
+
+- **No uid/gid drop.** Dropping to an unprivileged uid/gid requires `CAP_SETUID`/`CAP_SETGID` (i.e. running as root). When mcpproxy runs unprivileged, the uid/gid drop is **best-effort and typically a no-op** — the sandboxed process keeps the launching user's identity. Landlock (filesystem) and `setrlimit` (resource caps) still apply. Docker mode does drop to a container user. This is an honest trade-off, not a bug.
+- **Linux-only.** Landlock is a Linux 5.13+ feature. On older kernels the launcher degrades best-effort (fewer access-right bits enforced on ABI 1). On macOS/Windows `sandbox` is a documented **no-op** and behaves like `none`.
+- **Filesystem + resources only.** Landlock confines the filesystem write-allowlist; it does not provide network namespacing. Pair with care for network-sensitive servers, or use `docker` mode with `network_mode: none`.
+- **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped (the scan reports `degraded`). A native scanner runtime is a future enhancement (D3 option a).
+
+## Platform support matrix
+
+| Platform | `docker` | `sandbox` | `none` | Docker scanner plugins |
+|----------|----------|-----------|--------|------------------------|
+| Linux (kernel ≥ 5.13) | ✅ (needs Docker daemon) | ✅ Landlock + rlimits (no uid/gid drop) | ✅ | ✅ under `docker`; skipped+degraded under `sandbox`/`none` |
+| Linux (kernel < 5.13) | ✅ (needs Docker daemon) | ⚠️ best-effort: rlimits apply, Landlock partial/unavailable | ✅ | same as above |
+| macOS | ✅ (Docker Desktop) | ⚠️ no-op ⇒ effectively `none` | ✅ | ✅ under `docker`; n/a otherwise |
+| Windows | ✅ (Docker Desktop) | ⚠️ no-op ⇒ effectively `none` | ✅ | ✅ under `docker`; n/a otherwise |
 
 ## Security Considerations
 

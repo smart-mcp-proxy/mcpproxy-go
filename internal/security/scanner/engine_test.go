@@ -600,6 +600,99 @@ func TestEngineInProcessScannerAlwaysAvailable(t *testing.T) {
 	}
 }
 
+// TestEngineResolveScannersSkipsDockerUnderSandbox verifies D3 option (b)
+// (MCP-34.4): when the resolved isolation mode is "sandbox" (or "none") — i.e.
+// no Docker is available to run scanner containers — Docker-based scanner
+// plugins are cleanly skipped with an honest, mode-specific prefail message
+// (referencing MCPX_DOCKER_SNAP_APPARMOR) instead of the misleading
+// "pull the image" message, while the always-on in-process scanner still runs.
+// The skipped Docker scanners are still surfaced (recorded as failed) so the
+// scan summary degrades rather than silently pretending all-clear.
+func TestEngineResolveScannersSkipsDockerUnderSandbox(t *testing.T) {
+	for _, mode := range []string{"sandbox", "none"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			logger := zap.NewNop()
+			registry := NewRegistry(dir, logger)
+			registry.scanners["mcp-scan"].Status = ScannerStatusInstalled
+
+			// A non-nil docker runner with a real image present would normally
+			// let the Docker scanner pass checkImage; the sandbox/none gate must
+			// short-circuit before any Docker probe.
+			engine := NewEngine(nil, registry, dir, logger)
+			engine.isolationMode = mode
+
+			resolved, err := engine.resolveScanners(nil)
+			if err != nil {
+				t.Fatalf("resolveScanners: %v", err)
+			}
+
+			byID := make(map[string]resolvedScanner)
+			for _, rs := range resolved {
+				byID[rs.plugin.ID] = rs
+			}
+
+			// Docker scanner is still surfaced (visible in report) but prefailed.
+			dockerScanner, ok := byID["mcp-scan"]
+			if !ok {
+				t.Fatalf("expected mcp-scan to remain in resolved set under %s mode, got %v", mode, byID)
+			}
+			if dockerScanner.prefail == "" {
+				t.Fatalf("expected Docker scanner mcp-scan to be prefailed (skipped) under %s mode", mode)
+			}
+			if !strings.Contains(dockerScanner.prefail, mode) {
+				t.Errorf("prefail should name the isolation mode %q; got %q", mode, dockerScanner.prefail)
+			}
+			if !strings.Contains(dockerScanner.prefail, "MCPX_DOCKER_SNAP_APPARMOR") {
+				t.Errorf("prefail should reference the MCPX_DOCKER_SNAP_APPARMOR error doc; got %q", dockerScanner.prefail)
+			}
+			// The misleading "pull the image" guidance must NOT appear — you
+			// cannot pull/run Docker scanners at all under sandbox/none mode.
+			if strings.Contains(dockerScanner.prefail, "docker pull") {
+				t.Errorf("prefail must not tell the user to docker pull under %s mode; got %q", mode, dockerScanner.prefail)
+			}
+
+			// In-process scanner still runs (never prefailed).
+			inProc, ok := byID[inProcessTPAScannerID]
+			if !ok {
+				t.Fatalf("expected in-process scanner to remain available under %s mode", mode)
+			}
+			if inProc.prefail != "" {
+				t.Errorf("in-process scanner must not be prefailed under %s mode; got %q", mode, inProc.prefail)
+			}
+		})
+	}
+}
+
+// TestEngineResolveScannersDockerModeUnaffected is the back-compat guard: with
+// the default isolation mode (docker / empty) the sandbox skip path is inert,
+// so a Docker scanner with a nil docker runner resolves without a prefail (the
+// historical behaviour relied on by existing tests).
+func TestEngineResolveScannersDockerModeUnaffected(t *testing.T) {
+	for _, mode := range []string{"", "docker"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			dir := t.TempDir()
+			logger := zap.NewNop()
+			registry := NewRegistry(dir, logger)
+			registry.scanners["mcp-scan"].Status = ScannerStatusInstalled
+
+			engine := NewEngine(nil, registry, dir, logger)
+			engine.isolationMode = mode
+
+			resolved, err := engine.resolveScanners([]string{"mcp-scan"})
+			if err != nil {
+				t.Fatalf("resolveScanners: %v", err)
+			}
+			if len(resolved) != 1 {
+				t.Fatalf("expected 1 scanner, got %d", len(resolved))
+			}
+			if resolved[0].prefail != "" {
+				t.Errorf("Docker scanner unexpectedly prefailed under mode %q (nil docker runner skips image check): %q", mode, resolved[0].prefail)
+			}
+		})
+	}
+}
+
 func TestEngineParseResultsSARIF(t *testing.T) {
 	dir := t.TempDir()
 	logger := zap.NewNop()

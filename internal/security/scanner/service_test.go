@@ -369,6 +369,28 @@ func newTestService(t *testing.T) (*Service, *mockStorage, *mockEmitter) {
 	return svc, store, emitter
 }
 
+// TestServiceSetIsolationMode verifies the setter propagates the resolved
+// isolation mode to the scan engine (MCP-34.4 / D3 option b), which is what
+// gates the Docker-scanner skip path. Default ("") leaves Docker behaviour
+// intact.
+func TestServiceSetIsolationMode(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	if svc.engine.isolationMode != "" {
+		t.Fatalf("expected default isolation mode to be empty, got %q", svc.engine.isolationMode)
+	}
+
+	svc.SetIsolationMode("sandbox")
+	if svc.engine.isolationMode != "sandbox" {
+		t.Errorf("expected engine isolation mode 'sandbox', got %q", svc.engine.isolationMode)
+	}
+
+	svc.SetIsolationMode("docker")
+	if svc.engine.isolationMode != "docker" {
+		t.Errorf("expected engine isolation mode 'docker', got %q", svc.engine.isolationMode)
+	}
+}
+
 func TestServiceListScannersEmpty(t *testing.T) {
 	svc, _, _ := newTestService(t)
 

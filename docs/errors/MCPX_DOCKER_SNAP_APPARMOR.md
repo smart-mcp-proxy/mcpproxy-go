@@ -24,7 +24,7 @@ Docker isolation works fine.
 
 ## How to fix
 
-You have three options:
+You have four options:
 
 ### 1. Switch to non-snap Docker (recommended)
 
@@ -34,7 +34,25 @@ sudo snap remove docker
 # https://docs.docker.com/engine/install/ubuntu/
 ```
 
-### 2. Disable the scanner for this server (dry-run shown by default)
+### 2. Use native `sandbox` isolation instead of Docker (no Docker daemon needed)
+
+If the real goal is to confine stdio servers on a snap-docker host, switch the
+isolation **mode** to `sandbox`. Servers are confined natively with a Linux
+Landlock filesystem allowlist + `setrlimit` (kernel 5.13+), which is unaffected
+by the snap-docker/AppArmor conflict because it needs no Docker and no user
+namespaces:
+
+```json
+{ "docker_isolation": { "mode": "sandbox" } }
+```
+
+Trade-off: the Docker-based scanner plugins cannot run under `sandbox`, so they
+are **skipped** and the affected server's `security_scan.status` becomes
+`degraded` (the always-on in-process `tpa-descriptions` scanner still runs).
+This is MCP-34.4 / D3 option (b) — clean, surfaced degradation. See
+[Security Isolation → Scanner behaviour](../docker-isolation.md#scanner-behaviour-under-each-mode-mcp-344).
+
+### 3. Disable the scanner for this server (dry-run shown by default)
 
 The error panel includes a **Disable scanner for this server** fix-step. The
 CLI equivalent:
@@ -46,7 +64,7 @@ mcpproxy upstream patch <server-name> --no-scanner --dry-run
 Drop `--dry-run` to apply. The server will still run with isolation, but
 without TPA pre-flight scanning.
 
-### 3. Run mcpproxy without isolation for that server
+### 4. Run mcpproxy without isolation for that server
 
 If you trust the upstream and don't need isolation:
 

@@ -32,6 +32,15 @@ type Engine struct {
 	// docker × AppArmor transition would otherwise deny entrypoint exec.
 	disableNoNewPrivileges bool
 
+	// isolationMode is the resolved global isolation mode ("docker", "sandbox",
+	// "none", or "" == docker for back-compat). Scanner *plugins* are
+	// Docker-based (Spec 039); under "sandbox"/"none" the host runs no Docker
+	// for scanners, so Docker-based scanners are cleanly skipped (prefailed with
+	// an honest, mode-specific reason) while in-process scanners still run. This
+	// is MCP-34.4 / D3 option (b): clean, surfaced degradation rather than a
+	// misleading "pull the image" failure. Set via Service.SetIsolationMode.
+	isolationMode string
+
 	// Track active scans (one per server)
 	mu          sync.Mutex
 	activeScans map[string]*ScanJob // keyed by server name
@@ -197,6 +206,18 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 		// local Docker (MCP-2082).
 		if s.InProcess {
 			return ""
+		}
+		// MCP-34.4 / D3 option (b): under a non-Docker isolation mode the host
+		// runs no Docker for scanner plugins, so Docker-based scanners cannot
+		// run at all. Skip them with an honest, mode-specific reason (pointing
+		// at the snap-docker/AppArmor failure doc) instead of the misleading
+		// "pull the image locally" guidance below — there is nothing to pull.
+		// They stay in the resolved set (recorded as failed), which downgrades
+		// the scan summary to "degraded" rather than a silent all-clear.
+		if mode := e.isolationMode; mode == "sandbox" || mode == "none" {
+			return fmt.Sprintf("Docker-based scanner %s skipped: isolation mode %q runs no Docker containers, so Docker scanner plugins cannot run on this host. "+
+				"In-process scanners still ran. To run Docker scanners, set isolation.mode to \"docker\" on a host with a working Docker daemon. "+
+				"See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.", s.ID, mode)
 		}
 		if e.docker == nil {
 			return ""

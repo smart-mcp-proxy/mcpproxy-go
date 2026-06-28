@@ -172,6 +172,25 @@ func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
 	}
 }
 
+// SetIsolationMode records the resolved global isolation mode ("docker",
+// "sandbox", "none", or "" == docker) so the scan engine can decide whether
+// Docker-based scanner plugins can run. Under "sandbox"/"none" the host runs no
+// Docker for scanners, so Docker scanner plugins are cleanly skipped (the scan
+// summary degrades) while in-process scanners still run. This is MCP-34.4 / D3
+// option (b): clean, surfaced degradation on snap-docker / non-Docker hosts.
+func (s *Service) SetIsolationMode(mode string) {
+	if s.engine == nil {
+		return
+	}
+	s.engine.isolationMode = mode
+	if mode == "sandbox" || mode == "none" {
+		s.logger.Warn("Isolation mode runs no Docker for scanner plugins; Docker-based scanners "+
+			"will be skipped and the security scan will report 'degraded' for affected servers. "+
+			"In-process scanners (e.g. tpa-descriptions) still run. See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.",
+			zap.String("isolation_mode", mode))
+	}
+}
+
 // SetFetchPackageSource toggles whether the source resolver may fetch the
 // published source of package-runner servers (npx/uvx) for scanning. See
 // SecurityConfig.ScannerFetchPackageSource (MCP-2206). Default is enabled.
