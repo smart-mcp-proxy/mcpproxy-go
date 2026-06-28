@@ -118,7 +118,7 @@ MCPProxy ships with a bundled registry of 8 scanners. The bundled list lives in 
 | `nova-proximity` | MCPProxy (NOVA-inspired rules) | source | — | Keyword-based, fully offline. Very fast. |
 | `ramparts` | Javelin | source | — | Rust-based YARA scanner. Runs fully offline: v0.8.x scans a live MCP endpoint, so MCPProxy replays the captured tool definitions to it over stdio (the upstream is never re-executed). *(`amd64`-only image; runs under emulation on arm64 — see [Scanner Images](/features/scanner-images).)* |
 | `semgrep-mcp` | Semgrep | source | — | Static analysis with MCP-specific rules. Uses the upstream `returntocorp/semgrep:latest` image. |
-| `tpa-descriptions` | MCPProxy | source | — | **Built-in, Docker-less, always on.** In-process analysis of tool descriptions/schemas for Tool-Poisoning-Attack indicators (hidden instructions, prompt-injection phrasing, data-exfiltration hints) and embedded secrets. Also runs the deterministic offline detection engine (Spec 076): hidden-Unicode smuggling (zero-width/bidi/tag-block/PUA), cross-server tool shadowing, and base64/hex payloads that decode to shell/exfil commands — each finding carries a `confidence` score and the contributing check `signals`. Runs for any connected server — including remote `http`/`sse` servers with no source or Docker. |
+| `tpa-descriptions` | MCPProxy | source | — | **Built-in, Docker-less, always on.** In-process analysis of tool descriptions/schemas via the deterministic offline [detect engine (Spec 076)](/features/tool-scanner): six checks across two tiers — **hard** (hidden-Unicode smuggling, cross-server shadowing, decode-to-shell payloads) auto-quarantine; **soft** (prompt-injection directives, capability-mismatch, embedded secrets) raise a review item. Each finding carries a `confidence` score and the contributing check `signals`. Fully offline (no network/filesystem/Docker), deterministic, and runs for any connected server — including remote `http`/`sse` servers with no source or Docker. See [Tool Scanner](/features/tool-scanner) for the full rule reference and the CI eval gate. |
 | `trivy-mcp` | Aqua Security | source, container_image | — | Filesystem + CVE scan. Uses the upstream `ghcr.io/aquasecurity/trivy:latest` image. |
 
 See [Scanner Images](/features/scanner-images) for the image sources and why vendor images are preferred over custom wrappers.
@@ -343,6 +343,7 @@ The Security page at `/security` in the Web UI mirrors the CLI and provides:
 
 ## Related reading
 
+- [Tool Scanner (Spec 076)](/features/tool-scanner) — the built-in offline detect engine behind `tpa-descriptions`: the six checks, two-tier model, and CI eval gate
 - [Security Commands](/cli/security-commands) — exhaustive CLI reference
 - [Scanner Images](/features/scanner-images) — where each Docker image comes from
 - [Security Quarantine](/features/security-quarantine) — the underlying quarantine mechanism that scanners gate
