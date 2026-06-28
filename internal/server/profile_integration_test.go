@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -519,6 +520,182 @@ func TestProfile_ActivityMetadata(t *testing.T) {
 	if intent, ok := rec.Metadata["intent"].(map[string]interface{}); ok {
 		_, nested := intent["profile"]
 		assert.False(t, nested, "profile must not be nested under metadata.intent.profile")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Profiles v2 (T2): set_profile session-scoped switching on the base /mcp endpoint
+// ---------------------------------------------------------------------------
+
+// callSetProfile invokes the set_profile tool and returns (active_profile,
+// servers, isError, rawText).
+func (e *profileTestEnv) callSetProfile(ctx context.Context, c *client.Client, slug string) (string, []string, bool, string) {
+	e.t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "set_profile"
+	req.Params.Arguments = map[string]interface{}{"profile": slug}
+	result, err := c.CallTool(ctx, req)
+	require.NoError(e.t, err)
+	text := extractText(result)
+	if result.IsError {
+		return "", nil, true, text
+	}
+	var resp struct {
+		ActiveProfile string   `json:"active_profile"`
+		Servers       []string `json:"servers"`
+	}
+	require.NoError(e.t, json.Unmarshal([]byte(text), &resp), "set_profile result must be JSON: %s", text)
+	return resp.ActiveProfile, resp.Servers, false, text
+}
+
+// TestProfile_SetProfileSessionScoped exercises the core T2 flow: a base /mcp
+// session selects a profile via set_profile, retrieve_tools is then scoped to
+// that profile (no re-index), switching swaps the scope, and clearing restores
+// all servers — all within one MCP session.
+func TestProfile_SetProfileSessionScoped(t *testing.T) {
+	env := newProfileTestEnv(t)
+	ctx := context.Background()
+
+	// Single base /mcp client → one stable MCP session across calls.
+	c := env.CreateProxyClient()
+	env.initClient(c)
+
+	// Switch to "research".
+	active, servers, isErr, text := env.callSetProfile(ctx, c, "research")
+	require.False(t, isErr, "set_profile(research) should succeed: %s", text)
+	assert.Equal(t, "research", active)
+	assert.Contains(t, servers, "research-srv")
+	assert.NotContains(t, servers, "deploy-srv")
+
+	// retrieve_tools on the SAME session is now scoped to research — no deploy tools.
+	names := env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	for _, n := range names {
+		assert.False(t, strings.Contains(n, "deploy_app") || strings.Contains(n, "rollback"),
+			"after set_profile(research), retrieve_tools must not return deploy tools; got: %v", names)
+	}
+
+	// Switch to "deploy" — scope swaps without re-index.
+	active, servers, isErr, _ = env.callSetProfile(ctx, c, "deploy")
+	require.False(t, isErr)
+	assert.Equal(t, "deploy", active)
+	assert.Contains(t, servers, "deploy-srv")
+	names = env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	for _, n := range names {
+		assert.False(t, strings.Contains(n, "search_papers") || strings.Contains(n, "fetch_article"),
+			"after set_profile(deploy), retrieve_tools must not return research tools; got: %v", names)
+	}
+
+	// Clear (empty slug) — back to all servers.
+	active, _, isErr, _ = env.callSetProfile(ctx, c, "")
+	require.False(t, isErr)
+	assert.Equal(t, "", active)
+	names = env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	hasResearch, hasDeploy := false, false
+	for _, n := range names {
+		if strings.Contains(n, "search_papers") || strings.Contains(n, "fetch_article") {
+			hasResearch = true
+		}
+		if strings.Contains(n, "deploy_app") || strings.Contains(n, "rollback") {
+			hasDeploy = true
+		}
+	}
+	assert.True(t, hasResearch && hasDeploy,
+		"after clearing the profile, retrieve_tools should see both servers; got: %v", names)
+}
+
+// TestProfile_SetProfileUnknown verifies set_profile rejects an unknown slug and
+// lists the available profiles.
+func TestProfile_SetProfileUnknown(t *testing.T) {
+	env := newProfileTestEnv(t)
+	ctx := context.Background()
+
+	c := env.CreateProxyClient()
+	env.initClient(c)
+
+	_, _, isErr, text := env.callSetProfile(ctx, c, "nonexistent")
+	assert.True(t, isErr, "set_profile with an unknown slug must error")
+	assert.Contains(t, text, "unknown profile 'nonexistent'", "error must name the bad slug: %s", text)
+}
+
+// ---------------------------------------------------------------------------
+// Profiles v2 (T3): per-agent-token profile_pin — server-side URL enforcement
+// ---------------------------------------------------------------------------
+
+// mintPinnedToken creates a stored agent token pinned to the given profile and
+// returns its raw secret. It uses the same HMAC key path the auth middleware
+// reads, so the minted token validates end-to-end.
+func (e *profileTestEnv) mintPinnedToken(name, pin string) string {
+	e.t.Helper()
+	cfg := e.proxyServer.runtime.Config()
+	hmacKey, err := auth.GetOrCreateHMACKey(cfg.DataDir)
+	require.NoError(e.t, err)
+	rawToken, err := auth.GenerateToken()
+	require.NoError(e.t, err)
+	require.NoError(e.t, e.proxyServer.runtime.StorageManager().CreateAgentToken(auth.AgentToken{
+		Name:           name,
+		AllowedServers: []string{"*"},
+		Permissions:    []string{"read"},
+		ExpiresAt:      time.Now().Add(24 * time.Hour),
+		ProfilePin:     pin,
+	}, rawToken, hmacKey))
+	return rawToken
+}
+
+// TestProfile_PinnedTokenURLEnforcement verifies the T3 server-side guard: an
+// agent token pinned to "research" is rejected with 403 at /mcp/p/deploy, but
+// reaches its own /mcp/p/research endpoint.
+func TestProfile_PinnedTokenURLEnforcement(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("pinned-research", "research")
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	const initBody = `{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`
+
+	post := func(slug string) *http.Response {
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp/p/"+slug, strings.NewReader(initBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	// Different profile → 403 with a pin-naming error.
+	resp := post("deploy")
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusForbidden, resp.StatusCode, "pinned token must be 403 on a non-pinned profile URL")
+	var body map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	errMsg, _ := body["error"].(string)
+	assert.Contains(t, errMsg, "pinned to profile 'research'", "403 error must name the pin: %s", errMsg)
+
+	// Its own pinned profile → route matched, not forbidden.
+	resp2 := post("research")
+	defer resp2.Body.Close()
+	assert.NotEqual(t, http.StatusForbidden, resp2.StatusCode,
+		"pinned token must reach its own profile URL; got %d", resp2.StatusCode)
+}
+
+// TestProfile_UnpinnedTokenUnaffected verifies an unpinned agent token can reach
+// any profile URL (no T3 enforcement applied).
+func TestProfile_UnpinnedTokenUnaffected(t *testing.T) {
+	env := newProfileTestEnv(t)
+	rawToken := env.mintPinnedToken("free-agent", "") // empty pin = unpinned
+
+	baseURL := strings.TrimSuffix(env.proxyAddr, "/mcp")
+	const initBody = `{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`
+
+	for _, slug := range []string{"research", "deploy"} {
+		req, err := http.NewRequest(http.MethodPost, baseURL+"/mcp/p/"+slug, strings.NewReader(initBody))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+rawToken)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.NotEqual(t, http.StatusForbidden, resp.StatusCode,
+			"unpinned token must not be forbidden at /mcp/p/%s; got %d", slug, resp.StatusCode)
 	}
 }
 

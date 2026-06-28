@@ -7,6 +7,7 @@ import api from '@/services/api'
 vi.mock('@/services/api', () => ({
   default: {
     getConnectStatus: vi.fn(),
+    getConnectClientStatus: vi.fn(),
     connectClient: vi.fn(),
     disconnectClient: vi.fn(),
     getOnboardingState: vi.fn(),
@@ -20,6 +21,7 @@ describe('ConnectModal', () => {
     pinia = createPinia()
     setActivePinia(pinia)
     ;(api.getConnectStatus as any).mockReset()
+    ;(api.getConnectClientStatus as any).mockReset()
     ;(api.connectClient as any).mockReset()
     ;(api.disconnectClient as any).mockReset()
     ;(api.getOnboardingState as any).mockReset()
@@ -267,5 +269,156 @@ describe('ConnectModal', () => {
     const connectButtons = wrapper.findAll('button.btn-primary.btn-xs')
     expect(connectButtons.length).toBe(1)
     expect(connectButtons[0].text()).toContain('Connect')
+  })
+
+  // Spec 075 (MCP-2833) US1: the stat-only listing reports access_state=unknown
+  // for installed clients. The view must NOT eagerly read content, so an
+  // installed+unknown client shows a neutral Connect affordance and an explicit
+  // "Check access" action — never a denial banner.
+  it('renders installed+unknown neutrally with a Check-access action and no denial banner', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'cursor',
+        name: 'Cursor',
+        config_path: '/Users/test/.cursor/mcp.json',
+        exists: true,
+        connected: false,
+        supported: true,
+        icon: 'cursor',
+        access_state: 'unknown',
+      }],
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // Neutral: no denial banner for an unverified client.
+    expect(wrapper.find('[data-test="connect-denied-banner"]').exists()).toBe(false)
+    // Explicit, no-eager-read affordance to verify access on demand.
+    expect(wrapper.find('[data-test="connect-check-access"]').exists()).toBe(true)
+    // Connect remains offered.
+    expect(wrapper.find('button.btn-primary.btn-xs').text()).toContain('Connect')
+  })
+
+  // Spec 075 US2: a permission-denied client surfaces a distinct, actionable
+  // remediation banner naming the tccutil reset command — not "not connected".
+  it('renders an actionable remediation banner for an access_state=denied client', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'claude-code',
+        name: 'Claude Code',
+        config_path: '/Users/test/.claude.json',
+        exists: true,
+        connected: false,
+        supported: true,
+        icon: 'claude-code',
+        access_state: 'denied',
+        remediation:
+          "macOS blocked mcpproxy from reading Claude Code's configuration (Privacy & Security ▸ App Data).\n" +
+          'Fix: System Settings ▸ Privacy & Security ▸ App Data ▸ enable mcpproxy,\n' +
+          'or run: tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy\n' +
+          '(dev builds: com.smartmcpproxy.mcpproxy.dev)',
+      }],
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const banner = wrapper.find('[data-test="connect-denied-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy')
+    expect(banner.text()).toContain('macOS blocked')
+    // A denied client must not present a plain Connect button as if it were fine.
+    expect(wrapper.find('[data-test="connect-blocked-badge"]').exists()).toBe(true)
+    // The exact reset command is one-click copyable.
+    expect(wrapper.find('[data-test="connect-copy-tccutil"]').exists()).toBe(true)
+  })
+
+  // Spec 075 FR-003: a malformed config is reported distinctly from a denial.
+  it('renders a distinct malformed badge (not a denial banner) for access_state=malformed', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'cursor',
+        name: 'Cursor',
+        config_path: '/Users/test/.cursor/mcp.json',
+        exists: true,
+        connected: false,
+        supported: true,
+        icon: 'cursor',
+        access_state: 'malformed',
+      }],
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="connect-malformed-badge"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-denied-banner"]').exists()).toBe(false)
+  })
+
+  // Spec 075 US1/US2: the explicit per-client "Check access" action reads one
+  // client's config on demand (the only privacy-prompt-eligible call) and
+  // resolves its access_state in-band, surfacing a denial without a full connect.
+  it('resolves a denial via the explicit Check-access action (per-client GET)', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'codex',
+        name: 'Codex CLI',
+        config_path: '/Users/test/.codex/config.toml',
+        exists: true,
+        connected: false,
+        supported: true,
+        icon: 'codex',
+        access_state: 'unknown',
+      }],
+    })
+    ;(api.getConnectClientStatus as any).mockResolvedValue({
+      success: true,
+      data: {
+        id: 'codex',
+        name: 'Codex CLI',
+        config_path: '/Users/test/.codex/config.toml',
+        exists: true,
+        connected: false,
+        supported: true,
+        icon: 'codex',
+        access_state: 'denied',
+        remediation: 'macOS blocked mcpproxy ... tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy',
+      },
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // Before checking: neutral, no banner.
+    expect(wrapper.find('[data-test="connect-denied-banner"]').exists()).toBe(false)
+
+    await wrapper.find('[data-test="connect-check-access"]').trigger('click')
+    await flushPromises()
+
+    expect(api.getConnectClientStatus).toHaveBeenCalledWith('codex')
+    const banner = wrapper.find('[data-test="connect-denied-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('tccutil reset SystemPolicyAppData')
   })
 })

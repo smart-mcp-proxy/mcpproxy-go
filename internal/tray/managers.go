@@ -289,6 +289,7 @@ type MenuManager struct {
 	// Menu references
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
+	profileMenu         *systray.MenuItem
 
 	// Menu tracking to prevent duplicates
 	serverMenuItems       map[string]*systray.MenuItem // server name -> menu item
@@ -300,6 +301,12 @@ type MenuManager struct {
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
 	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
 
+	// Profile switcher tracking (Profiles v2 T5). profileMenuItems is keyed by
+	// profile slug; the "" key is the synthetic "All servers" entry.
+	profileMenuItems    map[string]*systray.MenuItem
+	latestProfileNames  []string // sorted slugs currently rendered (excludes the "" entry)
+	latestActiveProfile string   // "" means all servers
+
 	// Latest server data snapshots
 	latestServers     []map[string]interface{}
 	latestQuarantined []map[string]interface{}
@@ -308,18 +315,24 @@ type MenuManager struct {
 	onServerAction func(serverName string, action string) // callback for server actions
 }
 
+// profileAllServersKey is the map key + display sentinel for the "no profile"
+// (all servers) choice in the profile switcher submenu.
+const profileAllServersKey = ""
+
 // NewMenuManager creates a new menu manager
-func NewMenuManager(upstreamMenu, quarantineMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
+func NewMenuManager(upstreamMenu, quarantineMenu, profileMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
 	return &MenuManager{
 		logger:                logger,
 		upstreamServersMenu:   upstreamMenu,
 		quarantineMenu:        quarantineMenu,
+		profileMenu:           profileMenu,
 		serverMenuItems:       make(map[string]*systray.MenuItem),
 		quarantineMenuItems:   make(map[string]*systray.MenuItem),
 		serverActionItems:     make(map[string]*systray.MenuItem),
 		serverQuarantineItems: make(map[string]*systray.MenuItem),
 		serverOAuthItems:      make(map[string]*systray.MenuItem),
 		serverRestartItems:    make(map[string]*systray.MenuItem),
+		profileMenuItems:      make(map[string]*systray.MenuItem),
 	}
 }
 
@@ -328,6 +341,114 @@ func (m *MenuManager) SetActionCallback(callback func(serverName string, action 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onServerAction = callback
+}
+
+// UpdateProfilesMenu refreshes the profile switcher submenu (Profiles v2 T5).
+// It renders an "All servers" entry plus one checkbox per configured profile,
+// checks the active one, and (re)wires click handlers that ask the core to switch
+// the server-level default active profile. systray menu items cannot be removed,
+// only hidden, so the items are rebuilt only when the set of profile slugs
+// changes; otherwise titles and checkmarks are updated in place. Because the
+// active profile is re-read on every sync, a switch made by another client
+// (Web UI, CLI) is reflected here within one sync interval.
+func (m *MenuManager) UpdateProfilesMenu(profiles []ProfileInfo, active string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.profileMenu == nil {
+		return
+	}
+
+	// Build the sorted slug list and a lookup of tool counts.
+	names := make([]string, 0, len(profiles))
+	toolCounts := make(map[string]int, len(profiles))
+	for _, p := range profiles {
+		if p.Name == "" {
+			continue
+		}
+		names = append(names, p.Name)
+		toolCounts[p.Name] = p.ToolCount
+	}
+	sort.Strings(names)
+
+	m.profileMenu.SetTitle(profileMenuTitle(active))
+
+	// Rebuild the items when the configured profile set changed (new/removed
+	// profiles); otherwise reuse existing items and only refresh checkmarks.
+	if m.profileSetChanged(names) {
+		for _, item := range m.profileMenuItems {
+			item.Hide()
+		}
+		m.profileMenuItems = make(map[string]*systray.MenuItem)
+
+		// "All servers" entry (clears the active profile).
+		allItem := m.profileMenu.AddSubMenuItemCheckbox("All servers", "Use all enabled servers (no profile)", active == profileAllServersKey)
+		m.profileMenuItems[profileAllServersKey] = allItem
+		m.wireProfileClick(profileAllServersKey, allItem)
+
+		for _, name := range names {
+			title := fmt.Sprintf("%s (%d tools)", name, toolCounts[name])
+			item := m.profileMenu.AddSubMenuItemCheckbox(title, fmt.Sprintf("Switch the active profile to %s", name), name == active)
+			m.profileMenuItems[name] = item
+			m.wireProfileClick(name, item)
+		}
+		m.latestProfileNames = names
+	} else {
+		// Refresh titles (tool counts may change) and checkmarks in place.
+		for _, name := range names {
+			if item, ok := m.profileMenuItems[name]; ok {
+				item.SetTitle(fmt.Sprintf("%s (%d tools)", name, toolCounts[name]))
+			}
+		}
+	}
+
+	// Reconcile checkmarks against the active profile.
+	for key, item := range m.profileMenuItems {
+		if key == active {
+			item.Check()
+		} else {
+			item.Uncheck()
+		}
+	}
+	m.latestActiveProfile = active
+}
+
+// profileSetChanged reports whether the sorted profile slug list differs from
+// what is currently rendered (excluding the synthetic "All servers" entry).
+func (m *MenuManager) profileSetChanged(names []string) bool {
+	if len(m.profileMenuItems) == 0 {
+		return true
+	}
+	if len(names) != len(m.latestProfileNames) {
+		return true
+	}
+	for i := range names {
+		if names[i] != m.latestProfileNames[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// wireProfileClick starts a goroutine that forwards clicks on a profile entry to
+// the action callback as a "switch_profile" action keyed by the profile slug.
+func (m *MenuManager) wireProfileClick(slug string, item *systray.MenuItem) {
+	go func(name string, it *systray.MenuItem) {
+		for range it.ClickedCh {
+			if m.onServerAction != nil {
+				go m.onServerAction(name, "switch_profile")
+			}
+		}
+	}(slug, item)
+}
+
+// profileMenuTitle renders the top-level profile menu label with the active
+// selection, e.g. "Profile: research" or "Profile: All servers".
+func profileMenuTitle(active string) string {
+	if active == profileAllServersKey {
+		return "Profile: All servers"
+	}
+	return fmt.Sprintf("Profile: %s", active)
 }
 
 // UpdateUpstreamServersMenu updates the upstream servers menu without duplicates
@@ -1139,6 +1260,17 @@ func (m *SynchronizationManager) performSync() error {
 		m.menuManager.UpdateQuarantineMenu(quarantinedServers)
 	}
 
+	// Refresh the profile switcher (Profiles v2 T5). Re-reading the active
+	// profile each sync is how a switch made by another client is reflected in
+	// the tray. Profile errors are non-fatal: keep the rest of the menu fresh.
+	if profiles, profErr := m.server.GetProfiles(); profErr != nil {
+		m.logger.Debug("Failed to get profiles, skipping profile menu update", zap.Error(profErr))
+	} else if active, activeErr := m.server.GetActiveProfile(); activeErr != nil {
+		m.logger.Debug("Failed to get active profile, skipping profile menu update", zap.Error(activeErr))
+	} else {
+		m.menuManager.UpdateProfilesMenu(profiles, active)
+	}
+
 	if m.onSync != nil {
 		m.onSync()
 	}
@@ -1257,4 +1389,3 @@ func extractHealthLevel(server map[string]interface{}) string {
 
 	return ""
 }
-

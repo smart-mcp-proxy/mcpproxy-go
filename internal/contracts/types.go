@@ -3,6 +3,8 @@ package contracts
 
 import (
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // APIResponse is the standard wrapper for all API responses
@@ -59,8 +61,14 @@ type Server struct {
 	// the payload), so the Web UI toggle (MCP-2932) can distinguish unset from
 	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
 	// AddServerRequest.
-	AutoApproveToolChanges *bool                `json:"auto_approve_tool_changes,omitempty"`
-	SecurityScan           *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
+	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
+	// the per-server MCP `initialize` handshake deadline override. Serialized as
+	// a duration string (e.g. "120s"); nil/omitted means "inherit the global
+	// default". Surfaced on the GET path so clients can read back a configured
+	// override; PATCH/POST accept it via AddServerRequest.
+	InitTimeout  *config.Duration     `json:"init_timeout,omitempty" swaggertype:"string"`
+	SecurityScan *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
 	// Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error
 	// has been classified by internal/diagnostics. Healthy servers omit

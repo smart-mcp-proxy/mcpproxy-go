@@ -997,3 +997,131 @@ func TestCopyServerConfig_AllFields(t *testing.T) {
 		t.Error("CopyServerConfig(nil) should return nil")
 	}
 }
+
+// TestCopyServerConfig_PreservesAllowlistAndOverrides guards the fields that
+// were silently dropped by CopyServerConfig before this fix: the per-tool
+// allowlist/denylist, ReconnectOnUse, the spec-074 *Duration overrides, and the
+// source-registry provenance. A drop here loses a server's disabled_tools and
+// per-server cadence overrides on any config merge/patch round-trip.
+func TestCopyServerConfig_PreservesAllowlistAndOverrides(t *testing.T) {
+	hc := Duration(30 * time.Second)
+	td := Duration(5 * time.Minute)
+	it := Duration(120 * time.Second)
+	src := &ServerConfig{
+		Name:                     "srv",
+		ReconnectOnUse:           true,
+		EnabledTools:             []string{"a", "b"},
+		DisabledTools:            []string{"c"},
+		HealthCheckInterval:      &hc,
+		ToolDiscoveryInterval:    &td,
+		InitTimeout:              &it,
+		SourceRegistryID:         "reg-1",
+		SourceRegistryProvenance: "official",
+	}
+
+	dst := CopyServerConfig(src)
+
+	if dst.InitTimeout == nil || *dst.InitTimeout != it {
+		t.Errorf("InitTimeout: got %v, want %v", dst.InitTimeout, it)
+	}
+
+	if !dst.ReconnectOnUse {
+		t.Error("ReconnectOnUse was dropped")
+	}
+	if dst.SourceRegistryID != "reg-1" {
+		t.Errorf("SourceRegistryID: got %q, want %q", dst.SourceRegistryID, "reg-1")
+	}
+	if dst.SourceRegistryProvenance != "official" {
+		t.Errorf("SourceRegistryProvenance: got %q, want %q", dst.SourceRegistryProvenance, "official")
+	}
+	if !reflect.DeepEqual(dst.EnabledTools, src.EnabledTools) {
+		t.Errorf("EnabledTools: got %v, want %v", dst.EnabledTools, src.EnabledTools)
+	}
+	if !reflect.DeepEqual(dst.DisabledTools, src.DisabledTools) {
+		t.Errorf("DisabledTools: got %v, want %v", dst.DisabledTools, src.DisabledTools)
+	}
+	if dst.HealthCheckInterval == nil || *dst.HealthCheckInterval != hc {
+		t.Errorf("HealthCheckInterval: got %v, want %v", dst.HealthCheckInterval, hc)
+	}
+	if dst.ToolDiscoveryInterval == nil || *dst.ToolDiscoveryInterval != td {
+		t.Errorf("ToolDiscoveryInterval: got %v, want %v", dst.ToolDiscoveryInterval, td)
+	}
+
+	// Deep copy: mutating the source must not affect the copy.
+	src.DisabledTools[0] = "mutated"
+	if dst.DisabledTools[0] == "mutated" {
+		t.Error("DisabledTools is aliased, not deep-copied")
+	}
+	*src.HealthCheckInterval = Duration(time.Hour)
+	if *dst.HealthCheckInterval == Duration(time.Hour) {
+		t.Error("HealthCheckInterval pointer is shared, not copied by value")
+	}
+}
+
+// TestMergeServerConfig_InitTimeout covers MCP-3322: a patch carrying
+// init_timeout sets/replaces the per-server override (and records a diff), while
+// a patch that omits it preserves the existing value.
+func TestMergeServerConfig_InitTimeout(t *testing.T) {
+	t.Run("patch sets init_timeout from unset", func(t *testing.T) {
+		base := &ServerConfig{Name: "srv", Enabled: true}
+		it := Duration(120 * time.Second)
+		patch := &ServerConfig{InitTimeout: &it}
+
+		merged, diff, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if merged.InitTimeout == nil || *merged.InitTimeout != it {
+			t.Errorf("InitTimeout: got %v, want %v", merged.InitTimeout, it)
+		}
+		if diff == nil || diff.Modified["init_timeout"].Path != "init_timeout" {
+			t.Errorf("expected init_timeout in diff, got %+v", diff)
+		}
+	})
+
+	t.Run("unrelated patch preserves init_timeout", func(t *testing.T) {
+		it := Duration(120 * time.Second)
+		base := &ServerConfig{Name: "srv", Enabled: true, InitTimeout: &it}
+		patch := &ServerConfig{Enabled: true, URL: "http://example.com/mcp"}
+
+		merged, _, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if merged.InitTimeout == nil || *merged.InitTimeout != it {
+			t.Errorf("InitTimeout was wiped on unrelated patch: got %v, want %v", merged.InitTimeout, it)
+		}
+	})
+
+	t.Run("patch replaces existing init_timeout", func(t *testing.T) {
+		old := Duration(120 * time.Second)
+		base := &ServerConfig{Name: "srv", Enabled: true, InitTimeout: &old}
+		newVal := Duration(45 * time.Second)
+		patch := &ServerConfig{InitTimeout: &newVal}
+
+		merged, _, err := MergeServerConfig(base, patch, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("merge: %v", err)
+		}
+		if merged.InitTimeout == nil || *merged.InitTimeout != newVal {
+			t.Errorf("InitTimeout: got %v, want %v", merged.InitTimeout, newVal)
+		}
+	})
+}
+
+// TestMergeServerConfig_PreservesDisabledToolsOnUnrelatedPatch is the
+// end-to-end regression: patching an unrelated field on a server that has a
+// disabled_tools denylist must not wipe the denylist (it previously did,
+// because MergeServerConfig starts from CopyServerConfig(base)).
+func TestMergeServerConfig_PreservesDisabledToolsOnUnrelatedPatch(t *testing.T) {
+	base := &ServerConfig{Name: "srv", DisabledTools: []string{"danger"}}
+	patch := &ServerConfig{Env: map[string]string{"K": "V"}}
+
+	merged, _, err := MergeServerConfig(base, patch, MergeOptions{})
+	if err != nil {
+		t.Fatalf("MergeServerConfig: %v", err)
+	}
+	if len(merged.DisabledTools) != 1 || merged.DisabledTools[0] != "danger" {
+		t.Errorf("DisabledTools dropped on unrelated patch: got %v, want [danger]", merged.DisabledTools)
+	}
+}

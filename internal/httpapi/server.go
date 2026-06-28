@@ -220,6 +220,13 @@ type Server struct {
 	// staleness is bounded.
 	usageCacheMu sync.Mutex
 	usageCache   map[string]usageCacheEntry
+
+	// activeProfile is the server-level default active profile surfaced to UI
+	// clients (Web UI / tray) via GET/PUT /api/v1/profiles/active (Profiles v2
+	// T2). Empty means "all servers". It is a UI-facing default and does not
+	// override a live MCP session's set_profile selection.
+	activeProfileMu sync.RWMutex
+	activeProfile   string
 }
 
 // usageCacheEntry is one cached usage response with its expiry.
@@ -560,17 +567,23 @@ func (s *Server) setupRoutes() {
 		_, _ = w.Write([]byte(`{"ready":false}`))
 	}
 
-	// Observability endpoints (registered first to avoid conflicts)
+	// Observability /metrics endpoint (MCP-32). Independent of the health
+	// endpoints below: enabling metrics must not change readiness semantics.
 	if s.observability != nil {
-		if health := s.observability.Health(); health != nil {
-			s.router.Get("/healthz", health.HealthzHandler())
-			s.router.Get("/readyz", health.ReadyzHandler())
-		}
 		if metrics := s.observability.Metrics(); metrics != nil {
 			s.router.Handle("/metrics", metrics.Handler())
 		}
+	}
+
+	// Health and readiness endpoints. The observability health manager only
+	// takes over when it is actually enabled; otherwise the controller-backed
+	// handlers remain authoritative. A config-gated feature (metrics/tracing)
+	// must be a no-op for readiness when health is not enabled (MCP-32).
+	if s.observability != nil && s.observability.Health() != nil {
+		health := s.observability.Health()
+		s.router.Get("/healthz", health.HealthzHandler())
+		s.router.Get("/readyz", health.ReadyzHandler())
 	} else {
-		// Register custom health endpoints only if observability is not available
 		for _, path := range []string{"/livez", "/healthz", "/health"} {
 			s.router.Get(path, livenessHandler)
 		}
@@ -600,6 +613,11 @@ func (s *Server) setupRoutes() {
 
 		// Routing mode endpoint
 		r.Get("/routing", s.handleGetRouting)
+
+		// Profiles (Profiles v2 T2) — list + default active get/set for UI surfaces
+		r.Get("/profiles", s.handleListProfiles)
+		r.Get("/profiles/active", s.handleGetActiveProfile)
+		r.Put("/profiles/active", s.handleSetActiveProfile)
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
@@ -1334,6 +1352,11 @@ type AddServerRequest struct {
 	// semantics — do NOT collapse to a plain bool, or an omitted field would
 	// silently reset a previously-set value.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// InitTimeout is the per-server MCP `initialize` handshake deadline override
+	// (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
+	// pointer means "leave unchanged" on PATCH; a present value is applied.
+	// Mirrors config.ServerConfig.InitTimeout's *Duration tri-state.
+	InitTimeout *config.Duration `json:"init_timeout,omitempty" swaggertype:"string"`
 	// Isolation carries per-server Docker isolation overrides (image,
 	// network_mode, extra_args, working_dir, enabled). A nil pointer
 	// means "do not touch isolation config"; an empty-but-present
@@ -1462,6 +1485,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// *bool nil-preserve semantics: only set when the caller provided it.
 	if req.AutoApproveToolChanges != nil {
 		serverConfig.AutoApproveToolChanges = req.AutoApproveToolChanges
+	}
+	// MCP-3322: carry the per-server init_timeout override through on create.
+	if req.InitTimeout != nil {
+		serverConfig.InitTimeout = req.InitTimeout
 	}
 
 	// Add server via controller
@@ -1662,6 +1689,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
+	}
+	// MCP-3322: init_timeout is a tri-state *Duration — preserve the existing
+	// pointer when the request omits it so an unrelated PATCH doesn't wipe a
+	// configured deadline.
+	if req.InitTimeout != nil {
+		updates.InitTimeout = req.InitTimeout
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.InitTimeout = existingSrv.InitTimeout
 	}
 	if req.Isolation != nil {
 		updates.Isolation = req.Isolation.toConfig()

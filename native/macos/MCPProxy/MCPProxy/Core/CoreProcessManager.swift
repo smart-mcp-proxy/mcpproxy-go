@@ -574,6 +574,13 @@ actor CoreProcessManager {
                 }
             }
 
+        case "active_profile.changed":
+            // Profiles v2 T5: the server-level default active profile was switched
+            // (possibly by another client). Refetch profiles + active so the tray
+            // submenu reflects it. The payload carries active_profile, but a
+            // refetch also picks up tool-count/profile-set changes uniformly.
+            await refreshProfiles()
+
         case "ping":
             // Keepalive; no action needed
             break
@@ -621,6 +628,7 @@ actor CoreProcessManager {
         await refreshSessions()
         await refreshTokenMetrics()
         await refreshSecurityStatus()
+        await refreshProfiles()
         // Bump activityVersion so ActivityView reloads
         // (SSE doesn't emit "activity" events, so periodic refresh is needed)
         await MainActor.run { appState.activityVersion += 1 }
@@ -688,6 +696,24 @@ actor CoreProcessManager {
     /// this is *not* the on-demand refresh path (that's been retired).
     func refreshServersForSafetyNet() async {
         await refreshServers()
+    }
+
+    /// Fetch the configured profiles + active profile and update appState
+    /// (Profiles v2 T5). Driven on connect, on the periodic refresh, and on the
+    /// `active_profile.changed` SSE event so a switch made by another client
+    /// (Web UI, CLI, the Go tray) is reflected in the macOS tray submenu.
+    func refreshProfiles() async {
+        guard let apiClient else { return }
+        do {
+            let profiles = try await apiClient.profiles()
+            let active = try await apiClient.activeProfile()
+            await MainActor.run {
+                if appState.profiles != profiles { appState.profiles = profiles }
+                if appState.activeProfile != active { appState.activeProfile = active }
+            }
+        } catch {
+            // Non-fatal; we'll retry on the next refresh or SSE event.
+        }
     }
 
     /// Fetch recent activity and update appState.

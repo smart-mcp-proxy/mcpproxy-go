@@ -23,6 +23,7 @@ var (
 	tokenServers     string
 	tokenPermissions string
 	tokenExpires     string
+	tokenProfilePin  string
 )
 
 // GetTokenCommand returns the token parent command.
@@ -73,6 +74,7 @@ Examples:
 	cmd.Flags().StringVar(&tokenServers, "servers", "", "Comma-separated list of allowed server names, or \"*\" for all (required)")
 	cmd.Flags().StringVar(&tokenPermissions, "permissions", "", "Comma-separated permission tiers: read, write, destructive (required, must include read)")
 	cmd.Flags().StringVar(&tokenExpires, "expires", "30d", "Token expiry duration (e.g., 7d, 30d, 90d, 365d)")
+	cmd.Flags().StringVar(&tokenProfilePin, "profile-pin", "", "Pin this token to a profile; it can only operate in that profile (cannot switch via set_profile or /mcp/p/<other>)")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("servers")
 	_ = cmd.MarkFlagRequired("permissions")
@@ -160,6 +162,9 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 		"permissions":     permissions,
 		"expires_in":      tokenExpires,
 	}
+	if tokenProfilePin != "" {
+		body["profile_pin"] = tokenProfilePin
+	}
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
@@ -209,6 +214,9 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 	printField("  Name:        ", result, "name")
 	printListField("  Servers:     ", result, "allowed_servers")
 	printListField("  Permissions: ", result, "permissions")
+	if pin := getMapString(result, "profile_pin"); pin != "" {
+		fmt.Printf("  Profile Pin: %s\n", pin)
+	}
 	printField("  Expires:     ", result, "expires_at")
 
 	return nil
@@ -257,9 +265,9 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 	}
 
 	// Table format
-	fmt.Printf("%-20s %-14s %-25s %-20s %-8s %-25s\n",
-		"NAME", "PREFIX", "SERVERS", "PERMISSIONS", "REVOKED", "EXPIRES")
-	fmt.Println(strings.Repeat("-", 115))
+	fmt.Printf("%-20s %-14s %-25s %-20s %-8s %-12s %-25s\n",
+		"NAME", "PREFIX", "SERVERS", "PERMISSIONS", "REVOKED", "PROFILE PIN", "EXPIRES")
+	fmt.Println(strings.Repeat("-", 128))
 
 	for _, t := range tokens {
 		tok, ok := t.(map[string]interface{})
@@ -276,6 +284,11 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 		serverList := joinInterfaceSlice(tok, "allowed_servers", 23)
 		permList := joinInterfaceSlice(tok, "permissions", 0)
 
+		pin := getMapString(tok, "profile_pin")
+		if pin == "" {
+			pin = "-"
+		}
+
 		expiresAt := getMapString(tok, "expires_at")
 		if expiresAt != "" {
 			if t, parseErr := time.Parse(time.RFC3339, expiresAt); parseErr == nil {
@@ -283,8 +296,8 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 			}
 		}
 
-		fmt.Printf("%-20s %-14s %-25s %-20s %-8s %-25s\n",
-			name, prefix, serverList, permList, revoked, expiresAt)
+		fmt.Printf("%-20s %-14s %-25s %-20s %-8s %-12s %-25s\n",
+			name, prefix, serverList, permList, revoked, pin, expiresAt)
 	}
 
 	return nil
@@ -335,6 +348,9 @@ func runTokenShow(_ *cobra.Command, args []string) error {
 	printField("Token Prefix:   ", result, "token_prefix")
 	printListField("Servers:        ", result, "allowed_servers")
 	printListField("Permissions:    ", result, "permissions")
+	if pin := getMapString(result, "profile_pin"); pin != "" {
+		fmt.Printf("Profile Pin:    %s\n", pin)
+	}
 	if revoked, ok := result["revoked"].(bool); ok {
 		fmt.Printf("Revoked:        %v\n", revoked)
 	}

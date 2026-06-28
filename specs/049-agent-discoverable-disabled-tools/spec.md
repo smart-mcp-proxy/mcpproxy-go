@@ -120,11 +120,23 @@ callable one carries none.
   fields, no reordering).
 - **FR-003**: Each returned locked tool MUST carry a lean shape: name, owning
   server, the existing one-line description, and a single `status` value.
-- **FR-004**: `status` MUST be one of exactly five values —
+  Exception: a `server_quarantined` entry (and any tool surfaced by the
+  quarantined-tool discovery pass) withholds the description and schema, so it
+  carries name + owning server + `status` only.
+- **FR-004**: `status` MUST be one of exactly six values —
   `disabled_by_config`, `disabled_by_user`, `pending_approval`,
-  `server_disabled`, `disabled_unknown` — assigned by fixed first-match
-  precedence in that order (server-off, then config, then user-disabled, then
-  pending approval, else unknown).
+  `server_disabled`, `disabled_unknown`, `server_quarantined`. The first five
+  are assigned to index-discoverable tools by fixed first-match precedence in
+  that order (server-off, then config, then user-disabled, then pending
+  approval, else unknown). `server_quarantined` is assigned separately by the
+  quarantined-tool discovery pass (not the classifier), because quarantined
+  tools are deliberately absent from the search index (see Assumptions): it
+  covers a tool on a quarantined server (status `server_quarantined`) and a
+  tool-level pending/changed approval on a trusted server (status
+  `pending_approval`), with description and schema withheld to avoid exposing a
+  Tool Poisoning Attack payload. A tool also denied by operator config
+  (`enabled_tools`/`disabled_tools`) is skipped by this pass rather than
+  surfaced, since approval could not make it callable.
 - **FR-005**: The response MUST include a single remediation map emitted once,
   containing only the keys for statuses actually present in the response; no
   per-tool remediation text.
@@ -154,7 +166,8 @@ callable one carries none.
 ### Key Entities *(include if feature involves data)*
 
 - **Locked tool entry**: A discovered tool that is not callable — name, server,
-  one-line description, and one `status` of the five-value set.
+  one-line description (withheld for quarantined entries), and one `status` of
+  the six-value set.
 - **Status**: The single machine-branchable reason a tool is not callable,
   mapped 1:1 to a remediation class.
 - **Remediation map**: Response-level mapping from each present status to one
@@ -185,7 +198,13 @@ callable one carries none.
 
 - Locked tools are present in the existing search index (verified during
   brainstorming: indexing does not filter by callability; filtering is
-  request-time only).
+  request-time only). Exception: quarantined tools — both on a quarantined
+  server and tool-level pending/changed approvals — are deliberately excluded
+  from the search index so their untrusted descriptions cannot be ranked or
+  exposed (Tool Poisoning Attack defense). They are therefore not reachable via
+  the index loop and are instead enumerated from authoritative quarantine state
+  by a dedicated discovery pass that emits name-only `server_quarantined` /
+  `pending_approval` entries.
 - The config-vs-user discriminator introduced by PR #468 is available and is
   reused unchanged as the authoritative config-denial signal.
 - "Limit" refers to the discovery request's existing result-limit parameter.

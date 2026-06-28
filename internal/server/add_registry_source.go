@@ -124,6 +124,13 @@ func buildRegistrySourceEntry(rawURL, protocol, id, name string) (config.Registr
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return config.RegistryEntry{}, fmt.Errorf("%w: %q (must be an https URL)", ErrInvalidRegistryURL, rawURL)
 	}
+	// SSRF fail-fast (CWE-918): refuse a literal-IP source pointed at an
+	// internal/non-routable range up front. Hostname sources are guarded
+	// authoritatively at fetch/dial time (registries.registryDialControl). No
+	// DNS here, so this core stays pure and offline.
+	if err := registries.ValidateRegistrySourceURL(rawURL); err != nil {
+		return config.RegistryEntry{}, fmt.Errorf("%w: %v", ErrInvalidRegistryURL, err)
+	}
 
 	if protocol == "" {
 		protocol = defaultRegistryProtocol

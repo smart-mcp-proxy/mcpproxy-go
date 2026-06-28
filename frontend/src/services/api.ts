@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -256,6 +256,26 @@ class APIService {
   // Routing mode endpoint
   async getRouting(): Promise<APIResponse<RoutingInfo>> {
     return this.request<RoutingInfo>('/api/v1/routing')
+  }
+
+  // Profiles v2 (MCP-3243 / T4) — consume the REST surface from MCP-3241.
+  // List configured profiles with their effective servers + indexed tool count.
+  async getProfiles(): Promise<APIResponse<ListProfilesResponse>> {
+    return this.request<ListProfilesResponse>('/api/v1/profiles')
+  }
+
+  // Read the server-level default active profile (empty string = all servers).
+  async getActiveProfile(): Promise<APIResponse<ActiveProfileResponse>> {
+    return this.request<ActiveProfileResponse>('/api/v1/profiles/active')
+  }
+
+  // Set the server-level default active profile. Pass an empty string to clear
+  // (back to all servers); a non-empty slug must match a configured profile.
+  async setActiveProfile(profile: string): Promise<APIResponse<ActiveProfileResponse>> {
+    return this.request<ActiveProfileResponse>('/api/v1/profiles/active', {
+      method: 'PUT',
+      body: JSON.stringify({ profile }),
+    })
   }
 
   // Server endpoints
@@ -1139,6 +1159,17 @@ class APIService {
   // Connect feature (client registration)
   async getConnectStatus(): Promise<APIResponse<ConnectStatusResponse>> {
     return this.request<ConnectStatusResponse>('/api/v1/connect')
+  }
+
+  // Spec 075: resolve a single client's status on demand. This is the only
+  // Connect call that reads a client config file's contents (to classify
+  // access_state), so on macOS it is the sole place an App-Data privacy prompt
+  // may legitimately appear — and it is always scoped to an explicit user
+  // action ("Check access"), never the passive listing. Returns 200 with the
+  // resolved access_state (accessible|absent|denied|malformed) and, when
+  // denied, the remediation text.
+  async getConnectClientStatus(clientId: string): Promise<APIResponse<ClientStatus>> {
+    return this.request<ClientStatus>(`/api/v1/connect/${encodeURIComponent(clientId)}`)
   }
 
   async connectClient(clientId: string, serverName = 'mcpproxy', force = false): Promise<APIResponse<ConnectResult>> {

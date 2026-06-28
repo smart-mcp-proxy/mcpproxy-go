@@ -852,6 +852,39 @@ struct ServersListResponse: Codable {
     let servers: [ServerStatus]
 }
 
+// MARK: - Profiles (Profiles v2 T5)
+
+/// One configured profile, matching `httpapi.ProfileSummary` from
+/// `GET /api/v1/profiles`. A profile scopes tool discovery to a named subset of
+/// upstream servers.
+struct ProfileSummary: Codable, Identifiable, Equatable {
+    let name: String
+    let servers: [String]
+    let toolCount: Int
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case servers
+        case toolCount = "tool_count"
+    }
+}
+
+/// Response wrapper for `GET /api/v1/profiles`.
+struct ProfilesListResponse: Codable {
+    let profiles: [ProfileSummary]
+}
+
+/// Response wrapper for `GET|PUT /api/v1/profiles/active`.
+struct ActiveProfileResponse: Codable {
+    let activeProfile: String
+
+    enum CodingKeys: String, CodingKey {
+        case activeProfile = "active_profile"
+    }
+}
+
 // MARK: - Server Action Response
 
 /// Response for server action endpoints (enable, disable, restart, etc.).

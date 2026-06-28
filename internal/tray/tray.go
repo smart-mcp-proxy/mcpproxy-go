@@ -88,6 +88,13 @@ type ServerInterface interface {
 
 	// OAuth control
 	TriggerOAuthLogin(serverName string) error
+
+	// Profile switcher (Profiles v2 T5). The tray holds no state — it reads the
+	// configured profiles and the server-level default active profile from the
+	// core, and writes the active profile back, all via REST.
+	GetProfiles() ([]ProfileInfo, error)
+	GetActiveProfile() (string, error)
+	SetActiveProfile(name string) error
 }
 
 // App represents the system tray application
@@ -111,6 +118,7 @@ type App struct {
 	// startStopItem removed - tray doesn't directly control core lifecycle
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
+	profileMenu         *systray.MenuItem
 	portConflictMenu    *systray.MenuItem
 	portConflictInfo    *systray.MenuItem
 	portConflictRetry   *systray.MenuItem
@@ -128,11 +136,11 @@ type App struct {
 	autostartItem    *systray.MenuItem
 
 	// Update notification menu item (hidden until update is available)
-	updateMenuItem     *systray.MenuItem
-	updateAvailable    bool
-	latestVersion      string
-	latestReleaseURL   string
-	updateCheckMu      sync.RWMutex
+	updateMenuItem   *systray.MenuItem
+	updateAvailable  bool
+	latestVersion    string
+	latestReleaseURL string
+	updateCheckMu    sync.RWMutex
 
 	// Config path for opening from menu
 	configPath string
@@ -540,10 +548,13 @@ func (a *App) onReady() {
 	// --- Upstream & Quarantine Menus ---
 	a.upstreamServersMenu = systray.AddMenuItem("Upstream Servers", "Manage upstream servers")
 	a.quarantineMenu = systray.AddMenuItem("Security Quarantine", "Manage quarantined servers")
+
+	// --- Profile Switcher (Profiles v2 T5) ---
+	a.profileMenu = systray.AddMenuItem("Profile: All servers", "Switch the active tool-discovery profile")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
+	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.profileMenu, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.server, a.menuManager, a.logger)
 	a.syncManager.SetOnSync(func() {
 		a.instrumentation.NotifyMenus()
@@ -1606,6 +1617,10 @@ func (a *App) handleServerAction(serverName, action string) {
 	case "unquarantine":
 		err = a.syncManager.HandleServerUnquarantine(serverName)
 
+	case "switch_profile":
+		// Profiles v2 T5: serverName carries the profile slug ("" = all servers).
+		err = a.handleSwitchProfile(serverName)
+
 	default:
 		a.logger.Warn("Unknown server action requested", zap.String("action", action))
 	}
@@ -1616,6 +1631,26 @@ func (a *App) handleServerAction(serverName, action string) {
 			zap.String("action", action),
 			zap.Error(err))
 	}
+}
+
+// handleSwitchProfile sets the server-level default active profile via the core
+// REST surface (Profiles v2 T5) and triggers an immediate sync so the submenu's
+// title and checkmarks reflect the new selection without waiting for the next
+// poll. An empty slug clears the profile (all servers).
+func (a *App) handleSwitchProfile(slug string) error {
+	if a.server == nil {
+		return fmt.Errorf("server interface unavailable")
+	}
+	a.logger.Info("Switching active profile from tray", zap.String("profile", slug))
+	if err := a.server.SetActiveProfile(slug); err != nil {
+		return fmt.Errorf("failed to set active profile %q: %w", slug, err)
+	}
+	if a.syncManager != nil {
+		if err := a.syncManager.SyncNow(); err != nil {
+			a.logger.Debug("Profile switch sync refresh failed", zap.Error(err))
+		}
+	}
+	return nil
 }
 
 // handleOAuthLogin handles OAuth authentication for a server from the tray menu

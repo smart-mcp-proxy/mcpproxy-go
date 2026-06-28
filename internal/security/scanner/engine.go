@@ -58,6 +58,12 @@ type ScanRequest struct {
 	Env            map[string]string // Additional environment variables
 	ScanContext    *ScanContext      // Context metadata (set by service)
 	ScanPass       int               // 1 = security scan (fast), 2 = supply chain audit (background)
+	// PeerTools is a cross-server snapshot (other servers' current tool
+	// definitions, keyed by server name) used by the in-process tpa-descriptions
+	// scanner to build a multi-server RegistryView so the deterministic
+	// shadowing.cross_server check can detect impersonation/collisions across
+	// servers. Populated by the Service; nil for callers that don't supply it.
+	PeerTools map[string][]map[string]interface{}
 }
 
 // ScanCallback receives scan lifecycle events

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
@@ -741,4 +742,38 @@ func TestHandleRetrieveToolsForMode_ClosureReturnsDifferentInstructions(t *testi
 	// Code exec should mention code_execution, retrieve should mention call_tool_read
 	assert.Contains(t, codeExecInstructions, "code_execution")
 	assert.Contains(t, retrieveInstructions, "call_tool_read")
+}
+
+func TestSafeTruncateBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		s     string
+		limit int
+		want  int
+	}{
+		{"ascii cut mid-string", "hello world", 5, 5},
+		{"limit beyond length", "hi", 10, 2},
+		{"limit equals length", "hello", 5, 5},
+		{"zero limit", "hello", 0, 0},
+		{"negative limit", "hello", -1, 0},
+		// "héllo": 'é' is 2 bytes (0xC3 0xA9) at indices 1-2. A raw cut at 2
+		// would split it; safeTruncateBytes backs up to 1.
+		{"cut inside 2-byte rune backs up", "héllo", 2, 1},
+		{"cut at 2-byte rune end is kept", "héllo", 3, 3},
+		// "😀x": emoji is 4 bytes (indices 0-3). Cuts inside it back up to 0.
+		{"cut inside 4-byte rune backs up to 0", "😀x", 2, 0},
+		{"cut at emoji boundary kept", "😀x", 4, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := safeTruncateBytes(tt.s, tt.limit)
+			if got != tt.want {
+				t.Fatalf("safeTruncateBytes(%q, %d) = %d, want %d", tt.s, tt.limit, got, tt.want)
+			}
+			// The truncated prefix must always be valid UTF-8.
+			if !utf8.ValidString(tt.s[:got]) {
+				t.Errorf("prefix %q is not valid UTF-8", tt.s[:got])
+			}
+		})
+	}
 }

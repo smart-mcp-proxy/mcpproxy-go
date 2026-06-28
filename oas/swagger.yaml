@@ -18,6 +18,16 @@ components:
         activity_retention_days:
           description: Activity logging settings (RFC-003)
           type: integer
+        allow_private_registry_fetch:
+          description: |-
+            AllowPrivateRegistryFetch opts out of the registry SSRF guard (MCP-1076,
+            CWE-918). By default (false) registry fetches refuse any host that is — or
+            resolves to — a non-routable address (loopback, RFC1918/CGNAT private,
+            link-local incl. the 169.254.169.254 cloud-metadata endpoint), so a
+            malicious or typo'd registry source cannot turn the daemon into a
+            request-forgery vector against internal services. Set true ONLY when you
+            intentionally run a trusted registry mirror on an internal/private address.
+          type: boolean
         allow_server_add:
           type: boolean
         allow_server_remove:
@@ -82,6 +92,16 @@ components:
             in the resolvers (ResolveHealthCheckInterval / ResolveToolDiscoveryInterval)
             so an unset key behaves exactly as before this feature (SC-005). Validated
             in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
+          type: string
+        init_timeout:
+          description: |-
+            InitTimeout is the global default deadline for an upstream's MCP
+            `initialize` handshake (MCP-3322 / GH #760). *Duration tri-state: nil =
+            inherit the built-in 30s default; a positive value = that deadline. A
+            per-server InitTimeout overrides this. Resolved by ResolveInitTimeout;
+            validated to {0} ∪ [1s, 30m] in Validate(). Servers doing legitimate
+            first-run warmup (cache/index build) before answering `initialize` can
+            raise this so they are not killed mid-startup.
           type: string
         instructions:
           description: |-
@@ -249,7 +269,8 @@ components:
           description: 'Mount shared cache volumes for faster restarts (default: true)'
           type: boolean
         enabled:
-          description: Global enable/disable for Docker isolation
+          description: Global enable/disable for Docker isolation (legacy; superseded
+            by Mode)
           type: boolean
         extra_args:
           description: Additional docker run arguments
@@ -269,6 +290,15 @@ components:
         memory_limit:
           description: Memory limit for containers
           type: string
+        mode:
+          description: 'Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2).
+            Unset per-server inherits the global mode; unset globally falls back to
+            the legacy "enabled" flag (true ⇒ docker, false ⇒ none)'
+          type: string
+          x-enum-varnames:
+          - IsolationModeDocker
+          - IsolationModeSandbox
+          - IsolationModeNone
         network_mode:
           description: 'Docker network mode (default: bridge)'
           type: string
@@ -363,7 +393,8 @@ components:
       description: Per-server isolation settings
       properties:
         enabled:
-          description: Enable Docker isolation for this server (nil = inherit global)
+          description: Enable Docker isolation for this server (nil = inherit global;
+            legacy, superseded by Mode)
           type: boolean
         extra_args:
           description: Additional docker run arguments for this server
@@ -383,6 +414,8 @@ components:
         log_max_size:
           description: Maximum size of log files override
           type: string
+        mode:
+          $ref: '#/components/schemas/config.IsolationMode'
         network_mode:
           description: Custom network mode for this server
           type: string
@@ -390,6 +423,15 @@ components:
           description: Custom working directory in container
           type: string
       type: object
+    config.IsolationMode:
+      description: 'Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2). Unset
+        per-server inherits the global mode; unset globally falls back to the legacy
+        "enabled" flag (true ⇒ docker, false ⇒ none)'
+      type: string
+      x-enum-varnames:
+      - IsolationModeDocker
+      - IsolationModeSandbox
+      - IsolationModeNone
     config.LogConfig:
       description: Logging configuration
       properties:
@@ -418,6 +460,16 @@ components:
           description: MB
           type: integer
       type: object
+    config.MetricsExporterConfig:
+      description: |-
+        Metrics gates the Prometheus /metrics scrape endpoint (MCP-32). Disabled
+        by default — operators opt in for k8s/enterprise deployments.
+      properties:
+        enabled:
+          description: Enabled exposes /metrics on the existing HTTP listener when
+            true.
+          type: boolean
+      type: object
     config.OAuthConfig:
       description: OAuth configuration (keep even when empty to signal OAuth requirement)
       properties:
@@ -444,6 +496,10 @@ components:
       description: 'Observability settings (Spec 069): usage aggregate cache/persistence
         cadence.'
       properties:
+        metrics:
+          $ref: '#/components/schemas/config.MetricsExporterConfig'
+        tracing:
+          $ref: '#/components/schemas/config.TracingExporterConfig'
         usage_cache_ttl:
           description: |-
             UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
@@ -697,6 +753,15 @@ components:
             forward-compat, but the periodic index sweep is governed by the global
             cadence in this iteration (see spec 074 plan §C).
           type: string
+        init_timeout:
+          description: |-
+            InitTimeout overrides the global init_timeout for this server's MCP
+            `initialize` handshake deadline (MCP-3322 / GH #760). *Duration tri-state:
+            nil = inherit the global value (or 30s default), positive = that deadline.
+            Resolved by Config.ResolveInitTimeout; validated to {0} ∪ [1s, 30m]. Raise
+            this for upstreams that do legitimate first-run warmup (e.g. caching many
+            channels/users) before responding to `initialize`.
+          type: string
         isolation:
           $ref: '#/components/schemas/config.IsolationConfig'
         launcher_wait_timeout:
@@ -807,6 +872,28 @@ components:
         encoding:
           description: Default encoding (e.g., "cl100k_base")
           type: string
+      type: object
+    config.TracingExporterConfig:
+      description: |-
+        Tracing gates the OpenTelemetry OTLP trace exporter (MCP-32). Disabled by
+        default.
+      properties:
+        enabled:
+          description: Enabled turns on OTLP trace export for tool calls and upstream
+            hops.
+          type: boolean
+        endpoint:
+          description: |-
+            Endpoint is the collector address as host:port (no scheme), e.g.
+            "localhost:4318" for http or "localhost:4317" for grpc.
+          type: string
+        protocol:
+          description: 'Protocol selects the OTLP transport: "http" or "grpc".'
+          type: string
+        sample_rate:
+          description: SampleRate is the head-based trace sampling ratio in [0,1].
+            Default 0.1.
+          type: number
       type: object
     configimport.FailedServer:
       properties:
@@ -1858,6 +1945,14 @@ components:
           $ref: '#/components/schemas/contracts.HealthStatus'
         id:
           type: string
+        init_timeout:
+          description: |-
+            InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
+            the per-server MCP `initialize` handshake deadline override. Serialized as
+            a duration string (e.g. "120s"); nil/omitted means "inherit the global
+            default". Surfaced on the GET path so clients can read back a configured
+            override; PATCH/POST accept it via AddServerRequest.
+          type: string
         isolation:
           $ref: '#/components/schemas/contracts.IsolationConfig'
         isolation_defaults:
@@ -2272,6 +2367,13 @@ components:
           additionalProperties:
             type: string
           type: object
+        init_timeout:
+          description: |-
+            InitTimeout is the per-server MCP `initialize` handshake deadline override
+            (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
+            pointer means "leave unchanged" on PATCH; a present value is applied.
+            Mirrors config.ServerConfig.InitTimeout's *Duration tri-state.
+          type: string
         isolation:
           $ref: '#/components/schemas/httpapi.IsolationRequest'
         name:
@@ -2471,6 +2573,13 @@ components:
           description: |-
             ServerStepStatus is one of: "", "completed", "skipped". Empty
             preserves the existing value.
+          type: string
+      type: object
+    httpapi.SetActiveProfileRequest:
+      properties:
+        active_profile:
+          type: string
+        profile:
           type: string
       type: object
     management.BulkOperationResult:
@@ -3746,6 +3855,84 @@ paths:
       summary: Get onboarding wizard state and predicates (Spec 046)
       tags:
       - onboarding
+  /api/v1/profiles:
+    get:
+      description: List all configured profiles with their effective servers and indexed
+        tool count (Profiles v2). A profile scopes tool discovery and calls to a named
+        subset of upstream servers.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Profile list
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Configuration unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List configured profiles
+      tags:
+      - profiles
+  /api/v1/profiles/active:
+    get:
+      description: 'Get the server-level default active profile used by UI surfaces
+        (Web UI / tray). Empty string means "all servers". Note: within a live MCP
+        session, the set_profile tool selection takes precedence over this default.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Active profile
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the default active profile
+      tags:
+      - profiles
+    put:
+      description: Set the server-level default active profile for UI surfaces. The
+        slug must match a configured profile; pass an empty string to clear. This
+        does not affect live MCP sessions, which use the set_profile tool.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.SetActiveProfileRequest'
+        description: Profile slug to activate (empty clears)
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Active profile updated
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid request body
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown profile
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Set the default active profile
+      tags:
+      - profiles
   /api/v1/registries:
     get:
       description: Retrieves list of all MCP server registries that can be browsed

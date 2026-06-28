@@ -101,6 +101,13 @@ type Runtime struct {
 	lastGoodToolsMu sync.RWMutex
 	lastGoodTools   map[string][]*config.ToolMetadata
 
+	// Profiles v2 (Spec 057, T1): tracks the last-synced effective server set per
+	// profile so a config reload can rebuild only the profiles whose membership
+	// actually changed and drop profiles removed from config. Guards the
+	// per-profile Bleve index reconciliation (internal/runtime/profile_index.go).
+	profileIndexMu    sync.Mutex
+	profileMembership map[string][]string
+
 	// Schema v3 (telemetry): time-cached Docker daemon availability. The
 	// probe has a 2s `docker info` cost, so we don't want to run it on every
 	// heartbeat — but we also can't memoize it for the whole process lifetime:
@@ -263,10 +270,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			Message:     "Runtime is initializing...",
 			LastUpdated: time.Now(),
 		},
-		statusCh:      make(chan Status, 10),
-		eventSubs:     make(map[chan Event]struct{}),
-		phaseMachine:  newPhaseMachine(PhaseInitializing),
-		lastGoodTools: make(map[string][]*config.ToolMetadata),
+		statusCh:          make(chan Status, 10),
+		eventSubs:         make(map[chan Event]struct{}),
+		phaseMachine:      newPhaseMachine(PhaseInitializing),
+		lastGoodTools:     make(map[string][]*config.ToolMetadata),
+		profileMembership: make(map[string][]string),
 	}
 
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
@@ -1918,6 +1926,14 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// nil for servers that never configured it.
 		if serverStatus.Config != nil && serverStatus.Config.AutoApproveToolChanges != nil {
 			serverMap["auto_approve_tool_changes"] = *serverStatus.Config.AutoApproveToolChanges
+		}
+
+		// MCP-3322: surface the per-server init_timeout override so the REST GET
+		// payload (and SSE servers.changed embed) can read it back. Emitted as a
+		// duration string (e.g. "2m0s"); omitted when unset so the projection
+		// stays nil for servers that inherit the global default.
+		if serverStatus.Config != nil && serverStatus.Config.InitTimeout != nil {
+			serverMap["init_timeout"] = serverStatus.Config.InitTimeout.Duration().String()
 		}
 
 		// MCP-901: carry registry provenance through to the REST/SSE projection

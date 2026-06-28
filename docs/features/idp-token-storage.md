@@ -133,7 +133,12 @@ which validates the one-time `state`, exchanges the code, and persists the
 per-user credential (encrypted, `obtained_via=connect_flow`). The credential is
 always stored under the **initiating** user, so the callback cannot be used to
 write into another user's record. The browser then lands on `/ui/` with a
-`credential_connected` / `credential_error` query flag.
+`credential_connected` / `credential_error` query flag. The `credential_error`
+value is always a coerced, secret-free label (e.g. `access_denied`,
+`authorization_denied`); the raw, authorization-server-controlled error string is
+never logged or reflected back into the redirect, and token-endpoint failures
+surface only the HTTP status plus an allowlisted OAuth error code — never the raw
+response body (FR-029 / SC-005).
 
 ## Operational notes
 

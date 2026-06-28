@@ -24,39 +24,98 @@
         <div
           v-for="client in mergedClients"
           :key="client.id"
-          class="flex items-center justify-between p-3 rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors"
+          class="rounded-lg border border-base-300 hover:bg-base-200/50 transition-colors overflow-hidden"
+          :class="accessState(client) === 'denied' ? 'border-error/40' : ''"
         >
-          <div class="flex items-center gap-3 min-w-0 flex-1">
-            <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" :title="client.name">
-              {{ clientIcon(client) }}
+          <div class="flex items-center justify-between p-3">
+            <div class="flex items-center gap-3 min-w-0 flex-1">
+              <div class="w-8 h-8 flex items-center justify-center text-lg shrink-0" :title="client.name">
+                {{ clientIcon(client) }}
+              </div>
+              <div class="min-w-0 flex-1">
+                <div class="font-medium text-sm truncate">{{ client.name }}</div>
+                <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
+                <div v-if="client.note" class="text-xs opacity-60 italic mt-0.5" :title="client.note">{{ client.note }}</div>
+              </div>
             </div>
-            <div class="min-w-0 flex-1">
-              <div class="font-medium text-sm truncate">{{ client.name }}</div>
-              <div class="text-xs opacity-50 truncate" :title="client.config_path">{{ client.config_path }}</div>
-              <div v-if="client.note" class="text-xs opacity-60 italic mt-0.5" :title="client.note">{{ client.note }}</div>
+            <div class="shrink-0 ml-2 flex flex-col items-end gap-1">
+              <span v-if="!client.supported" class="badge badge-ghost badge-sm">{{ client.reason || 'Not supported' }}</span>
+              <!-- Spec 075 US2: macOS blocked reading this client's config. -->
+              <span
+                v-else-if="accessState(client) === 'denied'"
+                data-test="connect-blocked-badge"
+                class="badge badge-error badge-sm gap-1"
+                title="macOS blocked access to this client's config (Privacy & Security ▸ App Data)"
+              >
+                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                Blocked
+              </span>
+              <!-- Spec 075 FR-003: config exists but is unparseable — distinct from a denial. -->
+              <span
+                v-else-if="accessState(client) === 'malformed'"
+                data-test="connect-malformed-badge"
+                class="badge badge-warning badge-sm"
+                title="Config exists but could not be parsed"
+              >Unreadable config</span>
+              <span v-else-if="!client.exists && !client.bridge" class="text-xs opacity-40">Config not found</span>
+              <button
+                v-else-if="client.connected"
+                @click="disconnect(client.id)"
+                class="btn btn-ghost btn-xs text-error"
+                :disabled="loading.clients[client.id]"
+              >
+                <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Disconnect</span>
+              </button>
+              <button
+                v-else
+                @click="connect(client.id)"
+                class="btn btn-primary btn-xs"
+                :disabled="loading.clients[client.id]"
+              >
+                <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Connect</span>
+              </button>
+              <!-- Spec 075 US1: explicit, no-eager-read access check. The stat-only
+                   listing leaves installed clients 'unknown'; this is the only
+                   action that reads the config (the sole macOS privacy-prompt site). -->
+              <button
+                v-if="client.exists && accessState(client) === 'unknown' && !client.connected"
+                data-test="connect-check-access"
+                @click="checkAccess(client.id)"
+                class="btn btn-ghost btn-2xs h-auto min-h-0 py-0.5 text-[0.7rem] opacity-60 hover:opacity-100"
+                :disabled="checking[client.id]"
+                title="Read this client's config now to verify access (may prompt on macOS)"
+              >
+                <span v-if="checking[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Check access</span>
+              </button>
             </div>
           </div>
-          <div class="shrink-0 ml-2">
-            <span v-if="!client.supported" class="badge badge-ghost badge-sm">{{ client.reason || 'Not supported' }}</span>
-            <span v-else-if="!client.exists && !client.bridge" class="text-xs opacity-40">Config not found</span>
-            <button
-              v-else-if="client.connected"
-              @click="disconnect(client.id)"
-              class="btn btn-ghost btn-xs text-error"
-              :disabled="loading.clients[client.id]"
-            >
-              <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
-              <span v-else>Disconnect</span>
-            </button>
-            <button
-              v-else
-              @click="connect(client.id)"
-              class="btn btn-primary btn-xs"
-              :disabled="loading.clients[client.id]"
-            >
-              <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
-              <span v-else>Connect</span>
-            </button>
+          <!-- Spec 075 US2: actionable remediation banner for a macOS App-Data denial. -->
+          <div
+            v-if="accessState(client) === 'denied'"
+            data-test="connect-denied-banner"
+            class="border-t border-error/30 bg-error/10 px-3 py-2 space-y-2"
+          >
+            <p class="text-xs whitespace-pre-line leading-relaxed">{{ client.remediation || defaultRemediation(client) }}</p>
+            <div class="flex items-center gap-2">
+              <button
+                data-test="connect-copy-tccutil"
+                @click="copyTccutil(client)"
+                class="btn btn-xs btn-outline btn-error"
+              >
+                {{ copiedClient === client.id ? 'Copied ✓' : 'Copy reset command' }}
+              </button>
+              <button
+                @click="checkAccess(client.id)"
+                class="btn btn-xs btn-ghost"
+                :disabled="checking[client.id]"
+              >
+                <span v-if="checking[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Re-check</span>
+              </button>
+            </div>
           </div>
         </div>
 
@@ -92,7 +151,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
-import type { ClientStatus } from '@/types'
+import type { ClientStatus, AccessState } from '@/types'
 
 interface Props {
   show: boolean
@@ -115,6 +174,13 @@ const loading = reactive({
   initial: false,
   clients: {} as Record<string, boolean>,
 })
+// Spec 075: per-client GET status results keyed by id. The stat-only listing
+// reports access_state='unknown'; an explicit "Check access" (or a failed
+// connect/disconnect) reads one config on demand and resolves it here. Because
+// this GET actually read the file, it is authoritative over the listing.
+const resolved = ref<Record<string, ClientStatus>>({})
+const checking = reactive<Record<string, boolean>>({})
+const copiedClient = ref<string | null>(null)
 
 // MCP-2952: `GET /api/v1/connect` is stat-only (#706/MCP-2829) and reports
 // connected=false for every client. Merge the content-resolved
@@ -123,15 +189,29 @@ const loading = reactive({
 // Derived (not mutated) so refreshes stay correct.
 const mergedClients = computed<ClientStatus[]>(() => {
   const connectedIds = new Set(onboarding.connectedClientIds)
-  return clients.value.map(c =>
-    c.connected || !connectedIds.has(c.id) ? c : { ...c, connected: true }
-  )
+  return clients.value.map(c => {
+    // A per-client GET (Check access / post-action resolve) read the config and
+    // is authoritative — it supersedes the stat-only listing for this client.
+    const override = resolved.value[c.id]
+    if (override) {
+      return { ...c, ...override }
+    }
+    return c.connected || !connectedIds.has(c.id) ? c : { ...c, connected: true }
+  })
 })
+
+// Default to 'unknown' for the content-read-free listing (no eager read).
+function accessState(client: ClientStatus): AccessState {
+  return client.access_state ?? 'unknown'
+}
 
 const connectableClients = computed(() =>
   // Bridge clients (e.g. Claude Desktop) can be connected even without an
-  // existing config file — Connect creates it.
-  mergedClients.value.filter(c => c.supported && (c.exists || c.bridge) && !c.connected)
+  // existing config file — Connect creates it. A client macOS has blocked
+  // ('denied') is excluded: the write would fail with the same privacy error.
+  mergedClients.value.filter(
+    c => c.supported && (c.exists || c.bridge) && !c.connected && accessState(c) !== 'denied'
+  )
 )
 
 const allConnected = computed(() =>
@@ -164,6 +244,8 @@ async function fetchClients() {
     const response = await api.getConnectStatus()
     if (response.success && response.data) {
       clients.value = Array.isArray(response.data) ? response.data : []
+      // A fresh stat-only listing supersedes any earlier on-demand resolutions.
+      resolved.value = {}
     } else {
       error.value = response.error || 'Failed to load client status'
     }
@@ -192,10 +274,14 @@ async function connect(clientId: string) {
     } else {
       resultMessage.value = response.error || 'Failed to connect'
       resultSuccess.value = false
+      // The write may have failed because macOS blocked the config. Resolve the
+      // access state in-band so a denial surfaces as the actionable banner.
+      void checkAccess(clientId)
     }
   } catch (err) {
     resultMessage.value = err instanceof Error ? err.message : 'Unknown error'
     resultSuccess.value = false
+    void checkAccess(clientId)
   } finally {
     loading.clients[clientId] = false
   }
@@ -220,12 +306,70 @@ async function disconnect(clientId: string) {
     } else {
       resultMessage.value = response.error || 'Failed to disconnect'
       resultSuccess.value = false
+      void checkAccess(clientId)
     }
   } catch (err) {
     resultMessage.value = err instanceof Error ? err.message : 'Unknown error'
     resultSuccess.value = false
+    void checkAccess(clientId)
   } finally {
     loading.clients[clientId] = false
+  }
+}
+
+// Spec 075 US1/US2: read one client's config on demand to resolve its
+// access_state (accessible/absent/denied/malformed) and remediation. This is
+// the only Connect call that opens a config file, so it is the sole legitimate
+// macOS App-Data privacy-prompt site — always tied to an explicit user action.
+async function checkAccess(clientId: string) {
+  checking[clientId] = true
+  try {
+    const response = await api.getConnectClientStatus(clientId)
+    if (response.success && response.data) {
+      resolved.value = { ...resolved.value, [clientId]: response.data }
+    }
+  } catch {
+    // Best-effort: leave the client's state as-is (unknown) on failure.
+  } finally {
+    checking[clientId] = false
+  }
+}
+
+// Fallback remediation if the backend omitted the text (defensive; the core
+// always populates `remediation` on a denial). Mirrors connect/access.go.
+function defaultRemediation(client: ClientStatus): string {
+  return (
+    `macOS blocked mcpproxy from reading ${client.name}'s configuration (Privacy & Security ▸ App Data).\n` +
+    'Fix: System Settings ▸ Privacy & Security ▸ App Data ▸ enable mcpproxy,\n' +
+    'or run: tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy\n' +
+    '(dev builds: com.smartmcpproxy.mcpproxy.dev)'
+  )
+}
+
+// Extract the exact `tccutil reset …` command from the remediation text so the
+// user can paste it directly into a terminal.
+function tccutilCommand(client: ClientStatus): string {
+  const text = client.remediation || defaultRemediation(client)
+  const line = text.split('\n').find(l => l.includes('tccutil reset'))
+  // Strip a leading "or run: " prefix if present.
+  return (line ?? 'tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy')
+    .replace(/^.*?(tccutil reset)/, '$1')
+    .trim()
+}
+
+async function copyTccutil(client: ClientStatus) {
+  const cmd = tccutilCommand(client)
+  try {
+    await navigator.clipboard.writeText(cmd)
+    copiedClient.value = client.id
+    setTimeout(() => {
+      if (copiedClient.value === client.id) copiedClient.value = null
+    }, 2000)
+  } catch {
+    // Clipboard unavailable (e.g. insecure context): surface the command so the
+    // user can copy it manually.
+    resultMessage.value = cmd
+    resultSuccess.value = false
   }
 }
 

@@ -234,6 +234,15 @@ type ScanFinding struct {
 	// other non-package findings stay false so the UI can route them to their proper
 	// threat_type group instead of the CVE section.
 	SupplyChainAudit bool `json:"supply_chain_audit,omitempty"`
+	// Confidence is the combined 0.0–1.0 confidence of the deterministic
+	// tool-scanner (Spec 076). Independent signals on a tool add (capped at
+	// 1.0), so agreement raises it. Zero/omitted for findings produced by
+	// scanners that do not emit confidence. Additive — see detect.Engine.
+	Confidence float64 `json:"confidence,omitempty"`
+	// Signals lists the deterministic check IDs that contributed to this
+	// finding (e.g. "unicode.hidden", "directive.imperative"), giving operators
+	// transparency into why a tool was flagged (Spec 076, FR-010). Additive.
+	Signals []string `json:"signals,omitempty"`
 }
 
 // ScanReport represents aggregated scan results for a server

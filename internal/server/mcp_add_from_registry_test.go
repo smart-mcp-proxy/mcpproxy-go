@@ -59,6 +59,9 @@ func startTestRegistry(t *testing.T, servers []map[string]interface{}) {
 	t.Cleanup(srv.Close)
 
 	registries.SetRegistriesFromConfig(&config.Config{
+		// The registry is served on loopback (httptest); opt past the SSRF guard
+		// (MCP-1076) the same way an operator would for a trusted internal mirror.
+		AllowPrivateRegistryFetch: true,
 		Registries: []config.RegistryEntry{
 			{ID: "testreg", Name: "testreg", ServersURL: srv.URL, Protocol: "modelcontextprotocol/registry"},
 		},

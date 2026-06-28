@@ -81,11 +81,45 @@ type Server struct {
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
 	shutdownSignal string
+
+	// MCP-32: observability manager (Prometheus /metrics + OTLP tracing).
+	// Nil when disabled; config-gated and off by default.
+	observability *observability.Manager
 }
 
 // NewServer creates a new server instance
 func NewServer(cfg *config.Config, logger *zap.Logger) (*Server, error) {
 	return NewServerWithConfigPath(cfg, "", logger)
+}
+
+// buildObservabilityConfig maps the file-level observability config (MCP-32)
+// onto the observability package config. Exporters are OFF unless explicitly
+// enabled. Health checks remain on (cheap, internal). Defensive against a nil
+// observability block.
+func buildObservabilityConfig(cfg *config.Config) observability.Config {
+	out := observability.DefaultConfig("mcpproxy", httpapi.GetBuildVersion())
+	// DefaultConfig enables metrics; flip to opt-in per the MCP-32 directive.
+	out.Metrics.Enabled = false
+	out.Tracing.Enabled = false
+	// The observability package's health manager is out of scope for MCP-32 and
+	// its readiness is vacuous (no registered checkers). Keep the existing
+	// controller-backed /healthz and /readyz authoritative in all cases.
+	out.Health.Enabled = false
+
+	obs := cfg.Observability
+	if obs == nil {
+		return out
+	}
+	if obs.Metrics != nil {
+		out.Metrics.Enabled = obs.Metrics.Enabled
+	}
+	if obs.Tracing != nil {
+		out.Tracing.Enabled = obs.Tracing.Enabled
+		out.Tracing.Protocol = obs.Tracing.Protocol
+		out.Tracing.OTLPEndpoint = obs.Tracing.Endpoint
+		out.Tracing.SampleRate = obs.Tracing.SampleRate
+	}
+	return out
 }
 
 // NewServerWithConfigPath creates a new server instance with explicit config path tracking
@@ -102,15 +136,18 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Initialize telemetry service with build version and edition (Spec 036)
 	rt.SetTelemetry(httpapi.GetBuildVersion(), httpapi.GetEdition())
 
-	// Initialize observability manager for metrics (FR-011: OAuth refresh metrics)
-	obsConfig := observability.DefaultConfig("mcpproxy", httpapi.GetBuildVersion())
+	// Initialize observability manager (MCP-32): Prometheus /metrics + OTLP
+	// tracing, config-gated and OFF by default. OAuth refresh metrics (Spec 023,
+	// FR-011) are wired here too when metrics are enabled.
+	obsConfig := buildObservabilityConfig(cfg)
 	obsManager, err := observability.NewManager(logger.Sugar(), &obsConfig)
 	if err != nil {
-		logger.Warn("Failed to create observability manager, metrics will be disabled", zap.Error(err))
+		logger.Warn("Failed to create observability manager, metrics/tracing will be disabled", zap.Error(err))
+		obsManager = nil
 	} else if obsManager.Metrics() != nil {
 		// Wire up metrics recorder to RefreshManager for OAuth refresh metrics
 		rt.SetRefreshMetricsRecorder(obsManager.Metrics())
-		logger.Info("OAuth refresh metrics enabled")
+		logger.Info("Prometheus metrics enabled", zap.String("endpoint", "/metrics"))
 	}
 
 	// Initialize management service and set it on runtime
@@ -126,10 +163,11 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	rt.SetManagementService(mgmtService)
 
 	server := &Server{
-		logger:   logger,
-		runtime:  rt,
-		statusCh: make(chan interface{}, 10),
-		eventsCh: rt.SubscribeEvents(),
+		logger:        logger,
+		runtime:       rt,
+		statusCh:      make(chan interface{}, 10),
+		eventsCh:      rt.SubscribeEvents(),
+		observability: obsManager,
 	}
 
 	mcpProxy := NewMCPProxyServer(
@@ -143,6 +181,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		cfg.DebugSearch,
 		cfg,
 	)
+	// MCP-32: give the MCP proxy access to observability for tool-call metrics
+	// and OTLP spans.
+	mcpProxy.SetObservability(obsManager)
 
 	server.mcpProxy = mcpProxy
 
@@ -234,6 +275,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				TokenPrefix:    agentToken.TokenPrefix,
 				AllowedServers: agentToken.AllowedServers,
 				Permissions:    agentToken.Permissions,
+				ProfilePin:     agentToken.ProfilePin,
 			}
 			ctx := auth.WithAuthContext(r.Context(), authCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -531,6 +573,16 @@ func (s *Server) Shutdown() error {
 
 	if s.eventsCh != nil {
 		s.runtime.UnsubscribeEvents(s.eventsCh)
+	}
+
+	// MCP-32: flush and shut down the OTLP tracer provider so buffered spans
+	// are exported before exit.
+	if s.observability != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.observability.Close(ctx); err != nil {
+			s.logger.Warn("Failed to close observability manager", zap.Error(err))
+		}
+		cancel()
 	}
 
 	s.logger.Info("Shutting down MCP proxy server...")
@@ -1182,6 +1234,14 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
+	// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
+	// existing pointer when the request omits the field, so this nil-guard is
+	// the second half of the nil-preserve contract.
+	if updates.InitTimeout != nil {
+		existing.InitTimeout = updates.InitTimeout
+	}
+
 	// Isolation is PATCH-semantic: nil means "leave unchanged"; a
 	// present struct means "replace". Within the struct, the caller
 	// only populates fields they want to set (handled upstream by
@@ -1373,6 +1433,11 @@ func (s *Server) StartServer(ctx context.Context) error {
 	}
 
 	s.serverCtx, s.serverCancel = context.WithCancel(ctx)
+
+	// MCP-32: project runtime events onto Prometheus metrics while running.
+	if s.observability != nil && s.observability.Metrics() != nil {
+		go s.runMetricsBridge(s.serverCtx, s.observability.Metrics())
+	}
 
 	go func() {
 		var serverError error
@@ -1615,6 +1680,19 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 		slug = strings.Trim(slug, "/")
 
+		// Profiles v2 T3: a profile-pinned agent token may only operate within its
+		// pinned profile. A request to any other /mcp/p/<slug> is forbidden (403),
+		// regardless of whether that slug is a real profile. Auth has already run
+		// (mcpAuthMiddleware wraps this handler), so the pin is on the context.
+		if pin := profilePinFromContext(r.Context()); pin != "" && pin != slug {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": fmt.Sprintf("agent token is pinned to profile '%s' and cannot access profile '%s'", pin, slug),
+			})
+			return
+		}
+
 		// Look up profile by slug (lock-free snapshot).
 		var found *config.ProfileConfig
 		for i := range cfg.Profiles {
@@ -1649,6 +1727,36 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 
 // startCustomHTTPServer creates a custom HTTP server that handles MCP endpoints
 // It supports both TCP (for browsers) and Unix socket/named pipe (for tray) listeners
+// registerHTTPHandlers forwards the REST API, SSE events, health endpoints,
+// and the observability /metrics endpoint from the outer http.ServeMux to the
+// httpapi chi router (httpAPIServer).
+//
+// MCP-3135: /metrics is registered on the chi router (httpapi.setupRoutes), but
+// the outer mux must explicitly forward it — otherwise GET /metrics returns 404
+// even when metrics are enabled. The forward is gated on metrics actually being
+// enabled so a disabled deployment keeps /metrics unrouted (404).
+func (s *Server) registerHTTPHandlers(mux *http.ServeMux, httpAPIServer http.Handler) {
+	mux.Handle("/api/", httpAPIServer)
+	mux.Handle("/events", httpAPIServer)
+
+	// Mount health endpoints directly on main mux at root level
+	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
+	for _, endpoint := range healthEndpoints {
+		mux.Handle(endpoint, httpAPIServer)
+	}
+
+	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
+	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+
+	// MCP-32/MCP-3135: forward /metrics to the chi router only when the
+	// Prometheus exporter is enabled. Without this the handler registered in
+	// httpapi.setupRoutes is unreachable through the outer mux.
+	if s.observability != nil && s.observability.Metrics() != nil {
+		mux.Handle("/metrics", httpAPIServer)
+		s.logger.Info("Registered metrics endpoint", zap.String("endpoint", "/metrics"))
+	}
+}
+
 func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *server.StreamableHTTPServer) error {
 	cfg := s.runtime.Config()
 	if cfg == nil {
@@ -1790,9 +1898,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/v1/tool_code", mcpHandler)
 	mux.Handle("/v1/tool-code", mcpHandler) // Alias for python client
 
-	// API v1 endpoints with chi router for REST API and SSE
-	// TODO: Add observability manager integration
-	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), nil)
+	// API v1 endpoints with chi router for REST API and SSE.
+	// MCP-32: pass the observability manager so /metrics is served (and HTTP
+	// request metrics/tracing middleware applied) when enabled.
+	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()
@@ -1880,17 +1989,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 	// Wire server edition multi-user OAuth (no-op in personal edition)
 	wireServerEditionOAuth(s, httpAPIServer)
-	mux.Handle("/api/", httpAPIServer)
-	mux.Handle("/events", httpAPIServer)
 
-	// Mount health endpoints directly on main mux at root level
-	healthEndpoints := []string{"/healthz", "/readyz", "/livez", "/ready", "/health"}
-	for _, endpoint := range healthEndpoints {
-		mux.Handle(endpoint, httpAPIServer)
-	}
-
-	s.logger.Info("Registered REST API endpoints", zap.Strings("api_endpoints", []string{"/api/v1/*", "/events"}))
-	s.logger.Info("Registered health endpoints", zap.Strings("health_endpoints", healthEndpoints))
+	// Forward REST API, events, health, and (MCP-32) /metrics onto the outer
+	// mux. Extracted so the routing is unit-testable (MCP-3135 regression).
+	s.registerHTTPHandlers(mux, httpAPIServer)
 
 	// Debug / profiling endpoints (API-key gated). Block & mutex profiles
 	// default to off; we enable them when the route is hit so the running
@@ -2491,6 +2593,15 @@ func (s *Server) NotifySecretsChanged(ctx context.Context, operation, secretName
 	return s.runtime.NotifySecretsChanged(ctx, operation, secretName)
 }
 
+// EmitActiveProfileChanged broadcasts an active_profile.changed event so UI
+// surfaces (Web UI, tray) reflect a default-profile switch made by another
+// client (Profiles v2 T2/T5). The REST handler invokes this via an optional
+// capability assertion, so adding it here does not widen the httpapi
+// ServerController interface.
+func (s *Server) EmitActiveProfileChanged(profile string) {
+	s.runtime.EmitActiveProfileChanged(profile)
+}
+
 // GetCurrentConfig returns the current configuration
 func (s *Server) GetCurrentConfig() interface{} {
 	return s.runtime.GetCurrentConfig()
@@ -2806,6 +2917,26 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 		return p.server.GetServerTools(serverName)
 	}
 	return nil, fmt.Errorf("server tools not available")
+}
+
+// GetAllServerTools implements scanner's optional allServerToolsProvider: it
+// returns every configured server's current tool definitions, keyed by server
+// name, so a scan can build a cross-server snapshot for the shadowing check.
+// Best-effort: servers that error or expose no tools are skipped, never fatal.
+func (p *configServerInfoProvider) GetAllServerTools() (map[string][]map[string]interface{}, error) {
+	cfg := p.currentConfig()
+	if cfg == nil || p.server == nil {
+		return nil, nil
+	}
+	all := make(map[string][]map[string]interface{}, len(cfg.Servers))
+	for _, sc := range cfg.Servers {
+		tools, err := p.server.GetServerTools(sc.Name)
+		if err != nil || len(tools) == 0 {
+			continue
+		}
+		all[sc.Name] = tools
+	}
+	return all, nil
 }
 
 // EnsureConnected attempts to connect a disconnected server so tool definitions

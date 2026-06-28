@@ -58,6 +58,10 @@ func (d Duration) Duration() time.Duration {
 const (
 	defaultHealthCheckInterval   = 30 * time.Second
 	defaultToolDiscoveryInterval = 5 * time.Minute
+	// defaultInitTimeout is the deadline applied to a stdio/HTTP upstream's MCP
+	// `initialize` handshake when no per-server or global override is set
+	// (MCP-3322 / GH #760). It preserves the historical ~30s behaviour.
+	defaultInitTimeout = 30 * time.Second
 )
 
 // resolveInterval applies the per-server → global → default precedence for an
@@ -97,6 +101,23 @@ func (c *Config) ResolveToolDiscoveryInterval(sc *ServerConfig) time.Duration {
 	return resolveInterval(server, c.ToolDiscoveryInterval, defaultToolDiscoveryInterval)
 }
 
+// ResolveInitTimeout resolves the effective MCP `initialize` handshake deadline
+// for a server: per-server override → global → 30s default (MCP-3322 / GH #760).
+// Unlike the discovery intervals, a resolved value <= 0 maps to the default
+// rather than "disabled" — a zero/negative connect deadline would let a stuck
+// upstream hang the connect path forever, so we always keep a real ceiling.
+func (c *Config) ResolveInitTimeout(sc *ServerConfig) time.Duration {
+	var server *Duration
+	if sc != nil {
+		server = sc.InitTimeout
+	}
+	resolved := resolveInterval(server, c.InitTimeout, defaultInitTimeout)
+	if resolved <= 0 {
+		return defaultInitTimeout
+	}
+	return resolved
+}
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen       string `json:"listen" mapstructure:"listen"`
@@ -126,6 +147,15 @@ type Config struct {
 	// in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health-check-interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool-discovery-interval" swaggertype:"string"`
+
+	// InitTimeout is the global default deadline for an upstream's MCP
+	// `initialize` handshake (MCP-3322 / GH #760). *Duration tri-state: nil =
+	// inherit the built-in 30s default; a positive value = that deadline. A
+	// per-server InitTimeout overrides this. Resolved by ResolveInitTimeout;
+	// validated to {0} ∪ [1s, 30m] in Validate(). Servers doing legitimate
+	// first-run warmup (cache/index build) before answering `initialize` can
+	// raise this so they are not killed mid-startup.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -176,6 +206,15 @@ type Config struct {
 	// sources. Built-in defaults are unaffected. Documented but otherwise inert
 	// beyond the add-source rejection.
 	RegistriesLocked bool `json:"registries_locked,omitempty" mapstructure:"registries-locked"`
+
+	// AllowPrivateRegistryFetch opts out of the registry SSRF guard (MCP-1076,
+	// CWE-918). By default (false) registry fetches refuse any host that is — or
+	// resolves to — a non-routable address (loopback, RFC1918/CGNAT private,
+	// link-local incl. the 169.254.169.254 cloud-metadata endpoint), so a
+	// malicious or typo'd registry source cannot turn the daemon into a
+	// request-forgery vector against internal services. Set true ONLY when you
+	// intentionally run a trusted registry mirror on an internal/private address.
+	AllowPrivateRegistryFetch bool `json:"allow_private_registry_fetch,omitempty" mapstructure:"allow-private-registry-fetch"`
 
 	// Deprecated: Features flags are unused and have no runtime effect. Kept for backward compatibility.
 	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
@@ -358,6 +397,14 @@ type ServerConfig struct {
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health_check_interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool_discovery_interval" swaggertype:"string"`
 
+	// InitTimeout overrides the global init_timeout for this server's MCP
+	// `initialize` handshake deadline (MCP-3322 / GH #760). *Duration tri-state:
+	// nil = inherit the global value (or 30s default), positive = that deadline.
+	// Resolved by Config.ResolveInitTimeout; validated to {0} ∪ [1s, 30m]. Raise
+	// this for upstreams that do legitimate first-run warmup (e.g. caching many
+	// channels/users) before responding to `initialize`.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init_timeout" swaggertype:"string"`
+
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
@@ -390,9 +437,43 @@ type OAuthConfig struct {
 	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
 }
 
+// IsolationMode selects how an stdio MCP server's process is isolated (MCP-34.2).
+//
+//   - "docker"  — run the server inside a Docker container (the original behavior).
+//   - "sandbox" — run under a native OS sandbox (Landlock LSM + rlimits on Linux;
+//     see MCP-34). No daemon required.
+//   - "none"    — no isolation; the server process runs directly on the host.
+//
+// The empty string means "unset": back-compat code falls back to the legacy
+// boolean Enabled flag (enabled:true ⇒ docker, enabled:false ⇒ none).
+type IsolationMode string
+
+const (
+	// IsolationModeDocker runs the server inside a Docker container.
+	IsolationModeDocker IsolationMode = "docker"
+	// IsolationModeSandbox runs the server under a native OS sandbox (Landlock/rlimits).
+	IsolationModeSandbox IsolationMode = "sandbox"
+	// IsolationModeNone disables isolation; the process runs directly.
+	IsolationModeNone IsolationMode = "none"
+)
+
+// IsValid reports whether the mode is a recognized value. The empty string
+// ("unset") is treated as valid because the global config falls back to the
+// legacy Enabled bool; callers that require an explicit mode should check for
+// emptiness separately.
+func (m IsolationMode) IsValid() bool {
+	switch m {
+	case IsolationModeDocker, IsolationModeSandbox, IsolationModeNone, "":
+		return true
+	default:
+		return false
+	}
+}
+
 // DockerIsolationConfig represents global Docker isolation settings
 type DockerIsolationConfig struct {
-	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation
+	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation (legacy; superseded by Mode)
+	Mode              IsolationMode     `json:"mode,omitempty" mapstructure:"mode"`                            // Isolation mode: "docker" | "sandbox" | "none". Empty falls back to Enabled (MCP-34.2)
 	EnableCacheVolume bool              `json:"enable_cache_volume" mapstructure:"enable_cache_volume"`        // Mount shared cache volumes for faster restarts (default: true)
 	DefaultImages     map[string]string `json:"default_images" mapstructure:"default_images"`                  // Map of runtime type to Docker image
 	Registry          string            `json:"registry,omitempty" mapstructure:"registry"`                    // Custom registry (defaults to docker.io)
@@ -408,14 +489,34 @@ type DockerIsolationConfig struct {
 
 // IsolationConfig represents per-server isolation settings
 type IsolationConfig struct {
-	Enabled     *bool    `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global)
-	Image       string   `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
-	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
-	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
-	WorkingDir  string   `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
-	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
-	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
-	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+	Enabled     *bool          `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global; legacy, superseded by Mode)
+	Mode        *IsolationMode `json:"mode,omitempty" mapstructure:"mode"`                   // Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2). Unset per-server inherits the global mode; unset globally falls back to the legacy "enabled" flag (true ⇒ docker, false ⇒ none)
+	Image       string         `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
+	NetworkMode string         `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
+	ExtraArgs   []string       `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
+	WorkingDir  string         `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
+	LogDriver   string         `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
+	LogMaxSize  string         `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
+	LogMaxFiles string         `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+}
+
+// ResolvedMode returns the effective global isolation mode, applying back-compat
+// mapping from the legacy Enabled bool (MCP-34.2):
+//
+//   - an explicit Mode always wins;
+//   - otherwise enabled:true ⇒ docker, enabled:false ⇒ none;
+//   - a nil config resolves to none.
+func (dic *DockerIsolationConfig) ResolvedMode() IsolationMode {
+	if dic == nil {
+		return IsolationModeNone
+	}
+	if dic.Mode != "" {
+		return dic.Mode
+	}
+	if dic.Enabled {
+		return IsolationModeDocker
+	}
+	return IsolationModeNone
 }
 
 // IsEnabled returns true if isolation is explicitly enabled, false otherwise.
@@ -944,7 +1045,8 @@ func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
 	return c.StrictServerValidation
 }
 
-// ObservabilityConfig controls the Spec 069 usage aggregate cadence.
+// ObservabilityConfig controls the Spec 069 usage aggregate cadence plus the
+// MCP-32 metrics/tracing exporters.
 type ObservabilityConfig struct {
 	// UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
 	// wide windows (FR-005). Default 5s.
@@ -952,6 +1054,56 @@ type ObservabilityConfig struct {
 	// UsagePersistInterval is how often the actor-owned usage aggregate snapshot
 	// is flushed to storage. Default 30s.
 	UsagePersistInterval Duration `json:"usage_persist_interval,omitempty" mapstructure:"usage-persist-interval" swaggertype:"string"`
+
+	// Metrics gates the Prometheus /metrics scrape endpoint (MCP-32). Disabled
+	// by default — operators opt in for k8s/enterprise deployments.
+	Metrics *MetricsExporterConfig `json:"metrics,omitempty" mapstructure:"metrics"`
+	// Tracing gates the OpenTelemetry OTLP trace exporter (MCP-32). Disabled by
+	// default.
+	Tracing *TracingExporterConfig `json:"tracing,omitempty" mapstructure:"tracing"`
+}
+
+// MetricsExporterConfig controls the Prometheus /metrics endpoint (MCP-32).
+type MetricsExporterConfig struct {
+	// Enabled exposes /metrics on the existing HTTP listener when true.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+}
+
+// TracingExporterConfig controls the OpenTelemetry OTLP trace exporter (MCP-32).
+type TracingExporterConfig struct {
+	// Enabled turns on OTLP trace export for tool calls and upstream hops.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	// Protocol selects the OTLP transport: "http" or "grpc".
+	Protocol string `json:"protocol,omitempty" mapstructure:"protocol"`
+	// Endpoint is the collector address as host:port (no scheme), e.g.
+	// "localhost:4318" for http or "localhost:4317" for grpc.
+	Endpoint string `json:"endpoint,omitempty" mapstructure:"endpoint"`
+	// SampleRate is the head-based trace sampling ratio in [0,1]. Default 0.1.
+	SampleRate float64 `json:"sample_rate,omitempty" mapstructure:"sample-rate"`
+}
+
+// Default OTLP transport values shared by defaults and validation repair.
+const (
+	defaultTracingProtocol   = "http"
+	defaultTracingHTTPEnd    = "localhost:4318"
+	defaultTracingGRPCEnd    = "localhost:4317"
+	defaultTracingSampleRate = 0.1
+)
+
+// DefaultMetricsExporterConfig returns the default (disabled) metrics exporter.
+func DefaultMetricsExporterConfig() *MetricsExporterConfig {
+	return &MetricsExporterConfig{Enabled: false}
+}
+
+// DefaultTracingExporterConfig returns the default (disabled) tracing exporter
+// with sane transport defaults pre-filled.
+func DefaultTracingExporterConfig() *TracingExporterConfig {
+	return &TracingExporterConfig{
+		Enabled:    false,
+		Protocol:   defaultTracingProtocol,
+		Endpoint:   defaultTracingHTTPEnd,
+		SampleRate: defaultTracingSampleRate,
+	}
 }
 
 // DefaultObservabilityConfig returns the default observability configuration.
@@ -959,6 +1111,8 @@ func DefaultObservabilityConfig() *ObservabilityConfig {
 	return &ObservabilityConfig{
 		UsageCacheTTL:        Duration(5 * time.Second),
 		UsagePersistInterval: Duration(30 * time.Second),
+		Metrics:              DefaultMetricsExporterConfig(),
+		Tracing:              DefaultTracingExporterConfig(),
 	}
 }
 
@@ -1393,6 +1547,9 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	}
 
 	// Validate global discovery/health-check intervals (spec 074, FR-008).
+	if e := validateIntervalBound("init_timeout", c.InitTimeout, time.Second, 30*time.Minute); e != nil {
+		errors = append(errors, *e)
+	}
 	if e := validateIntervalBound("health_check_interval", c.HealthCheckInterval, 5*time.Second, time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
@@ -1437,10 +1594,27 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		}
 	}
 
+	// Validate global isolation mode (MCP-34.2). Empty is allowed (back-compat
+	// fallback to the Enabled bool); only a non-empty unknown value is invalid.
+	if c.DockerIsolation != nil && !c.DockerIsolation.Mode.IsValid() {
+		errors = append(errors, ValidationError{
+			Field:   "docker_isolation.mode",
+			Message: fmt.Sprintf("invalid isolation mode: %s (must be docker, sandbox, or none)", c.DockerIsolation.Mode),
+		})
+	}
+
 	// Validate server configurations
 	serverNames := make(map[string]bool)
 	for i, server := range c.Servers {
 		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+
+		// Validate per-server isolation mode override (MCP-34.2).
+		if server.Isolation != nil && server.Isolation.Mode != nil && !server.Isolation.Mode.IsValid() {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("%s.isolation.mode", fieldPrefix),
+				Message: fmt.Sprintf("invalid isolation mode: %s (must be docker, sandbox, or none)", *server.Isolation.Mode),
+			})
+		}
 
 		// Validate server name
 		if server.Name == "" {
@@ -1514,6 +1688,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, *e)
 		}
 		if e := validateIntervalBound(fieldPrefix+".tool_discovery_interval", server.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+			errors = append(errors, *e)
+		}
+		// MCP-3322: per-server MCP `initialize` handshake deadline override.
+		if e := validateIntervalBound(fieldPrefix+".init_timeout", server.InitTimeout, time.Second, 30*time.Minute); e != nil {
 			errors = append(errors, *e)
 		}
 	}
@@ -1687,6 +1865,28 @@ func (c *Config) Validate() error {
 	}
 	if c.Observability.UsagePersistInterval.Duration() <= 0 {
 		c.Observability.UsagePersistInterval = Duration(30 * time.Second)
+	}
+	// MCP-32 exporters: fill missing sub-configs (disabled) and repair invalid
+	// tracing transport so the OTLP exporter can always construct when enabled.
+	if c.Observability.Metrics == nil {
+		c.Observability.Metrics = DefaultMetricsExporterConfig()
+	}
+	if c.Observability.Tracing == nil {
+		c.Observability.Tracing = DefaultTracingExporterConfig()
+	}
+	tr := c.Observability.Tracing
+	if tr.Protocol != defaultTracingProtocol && tr.Protocol != "grpc" {
+		tr.Protocol = defaultTracingProtocol
+	}
+	if tr.Endpoint == "" {
+		if tr.Protocol == "grpc" {
+			tr.Endpoint = defaultTracingGRPCEnd
+		} else {
+			tr.Endpoint = defaultTracingHTTPEnd
+		}
+	}
+	if tr.SampleRate < 0 || tr.SampleRate > 1 {
+		tr.SampleRate = defaultTracingSampleRate
 	}
 
 	return nil

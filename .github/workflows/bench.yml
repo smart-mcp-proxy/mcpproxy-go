@@ -1,0 +1,158 @@
+name: Benchmark Dashboard
+
+# Triggered on stable release tags — runs the live benchmark and publishes the
+# dashboard to Cloudflare Pages (mcpproxy-bench project).
+#
+# Non-blocking: bench failure never gates the release pipeline.
+#
+# Why host binary instead of bench/docker-compose.yml:
+#   The Dockerfile uses a distroless runtime image that lacks npx/uvx. The 7
+#   snapshot-server configs spawn stdio servers via npx/uvx, which need to run
+#   in the same environment as mcpproxy. The eval.yml retrieval-d1 job solves
+#   this by building the binary and running it on the host runner (where Node.js
+#   and uv are installed). We follow the same pattern here.
+#   The docker-compose.yml is kept for local development; a future PR can add a
+#   bench-specific image that includes the runtime tools.
+#
+# Reports are never committed (Spec 065 CN-003) — published as CI artifacts and
+# Cloudflare Pages deployments only.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench-dashboard:
+    name: Run benchmark and publish dashboard
+    runs-on: ubuntu-latest
+    environment: production
+    # Stable releases only — RC/prerelease tags (v*-rc.*, v*-next.*) are handled
+    # by prerelease.yml. workflow_dispatch allows manual runs from any ref.
+    if: "github.event_name == 'workflow_dispatch' || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go')"
+    # Non-blocking: bench failure never blocks the release.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Set up Node.js (npx-launched MCP reference servers)
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Set up uv (uvx-launched MCP reference servers)
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+
+      - name: Build mcpproxy (personal edition)
+        run: go build -o mcpproxy ./cmd/mcpproxy
+
+      # Offline benchmark: deterministic token-reduction scores, no live servers.
+      # Writes bench/results/report.json and bench/results/dashboard.html.
+      - name: Run offline benchmark
+        run: go run ./bench/cmd/bench -out bench/results
+
+      # Live benchmark: boot mcpproxy with the 7 no-auth reference servers, wait
+      # for the full tool catalog, then score accuracy + latency + full-schema tokens.
+      # Writes bench/results/live_report.json.
+      - name: Boot mcpproxy with reference servers and run live benchmark
+        env:
+          DS: ${{ github.workspace }}/specs/065-evaluation-foundation/datasets
+          BASE: http://127.0.0.1:8092
+          KEY: eval-corpus-snapshot
+        run: |
+          set -uo pipefail
+
+          mkdir -p "$RUNNER_TEMP/bench"
+          ./mcpproxy serve \
+            --config "$DS/snapshot-servers.config.json" \
+            --data-dir "$RUNNER_TEMP/bench" \
+            --listen 127.0.0.1:8092 \
+            --log-level info > "$RUNNER_TEMP/mcpproxy-bench.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          # Wait for the full tool catalog before scoring: the retrieval index is
+          # built after all servers connect (~45 tools across 7 reference servers).
+          ready=0
+          expected=44
+          for i in $(seq 1 60); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::mcpproxy exited during startup"
+              tail -40 "$RUNNER_TEMP/mcpproxy-bench.log" || true
+              exit 1
+            fi
+            t="$(curl -fsS -H "X-API-Key: $KEY" "$BASE/api/v1/tools" \
+                 | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len((d.get("data") or {}).get("tools", [])))' 2>/dev/null || echo 0)"
+            echo "attempt $i: catalog has $t tool(s)"
+            if [ "$t" -ge "$expected" ]; then
+              echo "Catalog full ($t tools); settling 8s for index build."
+              sleep 8
+              ready=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::mcpproxy catalog did not reach ${expected} tools in 5 minutes"
+            tail -80 "$RUNNER_TEMP/mcpproxy-bench.log" || true
+            exit 1
+          fi
+
+          go run ./bench/cmd/bench \
+            -live \
+            -proxy "$BASE" \
+            -api-key "$KEY" \
+            -out bench/results
+
+          kill "$server_pid" 2>/dev/null || true
+
+      # Serve dashboard.html at the root URL for Cloudflare Pages.
+      - name: Prepare dashboard index
+        run: cp bench/results/dashboard.html bench/results/index.html
+
+      # Always upload results as a CI artifact — available even if Pages deploy fails.
+      - name: Upload dashboard artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: bench-dashboard-${{ github.ref_name }}
+          path: bench/results/
+          retention-days: 90
+          if-no-files-found: warn
+
+      # Bootstrap: create the Cloudflare Pages project if it does not yet exist.
+      # Idempotent — fails silently (continue-on-error) when the project already
+      # exists (Cloudflare error 8000007). Requires Pages:Edit scope on the token.
+      # If the token is deploy-only, create the project once manually in the
+      # Cloudflare dashboard (name: mcpproxy-bench, production branch: main) and
+      # this step will harmlessly fail every run thereafter.
+      - name: Create Cloudflare Pages project (if missing)
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create mcpproxy-bench --production-branch=main
+
+      # Publish to Cloudflare Pages (mcpproxy-bench project).
+      # --commit-dirty=true: bench results are written into the working tree during
+      # the run and never committed to git, so wrangler would otherwise reject the
+      # dirty-tree check. The Pages URL will be mcpproxy-bench.pages.dev (or a
+      # custom domain such as bench.mcpproxy.app once configured in Cloudflare).
+      - name: Deploy benchmark dashboard to Cloudflare Pages
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0  # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy bench/results --project-name=mcpproxy-bench --commit-dirty=true

@@ -53,6 +53,7 @@ func TestRegistryAddCLIE2E(t *testing.T) {
 		"data_dir": "` + tmpDir + `",
 		"enable_socket": true,
 		"check_server_repo": false,
+		"allow_private_registry_fetch": true,
 		"registries": [
 			{
 				"id": "mocktest",
@@ -141,6 +142,7 @@ func TestRegistryAddCLIMissingInputE2E(t *testing.T) {
 		"data_dir": "` + tmpDir + `",
 		"enable_socket": true,
 		"check_server_repo": false,
+		"allow_private_registry_fetch": true,
 		"registries": [
 			{"id":"mocktest","name":"Mock","description":"d","url":"` + mockReg.URL + `","protocol":"raw/list","servers_url":"` + mockReg.URL + `/servers"}
 		],
