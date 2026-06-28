@@ -24,13 +24,26 @@ Tool description gains exactly one sentence (FR-014):
   "tools": [ /* callable results — UNCHANGED order/shape (FR-002, FR-006) */ ],
   "disabled": [                                  // NEW, after callable, ≤ min(limit,10)
     { "name": "delete_repo", "server": "github",
-      "description": "Delete a repository", "status": "disabled_by_config" }
+      "description": "Delete a repository", "status": "disabled_by_config" },
+    // Quarantined-tool discovery pass: name-only, description/schema withheld
+    // (TPA defense); `name` is the "<server>:<tool>" key. Prepended ahead of
+    // index-derived locked entries so the min(limit,10) cap can't drop them.
+    { "name": "github:rotate_keys", "server": "github",
+      "status": "server_quarantined" }
   ],
   "remediation": {                               // NEW, once, only present statuses
-    "disabled_by_config": "Locked by operator policy in mcp_config.json (enabled_tools/disabled_tools). The user cannot enable this from the UI; ask the operator to change the server config."
+    "disabled_by_config": "Locked by operator policy in mcp_config.json (enabled_tools/disabled_tools). The user cannot enable this from the UI; ask the operator to change the server config.",
+    "server_quarantined": "Its server is quarantined for security review. Its tools cannot be called until the user reviews and approves the server in the mcpproxy UI or system tray."
   }
 }
 ```
+
+`status` enum (FR-004): `disabled_by_config`, `disabled_by_user`,
+`pending_approval`, `server_disabled`, `disabled_unknown`, `server_quarantined`.
+The first five are classifier-assigned to index-discoverable tools; the last is
+assigned by the quarantined-tool discovery pass (also re-using `pending_approval`
+for tool-level pending/changed approvals), which surfaces name-only entries from
+authoritative quarantine state because quarantined tools are not in the index.
 
 ### Response delta (0 callable results, ≥1 locked match, flag OFF) — FR-009
 
