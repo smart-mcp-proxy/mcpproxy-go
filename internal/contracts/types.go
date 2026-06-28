@@ -231,16 +231,21 @@ type Tool struct {
 }
 
 // DisabledToolStatus is the single machine-branchable reason a tool exists but
-// is not callable (Spec 049). Exactly one value per locked tool, assigned by
-// fixed first-match precedence (server-off → config → user → pending → unknown).
+// is not callable (Spec 049). Exactly one value per locked tool. The
+// classifier (classifyServerToolStatus) assigns the index-discoverable reasons
+// by fixed first-match precedence (server-off → config → user → pending →
+// unknown). DisabledStatusServerQuarantined is assigned separately by the
+// quarantined-tool discovery pass (quarantined tools are never in the index),
+// not by the classifier.
 type DisabledToolStatus = string
 
 const (
-	DisabledStatusServerDisabled  DisabledToolStatus = "server_disabled"
-	DisabledStatusByConfig        DisabledToolStatus = "disabled_by_config"
-	DisabledStatusByUser          DisabledToolStatus = "disabled_by_user"
-	DisabledStatusPendingApproval DisabledToolStatus = "pending_approval"
-	DisabledStatusUnknown         DisabledToolStatus = "disabled_unknown"
+	DisabledStatusServerDisabled    DisabledToolStatus = "server_disabled"
+	DisabledStatusServerQuarantined DisabledToolStatus = "server_quarantined"
+	DisabledStatusByConfig          DisabledToolStatus = "disabled_by_config"
+	DisabledStatusByUser            DisabledToolStatus = "disabled_by_user"
+	DisabledStatusPendingApproval   DisabledToolStatus = "pending_approval"
+	DisabledStatusUnknown           DisabledToolStatus = "disabled_unknown"
 )
 
 // LockedToolEntry is the lean discovery shape for a non-callable tool returned
