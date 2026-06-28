@@ -45,7 +45,17 @@ Three properties hold by construction:
 
 ## The two-tier model
 
-Each check emits zero or more **signals**, and every signal carries a **tier**:
+> **Scope of "soft never auto-quarantines":** the two-tier semantics below
+> describe the **detect-engine signals** specifically. The live `tpa-descriptions`
+> scanner currently runs the detect engine *alongside* a set of still-active
+> legacy TPA keyword rules that produce their own dangerous, approval-blocking
+> findings — see [Coexistence with the legacy TPA rules](#coexistence-with-the-legacy-tpa-rules)
+> below. So a phrase like "ignore previous instructions" can still yield a
+> blocking finding today even though the detect engine classifies it as a soft
+> signal.
+
+Each detect-engine check emits zero or more **signals**, and every signal
+carries a **tier**:
 
 | Tier | What it means | Effect on the tool |
 |------|---------------|--------------------|
@@ -70,6 +80,35 @@ finding (`internal/security/detect/aggregate.go`):
   check IDs** (`signals`), so an operator can see *why* a tool was flagged and
   how strongly (FR-010). These surface in the CLI report (`Confidence:` /
   `Signals:` lines) and in the REST scan report JSON.
+
+### Coexistence with the legacy TPA rules
+
+The two-tier model above governs the **detect engine**. The current
+`tpa-descriptions` scanner does not run the detect engine *exclusively* — it
+runs it **alongside a legacy set of TPA keyword rules** that predate Spec 076
+(`internal/security/scanner/inprocess.go`). The detect-engine findings are
+emitted first, then the legacy rules are appended:
+
+- **`tpa_hidden_instructions`** (critical) — phrases like "ignore previous
+  instructions", "do not tell the user", `<IMPORTANT>`.
+- **`prompt_injection_in_description`** (high) — "system prompt", "you must
+  always", "always call this tool first", "jailbreak", etc.
+- **`data_exfiltration_in_description`** (high) — `~/.ssh`, `id_rsa`,
+  `/etc/passwd`, ".env file", "send the credentials", etc.
+
+All three legacy rules are **`dangerous`-level**, so — unlike the detect
+engine's *soft* `directive.imperative` / `capability.mismatch` checks, which
+only raise a review item — a legacy-rule match **blocks `security approve`** and
+drives the scan summary to `dangerous`. There is therefore some deliberate
+overlap: a description containing "ignore previous instructions" is a *soft*
+detect-engine `directive.imperative` signal **and** a *dangerous* legacy
+`tpa_hidden_instructions` finding at the same time, and today the dangerous
+legacy finding is what gates approval.
+
+This coexistence is intentional for the migration — it keeps the MVP from
+regressing any pre-076 keyword coverage. Folding the legacy rules into the
+detect engine (so the two-tier model applies uniformly) is a **separate
+implementation change tracked outside this docs page**, not yet shipped.
 
 ### Normalization (FR-007)
 
@@ -249,6 +288,12 @@ finding shape is preserved, all existing entry points keep working unchanged
 It reuses — rather than rebuilds — the Spec-032 quarantine hashing, the
 quarantine state machine, the aggregated-report types, and the
 `internal/security/patterns/` secret matchers (FR-012).
+
+`inprocess.go` does **not** delegate to the detect engine exclusively today: it
+also appends the legacy dangerous TPA keyword rules to the same findings list
+(see [Coexistence with the legacy TPA rules](#coexistence-with-the-legacy-tpa-rules)).
+The detect engine's two-tier semantics therefore describe its own signals, not
+the legacy rules' findings.
 
 ## Related reading
 
