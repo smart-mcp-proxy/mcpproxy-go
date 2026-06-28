@@ -50,7 +50,7 @@ Trade-off: the Docker-based scanner plugins cannot run under `sandbox`, so they
 are **skipped** and the affected server's `security_scan.status` becomes
 `degraded` (the always-on in-process `tpa-descriptions` scanner still runs).
 This is MCP-34.4 / D3 option (b) — clean, surfaced degradation. See
-[Security Isolation → Scanner behaviour](../docker-isolation.md#scanner-behaviour-under-each-mode-mcp-344).
+[Security Isolation → Scanner behaviour](../features/docker-isolation.md#scanner-behaviour-under-each-mode-mcp-344).
 
 ### 3. Disable the scanner for this server (dry-run shown by default)
 
