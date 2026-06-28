@@ -35,9 +35,13 @@ type gatePeer struct {
 // gateEntry is one labeled sample: a tool, its owning server, optional peers,
 // the ground-truth label/category, and redistributable provenance.
 type gateEntry struct {
-	ID         string     `json:"id"`
-	Label      string     `json:"label"`    // "malicious" | "benign"
-	Category   string     `json:"category"` // detect taxonomy or benign|hard_negative
+	ID       string `json:"id"`
+	Label    string `json:"label"`    // "malicious" | "benign"
+	Category string `json:"category"` // detect taxonomy or benign|hard_negative
+	// Resembles names the attack class a hard_negative mimics (e.g.
+	// "unicode_smuggling"), so a false positive on it counts toward that
+	// category's precision/FP (SC-003). Empty for clean-benign entries.
+	Resembles  string     `json:"resembles,omitempty"`
 	Server     string     `json:"server"`
 	Tool       gateTool   `json:"tool"`
 	Peers      []gatePeer `json:"peers,omitempty"`
@@ -78,13 +82,21 @@ func gateChecks() []detect.Check {
 	}
 }
 
-// categoryMetric is one category's per-run scorecard.
+// categoryMetric is one category's per-run scorecard (T018: per-category
+// recall/precision/FP/F1). Precision and FP are attributed via hard-negatives
+// that resemble this category (SC-003); a category with no resembling
+// hard-negatives reports zero FP.
 type categoryMetric struct {
-	Category  string  `json:"category"`
-	Gated     bool    `json:"gated"`     // is this category's check registered?
-	Malicious int     `json:"malicious"` // malicious samples in this category
-	Detected  int     `json:"detected"`  // malicious samples the engine flagged
-	Recall    float64 `json:"recall"`
+	Category       string  `json:"category"`
+	Gated          bool    `json:"gated"`     // is this category's check registered?
+	Malicious      int     `json:"malicious"` // malicious samples in this category
+	Detected       int     `json:"detected"`  // malicious samples the engine flagged (TP)
+	Recall         float64 `json:"recall"`
+	HardNegatives  int     `json:"hard_negatives"`  // resembling hard-negatives
+	FalsePositives int     `json:"false_positives"` // resembling hard-negatives flagged (FP)
+	FPRate         float64 `json:"fp_rate"`
+	Precision      float64 `json:"precision"` // TP / (TP + FP)
+	F1             float64 `json:"f1"`
 }
 
 // gateMetrics is the full metrics report emitted for the CI log.
@@ -133,9 +145,19 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 	type catTally struct {
 		gated              bool
 		malicious, flagged int
+		hardNeg, hardNegFP int
 	}
 	cats := map[string]*catTally{}
 	order := []string{}
+	getCat := func(cat string) *catTally {
+		ct := cats[cat]
+		if ct == nil {
+			ct = &catTally{gated: gatedCategory(cat)}
+			cats[cat] = ct
+			order = append(order, cat)
+		}
+		return ct
+	}
 
 	var gatedMal, gatedDet, truePos int
 	var benignTotal, benignFP, hardNegTotal, hardNegFP int
@@ -146,12 +168,7 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 
 		switch e.Label {
 		case "malicious":
-			ct := cats[e.Category]
-			if ct == nil {
-				ct = &catTally{gated: gatedCategory(e.Category)}
-				cats[e.Category] = ct
-				order = append(order, e.Category)
-			}
+			ct := getCat(e.Category)
 			ct.malicious++
 			if flagged {
 				ct.flagged++
@@ -168,11 +185,20 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 			if flagged {
 				benignFP++
 			}
-			// SC-002 gates the FP rate on the hard-negative set specifically.
+			// SC-002 gates the FP rate on the hard-negative set specifically;
+			// SC-003 attributes each hard-negative FP to the attack class it
+			// resembles for the per-category precision/FP.
 			if e.Category == "hard_negative" {
 				hardNegTotal++
 				if flagged {
 					hardNegFP++
+				}
+				if e.Resembles != "" {
+					ct := getCat(e.Resembles)
+					ct.hardNeg++
+					if flagged {
+						ct.hardNegFP++
+					}
 				}
 			}
 		}
@@ -190,20 +216,25 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 	}
 	for _, cat := range order {
 		ct := cats[cat]
+		recall := ratio(ct.flagged, ct.malicious)
+		precision := ratio(ct.flagged, ct.flagged+ct.hardNegFP)
 		m.Categories = append(m.Categories, categoryMetric{
-			Category:  cat,
-			Gated:     ct.gated,
-			Malicious: ct.malicious,
-			Detected:  ct.flagged,
-			Recall:    ratio(ct.flagged, ct.malicious),
+			Category:       cat,
+			Gated:          ct.gated,
+			Malicious:      ct.malicious,
+			Detected:       ct.flagged,
+			Recall:         recall,
+			HardNegatives:  ct.hardNeg,
+			FalsePositives: ct.hardNegFP,
+			FPRate:         ratio(ct.hardNegFP, ct.hardNeg),
+			Precision:      precision,
+			F1:             f1(precision, recall),
 		})
 	}
 	m.OverallRecall = ratio(gatedDet, gatedMal)
 	m.FPRate = ratio(hardNegFP, hardNegTotal)
 	m.Precision = ratio(truePos, truePos+benignFP)
-	if m.Precision+m.OverallRecall > 0 {
-		m.F1 = 2 * m.Precision * m.OverallRecall / (m.Precision + m.OverallRecall)
-	}
+	m.F1 = f1(m.Precision, m.OverallRecall)
 	return m
 }
 
@@ -309,4 +340,12 @@ func ratio(n, d int) float64 {
 		return 0
 	}
 	return float64(n) / float64(d)
+}
+
+// f1 is the harmonic mean of precision and recall (0 when both are 0).
+func f1(precision, recall float64) float64 {
+	if precision+recall == 0 {
+		return 0
+	}
+	return 2 * precision * recall / (precision + recall)
 }

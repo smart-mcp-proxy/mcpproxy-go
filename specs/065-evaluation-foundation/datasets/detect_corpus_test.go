@@ -50,6 +50,7 @@ type detectEntry struct {
 	ID         string       `json:"id"`
 	Label      string       `json:"label"`
 	Category   string       `json:"category"`
+	Resembles  string       `json:"resembles"`
 	Server     string       `json:"server"`
 	Tool       detectTool   `json:"tool"`
 	Peers      []detectPeer `json:"peers"`
@@ -150,11 +151,19 @@ func TestDetectCorpus_GatedCoverage(t *testing.T) {
 			maliciousByCat[e.Category]++
 		}
 		if e.Label == "benign" && e.Category == "hard_negative" {
-			for cat, prefix := range hardNegPrefix {
-				if strings.HasPrefix(e.ID, prefix) {
-					hardNegByCat[cat]++
-				}
+			// `resembles` is the machine-readable attribution the gate uses for
+			// per-category precision/FP; it must be set, name a gated category, and
+			// agree with the id prefix convention.
+			if e.Resembles == "" {
+				t.Errorf("hard_negative %q: missing resembles (needed for per-category FP)", e.ID)
+				continue
 			}
+			if prefix, ok := hardNegPrefix[e.Resembles]; !ok {
+				t.Errorf("hard_negative %q: resembles %q is not a gated category", e.ID, e.Resembles)
+			} else if !strings.HasPrefix(e.ID, prefix) {
+				t.Errorf("hard_negative %q: id should start with %q to match resembles %q", e.ID, prefix, e.Resembles)
+			}
+			hardNegByCat[e.Resembles]++
 		}
 	}
 

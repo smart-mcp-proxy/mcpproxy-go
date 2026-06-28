@@ -294,6 +294,7 @@
       "id": "hn_unicode_accents",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "unicode_smuggling",
       "server": "i18n",
       "tool": {
         "name": "translate_phrase",
@@ -308,6 +309,7 @@
       "id": "hn_unicode_cjk",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "unicode_smuggling",
       "server": "i18n",
       "tool": {
         "name": "romanize_text",
@@ -322,6 +324,7 @@
       "id": "hn_decoded_json",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "decoded_payload",
       "server": "cfg",
       "tool": {
         "name": "load_settings",
@@ -336,6 +339,7 @@
       "id": "hn_decoded_text",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "decoded_payload",
       "server": "notes",
       "tool": {
         "name": "decode_note",
@@ -350,6 +354,7 @@
       "id": "hn_decoded_plain_curl",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "decoded_payload",
       "server": "docs",
       "tool": {
         "name": "install_docs",
@@ -364,6 +369,7 @@
       "id": "hn_decoded_hexid",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "decoded_payload",
       "server": "db",
       "tool": {
         "name": "lookup_hash",
@@ -378,6 +384,7 @@
       "id": "hn_shadowing_generic",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "shadowing",
       "server": "engine-a",
       "tool": {
         "name": "search",
@@ -401,6 +408,7 @@
       "id": "hn_shadowing_same_server",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "shadowing",
       "server": "reports",
       "tool": {
         "name": "export_report",
@@ -424,6 +432,7 @@
       "id": "hn_shadowing_selfref",
       "label": "benign",
       "category": "hard_negative",
+      "resembles": "shadowing",
       "server": "billing",
       "tool": {
         "name": "calculate_total",

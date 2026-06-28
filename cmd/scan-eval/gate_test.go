@@ -52,12 +52,12 @@ func gateFixture() *gateCorpus {
 			},
 			{
 				// hard-negative: ordinary accented Unicode, no hidden classes.
-				ID: "hn1", Label: "benign", Category: "hard_negative", Server: "i18n",
+				ID: "hn1", Label: "benign", Category: "hard_negative", Resembles: "unicode_smuggling", Server: "i18n",
 				Tool: gateTool{Name: "translate_text", Description: "Translates café and naïve into other languages."},
 			},
 			{
 				// hard-negative: benign base64 that decodes to JSON, not a command.
-				ID: "hn2", Label: "benign", Category: "hard_negative", Server: "cfg",
+				ID: "hn2", Label: "benign", Category: "hard_negative", Resembles: "decoded_payload", Server: "cfg",
 				Tool: gateTool{Name: "load_config", Description: "Loads config blob=" + benignJSONB64},
 			},
 		},
@@ -82,6 +82,14 @@ func TestEvaluateGateCorpus_DetectsAndExcludesUngated(t *testing.T) {
 		}
 		if c.Detected != c.Malicious || c.Malicious == 0 {
 			t.Errorf("category %q: want all %d malicious detected, got %d", cat, c.Malicious, c.Detected)
+		}
+		// T018: every gated category caught all malicious and flagged none of its
+		// resembling hard-negatives → recall 1.0, precision 1.0, FP 0, F1 1.0.
+		if c.Recall != 1.0 || c.Precision != 1.0 || c.F1 != 1.0 {
+			t.Errorf("category %q: want recall/precision/f1 = 1.0, got r=%v p=%v f1=%v", cat, c.Recall, c.Precision, c.F1)
+		}
+		if c.FalsePositives != 0 || c.FPRate != 0.0 {
+			t.Errorf("category %q: want 0 FP, got fp=%d rate=%v", cat, c.FalsePositives, c.FPRate)
 		}
 	}
 
@@ -159,6 +167,51 @@ func TestGateFP_HardNegativeDenominatorOnly(t *testing.T) {
 	}
 	if m2.FPRate != m1.FPRate {
 		t.Errorf("fp_rate diluted by benign growth: %v -> %v (must be hard-negative-only)", m1.FPRate, m2.FPRate)
+	}
+}
+
+// TestGateMetrics_PerCategoryShapeAndFPAttribution proves T018's contract: the
+// per-category JSON carries recall/precision/FP/F1, and a hard-negative that
+// resembles a category and is (wrongly) flagged lowers THAT category's precision.
+func TestGateMetrics_PerCategoryShapeAndFPAttribution(t *testing.T) {
+	c := &gateCorpus{Version: "t", Entries: []gateEntry{
+		{ID: "u_m", Label: "malicious", Category: "unicode_smuggling", Server: "evil",
+			Tool: gateTool{Name: "add_numbers", Description: "Adds." + zeroWidthSpace + " hidden."}},
+		{ID: "u_hn_fp", Label: "benign", Category: "hard_negative", Resembles: "unicode_smuggling", Server: "ok",
+			Tool: gateTool{Name: "list_things", Description: "Lists things." + zeroWidthSpace + " benign."}},
+	}}
+	m := evaluateGateCorpus(c, gateChecks())
+
+	var uni *categoryMetric
+	for i := range m.Categories {
+		if m.Categories[i].Category == "unicode_smuggling" {
+			uni = &m.Categories[i]
+		}
+	}
+	if uni == nil {
+		t.Fatal("unicode_smuggling category missing")
+	}
+	// 1 TP, 1 resembling hard-negative flagged → precision 1/2, recall 1, FP 1.
+	if uni.Detected != 1 || uni.FalsePositives != 1 {
+		t.Fatalf("TP/FP = %d/%d, want 1/1", uni.Detected, uni.FalsePositives)
+	}
+	if uni.Recall != 1.0 || uni.Precision != 0.5 {
+		t.Errorf("recall/precision = %v/%v, want 1.0/0.5", uni.Recall, uni.Precision)
+	}
+	wantF1 := 2 * 0.5 * 1.0 / (0.5 + 1.0)
+	if uni.F1 != wantF1 {
+		t.Errorf("f1 = %v, want %v", uni.F1, wantF1)
+	}
+
+	// The serialized per-category object must expose all of recall/precision/FP/F1.
+	blob, err := json.Marshal(m.Categories[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"recall", "precision", "false_positives", "fp_rate", "f1"} {
+		if !strings.Contains(string(blob), `"`+key+`"`) {
+			t.Errorf("per-category JSON missing key %q: %s", key, blob)
+		}
 	}
 }
 
