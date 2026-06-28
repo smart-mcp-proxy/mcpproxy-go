@@ -91,7 +91,8 @@ not exercised.
 
 ### 4.3 Status taxonomy & classification
 
-`status` is one of five values. Classification order is **first match wins**:
+`status` is one of six values. The first five are classifier-assigned to
+index-discoverable tools; classification order is **first match wins**:
 
 | Order | Condition | `status` | `remediation` text (emitted once if present) |
 |------|-----------|----------|----------------------------------------------|
@@ -104,6 +105,17 @@ not exercised.
 `disabled_unknown` (5th bucket) exists so a transient storage error never causes a
 *wrong* remediation (e.g. telling the user to toggle a UI switch for a
 config-locked tool). The four happy-path states stay clean.
+
+The sixth value, `server_quarantined`, is **not** classifier-assigned: quarantined
+tools are deliberately absent from the search index (their untrusted descriptions
+are withheld as a Tool Poisoning Attack defense), so the index loop cannot reach
+them. A dedicated discovery pass enumerates them from authoritative quarantine
+state and emits **name-only** locked entries — a tool on a quarantined server gets
+`server_quarantined`; a tool-level pending/changed approval on a trusted server
+re-uses `pending_approval`. A tool also denied by operator config is skipped
+(approval could not make it callable). Remediation for `server_quarantined`: "Its
+server is quarantined for security review. Its tools cannot be called until the
+user reviews and approves the server in the mcpproxy UI or system tray."
 
 ### 4.4 Reactive triggers (discoverability)
 
