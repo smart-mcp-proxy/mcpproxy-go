@@ -85,8 +85,8 @@ Single Go module. New package `internal/security/detect/` (engine + `checks/`); 
 
 **Independent test**: a multi-signal tool yields a finding listing each check, carrying confidence, with severity rising by signal count.
 
-- [ ] T020 [US4] Update the risk-score aggregation in `internal/security/scanner/` (types.go / sarif.go scoring) so independent signals on a tool ADD to the score rather than dedup by `(rule_id+location)`; write a scoring test proving consensus raises the score (FR-006, SC-007).
-- [ ] T021 [P] [US4] Surface `confidence` + `signals` in the CLI report (`cmd/mcpproxy/security_cmd.go` printReportTable) and confirm they serialize in the REST scan report; add/update the report-rendering test.
+- [x] T020 [US4] Update the risk-score aggregation in `internal/security/scanner/` (types.go / sarif.go scoring) so independent signals on a tool ADD to the score rather than dedup by `(rule_id+location)`; write a scoring test proving consensus raises the score (FR-006, SC-007).
+- [x] T021 [P] [US4] Surface `confidence` + `signals` in the CLI report (`cmd/mcpproxy/security_cmd.go` printReportTable) and confirm they serialize in the REST scan report; add/update the report-rendering test.
 
 **Checkpoint**: operator can see why a tool was flagged and how strongly.
 
