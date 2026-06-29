@@ -44,7 +44,7 @@ cat > /tmp/harness-docker/mcp_config.json <<'EOF'
   "listen": "127.0.0.1:18080",
   "api_key": "harness-key",
   "enable_web_ui": false,
-  "isolation": { "mode": "docker" },
+  "docker_isolation": { "mode": "docker" },
   "mcpServers": [
     {
       "name": "everything",
@@ -99,7 +99,7 @@ cat > /tmp/harness-sandbox/mcp_config.json <<'EOF'
   "listen": "127.0.0.1:18081",
   "api_key": "harness-key",
   "enable_web_ui": false,
-  "isolation": { "mode": "sandbox" },
+  "docker_isolation": { "mode": "sandbox" },
   "mcpServers": [
     {
       "name": "everything",

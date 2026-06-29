@@ -96,7 +96,7 @@ jobs:
             "listen": "127.0.0.1:19237",
             "api_key": "qa-sandbox-ci-test",
             "enable_web_ui": false,
-            "isolation": { "mode": "sandbox" },
+            "docker_isolation": { "mode": "sandbox" },
             "mcpServers": []
           }
           EOF
@@ -137,7 +137,15 @@ jobs:
             cat /tmp/mcp3236-ci/server.log
             exit 1
           fi
-          echo "Server healthy (/readyz) with isolation.mode=sandbox"
+          # Prove the server actually resolved SANDBOX mode (the global key is
+          # docker_isolation.mode — a wrong key silently falls back to "none",
+          # which would make this probe vacuous).
+          if ! grep -i "isolation_mode" /tmp/mcp3236-ci/server.log | grep -qi "sandbox"; then
+            echo "ERROR: server did not start in sandbox mode (expected isolation_mode=sandbox)"
+            grep -i "isolation_mode" /tmp/mcp3236-ci/server.log || echo "(no isolation_mode log line found)"
+            exit 1
+          fi
+          echo "Server healthy (/readyz) and confirmed isolation_mode=sandbox"
 
       - name: macOS/non-Linux graceful-degrade probe (build check)
         run: |
