@@ -369,6 +369,65 @@ func newTestService(t *testing.T) (*Service, *mockStorage, *mockEmitter) {
 	return svc, store, emitter
 }
 
+// TestServiceSetIsolationMode verifies the setter propagates the resolved
+// isolation mode to the scan engine (MCP-34.4 / D3 option b), which is what
+// gates the Docker-scanner skip path. Default ("") leaves Docker behaviour
+// intact.
+func TestServiceSetIsolationMode(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	if svc.engine.isolationMode != "" {
+		t.Fatalf("expected default isolation mode to be empty, got %q", svc.engine.isolationMode)
+	}
+
+	svc.SetIsolationMode("sandbox")
+	if svc.engine.isolationMode != "sandbox" {
+		t.Errorf("expected engine isolation mode 'sandbox', got %q", svc.engine.isolationMode)
+	}
+
+	svc.SetIsolationMode("docker")
+	if svc.engine.isolationMode != "docker" {
+		t.Errorf("expected engine isolation mode 'docker', got %q", svc.engine.isolationMode)
+	}
+}
+
+// TestServiceResolveIsolationModePerServer verifies the per-server resolver
+// (MCP-34.4 review fix): a per-server resolved mode takes precedence over the
+// engine-wide default, so a server pinned to isolation.mode:docker keeps
+// running Docker scanners under a global sandbox default, and a server resolved
+// to sandbox/none skips them under a global docker default. A "" resolver
+// result (or no resolver) falls back to the engine-wide default.
+func TestServiceResolveIsolationModePerServer(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	svc.SetIsolationMode("sandbox") // engine-wide default
+
+	// No resolver wired yet → fall back to the engine default.
+	if got := svc.resolveIsolationMode("any"); got != "sandbox" {
+		t.Errorf("with no resolver, expected fallback to engine default 'sandbox', got %q", got)
+	}
+
+	perServer := map[string]string{
+		"pinned-docker":  "docker", // overrides the global sandbox default
+		"pinned-none":    "none",
+		"pinned-sandbox": "sandbox",
+		"inherits":       "", // resolver yields "" → fall back to default
+	}
+	svc.SetIsolationModeResolver(func(serverName string) string { return perServer[serverName] })
+
+	cases := map[string]string{
+		"pinned-docker":  "docker",
+		"pinned-none":    "none",
+		"pinned-sandbox": "sandbox",
+		"inherits":       "sandbox", // "" → engine default
+		"unknown-server": "sandbox", // not in map → "" → engine default
+	}
+	for server, want := range cases {
+		if got := svc.resolveIsolationMode(server); got != want {
+			t.Errorf("resolveIsolationMode(%q) = %q, want %q", server, got, want)
+		}
+	}
+}
+
 func TestServiceListScannersEmpty(t *testing.T) {
 	svc, _, _ := newTestService(t)
 
