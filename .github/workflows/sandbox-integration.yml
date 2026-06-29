@@ -118,25 +118,26 @@ jobs:
 
       - name: Verify server health under sandbox config
         run: |
-          # /api/v1/status returns {"status": {"phase": "Ready", ...}, ...}.
-          # Readiness = status.phase == "Ready" (there is no top-level "running"
-          # field). The server serves HTTP before reaching Ready, so poll up to 30s.
-          PHASE=""
-          STATUS=""
+          # Use the dedicated readiness endpoint (/readyz returns 200 once the
+          # server has completed startup) — structure-independent, unlike parsing
+          # the /api/v1/status JSON. The server serves HTTP before it's ready, so
+          # poll up to 30s.
+          READY=0
           for i in $(seq 1 30); do
-            STATUS=$(curl -sf -H "X-API-Key: qa-sandbox-ci-test" \
-              http://127.0.0.1:19237/api/v1/status 2>/dev/null) || { sleep 1; continue; }
-            PHASE=$(echo "$STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print((d.get('status') or {}).get('phase',''))" 2>/dev/null || echo "")
-            [ "$PHASE" = "Ready" ] && { echo "Server reached phase=Ready after ${i}s"; break; }
+            if curl -sf http://127.0.0.1:19237/readyz > /dev/null 2>&1; then
+              READY=1; echo "Server ready (/readyz 200) after ${i}s"; break
+            fi
             sleep 1
           done
-          echo "$STATUS" | python3 -m json.tool || true
-          if [ "$PHASE" != "Ready" ]; then
-            echo "ERROR: server did not reach phase=Ready (last phase='$PHASE') after 30s"
+          echo "--- /readyz body ---"; curl -s http://127.0.0.1:19237/readyz || true; echo
+          echo "--- /api/v1/status ---"
+          curl -sf -H "X-API-Key: qa-sandbox-ci-test" http://127.0.0.1:19237/api/v1/status | python3 -m json.tool || true
+          if [ "$READY" != "1" ]; then
+            echo "ERROR: /readyz did not return 200 within 30s"
             cat /tmp/mcp3236-ci/server.log
             exit 1
           fi
-          echo "Server healthy (phase=Ready) with isolation.mode=sandbox"
+          echo "Server healthy (/readyz) with isolation.mode=sandbox"
 
       - name: macOS/non-Linux graceful-degrade probe (build check)
         run: |
