@@ -118,12 +118,21 @@ jobs:
 
       - name: Verify server health under sandbox config
         run: |
-          STATUS=$(curl -sf -H "X-API-Key: qa-sandbox-ci-test" \
-            http://127.0.0.1:19237/api/v1/status)
-          echo "$STATUS" | python3 -m json.tool
-          RUNNING=$(echo "$STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('running',False))")
+          # Poll for running:True — the server responds to /status before it
+          # finishes warming up (Bleve index, capability registration), so a
+          # single check races against startup. Retry up to 30s.
+          RUNNING=False
+          STATUS=""
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf -H "X-API-Key: qa-sandbox-ci-test" \
+              http://127.0.0.1:19237/api/v1/status 2>/dev/null) || { sleep 1; continue; }
+            RUNNING=$(echo "$STATUS" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('running',False))" 2>/dev/null || echo False)
+            [ "$RUNNING" = "True" ] && { echo "Server ready after ${i}s"; break; }
+            sleep 1
+          done
+          echo "$STATUS" | python3 -m json.tool || true
           if [ "$RUNNING" != "True" ]; then
-            echo "ERROR: server not running"
+            echo "ERROR: server not running (running != True after 30s)"
             cat /tmp/mcp3236-ci/server.log
             exit 1
           fi
