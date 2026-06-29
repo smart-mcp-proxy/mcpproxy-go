@@ -39,6 +39,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
@@ -1965,9 +1966,32 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// active. Under "sandbox"/"none" the host runs no Docker for scanner
 		// plugins, so they degrade cleanly (skip + "degraded" scan summary)
 		// instead of failing with a misleading "pull the image" message.
+		//
+		// Two layers: SetIsolationMode is the engine-wide default; the resolver
+		// is per-server so a server pinned to isolation.mode:docker still runs
+		// Docker scanners under a global sandbox default (and vice versa),
+		// matching the per-server isolation resolver and the docs.
 		if cfg != nil && cfg.DockerIsolation != nil {
 			secService.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
 		}
+		secService.SetIsolationModeResolver(func(serverName string) string {
+			liveCfg := s.runtime.Config()
+			if liveCfg == nil || liveCfg.DockerIsolation == nil {
+				return ""
+			}
+			var sc *config.ServerConfig
+			for _, candidate := range liveCfg.Servers {
+				if candidate != nil && candidate.Name == serverName {
+					sc = candidate
+					break
+				}
+			}
+			if sc == nil {
+				return "" // unknown server → fall back to the engine-wide default
+			}
+			im := core.NewIsolationManager(liveCfg.DockerIsolation)
+			return string(im.ResolveMode(sc))
+		})
 		// Published-package-source fetch is enabled by default; only an explicit
 		// false in config disables it (MCP-2206).
 		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerFetchPackageSource != nil && !*cfg.Security.ScannerFetchPackageSource {

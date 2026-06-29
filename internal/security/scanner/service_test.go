@@ -391,6 +391,43 @@ func TestServiceSetIsolationMode(t *testing.T) {
 	}
 }
 
+// TestServiceResolveIsolationModePerServer verifies the per-server resolver
+// (MCP-34.4 review fix): a per-server resolved mode takes precedence over the
+// engine-wide default, so a server pinned to isolation.mode:docker keeps
+// running Docker scanners under a global sandbox default, and a server resolved
+// to sandbox/none skips them under a global docker default. A "" resolver
+// result (or no resolver) falls back to the engine-wide default.
+func TestServiceResolveIsolationModePerServer(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	svc.SetIsolationMode("sandbox") // engine-wide default
+
+	// No resolver wired yet → fall back to the engine default.
+	if got := svc.resolveIsolationMode("any"); got != "sandbox" {
+		t.Errorf("with no resolver, expected fallback to engine default 'sandbox', got %q", got)
+	}
+
+	perServer := map[string]string{
+		"pinned-docker":  "docker", // overrides the global sandbox default
+		"pinned-none":    "none",
+		"pinned-sandbox": "sandbox",
+		"inherits":       "", // resolver yields "" → fall back to default
+	}
+	svc.SetIsolationModeResolver(func(serverName string) string { return perServer[serverName] })
+
+	cases := map[string]string{
+		"pinned-docker":  "docker",
+		"pinned-none":    "none",
+		"pinned-sandbox": "sandbox",
+		"inherits":       "sandbox", // "" → engine default
+		"unknown-server": "sandbox", // not in map → "" → engine default
+	}
+	for server, want := range cases {
+		if got := svc.resolveIsolationMode(server); got != want {
+			t.Errorf("resolveIsolationMode(%q) = %q, want %q", server, got, want)
+		}
+	}
+}
+
 func TestServiceListScannersEmpty(t *testing.T) {
 	svc, _, _ := newTestService(t)
 

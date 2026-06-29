@@ -32,13 +32,15 @@ type Engine struct {
 	// docker × AppArmor transition would otherwise deny entrypoint exec.
 	disableNoNewPrivileges bool
 
-	// isolationMode is the resolved global isolation mode ("docker", "sandbox",
-	// "none", or "" == docker for back-compat). Scanner *plugins* are
-	// Docker-based (Spec 039); under "sandbox"/"none" the host runs no Docker
-	// for scanners, so Docker-based scanners are cleanly skipped (prefailed with
-	// an honest, mode-specific reason) while in-process scanners still run. This
-	// is MCP-34.4 / D3 option (b): clean, surfaced degradation rather than a
-	// misleading "pull the image" failure. Set via Service.SetIsolationMode.
+	// isolationMode is the engine-wide DEFAULT isolation mode ("docker",
+	// "sandbox", "none", or "" == docker for back-compat), used only when a
+	// ScanRequest does not carry a per-server IsolationMode. The per-server
+	// resolved mode on the request takes precedence (MCP-34.4) so a server with
+	// an explicit isolation.mode override gets the right scanner behaviour.
+	// Scanner *plugins* are Docker-based (Spec 039); under "sandbox"/"none" the
+	// host runs no Docker for scanners, so Docker-based scanners are cleanly
+	// skipped (prefailed with an honest reason) while in-process scanners still
+	// run — D3 option (b). Set via Service.SetIsolationMode.
 	isolationMode string
 
 	// Track active scans (one per server)
@@ -67,6 +69,14 @@ type ScanRequest struct {
 	Env            map[string]string // Additional environment variables
 	ScanContext    *ScanContext      // Context metadata (set by service)
 	ScanPass       int               // 1 = security scan (fast), 2 = supply chain audit (background)
+	// IsolationMode is THIS server's resolved isolation mode ("docker",
+	// "sandbox", "none", or "" to fall back to the engine's service-wide
+	// default). Set per-server by the Service so the Docker-scanner skip
+	// (MCP-34.4) follows the scanned server's effective mode — a per-server
+	// isolation.mode override beats the global mode (internal/upstream/core
+	// IsolationManager.ResolveMode). Under "sandbox"/"none" Docker scanner
+	// plugins are skipped; under "docker" they run.
+	IsolationMode string
 	// PeerTools is a cross-server snapshot (other servers' current tool
 	// definitions, keyed by server name) used by the in-process tpa-descriptions
 	// scanner to build a multi-server RegistryView so the deterministic
@@ -109,8 +119,11 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		return existing, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, existing.ID)
 	}
 
-	// Determine which scanners to use
-	resolved, err := e.resolveScanners(req.ScannerIDs)
+	// Determine which scanners to use. The Docker-scanner skip (MCP-34.4)
+	// follows THIS server's resolved isolation mode (per-server override beats
+	// the global default); fall back to the engine-wide default when the
+	// request didn't carry one.
+	resolved, err := e.resolveScanners(req.ScannerIDs, e.effectiveIsolationMode(req.IsolationMode))
 	if err != nil {
 		e.mu.Unlock()
 		return nil, err
@@ -195,7 +208,30 @@ type resolvedScanner struct {
 // executeScan loop records it as a failed scanner in the job. That way the
 // aggregated scan report shows "X of Y scanners failed" instead of pretending
 // nothing is wrong.
-func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, error) {
+// effectiveIsolationMode resolves the isolation mode to use for a scan: the
+// per-server mode carried on the ScanRequest when present, otherwise the
+// engine-wide default set via Service.SetIsolationMode. This is what lets the
+// Docker-scanner skip (MCP-34.4) honour a per-server isolation.mode override.
+func (e *Engine) effectiveIsolationMode(requestMode string) string {
+	if requestMode != "" {
+		return requestMode
+	}
+	return e.isolationMode
+}
+
+// resolveScanners determines which scanners to use.
+//
+// Unlike the old behaviour (silently dropping scanners with missing Docker
+// images), this now includes every enabled scanner in the result. When a
+// scanner's image is absent locally it is flagged with prefail so the
+// executeScan loop records it as a failed scanner in the job. That way the
+// aggregated scan report shows "X of Y scanners failed" instead of pretending
+// nothing is wrong.
+//
+// isolationMode is THIS server's resolved isolation mode (per-server override
+// already applied by the caller); under "sandbox"/"none" Docker scanner plugins
+// are skipped (MCP-34.4).
+func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([]resolvedScanner, error) {
 	all := e.registry.List()
 
 	// Helper: check whether a scanner's image is present locally. Returns a
@@ -214,9 +250,12 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 		// "pull the image locally" guidance below — there is nothing to pull.
 		// They stay in the resolved set (recorded as failed), which downgrades
 		// the scan summary to "degraded" rather than a silent all-clear.
-		if mode := e.isolationMode; mode == "sandbox" || mode == "none" {
-			return fmt.Sprintf("Docker-based scanner %s skipped: isolation mode %q runs no Docker containers, so Docker scanner plugins cannot run on this host. "+
-				"In-process scanners still ran. To run Docker scanners, set isolation.mode to \"docker\" on a host with a working Docker daemon. "+
+		// `isolationMode` is per-server resolved, so a server pinned to
+		// isolation.mode:docker still runs Docker scanners under a global
+		// sandbox default, and vice versa.
+		if mode := isolationMode; mode == "sandbox" || mode == "none" {
+			return fmt.Sprintf("Docker-based scanner %s skipped: isolation mode %q runs no Docker containers, so Docker scanner plugins cannot run for this server. "+
+				"In-process scanners still ran. To run Docker scanners, set isolation.mode to \"docker\" for this server on a host with a working Docker daemon. "+
 				"See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.", s.ID, mode)
 		}
 		if e.docker == nil {

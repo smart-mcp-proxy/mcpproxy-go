@@ -433,7 +433,7 @@ func TestEngineResolveScanners(t *testing.T) {
 	// Resolve all installed. The Docker scanner we just enabled plus the
 	// always-installed in-process scanner (tpa-descriptions) should both
 	// resolve (MCP-2082).
-	scanners, err := engine.resolveScanners(nil)
+	scanners, err := engine.resolveScanners(nil, "")
 	if err != nil {
 		t.Fatalf("resolveScanners: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestEngineResolveScanners(t *testing.T) {
 	}
 
 	// Resolve specific
-	scanners, err = engine.resolveScanners([]string{"mcp-scan"})
+	scanners, err = engine.resolveScanners([]string{"mcp-scan"}, "")
 	if err != nil {
 		t.Fatalf("resolveScanners specific: %v", err)
 	}
@@ -461,13 +461,13 @@ func TestEngineResolveScanners(t *testing.T) {
 	}
 
 	// Resolve non-installed
-	_, err = engine.resolveScanners([]string{"cisco-mcp-scanner"})
+	_, err = engine.resolveScanners([]string{"cisco-mcp-scanner"}, "")
 	if err == nil {
 		t.Error("expected error for non-installed scanner")
 	}
 
 	// Resolve nonexistent
-	_, err = engine.resolveScanners([]string{"nonexistent"})
+	_, err = engine.resolveScanners([]string{"nonexistent"}, "")
 	if err == nil {
 		t.Error("expected error for nonexistent scanner")
 	}
@@ -586,7 +586,7 @@ func TestEngineInProcessScannerAlwaysAvailable(t *testing.T) {
 	docker := NewDockerRunner(logger)
 	engine := NewEngine(docker, registry, dir, logger)
 
-	resolved, err := engine.resolveScanners(nil)
+	resolved, err := engine.resolveScanners(nil, "")
 	if err != nil {
 		t.Fatalf("resolveScanners: %v", err)
 	}
@@ -618,11 +618,11 @@ func TestEngineResolveScannersSkipsDockerUnderSandbox(t *testing.T) {
 
 			// A non-nil docker runner with a real image present would normally
 			// let the Docker scanner pass checkImage; the sandbox/none gate must
-			// short-circuit before any Docker probe.
+			// short-circuit before any Docker probe. The per-server resolved mode
+			// is passed directly into resolveScanners (MCP-34.4).
 			engine := NewEngine(nil, registry, dir, logger)
-			engine.isolationMode = mode
 
-			resolved, err := engine.resolveScanners(nil)
+			resolved, err := engine.resolveScanners(nil, mode)
 			if err != nil {
 				t.Fatalf("resolveScanners: %v", err)
 			}
@@ -664,10 +664,12 @@ func TestEngineResolveScannersSkipsDockerUnderSandbox(t *testing.T) {
 	}
 }
 
-// TestEngineResolveScannersDockerModeUnaffected is the back-compat guard: with
-// the default isolation mode (docker / empty) the sandbox skip path is inert,
-// so a Docker scanner with a nil docker runner resolves without a prefail (the
-// historical behaviour relied on by existing tests).
+// TestEngineResolveScannersDockerModeUnaffected is the back-compat / per-server
+// guard: with mode "docker" (or "" — fall back to engine default) the sandbox
+// skip path is inert, so a Docker scanner with a nil docker runner resolves
+// without a prefail. The "docker" case is exactly the per-server override that
+// must keep running Docker scanners even under a global sandbox default
+// (MCP-34.4).
 func TestEngineResolveScannersDockerModeUnaffected(t *testing.T) {
 	for _, mode := range []string{"", "docker"} {
 		t.Run("mode="+mode, func(t *testing.T) {
@@ -677,9 +679,8 @@ func TestEngineResolveScannersDockerModeUnaffected(t *testing.T) {
 			registry.scanners["mcp-scan"].Status = ScannerStatusInstalled
 
 			engine := NewEngine(nil, registry, dir, logger)
-			engine.isolationMode = mode
 
-			resolved, err := engine.resolveScanners([]string{"mcp-scan"})
+			resolved, err := engine.resolveScanners([]string{"mcp-scan"}, mode)
 			if err != nil {
 				t.Fatalf("resolveScanners: %v", err)
 			}
@@ -690,6 +691,23 @@ func TestEngineResolveScannersDockerModeUnaffected(t *testing.T) {
 				t.Errorf("Docker scanner unexpectedly prefailed under mode %q (nil docker runner skips image check): %q", mode, resolved[0].prefail)
 			}
 		})
+	}
+}
+
+// TestEngineEffectiveIsolationMode locks the precedence used by StartScan: the
+// per-request (per-server) mode wins; an empty request falls back to the
+// engine-wide default (MCP-34.4).
+func TestEngineEffectiveIsolationMode(t *testing.T) {
+	e := &Engine{isolationMode: "sandbox"}
+	if got := e.effectiveIsolationMode("docker"); got != "docker" {
+		t.Errorf("per-server 'docker' must win over engine default 'sandbox'; got %q", got)
+	}
+	if got := e.effectiveIsolationMode(""); got != "sandbox" {
+		t.Errorf("empty request must fall back to engine default 'sandbox'; got %q", got)
+	}
+	e2 := &Engine{isolationMode: ""}
+	if got := e2.effectiveIsolationMode("none"); got != "none" {
+		t.Errorf("per-server 'none' must win; got %q", got)
 	}
 }
 

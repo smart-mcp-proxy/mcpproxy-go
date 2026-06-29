@@ -123,6 +123,13 @@ type Service struct {
 	pulls          *pullManager
 	logger         *zap.Logger
 
+	// isolationModeResolver returns a server's resolved isolation mode
+	// ("docker"/"sandbox"/"none", or "" if unknown). Injected by the wiring
+	// layer so the scanner honours per-server isolation.mode overrides
+	// (MCP-34.4) without the scanner package depending on the isolation
+	// resolver. Nil ⇒ fall back to the engine-wide default.
+	isolationModeResolver func(serverName string) string
+
 	// In-memory scan summary cache — avoids expensive BBolt reads per server
 	summaryCache   map[string]*ScanSummary
 	summaryCacheMu sync.RWMutex
@@ -172,23 +179,51 @@ func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
 	}
 }
 
-// SetIsolationMode records the resolved global isolation mode ("docker",
-// "sandbox", "none", or "" == docker) so the scan engine can decide whether
-// Docker-based scanner plugins can run. Under "sandbox"/"none" the host runs no
-// Docker for scanners, so Docker scanner plugins are cleanly skipped (the scan
-// summary degrades) while in-process scanners still run. This is MCP-34.4 / D3
-// option (b): clean, surfaced degradation on snap-docker / non-Docker hosts.
+// SetIsolationMode records the engine-wide DEFAULT isolation mode ("docker",
+// "sandbox", "none", or "" == docker), used when a scan has no per-server mode
+// (no resolver wired, or the resolver returns ""). Per-server resolution via
+// SetIsolationModeResolver takes precedence. Under "sandbox"/"none" the host
+// runs no Docker for scanners, so Docker scanner plugins are cleanly skipped
+// (the scan summary degrades) while in-process scanners still run — MCP-34.4 /
+// D3 option (b): clean, surfaced degradation on snap-docker / non-Docker hosts.
 func (s *Service) SetIsolationMode(mode string) {
 	if s.engine == nil {
 		return
 	}
 	s.engine.isolationMode = mode
 	if mode == "sandbox" || mode == "none" {
-		s.logger.Warn("Isolation mode runs no Docker for scanner plugins; Docker-based scanners "+
-			"will be skipped and the security scan will report 'degraded' for affected servers. "+
-			"In-process scanners (e.g. tpa-descriptions) still run. See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.",
+		s.logger.Warn("Default isolation mode runs no Docker for scanner plugins; Docker-based scanners "+
+			"will be skipped and the security scan will report 'degraded' for affected servers "+
+			"(per-server isolation.mode:docker overrides). In-process scanners (e.g. tpa-descriptions) "+
+			"still run. See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.",
 			zap.String("isolation_mode", mode))
 	}
+}
+
+// SetIsolationModeResolver injects a per-server isolation-mode resolver so the
+// Docker-scanner skip (MCP-34.4) follows each scanned server's RESOLVED mode —
+// a per-server isolation.mode override beats the global default. The resolver
+// returns "docker"/"sandbox"/"none", or "" to fall back to the engine-wide
+// default. Wired in the server layer from the upstream IsolationManager so the
+// scanner package stays decoupled from the resolver.
+func (s *Service) SetIsolationModeResolver(resolver func(serverName string) string) {
+	s.isolationModeResolver = resolver
+}
+
+// resolveIsolationMode returns the isolation mode to apply to a scan of
+// serverName: the per-server resolver result when it yields a concrete mode,
+// otherwise the engine-wide default. Falls back gracefully when no resolver is
+// wired (e.g. unit tests) so behaviour matches SetIsolationMode alone.
+func (s *Service) resolveIsolationMode(serverName string) string {
+	if s.isolationModeResolver != nil {
+		if mode := s.isolationModeResolver(serverName); mode != "" {
+			return mode
+		}
+	}
+	if s.engine != nil {
+		return s.engine.isolationMode
+	}
+	return ""
 }
 
 // SetFetchPackageSource toggles whether the source resolver may fetch the
@@ -681,11 +716,12 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 // After Pass 1 completes, Pass 2 (supply chain audit) is auto-started in the background.
 func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*ScanJob, error) {
 	req := ScanRequest{
-		ServerName: serverName,
-		DryRun:     dryRun,
-		ScannerIDs: scannerIDs,
-		SourceDir:  sourceDir,
-		ScanPass:   ScanPassSecurityScan,
+		ServerName:    serverName,
+		DryRun:        dryRun,
+		ScannerIDs:    scannerIDs,
+		SourceDir:     sourceDir,
+		ScanPass:      ScanPassSecurityScan,
+		IsolationMode: s.resolveIsolationMode(serverName),
 	}
 
 	// Build scan context for transparency
@@ -892,9 +928,10 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 	ctx := context.Background()
 
 	req := ScanRequest{
-		ServerName: serverName,
-		DryRun:     false,
-		ScanPass:   ScanPassSupplyChainAudit,
+		ServerName:    serverName,
+		DryRun:        false,
+		ScanPass:      ScanPassSupplyChainAudit,
+		IsolationMode: s.resolveIsolationMode(serverName),
 	}
 
 	// Build scan context
