@@ -766,8 +766,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 		agg.Reports = append(agg.Reports, *r)
 	}
 
-	// Classify findings that lack threat_type/threat_level (legacy data)
+	// Classify findings that lack threat_type/threat_level (legacy data). This
+	// must run before MergeFindings so consensus (which keys on threat_type) and
+	// severity backfill see fully-classified findings.
 	ClassifyAllFindings(agg.Findings)
+
+	// Spec 077 (T021, FR-010/FR-011/FR-012): collapse the per-scanner findings
+	// into a single unified list. Findings sharing (rule_id, location) merge into
+	// one entry whose Sources lists every contributing scanner; cross-source
+	// agreement on the same (location, threat_type) raises confidence.
+	agg.Findings = MergeFindings(agg.Findings)
 
 	// Flag findings that belong in the Supply Chain Audit (CVEs) UI section.
 	// Match only real CVE/package vulnerabilities so AI-scanner output from Pass 2
