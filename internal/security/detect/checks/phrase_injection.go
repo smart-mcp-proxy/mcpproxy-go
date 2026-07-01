@@ -62,6 +62,16 @@ var phraseFamilies = []phraseFamily{
 		threat: detect.ThreatPromptInjection,
 		what:   "instruction-override directive",
 	},
+	{ // Guardrail override: "ignore your guidelines", "disregard these instructions",
+		// "bypass your restrictions". Restores the legacy tpa "ignore your
+		// guidelines" posture (Spec 077 FR-004). Requires a possessive/demonstrative
+		// ("your"/"these") so it fires only on an imperative to disregard the agent's
+		// OWN directives — inherently injection, essentially never benign.
+		re:     regexp.MustCompile(`\b(?:ignore|disregard|bypass|override|violat\w*|abandon|circumvent) (?:all )?(?:your|these) (?:safety |content |system |ethical |usage )?(?:guidelin\w*|instruction|rule|policy|restriction|constraint|directive|protocol|guardrail)\w*`),
+		base:   0.85,
+		threat: detect.ThreatPromptInjection,
+		what:   "guardrail-override directive",
+	},
 	{ // Secret exfiltration: an exfil verb + a sensitive target within the same sentence.
 		re:     regexp.MustCompile(`\b(?:send|upload|post|transmit|exfiltrat\w*|leak|forward|copy|dump|steal|harvest|expos\w*|smuggle|beacon)\b[^.!?]{0,40}?(?:credential|api key|access token|auth token|secret|password|passphrase|private key|ssh key|\.env|env file|id_rsa|/etc/passwd|~/\.ssh|~/\.aws|/\.ssh/|/\.aws/)`),
 		base:   0.88,

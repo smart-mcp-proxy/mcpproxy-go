@@ -39,6 +39,14 @@ const positionWindow = 80
 
 // exampleCues are substrings that, when they appear shortly before a match,
 // indicate the match is being quoted or illustrated rather than instructing.
+//
+// The colon-introduced content nouns ("text:", "output:", …) are the
+// description-context control (FR-005): a phrase that follows "returns training
+// text:" / "example output:" is returned/illustrative CONTENT the tool talks
+// about, not an instruction to the agent, so it must not clear the hard tier.
+// These are deliberately colon-anchored — the bare nouns would over-match — and
+// the corpus positives introduce their directives with a period, so recall on
+// genuine embedded imperatives is unaffected.
 var exampleCues = []string{
 	"such as",
 	"for example",
@@ -54,6 +62,20 @@ var exampleCues = []string{
 	"like ",
 	"says ",
 	"say ",
+	// Colon-introduced content nouns: the following phrase is quoted/returned
+	// content, not an instruction (see doc comment above).
+	"text:",
+	"output:",
+	"response:",
+	"returns:",
+	"return:",
+	"example:",
+	"sample:",
+	"prompt:",
+	"message:",
+	"string:",
+	"content:",
+	"payload:",
 }
 
 // ClassifyPosition decides whether the match starting at byte offset matchStart

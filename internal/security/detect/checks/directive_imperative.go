@@ -70,6 +70,30 @@ var directiveFamilies = []directiveFamily{
 		base: 0.55,
 		what: "tool-preamble injection",
 	},
+	{ // Tool-priority coercion (legacy tpa): "always call this tool first",
+		// "before using any other tool". Broader than tool-preamble and benignly
+		// phrasable ("call this tool first to authenticate"), so it lives in the
+		// SOFT tier (review, never auto-quarantine). "always" stems to "alway".
+		re:   regexp.MustCompile(`\b(?:(?:alway\w* )?(?:call|us\w*|invok\w*|run\w*) this tool (?:first|before)|before (?:us\w*|call\w*|invok\w*|run\w*) any other tool)\b`),
+		base: 0.5,
+		what: "tool-priority coercion",
+	},
+	{ // Jailbreak / mode-override triggers (legacy tpa): "developer mode",
+		// "jailbreak", "ignore your guidelines". Kept SOFT because "developer mode"
+		// has legitimate uses; a genuine guardrail-override is separately caught at
+		// the HARD tier by phrase.injection.
+		re:   regexp.MustCompile(`\b(?:developer mode|jailbreak\w*|dan mode|do anything now|unrestricted mode|ignore your guidelin\w*)\b`),
+		base: 0.5,
+		what: "jailbreak trigger",
+	},
+	{ // Data-forwarding to an external sink (legacy tpa): "upload the file to an
+		// external endpoint", "post the contents to a remote server". Requires an
+		// external/remote-flavoured target so benign "uploads the file to the
+		// storage bucket" does not match. SOFT: it informs review without blocking.
+		re:   regexp.MustCompile(`\b(?:upload|post|send|transmit|forward|exfiltrat\w*|leak|dump) (?:the |all |your )?(?:file|content|data|output|result|conversation|log|record|payload)\w* to (?:an? |the |our )?(?:external|remote|third.?party|attacker|adversar\w*|off.?site|another server|http|ftp)`),
+		base: 0.5,
+		what: "external data-forwarding directive",
+	},
 }
 
 // Inspect implements detect.Check. It emits at most one signal per tool: the
