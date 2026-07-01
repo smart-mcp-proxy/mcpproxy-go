@@ -20,11 +20,13 @@ import (
 
 const detectCorpusFile = "detect_corpus_v1.json"
 
-// gatedDetectCategories are the malicious taxonomies a US1-merged detect.Engine
-// can measure today. capability_mismatch is intentionally excluded — its check
-// lands in US2, so the corpus may carry samples but the gate must not enforce
-// them yet (the gate handles this via its category→check registration map).
-var gatedDetectCategories = []string{"unicode_smuggling", "decoded_payload", "shadowing"}
+// gatedDetectCategories are the malicious taxonomies the detect.Engine can
+// measure today. phrase_injection joined the gate in Spec 077 US1 (its curated
+// hard-tier check is registered in gateChecks). capability_mismatch is still
+// intentionally excluded — its check is soft/measured-not-gated, so the corpus
+// may carry samples but the gate must not enforce them (the gate handles this
+// via its category→check registration map).
+var gatedDetectCategories = []string{"unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection"}
 
 // hardNegPrefix maps a gated category to the id prefix its resembling
 // hard-negatives use, so INV-3 (which attack a benign FP mimics) stays
@@ -33,6 +35,7 @@ var hardNegPrefix = map[string]string{
 	"unicode_smuggling": "hn_unicode",
 	"decoded_payload":   "hn_decoded",
 	"shadowing":         "hn_shadowing",
+	"phrase_injection":  "hn_phrase",
 }
 
 type detectTool struct {
@@ -67,7 +70,7 @@ func validDetectCategory(label, category string) bool {
 	switch label {
 	case "malicious":
 		switch category {
-		case "unicode_smuggling", "decoded_payload", "shadowing", "capability_mismatch":
+		case "unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection", "capability_mismatch":
 			return true
 		}
 	case "benign":

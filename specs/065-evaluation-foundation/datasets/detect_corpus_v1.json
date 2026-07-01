@@ -642,7 +642,7 @@
       }
     },
     {
-      "id": "hn_send_email",
+      "id": "hn_phrase_send_email",
       "label": "benign",
       "category": "hard_negative",
       "resembles": "phrase_injection",
@@ -657,7 +657,7 @@
       }
     },
     {
-      "id": "hn_upload_file",
+      "id": "hn_phrase_upload_file",
       "label": "benign",
       "category": "hard_negative",
       "resembles": "phrase_injection",
