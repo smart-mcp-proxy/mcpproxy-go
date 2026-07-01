@@ -518,6 +518,12 @@ func initializeRegistries(cfg *Config) {
 	// field. Runs on initial load and every hot-reload (LoadFromFile path).
 	normalizeServerQuarantineFlags(cfg)
 
+	// One-time migration (Spec 077 US3): fold the deprecated top-level
+	// scanner_fetch_package_source / scanner_disable_no_new_privileges keys into
+	// the unified security.deep_scan block, and drop the removed
+	// auto_scan_quarantined key. Existing configs load unchanged.
+	migrateDeepScanConfig(cfg)
+
 	// This function will be implemented to avoid circular imports
 	// For now, we'll create a callback mechanism
 	if registriesInitCallback != nil {
