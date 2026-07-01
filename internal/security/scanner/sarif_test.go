@@ -424,6 +424,86 @@ func TestCalculateRiskScoreCrossSourceConsensusAdds(t *testing.T) {
 	}
 }
 
+// TestCalculateRiskScoreConsensusUsesMaxSeverity proves the consensus group is
+// scored at its MOST-SEVERE member's threat level, not whichever finding is
+// encountered first. For severity-derived threat_types (supply_chain here)
+// agreeing findings can carry different threat_levels; the previous code counted
+// the group at the first finding's level, making the score order-dependent and
+// able to drop a genuine warning. The score must be identical in both orders and
+// reflect the warning (high) member, not the info (low) one.
+func TestCalculateRiskScoreConsensusUsesMaxSeverity(t *testing.T) {
+	warningFinding := ScanFinding{
+		RuleID:      "trivy.CVE-1",
+		Location:    "srv:tool",
+		ThreatType:  ThreatSupplyChain,
+		ThreatLevel: ThreatLevelWarning,
+		Severity:    SeverityHigh,
+		Scanner:     "trivy",
+	}
+	infoFinding := ScanFinding{
+		RuleID:      "grype.CVE-2",
+		Location:    "srv:tool",
+		ThreatType:  ThreatSupplyChain,
+		ThreatLevel: ThreatLevelInfo,
+		Severity:    SeverityLow,
+		Scanner:     "grype",
+	}
+
+	ab := CalculateRiskScore([]ScanFinding{warningFinding, infoFinding})
+	ba := CalculateRiskScore([]ScanFinding{infoFinding, warningFinding})
+
+	if ab != ba {
+		t.Fatalf("consensus score is order-dependent: [warning,info]=%d [info,warning]=%d", ab, ba)
+	}
+	// Two distinct sources agree → weight 2 at the warning level: 6*log2(3)=9.
+	// Scoring at the info level (the bug) would give 2*log2(3)=3.
+	if ab != 9 {
+		t.Errorf("consensus score = %d, want 9 (warning-level, 2 sources)", ab)
+	}
+}
+
+// TestMergeFindingsAbsorbsStrongerFields proves that phase-1 dedup keeps the
+// absorbed duplicate's stronger fields: on merge the result takes max(Confidence),
+// the more-severe Tier (hard > soft), and the union of Signals — regardless of
+// which finding is encountered first.
+func TestMergeFindingsAbsorbsStrongerFields(t *testing.T) {
+	hard := ScanFinding{
+		RuleID: "detect.tpa", Location: "srv:tool",
+		Tier: TierHard, Confidence: 0.9, Signals: []string{"unicode.hidden"},
+		Scanner: "tpa-descriptions",
+	}
+	soft := ScanFinding{
+		RuleID: "detect.tpa", Location: "srv:tool",
+		Tier: TierSoft, Confidence: 0.2, Signals: []string{"directive.imperative"},
+		Scanner: "cisco-mcp-scanner",
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   []ScanFinding
+	}{
+		{"soft-first", []ScanFinding{soft, hard}},
+		{"hard-first", []ScanFinding{hard, soft}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := MergeFindings(tc.in)
+			if len(merged) != 1 {
+				t.Fatalf("expected 1 merged finding, got %d: %+v", len(merged), merged)
+			}
+			m := merged[0]
+			if m.Tier != TierHard {
+				t.Errorf("merged tier = %q, want hard (more-severe tier must win)", m.Tier)
+			}
+			if m.Confidence != 0.9 {
+				t.Errorf("merged confidence = %v, want 0.9 (max)", m.Confidence)
+			}
+			if len(m.Signals) != 2 {
+				t.Errorf("merged signals = %v, want union of both (2)", m.Signals)
+			}
+		})
+	}
+}
+
 // TestClassifyThreatBackfillsSeverity proves Spec 077 (T022): a finding that
 // arrives with no severity (as some external/legacy SARIF findings do) is given
 // a user-readable severity derived from its classified threat level.
