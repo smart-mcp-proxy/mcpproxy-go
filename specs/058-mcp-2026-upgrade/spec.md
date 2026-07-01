@@ -9,6 +9,16 @@
 
 This feature **cannot begin implementation** until the upstream MCP client/server library (`github.com/mark3labs/mcp-go`) ships support for protocol revision `2026-07-28`. As of 2026-05-28 the pinned library (v0.54.0) and the latest published release (v0.54.1) both target only `2025-11-25`; no `2026-07-28` constant exists in the library. This spec captures the full upgrade scope now so execution can start immediately once the gate clears. A scheduled tracking agent watches the library and the spec's RC→final status and notifies the maintainer when the gate opens.
 
+## Cross-Spec Reconciliation *(read at plan time)*
+
+> **Flagged 2026-07-01 (cross-spec contradiction audit).** FR-012 forbids per-connection variation of `*/list` results; identity-scoped views must be driven by request-carried identity (token / headers / `_meta`), **not connection state**. US3 + FR-013 already reconcile **Spec 028 agent-token scoping** — token identity travels in the `Authorization` header, so it is request-carried and compatible.
+>
+> **The unresolved case is Spec 057 (In-Proxy Profiles), which is SHIPPED on main.** Spec 057 selects a filtered per-profile toolset by **URL path** (`/mcp/p/<slug>`), not by `_meta`/header identity. Under FR-012 this MUST be classified before implementation:
+> - **Option A — treat the profile URL path as request-carried identity.** Each request line carries the slug, so arguably it is *not* connection state. But a client that opens a stream to `/mcp/p/<slug>` binds the profile to that endpoint, which is closer to connection state than to `_meta` identity, and FR-014 forbids relying on a long-lived GET stream — so profile routing must remain correct in a purely stateless, request-scoped model.
+> - **Option B — move profile selection into `_meta`/a header** (e.g. a `profile` field in per-request `_meta`), demoting or deprecating the `/mcp/p/<slug>` path form for `2026-07-28` clients while keeping it for `2025-11-25` clients during the deprecation window.
+>
+> **Action for plan.md:** pick A or B explicitly, add an acceptance scenario proving per-profile filtering (Spec 057) works under the stateless model without per-connection list variation, and confirm `GET`/`DELETE` on `/mcp/p/<slug>` follow FR-014. Do not implement 058 without resolving this — building FR-012 naively would break shipped per-profile routing. (028 needs no change; 057 does.)
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Connecting clients negotiate the new protocol without breakage (Priority: P1)

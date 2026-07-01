@@ -356,3 +356,29 @@ epics:
     priority: P3
     depends_on: []
     note: "PARKED. Single sign-on for the multi-user server edition."
+
+  # ── MERGED-BUT-UNIMPLEMENTED specs (cross-spec audit 2026-07-01) ───────────
+  # These specs are checked into specs/ but materially absent from code. Most
+  # "drafted/0%" specs are actually SHIPPED (stale tasks.md checkboxes) — these
+  # are the genuinely-unbuilt ones. See docs/personal-edition-polish.md audit.
+  - id: mcp-2026-upgrade
+    title: MCP protocol upgrade to 2026-07-28 revision
+    status: blocked
+    priority: P3
+    spec: specs/058-mcp-2026-upgrade
+    depends_on: []
+    note: "BLOCKED on mcp-go shipping 2026-07-28 (pinned v0.54.0 = 2025-11-25 only). CROSS-SPEC CONFLICT: FR-012 forbids per-connection */list variation; SHIPPED Spec 057 selects toolset by URL path /mcp/p/<slug>. Must reconcile at plan time (058 spec now carries a Cross-Spec Reconciliation note). 028 agent-token scoping is already compatible (header-carried)."
+  - id: security-gateway-cd
+    title: Security gateway Tracks C/D (per-arg least-privilege + signature provenance)
+    status: todo
+    priority: P3
+    spec: specs/054-mcp-security-gateway
+    depends_on: []
+    note: "Track A→Spec 056, Track B→Spec 059 (both shipped). UNBUILT: Track C per-ARGUMENT allow-listing (per-tool scope exists in mcp_direct_scope.go); Track D provenance + human-readable signature diff (SHA-256 pinning exists via Spec 032). Build ON 032/028, don't re-implement; honor the rug-pull re-quarantine interaction rule vs 032 auto-approve."
+  - id: discovery-eval-harness
+    title: Discovery-quality eval harness (Spec 065 second half)
+    status: todo
+    priority: P3
+    spec: specs/065-evaluation-foundation
+    depends_on: []
+    note: "Security recall/FP half SHIPPED (cmd/scan-eval, backs Spec 076/077 gate). UNBUILT: the discovery-quality (retrieve_tools recall) eval harness."
