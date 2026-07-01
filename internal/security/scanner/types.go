@@ -210,6 +210,18 @@ const (
 	ThreatLevelInfo      = "info"      // Low CVEs, informational
 )
 
+// Finding tiers (Spec 077). A hard-tier baseline finding gates approval
+// (auto-quarantine / dangerous verdict); a soft-tier finding is review-only.
+// The tier mirrors detect.TierHard/TierSoft and is set from detect output when
+// a finding comes from the deterministic baseline engine (see
+// detectFindingToScanFinding). Empty for findings that predate the two-tier
+// model (legacy/external scanners) — those keep their existing threat_level
+// semantics.
+const (
+	TierHard = "hard"
+	TierSoft = "soft"
+)
+
 // ScanFinding represents an individual security finding
 type ScanFinding struct {
 	RuleID           string  `json:"rule_id"`
@@ -243,6 +255,16 @@ type ScanFinding struct {
 	// finding (e.g. "unicode.hidden", "directive.imperative"), giving operators
 	// transparency into why a tool was flagged (Spec 076, FR-010). Additive.
 	Signals []string `json:"signals,omitempty"`
+	// Tier is "hard" or "soft" (Spec 077). A hard baseline finding gates
+	// approval and drives a "dangerous" verdict; a soft finding is review-only.
+	// Set from detect output for baseline findings; empty for legacy/external
+	// findings that predate the two-tier model. Additive, back-compat.
+	Tier string `json:"tier,omitempty"`
+	// Sources lists the contributing scanner ids for this finding (e.g.
+	// "tpa-descriptions", "cisco-mcp-scanner"). When two scanners agree on the
+	// same issue the merged finding lists both (Spec 077 FR-013). ≥1 for
+	// findings produced under Spec 077; empty for legacy findings. Additive.
+	Sources []string `json:"sources,omitempty"`
 }
 
 // ScanReport represents aggregated scan results for a server

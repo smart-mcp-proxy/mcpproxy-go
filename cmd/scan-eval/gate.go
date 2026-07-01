@@ -67,6 +67,7 @@ var categoryCheck = map[string]string{
 	"unicode_smuggling":   "unicode.hidden",
 	"decoded_payload":     "payload.decoded",
 	"shadowing":           "shadowing.cross_server",
+	"phrase_injection":    "phrase.injection",    // Spec 077 US1 — curated hard check
 	"capability_mismatch": "capability.mismatch", // US2 (T016) — not yet registered
 }
 
@@ -79,6 +80,7 @@ func gateChecks() []detect.Check {
 		&checks.UnicodeHidden{},
 		&checks.Shadowing{},
 		&checks.PayloadDecoded{},
+		&checks.PhraseInjection{}, // Spec 077 US1 — curated hard injection/exfil check
 	}
 }
 
