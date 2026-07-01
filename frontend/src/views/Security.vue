@@ -24,6 +24,26 @@
       </div>
     </div>
 
+    <!-- Baseline vs. deep scan (Spec 077 US3): the deterministic offline
+         baseline runs for every server with zero setup; the Docker-based
+         scanners below are an opt-in "deep scan" that enriches the report but
+         never blocks or degrades the baseline verdict. -->
+    <div class="alert alert-info shadow-sm">
+      <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+      </svg>
+      <div>
+        <div class="font-semibold">Deterministic baseline is always on</div>
+        <span class="text-sm">
+          Every server is scanned by the offline baseline engine with no Docker required.
+          The scanners below are an opt-in <span class="font-medium">deep scan</span> — enable
+          them (<code class="font-mono text-xs">security.deep_scan.enabled</code>) for extra
+          source-level analysis. Deep-scan failures are informational and never change the
+          baseline verdict.
+        </span>
+      </div>
+    </div>
+
     <!-- Scan All Progress Card -->
     <div v-if="queueProgress && queueProgress.status !== 'idle'" class="card bg-base-100 shadow-xl">
       <div class="card-body">
