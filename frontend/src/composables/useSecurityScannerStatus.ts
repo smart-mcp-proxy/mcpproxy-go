@@ -17,6 +17,18 @@ const totalFindings = ref<number>(0)
 const totalScans = ref<number>(0)
 let inflight: Promise<void> | null = null
 
+// Spec 077 US4 (MCP-2207): the backend now collapses the per-scanner
+// scan_started/progress/completed/failed storm into a single debounced
+// `security.scan_settled` event per server per scan (forwarded by the system
+// store as `mcpproxy:scan-settled`). We consume that one settled signal to
+// refresh the cached scan totals, instead of tracking per-scanner lifecycle
+// events. Registered once at module scope so all consumers share it.
+if (typeof window !== 'undefined') {
+  window.addEventListener('mcpproxy:scan-settled', () => {
+    void refreshSecurityScannerStatus()
+  })
+}
+
 export async function refreshSecurityScannerStatus(): Promise<void> {
   if (inflight) {
     return inflight
