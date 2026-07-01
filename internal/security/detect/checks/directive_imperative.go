@@ -45,8 +45,10 @@ type directiveFamily struct {
 // lowercase, contraction-expanded, lightly-stemmed forms (e.g. "instruction"
 // matches the stemmed "instructions"). Built once at init.
 var directiveFamilies = []directiveFamily{
-	{ // Hidden-instruction / role-injection tags: <IMPORTANT>, <system>, …
-		re:   regexp.MustCompile(`<\s*(important|system|secret|critical|admin|instruction|developer|assistant)\b`),
+	{ // Hidden-instruction / role-injection tags: <IMPORTANT>, <system>, <hidden>, …
+		// "hidden" restores the legacy tpa <hidden> marker (Spec 077 US1, Codex
+		// round-2 finding C).
+		re:   regexp.MustCompile(`<\s*(important|system|secret|critical|admin|instruction|developer|assistant|hidden)\b`),
 		base: 0.7,
 		what: "hidden-instruction tag",
 	},
@@ -59,6 +61,15 @@ var directiveFamilies = []directiveFamily{
 		re:   regexp.MustCompile(`\b(?:do not|must not|never) (?:tell|inform|reveal|disclos\w*|mention|notify|warn|expose)\b`),
 		base: 0.6,
 		what: "secrecy imperative",
+	},
+	{ // Covert-secrecy directive (legacy tpa restore, Spec 077 US1 Codex round-2
+		// finding C): coercion to act behind the user's back — "without telling the
+		// user", "without informing the user", "hide this from …", "keep this
+		// hidden/secret". Matched on NORMALIZED text (stemmed: "telling"→"tell").
+		// Benignly phrasable in rare cases, so SOFT (review, never auto-quarantine).
+		re:   regexp.MustCompile(`\b(?:without (?:tell|inform|notify|alert|warn)\w* (?:the )?(?:user|caller|human|operator|client)|(?:hide|conceal) (?:this|it|that)(?: \w+)? from|keep (?:this|it|that)(?: \w+)? (?:hidden|secret|conceal\w*|private|quiet|confidential))\b`),
+		base: 0.6,
+		what: "covert-secrecy directive",
 	},
 	{ // Exfiltration imperative: "reveal your system prompt", "send the api key".
 		re:   regexp.MustCompile(`\b(?:reveal|expose|print|output|send|leak|disclos\w*) (?:your |the |all )?(?:system prompt|api key\w*|secret\w*|password\w*|credential\w*|private key)\b`),
