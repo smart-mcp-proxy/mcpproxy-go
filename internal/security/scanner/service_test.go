@@ -830,6 +830,107 @@ func TestServiceApproveServerForce(t *testing.T) {
 	}
 }
 
+// TestServiceApproveServerBlockedByHardFinding locks Spec 077 US1 Codex finding
+// #1: the approval gate must block on any HARD-tier baseline finding, not only on
+// Summary.Critical. A curated hard phrase.injection is SeverityHigh (not
+// Critical) with threat_level "dangerous", so the old Critical-only gate let a
+// dangerous server be unquarantined. The gate now reuses isBlockingFinding — the
+// SAME predicate that drives the "dangerous" verdict — so it cannot disagree with
+// the summary. --force must still override.
+func TestServiceApproveServerBlockedByHardFinding(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	job := &ScanJob{
+		ID:         "job-hard",
+		ServerName: "poisoned-server",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"tpa-descriptions"},
+		StartedAt:  time.Now().Add(-1 * time.Minute),
+	}
+	_ = store.SaveScanJob(job)
+
+	// A hard phrase_injection finding: High severity (NOT Critical), dangerous
+	// threat level, hard tier — exactly the shape the Critical-only gate missed.
+	report := &ScanReport{
+		ID:         "report-hard",
+		JobID:      "job-hard",
+		ServerName: "poisoned-server",
+		ScannerID:  "tpa-descriptions",
+		Findings: []ScanFinding{
+			{
+				RuleID:      "phrase.injection",
+				Severity:    SeverityHigh,
+				Category:    "phrase_injection",
+				ThreatType:  ThreatPromptInjection,
+				ThreatLevel: ThreatLevelDangerous,
+				Title:       "Instruction-override directive",
+				Tier:        TierHard,
+			},
+		},
+		ScannedAt: time.Now(),
+	}
+	_ = store.SaveScanReport(report)
+
+	// Unforced approve must fail even though there are zero Critical findings.
+	if err := svc.ApproveServer(context.Background(), "poisoned-server", false, "admin@test.com"); err == nil {
+		t.Fatal("expected error: a hard-tier (dangerous) finding must block unforced approval")
+	}
+	if _, err := store.GetIntegrityBaseline("poisoned-server"); err == nil {
+		t.Fatal("expected no baseline after a rejected approval")
+	}
+
+	// --force must still override.
+	if err := svc.ApproveServer(context.Background(), "poisoned-server", true, "admin@test.com"); err != nil {
+		t.Fatalf("force approve should succeed despite the hard finding: %v", err)
+	}
+	if _, err := store.GetIntegrityBaseline("poisoned-server"); err != nil {
+		t.Fatalf("expected baseline after forced approval: %v", err)
+	}
+}
+
+// TestServiceApproveServerSoftFindingDoesNotBlock proves the gate's counterpart:
+// a SOFT baseline finding (review-only) must NOT block an unforced approval, even
+// at High severity — the two-tier model, not raw severity, governs blocking.
+func TestServiceApproveServerSoftFindingDoesNotBlock(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	job := &ScanJob{
+		ID:         "job-soft",
+		ServerName: "reviewable-server",
+		Status:     ScanJobStatusCompleted,
+		Scanners:   []string{"tpa-descriptions"},
+		StartedAt:  time.Now().Add(-1 * time.Minute),
+	}
+	_ = store.SaveScanJob(job)
+
+	report := &ScanReport{
+		ID:         "report-soft",
+		JobID:      "job-soft",
+		ServerName: "reviewable-server",
+		ScannerID:  "tpa-descriptions",
+		Findings: []ScanFinding{
+			{
+				RuleID:      "directive.imperative",
+				Severity:    SeverityHigh,
+				Category:    "prompt_injection",
+				ThreatType:  ThreatPromptInjection,
+				ThreatLevel: ThreatLevelWarning,
+				Title:       "Soft directive",
+				Tier:        TierSoft,
+			},
+		},
+		ScannedAt: time.Now(),
+	}
+	_ = store.SaveScanReport(report)
+
+	if err := svc.ApproveServer(context.Background(), "reviewable-server", false, "admin@test.com"); err != nil {
+		t.Fatalf("a soft finding must not block unforced approval: %v", err)
+	}
+	if _, err := store.GetIntegrityBaseline("reviewable-server"); err != nil {
+		t.Fatalf("expected baseline after approving a soft-only server: %v", err)
+	}
+}
+
 func TestServiceApproveServerNoScanForce(t *testing.T) {
 	svc, store, _ := newTestService(t)
 

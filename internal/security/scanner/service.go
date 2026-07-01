@@ -1408,9 +1408,27 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	// Check for critical findings (block unless force)
-	if aggReport != nil && aggReport.Summary.Critical > 0 && !force {
-		return fmt.Errorf("server has %d critical findings; resolve them or use --force to approve anyway", aggReport.Summary.Critical)
+	// Block approval on blocking findings unless forced. Spec 077 FR-021: the
+	// approval gate is tier-driven, mirroring the server verdict and the Approve
+	// modal. Any HARD-tier baseline finding (dangerous) blocks — and a curated
+	// hard phrase.injection is SeverityHigh, not Critical, so gating on Critical
+	// severity alone let a dangerous server be unquarantined. isBlockingFinding is
+	// the SAME predicate that drives the "dangerous" summary status, so the gate
+	// and the verdict can never disagree. Critical severity (e.g. a critical CVE)
+	// still blocks for back-compat.
+	if aggReport != nil && !force {
+		blocking := 0
+		for _, f := range aggReport.Findings {
+			if isBlockingFinding(f) {
+				blocking++
+			}
+		}
+		if blocking > 0 {
+			return fmt.Errorf("server has %d dangerous (hard-tier) finding(s); resolve them or use --force to approve anyway", blocking)
+		}
+		if aggReport.Summary.Critical > 0 {
+			return fmt.Errorf("server has %d critical findings; resolve them or use --force to approve anyway", aggReport.Summary.Critical)
+		}
 	}
 
 	// Create integrity baseline
