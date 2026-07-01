@@ -130,6 +130,24 @@
         </span>
       </div>
 
+      <!-- Deep scan (opt-in) availability — Spec 077 US3. Informational ONLY:
+           a failed or unavailable deep scanner NEVER changes the baseline
+           verdict above, so it is rendered as info, never an error. -->
+      <div v-if="report.deep_scan && report.deep_scan.enabled" class="alert alert-info">
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <div>
+          <div class="font-semibold">Deep scan (optional)</div>
+          <span v-if="(report.deep_scan.scanners_failed?.length ?? 0) > 0" class="text-sm">
+            {{ report.deep_scan.scanners_failed!.length }} deep scanner(s) were unavailable this run
+            ({{ report.deep_scan.scanners_failed!.map((f: { id: string; reason: string }) => f.id).join(', ') }}).
+            This does not affect the baseline verdict shown above.
+          </span>
+          <span v-else class="text-sm">Deep scan ran. Its findings are merged into the report above.</span>
+        </div>
+      </div>
+
       <!-- Scan incomplete warnings -->
       <div v-if="report.scan_complete === false && report.empty_scan" class="alert alert-warning">
         <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

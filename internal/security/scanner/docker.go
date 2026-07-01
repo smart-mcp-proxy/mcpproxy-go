@@ -200,7 +200,7 @@ func ClassifyScannerExecFailure(stderr string, exitCode int) string {
 		"snap-installed Docker). Fix options: (1) replace snap docker with " +
 		"your distro's docker package (e.g. `sudo snap remove docker && " +
 		"sudo apt install docker.io`), or (2) set " +
-		"`security.scanner_disable_no_new_privileges: true` in your " +
+		"`security.deep_scan.disable_no_new_privileges: true` in your " +
 		"mcpproxy config to drop the `--security-opt no-new-privileges` " +
 		"flag, which restores the AppArmor profile transition at the cost " +
 		"of a small isolation reduction."

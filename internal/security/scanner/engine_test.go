@@ -429,6 +429,9 @@ func TestEngineResolveScanners(t *testing.T) {
 
 	// Use nil docker to skip image existence checks in tests
 	engine := NewEngine(nil, registry, dir, logger)
+	// Spec 077 US3: Docker (deep) scanners only resolve when the deep-scan layer
+	// is enabled; this test exercises the Docker-scanner resolution mechanics.
+	engine.deepScanEnabled = true
 
 	// Resolve all installed. The Docker scanner we just enabled plus the
 	// always-installed in-process scanner (tpa-descriptions) should both
@@ -621,6 +624,9 @@ func TestEngineResolveScannersSkipsDockerUnderSandbox(t *testing.T) {
 			// short-circuit before any Docker probe. The per-server resolved mode
 			// is passed directly into resolveScanners (MCP-34.4).
 			engine := NewEngine(nil, registry, dir, logger)
+			// Spec 077 US3: the sandbox skip only matters once the deep-scan
+			// layer is enabled (otherwise Docker scanners never run at all).
+			engine.deepScanEnabled = true
 
 			resolved, err := engine.resolveScanners(nil, mode)
 			if err != nil {
@@ -679,6 +685,8 @@ func TestEngineResolveScannersDockerModeUnaffected(t *testing.T) {
 			registry.scanners["mcp-scan"].Status = ScannerStatusInstalled
 
 			engine := NewEngine(nil, registry, dir, logger)
+			// Spec 077 US3: Docker scanners are gated on the deep-scan layer.
+			engine.deepScanEnabled = true
 
 			resolved, err := engine.resolveScanners([]string{"mcp-scan"}, mode)
 			if err != nil {
@@ -1218,5 +1226,84 @@ func TestEngineInProcessScan_ShadowingViaPeerTools(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a shadowing.cross_server finding via StartScan + PeerTools, got reports %+v", cb.reports)
+	}
+}
+
+// TestDeepScanFailureLeavesBaselineVerdictUnchanged verifies Spec 077 US3
+// AS3/FR-007/FR-008: when the opt-in deep-scan layer is enabled but a Docker
+// deep scanner fails (or is unavailable), the baseline verdict is derived
+// solely from the in-process baseline findings and is NEVER downgraded to
+// "degraded". The failure is surfaced only as an informational
+// DeepScanDescriptor.
+func TestDeepScanFailureLeavesBaselineVerdictUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	docker := NewDockerRunner(logger)
+	registry := NewRegistry(dir, logger) // in-process tpa baseline + Docker scanners
+	svc := NewService(store, registry, docker, dir, logger)
+	svc.SetDeepScan(true, nil)
+
+	now := time.Now()
+	// Baseline (in-process) scanner completed cleanly; a Docker deep scanner failed.
+	if err := store.SaveScanJob(&ScanJob{
+		ID:         "j-deep-fail",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{inProcessTPAScannerID, "mcp-scan"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: inProcessTPAScannerID, Status: ScanJobStatusCompleted, FindingsCount: 0},
+			{ScannerID: "mcp-scan", Status: ScanJobStatusFailed, Error: "Docker image not available locally"},
+		},
+	}); err != nil {
+		t.Fatalf("SaveScanJob: %v", err)
+	}
+	if err := store.SaveScanReport(&ScanReport{
+		ID: "r-baseline", JobID: "j-deep-fail", ServerName: "server-a",
+		ScannerID: inProcessTPAScannerID, Findings: []ScanFinding{}, ScannedAt: now,
+	}); err != nil {
+		t.Fatalf("SaveScanReport: %v", err)
+	}
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+
+	// Baseline verdict MUST stay clean — a failed deep scanner never degrades it.
+	if summary.Status != "clean" {
+		t.Errorf("baseline verdict must stay 'clean' despite a failed deep scanner, got %q", summary.Status)
+	}
+
+	// The deep-scan failure is surfaced as an informational descriptor.
+	if summary.DeepScan == nil {
+		t.Fatal("expected DeepScanDescriptor to be populated when deep scan is enabled")
+	}
+	if !summary.DeepScan.Enabled {
+		t.Errorf("DeepScan.Enabled must be true when deep scan is on")
+	}
+	if len(summary.DeepScan.ScannersFailed) != 1 || summary.DeepScan.ScannersFailed[0].ID != "mcp-scan" {
+		t.Errorf("expected mcp-scan in DeepScan.ScannersFailed, got %+v", summary.DeepScan.ScannersFailed)
+	}
+	if summary.DeepScan.ScannersFailed[0].Reason == "" {
+		t.Errorf("deep-scan failure must carry a reason")
+	}
+
+	// FR-005/SC-005: the verdict must be identical to the same scan with deep
+	// scan disabled (baseline isolation).
+	svc.invalidateScanSummaryCache("server-a")
+	svc.SetDeepScan(false, nil)
+	baseline := svc.GetScanSummary(context.Background(), "server-a")
+	if baseline == nil {
+		t.Fatal("expected non-nil baseline summary")
+	}
+	if baseline.Status != summary.Status {
+		t.Errorf("baseline verdict changed with deep scan toggled: deep-on=%q deep-off=%q", summary.Status, baseline.Status)
+	}
+	// With deep scan off, the descriptor is omitted entirely (invariant).
+	if baseline.DeepScan != nil {
+		t.Errorf("DeepScanDescriptor must be omitted when deep scan is off, got %+v", baseline.DeepScan)
 	}
 }

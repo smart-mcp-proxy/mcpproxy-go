@@ -2000,7 +2000,6 @@ func (c *Config) GetAnonymousID() string {
 
 // SecurityConfig represents security scanner configuration (Spec 039)
 type SecurityConfig struct {
-	AutoScanQuarantined     bool     `json:"auto_scan_quarantined" mapstructure:"auto-scan-quarantined"`
 	ScanTimeoutDefault      Duration `json:"scan_timeout_default,omitempty" mapstructure:"scan-timeout-default" swaggertype:"string"`
 	IntegrityCheckInterval  Duration `json:"integrity_check_interval,omitempty" mapstructure:"integrity-check-interval" swaggertype:"string"`
 	IntegrityCheckOnRestart bool     `json:"integrity_check_on_restart" mapstructure:"integrity-check-on-restart"`
@@ -2008,6 +2007,11 @@ type SecurityConfig struct {
 	RuntimeReadOnly         bool     `json:"runtime_read_only" mapstructure:"runtime-read-only"`
 	RuntimeTmpfsSize        string   `json:"runtime_tmpfs_size,omitempty" mapstructure:"runtime-tmpfs-size"`
 
+	// Deprecated (Spec 077 US3): migrated on load into DeepScan.DisableNoNewPrivileges
+	// (see migrateDeepScanConfig). Retained only so existing configs that still carry
+	// the top-level key parse; consumers MUST read the effective value via
+	// SecurityConfig.IsDisableNoNewPrivileges. Cleared after migration.
+	//
 	// ScannerDisableNoNewPrivileges, when true, omits the
 	// `--security-opt no-new-privileges` flag from scanner container runs.
 	//
@@ -2025,6 +2029,11 @@ type SecurityConfig struct {
 	// distro-packaged docker.
 	ScannerDisableNoNewPrivileges bool `json:"scanner_disable_no_new_privileges,omitempty" mapstructure:"scanner-disable-no-new-privileges"`
 
+	// Deprecated (Spec 077 US3): migrated on load into DeepScan.FetchPackageSource
+	// (see migrateDeepScanConfig). Retained only so existing configs that still carry
+	// the top-level key parse; consumers MUST read the effective value via
+	// SecurityConfig.EffectiveFetchPackageSource. Cleared after migration.
+	//
 	// ScannerFetchPackageSource controls whether the scanner fetches the
 	// PUBLISHED source of package-runner servers (npx/uvx) — without executing
 	// it — when no local source is available (no Docker container, no local
@@ -2046,4 +2055,110 @@ type SecurityConfig struct {
 	// forbid the scanner's network egress; such servers then fall back to the
 	// tool-definitions-only scan with no regression.
 	ScannerFetchPackageSource *bool `json:"scanner_fetch_package_source,omitempty" mapstructure:"scanner-fetch-package-source"`
+
+	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
+	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
+	// keys (migrated on load) and gates the heavy Docker-based scanners + source
+	// extraction. Disabled by default (FR-006): only the deterministic in-process
+	// baseline scanner runs. A deep-scan failure NEVER changes the baseline verdict
+	// (FR-007/FR-008).
+	DeepScan *DeepScanConfig `json:"deep_scan,omitempty" mapstructure:"deep-scan"`
+}
+
+// DeepScanConfig configures the opt-in "deep scan" layer (Spec 077 US3):
+// Docker-based scanner plugins plus published-package-source extraction. The
+// whole layer is off by default; when disabled only the deterministic
+// in-process baseline scanner runs and no Docker is invoked. A deep-scan
+// failure is surfaced as an informational note and never degrades the baseline
+// verdict.
+type DeepScanConfig struct {
+	// Enabled is the master opt-in for the heavy layer (FR-006). Default false.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+
+	// FetchPackageSource controls whether the scanner fetches the PUBLISHED
+	// source of package-runner servers (npx/uvx) — without executing it — when
+	// no local source is available. Absorbs the deprecated top-level
+	// scanner_fetch_package_source. Default (nil) is ENABLED within deep scan.
+	FetchPackageSource *bool `json:"fetch_package_source,omitempty" mapstructure:"fetch-package-source" swaggertype:"boolean"`
+
+	// DisableNoNewPrivileges, when true, omits the `--security-opt
+	// no-new-privileges` flag from scanner container runs (snap-docker/AppArmor
+	// escape hatch). Absorbs the deprecated top-level
+	// scanner_disable_no_new_privileges. Default false.
+	DisableNoNewPrivileges bool `json:"disable_no_new_privileges,omitempty" mapstructure:"disable-no-new-privileges"`
+
+	// Scanners optionally restricts which deep scanners may run under the
+	// umbrella (by scanner id). Empty ⇒ all enabled deep scanners are eligible.
+	Scanners []string `json:"scanners,omitempty" mapstructure:"scanners"`
+}
+
+// IsDeepScanEnabled reports whether the opt-in deep-scan layer is turned on.
+// Nil-safe: a nil SecurityConfig or nil DeepScan means disabled (the default).
+func (sc *SecurityConfig) IsDeepScanEnabled() bool {
+	return sc != nil && sc.DeepScan != nil && sc.DeepScan.Enabled
+}
+
+// DeepScanScanners returns the optional per-scanner allow-list for the deep-scan
+// layer, or nil when unset (all enabled deep scanners are eligible).
+func (sc *SecurityConfig) DeepScanScanners() []string {
+	if sc != nil && sc.DeepScan != nil {
+		return sc.DeepScan.Scanners
+	}
+	return nil
+}
+
+// EffectiveFetchPackageSource resolves the package-source-fetch setting from the
+// deep_scan block first, falling back to the deprecated top-level key for
+// configs loaded before migration. Nil ⇒ default (enabled).
+func (sc *SecurityConfig) EffectiveFetchPackageSource() *bool {
+	if sc == nil {
+		return nil
+	}
+	if sc.DeepScan != nil && sc.DeepScan.FetchPackageSource != nil {
+		return sc.DeepScan.FetchPackageSource
+	}
+	return sc.ScannerFetchPackageSource
+}
+
+// IsDisableNoNewPrivileges resolves the no-new-privileges escape hatch from the
+// deep_scan block first, falling back to the deprecated top-level key.
+func (sc *SecurityConfig) IsDisableNoNewPrivileges() bool {
+	if sc == nil {
+		return false
+	}
+	if sc.DeepScan != nil && sc.DeepScan.DisableNoNewPrivileges {
+		return true
+	}
+	return sc.ScannerDisableNoNewPrivileges
+}
+
+// migrateDeepScanConfig folds the deprecated top-level scanner_fetch_package_source
+// and scanner_disable_no_new_privileges keys into the unified security.deep_scan
+// block (Spec 077 FR-017) so existing configs load unchanged and behave
+// identically after migration (SC-007). The removed auto_scan_quarantined key has
+// no struct field, so it is silently ignored on unmarshal (FR-016). Idempotent:
+// only fills deep_scan fields left unset, then clears the legacy keys so a
+// re-serialized config exposes only the new surface. Runs on every load and
+// hot-reload via initializeRegistries.
+func migrateDeepScanConfig(cfg *Config) {
+	if cfg == nil || cfg.Security == nil {
+		return
+	}
+	sc := cfg.Security
+	if sc.ScannerFetchPackageSource == nil && !sc.ScannerDisableNoNewPrivileges {
+		return // nothing legacy to migrate
+	}
+	if sc.DeepScan == nil {
+		sc.DeepScan = &DeepScanConfig{}
+	}
+	if sc.DeepScan.FetchPackageSource == nil && sc.ScannerFetchPackageSource != nil {
+		v := *sc.ScannerFetchPackageSource
+		sc.DeepScan.FetchPackageSource = &v
+	}
+	if !sc.DeepScan.DisableNoNewPrivileges && sc.ScannerDisableNoNewPrivileges {
+		sc.DeepScan.DisableNoNewPrivileges = true
+	}
+	// Clear the legacy keys so the migrated config serializes only deep_scan.*.
+	sc.ScannerFetchPackageSource = nil
+	sc.ScannerDisableNoNewPrivileges = false
 }
