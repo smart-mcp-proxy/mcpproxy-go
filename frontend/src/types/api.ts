@@ -89,6 +89,19 @@ export interface SecurityScanReport {
   pass1_complete?: boolean  // Security scan (fast) done
   pass2_complete?: boolean  // Supply chain audit done
   pass2_running?: boolean   // Supply chain audit in progress
+  // Opt-in deep-scan availability (Spec 077 US3). Informational only — a failed
+  // or unavailable deep scanner never changes the baseline verdict/status.
+  deep_scan?: DeepScanDescriptor
+}
+
+// DeepScanDescriptor reports the informational status of the opt-in "deep scan"
+// layer (Docker-based scanners + source extraction) separately from the
+// baseline verdict (Spec 077 US3). Rendered as a quiet info note, never an error.
+export interface DeepScanDescriptor {
+  enabled: boolean
+  ran: boolean
+  available: boolean
+  scanners_failed?: { id: string; reason: string }[]
 }
 
 // Scan job summary for history listing
