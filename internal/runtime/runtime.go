@@ -89,6 +89,10 @@ type Runtime struct {
 	// GET /api/v1/servers.
 	coalescer *serversChangedCoalescer
 
+	// Spec 077 US4 (MCP-2207): debounces the per-scanner security-scan
+	// lifecycle storm into one settled event per server per scan.
+	scanNotify *scanNotifyDebouncer
+
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
@@ -281,6 +285,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
 	rt.coalescer.start(appCtx)
+
+	// Spec 077 US4 (MCP-2207): collapse the per-scanner scan-notification storm
+	// into one settled event per server. 750ms bridges the rapid lifecycle
+	// signals of a reconnect storm without noticeably delaying the result.
+	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
 
 	return rt, nil
 }
