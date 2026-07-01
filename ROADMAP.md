@@ -92,6 +92,9 @@ graph TD
   paid_tier["Paid-tier MVP (billing / seats / license)<br/>MCP-40"]
   sdk_v1_migration["SDK v1 migration"]
   sso["SSO (server edition)"]
+  mcp_2026_upgrade["MCP protocol upgrade to 2026-07-28 revision"]
+  security_gateway_cd["Security gateway Tracks C/D (per-arg least-privilege + signature provenance)"]
+  discovery_eval_harness["Discovery-quality eval harness (Spec 065 second half)"]
 
   profiles_v2_indexes --> profiles_v2_set_profile
   profiles_v2_set_profile --> profiles_v2_profile_pin
@@ -127,7 +130,8 @@ graph TD
   class profiles_v2,profiles_v2_indexes,profiles_v2_set_profile,profiles_v2_profile_pin,profiles_v2_tray_switcher,sandbox_isolation,sandbox_spike,sandbox_mode_config,sandbox_launcher,sandbox_scanner_parity,sandbox_snap_docker_it,ts_code_exec_ga,ts_code_exec_cookbook,scanner_v2,scanner_v2_foundation,scanner_v2_hard_checks,scanner_v2_soft_checks,scanner_v2_consensus,scanner_v2_eval_gate,scanner_v2_docs done;
   class scanner_simplification in_progress;
   class windows_tray,windows_tray_window in_review;
-  class ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,registries_official_protocol,scanner_simpl_baseline,scanner_simpl_unified_report,scanner_simpl_deep_optin,scanner_simpl_notifications todo;
+  class mcp_2026_upgrade blocked;
+  class ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,registries_official_protocol,scanner_simpl_baseline,scanner_simpl_unified_report,scanner_simpl_deep_optin,scanner_simpl_notifications,security_gateway_cd,discovery_eval_harness todo;
   class marketplace,siem,paid_tier,sdk_v1_migration,sso parked;
 ```
 
@@ -137,10 +141,13 @@ graph TD
 | --- | --- | --- | --- | --- | --- | --- |
 | Scanner simplification (deterministic default, opt-in deep scan) | In progress | unassigned | P1 | 0/42 (0%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 25/60 (42%) | [002-windows-installer](./specs/002-windows-installer/) |  |
+| MCP protocol upgrade to 2026-07-28 revision | Blocked |  | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Web UI + macOS app UX audit | Todo | unassigned | P0 | — | [064-glass-cockpit](./specs/064-glass-cockpit/) |  |
 | Action log / transparency — info at a glance | Todo | unassigned | P0 | 63/66 (95%) | [024-expand-activity-log](./specs/024-expand-activity-log/) |  |
 | Analytics dashboard as default page | Todo | unassigned | P1 | 16/26 (62%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Registries — easier search + add-server | Todo | unassigned | P1 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
+| Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo |  | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
+| Discovery-quality eval harness (Spec 065 second half) | Todo |  | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Server marketplace `MCP-37` | Todo (parked) |  | P3 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Audit SIEM integration `MCP-39` | Todo (parked) |  | P3 | — |  |  |
 | Paid-tier MVP (billing / seats / license) `MCP-40` | Todo (parked) |  | P3 | — |  |  |

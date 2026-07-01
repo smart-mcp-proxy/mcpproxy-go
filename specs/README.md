@@ -1,6 +1,8 @@
 # Specs Index
 
-Every numbered directory under `specs/` is a feature specification produced with [GitHub spec-kit](https://github.com/github/spec-kit). This page is the canonical list; badges reflect `tasks.md` checklist progress and are a quick heuristic — not a guarantee. When ambiguous, cross-check `git log --grep='<spec-number>'` and the spec's `plan.md`.
+Every numbered directory under `specs/` is a feature specification produced with [GitHub spec-kit](https://github.com/github/spec-kit).
+
+> **Authoritative status lives in [`../roadmap.yaml`](../roadmap.yaml)** (rendered to [`../ROADMAP.md`](../ROADMAP.md)), **not in the badges below.** The badges on this page are derived purely from `tasks.md` checkbox counts and are known to be **systematically stale** — many specs shown as `drafted`/`0%` are in fact shipped (the checkboxes were never ticked after implementation). `roadmap.yaml` carries an explicit `status` field (`todo`/`in_progress`/`in_review`/`blocked`/`done`) per epic that does not depend on checkbox hygiene. Treat the table below as a spec *directory*, and `roadmap.yaml`/`ROADMAP.md` as the source of truth for **what is actually built**. When a badge and `roadmap.yaml` disagree, `roadmap.yaml` wins; confirm against code (`git log --grep='<spec-number>'`, or grep for the spec's key symbols) rather than the badge.
 
 **Status legend**
 
