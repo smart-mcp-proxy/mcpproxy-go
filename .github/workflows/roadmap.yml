@@ -1,0 +1,41 @@
+name: roadmap
+
+# Keep ROADMAP.md in sync with roadmap.yaml and the per-spec tasks.md badges.
+# ROADMAP.md is a generated file (scripts/gen-roadmap.py); this canary fails the
+# build if it is stale so the roadmap never silently drifts. Regenerate locally
+# with `python3 scripts/gen-roadmap.py` and commit the result.
+
+on:
+  pull_request:
+    paths:
+      - 'roadmap.yaml'
+      - 'ROADMAP.md'
+      - 'scripts/gen-roadmap.py'
+      - 'specs/**/tasks.md'
+      - '.github/workflows/roadmap.yml'
+  push:
+    branches: [main, next]
+    paths:
+      - 'roadmap.yaml'
+      - 'ROADMAP.md'
+      - 'scripts/gen-roadmap.py'
+      - 'specs/**/tasks.md'
+      - '.github/workflows/roadmap.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  roadmap-check:
+    name: roadmap-up-to-date
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML
+        run: pip install pyyaml
+      - name: Verify ROADMAP.md is up to date
+        run: python3 scripts/gen-roadmap.py --check
