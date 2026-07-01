@@ -188,8 +188,18 @@
                   >
                     {{ finding.threat_level }}
                   </span>
+                  <span v-if="finding.severity" class="badge badge-xs badge-outline shrink-0 uppercase">
+                    {{ finding.severity }}
+                  </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="findingHasConsensus(finding)"
+                    class="badge badge-xs badge-primary badge-outline shrink-0"
+                    :title="`Flagged independently by ${findingSources(finding).length} scanners`"
+                  >
+                    consensus &times;{{ findingSources(finding).length }}
                   </span>
                   <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
                     {{ finding.package_name }}
@@ -229,9 +239,9 @@
                         <span class="text-base-content/50">Location:</span>
                         <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
-                      <div v-if="finding.scanner">
-                        <span class="text-base-content/50">Scanner:</span>
-                        <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
+                      <div v-if="findingSources(finding).length">
+                        <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
+                        <span class="ml-1">{{ findingSourcesLabel(finding) }}</span>
                       </div>
                     </div>
                     <a
@@ -285,8 +295,18 @@
                   >
                     {{ finding.threat_level }}
                   </span>
+                  <span v-if="finding.severity" class="badge badge-xs badge-outline shrink-0 uppercase">
+                    {{ finding.severity }}
+                  </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="findingHasConsensus(finding)"
+                    class="badge badge-xs badge-primary badge-outline shrink-0"
+                    :title="`Flagged independently by ${findingSources(finding).length} scanners`"
+                  >
+                    consensus &times;{{ findingSources(finding).length }}
                   </span>
                   <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
                     {{ finding.package_name }}
@@ -325,9 +345,9 @@
                         <span class="text-base-content/50">Location:</span>
                         <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
-                      <div v-if="finding.scanner">
-                        <span class="text-base-content/50">Scanner:</span>
-                        <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
+                      <div v-if="findingSources(finding).length">
+                        <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
+                        <span class="ml-1">{{ findingSourcesLabel(finding) }}</span>
                       </div>
                     </div>
                     <a
@@ -613,6 +633,24 @@ const scannerNames: Record<string, string> = {
 
 function scannerDisplayName(id: string): string {
   return scannerNames[id] || id
+}
+
+// Spec 077 unified report — a finding's contributing sources. Prefers the
+// merged `sources` list; falls back to the single `scanner` id for legacy
+// findings that predate multi-source attribution.
+function findingSources(finding: SecurityScanFinding): string[] {
+  if (finding.sources && finding.sources.length > 0) return finding.sources
+  if (finding.scanner) return [finding.scanner]
+  return []
+}
+
+// True when ≥2 independent scanners agreed on a finding (consensus).
+function findingHasConsensus(finding: SecurityScanFinding): boolean {
+  return findingSources(finding).length > 1
+}
+
+function findingSourcesLabel(finding: SecurityScanFinding): string {
+  return findingSources(finding).map(scannerDisplayName).join(', ')
 }
 
 // Scan context from the aggregated report (populated from job's ScanContext)

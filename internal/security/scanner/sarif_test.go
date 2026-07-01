@@ -336,6 +336,215 @@ func TestCalculateRiskScoreCrossScannerDedupRetained(t *testing.T) {
 	}
 }
 
+// TestMergeFindingsDedupByRuleAndLocation proves Spec 077 FR-010/FR-011: two
+// scanners reporting the same issue (same rule_id + location) collapse into a
+// single unified entry whose Sources lists every contributing scanner.
+func TestMergeFindingsDedupByRuleAndLocation(t *testing.T) {
+	findings := []ScanFinding{
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "tpa-descriptions", Sources: []string{"tpa-descriptions"}},
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner", Sources: []string{"cisco-mcp-scanner"}},
+	}
+
+	merged := MergeFindings(findings)
+	if len(merged) != 1 {
+		t.Fatalf("expected exactly 1 merged finding, got %d: %+v", len(merged), merged)
+	}
+	if len(merged[0].Sources) != 2 {
+		t.Fatalf("expected merged finding to carry 2 sources, got %v", merged[0].Sources)
+	}
+	// Sources must be a stable (sorted) union so the wire output is deterministic.
+	if merged[0].Sources[0] != "cisco-mcp-scanner" || merged[0].Sources[1] != "tpa-descriptions" {
+		t.Errorf("expected sorted sources [cisco-mcp-scanner tpa-descriptions], got %v", merged[0].Sources)
+	}
+}
+
+// TestMergeFindingsConsensusBoostsConfidence proves Spec 077 FR-012: when two
+// independent sources agree on the same (location, threat_type) — even via
+// different rule ids — the merged finding's confidence rises above the
+// single-source confidence.
+func TestMergeFindingsConsensusBoostsConfidence(t *testing.T) {
+	single := MergeFindings([]ScanFinding{
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "tpa-descriptions", Confidence: 0.6},
+	})
+	if len(single) != 1 {
+		t.Fatalf("expected 1 finding for single source, got %d", len(single))
+	}
+	singleConf := single[0].Confidence
+
+	consensus := MergeFindings([]ScanFinding{
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "tpa-descriptions", Confidence: 0.6},
+		{RuleID: "cisco.poison", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner", Confidence: 0.5},
+	})
+
+	// The tpa-descriptions finding (same rule as the single-source case) must be
+	// boosted by the agreement of the second, independent source.
+	var boosted float64
+	found := false
+	for _, f := range consensus {
+		if f.RuleID == "detect.tpa" {
+			boosted = f.Confidence
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected detect.tpa finding to survive merge, got %+v", consensus)
+	}
+	if boosted <= singleConf {
+		t.Errorf("consensus confidence %v must exceed single-source confidence %v", boosted, singleConf)
+	}
+}
+
+// TestCalculateRiskScoreCrossSourceConsensusAdds proves Spec 077 (T020): two
+// independent external/Docker scanners agreeing on the same (location,
+// threat_type) via different rule ids ADD to the consensus weight instead of
+// each flattening to weight 1, so the score exceeds a single-source scan.
+func TestCalculateRiskScoreCrossSourceConsensusAdds(t *testing.T) {
+	single := []ScanFinding{
+		{RuleID: "cisco.x", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner"},
+	}
+	consensus := []ScanFinding{
+		{RuleID: "cisco.x", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner"},
+		{RuleID: "ramparts.y", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "ramparts"},
+	}
+
+	singleScore := CalculateRiskScore(single)
+	consensusScore := CalculateRiskScore(consensus)
+
+	// single: one dangerous, one source → weight 1 → 25*log2(2)=25
+	if singleScore != 25 {
+		t.Errorf("single-source score = %d, want 25", singleScore)
+	}
+	// consensus: one issue (location+threat_type), two distinct sources → weight
+	// 2 → 25*log2(3)=39. Counted once (not double), but heavier than single.
+	if consensusScore != 39 {
+		t.Errorf("cross-source consensus score = %d, want 39", consensusScore)
+	}
+	if consensusScore <= singleScore {
+		t.Errorf("consensus score %d must exceed single-source score %d", consensusScore, singleScore)
+	}
+}
+
+// TestCalculateRiskScoreConsensusUsesMaxSeverity proves the consensus group is
+// scored at its MOST-SEVERE member's threat level, not whichever finding is
+// encountered first. For severity-derived threat_types (supply_chain here)
+// agreeing findings can carry different threat_levels; the previous code counted
+// the group at the first finding's level, making the score order-dependent and
+// able to drop a genuine warning. The score must be identical in both orders and
+// reflect the warning (high) member, not the info (low) one.
+func TestCalculateRiskScoreConsensusUsesMaxSeverity(t *testing.T) {
+	warningFinding := ScanFinding{
+		RuleID:      "trivy.CVE-1",
+		Location:    "srv:tool",
+		ThreatType:  ThreatSupplyChain,
+		ThreatLevel: ThreatLevelWarning,
+		Severity:    SeverityHigh,
+		Scanner:     "trivy",
+	}
+	infoFinding := ScanFinding{
+		RuleID:      "grype.CVE-2",
+		Location:    "srv:tool",
+		ThreatType:  ThreatSupplyChain,
+		ThreatLevel: ThreatLevelInfo,
+		Severity:    SeverityLow,
+		Scanner:     "grype",
+	}
+
+	ab := CalculateRiskScore([]ScanFinding{warningFinding, infoFinding})
+	ba := CalculateRiskScore([]ScanFinding{infoFinding, warningFinding})
+
+	if ab != ba {
+		t.Fatalf("consensus score is order-dependent: [warning,info]=%d [info,warning]=%d", ab, ba)
+	}
+	// Two distinct sources agree → weight 2 at the warning level: 6*log2(3)=9.
+	// Scoring at the info level (the bug) would give 2*log2(3)=3.
+	if ab != 9 {
+		t.Errorf("consensus score = %d, want 9 (warning-level, 2 sources)", ab)
+	}
+}
+
+// TestMergeFindingsAbsorbsStrongerFields proves that phase-1 dedup keeps the
+// absorbed duplicate's stronger fields: on merge the result takes max(Confidence),
+// the more-severe Tier (hard > soft), and the union of Signals — regardless of
+// which finding is encountered first.
+func TestMergeFindingsAbsorbsStrongerFields(t *testing.T) {
+	hard := ScanFinding{
+		RuleID: "detect.tpa", Location: "srv:tool",
+		Tier: TierHard, Confidence: 0.9, Signals: []string{"unicode.hidden"},
+		Scanner: "tpa-descriptions",
+	}
+	soft := ScanFinding{
+		RuleID: "detect.tpa", Location: "srv:tool",
+		Tier: TierSoft, Confidence: 0.2, Signals: []string{"directive.imperative"},
+		Scanner: "cisco-mcp-scanner",
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   []ScanFinding
+	}{
+		{"soft-first", []ScanFinding{soft, hard}},
+		{"hard-first", []ScanFinding{hard, soft}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := MergeFindings(tc.in)
+			if len(merged) != 1 {
+				t.Fatalf("expected 1 merged finding, got %d: %+v", len(merged), merged)
+			}
+			m := merged[0]
+			if m.Tier != TierHard {
+				t.Errorf("merged tier = %q, want hard (more-severe tier must win)", m.Tier)
+			}
+			if m.Confidence != 0.9 {
+				t.Errorf("merged confidence = %v, want 0.9 (max)", m.Confidence)
+			}
+			if len(m.Signals) != 2 {
+				t.Errorf("merged signals = %v, want union of both (2)", m.Signals)
+			}
+		})
+	}
+}
+
+// TestClassifyThreatBackfillsSeverity proves Spec 077 (T022): a finding that
+// arrives with no severity (as some external/legacy SARIF findings do) is given
+// a user-readable severity derived from its classified threat level.
+func TestClassifyThreatBackfillsSeverity(t *testing.T) {
+	tests := []struct {
+		name        string
+		in          ScanFinding
+		wantSevSet  bool
+		wantMinKeep string // if in.Severity already set, it must be preserved
+	}{
+		{
+			name:       "dangerous tool poisoning with no severity",
+			in:         ScanFinding{RuleID: "tool-poisoning", Description: "hidden instruction"},
+			wantSevSet: true,
+		},
+		{
+			name:       "supply chain cve with no severity",
+			in:         ScanFinding{RuleID: "CVE-2025-0001", PackageName: "lodash"},
+			wantSevSet: true,
+		},
+		{
+			name:        "explicit severity preserved",
+			in:          ScanFinding{RuleID: "anything", Severity: SeverityCritical},
+			wantSevSet:  true,
+			wantMinKeep: SeverityCritical,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := tt.in
+			ClassifyThreat(&f)
+			if tt.wantSevSet && f.Severity == "" {
+				t.Errorf("expected severity to be backfilled, got empty")
+			}
+			if tt.wantMinKeep != "" && f.Severity != tt.wantMinKeep {
+				t.Errorf("expected severity %q preserved, got %q", tt.wantMinKeep, f.Severity)
+			}
+		})
+	}
+}
+
 func TestSummarizeFindings(t *testing.T) {
 	findings := []ScanFinding{
 		{Severity: SeverityCritical},

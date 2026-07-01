@@ -4,9 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 )
+
+// consensusConfidenceStep is how much each additional independent source raises
+// a finding's confidence when scanners agree on the same (location,
+// threat_type). Additive and capped at 1.0 (Spec 077 FR-012).
+const consensusConfidenceStep = 0.15
 
 // SARIF 2.1.0 types for parsing scanner output
 
@@ -275,13 +281,90 @@ func CalculateRiskScore(findings []ScanFinding) int {
 		return 0
 	}
 
-	// Deduplicate: group by (rule_id + location) to avoid triple-counting
-	// when multiple scanners report the same issue.
+	// Precompute cross-source consensus: for each (location, threat_type) with a
+	// non-empty threat_type, the set of distinct sources that independently
+	// flagged it. Two different scanners agreeing on the same issue — even via
+	// different rule ids — is consensus and raises the weight (Spec 077 FR-012,
+	// T020). External/Docker findings that used to flatten to weight 1 now ADD.
+	// An empty threat_type cannot form consensus and keeps the legacy per-rule
+	// dedup (so existing single-scanner scoring is unchanged).
+	type consensusKey struct{ location, threatType string }
+	groupSources := make(map[consensusKey]map[string]struct{})
+	// A consensus group is scored ONCE, at the MOST-SEVERE threat category among
+	// all agreeing findings (not whichever is encountered first) and at the
+	// MAX per-finding weight — so the score is order-independent even when
+	// severity-derived threat_types (supply_chain, uncategorized, the
+	// malicious_code fallback) put different threat_levels on agreeing findings.
+	groupMaxCat := make(map[consensusKey]int)
+	groupMaxWeight := make(map[consensusKey]int)
+	for i := range findings {
+		f := &findings[i]
+		if f.ThreatType == "" {
+			continue
+		}
+		ck := consensusKey{f.Location, f.ThreatType}
+		set := groupSources[ck]
+		if set == nil {
+			set = make(map[string]struct{})
+			groupSources[ck] = set
+		}
+		for _, s := range findingSources(*f) {
+			set[s] = struct{}{}
+		}
+		if cat := threatCategory(f); cat > groupMaxCat[ck] {
+			groupMaxCat[ck] = cat
+		}
+		if w := consensusWeight(*f); w > groupMaxWeight[ck] {
+			groupMaxWeight[ck] = w
+		}
+	}
+
+	// Deduplicate for scoring:
+	//   - legacy: group by (rule_id, location) to avoid triple-counting the same
+	//     rule reported by multiple scanners (unchanged behavior).
+	//   - consensus: when ≥2 distinct sources agree on the same (location,
+	//     threat_type), count that issue ONCE weighted by the number of agreeing
+	//     sources, so agreement raises the score without double-counting.
 	type dedupKey struct{ ruleID, location string }
 	seen := make(map[dedupKey]bool)
+	seenConsensus := make(map[consensusKey]bool)
 	var dangerousCount, warningCount, infoCount int
 
-	for _, f := range findings {
+	addWeight := func(category, weight int) {
+		switch category {
+		case threatCatDangerous:
+			dangerousCount += weight
+		case threatCatWarning:
+			warningCount += weight
+		case threatCatInfo:
+			infoCount += weight
+		}
+	}
+
+	for i := range findings {
+		f := &findings[i]
+
+		// Cross-source consensus path: only when ≥2 distinct sources agree on a
+		// classified (location, threat_type). Counted once, at the most-severe
+		// category and max weight of the whole group so the result is
+		// order-independent (not the first finding encountered).
+		if f.ThreatType != "" {
+			ck := consensusKey{f.Location, f.ThreatType}
+			if n := len(groupSources[ck]); n >= 2 {
+				if seenConsensus[ck] {
+					continue
+				}
+				seenConsensus[ck] = true
+				weight := groupMaxWeight[ck]
+				if n > weight {
+					weight = n
+				}
+				addWeight(groupMaxCat[ck], weight)
+				continue
+			}
+		}
+
+		// Legacy per-rule dedup (single source, or unclassified findings).
 		key := dedupKey{f.RuleID, f.Location}
 		if key.ruleID != "" && seen[key] {
 			continue // Skip duplicate finding
@@ -291,29 +374,8 @@ func CalculateRiskScore(findings []ScanFinding) int {
 		}
 
 		// Consensus weight: independent signals on one tool ADD to the score
-		// (FR-006). A single-signal or signal-less finding weighs 1.
-		weight := consensusWeight(f)
-
-		switch f.ThreatLevel {
-		case ThreatLevelDangerous:
-			dangerousCount += weight
-		case ThreatLevelWarning:
-			warningCount += weight
-		case ThreatLevelInfo:
-			infoCount += weight
-		default:
-			// Unclassified: use severity as fallback
-			switch f.Severity {
-			case SeverityCritical:
-				dangerousCount += weight
-			case SeverityHigh:
-				warningCount += weight
-			case SeverityMedium:
-				warningCount += weight
-			case SeverityLow:
-				infoCount += weight
-			}
-		}
+		// (Spec 076 FR-006). A single-signal or signal-less finding weighs 1.
+		addWeight(threatCategory(f), consensusWeight(*f))
 	}
 
 	// Logarithmic diminishing returns: score = weight * log2(1 + count)
@@ -339,6 +401,41 @@ func CalculateRiskScore(findings []ScanFinding) int {
 	return score
 }
 
+// Threat categories rank a finding's contribution to the risk score. Higher is
+// more severe; threatCatNone (the zero value) is not counted, so a group whose
+// members are all unclassified keeps the map default without spuriously scoring.
+const (
+	threatCatNone = iota
+	threatCatInfo
+	threatCatWarning
+	threatCatDangerous
+)
+
+// threatCategory maps a finding to its risk bucket, preferring the explicit
+// user-facing ThreatLevel and falling back to CVSS severity for unclassified
+// findings. It mirrors the previous inline switch in addWeight so legacy scoring
+// is unchanged; extracting it lets a consensus group be scored at the
+// most-severe member instead of whichever finding is encountered first.
+func threatCategory(f *ScanFinding) int {
+	switch f.ThreatLevel {
+	case ThreatLevelDangerous:
+		return threatCatDangerous
+	case ThreatLevelWarning:
+		return threatCatWarning
+	case ThreatLevelInfo:
+		return threatCatInfo
+	}
+	switch f.Severity {
+	case SeverityCritical:
+		return threatCatDangerous
+	case SeverityHigh, SeverityMedium:
+		return threatCatWarning
+	case SeverityLow:
+		return threatCatInfo
+	}
+	return threatCatNone
+}
+
 // consensusWeight returns how much a single (deduplicated) finding contributes
 // to its risk category. The deterministic scanner (Spec 076) aggregates every
 // independent check that fired on a tool into one finding's Signals list, so a
@@ -350,6 +447,139 @@ func consensusWeight(f ScanFinding) int {
 		return n
 	}
 	return 1
+}
+
+// tierRank orders finding tiers so the more-severe tier wins on merge:
+// hard > soft > empty/unknown.
+func tierRank(tier string) int {
+	switch tier {
+	case TierHard:
+		return 2
+	case TierSoft:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// findingSources returns the contributing scanner ids for a finding, preferring
+// the explicit Sources list (Spec 077) and falling back to the single Scanner
+// id for legacy findings that predate multi-source attribution.
+func findingSources(f ScanFinding) []string {
+	if len(f.Sources) > 0 {
+		return f.Sources
+	}
+	if f.Scanner != "" {
+		return []string{f.Scanner}
+	}
+	return nil
+}
+
+// sortedUnion returns the deduplicated, sorted union of the given source id
+// slices, dropping empty strings. Returns nil when the union is empty so the
+// JSON `sources` field stays omitted for legacy findings.
+func sortedUnion(lists ...[]string) []string {
+	set := make(map[string]struct{})
+	for _, list := range lists {
+		for _, s := range list {
+			if s != "" {
+				set[s] = struct{}{}
+			}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// MergeFindings collapses findings from every scanner into a single unified list
+// (Spec 077 FR-010/FR-011). Findings sharing a (rule_id, location) merge into one
+// entry whose Sources lists every contributing scanner. When ≥2 distinct sources
+// independently agree on the same (location, threat_type) — even via different
+// rule ids — each agreeing finding's Confidence is raised to reflect that
+// consensus (FR-012). Findings with an empty rule_id are never merged (each is
+// treated as a distinct issue) but still carry populated Sources.
+//
+// Order is preserved (first occurrence wins) so the report is stable.
+func MergeFindings(findings []ScanFinding) []ScanFinding {
+	result := make([]ScanFinding, 0, len(findings))
+
+	// Phase 1 — dedup by (rule_id, location); union contributing sources.
+	type key struct{ ruleID, location string }
+	index := make(map[key]int)
+	for i := range findings {
+		f := findings[i]
+		srcs := findingSources(f)
+		if f.RuleID == "" {
+			f.Sources = sortedUnion(f.Sources, srcs)
+			result = append(result, f)
+			continue
+		}
+		k := key{f.RuleID, f.Location}
+		if pos, ok := index[k]; ok {
+			result[pos].Sources = sortedUnion(result[pos].Sources, srcs)
+			// Absorb the duplicate's stronger fields (Spec 077): keep the
+			// higher confidence, the more-severe tier (hard > soft), and the
+			// union of signals — otherwise merging a hard/high-confidence
+			// finding with a same-(rule_id,location) soft/low-confidence
+			// duplicate would silently drop the hard tier and confidence.
+			if f.Confidence > result[pos].Confidence {
+				result[pos].Confidence = f.Confidence
+			}
+			if tierRank(f.Tier) > tierRank(result[pos].Tier) {
+				result[pos].Tier = f.Tier
+			}
+			result[pos].Signals = sortedUnion(result[pos].Signals, f.Signals)
+			continue
+		}
+		f.Sources = sortedUnion(f.Sources, srcs)
+		index[k] = len(result)
+		result = append(result, f)
+	}
+
+	// Phase 2 — consensus confidence boost by (location, threat_type).
+	type ckey struct{ location, threatType string }
+	group := make(map[ckey]map[string]struct{})
+	for i := range result {
+		f := &result[i]
+		if f.ThreatType == "" {
+			continue
+		}
+		ck := ckey{f.Location, f.ThreatType}
+		set := group[ck]
+		if set == nil {
+			set = make(map[string]struct{})
+			group[ck] = set
+		}
+		for _, s := range f.Sources {
+			set[s] = struct{}{}
+		}
+	}
+	for i := range result {
+		f := &result[i]
+		if f.ThreatType == "" {
+			continue
+		}
+		n := len(group[ckey{f.Location, f.ThreatType}])
+		if n < 2 {
+			continue
+		}
+		boosted := f.Confidence + consensusConfidenceStep*float64(n-1)
+		if boosted > 1.0 {
+			boosted = 1.0
+		}
+		if boosted > f.Confidence {
+			f.Confidence = boosted
+		}
+	}
+
+	return result
 }
 
 // SummarizeFindings produces a ReportSummary from findings
@@ -403,6 +633,13 @@ func parsePackageFromMessage(msg string) (pkg, installed, fixed string) {
 // ClassifyThreat assigns user-facing threat_type and threat_level to a finding
 // based on rule ID, category, description, and severity.
 func ClassifyThreat(f *ScanFinding) {
+	// Spec 077 (T022): guarantee every finding leaves classification with a
+	// user-readable severity. External/legacy SARIF findings sometimes arrive
+	// with no severity; backfill it from the classified threat level so the
+	// unified report never shows a blank severity. An explicit severity is
+	// preserved.
+	defer backfillSeverity(f)
+
 	ruleLC := strings.ToLower(f.RuleID)
 	catLC := strings.ToLower(f.Category)
 	titleLC := strings.ToLower(f.Title)
@@ -471,6 +708,25 @@ func ClassifyThreat(f *ScanFinding) {
 		f.ThreatLevel = ThreatLevelWarning
 	} else {
 		f.ThreatLevel = ThreatLevelInfo
+	}
+}
+
+// backfillSeverity derives a severity from the finding's classified threat
+// level when none was supplied, so every finding in the unified report carries a
+// clear severity (Spec 077 FR-013 / T022). Never overwrites an explicit value.
+func backfillSeverity(f *ScanFinding) {
+	if f.Severity != "" {
+		return
+	}
+	switch f.ThreatLevel {
+	case ThreatLevelDangerous:
+		f.Severity = SeverityHigh
+	case ThreatLevelWarning:
+		f.Severity = SeverityMedium
+	case ThreatLevelInfo:
+		f.Severity = SeverityInfo
+	default:
+		f.Severity = SeverityMedium
 	}
 }
 
