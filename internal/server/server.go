@@ -1959,7 +1959,15 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
-		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerDisableNoNewPrivileges {
+		// Spec 077 US3: gate the opt-in deep-scan layer (Docker scanners + source
+		// extraction). Off by default — only the deterministic in-process baseline
+		// runs. The deprecated top-level scanner_* keys are migrated into
+		// security.deep_scan on load, so the effective accessors read the unified
+		// surface here (T031).
+		if cfg != nil && cfg.Security != nil {
+			secService.SetDeepScan(cfg.Security.IsDeepScanEnabled(), cfg.Security.DeepScanScanners())
+		}
+		if cfg != nil && cfg.Security != nil && cfg.Security.IsDisableNoNewPrivileges() {
 			secService.SetScannerDisableNoNewPrivileges(true)
 		}
 		// MCP-34.4 / D3 option (b): tell the scanner which isolation mode is
@@ -1994,8 +2002,10 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		})
 		// Published-package-source fetch is enabled by default; only an explicit
 		// false in config disables it (MCP-2206).
-		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerFetchPackageSource != nil && !*cfg.Security.ScannerFetchPackageSource {
-			secService.SetFetchPackageSource(false)
+		if cfg != nil && cfg.Security != nil {
+			if fetch := cfg.Security.EffectiveFetchPackageSource(); fetch != nil && !*fetch {
+				secService.SetFetchPackageSource(false)
+			}
 		}
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{

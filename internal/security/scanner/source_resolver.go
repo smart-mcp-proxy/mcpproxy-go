@@ -27,7 +27,7 @@ type SourceResolver struct {
 	// the PUBLISHED source of a package-runner server (npx/uvx) — without
 	// executing it — as a last resort before falling back to a
 	// tool-definitions-only scan. Air-gapped deployments can disable this via
-	// security.scanner_fetch_package_source=false to forbid network egress.
+	// security.deep_scan.fetch_package_source=false to forbid network egress.
 	fetchPackageSource bool
 }
 
