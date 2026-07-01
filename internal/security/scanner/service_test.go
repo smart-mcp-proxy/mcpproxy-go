@@ -1368,27 +1368,35 @@ func TestServiceGetScanSummaryPartialSuccess(t *testing.T) {
 	if summary == nil {
 		t.Fatal("expected non-nil summary")
 	}
-	// MCP-2401: a scanner failed, so coverage is incomplete. A "0/100 clean"
-	// verdict here is misleading — the score's confidence is degraded because
-	// 1 of 2 scanners never ran. Status must reflect that, not plain "clean".
-	if summary.Status != "degraded" {
-		t.Errorf("expected status 'degraded' for incomplete coverage, got %q", summary.Status)
+	// Spec 077 US3 (FR-008/FR-014): a failed Docker deep scanner no longer
+	// downgrades the baseline to "degraded". The verdict is derived solely from
+	// baseline findings — here there are none, so it stays "clean". The deep
+	// failure is surfaced via DeepScan only when the layer is enabled (off here).
+	if summary.Status != "clean" {
+		t.Errorf("expected status 'clean' (deep-scan failure must not degrade the baseline), got %q", summary.Status)
 	}
+	if summary.DeepScan != nil {
+		t.Errorf("DeepScan descriptor must be omitted when deep scan is off, got %+v", summary.DeepScan)
+	}
+	// Coverage counts remain populated for informational display.
 	if summary.ScannersTotal != 2 || summary.ScannersRun != 1 || summary.ScannersFailed != 1 {
 		t.Errorf("expected coverage 1 run / 1 failed / 2 total, got %d run / %d failed / %d total",
 			summary.ScannersRun, summary.ScannersFailed, summary.ScannersTotal)
 	}
 }
 
-// TestServiceGetScanSummaryDegradedWithInfoFindings covers MCP-2401 when the
-// surviving scanners produced only informational findings but coverage is
-// incomplete — the verdict must degrade rather than read "clean".
-func TestServiceGetScanSummaryDegradedWithInfoFindings(t *testing.T) {
+// TestServiceGetScanSummaryDeepFailureWithInfoFindings is the Spec 077 US3
+// successor to the MCP-2401 degrade test: when the surviving baseline produced
+// only informational findings and a Docker deep scanner failed, the verdict must
+// stay "clean" (baseline-only, never "degraded"). With the deep-scan layer
+// enabled, the failure is surfaced via the informational DeepScan descriptor.
+func TestServiceGetScanSummaryDeepFailureWithInfoFindings(t *testing.T) {
 	svc, store, _ := newTestService(t)
+	svc.SetDeepScan(true, nil)
 
 	now := time.Now()
 	_ = store.SaveScanJob(&ScanJob{
-		ID:         "j-degraded-info",
+		ID:         "j-deep-info",
 		ServerName: "server-a",
 		Status:     ScanJobStatusCompleted,
 		Scanners:   []string{"s1", "s2"},
@@ -1399,7 +1407,7 @@ func TestServiceGetScanSummaryDegradedWithInfoFindings(t *testing.T) {
 		},
 	})
 	_ = store.SaveScanReport(&ScanReport{
-		ID: "r1", JobID: "j-degraded-info", ServerName: "server-a", ScannerID: "s1",
+		ID: "r1", JobID: "j-deep-info", ServerName: "server-a", ScannerID: "s1",
 		Findings: []ScanFinding{
 			{RuleID: "info-1", ThreatLevel: ThreatLevelInfo, Severity: "info", Title: "informational"},
 		},
@@ -1410,11 +1418,22 @@ func TestServiceGetScanSummaryDegradedWithInfoFindings(t *testing.T) {
 	if summary == nil {
 		t.Fatal("expected non-nil summary")
 	}
-	if summary.Status != "degraded" {
-		t.Errorf("expected status 'degraded' for incomplete coverage with info-only findings, got %q", summary.Status)
+	if summary.Status != "clean" {
+		t.Errorf("expected status 'clean' (deep-scan failure must not degrade the baseline), got %q", summary.Status)
+	}
+	// s1/s2 are unknown (non-in-process) ids → treated as deep scanners. With
+	// deep scan enabled, the failure of s2 is surfaced informationally.
+	if summary.DeepScan == nil {
+		t.Fatal("expected DeepScan descriptor when deep scan is enabled")
+	}
+	if !summary.DeepScan.Enabled {
+		t.Errorf("DeepScan.Enabled must be true")
+	}
+	if len(summary.DeepScan.ScannersFailed) != 1 || summary.DeepScan.ScannersFailed[0].ID != "s2" {
+		t.Errorf("expected s2 in DeepScan.ScannersFailed, got %+v", summary.DeepScan.ScannersFailed)
 	}
 	if summary.ScannersFailed != 1 {
-		t.Errorf("expected 1 failed scanner, got %d", summary.ScannersFailed)
+		t.Errorf("expected 1 failed scanner (coverage count), got %d", summary.ScannersFailed)
 	}
 }
 
@@ -2136,5 +2155,82 @@ func TestGetScanReport_LatestLatencyIndependentOfHistory(t *testing.T) {
 	}
 	if got := store.listCalls.Load(); got != 0 {
 		t.Errorf("expected 0 ListScanJobs (full-history) calls in latest-report path, got %d", got)
+	}
+}
+
+// TestServiceDeepScanOffByDefault verifies Spec 077 US3 AS1/FR-006: with the
+// deep-scan layer disabled (the default), only the deterministic in-process
+// baseline scanner is resolved to run — every Docker-based scanner is dropped
+// so no container is ever invoked, even when the scanner has been installed.
+// Enabling deep scan brings the installed Docker scanner back into the set.
+func TestServiceDeepScanOffByDefault(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	docker := NewDockerRunner(logger)
+	registry := NewRegistry(dir, logger) // bundled: in-process tpa + Docker scanners
+	// Install a Docker scanner so it WOULD resolve if deep scan were on.
+	registry.scanners["mcp-scan"].Status = ScannerStatusInstalled
+
+	svc := NewService(store, registry, docker, dir, logger)
+
+	// Default: deep scan is OFF.
+	if svc.engine.deepScanEnabled {
+		t.Fatalf("deep scan must be disabled by default (FR-006)")
+	}
+
+	resolved, err := svc.engine.resolveScanners(nil, "")
+	if err != nil {
+		t.Fatalf("resolveScanners: %v", err)
+	}
+	ids := make(map[string]bool)
+	for _, rs := range resolved {
+		ids[rs.plugin.ID] = true
+	}
+	if !ids[inProcessTPAScannerID] {
+		t.Errorf("baseline in-process scanner must always resolve; got %v", ids)
+	}
+	if ids["mcp-scan"] {
+		t.Errorf("Docker scanner must NOT resolve while deep scan is off; got %v", ids)
+	}
+	for id := range ids {
+		if p, gErr := registry.Get(id); gErr == nil && !p.InProcess {
+			t.Errorf("no Docker (non-in-process) scanner may resolve while deep scan is off; got %q", id)
+		}
+	}
+
+	// Turning deep scan on brings the installed Docker scanner back.
+	svc.SetDeepScan(true, nil)
+	if !svc.engine.deepScanEnabled {
+		t.Fatalf("SetDeepScan(true) must enable the deep-scan layer")
+	}
+	resolved, err = svc.engine.resolveScanners(nil, "")
+	if err != nil {
+		t.Fatalf("resolveScanners (deep on): %v", err)
+	}
+	ids = make(map[string]bool)
+	for _, rs := range resolved {
+		ids[rs.plugin.ID] = true
+	}
+	if !ids["mcp-scan"] {
+		t.Errorf("Docker scanner must resolve once deep scan is enabled; got %v", ids)
+	}
+
+	// A per-scanner allow-list restricts which deep scanners are eligible.
+	registry.scanners["semgrep-mcp"].Status = ScannerStatusInstalled
+	svc.SetDeepScan(true, []string{"mcp-scan"})
+	resolved, err = svc.engine.resolveScanners(nil, "")
+	if err != nil {
+		t.Fatalf("resolveScanners (allow-list): %v", err)
+	}
+	ids = make(map[string]bool)
+	for _, rs := range resolved {
+		ids[rs.plugin.ID] = true
+	}
+	if !ids["mcp-scan"] {
+		t.Errorf("allow-listed deep scanner must resolve; got %v", ids)
+	}
+	if ids["semgrep-mcp"] {
+		t.Errorf("non-allow-listed deep scanner must be dropped; got %v", ids)
 	}
 }

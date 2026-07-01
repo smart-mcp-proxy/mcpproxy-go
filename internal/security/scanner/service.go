@@ -174,7 +174,7 @@ func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
 	s.engine.disableNoNewPrivileges = disable
 	if disable {
 		s.logger.Warn("Scanner containers will run WITHOUT --security-opt no-new-privileges " +
-			"(security.scanner_disable_no_new_privileges=true). This is a workaround for " +
+			"(security.deep_scan.disable_no_new_privileges=true). This is a workaround for " +
 			"snap-docker + AppArmor hosts; prefer replacing snap docker with a distro package.")
 	}
 }
@@ -183,21 +183,97 @@ func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
 // "sandbox", "none", or "" == docker), used when a scan has no per-server mode
 // (no resolver wired, or the resolver returns ""). Per-server resolution via
 // SetIsolationModeResolver takes precedence. Under "sandbox"/"none" the host
-// runs no Docker for scanners, so Docker scanner plugins are cleanly skipped
-// (the scan summary degrades) while in-process scanners still run — MCP-34.4 /
-// D3 option (b): clean, surfaced degradation on snap-docker / non-Docker hosts.
+// runs no Docker for scanners, so Docker (deep) scanner plugins are cleanly
+// skipped while the in-process baseline still runs — MCP-34.4 / D3 option (b).
+// Per Spec 077 US3 such a skip is informational (surfaced via the deep-scan
+// descriptor) and NEVER degrades the baseline verdict; deep scanners only run at
+// all when security.deep_scan.enabled is set.
 func (s *Service) SetIsolationMode(mode string) {
 	if s.engine == nil {
 		return
 	}
 	s.engine.isolationMode = mode
 	if mode == "sandbox" || mode == "none" {
-		s.logger.Warn("Default isolation mode runs no Docker for scanner plugins; Docker-based scanners "+
-			"will be skipped and the security scan will report 'degraded' for affected servers "+
-			"(per-server isolation.mode:docker overrides). In-process scanners (e.g. tpa-descriptions) "+
-			"still run. See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.",
+		s.logger.Info("Default isolation mode runs no Docker for scanner plugins; Docker-based deep "+
+			"scanners are skipped (per-server isolation.mode:docker overrides). The deterministic "+
+			"in-process baseline still runs and the baseline verdict is unaffected (Spec 077). "+
+			"See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.",
 			zap.String("isolation_mode", mode))
 	}
+}
+
+// SetDeepScan configures the opt-in "deep scan" layer (Spec 077 US3). When
+// enabled is false (the default), only the deterministic in-process baseline
+// scanner runs and no Docker container is ever invoked; a deep-scan failure can
+// therefore never degrade the baseline verdict. scanners optionally restricts
+// which deep scanners are eligible (empty ⇒ all enabled deep scanners). This is
+// the runtime knob for security.deep_scan.enabled / security.deep_scan.scanners.
+func (s *Service) SetDeepScan(enabled bool, scanners []string) {
+	if s.engine == nil {
+		return
+	}
+	s.engine.deepScanEnabled = enabled
+	if len(scanners) > 0 {
+		allow := make(map[string]bool, len(scanners))
+		for _, id := range scanners {
+			allow[id] = true
+		}
+		s.engine.deepScanScanners = allow
+	} else {
+		s.engine.deepScanScanners = nil
+	}
+	if enabled {
+		s.logger.Info("Deep scan enabled (security.deep_scan.enabled=true): Docker scanner " +
+			"plugins + published-package-source extraction may run as an opt-in enrichment " +
+			"layer. Failures are surfaced as an informational note and NEVER change the " +
+			"baseline verdict (Spec 077 FR-007/FR-008).")
+	}
+}
+
+// deepScanEnabled reports whether the opt-in deep-scan layer is currently on.
+func (s *Service) deepScanEnabled() bool {
+	return s.engine != nil && s.engine.deepScanEnabled
+}
+
+// isBaselineScanner reports whether a scanner id belongs to the deterministic
+// in-process baseline (Spec 077). An unknown id is treated as a deep scanner so
+// its failure is attributed to the deep-scan layer, never the baseline.
+func (s *Service) isBaselineScanner(scannerID string) bool {
+	if s.registry != nil {
+		if p, err := s.registry.Get(scannerID); err == nil {
+			return p.InProcess
+		}
+	}
+	return false
+}
+
+// buildDeepScanDescriptor assembles the informational deep-scan availability
+// descriptor (Spec 077 FR-008) from a job's per-scanner statuses. It reports the
+// opt-in layer's state SEPARATELY from the baseline verdict and MUST NOT
+// influence ScanSummary.Status. Returns nil when deep scan is disabled, so the
+// descriptor is omitted entirely and the invariant (Enabled=false ⇒ everything
+// empty) holds.
+func (s *Service) buildDeepScanDescriptor(job *ScanJob) *DeepScanDescriptor {
+	if job == nil || !s.deepScanEnabled() {
+		return nil
+	}
+	desc := &DeepScanDescriptor{Enabled: true}
+	for _, ss := range job.ScannerStatuses {
+		if s.isBaselineScanner(ss.ScannerID) {
+			continue // baseline coverage drives Status, not the descriptor
+		}
+		switch ss.Status {
+		case ScanJobStatusCompleted:
+			desc.Ran = true
+			desc.Available = true
+		case ScanJobStatusFailed:
+			desc.ScannersFailed = append(desc.ScannersFailed, DeepScanScannerFailure{
+				ID:     ss.ScannerID,
+				Reason: ss.Error,
+			})
+		}
+	}
+	return desc
 }
 
 // SetIsolationModeResolver injects a per-server isolation-mode resolver so the
@@ -236,7 +312,7 @@ func (s *Service) SetFetchPackageSource(enabled bool) {
 	s.sourceResolver.SetFetchPackageSource(enabled)
 	if !enabled {
 		s.logger.Info("Scanner published-package-source fetch disabled " +
-			"(security.scanner_fetch_package_source=false); npx/uvx servers " +
+			"(security.deep_scan.fetch_package_source=false); npx/uvx servers " +
 			"without local source will scan tool definitions only.")
 	}
 }
@@ -1702,6 +1778,12 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		Status:     "clean",
 	}
 
+	// Spec 077 US3 (FR-008): surface the opt-in deep-scan layer as a SEPARATE
+	// informational dimension. This never influences Status — a failed or
+	// unavailable deep scanner leaves the baseline verdict untouched. Nil (and
+	// thus omitted) when deep scan is off.
+	summary.DeepScan = s.buildDeepScanDescriptor(primaryJob)
+
 	// Check if the primary job failed
 	if primaryJob.Status == ScanJobStatusFailed {
 		summary.Status = "failed"
@@ -1768,7 +1850,6 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 				summary.Status = "failed"
 			}
 		}
-		summary.degradeIfIncompleteCoverage()
 		s.cacheScanSummary(serverName, summary)
 		return summary
 	}
@@ -1808,9 +1889,6 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		summary.Status = "clean" // Only informational findings
 	}
 
-	// Incomplete coverage downgrades a would-be "clean" verdict (MCP-2401).
-	summary.degradeIfIncompleteCoverage()
-
 	// Cache for fast subsequent reads
 	s.cacheScanSummary(serverName, summary)
 	return summary
@@ -1837,26 +1915,16 @@ func isBlockingFinding(f ScanFinding) bool {
 	return f.Tier == TierHard
 }
 
-// degradeIfIncompleteCoverage downgrades a "clean" verdict to "degraded" when
-// at least one scanner failed, so a low/zero risk score is not read as a
-// trustworthy all-clear while a chunk of the scanner fleet never ran. Findings-
-// driven verdicts ("dangerous"/"warnings") are left intact — they already
-// signal risk; coverage can only have hidden more, never less (MCP-2401).
-func (sum *ScanSummary) degradeIfIncompleteCoverage() {
-	if sum.Status == "clean" && sum.ScannersFailed > 0 {
-		sum.Status = "degraded"
-	}
-}
-
 // ScanSummary is a compact representation of scan status for the server list.
 type ScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"`
-	Status        string         `json:"status"` // clean, degraded, warnings, dangerous, failed, not_scanned, scanning
+	Status        string         `json:"status"` // clean, warnings, dangerous, failed, not_scanned, scanning
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
-	// Scanner coverage for the primary (security) scan pass. When ScannersFailed
-	// > 0 the risk score is computed from incomplete data, so a "clean"/low score
-	// is not trustworthy — Status is reported as "degraded" instead (MCP-2401).
+	// Scanner coverage for the primary (security) scan pass. Informational only.
+	// Spec 077 US3 (FR-008/FR-014): Status is derived SOLELY from baseline
+	// findings — a failed Docker deep scanner no longer downgrades a clean
+	// verdict to "degraded"; that failure is surfaced via DeepScan instead.
 	ScannersRun    int `json:"scanners_run"`
 	ScannersFailed int `json:"scanners_failed"`
 	ScannersTotal  int `json:"scanners_total"`
