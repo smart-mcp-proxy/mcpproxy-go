@@ -254,6 +254,42 @@ components:
           description: 'Risk level: critical, high, medium, low'
           type: string
       type: object
+    config.DeepScanConfig:
+      description: |-
+        DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
+        deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
+        keys (migrated on load) and gates the heavy Docker-based scanners + source
+        extraction. Disabled by default (FR-006): only the deterministic in-process
+        baseline scanner runs. A deep-scan failure NEVER changes the baseline verdict
+        (FR-007/FR-008).
+      properties:
+        disable_no_new_privileges:
+          description: |-
+            DisableNoNewPrivileges, when true, omits the `--security-opt
+            no-new-privileges` flag from scanner container runs (snap-docker/AppArmor
+            escape hatch). Absorbs the deprecated top-level
+            scanner_disable_no_new_privileges. Default false.
+          type: boolean
+        enabled:
+          description: Enabled is the master opt-in for the heavy layer (FR-006).
+            Default false.
+          type: boolean
+        fetch_package_source:
+          description: |-
+            FetchPackageSource controls whether the scanner fetches the PUBLISHED
+            source of package-runner servers (npx/uvx) — without executing it — when
+            no local source is available. Absorbs the deprecated top-level
+            scanner_fetch_package_source. Default (nil) is ENABLED within deep scan.
+          type: boolean
+        scanners:
+          description: |-
+            Scanners optionally restricts which deep scanners may run under the
+            umbrella (by scanner id). Empty ⇒ all enabled deep scanners are eligible.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     config.DockerIsolationConfig:
       description: Docker isolation settings
       properties:
@@ -601,8 +637,8 @@ components:
     config.SecurityConfig:
       description: Security scanner settings (Spec 039)
       properties:
-        auto_scan_quarantined:
-          type: boolean
+        deep_scan:
+          $ref: '#/components/schemas/config.DeepScanConfig'
         integrity_check_interval:
           type: string
         integrity_check_on_restart:
@@ -615,6 +651,11 @@ components:
           type: string
         scanner_disable_no_new_privileges:
           description: |-
+            Deprecated (Spec 077 US3): migrated on load into DeepScan.DisableNoNewPrivileges
+            (see migrateDeepScanConfig). Retained only so existing configs that still carry
+            the top-level key parse; consumers MUST read the effective value via
+            SecurityConfig.IsDisableNoNewPrivileges. Cleared after migration.
+
             ScannerDisableNoNewPrivileges, when true, omits the
             `--security-opt no-new-privileges` flag from scanner container runs.
 
@@ -633,6 +674,11 @@ components:
           type: boolean
         scanner_fetch_package_source:
           description: |-
+            Deprecated (Spec 077 US3): migrated on load into DeepScan.FetchPackageSource
+            (see migrateDeepScanConfig). Retained only so existing configs that still carry
+            the top-level key parse; consumers MUST read the effective value via
+            SecurityConfig.EffectiveFetchPackageSource. Cleared after migration.
+
             ScannerFetchPackageSource controls whether the scanner fetches the
             PUBLISHED source of package-runner servers (npx/uvx) — without executing
             it — when no local source is available (no Docker container, no local
