@@ -265,11 +265,11 @@
     <div v-if="showApproveConfirmation" class="modal modal-open">
       <div class="modal-box">
         <h3 class="font-bold text-lg mb-4">
-          {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Critical Findings Detected' }}
+          {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Dangerous Findings Detected' }}
         </h3>
         <p v-if="approveDialogMode === 'critical'" class="mb-4">
           <strong>{{ server.name }}</strong> has
-          <span class="text-error font-semibold">{{ criticalFindingCount }} critical finding{{ criticalFindingCount === 1 ? '' : 's' }}</span>
+          <span class="text-error font-semibold">{{ dangerousFindingCount }} dangerous finding{{ dangerousFindingCount === 1 ? '' : 's' }}</span>
           in its most recent security scan. Approving this server will allow it to run despite these warnings.
         </p>
         <p v-else class="mb-4">
@@ -722,14 +722,17 @@ async function triggerLogout() {
   }
 }
 
-// Counts critical findings from the scan summary if available. Used to gate
-// the Approve button behind an extra confirmation (F-04).
-const criticalFindingCount = computed(() => {
+// Counts baseline DANGEROUS findings from the scan summary if available. Used to
+// gate the Approve button behind an extra confirmation (F-04). Spec 077 FR-021:
+// the gate blocks on baseline dangerous (hard-tier) findings only, matching the
+// tier-driven server verdict — not on `critical` severity, which a non-blocking
+// soft finding could also carry.
+const dangerousFindingCount = computed(() => {
   const scan = props.server.security_scan as any
   if (!scan) return 0
-  // finding_counts.critical is populated from the latest report summary.
+  // finding_counts.dangerous is populated from the latest report summary.
   const fc = scan.finding_counts as Record<string, number> | undefined
-  if (fc && typeof fc.critical === 'number') return fc.critical
+  if (fc && typeof fc.dangerous === 'number') return fc.dangerous
   return 0
 })
 
@@ -750,7 +753,7 @@ function handleApproveClick() {
     showApproveConfirmation.value = true
     return
   }
-  if (criticalFindingCount.value > 0) {
+  if (dangerousFindingCount.value > 0) {
     approveDialogMode.value = 'critical'
     showApproveConfirmation.value = true
     return
