@@ -25,6 +25,13 @@ repos:
         stages: [pre-push]
         pass_filenames: false
 
+      - id: roadmap-verify
+        name: Verify ROADMAP.md is up to date
+        entry: python3 scripts/gen-roadmap.py --check
+        language: system
+        pass_filenames: false
+        files: '^(roadmap\.yaml|ROADMAP\.md|scripts/gen-roadmap\.py|specs/.*/tasks\.md)$'
+
       - id: go-build
         name: go build
         entry: go build -o /dev/null ./cmd/mcpproxy
