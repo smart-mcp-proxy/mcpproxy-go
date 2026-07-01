@@ -2101,3 +2101,45 @@ func TestServiceDeepScanOffByDefault(t *testing.T) {
 		t.Errorf("non-allow-listed deep scanner must be dropped; got %v", ids)
 	}
 }
+
+// TestServiceDeepScanGatesPackageSourceFetch verifies Spec 077 US3: published-
+// package-source extraction is a facet of the opt-in deep-scan layer, so it must
+// not run (no network egress) while deep scan is off. Turning the deep-scan
+// layer off must force the source resolver's fetch fallback off; the server
+// layer re-enables it (honoring fetch_package_source) only when deep scan is on.
+func TestServiceDeepScanGatesPackageSourceFetch(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	docker := NewDockerRunner(logger)
+	registry := NewRegistry(dir, logger)
+
+	svc := NewService(store, registry, docker, dir, logger)
+
+	// Simulate an operator who had opted into source fetch previously.
+	svc.SetFetchPackageSource(true)
+	if !svc.sourceResolver.fetchPackageSource {
+		t.Fatalf("precondition: fetch should be enabled after SetFetchPackageSource(true)")
+	}
+
+	// Deep scan OFF (the default) must forbid the published-package-source fetch
+	// so scanning an npx/uvx server performs no network egress.
+	svc.SetDeepScan(false, nil)
+	if svc.sourceResolver.fetchPackageSource {
+		t.Errorf("deep scan off must force source fetch off (no egress by default)")
+	}
+
+	// The server layer is the authority when deep scan is on: it calls
+	// SetFetchPackageSource with deep_scan.fetch_package_source (default true).
+	svc.SetDeepScan(true, nil)
+	svc.SetFetchPackageSource(true)
+	if !svc.sourceResolver.fetchPackageSource {
+		t.Errorf("deep scan on with fetch_package_source=true must allow source fetch")
+	}
+
+	// An explicit fetch_package_source=false still wins while deep scan is on.
+	svc.SetFetchPackageSource(false)
+	if svc.sourceResolver.fetchPackageSource {
+		t.Errorf("explicit fetch_package_source=false must disable source fetch")
+	}
+}

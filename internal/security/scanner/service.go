@@ -222,6 +222,15 @@ func (s *Service) SetDeepScan(enabled bool, scanners []string) {
 	} else {
 		s.engine.deepScanScanners = nil
 	}
+	// Spec 077 US3: published-package-source extraction is part of the opt-in
+	// deep-scan layer, so it must never run (and never cause network egress)
+	// while deep scan is off. Force the resolver's fetch fallback off here as
+	// defense-in-depth. When deep scan is ENABLED the server layer decides the
+	// concrete value from deep_scan.fetch_package_source (default true) via
+	// SetFetchPackageSource, so we deliberately do not flip it back on here.
+	if !enabled && s.sourceResolver != nil {
+		s.sourceResolver.SetFetchPackageSource(false)
+	}
 	if enabled {
 		s.logger.Info("Deep scan enabled (security.deep_scan.enabled=true): Docker scanner " +
 			"plugins + published-package-source extraction may run as an opt-in enrichment " +
@@ -248,30 +257,47 @@ func (s *Service) isBaselineScanner(scannerID string) bool {
 }
 
 // buildDeepScanDescriptor assembles the informational deep-scan availability
-// descriptor (Spec 077 FR-008) from a job's per-scanner statuses. It reports the
-// opt-in layer's state SEPARATELY from the baseline verdict and MUST NOT
-// influence ScanSummary.Status. Returns nil when deep scan is disabled, so the
-// descriptor is omitted entirely and the invariant (Enabled=false ⇒ everything
-// empty) holds.
-func (s *Service) buildDeepScanDescriptor(job *ScanJob) *DeepScanDescriptor {
-	if job == nil || !s.deepScanEnabled() {
+// descriptor (Spec 077 FR-008) from the per-scanner statuses of one or more
+// jobs. It reports the opt-in layer's state SEPARATELY from the baseline verdict
+// and MUST NOT influence ScanSummary.Status. Both passes are considered: Pass 1
+// (security scan) and Pass 2 (supply-chain audit, where the heavy trivy /
+// supply-chain scanners run), so a Pass-2 scanner failure is reflected too.
+// Returns nil when deep scan is disabled, so the descriptor is omitted entirely
+// and the invariant (Enabled=false ⇒ everything empty) holds.
+func (s *Service) buildDeepScanDescriptor(jobs ...*ScanJob) *DeepScanDescriptor {
+	if !s.deepScanEnabled() {
 		return nil
 	}
+	haveJob := false
 	desc := &DeepScanDescriptor{Enabled: true}
-	for _, ss := range job.ScannerStatuses {
-		if s.isBaselineScanner(ss.ScannerID) {
-			continue // baseline coverage drives Status, not the descriptor
+	seenFailed := make(map[string]bool)
+	for _, job := range jobs {
+		if job == nil {
+			continue
 		}
-		switch ss.Status {
-		case ScanJobStatusCompleted:
-			desc.Ran = true
-			desc.Available = true
-		case ScanJobStatusFailed:
-			desc.ScannersFailed = append(desc.ScannersFailed, DeepScanScannerFailure{
-				ID:     ss.ScannerID,
-				Reason: ss.Error,
-			})
+		haveJob = true
+		for _, ss := range job.ScannerStatuses {
+			if s.isBaselineScanner(ss.ScannerID) {
+				continue // baseline coverage drives Status, not the descriptor
+			}
+			switch ss.Status {
+			case ScanJobStatusCompleted:
+				desc.Ran = true
+				desc.Available = true
+			case ScanJobStatusFailed:
+				if seenFailed[ss.ScannerID] {
+					continue // dedupe the same deep scanner across passes
+				}
+				seenFailed[ss.ScannerID] = true
+				desc.ScannersFailed = append(desc.ScannersFailed, DeepScanScannerFailure{
+					ID:     ss.ScannerID,
+					Reason: ss.Error,
+				})
+			}
 		}
+	}
+	if !haveJob {
+		return nil
 	}
 	return desc
 }
@@ -303,8 +329,14 @@ func (s *Service) resolveIsolationMode(serverName string) string {
 }
 
 // SetFetchPackageSource toggles whether the source resolver may fetch the
-// published source of package-runner servers (npx/uvx) for scanning. See
-// SecurityConfig.ScannerFetchPackageSource (MCP-2206). Default is enabled.
+// published source of package-runner servers (npx/uvx) for scanning. This is a
+// facet of the opt-in deep-scan layer (Spec 077 US3): the server layer only
+// enables it when security.deep_scan.enabled is true AND
+// security.deep_scan.fetch_package_source is not explicitly false (the
+// deprecated top-level ScannerFetchPackageSource, MCP-2206, is still honored as
+// a fallback). With deep scan off the effective value is always false, so
+// scanning an npx/uvx server performs no published-package-source network
+// egress by default.
 func (s *Service) SetFetchPackageSource(enabled bool) {
 	if s.sourceResolver == nil {
 		return
@@ -1219,6 +1251,12 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	agg.ScanContext = primaryJob.ScanContext
 	agg.ScannerStatuses = primaryJob.ScannerStatuses
 
+	// Spec 077 US3 (FR-008): mirror the opt-in deep-scan availability descriptor
+	// onto the report so the report page renders the informational banner. Both
+	// passes are considered. Informational only — never changes the verdict; nil
+	// (omitted) when deep scan is off.
+	agg.DeepScan = s.buildDeepScanDescriptor(pass1Job, pass2Job)
+
 	return agg, nil
 }
 
@@ -1315,6 +1353,7 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 	// If this is a Pass 1 job, try to find and merge companion Pass 2 results.
 	// The companion is resolved via the lightweight scan-job index, so this does
 	// NOT deserialize the full per-server scan history (MCP-2205).
+	var companionPass2 *ScanJob
 	if job.ScanPass == ScanPassSecurityScan || job.ScanPass == 0 {
 		if companionID := s.findCompanionPass2JobID(job); companionID != "" {
 			pass2Reports, err := s.storage.ListScanReportsByJob(companionID)
@@ -1330,6 +1369,12 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 				agg.Pass1Complete = true
 				agg.Pass2Complete = true
 			}
+			// Load the companion Pass-2 job so its per-scanner statuses feed the
+			// deep-scan descriptor (Spec 077 FR-008) — the heavy trivy /
+			// supply-chain scanners run in Pass 2.
+			if cj, cerr := s.storage.GetScanJob(companionID); cerr == nil {
+				companionPass2 = cj
+			}
 		}
 
 		// Check if Pass 2 is running
@@ -1341,6 +1386,13 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 	// Attach scan context and scanner execution logs from job
 	agg.ScanContext = job.ScanContext
 	agg.ScannerStatuses = job.ScannerStatuses
+
+	// Spec 077 US3 (FR-008): mirror the opt-in deep-scan availability descriptor
+	// so the report page renders the informational banner. Considers this job and
+	// its companion Pass-2 job (when the requested job is a Pass-1 job).
+	// Informational only — never changes the verdict; nil (omitted) when deep
+	// scan is off.
+	agg.DeepScan = s.buildDeepScanDescriptor(job, companionPass2)
 
 	return agg, nil
 }
@@ -1756,7 +1808,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// informational dimension. This never influences Status — a failed or
 	// unavailable deep scanner leaves the baseline verdict untouched. Nil (and
 	// thus omitted) when deep scan is off.
-	summary.DeepScan = s.buildDeepScanDescriptor(primaryJob)
+	summary.DeepScan = s.buildDeepScanDescriptor(pass1Job, pass2Job)
 
 	// Check if the primary job failed
 	if primaryJob.Status == ScanJobStatusFailed {

@@ -300,6 +300,11 @@ type AggregatedReport struct {
 	// Scan context from the primary job (for report page display)
 	ScanContext     *ScanContext       `json:"scan_context,omitempty"`
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses,omitempty"` // Per-scanner execution logs
+	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077 US3),
+	// mirrored from ScanSummary so the report page can render the informational
+	// deep-scan banner. Informational only — a failed or unavailable deep scanner
+	// never changes the baseline verdict. nil/omitted when deep scan is disabled.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
 }
 
 // ReportSummary provides counts by severity and threat level
