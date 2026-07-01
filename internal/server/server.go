@@ -2000,12 +2000,18 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			im := core.NewIsolationManager(liveCfg.DockerIsolation)
 			return string(im.ResolveMode(sc))
 		})
-		// Published-package-source fetch is enabled by default; only an explicit
-		// false in config disables it (MCP-2206).
+		// Spec 077 US3: published-package-source extraction is part of the opt-in
+		// deep-scan layer, so it only runs when deep scan is enabled. When enabled
+		// it honors deep_scan.fetch_package_source (default true; an explicit
+		// false — or the deprecated top-level ScannerFetchPackageSource, MCP-2206 —
+		// forbids the network egress for air-gapped hosts). Deep scan OFF (the
+		// default) ⇒ no source fetch/egress at all.
 		if cfg != nil && cfg.Security != nil {
-			if fetch := cfg.Security.EffectiveFetchPackageSource(); fetch != nil && !*fetch {
-				secService.SetFetchPackageSource(false)
+			fetchPref := true
+			if fetch := cfg.Security.EffectiveFetchPackageSource(); fetch != nil {
+				fetchPref = *fetch
 			}
+			secService.SetFetchPackageSource(cfg.Security.IsDeepScanEnabled() && fetchPref)
 		}
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
