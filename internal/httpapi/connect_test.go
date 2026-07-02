@@ -282,3 +282,85 @@ func TestHandleConnectClient_TrueConflictStillReturns409(t *testing.T) {
 	assert.Equal(t, "already_exists", resp.Data.Action)
 	assert.NotEmpty(t, resp.Error)
 }
+
+// TestHandleConnectClientPreview_MaskedNoSideEffects exercises the Spec 078 US1
+// preview endpoint end-to-end: it returns the exact entry a connect would write
+// with the API key masked, does not modify the config, and creates no backup.
+func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	original := []byte(`{"mcpServers":{"other":{"url":"http://x"}}}`)
+	require.NoError(t, os.WriteFile(cfgPath, original, 0o644))
+
+	const secret = "rest-secret-key-9999"
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", secret, home)
+	srv.SetConnectService(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code/preview", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	rawBody := w.Body.Bytes()
+	assert.NotContains(t, string(rawBody), secret, "real API key must not appear in the preview payload")
+
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    connect.ConnectPreview `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rawBody, &resp))
+	assert.True(t, resp.Success)
+	assert.Equal(t, cfgPath, resp.Data.ConfigPath)
+	assert.Equal(t, "mcpServers", resp.Data.ServerKey)
+	assert.Equal(t, "mcpproxy", resp.Data.ServerName)
+	assert.True(t, resp.Data.ContainsAPIKey)
+	assert.False(t, resp.Data.EntryExists)
+	assert.Equal(t, "accessible", resp.Data.AccessState)
+	assert.Contains(t, resp.Data.EntryText, "http://127.0.0.1:8080/mcp")
+
+	// No write, no backup.
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, string(original), string(after))
+	entries, err := os.ReadDir(filepath.Dir(cfgPath))
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.NotContains(t, e.Name(), ".bak.", "preview must not create a backup")
+	}
+}
+
+// TestHandleConnectClientPreview_DeniedReturns403 asserts a permission-denied
+// config read during preview surfaces 403 + remediation, matching connect.
+func TestHandleConnectClientPreview_DeniedReturns403(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{}`), 0o644))
+
+	svc := connect.NewServiceWithReader("127.0.0.1:8080", "", home, denyingReader)
+	srv.SetConnectService(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code/preview", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.False(t, resp.Success)
+	assert.Contains(t, resp.Error, "tccutil reset SystemPolicyAppData")
+}

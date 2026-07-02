@@ -3594,6 +3594,55 @@ paths:
       summary: Connect MCPProxy to a client
       tags:
       - connect
+  /api/v1/connect/{client}/preview:
+    get:
+      description: |-
+        Returns the exact entry a subsequent connect would add to the client's
+        config — target path, server key, entry name, and entry contents — WITHOUT
+        modifying the file or creating a backup (Spec 078 US1). The embedded API key
+        is masked in the payload; contains_api_key flags that a credential is written.
+        entry_exists distinguishes a create from an overwrite of a same-named entry.
+        Reads the config on demand to classify create-vs-overwrite, so on macOS this
+        may raise an App-Data privacy prompt; a denial returns 403 + remediation.
+      parameters:
+      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
+          codex, gemini, opencode)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: ConnectPreview
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Permission denied (macOS App-Data block)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown client
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Preview the change a connect would make (no write)
+      tags:
+      - connect
   /api/v1/diagnostics:
     get:
       description: Get comprehensive health diagnostics including upstream errors,
