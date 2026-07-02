@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   roadmap-check:
@@ -39,3 +40,12 @@ jobs:
         run: pip install pyyaml
       - name: Verify ROADMAP.md is up to date
         run: python3 scripts/gen-roadmap.py --check
+      # Non-blocking: report roadmap.yaml drift vs live GitHub PR state, dangling
+      # spec: links, and status sanity. `gh` is preinstalled on GitHub runners;
+      # GH_TOKEN authenticates it. continue-on-error so drift is surfaced in the
+      # log without failing the build (roadmap.yaml is hand-maintained).
+      - name: Cross-check roadmap.yaml vs GitHub (advisory)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/gen-roadmap.py --check-github

@@ -12,6 +12,11 @@
 #     python3 scripts/gen-roadmap.py        # writes ROADMAP.md
 #     # or: scripts/gen-roadmap              # same thing (wrapper)
 #
+# Validate this file against ground truth (does not write ROADMAP.md):
+#     python3 scripts/gen-roadmap.py --check-github   # PR state vs status,
+#         # dangling spec: links, status sanity. Add --strict to fail on
+#         # warnings. Needs an authenticated `gh`; exits 2 if gh is missing.
+#
 # ── Schema ──────────────────────────────────────────────────────────────────
 # version:  schema version (int).
 # epics:    list of epic objects. Each epic:
