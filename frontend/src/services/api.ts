@@ -1,4 +1,4 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -1170,6 +1170,15 @@ class APIService {
   // denied, the remediation text.
   async getConnectClientStatus(clientId: string): Promise<APIResponse<ClientStatus>> {
     return this.request<ClientStatus>(`/api/v1/connect/${encodeURIComponent(clientId)}`)
+  }
+
+  // Spec 078 US1: preview the exact entry a connect would write, WITHOUT
+  // modifying the file or creating a backup. The apikey in the returned entry is
+  // masked. Like getConnectClientStatus this reads the config on demand (to
+  // classify create-vs-overwrite), so on macOS it may raise an App-Data prompt;
+  // a denial returns 403 with remediation (surfaced as success:false + error).
+  async getConnectPreview(clientId: string): Promise<APIResponse<ConnectPreview>> {
+    return this.request<ConnectPreview>(`/api/v1/connect/${encodeURIComponent(clientId)}/preview`)
   }
 
   async connectClient(clientId: string, serverName = 'mcpproxy', force = false): Promise<APIResponse<ConnectResult>> {
