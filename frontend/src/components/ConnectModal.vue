@@ -69,7 +69,7 @@
               </button>
               <button
                 v-else
-                @click="connect(client.id)"
+                @click="connectSingle(client.id)"
                 class="btn btn-primary btn-xs"
                 :disabled="loading.clients[client.id]"
               >
@@ -157,6 +157,37 @@
         >
           No prior config file existed, so no backup was needed.
         </div>
+        <!-- Spec 078 US2 / SC-005: Connect All renders EVERY successful
+             client's backup outcome — one line per client, each with its own
+             copy affordance — instead of only the last connect's path. -->
+        <div v-if="bulkBackups.length > 0" data-test="connect-bulk-backups" class="mt-2 space-y-1">
+          <div
+            v-for="b in bulkBackups"
+            :key="b.id"
+            :data-test="`connect-bulk-backup-${b.id}`"
+            class="flex items-start justify-between gap-2 rounded-lg bg-base-200 px-3 py-2"
+          >
+            <span class="text-xs leading-relaxed min-w-0">
+              <span class="font-medium">{{ b.name }}:</span>
+              <template v-if="b.backupPath">
+                a backup of your previous config was saved to
+                <code class="font-mono text-[11px] break-all" :title="b.backupPath">{{ b.backupPath }}</code>
+              </template>
+              <template v-else>
+                No prior config file existed, so no backup was needed.
+              </template>
+            </span>
+            <button
+              v-if="b.backupPath"
+              :data-test="`connect-bulk-copy-${b.id}`"
+              @click="copyBulkBackupPath(b)"
+              class="btn btn-ghost btn-xs shrink-0"
+              title="Copy this backup path to the clipboard"
+            >
+              {{ copiedBulkClient === b.id ? 'Copied ✓' : 'Copy path' }}
+            </button>
+          </div>
+        </div>
       </div>
 
       <div class="modal-action">
@@ -203,6 +234,12 @@ const resultSuccess = ref(false)
 // back up; undefined = no successful operation to report on.
 const resultBackupPath = ref<string | null | undefined>(undefined)
 const copiedBackup = ref(false)
+// Spec 078 US2 / SC-005: per-client backup outcomes for Connect All. Every
+// successful connect in the bulk run keeps its own entry (string = backup
+// created; null = no prior file), so no client's backup path is overwritten
+// by the next one. Empty when the last operation was a single connect.
+const bulkBackups = ref<Array<{ id: string; name: string; backupPath: string | null }>>([])
+const copiedBulkClient = ref<string | null>(null)
 const loading = reactive({
   initial: false,
   clients: {} as Record<string, boolean>,
@@ -289,7 +326,17 @@ async function fetchClients() {
   }
 }
 
-async function connect(clientId: string) {
+// Single-connect entry point (row button): a fresh single operation supersedes
+// any earlier Connect All per-client backup list.
+async function connectSingle(clientId: string) {
+  bulkBackups.value = []
+  copiedBulkClient.value = null
+  await connect(clientId)
+}
+
+// Returns the outcome so connectAll can accumulate per-client backup results
+// (ok=true with backupPath string = backup created; null = no prior file).
+async function connect(clientId: string): Promise<{ ok: boolean; backupPath: string | null }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
   resultBackupPath.value = undefined
@@ -301,20 +348,21 @@ async function connect(clientId: string) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
       // Empty/absent backup_path on success means no prior file existed.
-      resultBackupPath.value = response.data.backup_path || null
+      const backupPath = response.data.backup_path || null
+      resultBackupPath.value = backupPath
       await fetchClients()
       systemStore.addToast({
         type: 'success',
         title: 'Client Connected',
         message: `MCPProxy registered in ${clientId}`,
       })
-    } else {
-      resultMessage.value = response.error || 'Failed to connect'
-      resultSuccess.value = false
-      // The write may have failed because macOS blocked the config. Resolve the
-      // access state in-band so a denial surfaces as the actionable banner.
-      void checkAccess(clientId)
+      return { ok: true, backupPath }
     }
+    resultMessage.value = response.error || 'Failed to connect'
+    resultSuccess.value = false
+    // The write may have failed because macOS blocked the config. Resolve the
+    // access state in-band so a denial surfaces as the actionable banner.
+    void checkAccess(clientId)
   } catch (err) {
     resultMessage.value = err instanceof Error ? err.message : 'Unknown error'
     resultSuccess.value = false
@@ -322,6 +370,7 @@ async function connect(clientId: string) {
   } finally {
     loading.clients[clientId] = false
   }
+  return { ok: false, backupPath: null }
 }
 
 async function disconnect(clientId: string) {
@@ -329,6 +378,8 @@ async function disconnect(clientId: string) {
   resultMessage.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
+  bulkBackups.value = []
+  copiedBulkClient.value = null
 
   try {
     const client = clients.value.find(c => c.id === clientId)
@@ -429,9 +480,42 @@ async function copyBackupPath() {
   }
 }
 
+// Spec 078 US2 / SC-005: Connect All accumulates every successful client's
+// backup outcome instead of letting each connect() overwrite the previous
+// client's backup path.
 async function connectAll() {
-  for (const client of connectableClients.value) {
-    await connect(client.id)
+  bulkBackups.value = []
+  copiedBulkClient.value = null
+  // Snapshot: connect() refetches the client list mid-loop, which mutates the
+  // connectableClients computed while we iterate it.
+  const targets = [...connectableClients.value]
+  const collected: Array<{ id: string; name: string; backupPath: string | null }> = []
+  for (const client of targets) {
+    const outcome = await connect(client.id)
+    if (outcome.ok) {
+      collected.push({ id: client.id, name: client.name, backupPath: outcome.backupPath })
+    }
+  }
+  if (collected.length > 0) {
+    bulkBackups.value = collected
+    // The per-client list is authoritative for a bulk run; suppress the
+    // single-result line that would otherwise repeat only the last backup.
+    resultBackupPath.value = undefined
+  }
+}
+
+// Per-row copy for the Connect All backup list.
+async function copyBulkBackupPath(entry: { id: string; backupPath: string | null }) {
+  if (!entry.backupPath) return
+  try {
+    await navigator.clipboard.writeText(entry.backupPath)
+    copiedBulkClient.value = entry.id
+    setTimeout(() => {
+      if (copiedBulkClient.value === entry.id) copiedBulkClient.value = null
+    }, 2000)
+  } catch {
+    // Clipboard unavailable (e.g. insecure context): the full path is already
+    // rendered, so the user can select and copy it manually.
   }
 }
 
@@ -439,6 +523,8 @@ function close() {
   resultMessage.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
+  bulkBackups.value = []
+  copiedBulkClient.value = null
   emit('close')
 }
 
@@ -452,6 +538,8 @@ watch(() => props.show, (newVal) => {
     resultMessage.value = ''
     resultBackupPath.value = undefined
     copiedBackup.value = false
+    bulkBackups.value = []
+    copiedBulkClient.value = null
   }
 })
 </script>

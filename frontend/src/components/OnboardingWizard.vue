@@ -707,6 +707,10 @@ watch(() => props.show, async (open) => {
   if (open) {
     serverAddedJustNow.value = false
     connectMessage.value = ''
+    // Backup lines are session-scoped (Spec 078 US2): don't replay backup
+    // rows from connects performed in a previous wizard session.
+    for (const k of Object.keys(connectBackups)) delete connectBackups[k]
+    copiedBackupClient.value = null
     await onboarding.fetchState()
     await Promise.all([
       fetchClients(),
@@ -1160,7 +1164,11 @@ const ClientRow: FunctionalComponent<
       h('div', { class: 'shrink-0 ml-2' }, [
         !c.supported
           ? h('span', { class: 'badge badge-ghost badge-sm' }, c.reason || 'Not supported')
-          : !c.exists
+          // Bridge clients (e.g. Claude Desktop) are connectable even without
+          // an existing config file — Connect creates it (parity with
+          // ConnectModal's connectableClients gating; Spec 078 US2/FR-006:
+          // this is the path that produces the "no prior file" backup case).
+          : !c.exists && !c.bridge
             ? h('span', { class: 'text-xs opacity-40' }, 'Not installed')
             : c.connected
               ? h('span', { class: 'badge badge-success badge-sm' }, 'Connected')

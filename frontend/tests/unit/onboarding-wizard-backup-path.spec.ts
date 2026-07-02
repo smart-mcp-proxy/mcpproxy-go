@@ -52,6 +52,23 @@ function cursorClient() {
   }
 }
 
+// Bridge client with NO config file on disk — the only real-world producer of
+// an empty backup_path (connect creates the file). Spec 078 US2's independent
+// test runs against exactly this shape.
+function bridgeClientNoConfig() {
+  return {
+    id: 'claude-desktop',
+    name: 'Claude Desktop',
+    config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+    exists: false,
+    connected: false,
+    supported: true,
+    bridge: true,
+    note: 'Connects via an mcp-remote stdio bridge (npx -y mcp-remote). Requires Node.js.',
+    icon: 'claude-desktop',
+  }
+}
+
 async function openClientsTab(pinia: any) {
   const wrapper = mount(OnboardingWizard, {
     props: { show: false },
@@ -141,5 +158,91 @@ describe('OnboardingWizard backup path surfacing (Spec 078 US2)', () => {
     expect(backup.exists()).toBe(true)
     expect(backup.text()).toContain('No prior config file existed, so no backup was needed.')
     expect(backup.find('[data-test="client-copy-backup-cursor"]').exists()).toBe(false)
+  })
+
+  // Spec 078 US2 independent test / FR-006: a bridge client with no config file
+  // on disk MUST be connectable from the wizard (Connect creates the file) and
+  // the result MUST state the "no prior file to back up" case. Previously the
+  // wizard row rendered 'Not installed' for every exists=false client — making
+  // the no-prior-file branch unreachable from the wizard.
+  it('offers Connect for a bridge client with no config file and states no backup was needed', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [bridgeClientNoConfig()],
+    })
+    ;(api.connectClient as any).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        client: 'claude-desktop',
+        config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+        // no backup_path: connect created the file
+        server_name: 'mcpproxy',
+        action: 'added',
+        message: 'MCPProxy registered in Claude Desktop as mcpproxy',
+      },
+    })
+
+    const wrapper = await openClientsTab(pinia)
+
+    const row = wrapper.find('[data-test="client-row-claude-desktop"]')
+    expect(row.exists()).toBe(true)
+    // Bridge clients are connectable even without an existing config file
+    // (parity with ConnectModal's connectableClients gating).
+    expect(row.text()).not.toContain('Not installed')
+    const connectBtn = wrapper.find('[data-test="connect-claude-desktop"]')
+    expect(connectBtn.exists()).toBe(true)
+
+    await connectBtn.trigger('click')
+    await flushPromises()
+
+    const backup = wrapper.find('[data-test="client-backup-claude-desktop"]')
+    expect(backup.exists()).toBe(true)
+    expect(backup.text()).toContain('No prior config file existed, so no backup was needed.')
+  })
+
+  // A non-bridge client that is simply not installed must still NOT offer Connect.
+  it('keeps Not installed (no Connect) for a non-bridge client without a config', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{ ...cursorClient(), exists: false }],
+    })
+
+    const wrapper = await openClientsTab(pinia)
+
+    const row = wrapper.find('[data-test="client-row-cursor"]')
+    expect(row.exists()).toBe(true)
+    expect(row.text()).toContain('Not installed')
+    expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(false)
+  })
+
+  // Backup lines are session-scoped: reopening the wizard must not replay
+  // backup rows from connects performed in a previous wizard session.
+  it('clears backup rows when the wizard is closed and reopened', async () => {
+    ;(api.connectClient as any).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        client: 'cursor',
+        config_path: '/Users/test/.cursor/mcp.json',
+        backup_path: '/Users/test/.cursor/mcp.json.bak.20260702-101530',
+        server_name: 'mcpproxy',
+        action: 'added',
+        message: 'MCPProxy registered in Cursor as mcpproxy',
+      },
+    })
+
+    const wrapper = await openClientsTab(pinia)
+    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(true)
+
+    // Close and reopen the wizard: a fresh session must start clean.
+    await wrapper.setProps({ show: false })
+    await flushPromises()
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(false)
   })
 })
