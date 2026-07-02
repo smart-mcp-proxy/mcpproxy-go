@@ -34,24 +34,28 @@ func TestInProcessToolScan_DetectsHiddenInstructions(t *testing.T) {
 	if len(findings) == 0 {
 		t.Fatalf("expected TPA findings for poisoned description, got none")
 	}
-	// Must classify as a dangerous tool-poisoning threat and reference the tool.
-	var gotPoisoning bool
+	// Must produce a dangerous (approval-blocking) HARD finding referencing the
+	// tool. Spec 077 deleted the legacy tpa_hidden_instructions rule (which
+	// labeled this tool_poisoning); the equivalent blocking posture is now the
+	// hard-tier phrase.injection check, which classifies an "ignore all previous
+	// instructions …" directive as prompt_injection. The security-relevant
+	// property — a dangerous, hard-tier block — is preserved; only the threat
+	// category shifts to the more accurate prompt_injection.
+	var gotBlocking bool
 	for _, f := range findings {
-		// Legacy heuristics locate as "tool:NAME"; the Spec-076 detect.Engine
-		// (incl. the US2 directive.imperative soft check, which also fires on this
-		// poisoned text) locates as "server:tool". Both must reference the tool.
+		// The Spec-076/077 detect.Engine locates findings as "server:tool".
 		if !strings.HasSuffix(f.Location, "get_weather") {
 			t.Errorf("finding location = %q, want a reference to get_weather", f.Location)
 		}
 		if f.Scanner != "tpa-descriptions" {
 			t.Errorf("finding scanner = %q, want tpa-descriptions", f.Scanner)
 		}
-		if f.ThreatType == ThreatToolPoisoning && f.ThreatLevel == ThreatLevelDangerous {
-			gotPoisoning = true
+		if f.ThreatLevel == ThreatLevelDangerous && f.Tier == TierHard {
+			gotBlocking = true
 		}
 	}
-	if !gotPoisoning {
-		t.Errorf("expected at least one dangerous tool_poisoning finding, got %+v", findings)
+	if !gotBlocking {
+		t.Errorf("expected at least one dangerous hard-tier finding, got %+v", findings)
 	}
 }
 

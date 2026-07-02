@@ -67,6 +67,7 @@ var categoryCheck = map[string]string{
 	"unicode_smuggling":   "unicode.hidden",
 	"decoded_payload":     "payload.decoded",
 	"shadowing":           "shadowing.cross_server",
+	"phrase_injection":    "phrase.injection",    // Spec 077 US1 — curated hard check
 	"capability_mismatch": "capability.mismatch", // US2 (T016) — not yet registered
 }
 
@@ -79,6 +80,7 @@ func gateChecks() []detect.Check {
 		&checks.UnicodeHidden{},
 		&checks.Shadowing{},
 		&checks.PayloadDecoded{},
+		&checks.PhraseInjection{}, // Spec 077 US1 — curated hard injection/exfil check
 	}
 }
 
@@ -239,7 +241,18 @@ func evaluateGateCorpus(c *gateCorpus, checkList []detect.Check) gateMetrics {
 }
 
 // scanEntryFlagged builds the entry's RegistryView (its tool + peers), scans it,
-// and reports whether the engine produced any finding for the entry's own tool.
+// and reports whether the engine HARD-flagged (auto-quarantine tier) the entry's
+// own tool.
+//
+// The gate measures the auto-quarantine decision, i.e. the HARD tier only. This
+// matters since Spec 077 US1 (Codex round-3) made phrase.injection "never fully
+// suppress" a matched injection: a phrase quoted or merely described now surfaces
+// as a SOFT review finding instead of nothing. Counting any finding would then
+// score those benign hard-negatives (a scanner quoting "ignore previous
+// instructions") as false positives, even though they are only review-flagged and
+// never blocked. Recall is unaffected — every gated category's malicious samples
+// are detected at the HARD tier — so the gate keeps measuring exactly the
+// blocking behavior the product ships.
 func scanEntryFlagged(engine *detect.Engine, e gateEntry) bool {
 	views := []detect.ToolView{toGateView(e.Server, e.Tool)}
 	for _, p := range e.Peers {
@@ -248,7 +261,7 @@ func scanEntryFlagged(engine *detect.Engine, e gateEntry) bool {
 	res := engine.Scan(detect.NewRegistryView(views))
 	want := e.Server + ":" + e.Tool.Name
 	for _, f := range res.Findings {
-		if f.Location == want {
+		if f.Location == want && f.ThreatLevel == detect.ThreatLevelDangerous {
 			return true
 		}
 	}

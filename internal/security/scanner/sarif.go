@@ -403,6 +403,19 @@ func parsePackageFromMessage(msg string) (pkg, installed, fixed string) {
 // ClassifyThreat assigns user-facing threat_type and threat_level to a finding
 // based on rule ID, category, description, and severity.
 func ClassifyThreat(f *ScanFinding) {
+	// Baseline detect findings (Spec 076/077) already carry authoritative
+	// threat_type / threat_level / tier from the deterministic engine, so the
+	// legacy keyword classifier must NOT rewrite them. Overriding here can flip a
+	// soft (review-only) finding to "dangerous" — every soft check's threat_type
+	// string (e.g. "exfiltration", "prompt_injection", "tool_poisoning") happens
+	// to match a dangerous keyword branch below — which breaks the tier↔level
+	// coupling (tier==hard ⇔ dangerous) the summary and approval gate depend on. A
+	// baseline finding is identified by its non-empty Tier; legacy / external
+	// scanner findings (empty Tier) still get classified as before.
+	if f.Tier != "" {
+		return
+	}
+
 	ruleLC := strings.ToLower(f.RuleID)
 	catLC := strings.ToLower(f.Category)
 	titleLC := strings.ToLower(f.Title)

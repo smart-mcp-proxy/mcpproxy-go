@@ -221,11 +221,11 @@
       <div v-if="showApproveConfirmation" class="modal modal-open">
         <div class="modal-box">
           <h3 class="font-bold text-lg mb-4">
-            {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Critical Findings Detected' }}
+            {{ approveDialogMode === 'no_scan' ? 'No Security Scan Run' : 'Dangerous Findings Detected' }}
           </h3>
           <p v-if="approveDialogMode === 'critical'" class="mb-4">
             <strong>{{ server.name }}</strong> has
-            <span class="text-error font-semibold">{{ criticalFindingCount }} critical finding{{ criticalFindingCount === 1 ? '' : 's' }}</span>
+            <span class="text-error font-semibold">{{ dangerousFindingCount }} dangerous finding{{ dangerousFindingCount === 1 ? '' : 's' }}</span>
             in its most recent security scan. Approving will allow this server to run despite these warnings.
           </p>
           <p v-else class="mb-4">
@@ -2399,13 +2399,18 @@ async function unquarantineServer() {
 const showApproveConfirmation = ref(false)
 const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
 
-const criticalFindingCount = computed(() => {
+// Spec 077 FR-021: the approval gate blocks on baseline DANGEROUS findings only
+// (hard-tier). Deep-scan findings inform but never gate. The server-side verdict
+// is now tier-driven, so the modal mirrors it by counting `dangerous` (threat
+// level) rather than `critical` (severity) — a soft finding can be "high"
+// severity yet must not block approval.
+const dangerousFindingCount = computed(() => {
   // Prefer the loaded scan report summary if available; otherwise fall back
   // to finding_counts on the server's security_scan summary (if populated).
   const rep = scanReport.value as any
-  if (rep?.summary?.critical != null) return rep.summary.critical as number
+  if (rep?.summary?.dangerous != null) return rep.summary.dangerous as number
   const scan = server.value?.security_scan as any
-  if (scan?.finding_counts?.critical != null) return scan.finding_counts.critical as number
+  if (scan?.finding_counts?.dangerous != null) return scan.finding_counts.dangerous as number
   return 0
 })
 
@@ -2421,7 +2426,7 @@ function handleApproveClick() {
     showApproveConfirmation.value = true
     return
   }
-  if (criticalFindingCount.value > 0) {
+  if (dangerousFindingCount.value > 0) {
     approveDialogMode.value = 'critical'
     showApproveConfirmation.value = true
     return

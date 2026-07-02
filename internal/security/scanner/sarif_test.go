@@ -398,3 +398,76 @@ func TestSARIFRoundTrip(t *testing.T) {
 		t.Error("round-trip failed: ruleId mismatch")
 	}
 }
+
+// TestClassifyThreat_PreservesBaselineTier locks Spec 077 US1 Codex finding #2:
+// the legacy keyword classifier must NOT rewrite a baseline detect finding (one
+// that carries a Tier). Before the fix, ClassifyThreat re-derived threat_level
+// from the description keywords, so a HARD finding whose text lacked a
+// "dangerous" keyword was downgraded dangerous→warning while its Tier stayed
+// "hard" — breaking the tier↔level coupling the summary and approval gate rely
+// on. A baseline finding must pass through untouched.
+func TestClassifyThreat_PreservesBaselineTier(t *testing.T) {
+	// A hard phrase_injection finding whose description contains no keyword the
+	// classifier would map to "dangerous" (it would otherwise fall through to the
+	// default branch and be set to "warning" at High severity).
+	f := ScanFinding{
+		RuleID:      "phrase.injection",
+		Severity:    SeverityHigh,
+		Category:    "phrase_injection",
+		ThreatType:  ThreatPromptInjection,
+		ThreatLevel: ThreatLevelDangerous,
+		Title:       "Curated injection directive",
+		Description: "Description contains a high-confidence directive to the agent.",
+		Tier:        TierHard,
+	}
+	ClassifyThreat(&f)
+	if f.ThreatLevel != ThreatLevelDangerous {
+		t.Errorf("baseline hard finding downgraded: threat_level = %q, want %q", f.ThreatLevel, ThreatLevelDangerous)
+	}
+	if f.Tier != TierHard {
+		t.Errorf("Tier mutated to %q, want %q", f.Tier, TierHard)
+	}
+	// The hard/dangerous coupling isBlockingFinding depends on must survive.
+	if !isBlockingFinding(f) {
+		t.Error("hard finding must remain blocking after classification")
+	}
+
+	// A soft baseline finding must likewise not be promoted to dangerous even
+	// though its threat_type ("prompt_injection") matches a dangerous keyword.
+	soft := ScanFinding{
+		RuleID:      "directive.imperative",
+		Severity:    SeverityHigh,
+		Category:    "prompt_injection",
+		ThreatType:  ThreatPromptInjection,
+		ThreatLevel: ThreatLevelWarning,
+		Description: "prompt injection phrasing present but soft-tier",
+		Tier:        TierSoft,
+	}
+	ClassifyThreat(&soft)
+	if soft.ThreatLevel != ThreatLevelWarning {
+		t.Errorf("soft baseline finding rewritten: threat_level = %q, want %q", soft.ThreatLevel, ThreatLevelWarning)
+	}
+	if isBlockingFinding(soft) {
+		t.Error("soft finding must never block, even with an injection threat_type")
+	}
+}
+
+// TestClassifyThreat_StillClassifiesLegacy proves the guard is scoped to
+// baseline findings only: a legacy/external finding (no Tier) is still
+// classified by keyword as before, so back-compat is preserved.
+func TestClassifyThreat_StillClassifiesLegacy(t *testing.T) {
+	f := ScanFinding{
+		RuleID:      "cisco-mcp-001",
+		Severity:    SeverityHigh,
+		Category:    "prompt-injection",
+		Description: "detected prompt injection payload",
+		// no Tier — legacy finding
+	}
+	ClassifyThreat(&f)
+	if f.ThreatType != ThreatPromptInjection {
+		t.Errorf("legacy finding threat_type = %q, want %q", f.ThreatType, ThreatPromptInjection)
+	}
+	if f.ThreatLevel != ThreatLevelDangerous {
+		t.Errorf("legacy finding threat_level = %q, want %q", f.ThreatLevel, ThreatLevelDangerous)
+	}
+}
