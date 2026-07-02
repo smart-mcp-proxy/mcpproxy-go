@@ -94,7 +94,8 @@ graph TD
   end
   subgraph sg_upgrade_nudge["Upgrade awareness & guided update"]
     upgrade_nudge["Upgrade awareness & guided update"]
-    upgrade_nudge_surfacing["US1: universal awareness — status output, startup log, dismissible Web UI banner, update_check config block"]
+    upgrade_nudge_status_log["US1 slice: update availability in mcpproxy status + deduped startup log"]
+    upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + update_check config block"]
     upgrade_nudge_channel["US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"]
     upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no prerelease downgrade nudges"]
   end
@@ -151,6 +152,7 @@ graph TD
   scanner_simpl_unified_report --> scanner_simpl_deep_optin
   scanner_simpl_unified_report --> scanner_simpl_notifications
   scanner_simpl_deep_optin --> scanner_simpl_deepscan_fixes
+  upgrade_nudge_status_log --> upgrade_nudge_surfacing
   upgrade_nudge_surfacing --> upgrade_nudge_channel
   upgrade_nudge_surfacing --> upgrade_nudge_quiet
   telemetry_machineid_client --> telemetry_machineid_worker
@@ -162,10 +164,10 @@ graph TD
   classDef blocked fill:#a40e26,stroke:#5c0712,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   classDef parked fill:#30363d,stroke:#161b22,color:#9da7b3,stroke-dasharray:4 3;
-  class profiles_v2,profiles_v2_indexes,profiles_v2_set_profile,profiles_v2_profile_pin,profiles_v2_tray_switcher,sandbox_isolation,sandbox_spike,sandbox_mode_config,sandbox_launcher,sandbox_scanner_parity,sandbox_snap_docker_it,ts_code_exec_ga,ts_code_exec_cookbook,scanner_v2,scanner_v2_foundation,scanner_v2_hard_checks,scanner_v2_soft_checks,scanner_v2_consensus,scanner_v2_eval_gate,scanner_v2_docs,registries_official_protocol,scanner_simpl_baseline,scanner_simpl_unified_report,scanner_simpl_notifications done;
-  class scanner_simplification,telemetry_identity in_progress;
-  class windows_tray,windows_tray_window,scanner_simpl_deep_optin,telemetry_machineid_client in_review;
-  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,scanner_simpl_deepscan_fixes,upgrade_nudge,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust,connect_trust_preview,connect_trust_backup_visibility,connect_trust_undo,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,planning_hygiene,hygiene_roadmap_github_check,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract todo;
+  class profiles_v2,profiles_v2_indexes,profiles_v2_set_profile,profiles_v2_profile_pin,profiles_v2_tray_switcher,sandbox_isolation,sandbox_spike,sandbox_mode_config,sandbox_launcher,sandbox_scanner_parity,sandbox_snap_docker_it,ts_code_exec_ga,ts_code_exec_cookbook,scanner_v2,scanner_v2_foundation,scanner_v2_hard_checks,scanner_v2_soft_checks,scanner_v2_consensus,scanner_v2_eval_gate,scanner_v2_docs,registries_official_protocol,scanner_simplification,scanner_simpl_baseline,scanner_simpl_unified_report,scanner_simpl_deep_optin,scanner_simpl_notifications,scanner_simpl_deepscan_fixes,upgrade_nudge_status_log,connect_trust_preview,connect_trust_backup_visibility,telemetry_machineid_client,hygiene_roadmap_github_check done;
+  class upgrade_nudge,connect_trust,telemetry_identity in_progress;
+  class windows_tray,windows_tray_window in_review;
+  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust_undo,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,planning_hygiene,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract todo;
   class marketplace,siem,paid_tier,sdk_v1_migration,sso parked;
 ```
 
@@ -173,13 +175,12 @@ graph TD
 
 | Epic | Status | Assignee | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- | --- |
-| Scanner simplification (deterministic default, opt-in deep scan) | In progress | unassigned | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
+| Upgrade awareness & guided update | In progress | unassigned | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
+| Connect step trust: preview, visible backup, one-click undo | In progress | unassigned | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | unassigned | P1 | — |  |  |
 | Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 25/60 (42%) | [002-windows-installer](./specs/002-windows-installer/) |  |
 | Web UI + macOS app UX audit | Todo | unassigned | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | unassigned | P0 | — |  |  |
-| Upgrade awareness & guided update | Todo | unassigned | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
-| Connect step trust: preview, visible backup, one-click undo | Todo | unassigned | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Analytics dashboard as default page | Todo | unassigned | P1 | 16/26 (62%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Registries — easier search + add-server | Todo | unassigned | P1 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Planning/docs truth automation | Todo | unassigned | P2 | — |  |  |
@@ -191,6 +192,7 @@ graph TD
 | Profiles v2 (per-profile tool views) `MCP-33` | Done | BackendEngineer | P1 | — |  |  |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | BackendEngineer | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | BackendEngineer | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
+| Scanner simplification (deterministic default, opt-in deep scan) | Done | unassigned | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | TypeScript code-execution GA + cookbook `MCP-38` | Done | BackendEngineer | P2 | 19/19 (100%) | [033-typescript-code-execution](./specs/033-typescript-code-execution/) |  |
 
 ## Per-spec progress (recomputed from `specs/<NNN>/tasks.md`)
