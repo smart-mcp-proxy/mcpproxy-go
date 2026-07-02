@@ -1927,7 +1927,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	})
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
-		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
+		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth)
 		httpAPIServer.SetConnectService(connectSvc)
 
 		// Spec 046: wire the onboarding-funnel provider on the telemetry

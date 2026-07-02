@@ -95,50 +95,75 @@ func readWrittenEntry(t *testing.T, svc *Service, clientID, serverName string) m
 // It compares against the SHARED constructor with the real (unmasked) URL, then
 // separately confirms the preview payload masks that URL.
 func TestPreview_EqualsWrite(t *testing.T) {
-	for _, clientID := range supportedPreviewClients {
-		clientID := clientID
-		t.Run(clientID, func(t *testing.T) {
-			svc, home := testServiceWithKey(t)
-			seedClientConfig(t, home, clientID)
-
-			preview, err := svc.Preview(clientID, "mcpproxy")
-			if err != nil {
-				t.Fatalf("Preview: %v", err)
+	// Matrix: every supported client × require_mcp_auth on/off. The previewed
+	// entry must equal the written entry's shape for the same configuration
+	// (Spec 078 SC-004), with the credential masked in the preview only.
+	for _, authOn := range []bool{false, true} {
+		authOn := authOn
+		for _, clientID := range supportedPreviewClients {
+			clientID := clientID
+			name := clientID
+			if authOn {
+				name += "/auth-on"
+			} else {
+				name += "/auth-off"
 			}
+			t.Run(name, func(t *testing.T) {
+				svc, home := testServiceWithKey(t)
+				svc.WithRequireMCPAuth(authOn)
+				seedClientConfig(t, home, clientID)
 
-			res, err := svc.Connect(clientID, "mcpproxy", true)
-			if err != nil {
-				t.Fatalf("Connect: %v", err)
-			}
-			if !res.Success {
-				t.Fatalf("Connect not successful: %+v", res)
-			}
+				preview, err := svc.Preview(clientID, "mcpproxy")
+				if err != nil {
+					t.Fatalf("Preview: %v", err)
+				}
 
-			written := readWrittenEntry(t, svc, clientID, "mcpproxy")
+				res, err := svc.Connect(clientID, "mcpproxy", true)
+				if err != nil {
+					t.Fatalf("Connect: %v", err)
+				}
+				if !res.Success {
+					t.Fatalf("Connect not successful: %+v", res)
+				}
 
-			// The write uses buildServerEntry(clientID, realURL); the shared
-			// constructor is the single source of truth for preview and write.
-			wantUnmasked := buildServerEntry(clientID, svc.mcpURL())
-			if got, want := marshalEntry(t, written), marshalEntry(t, wantUnmasked); got != want {
-				t.Fatalf("written entry != shared constructor output\n got: %s\nwant: %s", got, want)
-			}
+				written := readWrittenEntry(t, svc, clientID, "mcpproxy")
 
-			// The preview payload masks the credential: its entry equals the
-			// shared constructor fed the masked URL, and never the real key.
-			wantMasked := buildServerEntry(clientID, maskURLAPIKey(svc.mcpURL()))
-			if got, want := marshalEntry(t, preview.Entry), marshalEntry(t, wantMasked); got != want {
-				t.Fatalf("preview entry != masked constructor output\n got: %s\nwant: %s", got, want)
-			}
-		})
+				// The write and preview both call buildServerEntry — the single
+				// source of truth. Unmasked params == written; masked == preview.
+				wantUnmasked := buildServerEntry(clientID, svc.entryParams(false))
+				if got, want := marshalEntry(t, written), marshalEntry(t, wantUnmasked); got != want {
+					t.Fatalf("written entry != shared constructor output\n got: %s\nwant: %s", got, want)
+				}
+				wantMasked := buildServerEntry(clientID, svc.entryParams(true))
+				if got, want := marshalEntry(t, preview.Entry), marshalEntry(t, wantMasked); got != want {
+					t.Fatalf("preview entry != masked constructor output\n got: %s\nwant: %s", got, want)
+				}
+
+				// Spec 078 security fix: with auth off, the written config must
+				// contain no credential at all.
+				if !authOn {
+					if strings.Contains(marshalEntry(t, written), "apikey") ||
+						strings.Contains(marshalEntry(t, written), "test-key-123") ||
+						strings.Contains(marshalEntry(t, written), "headers") {
+						t.Fatalf("auth-off write must embed no credential, got: %s", marshalEntry(t, written))
+					}
+					if preview.ContainsAPIKey {
+						t.Fatal("auth-off preview must report contains_api_key=false")
+					}
+				}
+			})
+		}
 	}
 }
 
-// TestPreview_MasksAPIKey verifies the real API key never appears anywhere in
-// the preview payload while ContainsAPIKey honestly flags that a credential is
-// written, and the base URL stays visible (Spec 078 FR-004).
-func TestPreview_MasksAPIKey(t *testing.T) {
+// TestPreview_MasksCredential verifies the real API key never appears anywhere
+// in the preview payload while ContainsAPIKey honestly flags that a credential
+// is written, and the base URL stays visible (Spec 078 FR-004). Runs with
+// require_mcp_auth on (the only mode that writes a credential).
+func TestPreview_MasksCredential(t *testing.T) {
 	const secret = "super-secret-key-1234"
 	svc, home := serviceWithKey(t, secret)
+	svc.WithRequireMCPAuth(true)
 	seedClientConfig(t, home, "claude-code")
 
 	preview, err := svc.Preview("claude-code", "mcpproxy")
@@ -154,13 +179,17 @@ func TestPreview_MasksAPIKey(t *testing.T) {
 		t.Fatalf("real API key leaked into preview payload: %s", payload)
 	}
 	if !preview.ContainsAPIKey {
-		t.Fatal("ContainsAPIKey must be true when the URL embeds a credential")
+		t.Fatal("ContainsAPIKey must be true when auth is on with a key")
 	}
 	if !strings.Contains(preview.EntryText, apiKeyMask) {
 		t.Fatalf("EntryText should show the mask, got: %s", preview.EntryText)
 	}
 	if !strings.Contains(preview.EntryText, "http://127.0.0.1:8080/mcp") {
 		t.Fatalf("EntryText should keep the base URL visible, got: %s", preview.EntryText)
+	}
+	// claude-code carries the credential in a header, so the URL stays clean.
+	if strings.Contains(preview.EntryText, "apikey=") {
+		t.Fatalf("claude-code should use a header, not an apikey query: %s", preview.EntryText)
 	}
 }
 
@@ -335,5 +364,118 @@ func TestPreview_UnknownClient(t *testing.T) {
 	svc, _ := testService(t)
 	if _, err := svc.Preview("not-a-client", "mcpproxy"); err == nil {
 		t.Fatal("expected error for unknown client")
+	}
+}
+
+// TestConnect_CredentialCarrierMatrix pins the per-client credential carrier
+// when require_mcp_auth is on (Spec 078): a header where the client config
+// supports one, the mcp-remote --header bridge arg for Claude Desktop, and the
+// ?apikey= query only for Codex (whose TOML headers are env-var indirected).
+func TestConnect_CredentialCarrierMatrix(t *testing.T) {
+	type carrier int
+	const (
+		header carrier = iota
+		bridgeHeaderArg
+		query
+	)
+	want := map[string]carrier{
+		"claude-code":    header,
+		"vscode":         header,
+		"cursor":         header,
+		"windsurf":       header,
+		"gemini":         header,
+		"opencode":       header,
+		"claude-desktop": bridgeHeaderArg,
+		"codex":          query,
+	}
+
+	for clientID, c := range want {
+		clientID, c := clientID, c
+		t.Run(clientID, func(t *testing.T) {
+			svc, home := testServiceWithKey(t)
+			svc.WithRequireMCPAuth(true)
+			seedClientConfig(t, home, clientID)
+
+			if _, err := svc.Connect(clientID, "mcpproxy", true); err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			entry := readWrittenEntry(t, svc, clientID, "mcpproxy")
+
+			switch c {
+			case header:
+				h, ok := entry["headers"].(map[string]interface{})
+				if !ok || h["X-API-Key"] != "test-key-123" {
+					t.Fatalf("%s: expected X-API-Key header, got %v", clientID, entry)
+				}
+				// URL carrier must NOT also carry the key.
+				for _, f := range []string{"url", "serverUrl", "httpUrl"} {
+					if u, ok := entry[f].(string); ok && strings.Contains(u, "apikey") {
+						t.Fatalf("%s: header client must keep URL clean, got %v", clientID, u)
+					}
+				}
+			case bridgeHeaderArg:
+				args := entry["args"].([]interface{})
+				last, _ := args[len(args)-1].(string)
+				if last != "X-API-Key:test-key-123" {
+					t.Fatalf("%s: expected --header arg, got %v", clientID, args)
+				}
+			case query:
+				u, _ := entry["url"].(string)
+				if !strings.Contains(u, "apikey=test-key-123") {
+					t.Fatalf("%s: expected apikey query, got %v", clientID, u)
+				}
+			}
+		})
+	}
+}
+
+// TestConnect_LegacyEntryMigration proves an upgrade over a legacy entry that
+// carried ?apikey= is recognized and updated in place (not duplicated), and the
+// upgraded entry drops the leaked key when require_mcp_auth is off (Spec 078).
+func TestConnect_LegacyEntryMigration(t *testing.T) {
+	svc, home := testService(t) // auth off
+	cfgPath := ConfigPath("claude-code", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A legacy mcpproxy entry written by a pre-Spec-078 build: url carries the key.
+	legacy := `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp?apikey=old-leaked-key"}}}`
+	if err := os.WriteFile(cfgPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The legacy entry is recognized as connected (matching anchors on base URL).
+	st, err := svc.GetStatus("claude-code")
+	if err != nil {
+		t.Fatalf("GetStatus: %v", err)
+	}
+	if !st.Connected {
+		t.Fatal("legacy ?apikey= entry must be recognized as connected")
+	}
+
+	// Reconnect (force) upgrades it in place to the clean, keyless shape.
+	if _, err := svc.Connect("claude-code", "mcpproxy", true); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	raw, _ := os.ReadFile(cfgPath)
+	if strings.Contains(string(raw), "old-leaked-key") || strings.Contains(string(raw), "apikey") {
+		t.Fatalf("upgrade must drop the leaked key, got: %s", raw)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	servers := data["mcpServers"].(map[string]interface{})
+	if len(servers) != 1 {
+		t.Fatalf("expected a single mcpproxy entry (no duplicate), got %d: %v", len(servers), servers)
+	}
+
+	// Disconnect must still find and remove the (now clean) entry.
+	res, err := svc.Disconnect("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if res.Action != "removed" {
+		t.Fatalf("expected removed, got %s", res.Action)
 	}
 }
