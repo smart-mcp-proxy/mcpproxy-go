@@ -137,6 +137,27 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     expect(api.connectClient).toHaveBeenCalledWith('cursor', 'mcpproxy', false)
   })
 
+  it('shows no credential line when the entry is keyless (require_mcp_auth off)', async () => {
+    // Spec 078 security fix: default (auth off) writes a clean, keyless entry.
+    ;(api.getConnectPreview as any).mockResolvedValue(
+      previewFor({
+        contains_api_key: false,
+        entry: { type: 'sse', url: 'http://127.0.0.1:8080/mcp' },
+        entry_text: '{\n  "mcpproxy": {\n    "url": "http://127.0.0.1:8080/mcp",\n    "type": "sse"\n  }\n}',
+      }),
+    )
+    const wrapper = await open()
+
+    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="connect-preview-cursor"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="connect-preview-apikey-cursor"]').exists()).toBe(false)
+    const entry = wrapper.find('[data-test="connect-preview-entry-cursor"]')
+    expect(entry.text()).not.toContain('apikey')
+    expect(entry.text()).not.toContain('••••')
+  })
+
   it('an existing entry shows the overwrite warning and confirm implies force=true', async () => {
     ;(api.getConnectPreview as any).mockResolvedValue(previewFor({ entry_exists: true }))
     const wrapper = await open()

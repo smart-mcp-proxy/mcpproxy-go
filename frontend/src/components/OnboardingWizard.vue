@@ -1344,7 +1344,7 @@ const ClientRow: FunctionalComponent<
             ? h(
                 'p',
                 { class: 'text-[11px] opacity-60 leading-relaxed', 'data-test': `client-preview-apikey-${c.id}` },
-                'The URL includes your API key (shown masked). The real key is written into the config so the client can authenticate.'
+                'This entry includes your API key (shown masked). The real key is written into the config so the client can authenticate.'
               )
             : null,
           h('div', { class: 'flex items-center gap-2 pt-0.5' }, [
