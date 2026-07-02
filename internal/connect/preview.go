@@ -4,20 +4,16 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"regexp"
 
 	"github.com/BurntSushi/toml"
 )
 
-// apiKeyMask is the placeholder substituted for the real apikey query value in a
-// preview. It is deliberately human-readable (not percent-encoded) so the user
-// plainly sees a credential is written without the secret ever leaving the core
-// in a preview payload, log, or telemetry event (Spec 078 FR-004).
+// apiKeyMask is the placeholder substituted for the real credential in a
+// preview, whether it is carried in a header value, a bridge --header arg, or an
+// ?apikey= query. It is deliberately human-readable (not percent-encoded) so the
+// user plainly sees a credential is written without the secret ever leaving the
+// core in a preview payload, log, or telemetry event (Spec 078 FR-004).
 const apiKeyMask = "••••" // ••••
-
-// apiKeyQueryPattern matches an apikey query parameter value in the MCP URL,
-// capturing the `?apikey=` / `&apikey=` prefix so only the value is replaced.
-var apiKeyQueryPattern = regexp.MustCompile(`([?&]apikey=)[^&]*`)
 
 // ConnectPreview describes the exact change a subsequent Connect would make to a
 // client config, WITHOUT modifying the file or creating a backup (Spec 078 US1).
@@ -39,13 +35,6 @@ type ConnectPreview struct {
 	// EntryExists (Spec 075): accessible|absent|malformed. A denied read never
 	// reaches here — it is returned as a typed *AccessError (403 + remediation).
 	AccessState string `json:"access_state"`
-}
-
-// maskURLAPIKey replaces the apikey query value with a fixed mask, leaving the
-// rest of the URL (scheme, host, path, other params) intact. When no apikey is
-// present it returns the URL unchanged.
-func maskURLAPIKey(raw string) string {
-	return apiKeyQueryPattern.ReplaceAllString(raw, `${1}`+apiKeyMask)
 }
 
 // Preview computes the exact entry a Connect would write for the given client,
@@ -97,12 +86,11 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		}
 	}
 
-	// Build the entry from the SAME constructor the write uses, then mask the
-	// embedded credential for display. Because the real write also calls
+	// Build the entry from the SAME constructor the write uses, with the
+	// credential masked for display. Because the real write also calls
 	// buildServerEntry, the masked entry differs from the written entry only in
-	// the apikey value — the shape and every other field are identical.
-	maskedURL := maskURLAPIKey(s.mcpURL())
-	maskedEntry := buildServerEntry(clientID, maskedURL)
+	// the credential value — the carrier, shape, and every other field match.
+	maskedEntry := buildServerEntry(clientID, s.entryParams(true))
 
 	entryText, err := renderEntrySnippet(client, serverName, maskedEntry)
 	if err != nil {
@@ -118,7 +106,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		Entry:          maskedEntry,
 		EntryText:      entryText,
 		EntryExists:    entryExists,
-		ContainsAPIKey: s.apiKey != "",
+		ContainsAPIKey: s.containsCredential(),
 		Bridge:         client.Bridge,
 		AccessState:    accessState,
 	}, nil

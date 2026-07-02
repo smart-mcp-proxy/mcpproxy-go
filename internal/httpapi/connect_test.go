@@ -298,7 +298,8 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	require.NoError(t, os.WriteFile(cfgPath, original, 0o644))
 
 	const secret = "rest-secret-key-9999"
-	svc := connect.NewServiceWithHome("127.0.0.1:8080", secret, home)
+	// require_mcp_auth on so a credential is written (masked in the preview).
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", secret, home).WithRequireMCPAuth(true)
 	srv.SetConnectService(svc)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code/preview", http.NoBody)
@@ -323,6 +324,9 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	assert.False(t, resp.Data.EntryExists)
 	assert.Equal(t, "accessible", resp.Data.AccessState)
 	assert.Contains(t, resp.Data.EntryText, "http://127.0.0.1:8080/mcp")
+	// claude-code carries the masked credential in a header, not the URL.
+	assert.Contains(t, resp.Data.EntryText, "X-API-Key")
+	assert.NotContains(t, resp.Data.EntryText, "apikey=")
 
 	// No write, no backup.
 	after, err := os.ReadFile(cfgPath)

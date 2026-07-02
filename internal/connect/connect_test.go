@@ -283,8 +283,10 @@ func TestConnect_ClaudeCode_NewFile(t *testing.T) {
 	}
 }
 
-func TestConnect_ClaudeCode_WithAPIKey(t *testing.T) {
-	svc, _ := testServiceWithKey(t)
+// Spec 078 security fix: with require_mcp_auth off (default), claude-code gets a
+// clean, keyless entry — the REST-admin key is NOT leaked into the config.
+func TestConnect_ClaudeCode_AuthOff_NoKeyWritten(t *testing.T) {
+	svc, _ := testServiceWithKey(t) // key set but require_mcp_auth off
 
 	result, err := svc.Connect("claude-code", "", false)
 	if err != nil {
@@ -298,18 +300,49 @@ func TestConnect_ClaudeCode_WithAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read config failed: %v", err)
 	}
+	if strings.Contains(string(raw), "apikey") || strings.Contains(string(raw), "test-key-123") || strings.Contains(string(raw), "headers") {
+		t.Fatalf("auth-off connect must not embed a credential, got: %s", raw)
+	}
 
 	var data map[string]interface{}
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatalf("Parse config failed: %v", err)
 	}
+	entry := data["mcpServers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("Expected clean url, got %v", entry["url"])
+	}
+}
 
-	servers := data["mcpServers"].(map[string]interface{})
-	entry := servers["mcpproxy"].(map[string]interface{})
+// With require_mcp_auth on, claude-code carries the credential in an X-API-Key
+// header (its config schema supports one) and the URL stays clean.
+func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
+	svc, _ := testServiceWithKey(t)
+	svc.WithRequireMCPAuth(true)
 
-	expectedURL := "http://127.0.0.1:8080/mcp?apikey=test-key-123"
-	if entry["url"] != expectedURL {
-		t.Errorf("Expected url=%s, got %v", expectedURL, entry["url"])
+	result, err := svc.Connect("claude-code", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatalf("Read config failed: %v", err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("Parse config failed: %v", err)
+	}
+	entry := data["mcpServers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("Expected clean url with header carrier, got %v", entry["url"])
+	}
+	headers, ok := entry["headers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected headers object, got %T", entry["headers"])
+	}
+	if headers["X-API-Key"] != "test-key-123" {
+		t.Errorf("Expected X-API-Key header, got %v", headers["X-API-Key"])
 	}
 }
 
@@ -766,7 +799,7 @@ func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
 }
 
 func TestBuildServerEntry_ClaudeDesktop_StdioBridge(t *testing.T) {
-	entry := buildServerEntry("claude-desktop", "http://127.0.0.1:8080/mcp")
+	entry := buildServerEntry("claude-desktop", serverEntryParams{baseURL: "http://127.0.0.1:8080/mcp"})
 
 	if entry["command"] != "npx" {
 		t.Errorf("expected command=npx, got %v", entry["command"])
@@ -838,29 +871,49 @@ func TestConnect_ClaudeDesktop_WritesStdioBridge(t *testing.T) {
 	}
 }
 
-func TestConnect_ClaudeDesktop_BridgeIncludesAPIKey(t *testing.T) {
-	svc, homeDir := testServiceWithKey(t)
+// With require_mcp_auth on, the Claude Desktop bridge forwards the credential
+// via an mcp-remote --header arg (no space after the colon), and the URL arg
+// stays clean. With auth off it embeds no credential at all.
+func TestConnect_ClaudeDesktop_BridgeCredentialCarrier(t *testing.T) {
+	for _, authOn := range []bool{false, true} {
+		authOn := authOn
+		t.Run(map[bool]string{true: "auth-on", false: "auth-off"}[authOn], func(t *testing.T) {
+			svc, homeDir := testServiceWithKey(t)
+			svc.WithRequireMCPAuth(authOn)
 
-	cfgPath := ConfigPath("claude-desktop", homeDir)
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
+			cfgPath := ConfigPath("claude-desktop", homeDir)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
 
-	result, err := svc.Connect("claude-desktop", "", false)
-	if err != nil {
-		t.Fatalf("Connect failed: %v", err)
-	}
+			result, err := svc.Connect("claude-desktop", "", false)
+			if err != nil {
+				t.Fatalf("Connect failed: %v", err)
+			}
 
-	raw, _ := os.ReadFile(result.ConfigPath)
-	var data map[string]interface{}
-	json.Unmarshal(raw, &data)
-
-	servers := data["mcpServers"].(map[string]interface{})
-	entry := servers["mcpproxy"].(map[string]interface{})
-	args := entry["args"].([]interface{})
-	lastArg, _ := args[len(args)-1].(string)
-	if lastArg != "http://127.0.0.1:8080/mcp?apikey=test-key-123" {
-		t.Errorf("Expected bridge URL with apikey, got %v", lastArg)
+			raw, _ := os.ReadFile(result.ConfigPath)
+			var data map[string]interface{}
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			entry := data["mcpServers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+			args := entry["args"].([]interface{})
+			// The mcpproxy URL arg (index 2) is always the clean base URL.
+			if args[2] != "http://127.0.0.1:8080/mcp" {
+				t.Errorf("Expected clean bridge URL arg, got %v", args[2])
+			}
+			if authOn {
+				lastArg, _ := args[len(args)-1].(string)
+				if lastArg != "X-API-Key:test-key-123" {
+					t.Errorf("Expected --header X-API-Key:test-key-123, got %v", lastArg)
+				}
+				if args[len(args)-2] != "--header" {
+					t.Errorf("Expected --header flag before value, got %v", args[len(args)-2])
+				}
+			} else if strings.Contains(string(raw), "test-key-123") || strings.Contains(string(raw), "--header") {
+				t.Errorf("auth-off bridge must embed no credential, got: %s", raw)
+			}
+		})
 	}
 }
 
@@ -1097,33 +1150,46 @@ func TestConfigPath_UnknownClient(t *testing.T) {
 	}
 }
 
-// ---------- mcpURL tests ----------
+// ---------- baseURL / credential-carrier tests ----------
 
-func TestMcpURL_NoAPIKey(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "")
-	url := svc.mcpURL()
-	if url != "http://127.0.0.1:8080/mcp" {
-		t.Errorf("Expected http://127.0.0.1:8080/mcp, got %s", url)
-	}
-}
-
-func TestMcpURL_WithAPIKey(t *testing.T) {
+func TestBaseURL_NoQuery(t *testing.T) {
+	// The endpoint anchor is always credential-free, regardless of api key.
 	svc := NewService("127.0.0.1:8080", "my-secret")
-	url := svc.mcpURL()
-	if url != "http://127.0.0.1:8080/mcp?apikey=my-secret" {
-		t.Errorf("Expected url with apikey, got %s", url)
+	if got := svc.baseURL(); got != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("Expected clean base URL, got %s", got)
 	}
 }
 
-func TestMcpURL_APIKeyWithSpecialChars(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "key with spaces&special=chars")
-	url := svc.mcpURL()
-	if !strings.Contains(url, "apikey=") {
-		t.Errorf("Expected apikey param in URL, got %s", url)
+// Spec 078 security fix: with require_mcp_auth off (the default), no credential
+// is written into a client config even when an API key is configured.
+func TestEntryParams_AuthOff_NoCredential(t *testing.T) {
+	svc := NewService("127.0.0.1:8080", "my-secret") // require_mcp_auth defaults false
+	p := svc.entryParams(false)
+	if p.credential != "" {
+		t.Errorf("expected no credential when auth is off, got %q", p.credential)
 	}
-	// Should be URL-encoded
-	if strings.Contains(url, " ") {
-		t.Error("URL should not contain raw spaces")
+	if svc.containsCredential() {
+		t.Error("containsCredential must be false when auth is off")
+	}
+}
+
+// With require_mcp_auth on, the credential is present and the query carrier
+// URL-escapes special characters.
+func TestEntryParams_AuthOn_CredentialPresent(t *testing.T) {
+	svc := NewService("127.0.0.1:8080", "key with spaces&x=1").WithRequireMCPAuth(true)
+	p := svc.entryParams(false)
+	if p.credential != "key with spaces&x=1" {
+		t.Errorf("expected raw credential, got %q", p.credential)
+	}
+	if !svc.containsCredential() {
+		t.Error("containsCredential must be true when auth is on with a key")
+	}
+	q := credentialQuery(p.baseURL, p.credential)
+	if strings.Contains(q, " ") {
+		t.Errorf("query carrier must URL-escape spaces, got %s", q)
+	}
+	if !strings.Contains(q, "apikey=") {
+		t.Errorf("expected apikey query, got %s", q)
 	}
 }
 
