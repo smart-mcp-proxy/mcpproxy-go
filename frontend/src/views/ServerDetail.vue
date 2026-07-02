@@ -1230,10 +1230,10 @@
                   <div class="text-xs text-base-content/50">Risk Score</div>
                 </div>
                 <div class="flex gap-4 text-sm">
-                  <span v-if="scanReport.summary?.dangerous" class="text-error font-semibold">{{ scanReport.summary.dangerous }} dangerous</span>
-                  <span v-if="scanReport.summary?.warnings" class="text-warning font-semibold">{{ scanReport.summary.warnings }} warnings</span>
-                  <span v-if="scanReport.summary?.info_level" class="text-info">{{ scanReport.summary.info_level }} info</span>
-                  <span v-if="scanReport.summary?.total === 0" class="text-success font-semibold">No findings</span>
+                  <span v-if="scanThreatCounts.dangerous" class="text-error font-semibold">{{ scanThreatCounts.dangerous }} dangerous</span>
+                  <span v-if="scanThreatCounts.warnings" class="text-warning font-semibold">{{ scanThreatCounts.warnings }} warnings</span>
+                  <span v-if="scanThreatCounts.info" class="text-info">{{ scanThreatCounts.info }} info</span>
+                  <span v-if="scanThreatCounts.total === 0" class="text-success font-semibold">No findings</span>
                 </div>
               </div>
 
@@ -2401,17 +2401,38 @@ const approveDialogMode = ref<'no_scan' | 'critical'>('no_scan')
 
 // Spec 077 FR-021: the approval gate blocks on baseline DANGEROUS findings only
 // (hard-tier). Deep-scan findings inform but never gate. The server-side verdict
-// is now tier-driven, so the modal mirrors it by counting `dangerous` (threat
-// level) rather than `critical` (severity) — a soft finding can be "high"
-// severity yet must not block approval.
+// is tier-driven, so the modal mirrors it via the TIER-DRIVEN finding_counts —
+// NOT the raw threat-level report summary, where a tierless deep-scan/external
+// finding can read "dangerous" and would show the "Dangerous Findings Detected"
+// dialog even though the backend gate (hard-tier only) would not block.
 const dangerousFindingCount = computed(() => {
-  // Prefer the loaded scan report summary if available; otherwise fall back
-  // to finding_counts on the server's security_scan summary (if populated).
+  // Prefer the tier-driven counts on the loaded report, then the server's
+  // security_scan summary; the raw report summary is only a last-resort
+  // fallback for cores that predate report-level finding_counts.
   const rep = scanReport.value as any
-  if (rep?.summary?.dangerous != null) return rep.summary.dangerous as number
+  if (rep?.finding_counts?.dangerous != null) return rep.finding_counts.dangerous as number
   const scan = server.value?.security_scan as any
   if (scan?.finding_counts?.dangerous != null) return scan.finding_counts.dangerous as number
+  if (rep?.summary?.dangerous != null) return rep.summary.dangerous as number
   return 0
+})
+
+// Tier-driven counts for the Security-tab summary strip (Spec 077 FR-014):
+// buckets findings exactly like the server list's finding_counts — a tierless
+// deep-scan/external "dangerous" finding shows as a warning on both surfaces.
+// Raw threat-level summary is only a fallback for pre-Spec-077 payloads.
+const scanThreatCounts = computed(() => {
+  const rep = scanReport.value as any
+  const fc = rep?.finding_counts
+  if (fc) {
+    return { dangerous: fc.dangerous ?? 0, warnings: fc.warning ?? 0, info: fc.info ?? 0, total: fc.total ?? 0 }
+  }
+  return {
+    dangerous: rep?.summary?.dangerous ?? 0,
+    warnings: rep?.summary?.warnings ?? 0,
+    info: rep?.summary?.info_level ?? 0,
+    total: rep?.summary?.total ?? 0,
+  }
 })
 
 const hasCompletedScanForApprove = computed(() => {

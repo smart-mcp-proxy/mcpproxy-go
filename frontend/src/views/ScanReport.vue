@@ -96,25 +96,25 @@
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Dangerous</div>
-            <div class="stat-value text-lg text-error">{{ report.summary?.dangerous ?? 0 }}</div>
+            <div class="stat-value text-lg text-error">{{ threatCounts.dangerous }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Warnings</div>
-            <div class="stat-value text-lg text-warning">{{ report.summary?.warnings ?? 0 }}</div>
+            <div class="stat-value text-lg text-warning">{{ threatCounts.warnings }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Info</div>
-            <div class="stat-value text-lg text-info">{{ report.summary?.info_level ?? 0 }}</div>
+            <div class="stat-value text-lg text-info">{{ threatCounts.info }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Total</div>
-            <div class="stat-value text-lg">{{ report.summary?.total ?? 0 }}</div>
+            <div class="stat-value text-lg">{{ threatCounts.total }}</div>
           </div>
         </div>
       </div>
@@ -555,7 +555,7 @@
             </div>
             <div class="flex gap-2">
               <button
-                v-if="serverAdminState === 'enabled' && report.summary?.dangerous > 0"
+                v-if="serverAdminState === 'enabled' && reportStatus === 'dangerous'"
                 @click="quarantineServer"
                 :disabled="actionLoading"
                 class="btn btn-error btn-sm"
@@ -638,15 +638,39 @@ const scanContext = computed(() => {
   return report.value?.scan_context || null
 })
 
-// Status display
+// Status display. Spec 077 FR-014 verdict purity: the badge shows the
+// tier-driven, baseline-only `verdict` computed server-side with the SAME
+// predicate as the server-list status, so this page can never say "dangerous"
+// while the server list says "clean" (a tierless deep-scan/external finding
+// never moves the verdict). Raw summary counts remain only as a fallback for
+// reports served by a core that predates the verdict field.
 const reportStatus = computed(() => {
   if (!report.value) return 'unknown'
   if (report.value.scan_complete === false) return 'incomplete'
   if (report.value.empty_scan) return 'empty'
   if (!report.value.findings || report.value.findings.length === 0) return 'clean'
+  if (report.value.verdict) return report.value.verdict
   if (report.value.summary?.dangerous > 0) return 'dangerous'
   if (report.value.summary?.warnings > 0) return 'warnings'
   return 'clean'
+})
+
+// Threat tiles use the tier-driven buckets (finding_counts) matching the
+// server list exactly (Spec 077 FR-014): a tierless deep-scan "dangerous"
+// finding counts as a warning on BOTH surfaces. Falls back to the raw
+// threat-level summary for pre-Spec-077 payloads.
+const threatCounts = computed(() => {
+  const r = report.value
+  const fc = r?.finding_counts
+  if (fc) {
+    return { dangerous: fc.dangerous ?? 0, warnings: fc.warning ?? 0, info: fc.info ?? 0, total: fc.total ?? 0 }
+  }
+  return {
+    dangerous: r?.summary?.dangerous ?? 0,
+    warnings: r?.summary?.warnings ?? 0,
+    info: r?.summary?.info_level ?? 0,
+    total: r?.summary?.total ?? 0,
+  }
 })
 
 const statusBadgeClass = computed(() => {
@@ -800,8 +824,15 @@ async function quarantineServer() {
 
 // F-04: Go through the security-aware approval path instead of the legacy
 // unquarantine endpoint. hasUnresolvedCritical disables the primary Approve
-// button so the user must use Force Approve explicitly.
+// button so the user must use Force Approve explicitly. It mirrors the
+// backend approval gate (Spec 077 FR-021: hard-tier BASELINE findings only)
+// via the tier-driven finding_counts — a tierless deep-scan/external finding
+// or a non-blocking soft finding with "critical" severity must not lock the
+// Approve button when the backend would accept. Raw summary.critical is only
+// a fallback for payloads that predate finding_counts.
 const hasUnresolvedCritical = computed(() => {
+  const fc = report.value?.finding_counts
+  if (fc) return (fc.dangerous ?? 0) > 0
   return (report.value?.summary?.critical ?? 0) > 0
 })
 

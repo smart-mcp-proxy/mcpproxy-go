@@ -1983,50 +1983,12 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 
 	summary.RiskScore = CalculateRiskScore(allFindings)
 
-	// Count by tier/threat level. Spec 077 FR-014/FR-021: the "dangerous"
-	// verdict is tier-driven — only a HARD baseline finding is counted as
-	// dangerous (isBlockingFinding). A baseline soft finding (detect emits
-	// ThreatLevelWarning for soft-only) counts as a warning. Legacy/external/
-	// deep-scan findings carry no tier and therefore never count as dangerous
-	// (US3 FR-021 — they inform but do not gate); they surface at warning/info
-	// prominence by threat_level. A tierless finding at threat_level
-	// "dangerous" is bucketed as a WARNING: it informs without gating, and it
-	// must not rank BELOW a warning-level finding (the old bucketing dropped
-	// it into Info — an inversion).
-	counts := FindingCounts{Total: len(allFindings)}
-	baselineWarnings := 0
-	for _, f := range allFindings {
-		switch {
-		case isBlockingFinding(f):
-			counts.Dangerous++
-		case f.ThreatLevel == ThreatLevelWarning,
-			f.Tier == "" && f.ThreatLevel == ThreatLevelDangerous:
-			counts.Warning++
-		default:
-			counts.Info++
-		}
-		// FR-014: only BASELINE findings move the verdict at ANY level. The
-		// in-process detect engine is the only producer that sets Tier, so a
-		// non-empty Tier identifies a baseline finding.
-		if f.Tier != "" && !isBlockingFinding(f) && f.ThreatLevel == ThreatLevelWarning {
-			baselineWarnings++
-		}
-	}
+	// Tier-driven, baseline-only bucketing + verdict (Spec 077 FR-014/FR-021).
+	// deriveBaselineVerdict is SHARED with AggregateReports so the server-list
+	// status and the report-page verdict can never disagree.
+	verdict, counts := deriveBaselineVerdict(allFindings)
 	summary.FindingCounts = &counts
-
-	// Determine status (Spec 077 FR-014): the verdict derives SOLELY from
-	// baseline findings at every level — "dangerous" requires ≥1 hard-tier
-	// baseline finding, "warnings" requires ≥1 warning-level baseline (soft)
-	// finding. Deep-scan/external/legacy findings are reported via
-	// FindingCounts and the DeepScan descriptor but never move the verdict.
-	switch {
-	case counts.Dangerous > 0:
-		summary.Status = "dangerous"
-	case baselineWarnings > 0:
-		summary.Status = "warnings"
-	default:
-		summary.Status = "clean" // baseline produced nothing above info level
-	}
+	summary.Status = verdict
 
 	// Cache for fast subsequent reads
 	s.cacheScanSummary(serverName, summary)
@@ -2052,6 +2014,53 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 // (GetScanSummary) and the ApproveServer gate, so the two can never disagree.
 func isBlockingFinding(f ScanFinding) bool {
 	return f.Tier == TierHard
+}
+
+// deriveBaselineVerdict buckets findings by the Spec 077 tier-driven model and
+// derives the baseline-only verdict (FR-014/FR-021). It is the SINGLE source of
+// truth shared by GetScanSummary (server-list status) and AggregateReports
+// (report-page verdict), so the two surfaces can never disagree.
+//
+// Bucketing: only a HARD baseline finding counts as dangerous
+// (isBlockingFinding). A baseline soft finding (detect emits ThreatLevelWarning
+// for soft-only) counts as a warning. Legacy/external/deep-scan findings carry
+// no tier and therefore never count as dangerous (US3 FR-021 — they inform but
+// do not gate); they surface at warning/info prominence by threat_level. A
+// tierless finding at threat_level "dangerous" is bucketed as a WARNING: it
+// informs without gating, and it must not rank BELOW a warning-level finding
+// (the old bucketing dropped it into Info — an inversion).
+//
+// Verdict: derives SOLELY from baseline findings at every level — "dangerous"
+// requires ≥1 hard-tier baseline finding, "warnings" requires ≥1 warning-level
+// baseline (soft) finding, else "clean". Deep-scan/external/legacy findings are
+// reported via FindingCounts and the DeepScan descriptor but never move it.
+// Only the in-process detect engine sets Tier, so a non-empty Tier identifies a
+// baseline finding.
+func deriveBaselineVerdict(findings []ScanFinding) (string, FindingCounts) {
+	counts := FindingCounts{Total: len(findings)}
+	baselineWarnings := 0
+	for _, f := range findings {
+		switch {
+		case isBlockingFinding(f):
+			counts.Dangerous++
+		case f.ThreatLevel == ThreatLevelWarning,
+			f.Tier == "" && f.ThreatLevel == ThreatLevelDangerous:
+			counts.Warning++
+		default:
+			counts.Info++
+		}
+		if f.Tier != "" && !isBlockingFinding(f) && f.ThreatLevel == ThreatLevelWarning {
+			baselineWarnings++
+		}
+	}
+	switch {
+	case counts.Dangerous > 0:
+		return "dangerous", counts
+	case baselineWarnings > 0:
+		return "warnings", counts
+	default:
+		return "clean", counts // baseline produced nothing above info level
+	}
 }
 
 // ScanSummary is a compact representation of scan status for the server list.

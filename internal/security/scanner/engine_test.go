@@ -1315,3 +1315,80 @@ func TestDeepScanFailureLeavesBaselineVerdictUnchanged(t *testing.T) {
 		t.Errorf("disabled deep scan must not report failures, got %+v", baseline.DeepScan.ScannersFailed)
 	}
 }
+
+// TestAggregateReportsVerdictBaselineOnly locks Spec 077 FR-014 at the
+// aggregated-report level (the payload the report PAGE renders): the
+// report-level Verdict/FindingCounts must use the SAME tier-driven,
+// baseline-only derivation as the server-list summary (GetScanSummary), so
+// the report page badge can never say "dangerous" while the server list says
+// "clean". Summary keeps the RAW threat-level counts for transparency; the
+// verdict is what verdict-bearing UI must read.
+func TestAggregateReportsVerdictBaselineOnly(t *testing.T) {
+	t.Run("tierless dangerous finding does not move the verdict", func(t *testing.T) {
+		// A deep-scan/external scanner finding carries no Tier. Rule id
+		// "tool-poisoning" makes ClassifyThreat assign threat_level=dangerous.
+		agg := AggregateReports("j1", "server-a", []*ScanReport{
+			{
+				ID: "r1", ScannerID: "trivy",
+				Findings: []ScanFinding{
+					{RuleID: "tool-poisoning", Severity: SeverityCritical, Title: "hidden instruction"},
+				},
+			},
+		})
+		if agg.Verdict != "clean" {
+			t.Errorf("verdict must derive solely from baseline findings (FR-014): expected 'clean', got %q", agg.Verdict)
+		}
+		if agg.FindingCounts == nil {
+			t.Fatal("expected FindingCounts on aggregated report")
+		}
+		if agg.FindingCounts.Dangerous != 0 {
+			t.Errorf("tierless findings must never count as dangerous, got %d", agg.FindingCounts.Dangerous)
+		}
+		if agg.FindingCounts.Warning != 1 {
+			t.Errorf("tierless dangerous finding must surface at warning prominence, got Warning=%d Info=%d",
+				agg.FindingCounts.Warning, agg.FindingCounts.Info)
+		}
+		// Raw threat-level counts are retained untouched for transparency.
+		if agg.Summary.Dangerous != 1 {
+			t.Errorf("raw Summary.Dangerous must keep the threat-level count, got %d", agg.Summary.Dangerous)
+		}
+	})
+
+	t.Run("hard-tier baseline finding yields dangerous", func(t *testing.T) {
+		agg := AggregateReports("j2", "server-a", []*ScanReport{
+			{
+				ID: "r1", ScannerID: inProcessTPAScannerID,
+				Findings: []ScanFinding{
+					{RuleID: "detect/phrase_injection", Tier: TierHard, ThreatLevel: ThreatLevelDangerous, ThreatType: "prompt_injection", Severity: SeverityCritical, Title: "injection"},
+				},
+			},
+		})
+		if agg.Verdict != "dangerous" {
+			t.Errorf("hard-tier baseline finding must yield 'dangerous', got %q", agg.Verdict)
+		}
+		if agg.FindingCounts == nil || agg.FindingCounts.Dangerous != 1 {
+			t.Errorf("expected FindingCounts.Dangerous=1, got %+v", agg.FindingCounts)
+		}
+	})
+
+	t.Run("soft-tier baseline finding yields warnings", func(t *testing.T) {
+		agg := AggregateReports("j3", "server-a", []*ScanReport{
+			{
+				ID: "r1", ScannerID: inProcessTPAScannerID,
+				Findings: []ScanFinding{
+					{RuleID: "detect/directive_imperative", Tier: TierSoft, ThreatLevel: ThreatLevelWarning, ThreatType: "tool_poisoning", Severity: SeverityMedium, Title: "directive"},
+				},
+			},
+		})
+		if agg.Verdict != "warnings" {
+			t.Errorf("soft-tier baseline finding must yield 'warnings', got %q", agg.Verdict)
+		}
+	})
+
+	t.Run("no findings yields clean", func(t *testing.T) {
+		agg := AggregateReports("j4", "server-a", []*ScanReport{{ID: "r1", ScannerID: "trivy"}})
+		if agg.Verdict != "clean" {
+			t.Errorf("expected 'clean' for empty findings, got %q", agg.Verdict)
+		}
+	})
+}

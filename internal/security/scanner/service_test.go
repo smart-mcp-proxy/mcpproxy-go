@@ -2728,3 +2728,69 @@ func TestBuildDeepScanDescriptorPresentWhenDisabled(t *testing.T) {
 		t.Errorf("report must carry the disabled deep-scan descriptor, got %+v", report.DeepScan)
 	}
 }
+
+// TestGetScanReportByJobIDVerdictMatchesSummary pins the FR-014 cross-surface
+// invariant the report page depends on: for the same scan data, the aggregated
+// report's tier-driven Verdict (rendered as the report-page badge) must equal
+// the server-list summary Status from GetScanSummary. With deep scan on, a
+// tierless Docker-scanner finding that ClassifyThreat marks "dangerous" must
+// leave BOTH surfaces at "clean", and both must bucket it as a warning.
+func TestGetScanReportByJobIDVerdictMatchesSummary(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	svc.SetDeepScan(true, nil)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-report-verdict",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 1},
+		},
+	})
+	// Tierless (deep-scan/external) finding; rule id "tool-poisoning" makes
+	// ClassifyThreat assign threat_level=dangerous.
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r-report-verdict", JobID: "j-report-verdict", ServerName: "server-a", ScannerID: "test-scanner",
+		Findings: []ScanFinding{
+			{RuleID: "tool-poisoning", Severity: SeverityCritical, Title: "hidden instruction in description"},
+		},
+		ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	report, err := svc.GetScanReportByJobID(context.Background(), "j-report-verdict")
+	if err != nil {
+		t.Fatalf("GetScanReportByJobID: %v", err)
+	}
+
+	if report.Verdict != summary.Status {
+		t.Errorf("report verdict %q must match server-list status %q (FR-014 verdict purity)", report.Verdict, summary.Status)
+	}
+	if summary.Status != "clean" || report.Verdict != "clean" {
+		t.Errorf("tierless dangerous finding must not move either verdict: summary=%q report=%q", summary.Status, report.Verdict)
+	}
+	if report.FindingCounts == nil {
+		t.Fatal("expected tier-driven FindingCounts on aggregated report")
+	}
+	if summary.FindingCounts == nil {
+		t.Fatal("expected FindingCounts on summary")
+	}
+	if *report.FindingCounts != *summary.FindingCounts {
+		t.Errorf("report and summary must bucket findings identically: report=%+v summary=%+v",
+			*report.FindingCounts, *summary.FindingCounts)
+	}
+	if report.FindingCounts.Dangerous != 0 || report.FindingCounts.Warning != 1 {
+		t.Errorf("tierless dangerous finding must bucket as warning on the report too, got %+v", *report.FindingCounts)
+	}
+	// Raw threat-level counts stay available for transparency.
+	if report.Summary.Dangerous != 1 {
+		t.Errorf("raw report Summary.Dangerous must keep the threat-level count, got %d", report.Summary.Dangerous)
+	}
+}

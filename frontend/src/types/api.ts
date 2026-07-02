@@ -42,6 +42,15 @@ export interface SecurityScanSummary {
   risk_score: number
   status: SecurityScanStatus
   finding_counts?: SecurityScanFindingCounts
+  // Scanner coverage for the primary (baseline) scan pass — informational only.
+  // Spec 077 US3 (FR-008/FR-014): status derives SOLELY from baseline findings;
+  // a failed Docker deep scanner never downgrades the verdict.
+  scanners_run?: number
+  scanners_failed?: number
+  scanners_total?: number
+  // Opt-in deep-scan layer status (Spec 077 US3), always emitted on a computed
+  // summary (enabled=false when off). Informational — never influences status.
+  deep_scan?: DeepScanDescriptor
 }
 
 // Security scan finding (Spec 039)
@@ -74,7 +83,14 @@ export interface SecurityScanReport {
   status: SecurityScanStatus
   risk_score: number
   findings: SecurityScanFinding[]
-  finding_counts: SecurityScanFindingCounts
+  // Tier-driven, baseline-only verdict (Spec 077 FR-014): 'dangerous' only for
+  // hard-tier baseline findings; tierless deep-scan/external findings never
+  // move it. Verdict-bearing UI must read this, NOT summary (raw counts).
+  verdict?: 'clean' | 'warnings' | 'dangerous'
+  // Tier-driven buckets matching SecurityScanSummary.finding_counts (a tierless
+  // 'dangerous' finding buckets as warning — informs, never gates).
+  finding_counts?: SecurityScanFindingCounts
+  // Raw threat-level/severity counts across ALL findings — transparency only.
   summary: SecurityScanReportSummary
   scanned_at: string
   duration_ms?: number

@@ -824,6 +824,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
 
+	// Spec 077 FR-014 verdict purity: the report-level verdict uses the SAME
+	// tier-driven, baseline-only derivation as the server-list summary
+	// (GetScanSummary via deriveBaselineVerdict), so the report page can never
+	// disagree with the server verdict — a tierless deep-scan/external
+	// "dangerous" finding never moves it. Summary above keeps the RAW
+	// threat-level counts for transparency; verdict-bearing UI reads these.
+	verdict, counts := deriveBaselineVerdict(agg.Findings)
+	agg.Verdict = verdict
+	agg.FindingCounts = &counts
+
 	// ScannersRun = number of successful reports
 	agg.ScannersRun = len(reports)
 	// ScanComplete = at least one scanner succeeded
