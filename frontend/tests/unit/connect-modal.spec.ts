@@ -151,7 +151,7 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    // A real one-click Connect button must be offered (not greyed out).
+    // A real Review & connect button must be offered (not greyed out).
     const connectButton = wrapper.find('button.btn-primary.btn-xs')
     expect(connectButton.exists()).toBe(true)
     expect(connectButton.text()).toContain('Review & connect')
@@ -290,7 +290,7 @@ describe('ConnectModal', () => {
     expect(codexRow.exists()).toBe(true)
     expect(codexRow.text()).toContain('Disconnect')
 
-    // cursor is genuinely not connected -> Connect button still offered.
+    // cursor is genuinely not connected -> Review & connect button still offered.
     const connectButtons = wrapper.findAll('button.btn-primary.btn-xs')
     expect(connectButtons.length).toBe(1)
     expect(connectButtons[0].text()).toContain('Review & connect')
@@ -326,7 +326,7 @@ describe('ConnectModal', () => {
     expect(wrapper.find('[data-test="connect-denied-banner"]').exists()).toBe(false)
     // Explicit, no-eager-read affordance to verify access on demand.
     expect(wrapper.find('[data-test="connect-check-access"]').exists()).toBe(true)
-    // Connect remains offered.
+    // Review & connect remains offered.
     expect(wrapper.find('button.btn-primary.btn-xs').text()).toContain('Review & connect')
   })
 
@@ -433,7 +433,7 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    // Spec 078 US1: click Connect → preview panel → confirm writes.
+    // Spec 078 US1: click Review & connect → preview panel → confirm (Connect) writes.
     await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
     await flushPromises()
     await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
