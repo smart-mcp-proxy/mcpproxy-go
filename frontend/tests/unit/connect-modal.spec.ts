@@ -154,7 +154,7 @@ describe('ConnectModal', () => {
     // A real one-click Connect button must be offered (not greyed out).
     const connectButton = wrapper.find('button.btn-primary.btn-xs')
     expect(connectButton.exists()).toBe(true)
-    expect(connectButton.text()).toContain('Connect')
+    expect(connectButton.text()).toContain('Review & connect')
 
     // The bridge note must be surfaced to the user.
     expect(wrapper.text()).toContain('mcp-remote stdio bridge')
@@ -187,7 +187,7 @@ describe('ConnectModal', () => {
     // Fresh install: no config file yet, but the bridge Connect must still appear.
     const connectButton = wrapper.find('button.btn-primary.btn-xs')
     expect(connectButton.exists()).toBe(true)
-    expect(connectButton.text()).toContain('Connect')
+    expect(connectButton.text()).toContain('Review & connect')
     expect(wrapper.text()).not.toContain('Config not found')
   })
 
@@ -293,7 +293,7 @@ describe('ConnectModal', () => {
     // cursor is genuinely not connected -> Connect button still offered.
     const connectButtons = wrapper.findAll('button.btn-primary.btn-xs')
     expect(connectButtons.length).toBe(1)
-    expect(connectButtons[0].text()).toContain('Connect')
+    expect(connectButtons[0].text()).toContain('Review & connect')
   })
 
   // Spec 075 (MCP-2833) US1: the stat-only listing reports access_state=unknown
@@ -327,7 +327,7 @@ describe('ConnectModal', () => {
     // Explicit, no-eager-read affordance to verify access on demand.
     expect(wrapper.find('[data-test="connect-check-access"]').exists()).toBe(true)
     // Connect remains offered.
-    expect(wrapper.find('button.btn-primary.btn-xs').text()).toContain('Connect')
+    expect(wrapper.find('button.btn-primary.btn-xs').text()).toContain('Review & connect')
   })
 
   // Spec 075 US2: a permission-denied client surfaces a distinct, actionable

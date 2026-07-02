@@ -3,7 +3,7 @@
     <div class="modal-box max-w-lg">
       <h3 class="font-bold text-lg mb-2">Connect MCPProxy to AI Agents</h3>
       <p class="text-sm opacity-70 mb-4">
-        Register MCPProxy as an MCP server in your AI tools. This modifies the tool's config file (backup created automatically).
+        Register MCPProxy as an MCP server in your AI tools. Clicking a client shows the exact change first — nothing is written until you confirm (backup created automatically).
       </p>
 
       <!-- Loading state -->
@@ -75,7 +75,7 @@
                 :disabled="loading.clients[client.id] || previewLoading[client.id]"
               >
                 <span v-if="loading.clients[client.id] || previewLoading[client.id]" class="loading loading-spinner loading-xs"></span>
-                <span v-else>Connect</span>
+                <span v-else>Review & connect</span>
               </button>
               <!-- Spec 075 US1: explicit, no-eager-read access check. The stat-only
                    listing leaves installed clients 'unknown'; this is the only
