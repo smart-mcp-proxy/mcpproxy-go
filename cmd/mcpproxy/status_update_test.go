@@ -153,9 +153,10 @@ func TestExtractStatusUpdate(t *testing.T) {
 			"version": "v0.45.0",
 			"update": map[string]interface{}{
 				"available":      true,
-				"latest_version": "v0.46.0",
-				"release_url":    "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.46.0",
-				"is_prerelease":  false,
+				"latest_version": "v0.46.0-rc.1",
+				"release_url":    "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.46.0-rc.1",
+				"checked_at":     "2026-07-02T10:00:00Z",
+				"is_prerelease":  true,
 			},
 		}
 
@@ -166,11 +167,17 @@ func TestExtractStatusUpdate(t *testing.T) {
 		if !u.Available {
 			t.Error("expected Available=true")
 		}
-		if u.LatestVersion != "v0.46.0" {
-			t.Errorf("expected LatestVersion v0.46.0, got %q", u.LatestVersion)
+		if u.LatestVersion != "v0.46.0-rc.1" {
+			t.Errorf("expected LatestVersion v0.46.0-rc.1, got %q", u.LatestVersion)
 		}
-		if u.ReleaseURL != "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.46.0" {
+		if u.ReleaseURL != "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.46.0-rc.1" {
 			t.Errorf("unexpected ReleaseURL %q", u.ReleaseURL)
+		}
+		if u.CheckedAt != "2026-07-02T10:00:00Z" {
+			t.Errorf("expected CheckedAt to be preserved, got %q", u.CheckedAt)
+		}
+		if !u.IsPrerelease {
+			t.Error("expected IsPrerelease=true")
 		}
 	})
 
@@ -210,6 +217,8 @@ func TestStatusJSONIncludesUpdate(t *testing.T) {
 			Available:     true,
 			LatestVersion: "v0.46.0",
 			ReleaseURL:    "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.46.0",
+			CheckedAt:     "2026-07-02T10:00:00Z",
+			IsPrerelease:  true,
 		},
 	}
 
@@ -234,13 +243,21 @@ func TestStatusJSONIncludesUpdate(t *testing.T) {
 		t.Errorf("expected update.latest_version v0.46.0, got %q", result.Update.LatestVersion)
 	}
 
-	// Field name in the wire format must be "update" (snake_case contract).
+	// Field names in the wire format must match the /api/v1/info update
+	// object (snake_case contract, FR-021).
 	var raw map[string]interface{}
 	if err := json.Unmarshal([]byte(output), &raw); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	if _, ok := raw["update"]; !ok {
-		t.Error("expected raw JSON key 'update'")
+	rawUpdate, ok := raw["update"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected raw JSON key 'update'")
+	}
+	if v, ok := rawUpdate["checked_at"].(string); !ok || v != "2026-07-02T10:00:00Z" {
+		t.Errorf("expected raw JSON key 'update.checked_at', got %v", rawUpdate["checked_at"])
+	}
+	if v, ok := rawUpdate["is_prerelease"].(bool); !ok || !v {
+		t.Errorf("expected raw JSON key 'update.is_prerelease'=true, got %v", rawUpdate["is_prerelease"])
 	}
 }
 

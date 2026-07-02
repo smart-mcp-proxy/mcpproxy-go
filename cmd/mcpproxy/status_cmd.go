@@ -45,6 +45,8 @@ type StatusUpdateInfo struct {
 	Available     bool   `json:"available"`
 	LatestVersion string `json:"latest_version,omitempty"`
 	ReleaseURL    string `json:"release_url,omitempty"`
+	CheckedAt     string `json:"checked_at,omitempty"` // RFC 3339, as serialized by the daemon
+	IsPrerelease  bool   `json:"is_prerelease,omitempty"`
 	CheckError    string `json:"check_error,omitempty"`
 }
 
@@ -300,6 +302,12 @@ func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
 	if v, ok := updateData["release_url"].(string); ok {
 		u.ReleaseURL = v
 	}
+	if v, ok := updateData["checked_at"].(string); ok {
+		u.CheckedAt = v
+	}
+	if v, ok := updateData["is_prerelease"].(bool); ok {
+		u.IsPrerelease = v
+	}
 	if v, ok := updateData["check_error"].(string); ok {
 		u.CheckError = v
 	}
@@ -309,6 +317,11 @@ func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
 // statusVersionSuffix renders the update annotation appended to the Version
 // line, mirroring doctor's presentation. A failed or not-yet-completed check
 // renders nothing (quiet on failure; the error stays in JSON for diagnostics).
+//
+// TODO(spec-079/FR-002): extend the annotation with the human-readable
+// "N releases / M weeks behind" delta once internal/updatecheck computes it
+// (requires the release list + publish dates, not just the latest release;
+// additive per FR-021). This function is the single rendering point.
 func statusVersionSuffix(u *StatusUpdateInfo) string {
 	if u == nil || u.CheckError != "" {
 		return ""

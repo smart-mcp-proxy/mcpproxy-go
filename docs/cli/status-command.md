@@ -138,7 +138,8 @@ mcpproxy status -o json
   "update": {
     "available": true,
     "latest_version": "v1.3.0",
-    "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0"
+    "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
+    "checked_at": "2026-07-02T10:00:00Z"
   }
 }
 ```
@@ -150,6 +151,8 @@ When the daemon is running, `status` surfaces the result of the background updat
 - **Update available**: `Version: v1.2.0 (update available: v1.3.0 — <release URL>)`
 - **Up to date**: `Version: v1.3.0 (latest)`
 - **Check failed or not yet completed** (offline, rate-limited): the version is shown without any annotation. In JSON output the `update.check_error` field retains the failure reason for diagnostics.
+
+In machine-readable output (`-o json`/`-o yaml`) the `update` object also carries `checked_at` (when the last successful check ran, so consumers can judge staleness) and `is_prerelease` (whether the offered version is a prerelease), matching the `/api/v1/info` contract.
 
 ## API Key Masking
 

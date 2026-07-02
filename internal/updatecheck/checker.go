@@ -167,6 +167,10 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string) {
 	case updateAvailable && latestVersion != c.announcedVersion:
 		// Announce each newly detected version exactly once per process;
 		// subsequent ticks for the same version log at Debug only.
+		// TODO(spec-079/FR-002): include the "N releases / M weeks behind"
+		// delta here once the checker fetches the release list + publish
+		// dates (a later 079 slice extending VersionInfo, additive per
+		// FR-021).
 		c.announcedVersion = latestVersion
 		c.logger.Info("Update available",
 			zap.String("current", c.version),
