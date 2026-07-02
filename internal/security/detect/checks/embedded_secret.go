@@ -73,15 +73,45 @@ func builtinSecretPatterns() []*patterns.Pattern {
 // references restored from the legacy sensitive_file detector. Matched
 // case-insensitively against raw text; order is deterministic so ties resolve
 // stably.
+//
+// SOURCE OF TRUTH: internal/security/paths.go GetFilePathPatterns() is the
+// canonical sensitive-path list the deleted security.NewDetector(nil) path used.
+// That list is glob-style (e.g. "*.pem", "~/.aws/credentials") for matching real
+// filesystem paths in tool args/responses; here we need TEXT-scanning regexes for
+// free-form descriptions/schemas, and detect must stay offline (it cannot import
+// internal/security, which pulls in os). So the curated set below MIRRORS
+// paths.go rather than importing it — keep the two in sync when either changes.
+// Every category paths.go covers (SSH, AWS, GCP, Azure, Docker, kube, env,
+// private keys, git/registry creds, macOS keychain, Windows credentials, Linux
+// /etc) is represented here (Spec 077 US1, Codex round-5 finding #2).
 var sensitiveFilePatterns = []*regexp.Regexp{
+	// SSH private keys — ~/.ssh/id_rsa|dsa|ecdsa|ed25519, *_key (+ %USERPROFILE%).
 	regexp.MustCompile(`(?i)(?:~|%userprofile%|/home/[^/\s]+|/root)?[/\\]?\.ssh[/\\](?:id_(?:rsa|dsa|ecdsa|ed25519)|[^/\\\s]*_key)`),
+	// AWS credentials/config.
 	regexp.MustCompile(`(?i)(?:~|%userprofile%|/home/[^/\s]+|/root)?[/\\]?\.aws[/\\](?:credentials|config)`),
+	// GCP application-default/credentials.db + *service_account*.json.
 	regexp.MustCompile(`(?i)\.config[/\\]gcloud[/\\](?:application_default_credentials\.json|credentials\.db)`),
+	regexp.MustCompile(`(?i)[\w.\-]*service_account[\w.\-]*\.json\b`),
+	// Azure access tokens / profile.
+	regexp.MustCompile(`(?i)(?:~|%userprofile%|/home/[^/\s]+|/root)?[/\\]?\.azure[/\\](?:accesstokens|azureprofile)\.json`),
+	// Docker config (registry auth tokens).
+	regexp.MustCompile(`(?i)(?:~|%userprofile%|/home/[^/\s]+|/root)?[/\\]?\.docker[/\\]config\.json`),
+	// Kubernetes config.
 	regexp.MustCompile(`(?i)(?:~|/home/[^/\s]+|/root)?[/\\]?\.kube[/\\]config`),
+	// Linux system credential files.
 	regexp.MustCompile(`(?i)/etc/(?:passwd|shadow|sudoers)`),
+	// dotenv files — ".env", ".env.<stage>", and "<name>.env".
 	regexp.MustCompile(`(?i)(?:^|[\s"'` + "`" + `/\\])\.env(?:\.[a-z]+)?(?:$|[\s"'` + "`" + `])`),
-	regexp.MustCompile(`(?i)[\w./\\-]+\.(?:pem|pfx|p12|kdbx|pgpass)\b`),
-	regexp.MustCompile(`(?i)(?:\.git-credentials|\.npmrc|\.netrc)\b`),
+	regexp.MustCompile(`(?i)\b[\w-]+\.env\b`),
+	// Private-key / secret material files — .pem, .pfx, .p12, .ppk, .key, .kdbx, .pgpass.
+	regexp.MustCompile(`(?i)[\w./\\-]+\.(?:pem|pfx|p12|ppk|key|kdbx|pgpass)\b`),
+	// Git + package-registry credential files — .git-credentials, .gitconfig,
+	// .npmrc, .pypirc, .netrc.
+	regexp.MustCompile(`(?i)(?:\.git-credentials|\.gitconfig|\.npmrc|\.pypirc|\.netrc)\b`),
+	// macOS keychains — ~/Library/Keychains/* and /Library/Keychains/*.
+	regexp.MustCompile(`(?i)[/\\]?Library[/\\]Keychains[/\\]`),
+	// Windows credential store — %LOCALAPPDATA%|%APPDATA%\Microsoft\Credentials\*.
+	regexp.MustCompile(`(?i)%(?:localappdata|appdata)%[/\\]microsoft[/\\]credentials[/\\]`),
 }
 
 // entropyCandidate matches contiguous runs that could be an opaque secret token.

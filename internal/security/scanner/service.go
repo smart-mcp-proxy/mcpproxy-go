@@ -1422,11 +1422,11 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 	// gate), or a deep-scan/external finding — even though the very same summary and
 	// verdict showed the server as non-dangerous. Gate and verdict then disagreed.
 	// Under Spec 077's baseline-only, tier-driven model (FR-021, US3 FR-021 —
-	// deep-scan/external findings inform but never gate) only a HARD-tier baseline
-	// finding, or a legacy/external finding whose threat_level is "dangerous",
-	// blocks. A genuinely dangerous critical finding still carries threat_level
-	// "dangerous" and so still blocks via isBlockingFinding (and still shows
-	// "dangerous" in the summary) — the two stay consistent.
+	// deep-scan/external findings inform but never gate) ONLY a HARD-tier baseline
+	// finding blocks. Legacy/external/deep-scan findings carry no tier and never
+	// gate, even at threat_level "dangerous"; they still surface in the summary as
+	// warnings/info. isBlockingFinding is that single tier-driven predicate, so
+	// the gate and the "dangerous" summary status stay consistent.
 	if aggReport != nil && !force {
 		blocking := 0
 		for _, f := range aggReport.Findings {
@@ -1779,11 +1779,12 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	summary.RiskScore = CalculateRiskScore(allFindings)
 
 	// Count by tier/threat level. Spec 077 FR-014/FR-021: the "dangerous"
-	// verdict is tier-driven — only a HARD baseline finding blocks approval.
-	// A baseline soft finding (detect emits ThreatLevelWarning for soft-only)
-	// counts as a warning, never dangerous. Legacy/external findings that
-	// predate the two-tier model carry no tier, so they fall back to their
-	// existing threat_level semantics (back-compat).
+	// verdict is tier-driven — only a HARD baseline finding is counted as
+	// dangerous (isBlockingFinding). A baseline soft finding (detect emits
+	// ThreatLevelWarning for soft-only) counts as a warning. Legacy/external/
+	// deep-scan findings carry no tier and therefore never count as dangerous
+	// (US3 FR-021 — they inform but do not gate); they still surface as
+	// warnings/info by threat_level.
 	counts := FindingCounts{Total: len(allFindings)}
 	for _, f := range allFindings {
 		switch {
@@ -1798,7 +1799,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	summary.FindingCounts = &counts
 
 	// Determine status. A "dangerous" status therefore requires ≥1 hard-tier
-	// baseline finding (or a legacy dangerous finding).
+	// baseline finding.
 	if counts.Dangerous > 0 {
 		summary.Status = "dangerous"
 	} else if counts.Warning > 0 {
@@ -1816,21 +1817,24 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 }
 
 // isBlockingFinding reports whether a finding gates approval / drives a
-// "dangerous" verdict under the Spec 077 two-tier model (FR-021). A baseline
-// finding blocks only when it is HARD-tier. A legacy/external finding (produced
-// before the two-tier model, so it carries no tier) falls back to its
-// threat_level so pre-existing behavior is preserved. Baseline SOFT findings —
-// which carry Tier=="soft" — never block, even if some producer mislabeled their
-// threat_level, which is exactly what makes the two-tier model govern behavior.
+// "dangerous" verdict under the Spec 077 two-tier model (FR-021, US3 FR-021).
+// Blocking is PURELY tier-driven: a finding blocks if and only if it is a
+// HARD-tier baseline finding. Only the in-process detect engine (the baseline
+// scanner) sets Tier, and it emits Tier=="hard" exactly for the hard-tier
+// checks. Every other producer carries no tier:
+//
+//   - Baseline SOFT findings carry Tier=="soft" — review-only, never block.
+//   - Deep-scan / external / legacy findings (Docker scanners, imported SARIF,
+//     supply-chain audits) carry no tier. Per US3 FR-021 these INFORM but do
+//     NOT gate approval, so they never block regardless of threat_level. This
+//     keeps the gate consistent with the baseline-only, tier-driven verdict:
+//     a no-tier "dangerous" finding must not silently unquarantine-block a
+//     server when the baseline itself is clean.
+//
+// This is the SAME predicate that drives the "dangerous" summary status
+// (GetScanSummary) and the ApproveServer gate, so the two can never disagree.
 func isBlockingFinding(f ScanFinding) bool {
-	switch f.Tier {
-	case TierHard:
-		return true
-	case TierSoft:
-		return false
-	default:
-		return f.ThreatLevel == ThreatLevelDangerous
-	}
+	return f.Tier == TierHard
 }
 
 // degradeIfIncompleteCoverage downgrades a "clean" verdict to "degraded" when
