@@ -289,14 +289,30 @@ func CalculateRiskScore(findings []ScanFinding) int {
 	// An empty threat_type cannot form consensus and keeps the legacy per-rule
 	// dedup (so existing single-scanner scoring is unchanged).
 	type consensusKey struct{ location, threatType string }
-	groupSources := make(map[consensusKey]map[string]struct{})
 	// A consensus group is scored ONCE, at the MOST-SEVERE threat category among
-	// all agreeing findings (not whichever is encountered first) and at the
-	// MAX per-finding weight — so the score is order-independent even when
-	// severity-derived threat_types (supply_chain, uncategorized, the
-	// malicious_code fallback) put different threat_levels on agreeing findings.
+	// all agreeing findings (not whichever is encountered first) — so the score is
+	// order-independent even when severity-derived threat_types (supply_chain,
+	// uncategorized, the malicious_code fallback) put different threat_levels on
+	// agreeing findings.
+	//
+	// catKey narrows a group to a single severity/category bucket. The weight
+	// applied to a bucket counts only the findings that ACTUALLY rated the issue
+	// at (at least) that category — a weaker agreeing finding (e.g. an info CVE
+	// sharing a location+threat_type with a dangerous one) must NOT add weight to
+	// the stronger bucket. It can still have raised the finding's confidence in
+	// MergeFindings, but it never inflates dangerous risk (Spec 077 US2, Codex R2 #1).
+	type catKey struct {
+		location, threatType string
+		cat                  int
+	}
+	groupSources := make(map[consensusKey]map[string]struct{})
 	groupMaxCat := make(map[consensusKey]int)
-	groupMaxWeight := make(map[consensusKey]int)
+	// Per (group, category): distinct sources and max per-finding signal weight of
+	// the findings that rated the issue at exactly that category. Because a group
+	// is only ever scored at its MAX category, the sources counted there are
+	// precisely those whose own finding is "at least" the max category.
+	catSources := make(map[catKey]map[string]struct{})
+	catMaxWeight := make(map[catKey]int)
 	for i := range findings {
 		f := &findings[i]
 		if f.ThreatType == "" {
@@ -308,14 +324,25 @@ func CalculateRiskScore(findings []ScanFinding) int {
 			set = make(map[string]struct{})
 			groupSources[ck] = set
 		}
-		for _, s := range findingSources(*f) {
+		srcs := findingSources(*f)
+		for _, s := range srcs {
 			set[s] = struct{}{}
 		}
-		if cat := threatCategory(f); cat > groupMaxCat[ck] {
+		cat := threatCategory(f)
+		if cat > groupMaxCat[ck] {
 			groupMaxCat[ck] = cat
 		}
-		if w := consensusWeight(*f); w > groupMaxWeight[ck] {
-			groupMaxWeight[ck] = w
+		catk := catKey{f.Location, f.ThreatType, cat}
+		cs := catSources[catk]
+		if cs == nil {
+			cs = make(map[string]struct{})
+			catSources[catk] = cs
+		}
+		for _, s := range srcs {
+			cs[s] = struct{}{}
+		}
+		if w := consensusWeight(*f); w > catMaxWeight[catk] {
+			catMaxWeight[catk] = w
 		}
 	}
 
@@ -355,11 +382,21 @@ func CalculateRiskScore(findings []ScanFinding) int {
 					continue
 				}
 				seenConsensus[ck] = true
-				weight := groupMaxWeight[ck]
-				if n > weight {
-					weight = n
+				// Score the group ONCE at its most-severe category, weighted only
+				// by the findings that actually rated it at that category: the
+				// number of distinct sources at the max category, or the max
+				// signal weight of a single such finding, whichever is greater.
+				// A weaker agreeing finding never inflates the stronger bucket.
+				maxCat := groupMaxCat[ck]
+				catk := catKey{ck.location, ck.threatType, maxCat}
+				weight := len(catSources[catk])
+				if w := catMaxWeight[catk]; w > weight {
+					weight = w
 				}
-				addWeight(groupMaxCat[ck], weight)
+				if weight < 1 {
+					weight = 1
+				}
+				addWeight(maxCat, weight)
 				continue
 			}
 		}
@@ -537,6 +574,16 @@ func sortedUnion(lists ...[]string) []string {
 	return out
 }
 
+// backfillString copies src into *dst only when *dst is empty, so the kept
+// (most-severe) finding keeps its own non-empty value and merely fills its gaps
+// from an absorbed duplicate. Order-independent: filling an empty from a
+// non-empty gives the same result whichever finding is the merge anchor.
+func backfillString(dst *string, src string) {
+	if *dst == "" && src != "" {
+		*dst = src
+	}
+}
+
 // MergeFindings collapses findings from every scanner into a single unified list
 // (Spec 077 FR-010/FR-011). Findings sharing a (rule_id, location) merge into one
 // entry whose Sources lists every contributing scanner. When ≥2 distinct sources
@@ -583,6 +630,34 @@ func MergeFindings(findings []ScanFinding) []ScanFinding {
 				result[pos].ThreatLevel = f.ThreatLevel
 			}
 			result[pos].Signals = sortedUnion(result[pos].Signals, f.Signals)
+			// Backfill any enrichment field the kept finding lacks from the
+			// absorbed duplicate (Spec 077 US2, Codex R2 #2). Union semantics:
+			// prefer the kept/most-severe finding's non-empty values and fill only
+			// its empties from the other, so the absorbed duplicate's HelpURI,
+			// CVE/package metadata, evidence, category, title/description, scan
+			// pass and supply-chain flag are never silently dropped on merge.
+			// Numeric CVSS takes the max; the supply-chain flag ORs; slices were
+			// unioned above — all order-independent so the merge stays stable.
+			kept := &result[pos]
+			backfillString(&kept.Category, f.Category)
+			backfillString(&kept.ThreatType, f.ThreatType)
+			backfillString(&kept.Title, f.Title)
+			backfillString(&kept.Description, f.Description)
+			backfillString(&kept.Scanner, f.Scanner)
+			backfillString(&kept.HelpURI, f.HelpURI)
+			backfillString(&kept.PackageName, f.PackageName)
+			backfillString(&kept.InstalledVersion, f.InstalledVersion)
+			backfillString(&kept.FixedVersion, f.FixedVersion)
+			backfillString(&kept.Evidence, f.Evidence)
+			if f.CVSSScore > kept.CVSSScore {
+				kept.CVSSScore = f.CVSSScore
+			}
+			if kept.ScanPass == 0 && f.ScanPass != 0 {
+				kept.ScanPass = f.ScanPass
+			}
+			if f.SupplyChainAudit {
+				kept.SupplyChainAudit = true
+			}
 			continue
 		}
 		f.Sources = sortedUnion(f.Sources, srcs)

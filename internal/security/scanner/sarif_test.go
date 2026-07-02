@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -488,6 +489,11 @@ func TestCalculateRiskScoreCrossSourceConsensusAdds(t *testing.T) {
 // the group at the first finding's level, making the score order-dependent and
 // able to drop a genuine warning. The score must be identical in both orders and
 // reflect the warning (high) member, not the info (low) one.
+//
+// It also guards Codex R2 #1: the weaker (info) member shares only the coarse
+// (location, threat_type) — it does NOT itself rate the issue at warning, so it
+// must NOT add weight to the warning bucket. The warning bucket is weighted by
+// its single genuine warning source (weight 1), not by the raw source count (2).
 func TestCalculateRiskScoreConsensusUsesMaxSeverity(t *testing.T) {
 	warningFinding := ScanFinding{
 		RuleID:      "trivy.CVE-1",
@@ -512,10 +518,70 @@ func TestCalculateRiskScoreConsensusUsesMaxSeverity(t *testing.T) {
 	if ab != ba {
 		t.Fatalf("consensus score is order-dependent: [warning,info]=%d [info,warning]=%d", ab, ba)
 	}
-	// Two distinct sources agree → weight 2 at the warning level: 6*log2(3)=9.
-	// Scoring at the info level (the bug) would give 2*log2(3)=3.
-	if ab != 9 {
-		t.Errorf("consensus score = %d, want 9 (warning-level, 2 sources)", ab)
+	// Scored at the warning level (the max), NOT the info level (2*log2(2)=2 would
+	// be the bug of using the first finding). Only one source (trivy) rated it
+	// warning, so the warning bucket weight is 1: 6*log2(2)=6. The info member
+	// does not inflate the warning bucket (Codex R2 #1).
+	if ab != 6 {
+		t.Errorf("consensus score = %d, want 6 (warning-level, 1 warning-rated source)", ab)
+	}
+}
+
+// TestCalculateRiskScoreConsensusWeakDoesNotInflateStrong proves Codex R2 #1
+// directly: a HARD dangerous finding and a low/info finding that merely share a
+// (location, threat_type) must score the DANGEROUS bucket at weight 1 (the info
+// finding does not rate the issue as dangerous, so it adds no dangerous weight),
+// while two genuine dangerous findings from distinct sources score at weight 2.
+// The result is order-independent.
+func TestCalculateRiskScoreConsensusWeakDoesNotInflateStrong(t *testing.T) {
+	dangerous := ScanFinding{
+		RuleID:      "detect.tpa",
+		Location:    "srv:tool",
+		ThreatType:  ThreatToolPoisoning,
+		ThreatLevel: ThreatLevelDangerous,
+		Scanner:     "tpa-descriptions",
+	}
+	info := ScanFinding{
+		RuleID:      "cisco.hint",
+		Location:    "srv:tool",
+		ThreatType:  ThreatToolPoisoning,
+		ThreatLevel: ThreatLevelInfo,
+		Scanner:     "cisco-mcp-scanner",
+	}
+	dangerous2 := ScanFinding{
+		RuleID:      "ramparts.y",
+		Location:    "srv:tool",
+		ThreatType:  ThreatToolPoisoning,
+		ThreatLevel: ThreatLevelDangerous,
+		Scanner:     "ramparts",
+	}
+
+	// dangerous + info: two sources gate consensus, but only ONE rated it
+	// dangerous → dangerous weight 1 → 25*log2(2)=25 (same as a lone dangerous).
+	dangerFirst := CalculateRiskScore([]ScanFinding{dangerous, info})
+	infoFirst := CalculateRiskScore([]ScanFinding{info, dangerous})
+	if dangerFirst != infoFirst {
+		t.Fatalf("weak+strong score is order-dependent: danger-first=%d info-first=%d", dangerFirst, infoFirst)
+	}
+	if dangerFirst != 25 {
+		t.Errorf("dangerous+info consensus score = %d, want 25 (weight 1, info must not inflate dangerous)", dangerFirst)
+	}
+	if lone := CalculateRiskScore([]ScanFinding{dangerous}); dangerFirst != lone {
+		t.Errorf("dangerous+info score %d must equal lone-dangerous score %d — the info adds no dangerous weight", dangerFirst, lone)
+	}
+
+	// Two genuine dangerous sources DO boost the dangerous bucket to weight 2 →
+	// 25*log2(3)=39. Order-independent.
+	twoAB := CalculateRiskScore([]ScanFinding{dangerous, dangerous2})
+	twoBA := CalculateRiskScore([]ScanFinding{dangerous2, dangerous})
+	if twoAB != twoBA {
+		t.Fatalf("two-dangerous score is order-dependent: %d vs %d", twoAB, twoBA)
+	}
+	if twoAB != 39 {
+		t.Errorf("two dangerous sources consensus score = %d, want 39 (weight 2)", twoAB)
+	}
+	if twoAB <= dangerFirst {
+		t.Errorf("genuine dangerous consensus %d must exceed the non-inflated weak+strong %d", twoAB, dangerFirst)
 	}
 }
 
@@ -558,6 +624,72 @@ func TestMergeFindingsAbsorbsStrongerFields(t *testing.T) {
 				t.Errorf("merged signals = %v, want union of both (2)", m.Signals)
 			}
 		})
+	}
+}
+
+// TestMergeFindingsBackfillsEnrichmentMetadata proves Codex R2 #2: when a
+// duplicate is absorbed on (rule_id, location) dedup, the kept finding fills any
+// field it lacks from the duplicate instead of dropping it — HelpURI, CVSSScore,
+// package/version metadata, Evidence, category/title/description, scan pass and
+// the supply-chain flag. The result is identical in both merge orders.
+func TestMergeFindingsBackfillsEnrichmentMetadata(t *testing.T) {
+	// bare carries the threat classification but none of the enrichment.
+	// Attribution rides Sources (Spec 077); the legacy per-anchor Scanner field is
+	// left empty so the DeepEqual order-independence check below is exact.
+	bare := ScanFinding{
+		RuleID: "CVE-2025-1", Location: "srv:tool", ThreatType: ThreatSupplyChain,
+		Severity: SeverityHigh, ThreatLevel: ThreatLevelWarning,
+		Sources: []string{"scanner-a"},
+	}
+	// enriched shares the (rule_id, location) but adds all the metadata.
+	enriched := ScanFinding{
+		RuleID: "CVE-2025-1", Location: "srv:tool", ThreatType: ThreatSupplyChain,
+		Severity: SeverityHigh, ThreatLevel: ThreatLevelWarning,
+		Category: "supply-chain", Title: "Vulnerable dependency",
+		Description: "Package foo has a known CVE", HelpURI: "https://cve/CVE-2025-1",
+		CVSSScore: 7.5, PackageName: "foo", InstalledVersion: "1.0.0",
+		FixedVersion: "1.1.0", ScanPass: 2, Evidence: "foo@1.0.0",
+		SupplyChainAudit: true, Sources: []string{"scanner-b"},
+	}
+
+	assertEnriched := func(t *testing.T, merged []ScanFinding) {
+		t.Helper()
+		if len(merged) != 1 {
+			t.Fatalf("expected exactly 1 merged finding, got %d: %+v", len(merged), merged)
+		}
+		f := merged[0]
+		if f.HelpURI != "https://cve/CVE-2025-1" {
+			t.Errorf("HelpURI = %q, want backfilled from duplicate", f.HelpURI)
+		}
+		if f.CVSSScore != 7.5 {
+			t.Errorf("CVSSScore = %v, want 7.5 (max)", f.CVSSScore)
+		}
+		if f.PackageName != "foo" || f.InstalledVersion != "1.0.0" || f.FixedVersion != "1.1.0" {
+			t.Errorf("package metadata not backfilled: %+v", f)
+		}
+		if f.Evidence != "foo@1.0.0" {
+			t.Errorf("Evidence = %q, want backfilled", f.Evidence)
+		}
+		if f.Category != "supply-chain" || f.Title == "" || f.Description == "" {
+			t.Errorf("category/title/description not backfilled: %+v", f)
+		}
+		if f.ScanPass != 2 {
+			t.Errorf("ScanPass = %d, want 2 (backfilled)", f.ScanPass)
+		}
+		if !f.SupplyChainAudit {
+			t.Errorf("SupplyChainAudit = false, want true (OR of both)")
+		}
+	}
+
+	bareFirst := MergeFindings([]ScanFinding{bare, enriched})
+	enrichedFirst := MergeFindings([]ScanFinding{enriched, bare})
+	assertEnriched(t, bareFirst)
+	assertEnriched(t, enrichedFirst)
+
+	// Order-independence: the merged finding is field-for-field identical whether
+	// the enriched or the bare duplicate is the merge anchor.
+	if !reflect.DeepEqual(bareFirst, enrichedFirst) {
+		t.Errorf("merge is order-dependent:\n bare-first    = %+v\n enriched-first= %+v", bareFirst, enrichedFirst)
 	}
 }
 
