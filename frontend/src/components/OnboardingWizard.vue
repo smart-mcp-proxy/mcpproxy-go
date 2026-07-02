@@ -49,7 +49,7 @@
         <!-- ============================ -->
         <section v-if="activeTab === 'clients'" data-test="panel-clients">
           <p class="text-sm opacity-70 mb-4">
-            Pick at least one AI tool. MCPProxy registers itself in that tool's config so the assistant can talk to mcpproxy. A timestamped backup is created before any file is modified.
+            Pick at least one AI tool. MCPProxy registers itself in that tool's config so the assistant can talk to mcpproxy. You'll see the exact change before anything is written, and a timestamped backup is created first.
           </p>
 
           <div v-if="loadingClients" class="flex justify-center py-6">
@@ -1256,7 +1256,7 @@ const ClientRow: FunctionalComponent<
                   },
                   props.busy || props.previewBusy
                     ? [h('span', { class: 'loading loading-spinner loading-xs' })]
-                    : ['Connect']
+                    : ['Review & connect']
                 ),
       ]),
     ]
