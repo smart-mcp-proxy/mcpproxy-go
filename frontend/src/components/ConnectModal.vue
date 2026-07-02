@@ -168,7 +168,7 @@
               :data-test="`connect-preview-apikey-${client.id}`"
               class="text-[11px] opacity-60 leading-relaxed"
             >
-              The URL includes your API key (shown masked). The real key is written into the config so the client can authenticate.
+              This entry includes your API key (shown masked). The real key is written into the config so the client can authenticate.
             </p>
             <div class="flex items-center gap-2 pt-1">
               <button
