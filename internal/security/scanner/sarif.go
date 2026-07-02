@@ -262,11 +262,20 @@ func categorizeFromRule(ruleID string, props map[string]any, rules map[string]SA
 // Identical findings reported by several scanners (same rule_id + location) are
 // deduplicated before scoring.
 //
-// Spec 076 (FR-006, SC-007) — consensus is additive: the deterministic scanner
-// emits ONE finding per tool whose Signals list every independent check that
-// fired. A finding contributes its consensus weight (the count of distinct
-// contributing signals, min 1) to its category, so a tool flagged by several
-// checks raises the score instead of being collapsed to one. Findings from
+// Scoring is a pure function of each finding's OWN severity/category (Spec 077
+// US2). Cross-scanner AGREEMENT — two scanners independently flagging the same
+// (location, threat_type) via different rule ids — raises the merged finding's
+// CONFIDENCE in MergeFindings (SC-008) but adds NO risk-score weight: a weak
+// external finding that merely agrees with a strong one contributes only its own
+// (weak) category and can never inflate the stronger bucket. This keeps the score
+// deterministic, order-independent, and identical whether it is computed before
+// or after MergeFindings has run.
+//
+// Spec 076 (FR-006, SC-007) — a finding's OWN detect signals still add: the
+// deterministic scanner emits ONE finding per tool whose Signals list every
+// independent check that fired within that single scanner, so a finding flagged
+// by N of its own checks weighs N. That is a per-finding property of one
+// scanner's output, not cross-scanner agreement, so it is retained. Findings from
 // scanners that emit no per-signal data weigh 1, so legacy scoring is unchanged.
 //
 // Formula per category: category_score = weight * log2(1 + weighted_count)
@@ -281,80 +290,18 @@ func CalculateRiskScore(findings []ScanFinding) int {
 		return 0
 	}
 
-	// Precompute cross-source consensus: for each (location, threat_type) with a
-	// non-empty threat_type, the set of distinct sources that independently
-	// flagged it. Two different scanners agreeing on the same issue — even via
-	// different rule ids — is consensus and raises the weight (Spec 077 FR-012,
-	// T020). External/Docker findings that used to flatten to weight 1 now ADD.
-	// An empty threat_type cannot form consensus and keeps the legacy per-rule
-	// dedup (so existing single-scanner scoring is unchanged).
-	type consensusKey struct{ location, threatType string }
-	// A consensus group is scored ONCE, at the MOST-SEVERE threat category among
-	// all agreeing findings (not whichever is encountered first) — so the score is
-	// order-independent even when severity-derived threat_types (supply_chain,
-	// uncategorized, the malicious_code fallback) put different threat_levels on
-	// agreeing findings.
-	//
-	// catKey narrows a group to a single severity/category bucket. The weight
-	// applied to a bucket counts only the findings that ACTUALLY rated the issue
-	// at (at least) that category — a weaker agreeing finding (e.g. an info CVE
-	// sharing a location+threat_type with a dangerous one) must NOT add weight to
-	// the stronger bucket. It can still have raised the finding's confidence in
-	// MergeFindings, but it never inflates dangerous risk (Spec 077 US2, Codex R2 #1).
-	type catKey struct {
-		location, threatType string
-		cat                  int
-	}
-	groupSources := make(map[consensusKey]map[string]struct{})
-	groupMaxCat := make(map[consensusKey]int)
-	// Per (group, category): distinct sources and max per-finding signal weight of
-	// the findings that rated the issue at exactly that category. Because a group
-	// is only ever scored at its MAX category, the sources counted there are
-	// precisely those whose own finding is "at least" the max category.
-	catSources := make(map[catKey]map[string]struct{})
-	catMaxWeight := make(map[catKey]int)
-	for i := range findings {
-		f := &findings[i]
-		if f.ThreatType == "" {
-			continue
-		}
-		ck := consensusKey{f.Location, f.ThreatType}
-		set := groupSources[ck]
-		if set == nil {
-			set = make(map[string]struct{})
-			groupSources[ck] = set
-		}
-		srcs := findingSources(*f)
-		for _, s := range srcs {
-			set[s] = struct{}{}
-		}
-		cat := threatCategory(f)
-		if cat > groupMaxCat[ck] {
-			groupMaxCat[ck] = cat
-		}
-		catk := catKey{f.Location, f.ThreatType, cat}
-		cs := catSources[catk]
-		if cs == nil {
-			cs = make(map[string]struct{})
-			catSources[catk] = cs
-		}
-		for _, s := range srcs {
-			cs[s] = struct{}{}
-		}
-		if w := consensusWeight(*f); w > catMaxWeight[catk] {
-			catMaxWeight[catk] = w
-		}
-	}
-
-	// Deduplicate for scoring:
-	//   - legacy: group by (rule_id, location) to avoid triple-counting the same
-	//     rule reported by multiple scanners (unchanged behavior).
-	//   - consensus: when ≥2 distinct sources agree on the same (location,
-	//     threat_type), count that issue ONCE weighted by the number of agreeing
-	//     sources, so agreement raises the score without double-counting.
+	// Deduplicate by (rule_id, location): the same rule reported by several
+	// scanners (or twice in one report) is one issue, counted once. To stay
+	// order-independent — and independent of whether MergeFindings has run — the
+	// deduped issue is scored at the MAX threat category and MAX per-finding signal
+	// weight seen for that key, never whichever finding happened to be encountered
+	// first. Findings with an empty rule_id are never deduped: each is a distinct
+	// issue contributing its own category. Cross-scanner agreement across DIFFERENT
+	// rule ids adds no weight here — those are separate findings, each scored at its
+	// own category — so a weak agreeing finding cannot inflate a stronger one.
 	type dedupKey struct{ ruleID, location string }
-	seen := make(map[dedupKey]bool)
-	seenConsensus := make(map[consensusKey]bool)
+	type catWeight struct{ cat, weight int }
+	deduped := make(map[dedupKey]catWeight)
 	var dangerousCount, warningCount, infoCount int
 
 	addWeight := func(category, weight int) {
@@ -370,49 +317,31 @@ func CalculateRiskScore(findings []ScanFinding) int {
 
 	for i := range findings {
 		f := &findings[i]
+		cat := threatCategory(f)
+		// A finding's OWN detect signals add (Spec 076 FR-006); single-signal and
+		// legacy scanner findings weigh 1. Cross-scanner agreement adds nothing.
+		weight := consensusWeight(*f)
 
-		// Cross-source consensus path: only when ≥2 distinct sources agree on a
-		// classified (location, threat_type). Counted once, at the most-severe
-		// category and max weight of the whole group so the result is
-		// order-independent (not the first finding encountered).
-		if f.ThreatType != "" {
-			ck := consensusKey{f.Location, f.ThreatType}
-			if n := len(groupSources[ck]); n >= 2 {
-				if seenConsensus[ck] {
-					continue
-				}
-				seenConsensus[ck] = true
-				// Score the group ONCE at its most-severe category, weighted only
-				// by the findings that actually rated it at that category: the
-				// number of distinct sources at the max category, or the max
-				// signal weight of a single such finding, whichever is greater.
-				// A weaker agreeing finding never inflates the stronger bucket.
-				maxCat := groupMaxCat[ck]
-				catk := catKey{ck.location, ck.threatType, maxCat}
-				weight := len(catSources[catk])
-				if w := catMaxWeight[catk]; w > weight {
-					weight = w
-				}
-				if weight < 1 {
-					weight = 1
-				}
-				addWeight(maxCat, weight)
-				continue
-			}
+		if f.RuleID == "" {
+			// Never deduped; each empty-rule finding is a distinct issue.
+			addWeight(cat, weight)
+			continue
 		}
-
-		// Legacy per-rule dedup (single source, or unclassified findings).
 		key := dedupKey{f.RuleID, f.Location}
-		if key.ruleID != "" && seen[key] {
-			continue // Skip duplicate finding
+		cur := deduped[key]
+		if cat > cur.cat {
+			cur.cat = cat
 		}
-		if key.ruleID != "" {
-			seen[key] = true
+		if weight > cur.weight {
+			cur.weight = weight
 		}
+		deduped[key] = cur
+	}
 
-		// Consensus weight: independent signals on one tool ADD to the score
-		// (Spec 076 FR-006). A single-signal or signal-less finding weighs 1.
-		addWeight(threatCategory(f), consensusWeight(*f))
+	// Sum the deduped issues. Iteration order is irrelevant: addition is
+	// commutative, so the score is deterministic regardless of map order.
+	for _, cw := range deduped {
+		addWeight(cw.cat, cw.weight)
 	}
 
 	// Logarithmic diminishing returns: score = weight * log2(1 + count)
@@ -439,8 +368,8 @@ func CalculateRiskScore(findings []ScanFinding) int {
 }
 
 // Threat categories rank a finding's contribution to the risk score. Higher is
-// more severe; threatCatNone (the zero value) is not counted, so a group whose
-// members are all unclassified keeps the map default without spuriously scoring.
+// more severe; threatCatNone (the zero value) is not counted, so an unclassified
+// finding keeps the map default without spuriously scoring.
 const (
 	threatCatNone = iota
 	threatCatInfo
@@ -451,8 +380,8 @@ const (
 // threatCategory maps a finding to its risk bucket, preferring the explicit
 // user-facing ThreatLevel and falling back to CVSS severity for unclassified
 // findings. It mirrors the previous inline switch in addWeight so legacy scoring
-// is unchanged; extracting it lets a consensus group be scored at the
-// most-severe member instead of whichever finding is encountered first.
+// is unchanged; extracting it lets a deduped (rule_id, location) issue be scored
+// at its most-severe member instead of whichever finding is encountered first.
 func threatCategory(f *ScanFinding) int {
 	switch f.ThreatLevel {
 	case ThreatLevelDangerous:
@@ -475,10 +404,12 @@ func threatCategory(f *ScanFinding) int {
 
 // consensusWeight returns how much a single (deduplicated) finding contributes
 // to its risk category. The deterministic scanner (Spec 076) aggregates every
-// independent check that fired on a tool into one finding's Signals list, so a
-// finding flagged by N distinct checks weighs N — agreement raises the score
-// rather than being collapsed (FR-006). Findings with zero or one signal — and
-// every legacy scanner finding, which carries none — weigh 1.
+// independent check that fired on ONE tool — within that single scanner — into
+// the finding's Signals list, so a finding flagged by N of its own checks weighs
+// N (FR-006). This is a per-finding property of one scanner's output, NOT
+// cross-scanner agreement (which raises confidence, not score). Findings with
+// zero or one signal — and every legacy scanner finding, which carries none —
+// weigh 1.
 func consensusWeight(f ScanFinding) int {
 	if n := len(f.Signals); n > 1 {
 		return n

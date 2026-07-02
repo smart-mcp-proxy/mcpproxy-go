@@ -452,49 +452,61 @@ func TestMergeFindingsConsensusBoostsConfidence(t *testing.T) {
 	}
 }
 
-// TestCalculateRiskScoreCrossSourceConsensusAdds proves Spec 077 (T020): two
-// independent external/Docker scanners agreeing on the same (location,
-// threat_type) via different rule ids ADD to the consensus weight instead of
-// each flattening to weight 1, so the score exceeds a single-source scan.
-func TestCalculateRiskScoreCrossSourceConsensusAdds(t *testing.T) {
-	single := []ScanFinding{
-		{RuleID: "cisco.x", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner"},
+// TestCalculateRiskScoreCrossScannerAgreementDoesNotChangeScore proves the Spec
+// 077 US2 structural rule: cross-scanner AGREEMENT adds no risk-score weight. Two
+// scanners reporting the same issue (same rule_id + location) dedup to a single
+// contribution, so the score equals a lone finding — agreement never inflates it.
+// Agreement's effect is a CONFIDENCE boost (SC-008), proved separately in
+// TestMergeFindingsConsensusBoostsConfidence.
+func TestCalculateRiskScoreCrossScannerAgreementDoesNotChangeScore(t *testing.T) {
+	lone := []ScanFinding{
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "tpa-descriptions"},
 	}
-	consensus := []ScanFinding{
-		{RuleID: "cisco.x", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner"},
-		{RuleID: "ramparts.y", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "ramparts"},
+	agreeing := []ScanFinding{
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "tpa-descriptions"},
+		{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "cisco-mcp-scanner"},
 	}
 
-	singleScore := CalculateRiskScore(single)
-	consensusScore := CalculateRiskScore(consensus)
+	loneScore := CalculateRiskScore(lone)
+	agreeingScore := CalculateRiskScore(agreeing)
 
-	// single: one dangerous, one source → weight 1 → 25*log2(2)=25
-	if singleScore != 25 {
-		t.Errorf("single-source score = %d, want 25", singleScore)
+	// lone: one dangerous → 25*log2(2)=25.
+	if loneScore != 25 {
+		t.Errorf("lone dangerous score = %d, want 25", loneScore)
 	}
-	// consensus: one issue (location+threat_type), two distinct sources → weight
-	// 2 → 25*log2(3)=39. Counted once (not double), but heavier than single.
-	if consensusScore != 39 {
-		t.Errorf("cross-source consensus score = %d, want 39", consensusScore)
-	}
-	if consensusScore <= singleScore {
-		t.Errorf("consensus score %d must exceed single-source score %d", consensusScore, singleScore)
+	// Agreement adds NO score weight: the same (rule_id, location) dedups to one.
+	if agreeingScore != loneScore {
+		t.Errorf("cross-scanner agreement changed the score: agreeing=%d, lone=%d (want equal)", agreeingScore, loneScore)
 	}
 }
 
-// TestCalculateRiskScoreConsensusUsesMaxSeverity proves the consensus group is
-// scored at its MOST-SEVERE member's threat level, not whichever finding is
-// encountered first. For severity-derived threat_types (supply_chain here)
-// agreeing findings can carry different threat_levels; the previous code counted
-// the group at the first finding's level, making the score order-dependent and
-// able to drop a genuine warning. The score must be identical in both orders and
-// reflect the warning (high) member, not the info (low) one.
-//
-// It also guards Codex R2 #1: the weaker (info) member shares only the coarse
-// (location, threat_type) — it does NOT itself rate the issue at warning, so it
-// must NOT add weight to the warning bucket. The warning bucket is weighted by
-// its single genuine warning source (weight 1), not by the raw source count (2).
-func TestCalculateRiskScoreConsensusUsesMaxSeverity(t *testing.T) {
+// TestCalculateRiskScoreDistinctDangerousFindingsEachCount proves that two
+// GENUINELY DISTINCT dangerous findings (different rule ids at the same location)
+// each contribute their own category. This is NOT cross-scanner consensus
+// weighting — they are two separate issues in the unified report — so each is
+// scored at its own severity. Order-independent.
+func TestCalculateRiskScoreDistinctDangerousFindingsEachCount(t *testing.T) {
+	a := ScanFinding{RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "tpa-descriptions"}
+	b := ScanFinding{RuleID: "ramparts.y", Location: "srv:tool", ThreatType: ThreatToolPoisoning, ThreatLevel: ThreatLevelDangerous, Scanner: "ramparts"}
+
+	ab := CalculateRiskScore([]ScanFinding{a, b})
+	ba := CalculateRiskScore([]ScanFinding{b, a})
+	if ab != ba {
+		t.Fatalf("score is order-dependent: ab=%d ba=%d", ab, ba)
+	}
+	// two dangerous → 25*log2(3)=39.
+	if ab != 39 {
+		t.Errorf("two distinct dangerous findings score = %d, want 39", ab)
+	}
+}
+
+// TestCalculateRiskScoreWeakAgreeingFindingScoresAtOwnLevel proves the Spec 077
+// US2 model for severity-derived threat_types: when a warning and an info finding
+// share (location, threat_type) via DIFFERENT rule ids, each contributes ONLY its
+// own category. The info is never promoted to the warning bucket, and the warning
+// bucket stays at weight 1. The score is order-independent and does not depend on
+// which finding is encountered first.
+func TestCalculateRiskScoreWeakAgreeingFindingScoresAtOwnLevel(t *testing.T) {
 	warningFinding := ScanFinding{
 		RuleID:      "trivy.CVE-1",
 		Location:    "srv:tool",
@@ -516,24 +528,27 @@ func TestCalculateRiskScoreConsensusUsesMaxSeverity(t *testing.T) {
 	ba := CalculateRiskScore([]ScanFinding{infoFinding, warningFinding})
 
 	if ab != ba {
-		t.Fatalf("consensus score is order-dependent: [warning,info]=%d [info,warning]=%d", ab, ba)
+		t.Fatalf("score is order-dependent: [warning,info]=%d [info,warning]=%d", ab, ba)
 	}
-	// Scored at the warning level (the max), NOT the info level (2*log2(2)=2 would
-	// be the bug of using the first finding). Only one source (trivy) rated it
-	// warning, so the warning bucket weight is 1: 6*log2(2)=6. The info member
-	// does not inflate the warning bucket (Codex R2 #1).
-	if ab != 6 {
-		t.Errorf("consensus score = %d, want 6 (warning-level, 1 warning-rated source)", ab)
+	// warning bucket weight 1 (6*log2(2)=6) + info bucket weight 1 (2*log2(2)=2) = 8.
+	// The info NEVER inflates the warning bucket — it adds only its own info weight.
+	if ab != 8 {
+		t.Errorf("score = %d, want 8 (warning 6 + own info 2; info must not inflate warning)", ab)
+	}
+	// The warning contribution alone is unchanged by the agreeing info finding.
+	if lone := CalculateRiskScore([]ScanFinding{warningFinding}); lone != 6 {
+		t.Errorf("lone warning score = %d, want 6", lone)
 	}
 }
 
-// TestCalculateRiskScoreConsensusWeakDoesNotInflateStrong proves Codex R2 #1
-// directly: a HARD dangerous finding and a low/info finding that merely share a
-// (location, threat_type) must score the DANGEROUS bucket at weight 1 (the info
-// finding does not rate the issue as dangerous, so it adds no dangerous weight),
-// while two genuine dangerous findings from distinct sources score at weight 2.
-// The result is order-independent.
-func TestCalculateRiskScoreConsensusWeakDoesNotInflateStrong(t *testing.T) {
+// TestCalculateRiskScoreWeakDoesNotInflateStrongBucket proves the core Spec 077
+// US2 guarantee (resolving Codex R2 #1 structurally): a low/info finding that
+// merely shares a (location, threat_type) with a HARD dangerous finding does NOT
+// add weight to the DANGEROUS bucket. It contributes only its own info weight, so
+// the dangerous bucket stays at weight 1 — strictly less than two GENUINE
+// dangerous findings, which score the dangerous bucket at weight 2. The result is
+// order-independent.
+func TestCalculateRiskScoreWeakDoesNotInflateStrongBucket(t *testing.T) {
 	dangerous := ScanFinding{
 		RuleID:      "detect.tpa",
 		Location:    "srv:tool",
@@ -556,32 +571,35 @@ func TestCalculateRiskScoreConsensusWeakDoesNotInflateStrong(t *testing.T) {
 		Scanner:     "ramparts",
 	}
 
-	// dangerous + info: two sources gate consensus, but only ONE rated it
-	// dangerous → dangerous weight 1 → 25*log2(2)=25 (same as a lone dangerous).
+	// dangerous + info: dangerous bucket weight 1 (25*log2(2)=25) + own info weight
+	// 1 (2*log2(2)=2) = 27. The info NEVER reaches the dangerous bucket.
 	dangerFirst := CalculateRiskScore([]ScanFinding{dangerous, info})
 	infoFirst := CalculateRiskScore([]ScanFinding{info, dangerous})
 	if dangerFirst != infoFirst {
 		t.Fatalf("weak+strong score is order-dependent: danger-first=%d info-first=%d", dangerFirst, infoFirst)
 	}
-	if dangerFirst != 25 {
-		t.Errorf("dangerous+info consensus score = %d, want 25 (weight 1, info must not inflate dangerous)", dangerFirst)
+	if dangerFirst != 27 {
+		t.Errorf("dangerous+info score = %d, want 27 (dangerous 25 + own info 2)", dangerFirst)
 	}
-	if lone := CalculateRiskScore([]ScanFinding{dangerous}); dangerFirst != lone {
-		t.Errorf("dangerous+info score %d must equal lone-dangerous score %d — the info adds no dangerous weight", dangerFirst, lone)
+	// The DANGEROUS bucket is not inflated: dropping the info leaves the dangerous
+	// contribution (25) unchanged — the info never gains dangerous weight.
+	if lone := CalculateRiskScore([]ScanFinding{dangerous}); lone != 25 {
+		t.Errorf("lone dangerous score = %d, want 25", lone)
 	}
 
-	// Two genuine dangerous sources DO boost the dangerous bucket to weight 2 →
-	// 25*log2(3)=39. Order-independent.
+	// Two GENUINE dangerous findings DO score the dangerous bucket at weight 2 →
+	// 25*log2(3)=39, strictly more than the non-inflated weak+strong case.
+	// Order-independent.
 	twoAB := CalculateRiskScore([]ScanFinding{dangerous, dangerous2})
 	twoBA := CalculateRiskScore([]ScanFinding{dangerous2, dangerous})
 	if twoAB != twoBA {
 		t.Fatalf("two-dangerous score is order-dependent: %d vs %d", twoAB, twoBA)
 	}
 	if twoAB != 39 {
-		t.Errorf("two dangerous sources consensus score = %d, want 39 (weight 2)", twoAB)
+		t.Errorf("two dangerous findings score = %d, want 39 (dangerous weight 2)", twoAB)
 	}
 	if twoAB <= dangerFirst {
-		t.Errorf("genuine dangerous consensus %d must exceed the non-inflated weak+strong %d", twoAB, dangerFirst)
+		t.Errorf("two genuine dangerous %d must exceed weak+strong %d (info gained no dangerous weight)", twoAB, dangerFirst)
 	}
 }
 
