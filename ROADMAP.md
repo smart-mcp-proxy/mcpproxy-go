@@ -13,7 +13,10 @@ The roadmap models cross-spec **epics → tasks** with a dependency DAG, executi
 ```bash
 python3 scripts/gen-roadmap.py     # writes ROADMAP.md
 scripts/gen-roadmap                # convenience wrapper (same thing)
-python3 scripts/gen-roadmap.py --check   # CI canary: fail if stale
+python3 scripts/gen-roadmap.py --check          # CI canary: fail if ROADMAP.md is stale
+python3 scripts/gen-roadmap.py --check-github   # cross-check statuses vs live GitHub PR state,
+                                                # spec links, and status sanity (add --strict
+                                                # to fail on warnings; needs an authenticated gh)
 ```
 
 ## roadmap.yaml schema (short form)
