@@ -65,14 +65,14 @@ Per-server precedence: explicit per-server `mode` → per-server legacy `enabled
 
 ### Scanner behaviour under each mode (MCP-34.4)
 
-The security **scanner plugins** (Spec 039) are Docker-based. Under a non-Docker isolation mode they cannot run, so MCPProxy **degrades cleanly and surfaces it** rather than failing silently:
+The security **scanner plugins** (Spec 039) are Docker-based and, since Spec 077, belong to the **opt-in deep-scan layer** (they run only when `security.deep_scan.enabled: true`). Under a non-Docker isolation mode they cannot run at all, so MCPProxy **skips them and surfaces the skip informationally** rather than failing silently:
 
 | Mode | Docker scanner plugins | In-process scanner (`tpa-descriptions`) | Scan result for a server with only Docker scanners |
 |------|------------------------|------------------------------------------|----------------------------------------------------|
-| `docker` | Run normally | Runs | As scanned |
-| `sandbox` / `none` | **Skipped** with an honest, mode-specific reason pointing at [`MCPX_DOCKER_SNAP_APPARMOR`](errors/MCPX_DOCKER_SNAP_APPARMOR.md) | **Still runs** | `security_scan.status: "degraded"` (a low/zero risk score from incomplete coverage is not reported as a trustworthy all-clear) |
+| `docker` | Run normally (when deep scan is on) | Runs | As scanned |
+| `sandbox` / `none` | **Skipped** with an honest, mode-specific reason pointing at [`MCPX_DOCKER_SNAP_APPARMOR`](errors/MCPX_DOCKER_SNAP_APPARMOR.md) | **Still runs** | The baseline verdict is unchanged; the skip surfaces via the informational `deep_scan` descriptor |
 
-This is **decision D3 option (b)** from the [MCP-34 spike](development/sandbox-spike-mcp-34.md#recommendation-for-the-d3-scanner-question): clean, surfaced degradation. A native (non-Docker) scanner runtime — option (a) — is a larger follow-up and is not yet implemented. To run the full Docker-based scanner fleet, use `mode: docker` on a host with a working Docker daemon, or replace snap-docker with a distro Docker package (see the error doc).
+Since Spec 077 (FR-008) a skipped or failed deep scanner **never downgrades the baseline verdict to `degraded`** — the old `security_scan.status: "degraded"` behaviour was removed. The always-emitted `deep_scan` descriptor carries the skip instead (`enabled`, `ran`, `available`, `scanners_failed[]`, `skipped_scanners[]`). The deterministic in-process `tpa-descriptions` baseline scanner is the sole source of the verdict, so a low/zero risk score from a baseline-only scan is a trustworthy result. To run the full Docker-based scanner fleet, enable deep scan and use `mode: docker` on a host with a working Docker daemon, or replace snap-docker with a distro Docker package (see the error doc).
 
 The skip is also logged at startup:
 
@@ -358,8 +358,8 @@ On Ubuntu hosts where Docker is installed via **snap**, AppArmor's profile trans
 Your options on such a host:
 
 1. Replace snap Docker with a distro/upstream Docker package (full Docker mode works).
-2. Set `docker_isolation.mode: "sandbox"` — stdio servers are confined natively with Landlock; Docker-based scanners degrade cleanly (see [Scanner behaviour](#scanner-behaviour-under-each-mode-mcp-344)).
-3. Set `security.scanner_disable_no_new_privileges: true` to drop the `no-new-privileges` flag from scanner containers (weakens scanner hardening; prefer 1 or 2).
+2. Set `docker_isolation.mode: "sandbox"` — stdio servers are confined natively with Landlock; Docker-based scanners are skipped and surfaced via the informational `deep_scan` descriptor without changing the baseline verdict (see [Scanner behaviour](#scanner-behaviour-under-each-mode-mcp-344)).
+3. Set `security.deep_scan.disable_no_new_privileges: true` to drop the `no-new-privileges` flag from scanner containers (weakens scanner hardening; prefer 1 or 2). The deprecated top-level `security.scanner_disable_no_new_privileges` key still parses and is migrated into `security.deep_scan.disable_no_new_privileges` on load.
 
 ## Honest limitations
 
@@ -368,13 +368,13 @@ Your options on such a host:
 - **No uid/gid drop.** Dropping to an unprivileged uid/gid requires `CAP_SETUID`/`CAP_SETGID` (i.e. running as root). When mcpproxy runs unprivileged, the uid/gid drop is **best-effort and typically a no-op** — the sandboxed process keeps the launching user's identity. Landlock (filesystem) and `setrlimit` (resource caps) still apply. Docker mode does drop to a container user. This is an honest trade-off, not a bug.
 - **Linux-only.** Landlock is a Linux 5.13+ feature. On older kernels the launcher degrades best-effort (fewer access-right bits enforced on ABI 1). On macOS/Windows `sandbox` is a documented **no-op** and behaves like `none`.
 - **Filesystem + resources only.** Landlock confines the filesystem write-allowlist; it does not provide network namespacing. Pair with care for network-sensitive servers, or use `docker` mode with `network_mode: none`.
-- **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped (the scan reports `degraded`). A native scanner runtime is a future enhancement (D3 option a).
+- **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped and the skip is surfaced via the informational `deep_scan` descriptor — it never downgrades the baseline verdict (Spec 077 FR-008). A native scanner runtime is a future enhancement (D3 option a).
 
 ## Platform support matrix
 
 | Platform | `docker` | `sandbox` | `none` | Docker scanner plugins |
 |----------|----------|-----------|--------|------------------------|
-| Linux (kernel ≥ 5.13) | ✅ (needs Docker daemon) | ✅ Landlock + rlimits (no uid/gid drop) | ✅ | ✅ under `docker`; skipped+degraded under `sandbox`/`none` |
+| Linux (kernel ≥ 5.13) | ✅ (needs Docker daemon) | ✅ Landlock + rlimits (no uid/gid drop) | ✅ | ✅ under `docker` (deep scan on); skipped (informational, no verdict change) under `sandbox`/`none` |
 | Linux (kernel < 5.13) | ✅ (needs Docker daemon) | ⚠️ best-effort: rlimits apply, Landlock partial/unavailable | ✅ | same as above |
 | macOS | ✅ (Docker Desktop) | ⚠️ no-op ⇒ effectively `none` | ✅ | ✅ under `docker`; n/a otherwise |
 | Windows | ✅ (Docker Desktop) | ⚠️ no-op ⇒ effectively `none` | ✅ | ✅ under `docker`; n/a otherwise |

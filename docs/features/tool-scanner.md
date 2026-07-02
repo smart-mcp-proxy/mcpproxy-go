@@ -2,7 +2,7 @@
 id: tool-scanner
 title: Deterministic Tool Scanner (Spec 076)
 sidebar_label: Tool Scanner (detect engine)
-description: The offline, deterministic in-process detection engine that scans MCP tool definitions for hidden-Unicode smuggling, cross-server shadowing, decoded shell payloads, prompt-injection directives, capability mismatch, and embedded secrets.
+description: The offline, deterministic in-process detection engine that scans MCP tool definitions for hidden-Unicode smuggling, cross-server shadowing, decoded shell payloads, injection/exfiltration phrases, prompt-injection directives, capability mismatch, and embedded secrets. Since Spec 077 it is the sole in-process detector.
 keywords: [security, tool-poisoning, prompt-injection, unicode-smuggling, shadowing, detection, offline, deterministic, quarantine, mcp]
 ---
 
@@ -45,14 +45,13 @@ Three properties hold by construction:
 
 ## The two-tier model
 
-> **Scope of "soft never auto-quarantines":** the two-tier semantics below
-> describe the **detect-engine signals** specifically. The live `tpa-descriptions`
-> scanner currently runs the detect engine *alongside* a set of still-active
-> legacy TPA keyword rules that produce their own dangerous, approval-blocking
-> findings — see [Coexistence with the legacy TPA rules](#coexistence-with-the-legacy-tpa-rules)
-> below. So a phrase like "ignore previous instructions" can still yield a
-> blocking finding today even though the detect engine classifies it as a soft
-> signal.
+> **Since Spec 077 the detect engine is the sole in-process detector.** The
+> duplicated legacy TPA keyword rules and the duplicated legacy embedded-secret
+> path have been removed from `internal/security/scanner/inprocess.go`. The
+> approval-blocking posture they provided is preserved by the **hard-tier
+> `phrase.injection` check** (curated instruction-override and exfiltration
+> directives), so the two-tier model below now describes the *entire* in-process
+> behavior — there is no separate rule set running alongside it.
 
 Each detect-engine check emits zero or more **signals**, and every signal
 carries a **tier**:
@@ -81,35 +80,6 @@ finding (`internal/security/detect/aggregate.go`):
   how strongly (FR-010). These surface in the CLI report (`Confidence:` /
   `Signals:` lines) and in the REST scan report JSON.
 
-### Coexistence with the legacy TPA rules
-
-The two-tier model above governs the **detect engine**. The current
-`tpa-descriptions` scanner does not run the detect engine *exclusively* — it
-runs it **alongside a legacy set of TPA keyword rules** that predate Spec 076
-(`internal/security/scanner/inprocess.go`). The detect-engine findings are
-emitted first, then the legacy rules are appended:
-
-- **`tpa_hidden_instructions`** (critical) — phrases like "ignore previous
-  instructions", "do not tell the user", `<IMPORTANT>`.
-- **`prompt_injection_in_description`** (high) — "system prompt", "you must
-  always", "always call this tool first", "jailbreak", etc.
-- **`data_exfiltration_in_description`** (high) — `~/.ssh`, `id_rsa`,
-  `/etc/passwd`, ".env file", "send the credentials", etc.
-
-All three legacy rules are **`dangerous`-level**, so — unlike the detect
-engine's *soft* `directive.imperative` / `capability.mismatch` checks, which
-only raise a review item — a legacy-rule match **blocks `security approve`** and
-drives the scan summary to `dangerous`. There is therefore some deliberate
-overlap: a description containing "ignore previous instructions" is a *soft*
-detect-engine `directive.imperative` signal **and** a *dangerous* legacy
-`tpa_hidden_instructions` finding at the same time, and today the dangerous
-legacy finding is what gates approval.
-
-This coexistence is intentional for the migration — it keeps the MVP from
-regressing any pre-076 keyword coverage. Folding the legacy rules into the
-detect engine (so the two-tier model applies uniformly) is a **separate
-implementation change tracked outside this docs page**, not yet shipped.
-
 ### Normalization (FR-007)
 
 Phrase-matching checks (directive, capability, embedded-secret position logic)
@@ -125,9 +95,9 @@ The embedded-secret check likewise scans **raw** text, because secrets are
 case-sensitive and exact (lowercasing would fold the very bytes the matchers
 key on, e.g. `AKIA…` prefixes).
 
-## The six checks
+## The seven checks
 
-Three **hard** structural checks and three **soft** heuristic checks.
+Four **hard** checks and three **soft** heuristic checks.
 
 ### Hard tier
 
@@ -166,6 +136,25 @@ reverse-shell target (FR-008). Benign encoded data (an icon, a JSON config)
 decodes to non-matching/non-printable bytes and is never flagged. The
 **evidence presents the decoded content**, so an operator sees exactly what was
 hidden — not the encoded string.
+
+#### `phrase.injection` — curated injection / exfiltration directives
+
+Fires on a small, high-confidence set of prompt-injection and data-exfiltration
+**directives** (Spec 077 FR-004): instruction overrides ("ignore all previous
+instructions"), explicit secret-exfiltration ("send the credentials to …",
+"exfiltrate `~/.ssh/id_rsa`", "upload the `.env` file to …"), and system-prompt
+/ instruction exfiltration ("reveal your system prompt"). This is the hard-tier
+check that **restores the approval-blocking posture** of the deleted legacy TPA
+keyword rules — without their false positives.
+
+The patterns are deliberately narrow and every match is **position-discounted**:
+a phrase that is quoted or merely described (*"detects prompts such as 'ignore
+previous instructions'"*) lands below the hard emit floor and is **not**
+auto-blocked (FR-005, the core false-positive control). A matched-but-discounted
+phrase is not discarded, though — it is downgraded to a **soft** review signal
+(the never-fully-suppress invariant), so a real injection can never disappear
+behind a framing cue. Broader, lower-confidence phrasing lives in the soft
+`directive.imperative` check instead. Runs over **normalized** text.
 
 ### Soft tier
 
@@ -223,6 +212,7 @@ example as easily as a planted one.
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling (raw text) |
 | `shadowing.cross_server` | hard | Distinctive tool name collision or cross-server reference |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
+| `phrase.injection` | hard | Curated instruction-override / exfiltration directives (position-discounted; blocks approval) |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides (normalized, position-discounted) |
 | `capability.mismatch` | soft | Compute/string tool touching `~/.ssh` etc.; unexplained data-sink param |
 | `secret.embedded` | soft | Hardcoded live credential (confidence-scored, placeholders dropped) |
@@ -289,11 +279,11 @@ It reuses — rather than rebuilds — the Spec-032 quarantine hashing, the
 quarantine state machine, the aggregated-report types, and the
 `internal/security/patterns/` secret matchers (FR-012).
 
-`inprocess.go` does **not** delegate to the detect engine exclusively today: it
-also appends the legacy dangerous TPA keyword rules to the same findings list
-(see [Coexistence with the legacy TPA rules](#coexistence-with-the-legacy-tpa-rules)).
-The detect engine's two-tier semantics therefore describe its own signals, not
-the legacy rules' findings.
+Since Spec 077, `inprocess.go` delegates to the detect engine **exclusively** —
+the duplicated legacy TPA keyword rules and the duplicated legacy embedded-secret
+path have been removed. The engine's two-tier semantics therefore describe the
+entire in-process detection behavior, with `phrase.injection` (hard) carrying the
+approval-blocking posture the removed rules used to provide.
 
 ## Related reading
 
