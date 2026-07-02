@@ -27,6 +27,9 @@ func TestScanSummaryEnricherAdapterCarriesDeepScan(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		db := setupTestStorage(t)
+		// Close the bolt DB before t.TempDir cleanup — Windows cannot unlink
+		// config.db while the handle is open (setupTestStorage registers none).
+		t.Cleanup(func() { _ = db.Close() })
 		svc := scanner.NewService(db, scanner.NewRegistry(dir, logger), scanner.NewDockerRunner(logger), dir, logger)
 		now := time.Now()
 		require.NoError(t, db.SaveScanJob(&scanner.ScanJob{
