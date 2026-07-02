@@ -1427,13 +1427,17 @@ func TestServiceGetScanSummaryPartialSuccess(t *testing.T) {
 	}
 	// Spec 077 US3 (FR-008/FR-014): a failed Docker deep scanner no longer
 	// downgrades the baseline to "degraded". The verdict is derived solely from
-	// baseline findings — here there are none, so it stays "clean". The deep
-	// failure is surfaced via DeepScan only when the layer is enabled (off here).
+	// baseline findings — here there are none, so it stays "clean". With the
+	// layer off the descriptor still surfaces (audit FIX 3a) but reports it
+	// disabled with no failures.
 	if summary.Status != "clean" {
 		t.Errorf("expected status 'clean' (deep-scan failure must not degrade the baseline), got %q", summary.Status)
 	}
-	if summary.DeepScan != nil {
-		t.Errorf("DeepScan descriptor must be omitted when deep scan is off, got %+v", summary.DeepScan)
+	if summary.DeepScan == nil {
+		t.Fatalf("DeepScan descriptor must be emitted (enabled=false) when deep scan is off")
+	}
+	if summary.DeepScan.Enabled || summary.DeepScan.Ran || len(summary.DeepScan.ScannersFailed) != 0 {
+		t.Errorf("disabled deep scan must report enabled=false with no failures, got %+v", summary.DeepScan)
 	}
 	// Coverage counts remain populated for informational display.
 	if summary.ScannersTotal != 2 || summary.ScannersRun != 1 || summary.ScannersFailed != 1 {
@@ -1936,9 +1940,12 @@ func TestGetScanSummaryBothPasses(t *testing.T) {
 		t.Fatal("expected non-nil summary")
 	}
 
-	// Summary should reflect Pass 2 findings (warning status)
-	if summary.Status != "warnings" {
-		t.Errorf("expected status 'warnings' (from Pass 2 findings), got %s", summary.Status)
+	// The Pass-2 CVE is a tierless (deep-scan) finding: it surfaces in the
+	// counts at warning prominence but — per Spec 077 FR-014 (audit FIX 2) —
+	// it never moves the baseline verdict, which stays "clean" here because
+	// Pass 1 (the baseline) found nothing.
+	if summary.Status != "clean" {
+		t.Errorf("expected status 'clean' (tierless Pass-2 findings must not move the verdict, FR-014), got %s", summary.Status)
 	}
 
 	if summary.FindingCounts == nil {
@@ -2430,8 +2437,13 @@ func TestServiceStartScanDeepOffSkipsSourceResolution(t *testing.T) {
 	if summary.Status == "" || summary.Status == "scanning" || summary.Status == "not_scanned" {
 		t.Errorf("expected a settled deterministic verdict, got %q", summary.Status)
 	}
-	if summary.DeepScan != nil {
-		t.Errorf("DeepScan must be omitted while deep scan is off, got %+v", summary.DeepScan)
+	// Audit FIX 3a: the descriptor is emitted even while the layer is off, but
+	// must report it disabled and never-ran.
+	if summary.DeepScan == nil {
+		t.Fatalf("DeepScan descriptor must be emitted (enabled=false) while deep scan is off")
+	}
+	if summary.DeepScan.Enabled || summary.DeepScan.Ran || summary.DeepScan.Available {
+		t.Errorf("disabled deep scan must report enabled/ran/available=false, got %+v", summary.DeepScan)
 	}
 }
 
@@ -2484,4 +2496,235 @@ func TestServiceStartScanDeepOnRunsSourceResolutionAndPass2(t *testing.T) {
 	// Drain the engine so the background Pass-2 goroutine finishes before the
 	// test tears down its temp dirs (keeps -race teardown quiet).
 	waitForScanIdle(t, svc, "srv-on")
+}
+
+// TestApplySecurityConfigDefaultConfigGatesDeepScanOff locks the audit's FIX-1
+// invariant against the real default config: config.DefaultConfig() never
+// initializes Config.Security (it stays nil), and the server wiring passes
+// cfg.Security straight to ApplySecurityConfig. Even in that nil-Security case
+// the disabled-path gates MUST be applied unconditionally — deep scan off,
+// Docker deep scanners dropped, and the SourceResolver's constructed
+// fetchPackageSource=true default forced off (no package-source network egress).
+func TestApplySecurityConfigDefaultConfigGatesDeepScanOff(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	// Simulate the resolver's constructed default (NewSourceResolver: true) so
+	// the test proves ApplySecurityConfig actively flips it off rather than
+	// relying on a zero value.
+	svc.sourceResolver.SetFetchPackageSource(true)
+
+	cfg := config.DefaultConfig()
+	if cfg.Security != nil {
+		t.Fatalf("precondition: DefaultConfig must not initialize Security, got %+v", cfg.Security)
+	}
+	svc.ApplySecurityConfig(cfg.Security)
+
+	if svc.DeepScanEnabled() {
+		t.Errorf("nil Security (default config) must leave deep scan OFF")
+	}
+	if svc.sourceResolver.fetchPackageSource {
+		t.Errorf("nil Security (default config) must force the package-source fetch OFF")
+	}
+	// And the engine must resolve no Docker (non-in-process) scanner.
+	resolved, err := svc.engine.resolveScanners(nil, "")
+	if err != nil {
+		t.Fatalf("resolveScanners: %v", err)
+	}
+	for _, rs := range resolved {
+		if !rs.plugin.InProcess {
+			t.Errorf("Docker scanner %q must not resolve with default (nil) security config", rs.plugin.ID)
+		}
+	}
+}
+
+// TestServiceGetScanSummaryVerdictBaselineOnly locks Spec 077 FR-014 at EVERY
+// verdict level (audit FIX 2): the server verdict (clean/warnings/dangerous)
+// derives SOLELY from baseline (tiered, in-process detect) findings. A
+// deep-scan/external finding — which carries no Tier — must never move the
+// verdict, no matter its threat_level:
+//
+//   - a tierless threat_level=warning finding must NOT flip clean → warnings;
+//   - a tierless threat_level=dangerous finding must NOT flip the verdict either,
+//     and must surface at (at least) warning prominence in FindingCounts — the
+//     old code dropped it into the Info bucket, BELOW a warning-level finding.
+func TestServiceGetScanSummaryVerdictBaselineOnly(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	svc.SetDeepScan(true, nil)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-deep-findings",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 2},
+		},
+	})
+	// Two tierless (deep-scan/external) findings on an otherwise-clean baseline.
+	// Rule ids are chosen so ClassifyThreat deterministically assigns the
+	// intended threat levels: "rug-pull" → warning, "tool-poisoning" → dangerous.
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r-deep", JobID: "j-deep-findings", ServerName: "server-a", ScannerID: "test-scanner",
+		Findings: []ScanFinding{
+			{RuleID: "rug-pull", Severity: SeverityMedium, Title: "tool definition change"},
+			{RuleID: "tool-poisoning", Severity: SeverityCritical, Title: "hidden instruction in description"},
+		},
+		ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	// FR-014: baseline is clean, so the verdict stays clean regardless of the
+	// tierless deep/external findings.
+	if summary.Status != "clean" {
+		t.Errorf("verdict must derive solely from baseline findings (FR-014): expected 'clean', got %q", summary.Status)
+	}
+	if summary.FindingCounts == nil {
+		t.Fatal("expected FindingCounts")
+	}
+	if summary.FindingCounts.Dangerous != 0 {
+		t.Errorf("tierless findings must never count as dangerous, got %d", summary.FindingCounts.Dangerous)
+	}
+	// Both tierless findings surface at warning prominence: the warning-level
+	// one as before, and the dangerous-level one no longer INVERTED into Info.
+	if summary.FindingCounts.Warning != 2 {
+		t.Errorf("expected both tierless findings in the Warning bucket, got Warning=%d Info=%d",
+			summary.FindingCounts.Warning, summary.FindingCounts.Info)
+	}
+	if summary.FindingCounts.Total != 2 {
+		t.Errorf("expected total 2, got %d", summary.FindingCounts.Total)
+	}
+}
+
+// TestServiceGetScanSummaryVerdictBaselineSoftWarns is the FR-014 counterpart:
+// a BASELINE soft-tier finding (the in-process detect engine emits Tier=soft,
+// threat_level=warning) still moves the verdict to "warnings", and a baseline
+// hard-tier finding still yields "dangerous" — baseline-only does not mean
+// verdict-never-moves.
+func TestServiceGetScanSummaryVerdictBaselineSoftWarns(t *testing.T) {
+	svc, store, _ := newTestService(t)
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-baseline-soft",
+		ServerName: "server-soft",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 1},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r-soft", JobID: "j-baseline-soft", ServerName: "server-soft", ScannerID: "test-scanner",
+		Findings: []ScanFinding{
+			{RuleID: "directive_imperative", Tier: TierSoft, ThreatLevel: ThreatLevelWarning,
+				Severity: SeverityMedium, Title: "imperative directive"},
+		},
+		ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-soft")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Status != "warnings" {
+		t.Errorf("a baseline soft finding must yield 'warnings', got %q", summary.Status)
+	}
+
+	// Hard tier ⇒ dangerous (unchanged).
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-baseline-hard",
+		ServerName: "server-hard",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{"test-scanner"},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: "test-scanner", Status: ScanJobStatusCompleted, FindingsCount: 1},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r-hard", JobID: "j-baseline-hard", ServerName: "server-hard", ScannerID: "test-scanner",
+		Findings: []ScanFinding{
+			{RuleID: "phrase_injection", Tier: TierHard, ThreatLevel: ThreatLevelDangerous,
+				Severity: SeverityCritical, Title: "injection phrase"},
+		},
+		ScannedAt: now,
+	})
+	hard := svc.GetScanSummary(context.Background(), "server-hard")
+	if hard == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if hard.Status != "dangerous" {
+		t.Errorf("a baseline hard finding must yield 'dangerous', got %q", hard.Status)
+	}
+}
+
+// TestBuildDeepScanDescriptorPresentWhenDisabled locks audit FIX 3a: the
+// deep-scan descriptor is ALWAYS emitted, so scenario 1 of the Spec 077
+// quickstart (`deep_scan.enabled=false, ran=false`) is actually observable in
+// the JSON output. When the layer is off it reports enabled=false, ran=false,
+// and lists any ENABLED (installed/configured) Docker scanners that are being
+// skipped because of the gate — no more silent skip.
+func TestBuildDeepScanDescriptorPresentWhenDisabled(t *testing.T) {
+	svc, store, _ := newTestService(t)
+	// "test-scanner" is a Docker scanner; mark it enabled so it would run if
+	// deep scan were on. "scanner-b" stays merely available (not enabled).
+	svc.registry.scanners["test-scanner"].Status = ScannerStatusInstalled
+
+	now := time.Now()
+	_ = store.SaveScanJob(&ScanJob{
+		ID:         "j-off",
+		ServerName: "server-a",
+		Status:     ScanJobStatusCompleted,
+		ScanPass:   ScanPassSecurityScan,
+		Scanners:   []string{inProcessTPAScannerID},
+		StartedAt:  now,
+		ScannerStatuses: []ScannerJobStatus{
+			{ScannerID: inProcessTPAScannerID, Status: ScanJobStatusCompleted},
+		},
+	})
+	_ = store.SaveScanReport(&ScanReport{
+		ID: "r-off", JobID: "j-off", ServerName: "server-a", ScannerID: inProcessTPAScannerID,
+		Findings: []ScanFinding{}, ScannedAt: now,
+	})
+
+	summary := svc.GetScanSummary(context.Background(), "server-a")
+	if summary == nil {
+		t.Fatal("expected non-nil summary")
+	}
+	if summary.Status != "clean" {
+		t.Errorf("expected clean baseline, got %q", summary.Status)
+	}
+	if summary.DeepScan == nil {
+		t.Fatal("deep-scan descriptor must be emitted even when the layer is OFF (quickstart scenario 1)")
+	}
+	if summary.DeepScan.Enabled {
+		t.Errorf("DeepScan.Enabled must be false when deep scan is off")
+	}
+	if summary.DeepScan.Ran || summary.DeepScan.Available {
+		t.Errorf("DeepScan.Ran/Available must be false when deep scan is off, got %+v", summary.DeepScan)
+	}
+	if len(summary.DeepScan.ScannersFailed) != 0 {
+		t.Errorf("no scanner failures may be reported when deep scan is off, got %+v", summary.DeepScan.ScannersFailed)
+	}
+	if len(summary.DeepScan.SkippedScanners) != 1 || summary.DeepScan.SkippedScanners[0] != "test-scanner" {
+		t.Errorf("expected the enabled-but-skipped Docker scanner to be listed, got %v", summary.DeepScan.SkippedScanners)
+	}
+
+	// The aggregated report mirrors the descriptor too.
+	report, err := svc.GetScanReport(context.Background(), "server-a")
+	if err != nil {
+		t.Fatalf("GetScanReport: %v", err)
+	}
+	if report.DeepScan == nil || report.DeepScan.Enabled {
+		t.Errorf("report must carry the disabled deep-scan descriptor, got %+v", report.DeepScan)
+	}
 }

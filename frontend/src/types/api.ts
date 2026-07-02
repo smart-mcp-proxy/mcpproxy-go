@@ -102,6 +102,9 @@ export interface DeepScanDescriptor {
   ran: boolean
   available: boolean
   scanners_failed?: { id: string; reason: string }[]
+  // Docker scanners the user enabled that are skipped because deep scan is off.
+  // Only populated when enabled=false (the descriptor is always emitted).
+  skipped_scanners?: string[]
 }
 
 // Scan job summary for history listing

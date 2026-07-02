@@ -1302,8 +1302,16 @@ func TestDeepScanFailureLeavesBaselineVerdictUnchanged(t *testing.T) {
 	if baseline.Status != summary.Status {
 		t.Errorf("baseline verdict changed with deep scan toggled: deep-on=%q deep-off=%q", summary.Status, baseline.Status)
 	}
-	// With deep scan off, the descriptor is omitted entirely (invariant).
-	if baseline.DeepScan != nil {
-		t.Errorf("DeepScanDescriptor must be omitted when deep scan is off, got %+v", baseline.DeepScan)
+	// With deep scan off, the descriptor is still emitted (audit FIX 3a:
+	// quickstart scenario 1 expects an observable deep_scan.enabled=false) but
+	// reports the layer as fully off — never ran, no failures.
+	if baseline.DeepScan == nil {
+		t.Fatalf("DeepScanDescriptor must be emitted (enabled=false) when deep scan is off")
+	}
+	if baseline.DeepScan.Enabled || baseline.DeepScan.Ran || baseline.DeepScan.Available {
+		t.Errorf("disabled deep scan must report enabled/ran/available=false, got %+v", baseline.DeepScan)
+	}
+	if len(baseline.DeepScan.ScannersFailed) != 0 {
+		t.Errorf("disabled deep scan must not report failures, got %+v", baseline.DeepScan.ScannersFailed)
 	}
 }

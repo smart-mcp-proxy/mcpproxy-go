@@ -16,7 +16,8 @@ import (
 // when mapping the scanner-internal ScanSummary onto contracts.SecurityScanSummary
 // (Finding #3). With deep scan enabled and a failed deep scanner, the wire-shape
 // summary must expose deep_scan.enabled and the per-scanner failure. When deep
-// scan is off, the descriptor stays nil (omitted).
+// scan is off, the descriptor is still carried (audit FIX 3a) but reports the
+// layer disabled with no failures.
 func TestScanSummaryEnricherAdapterCarriesDeepScan(t *testing.T) {
 	logger := zap.NewNop()
 
@@ -46,11 +47,16 @@ func TestScanSummaryEnricherAdapterCarriesDeepScan(t *testing.T) {
 		return svc
 	}
 
-	// Deep scan OFF (default): descriptor omitted on the wire summary.
+	// Deep scan OFF (default): the descriptor is still carried on the wire
+	// summary (audit FIX 3a — quickstart scenario 1 observes enabled=false),
+	// reporting the layer fully off with no failures.
 	offSvc := seed(t)
 	off := (&scanSummaryEnricherAdapter{scanner: offSvc}).GetSecurityScanSummary(context.Background(), "server-a")
 	require.NotNil(t, off)
-	require.Nil(t, off.DeepScan, "deep_scan must be omitted while deep scan is off")
+	require.NotNil(t, off.DeepScan, "deep_scan descriptor must be carried even while deep scan is off")
+	require.False(t, off.DeepScan.Enabled, "deep_scan.enabled must be false while the layer is off")
+	require.False(t, off.DeepScan.Ran)
+	require.Empty(t, off.DeepScan.ScannersFailed)
 
 	// Deep scan ON: descriptor must be carried through, not dropped.
 	onSvc := seed(t)

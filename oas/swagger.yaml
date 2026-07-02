@@ -1195,8 +1195,9 @@ components:
     contracts.DeepScanDescriptor:
       description: |-
         DeepScan reports the opt-in "deep scan" layer status (Spec 077 US3),
-        SEPARATELY from the baseline verdict above. Nil/omitted when deep scan is
-        off (the default); it never influences Status.
+        SEPARATELY from the baseline verdict above. Always emitted on a computed
+        summary — when deep scan is off (the default) it reports enabled=false
+        plus any enabled-but-skipped Docker scanners. It never influences Status.
       properties:
         available:
           type: boolean
@@ -1207,6 +1208,14 @@ components:
         scanners_failed:
           items:
             $ref: '#/components/schemas/contracts.DeepScanScannerFailure'
+          type: array
+          uniqueItems: false
+        skipped_scanners:
+          description: |-
+            SkippedScanners lists Docker scanners the user enabled that are skipped
+            because security.deep_scan.enabled is false (informational).
+          items:
+            type: string
           type: array
           uniqueItems: false
       type: object

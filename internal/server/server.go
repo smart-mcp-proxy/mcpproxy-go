@@ -1994,9 +1994,16 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// surface here (T031). This exact call is re-run on every config.reloaded
 		// (reapplyScannerSecurityConfig) so a deep-scan toggle hot-reloads without
 		// a restart — startup and reload configure the scanner identically.
+		// ApplySecurityConfig is nil-safe (audit FIX 1): a nil Config or a nil
+		// Config.Security (DefaultConfig never initializes the security block)
+		// still forces the deep-scan layer OFF — no Docker scanners, no
+		// published-package-source fetch — so the disabled-path gates apply
+		// unconditionally rather than only when a security block exists.
+		var secCfg *config.SecurityConfig
 		if cfg != nil {
-			secService.ApplySecurityConfig(cfg.Security)
+			secCfg = cfg.Security
 		}
+		secService.ApplySecurityConfig(secCfg)
 		// MCP-34.4 / D3 option (b): tell the scanner which isolation mode is
 		// active. Under "sandbox"/"none" the host runs no Docker for scanner
 		// plugins, so they degrade cleanly (skip + "degraded" scan summary)
@@ -2905,8 +2912,9 @@ func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context,
 			Total:     summary.FindingCounts.Total,
 		}
 	}
-	// Surface the opt-in deep-scan layer status (Spec 077 US3). Nil when deep
-	// scan is off, so it stays omitted from the REST/SSE payload by default.
+	// Surface the opt-in deep-scan layer status (Spec 077 US3). Always emitted
+	// on a computed summary; when the layer is off it reports enabled=false
+	// plus any enabled-but-skipped Docker scanners (audit FIX 3a).
 	if summary.DeepScan != nil {
 		ds := &contracts.DeepScanDescriptor{
 			Enabled:   summary.DeepScan.Enabled,
@@ -2919,6 +2927,7 @@ func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context,
 				Reason: f.Reason,
 			})
 		}
+		ds.SkippedScanners = append(ds.SkippedScanners, summary.DeepScan.SkippedScanners...)
 		out.DeepScan = ds
 	}
 	return out

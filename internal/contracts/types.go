@@ -122,8 +122,9 @@ type SecurityScanSummary struct {
 	ScannersFailed int `json:"scanners_failed"`
 	ScannersTotal  int `json:"scanners_total"`
 	// DeepScan reports the opt-in "deep scan" layer status (Spec 077 US3),
-	// SEPARATELY from the baseline verdict above. Nil/omitted when deep scan is
-	// off (the default); it never influences Status.
+	// SEPARATELY from the baseline verdict above. Always emitted on a computed
+	// summary — when deep scan is off (the default) it reports enabled=false
+	// plus any enabled-but-skipped Docker scanners. It never influences Status.
 	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
 }
 
@@ -134,12 +135,16 @@ type SecurityScanSummary struct {
 // and never gates approval.
 //
 // Invariant: when Enabled is false, Ran and Available are false and
-// ScannersFailed is empty (the descriptor is omitted entirely).
+// ScannersFailed is empty; SkippedScanners is only populated in that disabled
+// state.
 type DeepScanDescriptor struct {
 	Enabled        bool                     `json:"enabled"`
 	Ran            bool                     `json:"ran"`
 	Available      bool                     `json:"available"`
 	ScannersFailed []DeepScanScannerFailure `json:"scanners_failed,omitempty"`
+	// SkippedScanners lists Docker scanners the user enabled that are skipped
+	// because security.deep_scan.enabled is false (informational).
+	SkippedScanners []string `json:"skipped_scanners,omitempty"`
 }
 
 // DeepScanScannerFailure names a single deep scanner that could not run and why.

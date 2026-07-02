@@ -291,11 +291,16 @@ func (s *Service) isBaselineScanner(scannerID string) bool {
 // and MUST NOT influence ScanSummary.Status. Both passes are considered: Pass 1
 // (security scan) and Pass 2 (supply-chain audit, where the heavy trivy /
 // supply-chain scanners run), so a Pass-2 scanner failure is reflected too.
-// Returns nil when deep scan is disabled, so the descriptor is omitted entirely
-// and the invariant (Enabled=false ⇒ everything empty) holds.
+//
+// The descriptor is ALWAYS emitted. When deep scan is disabled it reports
+// {enabled:false, ran:false} plus the ids of any enabled-but-skipped Docker
+// scanners, so quickstart scenario 1 (`deep_scan.enabled=false`) is observable
+// and a Docker scanner enabled while the layer is off is never skipped
+// silently. The invariant (Enabled=false ⇒ Ran/Available false, no failures)
+// still holds.
 func (s *Service) buildDeepScanDescriptor(jobs ...*ScanJob) *DeepScanDescriptor {
 	if !s.deepScanEnabled() {
-		return nil
+		return &DeepScanDescriptor{SkippedScanners: s.skippedDeepScannerIDs()}
 	}
 	haveJob := false
 	desc := &DeepScanDescriptor{Enabled: true}
@@ -329,6 +334,27 @@ func (s *Service) buildDeepScanDescriptor(jobs ...*ScanJob) *DeepScanDescriptor 
 		return nil
 	}
 	return desc
+}
+
+// skippedDeepScannerIDs returns the ids of Docker (non-in-process) scanners
+// that the user has enabled (installed/configured) but that will NOT run
+// because the opt-in deep-scan layer is off. Surfaced via the deep-scan
+// descriptor so the skip is visible instead of silent (audit FIX 3a).
+// Registry.List is sorted, so the result is deterministic.
+func (s *Service) skippedDeepScannerIDs() []string {
+	if s.registry == nil {
+		return nil
+	}
+	var ids []string
+	for _, p := range s.registry.List() {
+		if p.InProcess {
+			continue
+		}
+		if p.Status == ScannerStatusInstalled || p.Status == ScannerStatusConfigured {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
 }
 
 // SetIsolationModeResolver injects a per-server isolation-mode resolver so the
@@ -1298,8 +1324,8 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 
 	// Spec 077 US3 (FR-008): mirror the opt-in deep-scan availability descriptor
 	// onto the report so the report page renders the informational banner. Both
-	// passes are considered. Informational only — never changes the verdict; nil
-	// (omitted) when deep scan is off.
+	// passes are considered. Informational only — never changes the verdict;
+	// reports enabled=false (+ skipped scanners) while the layer is off.
 	agg.DeepScan = s.buildDeepScanDescriptor(pass1Job, pass2Job)
 
 	return agg, nil
@@ -1877,8 +1903,9 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 
 	// Spec 077 US3 (FR-008): surface the opt-in deep-scan layer as a SEPARATE
 	// informational dimension. This never influences Status — a failed or
-	// unavailable deep scanner leaves the baseline verdict untouched. Nil (and
-	// thus omitted) when deep scan is off.
+	// unavailable deep scanner leaves the baseline verdict untouched. Always
+	// present; reports enabled=false (+ any enabled-but-skipped Docker
+	// scanners) while the layer is off.
 	summary.DeepScan = s.buildDeepScanDescriptor(pass1Job, pass2Job)
 
 	// Check if the primary job failed
@@ -1961,29 +1988,44 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// dangerous (isBlockingFinding). A baseline soft finding (detect emits
 	// ThreatLevelWarning for soft-only) counts as a warning. Legacy/external/
 	// deep-scan findings carry no tier and therefore never count as dangerous
-	// (US3 FR-021 — they inform but do not gate); they still surface as
-	// warnings/info by threat_level.
+	// (US3 FR-021 — they inform but do not gate); they surface at warning/info
+	// prominence by threat_level. A tierless finding at threat_level
+	// "dangerous" is bucketed as a WARNING: it informs without gating, and it
+	// must not rank BELOW a warning-level finding (the old bucketing dropped
+	// it into Info — an inversion).
 	counts := FindingCounts{Total: len(allFindings)}
+	baselineWarnings := 0
 	for _, f := range allFindings {
 		switch {
 		case isBlockingFinding(f):
 			counts.Dangerous++
-		case f.ThreatLevel == ThreatLevelWarning:
+		case f.ThreatLevel == ThreatLevelWarning,
+			f.Tier == "" && f.ThreatLevel == ThreatLevelDangerous:
 			counts.Warning++
 		default:
 			counts.Info++
 		}
+		// FR-014: only BASELINE findings move the verdict at ANY level. The
+		// in-process detect engine is the only producer that sets Tier, so a
+		// non-empty Tier identifies a baseline finding.
+		if f.Tier != "" && !isBlockingFinding(f) && f.ThreatLevel == ThreatLevelWarning {
+			baselineWarnings++
+		}
 	}
 	summary.FindingCounts = &counts
 
-	// Determine status. A "dangerous" status therefore requires ≥1 hard-tier
-	// baseline finding.
-	if counts.Dangerous > 0 {
+	// Determine status (Spec 077 FR-014): the verdict derives SOLELY from
+	// baseline findings at every level — "dangerous" requires ≥1 hard-tier
+	// baseline finding, "warnings" requires ≥1 warning-level baseline (soft)
+	// finding. Deep-scan/external/legacy findings are reported via
+	// FindingCounts and the DeepScan descriptor but never move the verdict.
+	switch {
+	case counts.Dangerous > 0:
 		summary.Status = "dangerous"
-	} else if counts.Warning > 0 {
+	case baselineWarnings > 0:
 		summary.Status = "warnings"
-	} else if counts.Total > 0 {
-		summary.Status = "clean" // Only informational findings
+	default:
+		summary.Status = "clean" // baseline produced nothing above info level
 	}
 
 	// Cache for fast subsequent reads
@@ -2027,8 +2069,9 @@ type ScanSummary struct {
 	ScannersTotal  int `json:"scanners_total"`
 	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077
 	// FR-008). It is a SEPARATE informational dimension and MUST NOT influence
-	// Status. Nil/omitted when deep scan is off (the default). Populated by US3;
-	// for US1 this is a placeholder that serializes only when set.
+	// Status. Always emitted on a computed summary: when deep scan is off (the
+	// default) it reports enabled=false plus any enabled-but-skipped Docker
+	// scanners, so the skip is observable (audit FIX 3a).
 	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
 }
 
@@ -2039,7 +2082,10 @@ type ScanSummary struct {
 // clean baseline to "degraded" and never gates approval (FR-007/FR-021).
 //
 // Invariant: when Enabled is false, Ran and Available are false and
-// ScannersFailed is empty.
+// ScannersFailed is empty; SkippedScanners is only populated in that disabled
+// state. The descriptor itself is ALWAYS emitted (audit FIX 3a), so a
+// deep-scan-off scan observably reports enabled=false rather than omitting the
+// field.
 type DeepScanDescriptor struct {
 	// Enabled reflects security.deep_scan.enabled (default false).
 	Enabled bool `json:"enabled"`
@@ -2049,6 +2095,9 @@ type DeepScanDescriptor struct {
 	Available bool `json:"available"`
 	// ScannersFailed lists per-scanner best-effort failures (informational).
 	ScannersFailed []DeepScanScannerFailure `json:"scanners_failed,omitempty"`
+	// SkippedScanners lists Docker scanners the user enabled that are being
+	// skipped because deep scan is off (informational; disabled state only).
+	SkippedScanners []string `json:"skipped_scanners,omitempty"`
 }
 
 // DeepScanScannerFailure names a single deep scanner that could not run and why.
