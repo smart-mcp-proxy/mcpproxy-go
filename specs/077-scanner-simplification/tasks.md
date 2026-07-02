@@ -25,8 +25,8 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 **Purpose**: Establish a green regression baseline before refactoring the scanner.
 
-- [ ] T001 Confirm branch `077-scanner-simplification` builds and the existing scanner suite passes: `go build ./cmd/mcpproxy && go test ./internal/security/... ` — record as the pre-refactor reference.
-- [ ] T002 [P] Capture the current eval baseline: `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` and note per-category recall/FP as the no-regression reference for T006/T015.
+- [x] T001 Confirm branch `077-scanner-simplification` builds and the existing scanner suite passes: `go build ./cmd/mcpproxy && go test ./internal/security/... ` — record as the pre-refactor reference.
+- [x] T002 [P] Capture the current eval baseline: `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` and note per-category recall/FP as the no-regression reference for T006/T015.
 
 ---
 
@@ -34,8 +34,8 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 **Purpose**: Shared type changes that US1–US4 all build on. ⚠️ No user story work begins until this is done.
 
-- [ ] T003 Add `Tier` (`hard`|`soft`) and `Sources` (`[]string`) fields to the `ScanFinding` type in `internal/security/scanner/types.go` (JSON `omitempty`, back-compat); update `detectFindingToScanFinding` in `internal/security/scanner/inprocess.go` to set `Tier`/`Sources` from detect output.
-- [ ] T004 Add a `DeepScanDescriptor` type (`Enabled`, `Ran`, `Available`, `ScannersFailed []{ID,Reason}`) and a `DeepScan` field on the scan report/summary type in `internal/security/scanner/service.go` (unpopulated placeholder for now).
+- [x] T003 Add `Tier` (`hard`|`soft`) and `Sources` (`[]string`) fields to the `ScanFinding` type in `internal/security/scanner/types.go` (JSON `omitempty`, back-compat); update `detectFindingToScanFinding` in `internal/security/scanner/inprocess.go` to set `Tier`/`Sources` from detect output.
+- [x] T004 Add a `DeepScanDescriptor` type (`Enabled`, `Ran`, `Available`, `ScannersFailed []{ID,Reason}`) and a `DeepScan` field on the scan report/summary type in `internal/security/scanner/service.go` (unpopulated placeholder for now).
 - [ ] T005 [P] Copy the two contract schemas from `specs/077-scanner-simplification/contracts/` into `internal/security/scanner/testdata/` for report/config validation tests.
 
 **Checkpoint**: Shared types compile; scan output unchanged in behavior.
@@ -50,21 +50,21 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 ### Tests for User Story 1 (write first, must fail)
 
-- [ ] T006 [P] [US1] Failing test: no detection-coverage loss after legacy-rule deletion (every corpus attack still detected) in `internal/security/scanner/inprocess_test.go`.
-- [ ] T007 [P] [US1] Failing test: `phrase_injection` hard-tier recall on curated positives AND zero hard-block on benign near-misses in `internal/security/detect/checks/phrase_injection_test.go`.
-- [ ] T008 [P] [US1] Failing test: determinism (same tool set → identical findings/verdict across two runs) and baseline runs with no Docker in `internal/security/scanner/service_test.go`.
+- [x] T006 [P] [US1] Failing test: no detection-coverage loss after legacy-rule deletion (every corpus attack still detected) in `internal/security/scanner/inprocess_test.go`.
+- [x] T007 [P] [US1] Failing test: `phrase_injection` hard-tier recall on curated positives AND zero hard-block on benign near-misses in `internal/security/detect/checks/phrase_injection_test.go`.
+- [x] T008 [P] [US1] Failing test: determinism (same tool set → identical findings/verdict across two runs) and baseline runs with no Docker in `internal/security/scanner/service_test.go`.
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] Create the curated hard-tier check in `internal/security/detect/checks/phrase_injection.go` (high-confidence injection/exfiltration patterns; tier=hard; positions/thresholds to avoid benign FP).
-- [ ] T010 [US1] Register `phrase_injection` in the detect wiring `Checks` slice in `internal/security/scanner/inprocess.go` (check imports detect; engine never imports checks — no cycle).
-- [ ] T011 [US1] Delete legacy `tpaRules` + `matchAnyPhrase` and their append in `internal/security/scanner/inprocess.go`.
-- [ ] T012 [US1] Delete the legacy embedded-secret path (`security.NewDetector(nil)` append) in `internal/security/scanner/inprocess.go`; rely on detect's `EmbeddedSecret` check.
-- [ ] T013 [US1] Derive the baseline verdict (`clean`/`warning`/`dangerous`) from baseline hard/soft tiers only in `internal/security/scanner/service.go` (a `dangerous` status requires ≥1 hard baseline finding).
-- [ ] T014 [US1] Default all bundled Docker scanners to `enabled:false` and keep `tpa-descriptions` `enabled:true` in `internal/security/scanner/registry_bundled.go`.
-- [ ] T015 [US1] Add `phrase_injection` to `gateChecks()` in `cmd/scan-eval/gate.go`.
-- [ ] T016 [P] [US1] Extend `detect_corpus_v1.json` with curated `phrase_injection` positives and benign near-misses.
-- [ ] T017 [US1] Frontend: gate the Approve modal on baseline `dangerous` findings only in `frontend/src/views/ServerDetail.vue`.
+- [x] T009 [US1] Create the curated hard-tier check in `internal/security/detect/checks/phrase_injection.go` (high-confidence injection/exfiltration patterns; tier=hard; positions/thresholds to avoid benign FP).
+- [x] T010 [US1] Register `phrase_injection` in the detect wiring `Checks` slice in `internal/security/scanner/inprocess.go` (check imports detect; engine never imports checks — no cycle).
+- [x] T011 [US1] Delete legacy `tpaRules` + `matchAnyPhrase` and their append in `internal/security/scanner/inprocess.go`.
+- [x] T012 [US1] Delete the legacy embedded-secret path (`security.NewDetector(nil)` append) in `internal/security/scanner/inprocess.go`; rely on detect's `EmbeddedSecret` check.
+- [x] T013 [US1] Derive the baseline verdict (`clean`/`warning`/`dangerous`) from baseline hard/soft tiers only in `internal/security/scanner/service.go` (a `dangerous` status requires ≥1 hard baseline finding).
+- [x] T014 [US1] Default all bundled Docker scanners to `enabled:false` and keep `tpa-descriptions` `enabled:true` in `internal/security/scanner/registry_bundled.go`.
+- [x] T015 [US1] Add `phrase_injection` to `gateChecks()` in `cmd/scan-eval/gate.go`.
+- [x] T016 [P] [US1] Extend `detect_corpus_v1.json` with curated `phrase_injection` positives and benign near-misses.
+- [x] T017 [US1] Frontend: gate the Approve modal on baseline `dangerous` findings only in `frontend/src/views/ServerDetail.vue`.
 
 **Checkpoint**: MVP — offline deterministic baseline replaces the legacy stack; `scan-eval --gate` green with the new check.
 
@@ -78,15 +78,15 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 ### Tests for User Story 2 (write first, must fail)
 
-- [ ] T018 [P] [US2] Failing test: dedup by `(rule_id, location)` yields exactly one finding in `internal/security/scanner/sarif_test.go`.
-- [ ] T019 [P] [US2] Failing test: two independent sources agreeing on `(location, threat_type)` boosts confidence above single-source in `internal/security/scanner/sarif_test.go`.
+- [x] T018 [P] [US2] Failing test: dedup by `(rule_id, location)` yields exactly one finding in `internal/security/scanner/sarif_test.go`.
+- [x] T019 [P] [US2] Failing test: two independent sources agreeing on `(location, threat_type)` boosts confidence above single-source in `internal/security/scanner/sarif_test.go`.
 
 ### Implementation for User Story 2
 
-- [ ] T020 [US2] Extend `consensusWeight`/`CalculateRiskScore` so matched external findings on `(location, threat_type)` add to consensus, not flatten to weight 1, in `internal/security/scanner/sarif.go`.
-- [ ] T021 [US2] Populate `Finding.Sources` (all contributing scanner ids) during merge in `AggregateReports` in `internal/security/scanner/engine.go`.
-- [ ] T022 [US2] Ensure every finding carries a severity via `ClassifyThreat` backfill for external/legacy SARIF findings in `internal/security/scanner/sarif.go`.
-- [ ] T023 [US2] Frontend: render the single merged finding list with severity + source attribution in `frontend/src/views/ScanReport.vue`.
+- [x] T020 [US2] Extend `consensusWeight`/`CalculateRiskScore` so matched external findings on `(location, threat_type)` add to consensus, not flatten to weight 1, in `internal/security/scanner/sarif.go`.
+- [x] T021 [US2] Populate `Finding.Sources` (all contributing scanner ids) during merge in `AggregateReports` in `internal/security/scanner/engine.go`.
+- [x] T022 [US2] Ensure every finding carries a severity via `ClassifyThreat` backfill for external/legacy SARIF findings in `internal/security/scanner/sarif.go`.
+- [x] T023 [US2] Frontend: render the single merged finding list with severity + source attribution in `frontend/src/views/ScanReport.vue`.
 
 **Checkpoint**: US1 + US2 — one trustworthy merged report.
 
@@ -100,19 +100,19 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 ### Tests for User Story 3 (write first, must fail)
 
-- [ ] T024 [P] [US3] Failing test: deep scan off by default → only baseline runs, no Docker invoked, in `internal/security/scanner/service_test.go`.
-- [ ] T025 [P] [US3] Failing test: deep-scan failure/unavailable → baseline verdict unchanged AND descriptor populated, in `internal/security/scanner/engine_test.go`.
-- [ ] T026 [P] [US3] Failing test: config migration round-trip — `scanner_fetch_package_source`/`scanner_disable_no_new_privileges` map into `deep_scan.*`, `auto_scan_quarantined` ignored — in `internal/config/config_test.go`.
+- [x] T024 [P] [US3] Failing test: deep scan off by default → only baseline runs, no Docker invoked, in `internal/security/scanner/service_test.go`.
+- [x] T025 [P] [US3] Failing test: deep-scan failure/unavailable → baseline verdict unchanged AND descriptor populated, in `internal/security/scanner/engine_test.go`.
+- [x] T026 [P] [US3] Failing test: config migration round-trip — `scanner_fetch_package_source`/`scanner_disable_no_new_privileges` map into `deep_scan.*`, `auto_scan_quarantined` ignored — in `internal/config/config_test.go`.
 
 ### Implementation for User Story 3
 
-- [ ] T027 [US3] Add the `security.deep_scan` config struct (`Enabled`, `FetchPackageSource *bool`, `DisableNoNewPrivileges`, `Scanners []string`; `swaggertype` tags) and remove the orphaned `auto_scan_quarantined` in `internal/config/config.go`.
-- [ ] T028 [US3] Migrate deprecated top-level keys into `deep_scan.*` on load with back-compat aliases in the config loader/`normalizeServerQuarantineFlags` path in `internal/config/config.go`.
-- [ ] T029 [US3] Gate deep-scan execution on `deep_scan.enabled` (and the per-scanner list) in `resolveScanners`/`executeScan` in `internal/security/scanner/engine.go`.
-- [ ] T030 [US3] Populate `DeepScanDescriptor` and REMOVE the `degradeIfIncompleteCoverage` downgrade-to-`degraded` when only deep-scan plugins fail, in `internal/security/scanner/service.go`.
-- [ ] T031 [US3] Point `scanner_fetch_package_source` / `scanner_disable_no_new_privileges` consumers at `deep_scan.*` in `internal/security/scanner/engine.go` and `docker.go`.
-- [ ] T032 [US3] Regenerate OpenAPI: `make swagger` (config surface changed) and verify `make swagger-verify`.
-- [ ] T033 [US3] Frontend: show deep scan as an opt-in affordance and render deep-scan failures as info (not error) in `frontend/src/views/Security.vue` + `frontend/src/views/ScanReport.vue`.
+- [x] T027 [US3] Add the `security.deep_scan` config struct (`Enabled`, `FetchPackageSource *bool`, `DisableNoNewPrivileges`, `Scanners []string`; `swaggertype` tags) and remove the orphaned `auto_scan_quarantined` in `internal/config/config.go`.
+- [x] T028 [US3] Migrate deprecated top-level keys into `deep_scan.*` on load with back-compat aliases in the config loader/`normalizeServerQuarantineFlags` path in `internal/config/config.go`.
+- [x] T029 [US3] Gate deep-scan execution on `deep_scan.enabled` (and the per-scanner list) in `resolveScanners`/`executeScan` in `internal/security/scanner/engine.go`.
+- [x] T030 [US3] Populate `DeepScanDescriptor` and REMOVE the `degradeIfIncompleteCoverage` downgrade-to-`degraded` when only deep-scan plugins fail, in `internal/security/scanner/service.go`.
+- [x] T031 [US3] Point `scanner_fetch_package_source` / `scanner_disable_no_new_privileges` consumers at `deep_scan.*` in `internal/security/scanner/engine.go` and `docker.go`.
+- [x] T032 [US3] Regenerate OpenAPI: `make swagger` (config surface changed) and verify `make swagger-verify`.
+- [x] T033 [US3] Frontend: show deep scan as an opt-in affordance and render deep-scan failures as info (not error) in `frontend/src/views/Security.vue` + `frontend/src/views/ScanReport.vue`.
 
 **Checkpoint**: US1–US3 — deep scan is safely optional; the baseline is untouchable.
 
@@ -126,12 +126,12 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 ### Tests for User Story 4 (write first, must fail)
 
-- [ ] T034 [P] [US4] Failing test: a reconnect storm across N servers yields ≤ N settled scan events in `internal/runtime/scan_notify_test.go`.
+- [x] T034 [P] [US4] Failing test: a reconnect storm across N servers yields ≤ N settled scan events in `internal/runtime/scan_notify_test.go`.
 
 ### Implementation for User Story 4
 
-- [ ] T035 [US4] Replace per-scanner `security.scan_started/progress/completed/failed` emissions with one debounced `scan.settled` event per server per scan in the scan-notification emit path in `internal/runtime/`.
-- [ ] T036 [US4] Frontend: consume the settled event (drop per-scanner lifecycle handling) in `frontend/src/composables/useSecurityScannerStatus.ts`.
+- [x] T035 [US4] Replace per-scanner `security.scan_started/progress/completed/failed` emissions with one debounced `scan.settled` event per server per scan in the scan-notification emit path in `internal/runtime/`.
+- [x] T036 [US4] Frontend: consume the settled event (drop per-scanner lifecycle handling) in `frontend/src/composables/useSecurityScannerStatus.ts`.
 
 **Checkpoint**: All four stories independently functional.
 
@@ -139,9 +139,9 @@ Web app: Go core in `internal/` + `cmd/`, Vue frontend in `frontend/src/`. Paths
 
 ## Phase 7: Polish & Cross-Cutting
 
-- [ ] T037 [P] Update `docs/features/tool-scanner.md`: remove the legacy-coexistence caveat; document the baseline/deep-scan split, the `phrase_injection` hard check, and the two-tier model now governing behavior.
-- [ ] T038 [P] Update `docs/features/security-scanner-plugins.md`: deep scan is opt-in/off-by-default, config migration table, no-Docker default behavior.
-- [ ] T039 [P] Update `docs/configuration.md` for the `security.deep_scan` block and the removed `auto_scan_quarantined`.
+- [x] T037 [P] Update `docs/features/tool-scanner.md`: remove the legacy-coexistence caveat; document the baseline/deep-scan split, the `phrase_injection` hard check, and the two-tier model now governing behavior.
+- [x] T038 [P] Update `docs/features/security-scanner-plugins.md`: deep scan is opt-in/off-by-default, config migration table, no-Docker default behavior.
+- [x] T039 [P] Update `docs/configuration.md` for the `security.deep_scan` block and the removed `auto_scan_quarantined`.
 - [ ] T040 Run `specs/077-scanner-simplification/quickstart.md` scenarios 1–7 and record results.
 - [ ] T041 `golangci-lint run --config .github/.golangci.yml ./...` clean + `go test -race ./internal/... ` green.
 - [ ] T042 `./scripts/test-api-e2e.sh` green (unified report shape via REST).

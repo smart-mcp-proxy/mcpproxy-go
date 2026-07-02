@@ -173,7 +173,7 @@ graph TD
 
 | Epic | Status | Assignee | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- | --- |
-| Scanner simplification (deterministic default, opt-in deep scan) | In progress | unassigned | P1 | 0/42 (0%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
+| Scanner simplification (deterministic default, opt-in deep scan) | In progress | unassigned | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | unassigned | P1 | — |  |  |
 | Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 25/60 (42%) | [002-windows-installer](./specs/002-windows-installer/) |  |
 | Web UI + macOS app UX audit | Todo | unassigned | P0 | — |  |  |
@@ -274,6 +274,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [074-discovery-intervals](./specs/074-discovery-intervals/) | `drafted` | 0/19 (0%) |
 | [075-macos-tcc-connect](./specs/075-macos-tcc-connect/) | `in-flight` | 11/30 (37%) |
 | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) | `in-flight` | 22/24 (92%) |
-| [077-scanner-simplification](./specs/077-scanner-simplification/) | `drafted` | 0/42 (0%) |
+| [077-scanner-simplification](./specs/077-scanner-simplification/) | `in-flight` | 38/42 (90%) |
 | [078-connect-trust-preview](./specs/078-connect-trust-preview/) | — | — |
 | [079-upgrade-nudge](./specs/079-upgrade-nudge/) | — | — |
