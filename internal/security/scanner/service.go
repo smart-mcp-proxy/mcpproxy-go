@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // errNoScans is returned by findLatestPassJobs when the scan-job bucket has no
@@ -242,6 +244,33 @@ func (s *Service) SetDeepScan(enabled bool, scanners []string) {
 // deepScanEnabled reports whether the opt-in deep-scan layer is currently on.
 func (s *Service) deepScanEnabled() bool {
 	return s.engine != nil && s.engine.deepScanEnabled
+}
+
+// DeepScanEnabled reports whether the opt-in deep-scan layer is currently on.
+// Exported so the wiring/reload path (and its tests) can observe a config
+// hot-reload taking effect without recreating the service (Spec 077 US3).
+func (s *Service) DeepScanEnabled() bool {
+	return s.deepScanEnabled()
+}
+
+// ApplySecurityConfig (re)configures the opt-in deep-scan layer from the
+// effective security config in a single call, so both the startup wiring and
+// config hot-reload gate the scanner identically (Spec 077 US3). It resolves the
+// deep-scan master switch + per-scanner allow-list (SetDeepScan), the
+// no-new-privileges escape hatch (SetScannerDisableNoNewPrivileges), and the
+// published-package-source fetch (SetFetchPackageSource) — which only runs when
+// deep scan is ON and fetch is not explicitly disabled. All accessors are
+// nil-safe, so a nil SecurityConfig forces the layer fully off (baseline-only).
+// Idempotent: safe to call on every config.reloaded event.
+func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
+	enabled := sec.IsDeepScanEnabled()
+	s.SetDeepScan(enabled, sec.DeepScanScanners())
+	s.SetScannerDisableNoNewPrivileges(sec.IsDisableNoNewPrivileges())
+	fetchPref := true
+	if f := sec.EffectiveFetchPackageSource(); f != nil {
+		fetchPref = *f
+	}
+	s.SetFetchPackageSource(enabled && fetchPref)
 }
 
 // isBaselineScanner reports whether a scanner id belongs to the deterministic

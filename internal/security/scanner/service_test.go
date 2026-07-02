@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/stretchr/testify/assert"
 )
 
 // mockStorage implements the Storage interface for testing
@@ -367,6 +370,60 @@ func newTestService(t *testing.T) (*Service, *mockStorage, *mockEmitter) {
 	emitter := newMockEmitter()
 	svc.SetEmitter(emitter)
 	return svc, store, emitter
+}
+
+// TestServiceApplySecurityConfigReconfigures (Spec 077 US3 / Codex finding #1):
+// ApplySecurityConfig re-gates the opt-in deep-scan layer from the effective
+// security config, and the same live Service reflects a later config WITHOUT
+// being recreated — proving a config hot-reload takes effect without a restart.
+func TestServiceApplySecurityConfigReconfigures(t *testing.T) {
+	svc, _, _ := newTestService(t)
+
+	// Baseline: no deep-scan config ⇒ layer off, no source fetch/egress.
+	svc.ApplySecurityConfig(nil)
+	assert.False(t, svc.DeepScanEnabled(), "nil security config ⇒ deep scan off")
+	assert.False(t, svc.sourceResolver.fetchPackageSource, "deep scan off ⇒ no fetch")
+
+	// Enable deep scan (fetch defaults to true within the layer).
+	enabled := &config.SecurityConfig{DeepScan: &config.DeepScanConfig{
+		Enabled:                true,
+		DisableNoNewPrivileges: true,
+	}}
+	svc.ApplySecurityConfig(enabled)
+	assert.True(t, svc.DeepScanEnabled(), "deep scan enabled without recreating the service")
+	assert.True(t, svc.sourceResolver.fetchPackageSource, "deep scan on ⇒ fetch default true")
+	assert.True(t, svc.engine.disableNoNewPrivileges, "no-new-privileges escape hatch applied")
+
+	// Enabled but fetch explicitly disabled (air-gapped): layer on, egress off.
+	fetchOff := false
+	svc.ApplySecurityConfig(&config.SecurityConfig{DeepScan: &config.DeepScanConfig{
+		Enabled:            true,
+		FetchPackageSource: &fetchOff,
+	}})
+	assert.True(t, svc.DeepScanEnabled())
+	assert.False(t, svc.sourceResolver.fetchPackageSource, "explicit fetch=false forbids egress")
+	assert.False(t, svc.engine.disableNoNewPrivileges, "no-new-privileges reset when unset")
+
+	// Reload back to disabled ⇒ layer off again on the same service.
+	svc.ApplySecurityConfig(&config.SecurityConfig{DeepScan: &config.DeepScanConfig{Enabled: false}})
+	assert.False(t, svc.DeepScanEnabled(), "deep scan hot-reloads back off without restart")
+	assert.False(t, svc.sourceResolver.fetchPackageSource)
+}
+
+// TestServiceApplySecurityConfigLegacyKeys verifies ApplySecurityConfig honors
+// the deprecated top-level scanner_* keys via the effective accessors, so a
+// config that was migrated (or carries legacy keys) gates the scanner correctly.
+func TestServiceApplySecurityConfigLegacyKeys(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	fetchOff := false
+	svc.ApplySecurityConfig(&config.SecurityConfig{
+		DeepScan:                      &config.DeepScanConfig{Enabled: true},
+		ScannerFetchPackageSource:     &fetchOff, // deprecated fallback
+		ScannerDisableNoNewPrivileges: true,      // deprecated fallback
+	})
+	assert.True(t, svc.DeepScanEnabled())
+	assert.False(t, svc.sourceResolver.fetchPackageSource, "legacy fetch=false honored")
+	assert.True(t, svc.engine.disableNoNewPrivileges, "legacy no-new-privileges honored")
 }
 
 // TestServiceSetIsolationMode verifies the setter propagates the resolved

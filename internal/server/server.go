@@ -420,22 +420,50 @@ func (s *Server) forwardRuntimeStatus() {
 	}
 }
 
-// listenForRoutingModeRefresh subscribes to server events and refreshes routing mode
-// tool sets when upstream servers change (Spec 031).
+// listenForRoutingModeRefresh subscribes to server events and refreshes routing
+// mode tool sets when upstream servers change (Spec 031), and re-applies the
+// security scanner's opt-in deep-scan gate on config hot-reload (Spec 077 US3).
 func (s *Server) listenForRoutingModeRefresh() {
 	eventCh := s.runtime.SubscribeEvents()
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
-		if evt.Type == runtime.EventTypeServersChanged {
+		switch evt.Type {
+		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
 				zap.String("event_type", string(evt.Type)))
 			if s.mcpProxy != nil {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 			}
+		case runtime.EventTypeConfigReloaded:
+			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
+			// must re-gate the scanner so a security.deep_scan.* toggle takes
+			// effect without a restart. Fires on both reload paths, which both
+			// emit config.reloaded.
+			s.reapplyScannerSecurityConfig()
 		}
 	}
+}
+
+// reapplyScannerSecurityConfig re-applies the opt-in deep-scan gate (and the
+// engine-wide default isolation mode) to the running scanner service from the
+// live config, so a config hot-reload takes effect without a restart (Spec 077
+// US3). Mirrors the startup wiring; idempotent and nil-safe.
+func (s *Server) reapplyScannerSecurityConfig() {
+	if s.securityScanner == nil {
+		return
+	}
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return
+	}
+	s.securityScanner.ApplySecurityConfig(cfg.Security)
+	if cfg.DockerIsolation != nil {
+		s.securityScanner.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
+	}
+	s.logger.Debug("Re-applied security scanner config on hot-reload",
+		zap.Bool("deep_scan_enabled", s.securityScanner.DeepScanEnabled()))
 }
 
 // Start starts the MCP proxy server
@@ -1963,12 +1991,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// extraction). Off by default — only the deterministic in-process baseline
 		// runs. The deprecated top-level scanner_* keys are migrated into
 		// security.deep_scan on load, so the effective accessors read the unified
-		// surface here (T031).
-		if cfg != nil && cfg.Security != nil {
-			secService.SetDeepScan(cfg.Security.IsDeepScanEnabled(), cfg.Security.DeepScanScanners())
-		}
-		if cfg != nil && cfg.Security != nil && cfg.Security.IsDisableNoNewPrivileges() {
-			secService.SetScannerDisableNoNewPrivileges(true)
+		// surface here (T031). This exact call is re-run on every config.reloaded
+		// (reapplyScannerSecurityConfig) so a deep-scan toggle hot-reloads without
+		// a restart — startup and reload configure the scanner identically.
+		if cfg != nil {
+			secService.ApplySecurityConfig(cfg.Security)
 		}
 		// MCP-34.4 / D3 option (b): tell the scanner which isolation mode is
 		// active. Under "sandbox"/"none" the host runs no Docker for scanner
@@ -2000,19 +2027,6 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			im := core.NewIsolationManager(liveCfg.DockerIsolation)
 			return string(im.ResolveMode(sc))
 		})
-		// Spec 077 US3: published-package-source extraction is part of the opt-in
-		// deep-scan layer, so it only runs when deep scan is enabled. When enabled
-		// it honors deep_scan.fetch_package_source (default true; an explicit
-		// false — or the deprecated top-level ScannerFetchPackageSource, MCP-2206 —
-		// forbids the network egress for air-gapped hosts). Deep scan OFF (the
-		// default) ⇒ no source fetch/egress at all.
-		if cfg != nil && cfg.Security != nil {
-			fetchPref := true
-			if fetch := cfg.Security.EffectiveFetchPackageSource(); fetch != nil {
-				fetchPref = *fetch
-			}
-			secService.SetFetchPackageSource(cfg.Security.IsDeepScanEnabled() && fetchPref)
-		}
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
 			cfg:        cfg,

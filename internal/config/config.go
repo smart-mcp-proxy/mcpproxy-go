@@ -2132,6 +2132,15 @@ func (sc *SecurityConfig) IsDisableNoNewPrivileges() bool {
 	return sc.ScannerDisableNoNewPrivileges
 }
 
+// MigrateDeepScanConfig runs the Spec 077 US3 deep-scan config migration on an
+// already-parsed config. LoadFromFile applies it automatically (via
+// initializeRegistries); the /api/v1/config/apply path bypasses LoadFromFile, so
+// it calls this explicitly to normalize an API-submitted config identically to a
+// file load before diffing/saving (SC-007). Idempotent + nil-safe.
+func MigrateDeepScanConfig(cfg *Config) {
+	migrateDeepScanConfig(cfg)
+}
+
 // migrateDeepScanConfig folds the deprecated top-level scanner_fetch_package_source
 // and scanner_disable_no_new_privileges keys into the unified security.deep_scan
 // block (Spec 077 FR-017) so existing configs load unchanged and behave
