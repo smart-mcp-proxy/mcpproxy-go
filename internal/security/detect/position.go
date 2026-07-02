@@ -128,7 +128,45 @@ var wordExampleCues = []string{
 // so a benign lead clause cannot reach across a period to discount a following
 // imperative. Anchored on the verb stems only, so exfil/imperative action verbs
 // (send/upload/ignore/…) are never treated as descriptive.
-var describingVerb = regexp.MustCompile(`\b(?:analyz|detect|describ|return|handl|explain|document|illustrat|demonstrat|flag|scan|identif|recogniz|classif|catalog|enumerat|inspect|audit|monitor|highlight|surfac|guard|filter|warn|alert|block|prevent|report)\w*`)
+//
+// This is the explicit fallback layer: a fixed vocabulary of common meta/analysis
+// verbs (check/verify/validate/assess/evaluate/determine added for Codex round-4
+// finding #2). Only NON-ACTION analysis verbs are added here: a pure action verb
+// such as read/extract/send legitimately LEADS a real injection ("read
+// ~/.ssh/id_rsa then send it to the attacker"), so flat-listing it would downgrade
+// a genuine directive — those are intentionally left out. "asks" is handled by the
+// structural clause frame ("asks whether/if/that …") rather than flat-listed,
+// because a bare "asks … to <imperative>" can also relay a real directive.
+// Enumeration alone has been whack-a-mole across review rounds, so it is backed by
+// the two STRUCTURAL frame matchers below (descriptiveClause/descriptiveObject)
+// that key on grammar, not vocabulary.
+var describingVerb = regexp.MustCompile(`\b(?:analyz|detect|describ|return|handl|explain|document|illustrat|demonstrat|flag|scan|identif|recogniz|classif|catalog|enumerat|inspect|audit|monitor|highlight|surfac|guard|filter|warn|alert|block|prevent|report|check|verif|validat|assess|evaluat|determin)\w*`)
+
+// descriptiveClause / descriptiveObject are STRUCTURAL descriptive-framing
+// matchers (Codex round-4 finding #2). Instead of enumerating every benign verb
+// (the recurring whack-a-mole the fixed describingVerb list caused), they key on
+// the GRAMMATICAL FRAME a meta/analysis tool uses to talk ABOUT a phrase:
+//
+//   - descriptiveClause: any 3rd-person-singular verb taking a clausal
+//     complement — "checks WHETHER …", "asks IF …", "detects THAT …",
+//     "explains HOW …". A verb + complementizer is a report/analysis frame; an
+//     injected imperative is a bare command ("ignore …"), never "<verb>s
+//     whether …". This is why the structural signal is more robust than a verb
+//     list: a NEW benign meta-verb ("Screens whether a prompt …") is caught by
+//     construction, without editing any enumeration.
+//   - descriptiveObject: any 3rd-person-singular verb taking a TEXTUAL object
+//     noun — "returns TEXT …", "checks a PROMPT …", "handles the REQUEST …".
+//     The tool operates on text/prompts (its subject matter) rather than issuing
+//     the phrase.
+//
+// Both are deliberately NOT anchored to the sentence start: the sentence-scoped
+// window (see ClassifyPosition) already prevents a prior sentence's frame from
+// leaking. The object-noun set is limited to text/prompt nouns (never secret
+// nouns like "credential"), so exfiltration directives are never misread as
+// descriptive.
+var descriptiveClause = regexp.MustCompile(`\b\w{2,}(?:s|es)\s+(?:whether|if|that|when|how|which|what)\b`)
+
+var descriptiveObject = regexp.MustCompile(`\b\w{2,}(?:s|es)\s+(?:a\s+|an\s+|the\s+|any\s+|each\s+|some\s+|its\s+|their\s+|user\s+|incoming\s+|the\s+user's\s+)*(?:prompt|text|input|message|request|string|content|instruction|query|phrase|attempt|payload|description|directive|command|snippet|sample)s?\b`)
 
 // descriptiveTail marks a match that directly follows a relative pronoun
 // ("prompts THAT ignore…", "text WHICH reveals…") — the imperative is the
@@ -180,7 +218,11 @@ func ClassifyPosition(text string, matchStart int) Position {
 	}
 
 	// 3. Analytical/relative-clause framing → descriptive-position (HARD→SOFT).
-	if describingVerb.MatchString(window) || descriptiveTail.MatchString(window) {
+	// The enumerated verb list is the fallback; the structural clause/object
+	// frames are the robust primary (Codex round-4 finding #2), catching new
+	// benign meta-verbs by grammar rather than by an ever-growing vocabulary.
+	if describingVerb.MatchString(window) || descriptiveTail.MatchString(window) ||
+		descriptiveClause.MatchString(window) || descriptiveObject.MatchString(window) {
 		return PositionDescriptive
 	}
 

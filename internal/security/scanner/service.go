@@ -1409,13 +1409,24 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 	}
 
 	// Block approval on blocking findings unless forced. Spec 077 FR-021: the
-	// approval gate is tier-driven, mirroring the server verdict and the Approve
-	// modal. Any HARD-tier baseline finding (dangerous) blocks — and a curated
-	// hard phrase.injection is SeverityHigh, not Critical, so gating on Critical
-	// severity alone let a dangerous server be unquarantined. isBlockingFinding is
-	// the SAME predicate that drives the "dangerous" summary status, so the gate
-	// and the verdict can never disagree. Critical severity (e.g. a critical CVE)
-	// still blocks for back-compat.
+	// approval gate is PURELY tier-driven, mirroring the server verdict
+	// (GetScanSummary) and the Approve modal exactly. isBlockingFinding is the SAME
+	// predicate that drives the "dangerous" summary status, so the gate and the
+	// verdict can never disagree: a server blocks the gate if and only if its
+	// summary reads "dangerous".
+	//
+	// The former extra `Summary.Critical > 0` guard is intentionally gone (Codex
+	// round-4 finding #3). It could reject an unforced approval on a Critical-
+	// severity but NON-dangerous finding — e.g. a critical CVE, which the classifier
+	// maps to threat_level "warnings" (supply-chain findings inform, they do not
+	// gate), or a deep-scan/external finding — even though the very same summary and
+	// verdict showed the server as non-dangerous. Gate and verdict then disagreed.
+	// Under Spec 077's baseline-only, tier-driven model (FR-021, US3 FR-021 —
+	// deep-scan/external findings inform but never gate) only a HARD-tier baseline
+	// finding, or a legacy/external finding whose threat_level is "dangerous",
+	// blocks. A genuinely dangerous critical finding still carries threat_level
+	// "dangerous" and so still blocks via isBlockingFinding (and still shows
+	// "dangerous" in the summary) — the two stay consistent.
 	if aggReport != nil && !force {
 		blocking := 0
 		for _, f := range aggReport.Findings {
@@ -1425,9 +1436,6 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 		}
 		if blocking > 0 {
 			return fmt.Errorf("server has %d dangerous (hard-tier) finding(s); resolve them or use --force to approve anyway", blocking)
-		}
-		if aggReport.Summary.Critical > 0 {
-			return fmt.Errorf("server has %d critical findings; resolve them or use --force to approve anyway", aggReport.Summary.Critical)
 		}
 	}
 

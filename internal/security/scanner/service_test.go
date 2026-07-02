@@ -749,10 +749,20 @@ func TestServiceApproveServerNoCritical(t *testing.T) {
 	}
 }
 
-func TestServiceApproveServerBlockedByCritical(t *testing.T) {
+// TestServiceApproveServerCriticalNonDangerousConsistentWithVerdict locks Spec
+// 077 US1 Codex round-4 finding #3: the approval gate is PURELY tier-driven and
+// can never disagree with the server verdict (GetScanSummary). A Critical-SEVERITY
+// but NON-dangerous finding — e.g. a critical CVE, which the classifier maps to
+// threat_level "warnings" because supply-chain findings inform rather than gate —
+// must NOT block an unforced approval, AND the summary must report a non-dangerous
+// status. Gate (approval) and verdict (summary) must AGREE: both non-blocking.
+// The removed `Summary.Critical > 0` guard used to reject this approval while the
+// summary showed the very same server as non-dangerous.
+func TestServiceApproveServerCriticalNonDangerousConsistentWithVerdict(t *testing.T) {
 	svc, store, _ := newTestService(t)
 
-	// Create a scan job and report with critical findings
+	// Two critical-severity CVEs (supply-chain → threat_level "warnings", not
+	// "dangerous"; no HARD tier) plus a medium. None is a blocking finding.
 	job := &ScanJob{
 		ID:         "job-crit",
 		ServerName: "risky-server",
@@ -768,24 +778,34 @@ func TestServiceApproveServerBlockedByCritical(t *testing.T) {
 		ServerName: "risky-server",
 		ScannerID:  "test-scanner",
 		Findings: []ScanFinding{
-			{RuleID: "C1", Severity: SeverityCritical, Title: "Critical vuln"},
-			{RuleID: "C2", Severity: SeverityCritical, Title: "Another critical"},
+			{RuleID: "CVE-2025-1111", Severity: SeverityCritical, Title: "Critical CVE", PackageName: "left-pad"},
+			{RuleID: "CVE-2025-2222", Severity: SeverityCritical, Title: "Another critical CVE", PackageName: "colors"},
 			{RuleID: "M1", Severity: SeverityMedium, Title: "Medium issue"},
 		},
 		ScannedAt: time.Now(),
 	}
 	_ = store.SaveScanReport(report)
 
-	// Approve without force should fail
-	err := svc.ApproveServer(context.Background(), "risky-server", false, "admin@test.com")
-	if err == nil {
-		t.Fatal("expected error due to critical findings")
+	// Gate: an unforced approval must SUCCEED — no dangerous/hard-tier finding.
+	if err := svc.ApproveServer(context.Background(), "risky-server", false, "admin@test.com"); err != nil {
+		t.Fatalf("a critical-but-non-dangerous finding must not block unforced approval: %v", err)
+	}
+	if _, err := store.GetIntegrityBaseline("risky-server"); err != nil {
+		t.Fatalf("expected baseline after approving a non-dangerous server: %v", err)
 	}
 
-	// Verify baseline was NOT created
-	_, err = store.GetIntegrityBaseline("risky-server")
-	if err == nil {
-		t.Fatal("expected baseline to not exist after rejected approval")
+	// Verdict: the summary must AGREE that the server is non-dangerous. A gate that
+	// allowed approval while the verdict said "dangerous" would be the disagreement
+	// finding #3 forbids.
+	summary := svc.GetScanSummary(context.Background(), "risky-server")
+	if summary == nil {
+		t.Fatal("expected a scan summary")
+	}
+	if summary.Status == "dangerous" {
+		t.Fatalf("gate allowed approval but verdict is %q — gate and verdict disagree", summary.Status)
+	}
+	if summary.FindingCounts != nil && summary.FindingCounts.Dangerous > 0 {
+		t.Fatalf("gate allowed approval but verdict reports %d dangerous finding(s) — inconsistent", summary.FindingCounts.Dangerous)
 	}
 }
 
@@ -1002,9 +1022,13 @@ func TestServiceApproveServerCallsUnquarantiner(t *testing.T) {
 	}
 }
 
-// TestServiceApproveServerCriticalDoesNotUnquarantine verifies the
-// critical-findings guard still blocks approval before touching state.
-func TestServiceApproveServerCriticalDoesNotUnquarantine(t *testing.T) {
+// TestServiceApproveServerBlockedDoesNotUnquarantine verifies the tier-driven
+// blocking guard stops approval BEFORE touching state (no unquarantine, no
+// baseline). It uses a HARD-tier (dangerous) baseline finding — the shape that
+// actually blocks under Spec 077's tier-driven gate (Codex round-4 finding #3
+// dropped the legacy Critical-severity guard, so a bare critical no longer
+// blocks; a dangerous hard-tier finding still does).
+func TestServiceApproveServerBlockedDoesNotUnquarantine(t *testing.T) {
 	svc, store, _ := newTestService(t)
 	unq := &mockUnquarantiner{}
 	svc.SetServerUnquarantiner(unq)
@@ -1022,13 +1046,21 @@ func TestServiceApproveServerCriticalDoesNotUnquarantine(t *testing.T) {
 		ServerName: "risky",
 		ScannerID:  "test-scanner",
 		Findings: []ScanFinding{
-			{RuleID: "C1", Severity: SeverityCritical, Title: "Critical vuln"},
+			{
+				RuleID:      "phrase.injection",
+				Severity:    SeverityHigh,
+				Category:    "phrase_injection",
+				ThreatType:  ThreatPromptInjection,
+				ThreatLevel: ThreatLevelDangerous,
+				Title:       "Instruction-override directive",
+				Tier:        TierHard,
+			},
 		},
 		ScannedAt: time.Now(),
 	})
 
 	if err := svc.ApproveServer(context.Background(), "risky", false, "admin@test.com"); err == nil {
-		t.Fatal("expected critical-findings guard to block approval")
+		t.Fatal("expected the tier-driven guard to block approval on a dangerous hard-tier finding")
 	}
 
 	if calls := unq.Calls(); len(calls) != 0 {
