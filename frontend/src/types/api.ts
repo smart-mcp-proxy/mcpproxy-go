@@ -75,6 +75,11 @@ export interface SecurityScanFinding {
   scan_pass?: number            // 1 = security scan, 2 = supply chain audit
   evidence?: string             // Text/content that triggered the finding
   supply_chain_audit?: boolean  // True for real CVE/package findings — routes to the Supply Chain (CVEs) section regardless of scan_pass
+  // Spec 077 unified report — additive fields.
+  sources?: string[]            // Contributing scanner ids; ≥2 means scanners agreed (consensus)
+  tier?: string                 // "hard" (gates approval) | "soft" (review-only)
+  confidence?: number           // 0.0–1.0; raised when independent sources agree
+  signals?: string[]            // Deterministic detect check ids that fired
 }
 
 export interface SecurityScanReport {

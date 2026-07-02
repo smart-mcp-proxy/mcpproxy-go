@@ -246,13 +246,10 @@ func (s *ActivityService) handleEvent(evt Event) {
 	// Spec 032: Tool-level quarantine events
 	case EventTypeActivityToolQuarantineChange:
 		s.handleToolQuarantineChange(evt)
-	// Spec 039: Security scan events
-	case EventTypeSecurityScanStarted:
-		s.handleSecurityScanStarted(evt)
-	case EventTypeSecurityScanCompleted:
-		s.handleSecurityScanCompleted(evt)
-	case EventTypeSecurityScanFailed:
-		s.handleSecurityScanFailed(evt)
+	// Spec 077 US4: one settled activity record per server per scan replaces the
+	// former per-scanner started/completed/failed storm (Spec 039).
+	case EventTypeSecurityScanSettled:
+		s.handleSecurityScanSettled(evt)
 	default:
 		// Ignore other event types
 	}
@@ -855,82 +852,39 @@ func (s *ActivityService) handleToolQuarantineChange(evt Event) {
 }
 
 // handleSecurityScanStarted records a security scan start event (Spec 039).
-func (s *ActivityService) handleSecurityScanStarted(evt Event) {
+// handleSecurityScanSettled records the single settled scan result per server
+// per scan (Spec 077 US4, MCP-2207). It replaces the former started/completed/
+// failed handlers so the activity log carries one entry per scan instead of a
+// per-scanner storm.
+func (s *ActivityService) handleSecurityScanSettled(evt Event) {
 	serverName := getStringPayload(evt.Payload, "server_name")
-	jobID := getStringPayload(evt.Payload, "job_id")
-
-	metadata := map[string]interface{}{
-		"job_id": jobID,
-	}
-	if scanners := evt.Payload["scanners"]; scanners != nil {
-		metadata["scanners"] = scanners
-	}
-
-	record := &storage.ActivityRecord{
-		Type:       storage.ActivityTypeSecurityScan,
-		Source:     storage.ActivitySourceInternal,
-		ServerName: serverName,
-		ToolName:   "security_scan",
-		Status:     "started",
-		Timestamp:  evt.Timestamp,
-		Metadata:   metadata,
-	}
-
-	if err := s.storage.SaveActivity(record); err != nil {
-		s.logger.Error("Failed to save security scan started activity",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-}
-
-// handleSecurityScanCompleted records a security scan completion event (Spec 039).
-func (s *ActivityService) handleSecurityScanCompleted(evt Event) {
-	serverName := getStringPayload(evt.Payload, "server_name")
+	scanStatus := getStringPayload(evt.Payload, "status")
+	errMsg := getStringPayload(evt.Payload, "error")
 
 	metadata := map[string]interface{}{}
 	if findingsSummary := getMapPayload(evt.Payload, "findings_summary"); findingsSummary != nil {
 		metadata["findings_summary"] = findingsSummary
 	}
-	if jobID := getStringPayload(evt.Payload, "job_id"); jobID != "" {
-		metadata["job_id"] = jobID
-	}
 
-	record := &storage.ActivityRecord{
-		Type:       storage.ActivityTypeSecurityScan,
-		Source:     storage.ActivitySourceInternal,
-		ServerName: serverName,
-		ToolName:   "security_scan",
-		Status:     "success",
-		Timestamp:  evt.Timestamp,
-		Metadata:   metadata,
+	// Map the scan's terminal state onto the activity record status.
+	status := "success"
+	if scanStatus == "failed" {
+		status = "error"
 	}
-
-	if err := s.storage.SaveActivity(record); err != nil {
-		s.logger.Error("Failed to save security scan completed activity",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-}
-
-// handleSecurityScanFailed records a security scan failure event (Spec 039).
-func (s *ActivityService) handleSecurityScanFailed(evt Event) {
-	serverName := getStringPayload(evt.Payload, "server_name")
-	scannerID := getStringPayload(evt.Payload, "scanner_id")
-	errMsg := getStringPayload(evt.Payload, "error")
 
 	record := &storage.ActivityRecord{
 		Type:         storage.ActivityTypeSecurityScan,
 		Source:       storage.ActivitySourceInternal,
 		ServerName:   serverName,
 		ToolName:     "security_scan",
-		Status:       "error",
+		Status:       status,
 		ErrorMessage: errMsg,
 		Timestamp:    evt.Timestamp,
-		Metadata:     map[string]interface{}{"scanner_id": scannerID},
+		Metadata:     metadata,
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
-		s.logger.Error("Failed to save security scan failed activity",
+		s.logger.Error("Failed to save settled security scan activity",
 			zap.String("server", serverName),
 			zap.Error(err))
 	}

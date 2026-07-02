@@ -68,6 +68,9 @@
                 :key="c.id"
                 :client="c"
                 :busy="busyClients[c.id]"
+                :backup-path="connectBackups[c.id]"
+                :copied-backup="copiedBackupClient === c.id"
+                @copy-backup="copyBackupPath"
                 @connect="connectOne"
               />
             </div>
@@ -80,6 +83,9 @@
                 :key="c.id"
                 :client="c"
                 :busy="busyClients[c.id]"
+                :backup-path="connectBackups[c.id]"
+                :copied-backup="copiedBackupClient === c.id"
+                @copy-backup="copyBackupPath"
                 @connect="connectOne"
               />
             </div>
@@ -96,6 +102,9 @@
                   :key="c.id"
                   :client="c"
                   :busy="busyClients[c.id]"
+                  :backup-path="connectBackups[c.id]"
+                  :copied-backup="copiedBackupClient === c.id"
+                  @copy-backup="copyBackupPath"
                   @connect="connectOne"
                 />
               </div>
@@ -518,6 +527,11 @@ const clientsError = ref<string | null>(null)
 const busyClients = reactive<Record<string, boolean>>({})
 const connectMessage = ref('')
 const connectMessageOk = ref(true)
+// Spec 078 US2 / FR-006: backup path per client for connects performed in this
+// wizard session. string = timestamped backup created; null = success but no
+// prior file existed (nothing to back up); absent = no connect happened yet.
+const connectBackups = reactive<Record<string, string | null>>({})
+const copiedBackupClient = ref<string | null>(null)
 const addServerOpen = ref(false)
 const serverAddedJustNow = ref(false)
 
@@ -693,6 +707,10 @@ watch(() => props.show, async (open) => {
   if (open) {
     serverAddedJustNow.value = false
     connectMessage.value = ''
+    // Backup lines are session-scoped (Spec 078 US2): don't replay backup
+    // rows from connects performed in a previous wizard session.
+    for (const k of Object.keys(connectBackups)) delete connectBackups[k]
+    copiedBackupClient.value = null
     await onboarding.fetchState()
     await Promise.all([
       fetchClients(),
@@ -1028,6 +1046,9 @@ async function connectOne(clientId: string) {
     if (res.success && res.data) {
       connectMessageOk.value = true
       connectMessage.value = res.data.message || `Connected ${clientId}`
+      // Spec 078 US2: keep the backup path so the row can surface it; an
+      // empty/absent backup_path on success means no prior file existed.
+      connectBackups[clientId] = res.data.backup_path || null
       await fetchClients()
       // Spec 046 — record connect-step completion for telemetry funnel.
       // Only the first successful connect transitions the status; subsequent
@@ -1050,6 +1071,22 @@ async function connectOne(clientId: string) {
     connectMessage.value = (err as Error).message
   } finally {
     busyClients[clientId] = false
+  }
+}
+
+// Spec 078 US2: one-click copy of a row's backup path (same clipboard pattern
+// as ConnectModal's copy affordances).
+async function copyBackupPath(clientId: string) {
+  const path = connectBackups[clientId]
+  if (!path) return
+  try {
+    await navigator.clipboard.writeText(path)
+    copiedBackupClient.value = clientId
+    setTimeout(() => {
+      if (copiedBackupClient.value === clientId) copiedBackupClient.value = null
+    }, 2000)
+  } catch {
+    // Clipboard unavailable: the full path is already rendered in the row.
   }
 }
 
@@ -1111,14 +1148,14 @@ onMounted(() => {
 // --- ClientRow component ------------------------------------------------
 // Inlined as a functional component to keep this file self-contained while
 // the row layout stays consistent across all three lists.
-const ClientRow: FunctionalComponent<{ client: ClientStatus; busy?: boolean }, { connect: (id: string) => void }> = (props, { emit: rowEmit }) => {
+const ClientRow: FunctionalComponent<
+  { client: ClientStatus; busy?: boolean; backupPath?: string | null; copiedBackup?: boolean },
+  { connect: (id: string) => void; 'copy-backup': (id: string) => void }
+> = (props, { emit: rowEmit }) => {
   const c = props.client
-  return h(
+  const row = h(
     'div',
-    {
-      class: 'flex items-center justify-between p-2 rounded-lg border border-base-300',
-      'data-test': `client-row-${c.id}`,
-    },
+    { class: 'flex items-center justify-between' },
     [
       h('div', { class: 'min-w-0 flex-1' }, [
         h('div', { class: 'font-medium text-sm truncate' }, c.name),
@@ -1127,7 +1164,11 @@ const ClientRow: FunctionalComponent<{ client: ClientStatus; busy?: boolean }, {
       h('div', { class: 'shrink-0 ml-2' }, [
         !c.supported
           ? h('span', { class: 'badge badge-ghost badge-sm' }, c.reason || 'Not supported')
-          : !c.exists
+          // Bridge clients (e.g. Claude Desktop) are connectable even without
+          // an existing config file — Connect creates it (parity with
+          // ConnectModal's connectableClients gating; Spec 078 US2/FR-006:
+          // this is the path that produces the "no prior file" backup case).
+          : !c.exists && !c.bridge
             ? h('span', { class: 'text-xs opacity-40' }, 'Not installed')
             : c.connected
               ? h('span', { class: 'badge badge-success badge-sm' }, 'Connected')
@@ -1146,7 +1187,51 @@ const ClientRow: FunctionalComponent<{ client: ClientStatus; busy?: boolean }, {
       ]),
     ]
   )
+  // Spec 078 US2 / FR-006: after a connect performed in this wizard session,
+  // surface the timestamped backup (or the honest "no prior file" case) right
+  // in the row. undefined = no connect happened for this client yet.
+  const backupLine =
+    props.backupPath !== undefined
+      ? h(
+          'div',
+          {
+            class: 'mt-1 flex items-start justify-between gap-2 text-[11px] opacity-70',
+            'data-test': `client-backup-${c.id}`,
+          },
+          props.backupPath
+            ? [
+                h('span', { class: 'min-w-0 break-all leading-relaxed' }, [
+                  'A backup of your previous config was saved to ',
+                  h('code', { class: 'font-mono', title: props.backupPath }, props.backupPath),
+                ]),
+                h(
+                  'button',
+                  {
+                    class: 'btn btn-ghost btn-xs shrink-0',
+                    'data-test': `client-copy-backup-${c.id}`,
+                    title: 'Copy the backup path to the clipboard',
+                    onClick: () => rowEmit('copy-backup', c.id),
+                  },
+                  props.copiedBackup ? 'Copied ✓' : 'Copy path'
+                ),
+              ]
+            : 'No prior config file existed, so no backup was needed.'
+        )
+      : null
+  return h(
+    'div',
+    {
+      class: 'p-2 rounded-lg border border-base-300',
+      'data-test': `client-row-${c.id}`,
+    },
+    backupLine ? [row, backupLine] : [row]
+  )
 }
-ClientRow.props = { client: { type: Object, required: true }, busy: { type: Boolean, default: false } }
-ClientRow.emits = ['connect']
+ClientRow.props = {
+  client: { type: Object, required: true },
+  busy: { type: Boolean, default: false },
+  backupPath: { type: String, default: undefined },
+  copiedBackup: { type: Boolean, default: false },
+}
+ClientRow.emits = ['connect', 'copy-backup']
 </script>
