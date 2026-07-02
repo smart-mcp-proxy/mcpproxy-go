@@ -69,6 +69,15 @@ type Service struct {
 	// credential is written via an HTTP header where the client config supports
 	// one, falling back to the ?apikey= query only where it cannot.
 	requireMCPAuth bool
+	// configProvider, when set, supplies the LIVE listen address, API key, and
+	// require_mcp_auth on every call instead of the startup snapshot above. The
+	// /mcp auth middleware already honors require_mcp_auth live (server.go), so
+	// the long-lived HTTP connect service must too — otherwise a runtime toggle
+	// leaves a stale snapshot that re-introduces the API-key leak this fix closes
+	// (auth turned off, but connect still embeds the key) or writes keyless
+	// entries that cannot authenticate (auth turned on). Nil for CLI one-shots,
+	// where the freshly-loaded config is already current (Spec 078).
+	configProvider func() (listenAddr, apiKey string, requireMCPAuth bool)
 	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
 	// tests inject a permission-denied error or a call counter through it.
 	readFile func(string) ([]byte, error)
@@ -81,6 +90,27 @@ type Service struct {
 func (s *Service) WithRequireMCPAuth(v bool) *Service {
 	s.requireMCPAuth = v
 	return s
+}
+
+// WithConfigProvider installs a live-config accessor so the service reflects
+// runtime changes to listen/api_key/require_mcp_auth (hot-reloaded via the file
+// watcher or the wizard's require_mcp_auth toggle) rather than a startup
+// snapshot. Wired only for the long-lived HTTP server; CLI one-shots leave it
+// nil. Returns the receiver for chaining.
+func (s *Service) WithConfigProvider(fn func() (listenAddr, apiKey string, requireMCPAuth bool)) *Service {
+	s.configProvider = fn
+	return s
+}
+
+// resolveConfig returns the effective listen address, API key, and
+// require_mcp_auth: live from the provider when one is installed, otherwise the
+// startup snapshot. All credential/URL construction routes through here so a
+// runtime toggle is honored consistently (Spec 078).
+func (s *Service) resolveConfig() (listenAddr, apiKey string, requireMCPAuth bool) {
+	if s.configProvider != nil {
+		return s.configProvider()
+	}
+	return s.listenAddr, s.apiKey, s.requireMCPAuth
 }
 
 // NewService creates a Service that will inject the given listen address
@@ -131,7 +161,7 @@ func (s *Service) read(path string) ([]byte, error) {
 // (with or without a trailing ?apikey= query), so matching works across the
 // pre- and post-Spec-078 entry shapes.
 func (s *Service) baseURL() string {
-	addr := s.listenAddr
+	addr, _, _ := s.resolveConfig()
 	// If listen address starts with ":" (no host), default to localhost
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
@@ -154,9 +184,10 @@ type serverEntryParams struct {
 // entry. When masked is true the real key is replaced with the display mask for
 // previews (the real key never leaves the core in a preview payload).
 func (s *Service) entryParams(masked bool) serverEntryParams {
+	_, apiKey, requireMCPAuth := s.resolveConfig()
 	cred := ""
-	if s.requireMCPAuth && s.apiKey != "" {
-		cred = s.apiKey
+	if requireMCPAuth && apiKey != "" {
+		cred = apiKey
 		if masked {
 			cred = apiKeyMask
 		}
@@ -167,7 +198,8 @@ func (s *Service) entryParams(masked bool) serverEntryParams {
 // containsCredential reports whether connect will write a credential into the
 // client config for the current configuration.
 func (s *Service) containsCredential() bool {
-	return s.requireMCPAuth && s.apiKey != ""
+	_, apiKey, requireMCPAuth := s.resolveConfig()
+	return requireMCPAuth && apiKey != ""
 }
 
 // credentialQuery appends the credential as an ?apikey= query to base, for the

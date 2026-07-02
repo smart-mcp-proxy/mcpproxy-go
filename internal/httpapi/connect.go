@@ -90,7 +90,8 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Param       client path   string true "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
 // @Success     200    {object} contracts.APIResponse "ConnectPreview"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
@@ -109,7 +110,10 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	preview, err := svc.Preview(clientID, "")
+	// Honor an optional server_name so a caller can preview the exact entry name
+	// a subsequent POST connect (which accepts server_name) will write; defaults
+	// to "mcpproxy" when omitted, matching Connect (Spec 078 FR-002).
+	preview, err := svc.Preview(clientID, r.URL.Query().Get("server_name"))
 	if err != nil {
 		// A macOS App-Data (TCC) denial during the on-demand read surfaces as
 		// 403 + remediation, matching connect/disconnect (Spec 078 FR-012).

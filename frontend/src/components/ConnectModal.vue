@@ -139,13 +139,14 @@
             >
               An entry named “{{ previews[client.id]!.server_name }}” already exists — connecting will overwrite it (a backup is saved first).
             </p>
-            <!-- Malformed config (Spec 075): can't tell create vs overwrite. -->
+            <!-- Malformed config (Spec 075): the write parses the same bytes and
+                 would fail, so connecting is blocked until the file is fixed. -->
             <p
               v-else-if="previews[client.id]!.access_state === 'malformed'"
               :data-test="`connect-preview-malformed-${client.id}`"
               class="text-xs text-warning leading-relaxed"
             >
-              Your current config could not be parsed, so we can't show whether an entry already exists. Connecting still writes only the “{{ previews[client.id]!.server_name }}” entry.
+              Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove {{ previews[client.id]!.config_path }} first, then try again.
             </p>
             <!-- No prior file (bridge / absent): nothing to back up. -->
             <p
@@ -175,7 +176,7 @@
                 :data-test="`connect-preview-confirm-${client.id}`"
                 @click="confirmConnect(client.id)"
                 class="btn btn-primary btn-xs"
-                :disabled="loading.clients[client.id]"
+                :disabled="loading.clients[client.id] || previews[client.id]!.access_state === 'malformed'"
               >
                 <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Connect</span>

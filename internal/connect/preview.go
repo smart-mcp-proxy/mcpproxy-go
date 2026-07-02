@@ -132,8 +132,20 @@ func (s *Service) previewEntryExists(client ClientDef, raw []byte, serverName st
 	if !ok {
 		return false, true
 	}
-	_, exists = serversMap[serverName]
-	return exists, true
+	if _, ok := serversMap[serverName]; ok {
+		return true, true
+	}
+	// OpenCode's write path adopts an already-installed entry pointing at our MCP
+	// URL even under a different key (incl. the legacy ?apikey= shape) and
+	// normalizes it on connect; mirror that here so preview reports the overwrite
+	// instead of a misleading "create" that then diverges from the write (Spec
+	// 078 FR-002).
+	if client.ID == "opencode" {
+		if _, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // renderEntrySnippet renders the entry as the merge-ready snippet in the

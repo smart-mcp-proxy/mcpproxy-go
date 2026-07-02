@@ -1320,7 +1320,7 @@ const ClientRow: FunctionalComponent<
               ? h(
                   'p',
                   { class: 'text-xs text-warning leading-relaxed', 'data-test': `client-preview-malformed-${c.id}` },
-                  `Your current config could not be parsed, so we can't show whether an entry already exists. Connecting still writes only the "${p.server_name}" entry.`
+                  `Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove ${p.config_path} first, then try again.`
                 )
               : p.access_state === 'absent'
                 ? h(
@@ -1352,7 +1352,7 @@ const ClientRow: FunctionalComponent<
               'button',
               {
                 class: 'btn btn-primary btn-xs',
-                disabled: props.busy,
+                disabled: props.busy || p.access_state === 'malformed',
                 'data-test': `client-preview-confirm-${c.id}`,
                 onClick: () => rowEmit('confirm', c.id),
               },

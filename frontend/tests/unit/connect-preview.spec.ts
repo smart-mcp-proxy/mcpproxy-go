@@ -170,6 +170,26 @@ describe('ConnectModal preview (Spec 078 US1)', () => {
     await flushPromises()
     expect(api.connectClient).toHaveBeenCalledWith('cursor', 'mcpproxy', true)
   })
+
+  it('malformed config: confirm is disabled and the copy does not promise a write', async () => {
+    // The write parses the same bytes and would fail, so connecting is blocked
+    // until the file is fixed — the preview must not claim it writes the entry.
+    ;(api.getConnectPreview as any).mockResolvedValue(previewFor({ access_state: 'malformed' }))
+    const wrapper = await open()
+
+    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await flushPromises()
+
+    const warn = wrapper.find('[data-test="connect-preview-malformed-cursor"]')
+    expect(warn.exists()).toBe(true)
+    expect(warn.text()).toContain('connecting would fail')
+
+    const confirm = wrapper.find('[data-test="connect-preview-confirm-cursor"]')
+    expect(confirm.attributes('disabled')).toBeDefined()
+    await confirm.trigger('click')
+    await flushPromises()
+    expect(api.connectClient).not.toHaveBeenCalled()
+  })
 })
 
 describe('OnboardingWizard preview (Spec 078 US1)', () => {
