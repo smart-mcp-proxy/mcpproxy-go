@@ -211,6 +211,13 @@ func buildServerEntry(clientID, mcpURL string) map[string]interface{} {
 			"type": "http",
 			"url":  mcpURL,
 		}
+	case "codex":
+		// Codex speaks TOML; the entry is a single url key under
+		// [mcp_servers.<name>]. Constructed here (not inline in connectTOML) so
+		// preview and write share the one source of truth (Spec 078 FR-002).
+		return map[string]interface{}{
+			"url": mcpURL,
+		}
 	case "gemini":
 		return map[string]interface{}{
 			"httpUrl": mcpURL,

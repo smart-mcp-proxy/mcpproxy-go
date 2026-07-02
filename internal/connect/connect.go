@@ -541,10 +541,9 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL str
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Build Codex entry
-	entry := map[string]interface{}{
-		"url": mcpURL,
-	}
+	// Build Codex entry via the shared constructor so what connect writes is
+	// exactly what preview renders (Spec 078 FR-002).
+	entry := buildServerEntry(client.ID, mcpURL)
 	serversMap[serverName] = entry
 	data["mcp_servers"] = serversMap
 
