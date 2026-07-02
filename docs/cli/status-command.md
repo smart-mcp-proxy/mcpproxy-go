@@ -45,7 +45,7 @@ mcpproxy status
 ```
 MCPProxy Status
   State:       Running
-  Version:     v1.2.0
+  Version:     v1.2.0 (update available: v1.3.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0)
   Listen:      127.0.0.1:8080
   Uptime:      2h 15m
   API Key:     a1b2****gh78
@@ -134,9 +134,22 @@ mcpproxy status -o json
   },
   "socket_path": "/Users/you/.mcpproxy/mcpproxy.sock",
   "config_path": "/Users/you/.mcpproxy/mcp_config.json",
-  "version": "v1.2.0"
+  "version": "v1.2.0",
+  "update": {
+    "available": true,
+    "latest_version": "v1.3.0",
+    "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0"
+  }
 }
 ```
+
+## Update Availability
+
+When the daemon is running, `status` surfaces the result of the background update check (the same `update` object as `GET /api/v1/info` and `mcpproxy doctor`):
+
+- **Update available**: `Version: v1.2.0 (update available: v1.3.0 — <release URL>)`
+- **Up to date**: `Version: v1.3.0 (latest)`
+- **Check failed or not yet completed** (offline, rate-limited): the version is shown without any annotation. In JSON output the `update.check_error` field retains the failure reason for diagnostics.
 
 ## API Key Masking
 
