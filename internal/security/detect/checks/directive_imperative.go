@@ -45,10 +45,15 @@ type directiveFamily struct {
 // lowercase, contraction-expanded, lightly-stemmed forms (e.g. "instruction"
 // matches the stemmed "instructions"). Built once at init.
 var directiveFamilies = []directiveFamily{
-	{ // Hidden-instruction / role-injection tags: <IMPORTANT>, <system>, <hidden>, …
-		// "hidden" restores the legacy tpa <hidden> marker (Spec 077 US1, Codex
-		// round-2 finding C).
-		re:   regexp.MustCompile(`<\s*(important|system|secret|critical|admin|instruction|developer|assistant|hidden)\b`),
+	{ // Hidden-instruction / role-injection tags: <IMPORTANT>, <system>, <hidden>,
+		// <system_prompt>, … "hidden" restores the legacy tpa <hidden> marker (Spec 077
+		// US1, Codex round-2 finding C). The optional (?:[_-]\w+)* suffix lets a
+		// compound tag name match — <system_prompt> / <developer-note> — which a bare
+		// `\b` after the keyword misses because "_" is a word char (Codex round-3
+		// finding #3). It does NOT loosen to prefixes: "<systematic>" still fails (no
+		// separator), so the keyword must be a whole tag-name token or the head of an
+		// underscore/hyphen-joined one.
+		re:   regexp.MustCompile(`<\s*(?:important|system|secret|critical|admin|instruction|developer|assistant|hidden)(?:[_-]\w+)*\b`),
 		base: 0.7,
 		what: "hidden-instruction tag",
 	},
@@ -56,6 +61,17 @@ var directiveFamilies = []directiveFamily{
 		re:   regexp.MustCompile(`\b(ignore|disregard|forget|override|bypass) (?:the |all |any |these )?(?:previous|prior|above|earlier|preceding|all|these|any) (?:instruction|direction|command|prompt|rule|guideline)\w*`),
 		base: 0.65,
 		what: "instruction-override directive",
+	},
+	{ // Injected new-instruction preamble (legacy tpa restore, Spec 077 US1 Codex
+		// round-3 finding #2): "new instructions:", "updated directions:",
+		// "additional instructions:". The colon anchor keeps it to the smuggled-header
+		// shape — a benign "follow the new instructions carefully" (no colon) does not
+		// match. SOFT: benignly phrasable ("returns the new instructions: …"), so
+		// review-only. (Normalization leaves the trailing "instructions:" token
+		// unstemmed because the colon blocks the plural-strip, so \w* absorbs the "s".)
+		re:   regexp.MustCompile(`\b(?:new|updated|revised|additional|further|latest|real|actual|hidden|secret) (?:instruction|direction|command|rule|order)\w*\s*:`),
+		base: 0.5,
+		what: "injected instruction preamble",
 	},
 	{ // Secrecy imperative: "do not tell the user", "must not reveal".
 		re:   regexp.MustCompile(`\b(?:do not|must not|never) (?:tell|inform|reveal|disclos\w*|mention|notify|warn|expose)\b`),

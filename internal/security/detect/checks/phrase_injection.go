@@ -24,7 +24,10 @@ import (
 // verdict and auto-quarantine, so the patterns are deliberately narrow and every
 // match is position-discounted: a phrase that is quoted or merely described
 // ("detects prompts such as 'ignore previous instructions'") lands below the
-// hard emit floor and is not blocked (FR-005, the core false-positive control).
+// hard emit floor and is NOT auto-blocked (FR-005, the core false-positive
+// control). Such a matched-but-discounted phrase is not discarded either — it is
+// downgraded to a SOFT review signal (never-fully-suppress, Codex round-3), so a
+// real injection can never disappear behind a framing cue.
 //
 // It runs over the engine's NORMALIZED text (lowercased, contraction-expanded,
 // lightly-stemmed, format-runes stripped) so "don't disclose" / "do not tell"
@@ -34,11 +37,24 @@ type PhraseInjection struct{}
 // ID implements detect.Check.
 func (*PhraseInjection) ID() string { return "phrase.injection" }
 
-// phraseHardMinConfidence is the per-check emit floor. A lone example-position
-// match (base × exampleDiscount ≈ 0.9 × 0.25 = 0.225) lands below it and emits
-// nothing; an instruction-position match clears it. This keeps "describes the
-// phrase" tools from being hard-blocked (FR-005 MUST-NOT).
+// phraseHardMinConfidence is the HARD emit floor: at/above it a match
+// auto-quarantine-gates. An instruction-position match clears it; a discounted
+// (descriptive/example) one does not, so "describes the phrase" tools are never
+// hard-blocked (FR-005 MUST-NOT, the core false-positive control).
 const phraseHardMinConfidence = 0.6
+
+// phraseSoftFloor is the SOFT review floor. Because this check is built for
+// recall, a phrase that MATCHED a curated family but was position-discounted
+// below the hard floor is NOT dropped — it is re-floored to phraseSoftFloor and
+// emitted at the SOFT tier (review-only, never auto-quarantine). This is the
+// "never fully suppress a matched injection" invariant (Spec 077 US1, Codex
+// round-3): it closes the whole recurring silent-bypass class, where a fresh
+// framing cue each review round ("prompt:", "Example output format.", quotes)
+// pushed a real injection below every floor and made it vanish. Worst case a
+// matched injection now surfaces for review; it can never be invisible. The
+// accepted cost is soft-tier noise on scanners that legitimately quote an
+// injection string — soft is review-only, so it never blocks them.
+const phraseSoftFloor = 0.3
 
 // phraseFamily is one curated regex family with its instruction-position base
 // confidence and threat classification. Order is fixed for determinism.
@@ -61,6 +77,21 @@ var phraseFamilies = []phraseFamily{
 		base:   0.9,
 		threat: detect.ThreatPromptInjection,
 		what:   "instruction-override directive",
+	},
+	{ // Bare instruction override WITHOUT an explicit directive-noun: "ignore the
+		// above and …", "disregard all previous, then …", "forget everything above; …".
+		// The noun-anchored family above misses these (it requires
+		// instruction/direction/… after above/previous), but the legacy tpa rules
+		// caught them (Spec 077 US1, Codex round-3 finding #2). A trailing continuation
+		// (comma/semicolon/colon or and/then/instead/now) is REQUIRED so a benign
+		// "ignore the above warning" — where a noun follows the override word — never
+		// matches; only the override-then-new-directive shape does. HARD because a
+		// bare override immediately handing off to a follow-on instruction is
+		// essentially never benign in a tool description.
+		re:     regexp.MustCompile(`\b(?:ignore|disregard|forget) (?:all |the |any |these |everything )*(?:previous|prior|above|preceding|earlier|foregoing)\b\s*(?:,|;|:|\band\b|\bthen\b|\binstead\b|\bnow\b)`),
+		base:   0.85,
+		threat: detect.ThreatPromptInjection,
+		what:   "bare instruction-override directive",
 	},
 	{ // Guardrail override: "ignore your guidelines", "disregard these instructions",
 		// "bypass your restrictions". Restores the legacy tpa "ignore your
@@ -87,14 +118,22 @@ var phraseFamilies = []phraseFamily{
 }
 
 // Inspect implements detect.Check. It emits at most one signal per tool: the
-// highest-confidence curated directive that clears phraseHardMinConfidence after
-// position discounting.
+// highest-confidence curated directive found after position discounting.
+//
+// Tiering (Spec 077 US1, Codex round-3 "never fully suppress"):
+//   - conf ≥ phraseHardMinConfidence (instruction-position) → HARD (auto-quarantine).
+//   - a family MATCHED but was discounted below the hard floor
+//     (descriptive/example/quoted) → SOFT, re-floored to phraseSoftFloor so the
+//     match surfaces for review instead of vanishing. A matched injection is
+//     therefore never silently dropped, no matter what framing cue precedes it.
+//   - nothing matched → no signal.
 func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) []detect.Signal {
 	text := tool.NormalizedText
 	if text == "" {
 		return nil
 	}
 
+	matched := false
 	bestConf := 0.0
 	bestMatch := ""
 	bestWhat := ""
@@ -102,7 +141,8 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	for _, fam := range phraseFamilies {
 		for _, loc := range fam.re.FindAllStringIndex(text, -1) {
 			conf := fam.base * detect.ClassifyPosition(text, loc[0]).Discount()
-			if conf > bestConf {
+			if !matched || conf > bestConf {
+				matched = true
 				bestConf = conf
 				bestMatch = text[loc[0]:loc[1]]
 				bestWhat = fam.what
@@ -111,16 +151,30 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		}
 	}
 
-	if bestConf < phraseHardMinConfidence {
+	if !matched {
 		return nil
+	}
+
+	// Instruction-position clears the hard floor and auto-quarantine-gates. A
+	// matched-but-discounted phrase is NOT dropped: downgrade to SOFT and re-floor
+	// to the review floor so it always surfaces (never-fully-suppress invariant).
+	tier := detect.TierHard
+	conf := bestConf
+	detail := fmt.Sprintf("Description contains a high-confidence %s (%q) — an instruction to the agent, not a tool description.", bestWhat, bestMatch)
+	if bestConf < phraseHardMinConfidence {
+		tier = detect.TierSoft
+		if conf < phraseSoftFloor {
+			conf = phraseSoftFloor
+		}
+		detail = fmt.Sprintf("Description references a %s (%q) in a quoted/described position — surfaced for review, not auto-blocked.", bestWhat, bestMatch)
 	}
 
 	return []detect.Signal{{
 		CheckID:    c.ID(),
-		Tier:       detect.TierHard,
+		Tier:       tier,
 		ThreatType: bestThreat,
-		Confidence: detect.ClampConfidence(bestConf),
+		Confidence: detect.ClampConfidence(conf),
 		Evidence:   detect.CapEvidence(bestMatch),
-		Detail:     fmt.Sprintf("Description contains a high-confidence %s (%q) — an instruction to the agent, not a tool description.", bestWhat, bestMatch),
+		Detail:     detail,
 	}}
 }
