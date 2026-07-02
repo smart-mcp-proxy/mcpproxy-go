@@ -4,11 +4,12 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 5** (`schema_version: 5` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 6** (`schema_version: 6` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `anonymous_id` | `550e8400-...` | Random UUID for deduplication (not linked to you) |
+| `machine_id` | `9f86d081...` (64-hex) | Stable, **non-reversible** salted hash of the OS machine id — dedups ephemeral installs whose `anonymous_id` churns every run (schema v6). Empty/omitted when unreadable. Never the raw machine id |
 | `version` | `0.21.3` | Track version adoption |
 | `edition` | `personal` | Understand edition usage |
 | `os` | `darwin` | Platform distribution |
@@ -43,12 +44,26 @@ The following is **never** collected:
 - User identity, email, or account information
 - Tool call content, arguments, or responses
 - Any user-generated content
+- The **raw** OS machine id or any reversible hardware identifier (only the salted, non-reversible `machine_id` hash is sent — see below)
 
 ## Anonymous ID
 
 The anonymous ID is a random UUID (v4) generated on first run. It has **no correlation** to your hardware, user account, or identity. It exists solely to deduplicate heartbeats (so we don't count the same install twice in a day).
 
 You can delete it by removing the `telemetry.anonymous_id` field from your config — a new random ID will be generated on next startup.
+
+## Machine ID (schema v6)
+
+The `anonymous_id` above is a UUID persisted in the config file. In **ephemeral environments** — throwaway `HOME`s, layered Docker builds, CI runners — the config (and therefore the UUID) is regenerated on every run, so a single machine can masquerade as hundreds of distinct installs. That inflates our install counts and defeats deduplication.
+
+`machine_id` fixes this without collecting anything identifying:
+
+- It is a **salted, non-reversible hash** — `HMAC-SHA256` keyed by the OS machine id, scoped by an mcpproxy-specific application key. The **raw machine id is never transmitted**; only the hash leaves your machine.
+- The application-specific key means the value **cannot be correlated** with any other application's telemetry that hashes the same OS machine id.
+- It is **stable per physical machine**, so ephemeral installs collapse to one identity for counting.
+- If the OS machine id **cannot be read** (a container without `/etc/machine-id`, a permission error, or an exotic platform), the field is simply **omitted** — the heartbeat is never blocked, and the backend treats an absent value as "unknown".
+
+`machine_id` respects the **same opt-out** as every other field: when telemetry is disabled (see below), the entire heartbeat — including `machine_id` — is never sent.
 
 ## One-time opt-out signal
 
