@@ -129,6 +129,34 @@
         <div class="alert alert-sm" :class="resultSuccess ? 'alert-success' : 'alert-error'">
           <span class="text-sm">{{ resultMessage }}</span>
         </div>
+        <!-- Spec 078 US2 / FR-006: surface the timestamped backup after a
+             successful connect/disconnect; the "no prior file" case is stated
+             explicitly rather than showing a blank path. -->
+        <div
+          v-if="resultSuccess && resultBackupPath"
+          data-test="connect-backup-path"
+          class="mt-2 flex items-start justify-between gap-2 rounded-lg bg-base-200 px-3 py-2"
+        >
+          <span class="text-xs leading-relaxed min-w-0">
+            A backup of your previous config was saved to
+            <code class="font-mono text-[11px] break-all" :title="resultBackupPath">{{ resultBackupPath }}</code>
+          </span>
+          <button
+            data-test="connect-copy-backup"
+            @click="copyBackupPath"
+            class="btn btn-ghost btn-xs shrink-0"
+            title="Copy the backup path to the clipboard"
+          >
+            {{ copiedBackup ? 'Copied ✓' : 'Copy path' }}
+          </button>
+        </div>
+        <div
+          v-else-if="resultSuccess && resultBackupPath === null"
+          data-test="connect-no-backup"
+          class="mt-2 rounded-lg bg-base-200 px-3 py-2 text-xs opacity-70"
+        >
+          No prior config file existed, so no backup was needed.
+        </div>
       </div>
 
       <div class="modal-action">
@@ -170,6 +198,11 @@ const clients = ref<ClientStatus[]>([])
 const error = ref<string | null>(null)
 const resultMessage = ref('')
 const resultSuccess = ref(false)
+// Spec 078 US2: backup path of the last successful connect/disconnect.
+// string = timestamped backup created; null = success but no prior file to
+// back up; undefined = no successful operation to report on.
+const resultBackupPath = ref<string | null | undefined>(undefined)
+const copiedBackup = ref(false)
 const loading = reactive({
   initial: false,
   clients: {} as Record<string, boolean>,
@@ -259,12 +292,16 @@ async function fetchClients() {
 async function connect(clientId: string) {
   loading.clients[clientId] = true
   resultMessage.value = ''
+  resultBackupPath.value = undefined
+  copiedBackup.value = false
 
   try {
     const response = await api.connectClient(clientId)
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
+      // Empty/absent backup_path on success means no prior file existed.
+      resultBackupPath.value = response.data.backup_path || null
       await fetchClients()
       systemStore.addToast({
         type: 'success',
@@ -290,6 +327,8 @@ async function connect(clientId: string) {
 async function disconnect(clientId: string) {
   loading.clients[clientId] = true
   resultMessage.value = ''
+  resultBackupPath.value = undefined
+  copiedBackup.value = false
 
   try {
     const client = clients.value.find(c => c.id === clientId)
@@ -297,6 +336,7 @@ async function disconnect(clientId: string) {
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Disconnected from ${clientId}`
       resultSuccess.value = true
+      resultBackupPath.value = response.data.backup_path || null
       await fetchClients()
       systemStore.addToast({
         type: 'info',
@@ -373,6 +413,22 @@ async function copyTccutil(client: ClientStatus) {
   }
 }
 
+// Spec 078 US2: one-click copy of the backup path (same clipboard pattern as
+// copyTccutil above).
+async function copyBackupPath() {
+  if (!resultBackupPath.value) return
+  try {
+    await navigator.clipboard.writeText(resultBackupPath.value)
+    copiedBackup.value = true
+    setTimeout(() => {
+      copiedBackup.value = false
+    }, 2000)
+  } catch {
+    // Clipboard unavailable (e.g. insecure context): the full path is already
+    // rendered, so the user can select and copy it manually.
+  }
+}
+
 async function connectAll() {
   for (const client of connectableClients.value) {
     await connect(client.id)
@@ -381,6 +437,8 @@ async function connectAll() {
 
 function close() {
   resultMessage.value = ''
+  resultBackupPath.value = undefined
+  copiedBackup.value = false
   emit('close')
 }
 
@@ -392,6 +450,8 @@ watch(() => props.show, (newVal) => {
     fetchClients()
     void onboarding.fetchState()
     resultMessage.value = ''
+    resultBackupPath.value = undefined
+    copiedBackup.value = false
   }
 })
 </script>
