@@ -462,6 +462,45 @@ func tierRank(tier string) int {
 	}
 }
 
+// severityRank orders CVSS severities so the more-severe one wins on merge:
+// critical > high > medium > low > info > empty/unknown. The ordering is a
+// strict refinement of threatCategory's severity fallback (critical→dangerous,
+// high/medium→warning, low→info), so taking the max severity here never
+// disagrees with CalculateRiskScore's bucketing.
+func severityRank(sev string) int {
+	switch sev {
+	case SeverityCritical:
+		return 5
+	case SeverityHigh:
+		return 4
+	case SeverityMedium:
+		return 3
+	case SeverityLow:
+		return 2
+	case SeverityInfo:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// threatLevelRank orders user-facing threat levels so the more-severe one wins
+// on merge: dangerous > warning > info > empty/unknown. This mirrors
+// threatCategory's ThreatLevel bucketing exactly, so taking the max threat
+// level here is consistent with CalculateRiskScore.
+func threatLevelRank(level string) int {
+	switch level {
+	case ThreatLevelDangerous:
+		return 3
+	case ThreatLevelWarning:
+		return 2
+	case ThreatLevelInfo:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // findingSources returns the contributing scanner ids for a finding, preferring
 // the explicit Sources list (Spec 077) and falling back to the single Scanner
 // id for legacy findings that predate multi-source attribution.
@@ -525,15 +564,23 @@ func MergeFindings(findings []ScanFinding) []ScanFinding {
 		if pos, ok := index[k]; ok {
 			result[pos].Sources = sortedUnion(result[pos].Sources, srcs)
 			// Absorb the duplicate's stronger fields (Spec 077): keep the
-			// higher confidence, the more-severe tier (hard > soft), and the
-			// union of signals — otherwise merging a hard/high-confidence
-			// finding with a same-(rule_id,location) soft/low-confidence
-			// duplicate would silently drop the hard tier and confidence.
+			// higher confidence, the more-severe tier (hard > soft), the
+			// more-severe CVSS severity and user-facing threat level, and the
+			// union of signals — otherwise merging a hard/high finding with a
+			// same-(rule_id,location) soft/low duplicate would silently drop
+			// the stronger fields, making CalculateRiskScore and the summary
+			// order-dependent.
 			if f.Confidence > result[pos].Confidence {
 				result[pos].Confidence = f.Confidence
 			}
 			if tierRank(f.Tier) > tierRank(result[pos].Tier) {
 				result[pos].Tier = f.Tier
+			}
+			if severityRank(f.Severity) > severityRank(result[pos].Severity) {
+				result[pos].Severity = f.Severity
+			}
+			if threatLevelRank(f.ThreatLevel) > threatLevelRank(result[pos].ThreatLevel) {
+				result[pos].ThreatLevel = f.ThreatLevel
 			}
 			result[pos].Signals = sortedUnion(result[pos].Signals, f.Signals)
 			continue

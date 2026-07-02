@@ -358,6 +358,63 @@ func TestMergeFindingsDedupByRuleAndLocation(t *testing.T) {
 	}
 }
 
+// TestMergeFindingsAbsorbsStrongerSeverity proves Spec 077 (US2): when a
+// low/info duplicate and a high/warning duplicate share the same
+// (rule_id, location), the merged finding takes the MORE-SEVERE Severity and
+// ThreatLevel (alongside max Confidence and most-severe Tier) regardless of the
+// order in which the two are presented. Absorbing only some of the stronger
+// fields would make CalculateRiskScore and the summary order-dependent.
+func TestMergeFindingsAbsorbsStrongerSeverity(t *testing.T) {
+	weak := ScanFinding{
+		RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning,
+		Severity: SeverityInfo, ThreatLevel: ThreatLevelInfo, Tier: TierSoft,
+		Confidence: 0.3, Scanner: "scanner-a", Sources: []string{"scanner-a"},
+	}
+	strong := ScanFinding{
+		RuleID: "detect.tpa", Location: "srv:tool", ThreatType: ThreatToolPoisoning,
+		Severity: SeverityHigh, ThreatLevel: ThreatLevelWarning, Tier: TierHard,
+		Confidence: 0.9, Scanner: "scanner-b", Sources: []string{"scanner-b"},
+	}
+
+	assertMerged := func(t *testing.T, merged []ScanFinding) {
+		t.Helper()
+		if len(merged) != 1 {
+			t.Fatalf("expected exactly 1 merged finding, got %d: %+v", len(merged), merged)
+		}
+		f := merged[0]
+		if f.Severity != SeverityHigh {
+			t.Errorf("expected merged Severity=high, got %q", f.Severity)
+		}
+		if f.ThreatLevel != ThreatLevelWarning {
+			t.Errorf("expected merged ThreatLevel=warning, got %q", f.ThreatLevel)
+		}
+		if f.Tier != TierHard {
+			t.Errorf("expected merged Tier=hard, got %q", f.Tier)
+		}
+		// Max of the two confidences (0.9), possibly raised further by the
+		// two-source consensus boost — never the weak 0.3.
+		if f.Confidence < 0.9 {
+			t.Errorf("expected merged Confidence>=0.9, got %v", f.Confidence)
+		}
+	}
+
+	weakFirst := MergeFindings([]ScanFinding{weak, strong})
+	strongFirst := MergeFindings([]ScanFinding{strong, weak})
+	assertMerged(t, weakFirst)
+	assertMerged(t, strongFirst)
+
+	// The whole point: the merge — and therefore the aggregate risk score — is
+	// order-independent. A weak-then-strong ordering must not score lower than a
+	// strong-then-weak ordering.
+	if got, want := CalculateRiskScore(weakFirst), CalculateRiskScore(strongFirst); got != want {
+		t.Errorf("CalculateRiskScore is order-dependent: weak-first=%d strong-first=%d", got, want)
+	}
+	// And both must reflect the high/warning severity, not the info floor.
+	if s := CalculateRiskScore(weakFirst); s == 0 {
+		t.Errorf("expected non-zero risk score after absorbing the warning-level duplicate, got %d", s)
+	}
+}
+
 // TestMergeFindingsConsensusBoostsConfidence proves Spec 077 FR-012: when two
 // independent sources agree on the same (location, threat_type) — even via
 // different rule ids — the merged finding's confidence rises above the
