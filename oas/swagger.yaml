@@ -3612,6 +3612,12 @@ paths:
         required: true
         schema:
           type: string
+      - description: Entry name to preview (defaults to mcpproxy); mirror the value
+          passed to POST connect
+        in: query
+        name: server_name
+        schema:
+          type: string
       responses:
         "200":
           content:

@@ -367,6 +367,87 @@ func TestPreview_UnknownClient(t *testing.T) {
 	}
 }
 
+// TestPreview_LiveConfigProvider pins the Spec 078 security fix under a RUNTIME
+// require_mcp_auth toggle: the /mcp middleware honors require_mcp_auth live, so
+// the long-lived connect service must too. A stale startup snapshot would keep
+// embedding the real API key after auth is turned off — the exact leak this fix
+// closes. The provider flips the live value between preview/write calls.
+func TestPreview_LiveConfigProvider(t *testing.T) {
+	svc, home := serviceWithKey(t, "live-key-xyz")
+	seedClientConfig(t, home, "claude-code")
+
+	// Start snapshot as auth-on; the provider overrides it live.
+	svc.WithRequireMCPAuth(true)
+	requireAuth := false // provider's live value: auth OFF
+	svc.WithConfigProvider(func() (string, string, bool) {
+		return "127.0.0.1:8080", "live-key-xyz", requireAuth
+	})
+
+	// Auth OFF live: preview and write must embed NO credential, even though the
+	// startup snapshot said auth-on.
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ContainsAPIKey {
+		t.Fatal("auth-off (live) preview must report contains_api_key=false despite auth-on snapshot")
+	}
+	if _, err := svc.Connect("claude-code", "mcpproxy", true); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	written := marshalEntry(t, readWrittenEntry(t, svc, "claude-code", "mcpproxy"))
+	if strings.Contains(written, "live-key-xyz") || strings.Contains(written, "headers") {
+		t.Fatalf("auth-off (live) write must embed no credential, got: %s", written)
+	}
+
+	// Flip live to auth ON: now the credential is embedded (as a header for
+	// claude-code), without rebuilding the service.
+	requireAuth = true
+	preview2, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if !preview2.ContainsAPIKey {
+		t.Fatal("auth-on (live) preview must report contains_api_key=true")
+	}
+	if _, err := svc.Connect("claude-code", "mcpproxy", true); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	written2 := marshalEntry(t, readWrittenEntry(t, svc, "claude-code", "mcpproxy"))
+	if !strings.Contains(written2, "live-key-xyz") {
+		t.Fatalf("auth-on (live) write must embed the real credential, got: %s", written2)
+	}
+}
+
+// TestPreview_OpenCode_EquivalentEntryExists pins preview==write for OpenCode's
+// equivalent-entry adoption: an already-installed entry pointing at our MCP URL
+// under a DIFFERENT key (here the legacy ?apikey= shape) is adopted/normalized
+// by the write path, so preview must report entry_exists=true rather than a
+// misleading "create" that diverges from what connect actually does (FR-002).
+func TestPreview_OpenCode_EquivalentEntryExists(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy differently-named entry carrying the old ?apikey= URL form.
+	if err := os.WriteFile(cfgPath, []byte(`{
+	  "mcp": {
+	    "proxy-alt": {"type":"remote","url":"http://127.0.0.1:8080/mcp?apikey=old"}
+	  }
+	}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if !preview.EntryExists {
+		t.Fatal("expected EntryExists=true for an equivalent legacy ?apikey= entry under a different key")
+	}
+}
+
 // TestConnect_CredentialCarrierMatrix pins the per-client credential carrier
 // when require_mcp_auth is on (Spec 078): a header where the client config
 // supports one, the mcp-remote --header bridge arg for Claude Desktop, and the

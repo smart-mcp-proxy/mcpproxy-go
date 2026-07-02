@@ -339,6 +339,41 @@ func TestHandleConnectClientPreview_MaskedNoSideEffects(t *testing.T) {
 	}
 }
 
+// TestHandleConnectClientPreview_HonorsServerName asserts the preview endpoint
+// previews the exact entry name a subsequent POST connect (which accepts
+// server_name) will write, instead of always defaulting to "mcpproxy" — so a
+// caller previewing then connecting under a custom name does not diverge
+// (Spec 078 FR-002).
+func TestHandleConnectClientPreview_HonorsServerName(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	// Pre-existing entry named "custom" so entry_exists reflects THIS name.
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"mcpServers":{"custom":{"url":"http://x"}}}`), 0o644))
+
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
+	srv.SetConnectService(svc)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/connect/claude-code/preview?server_name=custom", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    connect.ConnectPreview `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.True(t, resp.Success)
+	assert.Equal(t, "custom", resp.Data.ServerName)
+	assert.True(t, resp.Data.EntryExists, "entry_exists must reflect the requested server_name")
+}
+
 // TestHandleConnectClientPreview_DeniedReturns403 asserts a permission-denied
 // config read during preview surfaces 403 + remediation, matching connect.
 func TestHandleConnectClientPreview_DeniedReturns403(t *testing.T) {
