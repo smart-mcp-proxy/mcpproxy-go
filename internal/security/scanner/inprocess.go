@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect/checks"
 )
@@ -21,67 +20,6 @@ import (
 // "Scan Now" yields a real description-based result instead of the
 // "No Source Available / all scanners failed" dead-end (MCP-2082).
 const inProcessTPAScannerID = "tpa-descriptions"
-
-// tpaRule is a heuristic over tool description/schema text. A rule fires when
-// the (lower-cased) text contains any of its phrases. Phrases are matched as
-// plain substrings — the same approach ClassifyThreat already uses — which
-// keeps the rule set readable and dependency-free.
-type tpaRule struct {
-	ruleID      string
-	title       string
-	severity    string
-	threatType  string
-	threatLevel string
-	phrases     []string
-}
-
-// tpaRules are ordered most- to least-specific. The first rule that matches a
-// given tool wins for that rule's category; a single tool can still match
-// multiple distinct rules (e.g. hidden-instructions AND exfiltration).
-var tpaRules = []tpaRule{
-	{
-		ruleID:      "tpa_hidden_instructions",
-		title:       "Hidden instructions in tool description",
-		severity:    SeverityCritical,
-		threatType:  ThreatToolPoisoning,
-		threatLevel: ThreatLevelDangerous,
-		phrases: []string{
-			"ignore previous instruction", "ignore all previous", "ignore the above",
-			"disregard previous", "disregard all previous", "disregard the above",
-			"do not tell the user", "don't tell the user", "do not inform the user",
-			"without telling the user", "without informing the user",
-			"do not mention this", "do not reveal", "do not disclose",
-			"hide this from", "keep this hidden", "keep this secret",
-			"<important>", "<secret>", "<system>", "<system_prompt>", "<hidden>",
-		},
-	},
-	{
-		ruleID:      "prompt_injection_in_description",
-		title:       "Prompt-injection phrasing in tool description",
-		severity:    SeverityHigh,
-		threatType:  ThreatPromptInjection,
-		threatLevel: ThreatLevelDangerous,
-		phrases: []string{
-			"new instructions:", "system prompt", "you must always",
-			"always call this tool first", "before using any other tool",
-			"before calling any other", "before you use any other",
-			"jailbreak", "developer mode", "ignore your guidelines",
-		},
-	},
-	{
-		ruleID:      "data_exfiltration_in_description",
-		title:       "Data-exfiltration hints in tool description",
-		severity:    SeverityHigh,
-		threatType:  ThreatMaliciousCode,
-		threatLevel: ThreatLevelDangerous,
-		phrases: []string{
-			"exfiltrat", "id_rsa", "~/.ssh", "/.ssh/", "~/.aws", "/.aws/",
-			"/etc/passwd", ".env file", "read the .env",
-			"send the credentials", "send credentials", "leak the",
-			"upload the file to", "post the contents to",
-		},
-	},
-}
 
 // toolDef is the subset of an MCP tool definition the in-process scanner needs.
 // Tools are exported by service.exportToolDefinitions as MCP tools/list output:
@@ -97,17 +35,17 @@ type toolDef struct {
 }
 
 // inProcessToolScan parses an exported tools.json document and returns findings
-// from the deterministic detect.Engine (Spec 076 structural checks: hidden
-// Unicode, cross-server shadowing, decoded shell payloads) plus the legacy TPA
-// phrase heuristics and embedded-secret detection. It is a pure function (no
-// Docker, no network) so it works for remote servers.
+// from the deterministic, offline detect.Engine (Spec 076/077). It is a pure
+// function (no Docker, no network) so it works for remote servers with no source
+// or container.
 //
-// Spec-076 migration boundary (US1): the structural attack classes are now
-// delegated to detect.Engine, which returns confidence-scored findings carrying
-// per-check Signals. The directive-phrase rules (tpaRules) and embedded-secret
-// detection remain here until US2 lands detect's directive.imperative and
-// secret.embedded checks, at which point this function fully delegates. Running
-// both side-by-side keeps the MVP from regressing any existing coverage.
+// Spec 077 (US1): the engine is now the SOLE in-process detector. The duplicate
+// legacy TPA phrase rules and the duplicate legacy embedded-secret path have
+// been removed — the blocking posture for high-confidence injection/exfiltration
+// phrases is preserved by the hard-tier detect check phrase.injection, and
+// embedded secrets are covered by detect's secret.embedded check. This is one
+// deterministic engine instead of three overlapping ones.
+//
 // peerTools maps a peer server's name to its current tool definitions. It feeds
 // the cross-server shadowing check a real multi-server RegistryView; nil/empty
 // means only the scanned server's tools are in view (no cross-server detection).
@@ -119,64 +57,7 @@ func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string
 		return nil
 	}
 
-	// Delegate the structural checks to the offline detect.Engine first.
-	findings := detectEngineFindings(doc.Tools, serverName, peerTools, scannerID)
-
-	// Default detector (built-in patterns) for embedded-secret detection in
-	// descriptions. nil config → DefaultSensitiveDataDetectionConfig, which
-	// already validates matches and ignores documented example keys.
-	detector := security.NewDetector(nil)
-
-	for _, tool := range doc.Tools {
-		location := "tool:" + tool.Name
-		// Scan the description plus the serialized input AND output schemas — TPA
-		// payloads hide in any of them (Spec 076 FR-001).
-		text := tool.Description
-		if len(tool.InputSchema) > 0 {
-			text += " " + string(tool.InputSchema)
-		}
-		if len(tool.OutputSchema) > 0 {
-			text += " " + string(tool.OutputSchema)
-		}
-		lower := strings.ToLower(text)
-
-		for _, rule := range tpaRules {
-			if phrase, ok := matchAnyPhrase(lower, rule.phrases); ok {
-				findings = append(findings, ScanFinding{
-					RuleID:      rule.ruleID,
-					Severity:    rule.severity,
-					ThreatType:  rule.threatType,
-					ThreatLevel: rule.threatLevel,
-					Title:       rule.title + " (" + tool.Name + ")",
-					Description: fmt.Sprintf("Tool %q description contains a %s indicator: %q.", tool.Name, rule.threatType, phrase),
-					Location:    location,
-					Scanner:     scannerID,
-					Evidence:    truncate(strings.TrimSpace(tool.Description), 500),
-				})
-			}
-		}
-
-		// Embedded secrets in the description (e.g. a hardcoded API key).
-		if result := detector.Scan(text, ""); result != nil && result.Detected {
-			for _, det := range result.Detections {
-				if det.IsLikelyExample {
-					continue
-				}
-				findings = append(findings, ScanFinding{
-					RuleID:      "embedded_secret",
-					Severity:    SeverityHigh,
-					ThreatType:  ThreatToolPoisoning,
-					ThreatLevel: ThreatLevelWarning,
-					Title:       fmt.Sprintf("Embedded %s in tool description (%s)", det.Category, tool.Name),
-					Description: fmt.Sprintf("Tool %q description contains a likely %s (%s).", tool.Name, det.Category, det.Type),
-					Location:    location,
-					Scanner:     scannerID,
-				})
-			}
-		}
-	}
-
-	return findings
+	return detectEngineFindings(doc.Tools, serverName, peerTools, scannerID)
 }
 
 // detectEngineFindings runs the Spec-076 offline detect.Engine over the scanned
@@ -208,11 +89,15 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 	engine := detect.NewEngine(detect.Options{
 		ScannerID: scannerID,
 		Checks: []detect.Check{
-			// US1 hard checks (#770).
+			// Spec 076 US1 hard checks (#770).
 			&checks.UnicodeHidden{},
 			&checks.Shadowing{},
 			&checks.PayloadDecoded{},
-			// US2 soft checks (MCP-3577).
+			// Spec 077 US1 hard check: curated injection/exfiltration phrases.
+			// Restores the approval-blocking posture of the deleted legacy
+			// tpaRules without their false positives.
+			&checks.PhraseInjection{},
+			// Spec 076 US2 soft checks (MCP-3577).
 			&checks.DirectiveImperative{},
 			&checks.CapabilityMismatch{},
 			&checks.EmbeddedSecret{},
@@ -272,6 +157,14 @@ func peerToolDefs(peers map[string][]map[string]interface{}) map[string][]toolDe
 // threat-level / threat-type vocabulary strings, so the copy is verbatim — no
 // translation table. The additive Confidence/Signals fields are carried through.
 func detectFindingToScanFinding(f detect.Finding) ScanFinding {
+	// A detect Finding is dangerous iff at least one HARD signal contributed to
+	// it (see detect.aggregate), so ThreatLevel is the faithful tier witness:
+	// dangerous → hard (gates approval), otherwise soft (review-only). Spec 077
+	// makes the verdict tier-driven, so every baseline finding carries a tier.
+	tier := TierSoft
+	if f.ThreatLevel == ThreatLevelDangerous {
+		tier = TierHard
+	}
 	return ScanFinding{
 		RuleID:      f.RuleID,
 		Severity:    f.Severity,
@@ -285,6 +178,8 @@ func detectFindingToScanFinding(f detect.Finding) ScanFinding {
 		Evidence:    f.Evidence,
 		Confidence:  f.Confidence,
 		Signals:     f.Signals,
+		Tier:        tier,
+		Sources:     []string{f.Scanner},
 	}
 }
 
@@ -334,14 +229,4 @@ func (e *Engine) runInProcessScanner(s *ScannerPlugin, req ScanRequest) (*ScanRe
 
 	logs.Stdout = fmt.Sprintf("in-process tool-description scan: %d finding(s)", len(findings))
 	return report, logs, nil
-}
-
-// matchAnyPhrase returns the first phrase contained in lowered text.
-func matchAnyPhrase(loweredText string, phrases []string) (string, bool) {
-	for _, p := range phrases {
-		if strings.Contains(loweredText, p) {
-			return p, true
-		}
-	}
-	return "", false
 }

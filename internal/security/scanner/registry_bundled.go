@@ -14,6 +14,15 @@ package scanner
 //
 // Keep this slice sorted alphabetically by ID so the list order is
 // deterministic across API, CLI, and UI.
+//
+// Default enablement (Spec 077 FR-018): the deterministic in-process scanner
+// (tpa-descriptions, InProcess:true) loads as "installed" and runs for every
+// server with zero setup — it is the always-on baseline. Every Docker-backed
+// scanner loads as "available" (see registry.go loadBundledRegistry), which the
+// engine's resolveScanners treats as NOT enabled: a Docker scanner only runs
+// once its image is pulled/configured. So the heavy "deep scan" layer is
+// off-by-default here without a separate Enabled flag; the deep-scan config gate
+// (US3) governs when those Docker scanners may be turned on at all.
 var bundledScanners = []*ScannerPlugin{
 	{
 		ID:          ciscoScannerID,

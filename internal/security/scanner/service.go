@@ -1408,9 +1408,35 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	// Check for critical findings (block unless force)
-	if aggReport != nil && aggReport.Summary.Critical > 0 && !force {
-		return fmt.Errorf("server has %d critical findings; resolve them or use --force to approve anyway", aggReport.Summary.Critical)
+	// Block approval on blocking findings unless forced. Spec 077 FR-021: the
+	// approval gate is PURELY tier-driven, mirroring the server verdict
+	// (GetScanSummary) and the Approve modal exactly. isBlockingFinding is the SAME
+	// predicate that drives the "dangerous" summary status, so the gate and the
+	// verdict can never disagree: a server blocks the gate if and only if its
+	// summary reads "dangerous".
+	//
+	// The former extra `Summary.Critical > 0` guard is intentionally gone (Codex
+	// round-4 finding #3). It could reject an unforced approval on a Critical-
+	// severity but NON-dangerous finding — e.g. a critical CVE, which the classifier
+	// maps to threat_level "warnings" (supply-chain findings inform, they do not
+	// gate), or a deep-scan/external finding — even though the very same summary and
+	// verdict showed the server as non-dangerous. Gate and verdict then disagreed.
+	// Under Spec 077's baseline-only, tier-driven model (FR-021, US3 FR-021 —
+	// deep-scan/external findings inform but never gate) ONLY a HARD-tier baseline
+	// finding blocks. Legacy/external/deep-scan findings carry no tier and never
+	// gate, even at threat_level "dangerous"; they still surface in the summary as
+	// warnings/info. isBlockingFinding is that single tier-driven predicate, so
+	// the gate and the "dangerous" summary status stay consistent.
+	if aggReport != nil && !force {
+		blocking := 0
+		for _, f := range aggReport.Findings {
+			if isBlockingFinding(f) {
+				blocking++
+			}
+		}
+		if blocking > 0 {
+			return fmt.Errorf("server has %d dangerous (hard-tier) finding(s); resolve them or use --force to approve anyway", blocking)
+		}
 	}
 
 	// Create integrity baseline
@@ -1752,13 +1778,19 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 
 	summary.RiskScore = CalculateRiskScore(allFindings)
 
-	// Count by threat level
+	// Count by tier/threat level. Spec 077 FR-014/FR-021: the "dangerous"
+	// verdict is tier-driven — only a HARD baseline finding is counted as
+	// dangerous (isBlockingFinding). A baseline soft finding (detect emits
+	// ThreatLevelWarning for soft-only) counts as a warning. Legacy/external/
+	// deep-scan findings carry no tier and therefore never count as dangerous
+	// (US3 FR-021 — they inform but do not gate); they still surface as
+	// warnings/info by threat_level.
 	counts := FindingCounts{Total: len(allFindings)}
 	for _, f := range allFindings {
-		switch f.ThreatLevel {
-		case ThreatLevelDangerous:
+		switch {
+		case isBlockingFinding(f):
 			counts.Dangerous++
-		case ThreatLevelWarning:
+		case f.ThreatLevel == ThreatLevelWarning:
 			counts.Warning++
 		default:
 			counts.Info++
@@ -1766,7 +1798,8 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	}
 	summary.FindingCounts = &counts
 
-	// Determine status
+	// Determine status. A "dangerous" status therefore requires ≥1 hard-tier
+	// baseline finding.
 	if counts.Dangerous > 0 {
 		summary.Status = "dangerous"
 	} else if counts.Warning > 0 {
@@ -1781,6 +1814,27 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 	// Cache for fast subsequent reads
 	s.cacheScanSummary(serverName, summary)
 	return summary
+}
+
+// isBlockingFinding reports whether a finding gates approval / drives a
+// "dangerous" verdict under the Spec 077 two-tier model (FR-021, US3 FR-021).
+// Blocking is PURELY tier-driven: a finding blocks if and only if it is a
+// HARD-tier baseline finding. Only the in-process detect engine (the baseline
+// scanner) sets Tier, and it emits Tier=="hard" exactly for the hard-tier
+// checks. Every other producer carries no tier:
+//
+//   - Baseline SOFT findings carry Tier=="soft" — review-only, never block.
+//   - Deep-scan / external / legacy findings (Docker scanners, imported SARIF,
+//     supply-chain audits) carry no tier. Per US3 FR-021 these INFORM but do
+//     NOT gate approval, so they never block regardless of threat_level. This
+//     keeps the gate consistent with the baseline-only, tier-driven verdict:
+//     a no-tier "dangerous" finding must not silently unquarantine-block a
+//     server when the baseline itself is clean.
+//
+// This is the SAME predicate that drives the "dangerous" summary status
+// (GetScanSummary) and the ApproveServer gate, so the two can never disagree.
+func isBlockingFinding(f ScanFinding) bool {
+	return f.Tier == TierHard
 }
 
 // degradeIfIncompleteCoverage downgrades a "clean" verdict to "degraded" when
@@ -1806,6 +1860,37 @@ type ScanSummary struct {
 	ScannersRun    int `json:"scanners_run"`
 	ScannersFailed int `json:"scanners_failed"`
 	ScannersTotal  int `json:"scanners_total"`
+	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077
+	// FR-008). It is a SEPARATE informational dimension and MUST NOT influence
+	// Status. Nil/omitted when deep scan is off (the default). Populated by US3;
+	// for US1 this is a placeholder that serializes only when set.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
+}
+
+// DeepScanDescriptor reports the informational status of the opt-in "deep scan"
+// layer (Docker-based scanners + source extraction) separately from the
+// baseline verdict (Spec 077 FR-008, US3). A disabled, unavailable, or failed
+// deep scan is surfaced here as a quiet note — it never downgrades an otherwise
+// clean baseline to "degraded" and never gates approval (FR-007/FR-021).
+//
+// Invariant: when Enabled is false, Ran and Available are false and
+// ScannersFailed is empty.
+type DeepScanDescriptor struct {
+	// Enabled reflects security.deep_scan.enabled (default false).
+	Enabled bool `json:"enabled"`
+	// Ran is true when at least one deep scanner executed this scan.
+	Ran bool `json:"ran"`
+	// Available is false when Docker/source-extraction/prereqs are unavailable.
+	Available bool `json:"available"`
+	// ScannersFailed lists per-scanner best-effort failures (informational).
+	ScannersFailed []DeepScanScannerFailure `json:"scanners_failed,omitempty"`
+}
+
+// DeepScanScannerFailure names a single deep scanner that could not run and why.
+// It is informational only and never affects the baseline verdict.
+type DeepScanScannerFailure struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // FindingCounts groups findings by user-facing threat level.
