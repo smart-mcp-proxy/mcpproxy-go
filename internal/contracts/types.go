@@ -112,14 +112,41 @@ type DiagnosticFixStep struct {
 type SecurityScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"` // 0-100
-	Status        string         `json:"status"`     // "clean", "degraded", "warnings", "dangerous", "failed", "not_scanned", "scanning"
+	Status        string         `json:"status"`     // "clean", "warnings", "dangerous", "failed", "not_scanned", "scanning"
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
-	// Scanner coverage for the primary scan pass. "degraded" status means
-	// ScannersFailed > 0, so the risk score reflects an incomplete scan and a
-	// low score should not be read as a trustworthy all-clear (MCP-2401).
+	// Scanner coverage for the primary (baseline) scan pass — informational only.
+	// Spec 077 US3 (FR-008/FR-014): Status is derived SOLELY from the
+	// deterministic baseline findings; a failed Docker deep scanner no longer
+	// downgrades a clean verdict. That failure is surfaced via DeepScan instead.
 	ScannersRun    int `json:"scanners_run"`
 	ScannersFailed int `json:"scanners_failed"`
 	ScannersTotal  int `json:"scanners_total"`
+	// DeepScan reports the opt-in "deep scan" layer status (Spec 077 US3),
+	// SEPARATELY from the baseline verdict above. Nil/omitted when deep scan is
+	// off (the default); it never influences Status.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
+}
+
+// DeepScanDescriptor reports the informational status of the opt-in "deep scan"
+// layer (Docker-based scanners + source extraction) separately from the
+// baseline verdict (Spec 077 US3, FR-008). A disabled, unavailable, or failed
+// deep scan is a quiet note — it never downgrades an otherwise clean baseline
+// and never gates approval.
+//
+// Invariant: when Enabled is false, Ran and Available are false and
+// ScannersFailed is empty (the descriptor is omitted entirely).
+type DeepScanDescriptor struct {
+	Enabled        bool                     `json:"enabled"`
+	Ran            bool                     `json:"ran"`
+	Available      bool                     `json:"available"`
+	ScannersFailed []DeepScanScannerFailure `json:"scanners_failed,omitempty"`
+}
+
+// DeepScanScannerFailure names a single deep scanner that could not run and why.
+// It is informational only and never affects the baseline verdict.
+type DeepScanScannerFailure struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // FindingCounts groups findings by user-facing threat category.

@@ -1192,6 +1192,31 @@ components:
         success:
           type: boolean
       type: object
+    contracts.DeepScanDescriptor:
+      description: |-
+        DeepScan reports the opt-in "deep scan" layer status (Spec 077 US3),
+        SEPARATELY from the baseline verdict above. Nil/omitted when deep scan is
+        off (the default); it never influences Status.
+      properties:
+        available:
+          type: boolean
+        enabled:
+          type: boolean
+        ran:
+          type: boolean
+        scanners_failed:
+          items:
+            $ref: '#/components/schemas/contracts.DeepScanScannerFailure'
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.DeepScanScannerFailure:
+      properties:
+        id:
+          type: string
+        reason:
+          type: string
+      type: object
     contracts.DeprecatedConfigWarning:
       properties:
         field:
@@ -1922,6 +1947,8 @@ components:
     contracts.SecurityScanSummary:
       description: Latest security scan results summary
       properties:
+        deep_scan:
+          $ref: '#/components/schemas/contracts.DeepScanDescriptor'
         finding_counts:
           $ref: '#/components/schemas/contracts.FindingCounts'
         last_scan_at:
@@ -1933,14 +1960,15 @@ components:
           type: integer
         scanners_run:
           description: |-
-            Scanner coverage for the primary scan pass. "degraded" status means
-            ScannersFailed > 0, so the risk score reflects an incomplete scan and a
-            low score should not be read as a trustworthy all-clear (MCP-2401).
+            Scanner coverage for the primary (baseline) scan pass — informational only.
+            Spec 077 US3 (FR-008/FR-014): Status is derived SOLELY from the
+            deterministic baseline findings; a failed Docker deep scanner no longer
+            downgrades a clean verdict. That failure is surfaced via DeepScan instead.
           type: integer
         scanners_total:
           type: integer
         status:
-          description: '"clean", "degraded", "warnings", "dangerous", "failed", "not_scanned",
+          description: '"clean", "warnings", "dangerous", "failed", "not_scanned",
             "scanning"'
           type: string
       type: object

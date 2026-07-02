@@ -2891,6 +2891,22 @@ func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context,
 			Total:     summary.FindingCounts.Total,
 		}
 	}
+	// Surface the opt-in deep-scan layer status (Spec 077 US3). Nil when deep
+	// scan is off, so it stays omitted from the REST/SSE payload by default.
+	if summary.DeepScan != nil {
+		ds := &contracts.DeepScanDescriptor{
+			Enabled:   summary.DeepScan.Enabled,
+			Ran:       summary.DeepScan.Ran,
+			Available: summary.DeepScan.Available,
+		}
+		for _, f := range summary.DeepScan.ScannersFailed {
+			ds.ScannersFailed = append(ds.ScannersFailed, contracts.DeepScanScannerFailure{
+				ID:     f.ID,
+				Reason: f.Reason,
+			})
+		}
+		out.DeepScan = ds
+	}
 	return out
 }
 

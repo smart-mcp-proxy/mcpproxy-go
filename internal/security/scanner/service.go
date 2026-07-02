@@ -801,8 +801,14 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 		a.cleanup()
 	}
 	// Auto-start Pass 2 (supply chain audit) in background after Pass 1 completes.
+	//
+	// Spec 077 US3 (FR-006): Pass 2 is the heavy/deep pass — it calls
+	// ResolveFullSource (Docker image pull / container creation / full-source
+	// extraction) and runs Docker-based deep scanners. It belongs to the opt-in
+	// deep-scan layer, so with deep scan OFF (the default) it must NOT be
+	// scheduled at all; the scan is the Pass-1 in-process baseline only.
 	// Skip for HTTP/URL servers — they have no filesystem to do supply chain analysis on.
-	if a.scanPass == ScanPassSecurityScan && !job.DryRun {
+	if a.scanPass == ScanPassSecurityScan && !job.DryRun && a.service.deepScanEnabled() {
 		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
 		if !isURLServer {
 			go a.service.startPass2(job.ServerName, a.serverInfo)
@@ -865,9 +871,19 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		}
 	}
 
-	// Auto-resolve source if not explicitly provided
+	// Auto-resolve source if not explicitly provided.
+	//
+	// Spec 077 US3 (FR-006): source resolution — Docker container lookup /
+	// extraction (source_resolver.go:findServerContainer/extractFromContainer)
+	// and the published-package-source fetch fallback — is part of the opt-in
+	// deep-scan layer. With deep scan OFF (the default) the only scanner is the
+	// deterministic in-process tpa-descriptions baseline, which scans tool
+	// DEFINITIONS (exported to a temp dir below), not source files — so any
+	// resolved source would be unused anyway. Skip Resolve entirely so no Docker
+	// invocation, network egress, or filesystem extraction ever happens by
+	// default. An explicitly supplied SourceDir (manual scan) is still honored.
 	var resolvedCleanup func()
-	if req.SourceDir == "" && serverInfo != nil {
+	if req.SourceDir == "" && serverInfo != nil && s.deepScanEnabled() {
 		resolved, err := s.sourceResolver.Resolve(ctx, *serverInfo)
 		if err != nil {
 			s.logger.Warn("Auto-source resolution failed",
