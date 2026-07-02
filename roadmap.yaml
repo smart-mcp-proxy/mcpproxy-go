@@ -296,12 +296,12 @@ epics:
 
   - id: scanner-simplification
     title: Scanner simplification (deterministic default, opt-in deep scan)
-    status: in_progress
+    status: done
     assignee: unassigned
     priority: P1
     spec: specs/077-scanner-simplification
     depends_on: [scanner-v2]
-    note: "Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. US1/US2/US4 merged; US3 (deep-scan opt-in) in review as #793. Docs tasks T037-T039 treated as merge-blocking for PR #793 (docs still describe deleted legacy tpaRules / six-checks / auto_scan_quarantined). First of the 5 personal-edition polish verticals."
+    note: "Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. COMPLETE: US1 #786, US2 #792, US4 #794, US3 + deep-scan trust fixes + docs truth sweep (T037-T039) #793 — all merged; shipped in v0.47.0-rc.2. Remaining 4 unchecked tasks in tasks.md are documented scope-outs. First of the 5 personal-edition polish verticals."
     tasks:
       - id: scanner-simpl-baseline
         title: "US1: deterministic offline baseline default + curated hard phrase_injection check (delete duplicate legacy rules)"
@@ -315,7 +315,7 @@ epics:
         depends_on: [scanner-simpl-baseline]
       - id: scanner-simpl-deep-optin
         title: "US3: opt-in deep scan (off by default), never blocks/degrades baseline; config migration"
-        status: in_review
+        status: done
         pr: "#793"
         depends_on: [scanner-simpl-baseline, scanner-simpl-unified-report]
       - id: scanner-simpl-notifications
@@ -325,24 +325,30 @@ epics:
         depends_on: [scanner-simpl-unified-report]
       - id: scanner-simpl-deepscan-fixes
         title: "Deep-scan trust fixes: nil-Security gating bug (source fetch runs with deep scan off on default configs), FR-014 verdict inversion (Dangerous deep finding < Warning), surface silently-skipped Docker scanners (non-nil deep_scan descriptor + CLI hint on security enable)"
-        status: todo
+        status: done
+        pr: "#793"
         priority: P1
         depends_on: [scanner-simpl-deep-optin]
 
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
-    status: todo
+    status: in_progress
     assignee: unassigned
     priority: P0
     spec: specs/079-upgrade-nudge
     depends_on: []
     note: "Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI."
     tasks:
-      - id: upgrade-nudge-surfacing
-        title: "US1: universal awareness — status output, startup log, dismissible Web UI banner, update_check config block"
-        status: todo
+      - id: upgrade-nudge-status-log
+        title: "US1 slice: update availability in mcpproxy status + deduped startup log"
+        status: done
+        pr: "#798"
         depends_on: []
+      - id: upgrade-nudge-surfacing
+        title: "US1 remainder: dismissible Web UI banner + update_check config block"
+        status: todo
+        depends_on: [upgrade-nudge-status-log]
       - id: upgrade-nudge-channel
         title: "US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"
         status: todo
@@ -354,7 +360,7 @@ epics:
 
   - id: connect-trust
     title: "Connect step trust: preview, visible backup, one-click undo"
-    status: todo
+    status: in_progress
     assignee: unassigned
     priority: P0
     spec: specs/078-connect-trust-preview
@@ -363,11 +369,13 @@ epics:
     tasks:
       - id: connect-trust-preview
         title: "US1: preview API + wizard diff UI (exact entry, API-key masking)"
-        status: todo
+        status: done
+        pr: "#802"
         depends_on: []
       - id: connect-trust-backup-visibility
         title: "US1: surface backup_path in Web UI + retention policy"
-        status: todo
+        status: done
+        pr: "#799"
         depends_on: []
       - id: connect-trust-undo
         title: "US2: one-click undo/disconnect in wizard"
@@ -388,7 +396,7 @@ epics:
     tasks:
       - id: telemetry-machineid-client
         title: "Hashed machine_id in heartbeat (schema v6)"
-        status: in_review
+        status: done
         pr: "https://github.com/smart-mcp-proxy/mcpproxy-go/pull/796"
         depends_on: []
       - id: telemetry-machineid-worker
@@ -414,7 +422,8 @@ epics:
     tasks:
       - id: hygiene-roadmap-github-check
         title: "gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links"
-        status: todo
+        status: done
+        pr: "#800"
         depends_on: []
       - id: hygiene-tasks-reconcile
         title: "CI rule: PR touching specs/<id> implementation paths must update tasks.md"
