@@ -90,9 +90,8 @@ epics:
     assignee: BackendEngineer
     priority: P1
     mcp: MCP-34
-    spec: specs/054-mcp-security-gateway
     depends_on: []
-    note: "Landlock LSM + setrlimit native sandbox for stdio upstreams; no userns (Ubuntu 24.04 safe). Code in internal/sandbox/."
+    note: "Landlock LSM + setrlimit native sandbox for stdio upstreams; no userns (Ubuntu 24.04 safe). Originated from roadmap item #11 (no dedicated spec — 054 is the unrelated security-gateway spec). Code in internal/sandbox/; PRs #754/#759/#768/#781/#782."
     tasks:
       - id: sandbox-spike
         title: Landlock sandbox spike (MCP-34.1)
@@ -198,13 +197,18 @@ epics:
     mcp: MCP-43
     spec: specs/002-windows-installer
     depends_on: []
-    note: "Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke."
+    note: "Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first."
     tasks:
+      - id: windows-tray-funnel-qa
+        title: "Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work)"
+        status: todo
+        priority: P2
+        depends_on: []
       - id: windows-tray-window
         title: WebView2 native window + profile submenu
         status: in_review
         mcp: MCP-43
-        depends_on: []
+        depends_on: [windows-tray-funnel-qa]
 
   # ── BACKLOG: personal-edition polish (NEW priorities) ─────────────────────
   - id: ux-audit
@@ -212,9 +216,8 @@ epics:
     status: todo
     assignee: unassigned
     priority: P0
-    spec: specs/064-glass-cockpit
     depends_on: []
-    note: "End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push."
+    note: "End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push. (No spec yet — 064 is the unrelated agent-fleet glass-cockpit spec.)"
     tasks:
       - id: ux-audit-webui-sweep
         title: Web UI heuristic + Playwright UX sweep
@@ -231,9 +234,8 @@ epics:
     status: todo
     assignee: unassigned
     priority: P0
-    spec: specs/024-expand-activity-log
     depends_on: [ux-audit]
-    note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Builds on activity-log backend + retention."
+    note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
     tasks:
       - id: action-log-glance-view
         title: At-a-glance action log view (top signals, health)
@@ -282,8 +284,9 @@ epics:
         depends_on: []
       - id: registries-official-protocol
         title: Official registry protocol integration
-        status: todo
+        status: done
         spec: specs/071-official-registry-protocol
+        note: "Spec 071 shipped 12/12 (official MCP registry v0.1 protocol adopted, #572)."
         depends_on: []
 
   - id: scanner-simplification
@@ -293,24 +296,133 @@ epics:
     priority: P1
     spec: specs/077-scanner-simplification
     depends_on: [scanner-v2]
-    note: "Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. Spec drafted (branch 077-scanner-simplification); plan next. First of the 5 personal-edition polish verticals."
+    note: "Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. US1/US2/US4 merged; US3 (deep-scan opt-in) in review as #793. Docs tasks T037-T039 treated as merge-blocking for PR #793 (docs still describe deleted legacy tpaRules / six-checks / auto_scan_quarantined). First of the 5 personal-edition polish verticals."
     tasks:
       - id: scanner-simpl-baseline
         title: "US1: deterministic offline baseline default + curated hard phrase_injection check (delete duplicate legacy rules)"
-        status: todo
+        status: done
+        pr: "#786"
         depends_on: []
       - id: scanner-simpl-unified-report
         title: "US2: single merged report + cross-scanner consensus confidence"
-        status: todo
+        status: done
+        pr: "#792"
         depends_on: [scanner-simpl-baseline]
       - id: scanner-simpl-deep-optin
         title: "US3: opt-in deep scan (off by default), never blocks/degrades baseline; config migration"
-        status: todo
+        status: in_review
+        pr: "#793"
         depends_on: [scanner-simpl-baseline, scanner-simpl-unified-report]
       - id: scanner-simpl-notifications
         title: "US4: collapse scan-notification storm into one debounced settled event (MCP-2207)"
-        status: todo
+        status: done
+        pr: "#794"
         depends_on: [scanner-simpl-unified-report]
+      - id: scanner-simpl-deepscan-fixes
+        title: "Deep-scan trust fixes: nil-Security gating bug (source fetch runs with deep scan off on default configs), FR-014 verdict inversion (Dangerous deep finding < Warning), surface silently-skipped Docker scanners (non-nil deep_scan descriptor + CLI hint on security enable)"
+        status: todo
+        priority: P1
+        depends_on: [scanner-simpl-deep-optin]
+
+  # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
+  - id: upgrade-nudge
+    title: Upgrade awareness & guided update
+    status: todo
+    assignee: unassigned
+    priority: P0
+    spec: specs/079-upgrade-nudge
+    depends_on: []
+    note: "Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI."
+    tasks:
+      - id: upgrade-nudge-surfacing
+        title: "US1: universal awareness — status output, startup log, dismissible Web UI banner, update_check config block"
+        status: todo
+        depends_on: []
+      - id: upgrade-nudge-channel
+        title: "US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"
+        status: todo
+        depends_on: [upgrade-nudge-surfacing]
+      - id: upgrade-nudge-quiet
+        title: "US3: operator control + CI/offline quiet + no prerelease downgrade nudges"
+        status: todo
+        depends_on: [upgrade-nudge-surfacing]
+
+  - id: connect-trust
+    title: "Connect step trust: preview, visible backup, one-click undo"
+    status: todo
+    assignee: unassigned
+    priority: P0
+    spec: specs/078-connect-trust-preview
+    depends_on: []
+    note: "72.4% of wizard-engaged users skip the connect step; completers retain ~50% at two weeks vs 6% for non-engaged. Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
+    tasks:
+      - id: connect-trust-preview
+        title: "US1: preview API + wizard diff UI (exact entry, API-key masking)"
+        status: todo
+        depends_on: []
+      - id: connect-trust-backup-visibility
+        title: "US1: surface backup_path in Web UI + retention policy"
+        status: todo
+        depends_on: []
+      - id: connect-trust-undo
+        title: "US2: one-click undo/disconnect in wizard"
+        status: todo
+        depends_on: []
+      - id: connect-trust-tcc-copy
+        title: "US2: pre-emptive macOS TCC explanation in wizard"
+        status: todo
+        depends_on: []
+
+  - id: telemetry-identity
+    title: "Telemetry identity & data quality (machine_id + CI-filter hardening)"
+    status: in_progress
+    assignee: unassigned
+    priority: P1
+    depends_on: []
+    note: "Heartbeat lacks a stable identity, so active-install counts are inflated by CI/dev churn and launch_source is 79% unknown. Add a hashed machine_id (schema v6) and harden the worker/dashboard cohort filters. Spans repos mcpproxy-go (client), mcpproxy-telemetry (worker), mcpproxy-dash (dashboard)."
+    tasks:
+      - id: telemetry-machineid-client
+        title: "Hashed machine_id in heartbeat (schema v6)"
+        status: in_review
+        pr: "https://github.com/smart-mcp-proxy/mcpproxy-go/pull/796"
+        depends_on: []
+      - id: telemetry-machineid-worker
+        title: "Worker migration: machine_id column + extraction (repo mcpproxy-telemetry)"
+        status: todo
+        depends_on: [telemetry-machineid-client]
+      - id: telemetry-machineid-dash
+        title: "Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"
+        status: todo
+        depends_on: [telemetry-machineid-worker]
+      - id: telemetry-snapshot-alerting
+        title: "Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"
+        status: todo
+        depends_on: []
+
+  - id: planning-hygiene
+    title: Planning/docs truth automation
+    status: todo
+    assignee: unassigned
+    priority: P2
+    depends_on: []
+    note: "Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests."
+    tasks:
+      - id: hygiene-roadmap-github-check
+        title: "gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links"
+        status: todo
+        depends_on: []
+      - id: hygiene-tasks-reconcile
+        title: "CI rule: PR touching specs/<id> implementation paths must update tasks.md"
+        status: todo
+        depends_on: []
+      - id: hygiene-docs-facts
+        title: "Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check"
+        status: todo
+        depends_on: []
+      - id: hygiene-quickstart-contract
+        title: "Run top quickstart.md scenario per spec as contract test in test-api-e2e.sh"
+        status: todo
+        depends_on: []
 
   # ── PARKED epics (intentionally on hold) ──────────────────────────────────
   - id: marketplace
@@ -319,9 +431,8 @@ epics:
     parked: true
     priority: P3
     mcp: MCP-37
-    spec: specs/070-registry-easy-upstream-add
     depends_on: []
-    note: "PARKED. ~60% already ships (browse/search/one-click add). Remaining = tray entries, metadata, telemetry."
+    note: "PARKED. ~60% already ships (browse/search/one-click add). No spec yet; gaps tracked as MCP-3246..3250 (tray entries, metadata, telemetry). (070 is the registries-search-add spec, not a marketplace spec.)"
 
   - id: siem
     title: Audit SIEM integration
