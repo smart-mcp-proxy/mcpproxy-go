@@ -281,18 +281,32 @@ type ScanReport struct {
 
 // AggregatedReport combines results from all scanners for a single scan job
 type AggregatedReport struct {
-	JobID          string        `json:"job_id"`
-	ServerName     string        `json:"server_name"`
-	Findings       []ScanFinding `json:"findings"`
-	RiskScore      int           `json:"risk_score"`
-	Summary        ReportSummary `json:"summary"`
-	ScannedAt      time.Time     `json:"scanned_at"`
-	Reports        []ScanReport  `json:"reports"`
-	ScannersRun    int           `json:"scanners_run"`    // How many scanners actually produced results
-	ScannersFailed int           `json:"scanners_failed"` // How many scanners failed
-	ScannersTotal  int           `json:"scanners_total"`  // Total scanners attempted
-	ScanComplete   bool          `json:"scan_complete"`   // True only if at least one scanner succeeded
-	EmptyScan      bool          `json:"empty_scan"`      // True when scanners ran but had no files to analyze
+	JobID      string        `json:"job_id"`
+	ServerName string        `json:"server_name"`
+	Findings   []ScanFinding `json:"findings"`
+	RiskScore  int           `json:"risk_score"`
+	// Summary carries the RAW threat-level / severity counts across ALL
+	// findings (baseline + deep-scan/external) for transparency. It is NOT a
+	// verdict — verdict-bearing UI must read Verdict/FindingCounts below.
+	Summary ReportSummary `json:"summary"`
+	// Verdict is the tier-driven, baseline-only verdict for this report
+	// (Spec 077 FR-014): "dangerous" (≥1 hard-tier baseline finding),
+	// "warnings" (≥1 soft-tier baseline finding), else "clean". It is derived
+	// by the SAME predicate as the server-list summary (GetScanSummary), so
+	// the report page can never disagree with the server verdict — a tierless
+	// deep-scan/external finding never moves it, regardless of threat_level.
+	Verdict string `json:"verdict"`
+	// FindingCounts buckets findings identically to ScanSummary.FindingCounts
+	// (hard-tier → dangerous; tierless "dangerous" → warning: informs, never
+	// gates), keeping the report page consistent with the server list.
+	FindingCounts  *FindingCounts `json:"finding_counts,omitempty"`
+	ScannedAt      time.Time      `json:"scanned_at"`
+	Reports        []ScanReport   `json:"reports"`
+	ScannersRun    int            `json:"scanners_run"`    // How many scanners actually produced results
+	ScannersFailed int            `json:"scanners_failed"` // How many scanners failed
+	ScannersTotal  int            `json:"scanners_total"`  // Total scanners attempted
+	ScanComplete   bool           `json:"scan_complete"`   // True only if at least one scanner succeeded
+	EmptyScan      bool           `json:"empty_scan"`      // True when scanners ran but had no files to analyze
 	// Two-pass scan tracking
 	Pass1Complete bool `json:"pass1_complete"` // Security scan (fast) done
 	Pass2Complete bool `json:"pass2_complete"` // Supply chain audit done
@@ -300,6 +314,11 @@ type AggregatedReport struct {
 	// Scan context from the primary job (for report page display)
 	ScanContext     *ScanContext       `json:"scan_context,omitempty"`
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses,omitempty"` // Per-scanner execution logs
+	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077 US3),
+	// mirrored from ScanSummary so the report page can render the informational
+	// deep-scan banner. Informational only — a failed or unavailable deep scanner
+	// never changes the baseline verdict. nil/omitted when deep scan is disabled.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
 }
 
 // ReportSummary provides counts by severity and threat level

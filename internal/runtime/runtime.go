@@ -1225,6 +1225,14 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		}, fmt.Errorf("configuration validation failed: %v", validationErrors[0].Error())
 	}
 
+	// Normalize the submitted config the same way LoadFromFile does before we
+	// diff/save it (Spec 077 US3): fold the deprecated security.scanner_* keys
+	// into security.deep_scan. The /api/v1/config/apply path bypasses
+	// LoadFromFile, so without this an API apply carrying the deprecated keys
+	// would re-serialize them instead of the unified deep_scan surface (SC-007).
+	// Idempotent + nil-safe.
+	config.MigrateDeepScanConfig(newCfg)
+
 	// Detect changes and determine if restart is required
 	result := DetectConfigChanges(r.cfg, newCfg)
 	if !result.Success {

@@ -254,6 +254,42 @@ components:
           description: 'Risk level: critical, high, medium, low'
           type: string
       type: object
+    config.DeepScanConfig:
+      description: |-
+        DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
+        deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
+        keys (migrated on load) and gates the heavy Docker-based scanners + source
+        extraction. Disabled by default (FR-006): only the deterministic in-process
+        baseline scanner runs. A deep-scan failure NEVER changes the baseline verdict
+        (FR-007/FR-008).
+      properties:
+        disable_no_new_privileges:
+          description: |-
+            DisableNoNewPrivileges, when true, omits the `--security-opt
+            no-new-privileges` flag from scanner container runs (snap-docker/AppArmor
+            escape hatch). Absorbs the deprecated top-level
+            scanner_disable_no_new_privileges. Default false.
+          type: boolean
+        enabled:
+          description: Enabled is the master opt-in for the heavy layer (FR-006).
+            Default false.
+          type: boolean
+        fetch_package_source:
+          description: |-
+            FetchPackageSource controls whether the scanner fetches the PUBLISHED
+            source of package-runner servers (npx/uvx) — without executing it — when
+            no local source is available. Absorbs the deprecated top-level
+            scanner_fetch_package_source. Default (nil) is ENABLED within deep scan.
+          type: boolean
+        scanners:
+          description: |-
+            Scanners optionally restricts which deep scanners may run under the
+            umbrella (by scanner id). Empty ⇒ all enabled deep scanners are eligible.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
     config.DockerIsolationConfig:
       description: Docker isolation settings
       properties:
@@ -601,8 +637,8 @@ components:
     config.SecurityConfig:
       description: Security scanner settings (Spec 039)
       properties:
-        auto_scan_quarantined:
-          type: boolean
+        deep_scan:
+          $ref: '#/components/schemas/config.DeepScanConfig'
         integrity_check_interval:
           type: string
         integrity_check_on_restart:
@@ -615,6 +651,11 @@ components:
           type: string
         scanner_disable_no_new_privileges:
           description: |-
+            Deprecated (Spec 077 US3): migrated on load into DeepScan.DisableNoNewPrivileges
+            (see migrateDeepScanConfig). Retained only so existing configs that still carry
+            the top-level key parse; consumers MUST read the effective value via
+            SecurityConfig.IsDisableNoNewPrivileges. Cleared after migration.
+
             ScannerDisableNoNewPrivileges, when true, omits the
             `--security-opt no-new-privileges` flag from scanner container runs.
 
@@ -633,6 +674,11 @@ components:
           type: boolean
         scanner_fetch_package_source:
           description: |-
+            Deprecated (Spec 077 US3): migrated on load into DeepScan.FetchPackageSource
+            (see migrateDeepScanConfig). Retained only so existing configs that still carry
+            the top-level key parse; consumers MUST read the effective value via
+            SecurityConfig.EffectiveFetchPackageSource. Cleared after migration.
+
             ScannerFetchPackageSource controls whether the scanner fetches the
             PUBLISHED source of package-runner servers (npx/uvx) — without executing
             it — when no local source is available (no Docker container, no local
@@ -1145,6 +1191,40 @@ components:
           type: integer
         success:
           type: boolean
+      type: object
+    contracts.DeepScanDescriptor:
+      description: |-
+        DeepScan reports the opt-in "deep scan" layer status (Spec 077 US3),
+        SEPARATELY from the baseline verdict above. Always emitted on a computed
+        summary — when deep scan is off (the default) it reports enabled=false
+        plus any enabled-but-skipped Docker scanners. It never influences Status.
+      properties:
+        available:
+          type: boolean
+        enabled:
+          type: boolean
+        ran:
+          type: boolean
+        scanners_failed:
+          items:
+            $ref: '#/components/schemas/contracts.DeepScanScannerFailure'
+          type: array
+          uniqueItems: false
+        skipped_scanners:
+          description: |-
+            SkippedScanners lists Docker scanners the user enabled that are skipped
+            because security.deep_scan.enabled is false (informational).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.DeepScanScannerFailure:
+      properties:
+        id:
+          type: string
+        reason:
+          type: string
       type: object
     contracts.DeprecatedConfigWarning:
       properties:
@@ -1876,6 +1956,8 @@ components:
     contracts.SecurityScanSummary:
       description: Latest security scan results summary
       properties:
+        deep_scan:
+          $ref: '#/components/schemas/contracts.DeepScanDescriptor'
         finding_counts:
           $ref: '#/components/schemas/contracts.FindingCounts'
         last_scan_at:
@@ -1887,14 +1969,15 @@ components:
           type: integer
         scanners_run:
           description: |-
-            Scanner coverage for the primary scan pass. "degraded" status means
-            ScannersFailed > 0, so the risk score reflects an incomplete scan and a
-            low score should not be read as a trustworthy all-clear (MCP-2401).
+            Scanner coverage for the primary (baseline) scan pass — informational only.
+            Spec 077 US3 (FR-008/FR-014): Status is derived SOLELY from the
+            deterministic baseline findings; a failed Docker deep scanner no longer
+            downgrades a clean verdict. That failure is surfaced via DeepScan instead.
           type: integer
         scanners_total:
           type: integer
         status:
-          description: '"clean", "degraded", "warnings", "dangerous", "failed", "not_scanned",
+          description: '"clean", "warnings", "dangerous", "failed", "not_scanned",
             "scanning"'
           type: string
       type: object

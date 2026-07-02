@@ -60,14 +60,14 @@ Per-server precedence: explicit per-server `mode` → per-server legacy `enabled
 
 ### Scanner behaviour under each mode (MCP-34.4)
 
-The security **scanner plugins** are Docker-based. Under a non-Docker isolation mode they cannot run, so MCPProxy **degrades cleanly and surfaces it** rather than failing silently:
+The security **scanner plugins** are Docker-based and, since Spec 077, belong to the **opt-in deep-scan layer** (they run only when `security.deep_scan.enabled: true`). Under a non-Docker isolation mode they cannot run at all, so MCPProxy **skips them and surfaces the skip informationally** rather than failing silently:
 
 | Mode | Docker scanner plugins | In-process scanner (`tpa-descriptions`) | Scan result for a server with only Docker scanners |
 |------|------------------------|------------------------------------------|----------------------------------------------------|
-| `docker` | Run normally | Runs | As scanned |
-| `sandbox` / `none` | **Skipped** with an honest, mode-specific reason pointing at [`MCPX_DOCKER_SNAP_APPARMOR`](/errors/MCPX_DOCKER_SNAP_APPARMOR) | **Still runs** | `security_scan.status: "degraded"` (a low/zero risk score from incomplete coverage is not reported as a trustworthy all-clear) |
+| `docker` | Run normally (when deep scan is on) | Runs | As scanned |
+| `sandbox` / `none` | **Skipped** with an honest, mode-specific reason pointing at [`MCPX_DOCKER_SNAP_APPARMOR`](/errors/MCPX_DOCKER_SNAP_APPARMOR) | **Still runs** | The baseline verdict is unchanged; the skip surfaces via the informational `deep_scan` descriptor |
 
-This is **decision D3 option (b)**: clean, surfaced degradation. A native (non-Docker) scanner runtime — option (a) — is a larger follow-up and is not yet implemented. To run the full Docker-based scanner fleet, use `mode: docker` on a host with a working Docker daemon, or replace snap-docker with a distro Docker package (see the error doc). The skip is also logged at startup:
+Since Spec 077 (FR-008) a skipped or failed deep scanner **never downgrades the baseline verdict to `degraded`** — the old `security_scan.status: "degraded"` behaviour was removed. The always-emitted `deep_scan` descriptor carries the skip instead: `{ "enabled": <bool>, "ran": <bool>, "available": <bool>, "scanners_failed": [...], "skipped_scanners": [...] }`. The deterministic in-process `tpa-descriptions` baseline scanner is the sole source of the verdict, so a low/zero risk score from a baseline-only scan is a trustworthy result, and the incomplete Docker coverage is reported as an informational note. To run the full Docker-based scanner fleet, enable deep scan and use `mode: docker` on a host with a working Docker daemon, or replace snap-docker with a distro Docker package (see the error doc). The skip is also logged at startup:
 
 ```
 WARN  Isolation mode runs no Docker for scanner plugins; Docker-based scanners will be skipped …  {"isolation_mode": "sandbox"}
@@ -318,13 +318,13 @@ See [Shutdown Behavior](/operations/shutdown-behavior) for detailed subprocess l
 - **No uid/gid drop.** Dropping to an unprivileged uid/gid requires `CAP_SETUID`/`CAP_SETGID` (i.e. running as root). When mcpproxy runs unprivileged, the uid/gid drop is **best-effort and typically a no-op** — the sandboxed process keeps the launching user's identity. Landlock (filesystem) and `setrlimit` (resource caps) still apply. Docker mode does drop to a container user. This is an honest trade-off, not a bug.
 - **Linux-only.** Landlock is a Linux 5.13+ feature. On older kernels the launcher degrades best-effort (fewer access-right bits enforced). On macOS/Windows `sandbox` is a documented **no-op** and behaves like `none`.
 - **Filesystem + resources only.** Landlock confines the filesystem write-allowlist; it does not provide network namespacing. For network-sensitive servers, use `docker` mode with `network_mode: none`.
-- **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped (the scan reports `degraded`). A native scanner runtime is a future enhancement.
+- **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped and the skip is surfaced via the informational `deep_scan` descriptor — it never downgrades the baseline verdict (Spec 077 FR-008). A native scanner runtime is a future enhancement.
 
 ## Platform support matrix
 
 | Platform | `docker` | `sandbox` | `none` | Docker scanner plugins |
 |----------|----------|-----------|--------|------------------------|
-| Linux (kernel ≥ 5.13) | ✅ (needs Docker daemon) | ✅ Landlock + rlimits (no uid/gid drop) | ✅ | ✅ under `docker`; skipped+degraded under `sandbox`/`none` |
+| Linux (kernel ≥ 5.13) | ✅ (needs Docker daemon) | ✅ Landlock + rlimits (no uid/gid drop) | ✅ | ✅ under `docker` (deep scan on); skipped (informational, no verdict change) under `sandbox`/`none` |
 | Linux (kernel &lt; 5.13) | ✅ (needs Docker daemon) | ⚠️ best-effort: rlimits apply, Landlock partial/unavailable | ✅ | same as above |
 | macOS | ✅ (Docker Desktop) | ⚠️ no-op ⇒ effectively `none` | ✅ | ✅ under `docker`; n/a otherwise |
 | Windows | ✅ (Docker Desktop) | ⚠️ no-op ⇒ effectively `none` | ✅ | ✅ under `docker`; n/a otherwise |
