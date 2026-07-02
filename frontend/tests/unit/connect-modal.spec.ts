@@ -8,11 +8,33 @@ vi.mock('@/services/api', () => ({
   default: {
     getConnectStatus: vi.fn(),
     getConnectClientStatus: vi.fn(),
+    getConnectPreview: vi.fn(),
     connectClient: vi.fn(),
     disconnectClient: vi.fn(),
     getOnboardingState: vi.fn(),
   },
 }))
+
+// Spec 078 US1: a generic accessible preview (create case). Individual tests
+// override entry_exists / access_state as needed.
+function previewOk(overrides: Record<string, unknown> = {}) {
+  return {
+    success: true,
+    data: {
+      client: 'cursor',
+      config_path: '/Users/test/.cursor/mcp.json',
+      format: 'json',
+      server_key: 'mcpServers',
+      server_name: 'mcpproxy',
+      entry: { type: 'http', url: 'http://127.0.0.1:8080/mcp' },
+      entry_text: '{\n  "mcpproxy": {\n    "type": "http",\n    "url": "http://127.0.0.1:8080/mcp"\n  }\n}',
+      entry_exists: false,
+      contains_api_key: false,
+      access_state: 'accessible',
+      ...overrides,
+    },
+  }
+}
 
 describe('ConnectModal', () => {
   let pinia: any
@@ -22,12 +44,15 @@ describe('ConnectModal', () => {
     setActivePinia(pinia)
     ;(api.getConnectStatus as any).mockReset()
     ;(api.getConnectClientStatus as any).mockReset()
+    ;(api.getConnectPreview as any).mockReset()
     ;(api.connectClient as any).mockReset()
     ;(api.disconnectClient as any).mockReset()
     ;(api.getOnboardingState as any).mockReset()
     // Default: no content-resolved connections (most tests exercise the
     // stat-only listing only). Individual tests override as needed.
     ;(api.getOnboardingState as any).mockResolvedValue({ success: true, data: null })
+    // Spec 078 US1: Connect now previews first; default to an accessible create.
+    ;(api.getConnectPreview as any).mockResolvedValue(previewOk())
   })
 
   it('renders an OpenCode row', async () => {
@@ -408,7 +433,10 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    await wrapper.find('button.btn-primary.btn-xs').trigger('click')
+    // Spec 078 US1: click Connect → preview panel → confirm writes.
+    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
     await flushPromises()
 
     const backup = wrapper.find('[data-test="connect-backup-path"]')
@@ -462,7 +490,10 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    await wrapper.find('button.btn-primary.btn-xs').trigger('click')
+    // Spec 078 US1: preview then confirm for the bridge (no-prior-file) case.
+    await wrapper.find('[data-test="connect-start-claude-desktop"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-preview-confirm-claude-desktop"]').trigger('click')
     await flushPromises()
 
     const noBackup = wrapper.find('[data-test="connect-no-backup"]')

@@ -69,11 +69,12 @@
               </button>
               <button
                 v-else
-                @click="connectSingle(client.id)"
+                :data-test="`connect-start-${client.id}`"
+                @click="startConnect(client.id)"
                 class="btn btn-primary btn-xs"
-                :disabled="loading.clients[client.id]"
+                :disabled="loading.clients[client.id] || previewLoading[client.id]"
               >
-                <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-if="loading.clients[client.id] || previewLoading[client.id]" class="loading loading-spinner loading-xs"></span>
                 <span v-else>Connect</span>
               </button>
               <!-- Spec 075 US1: explicit, no-eager-read access check. The stat-only
@@ -116,6 +117,87 @@
                 <span v-else>Re-check</span>
               </button>
             </div>
+          </div>
+          <!-- Spec 078 US1 / FR-001,003,004: preview the exact change before it
+               is written. Only this entry is added; nothing else in the file
+               changes. Confirm/Cancel gate the actual write. -->
+          <div
+            v-if="previews[client.id]"
+            :data-test="`connect-preview-${client.id}`"
+            class="border-t border-base-300 bg-base-200/40 px-3 py-3 space-y-2"
+          >
+            <p class="text-xs opacity-70 leading-relaxed">
+              Only this entry is added to
+              <code class="font-mono text-[11px] break-all" :title="previews[client.id]!.config_path">{{ previews[client.id]!.config_path }}</code>.
+              Everything else in the file stays untouched, and a timestamped backup is created first.
+            </p>
+            <!-- Overwrite warning (FR-003): an entry with this name already exists. -->
+            <p
+              v-if="previews[client.id]!.entry_exists"
+              :data-test="`connect-preview-overwrite-${client.id}`"
+              class="text-xs text-warning leading-relaxed"
+            >
+              An entry named “{{ previews[client.id]!.server_name }}” already exists — connecting will overwrite it (a backup is saved first).
+            </p>
+            <!-- Malformed config (Spec 075): can't tell create vs overwrite. -->
+            <p
+              v-else-if="previews[client.id]!.access_state === 'malformed'"
+              :data-test="`connect-preview-malformed-${client.id}`"
+              class="text-xs text-warning leading-relaxed"
+            >
+              Your current config could not be parsed, so we can't show whether an entry already exists. Connecting still writes only the “{{ previews[client.id]!.server_name }}” entry.
+            </p>
+            <!-- No prior file (bridge / absent): nothing to back up. -->
+            <p
+              v-else-if="previews[client.id]!.access_state === 'absent'"
+              :data-test="`connect-preview-no-file-${client.id}`"
+              class="text-xs opacity-60 leading-relaxed"
+            >
+              This file will be created; there is no prior file to back up.
+            </p>
+            <div>
+              <div class="text-[11px] font-semibold uppercase tracking-wider text-success/80 mb-1">+ will be added</div>
+              <pre
+                :data-test="`connect-preview-entry-${client.id}`"
+                class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed"
+              >{{ previews[client.id]!.entry_text }}</pre>
+            </div>
+            <!-- API-key honesty (FR-004): masked in the preview, real key written. -->
+            <p
+              v-if="previews[client.id]!.contains_api_key"
+              :data-test="`connect-preview-apikey-${client.id}`"
+              class="text-[11px] opacity-60 leading-relaxed"
+            >
+              The URL includes your API key (shown masked). The real key is written into the config so the client can authenticate.
+            </p>
+            <div class="flex items-center gap-2 pt-1">
+              <button
+                :data-test="`connect-preview-confirm-${client.id}`"
+                @click="confirmConnect(client.id)"
+                class="btn btn-primary btn-xs"
+                :disabled="loading.clients[client.id]"
+              >
+                <span v-if="loading.clients[client.id]" class="loading loading-spinner loading-xs"></span>
+                <span v-else>Connect</span>
+              </button>
+              <button
+                :data-test="`connect-preview-cancel-${client.id}`"
+                @click="cancelPreview(client.id)"
+                class="btn btn-ghost btn-xs"
+                :disabled="loading.clients[client.id]"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+          <!-- Spec 078 US1: preview fetch failed (non-denial). Denials fall
+               through to the denied banner above via checkAccess. -->
+          <div
+            v-else-if="previewError[client.id]"
+            :data-test="`connect-preview-error-${client.id}`"
+            class="border-t border-base-300 px-3 py-2 text-xs text-error"
+          >
+            {{ previewError[client.id] }}
           </div>
         </div>
 
@@ -210,7 +292,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 import { useOnboardingStore } from '@/stores/onboarding'
-import type { ClientStatus, AccessState } from '@/types'
+import type { ClientStatus, AccessState, ConnectPreview } from '@/types'
 
 interface Props {
   show: boolean
@@ -251,6 +333,13 @@ const loading = reactive({
 const resolved = ref<Record<string, ClientStatus>>({})
 const checking = reactive<Record<string, boolean>>({})
 const copiedClient = ref<string | null>(null)
+// Spec 078 US1: a fetched preview per client (the exact change a connect would
+// make, no write yet). Present => the confirm/cancel panel is shown for that
+// client. previewError holds a non-denial fetch failure (a denial resolves to
+// the access-state banner instead).
+const previews = ref<Record<string, ConnectPreview>>({})
+const previewLoading = reactive<Record<string, boolean>>({})
+const previewError = ref<Record<string, string>>({})
 
 // MCP-2952: `GET /api/v1/connect` is stat-only (#706/MCP-2829) and reports
 // connected=false for every client. Merge the content-resolved
@@ -326,24 +415,64 @@ async function fetchClients() {
   }
 }
 
-// Single-connect entry point (row button): a fresh single operation supersedes
-// any earlier Connect All per-client backup list.
-async function connectSingle(clientId: string) {
+// Spec 078 US1: clicking the row's Connect fetches the preview first and shows
+// the confirm/cancel panel — no file is written until the user confirms. A
+// denied read (403) is surfaced as the access-state banner via checkAccess.
+async function startConnect(clientId: string) {
+  previewLoading[clientId] = true
+  previewError.value = { ...previewError.value, [clientId]: '' }
+  try {
+    const response = await api.getConnectPreview(clientId)
+    if (response.success && response.data) {
+      previews.value = { ...previews.value, [clientId]: response.data }
+    } else {
+      // The preview read may have been blocked by macOS App-Data — resolve the
+      // access state so a denial renders the existing remediation banner.
+      previewError.value = { ...previewError.value, [clientId]: response.error || 'Failed to load preview' }
+      void checkAccess(clientId)
+    }
+  } catch (err) {
+    previewError.value = { ...previewError.value, [clientId]: err instanceof Error ? err.message : 'Failed to load preview' }
+    void checkAccess(clientId)
+  } finally {
+    previewLoading[clientId] = false
+  }
+}
+
+// Cancel dismisses the preview WITHOUT writing anything (Spec 078 US1).
+function cancelPreview(clientId: string) {
+  const next = { ...previews.value }
+  delete next[clientId]
+  previews.value = next
+}
+
+function clearPreview(clientId: string) {
+  cancelPreview(clientId)
+  const nextErr = { ...previewError.value }
+  delete nextErr[clientId]
+  previewError.value = nextErr
+}
+
+// Confirm proceeds with the connect. If an entry already exists, confirming
+// implies force=true (the user saw the overwrite warning in the preview).
+async function confirmConnect(clientId: string) {
+  const force = previews.value[clientId]?.entry_exists === true
   bulkBackups.value = []
   copiedBulkClient.value = null
-  await connect(clientId)
+  await connect(clientId, force)
+  clearPreview(clientId)
 }
 
 // Returns the outcome so connectAll can accumulate per-client backup results
 // (ok=true with backupPath string = backup created; null = no prior file).
-async function connect(clientId: string): Promise<{ ok: boolean; backupPath: string | null }> {
+async function connect(clientId: string, force = false): Promise<{ ok: boolean; backupPath: string | null }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
 
   try {
-    const response = await api.connectClient(clientId)
+    const response = await api.connectClient(clientId, 'mcpproxy', force)
     if (response.success && response.data) {
       resultMessage.value = response.data.message || `Connected to ${clientId}`
       resultSuccess.value = true
@@ -525,6 +654,8 @@ function close() {
   copiedBackup.value = false
   bulkBackups.value = []
   copiedBulkClient.value = null
+  previews.value = {}
+  previewError.value = {}
   emit('close')
 }
 
@@ -540,6 +671,8 @@ watch(() => props.show, (newVal) => {
     copiedBackup.value = false
     bulkBackups.value = []
     copiedBulkClient.value = null
+    previews.value = {}
+    previewError.value = {}
   }
 })
 </script>

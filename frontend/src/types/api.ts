@@ -833,6 +833,24 @@ export interface ConnectResult {
   error?: string
 }
 
+// Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
+// the file or creating a backup. entry/entry_text carry a MASKED apikey;
+// contains_api_key flags that a credential is written; entry_exists marks the
+// overwrite (force) case; access_state degrades per Spec 075.
+export interface ConnectPreview {
+  client: string
+  config_path: string
+  format: 'json' | 'toml'
+  server_key: string
+  server_name: string
+  entry: Record<string, unknown>
+  entry_text: string
+  entry_exists: boolean
+  contains_api_key: boolean
+  bridge?: boolean
+  access_state?: AccessState
+}
+
 // Onboarding wizard types (Spec 046)
 export interface OnboardingState {
   engaged: boolean
