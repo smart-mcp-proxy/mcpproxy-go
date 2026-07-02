@@ -1927,7 +1927,19 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	})
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
-		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
+		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey).
+			WithRequireMCPAuth(cfg.RequireMCPAuth).
+			// Read listen/api_key/require_mcp_auth LIVE so a runtime toggle (the
+			// /mcp middleware already honors require_mcp_auth per-request) is
+			// reflected in what connect writes, instead of the startup snapshot
+			// that would re-leak the API key after auth is turned off (Spec 078).
+			WithConfigProvider(func() (string, string, bool) {
+				c := s.runtime.Config()
+				if c == nil {
+					return "", "", false
+				}
+				return c.Listen, c.APIKey, c.RequireMCPAuth
+			})
 		httpAPIServer.SetConnectService(connectSvc)
 
 		// Spec 046: wire the onboarding-funnel provider on the telemetry

@@ -18,9 +18,32 @@ vi.mock('@/services/api', () => ({
     getConfig: vi.fn(),
     getDockerStatus: vi.fn(),
     getCanonicalConfigPaths: vi.fn(),
+    getConnectPreview: vi.fn(),
     connectClient: vi.fn(),
   },
 }))
+
+// Spec 078 US1: a generic accessible-create preview. The wizard keys previews by
+// client id, not by the response's client field, so a single default serves all
+// rows; individual tests override entry_exists/access_state where relevant.
+function previewOk(overrides: Record<string, unknown> = {}) {
+  return {
+    success: true,
+    data: {
+      client: 'cursor',
+      config_path: '/Users/test/.cursor/mcp.json',
+      format: 'json',
+      server_key: 'mcpServers',
+      server_name: 'mcpproxy',
+      entry: { type: 'sse', url: 'http://127.0.0.1:8080/mcp' },
+      entry_text: '{\n  "mcpproxy": {\n    "url": "http://127.0.0.1:8080/mcp",\n    "type": "sse"\n  }\n}',
+      entry_exists: false,
+      contains_api_key: false,
+      access_state: 'accessible',
+      ...overrides,
+    },
+  }
+}
 
 function onboardingState(connectedIds: string[]) {
   return {
@@ -96,7 +119,18 @@ describe('OnboardingWizard backup path surfacing (Spec 078 US2)', () => {
     ;(api.getOnboardingState as any).mockResolvedValue(onboardingState([]))
     ;(api.markOnboardingState as any).mockResolvedValue(onboardingState([]))
     ;(api.getConnectStatus as any).mockResolvedValue({ success: true, data: [cursorClient()] })
+    // Spec 078 US1: Connect previews first; default to an accessible create.
+    ;(api.getConnectPreview as any).mockResolvedValue(previewOk())
   })
+
+// Spec 078 US1: the wizard's Connect now opens a preview panel; the write only
+// happens on the panel's confirm button. Helper drives click → preview → confirm.
+async function connectViaPreview(wrapper: any, clientId: string) {
+  await wrapper.find(`[data-test="connect-${clientId}"]`).trigger('click')
+  await flushPromises()
+  await wrapper.find(`[data-test="client-preview-confirm-${clientId}"]`).trigger('click')
+  await flushPromises()
+}
 
   it('shows the backup path in the client row after a successful connect', async () => {
     ;(api.connectClient as any).mockResolvedValue({
@@ -119,8 +153,7 @@ describe('OnboardingWizard backup path surfacing (Spec 078 US2)', () => {
     // No backup info before any connect happened in this session.
     expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(false)
 
-    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
-    await flushPromises()
+    await connectViaPreview(wrapper, 'cursor')
 
     const backup = wrapper.find('[data-test="client-backup-cursor"]')
     expect(backup.exists()).toBe(true)
@@ -151,8 +184,7 @@ describe('OnboardingWizard backup path surfacing (Spec 078 US2)', () => {
 
     const wrapper = await openClientsTab(pinia)
 
-    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
-    await flushPromises()
+    await connectViaPreview(wrapper, 'cursor')
 
     const backup = wrapper.find('[data-test="client-backup-cursor"]')
     expect(backup.exists()).toBe(true)
@@ -193,8 +225,7 @@ describe('OnboardingWizard backup path surfacing (Spec 078 US2)', () => {
     const connectBtn = wrapper.find('[data-test="connect-claude-desktop"]')
     expect(connectBtn.exists()).toBe(true)
 
-    await connectBtn.trigger('click')
-    await flushPromises()
+    await connectViaPreview(wrapper, 'claude-desktop')
 
     const backup = wrapper.find('[data-test="client-backup-claude-desktop"]')
     expect(backup.exists()).toBe(true)
@@ -233,8 +264,7 @@ describe('OnboardingWizard backup path surfacing (Spec 078 US2)', () => {
     })
 
     const wrapper = await openClientsTab(pinia)
-    await wrapper.find('[data-test="connect-cursor"]').trigger('click')
-    await flushPromises()
+    await connectViaPreview(wrapper, 'cursor')
     expect(wrapper.find('[data-test="client-backup-cursor"]').exists()).toBe(true)
 
     // Close and reopen the wizard: a fresh session must start clean.

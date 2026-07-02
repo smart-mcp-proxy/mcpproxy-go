@@ -49,7 +49,7 @@
         <!-- ============================ -->
         <section v-if="activeTab === 'clients'" data-test="panel-clients">
           <p class="text-sm opacity-70 mb-4">
-            Pick at least one AI tool. MCPProxy registers itself in that tool's config so the assistant can talk to mcpproxy. A timestamped backup is created before any file is modified.
+            Pick at least one AI tool. MCPProxy registers itself in that tool's config so the assistant can talk to mcpproxy. You'll see the exact change before anything is written, and a timestamped backup is created first.
           </p>
 
           <div v-if="loadingClients" class="flex justify-center py-6">
@@ -70,8 +70,13 @@
                 :busy="busyClients[c.id]"
                 :backup-path="connectBackups[c.id]"
                 :copied-backup="copiedBackupClient === c.id"
+                :preview="previews[c.id]"
+                :preview-busy="previewBusy[c.id]"
+                :preview-error="previewErrors[c.id]"
                 @copy-backup="copyBackupPath"
-                @connect="connectOne"
+                @connect="startConnect"
+                @confirm="confirmConnect"
+                @cancel="cancelPreview"
               />
             </div>
 
@@ -85,8 +90,13 @@
                 :busy="busyClients[c.id]"
                 :backup-path="connectBackups[c.id]"
                 :copied-backup="copiedBackupClient === c.id"
+                :preview="previews[c.id]"
+                :preview-busy="previewBusy[c.id]"
+                :preview-error="previewErrors[c.id]"
                 @copy-backup="copyBackupPath"
-                @connect="connectOne"
+                @connect="startConnect"
+                @confirm="confirmConnect"
+                @cancel="cancelPreview"
               />
             </div>
 
@@ -104,8 +114,13 @@
                   :busy="busyClients[c.id]"
                   :backup-path="connectBackups[c.id]"
                   :copied-backup="copiedBackupClient === c.id"
+                  :preview="previews[c.id]"
+                  :preview-busy="previewBusy[c.id]"
+                  :preview-error="previewErrors[c.id]"
                   @copy-backup="copyBackupPath"
-                  @connect="connectOne"
+                  @connect="startConnect"
+                  @confirm="confirmConnect"
+                  @cancel="cancelPreview"
                 />
               </div>
             </details>
@@ -501,7 +516,7 @@ import { useOnboardingStore } from '@/stores/onboarding'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
 import AddServerModal from '@/components/AddServerModal.vue'
-import type { ClientStatus, ActivityRecord } from '@/types'
+import type { ClientStatus, ActivityRecord, ConnectPreview } from '@/types'
 
 interface Props {
   show: boolean
@@ -532,6 +547,12 @@ const connectMessageOk = ref(true)
 // prior file existed (nothing to back up); absent = no connect happened yet.
 const connectBackups = reactive<Record<string, string | null>>({})
 const copiedBackupClient = ref<string | null>(null)
+// Spec 078 US1: preview the exact change before writing. previews[id] present
+// => the confirm/cancel panel is shown in that client's row; the write only
+// happens on confirm. previewErrors holds a non-denial fetch failure.
+const previews = reactive<Record<string, ConnectPreview>>({})
+const previewBusy = reactive<Record<string, boolean>>({})
+const previewErrors = reactive<Record<string, string>>({})
 const addServerOpen = ref(false)
 const serverAddedJustNow = ref(false)
 
@@ -711,6 +732,10 @@ watch(() => props.show, async (open) => {
     // rows from connects performed in a previous wizard session.
     for (const k of Object.keys(connectBackups)) delete connectBackups[k]
     copiedBackupClient.value = null
+    // Spec 078 US1: previews are session-scoped too — don't replay a stale
+    // confirm/cancel panel from a previous wizard session.
+    for (const k of Object.keys(previews)) delete previews[k]
+    for (const k of Object.keys(previewErrors)) delete previewErrors[k]
     await onboarding.fetchState()
     await Promise.all([
       fetchClients(),
@@ -1038,11 +1063,47 @@ function onToggleQuarantine(v: boolean) {
   void patchConfig({ quarantine_enabled: v })
 }
 
-async function connectOne(clientId: string) {
+// Spec 078 US1: the row's Connect fetches the preview first and opens the
+// confirm/cancel panel — nothing is written until confirm. A denied read is
+// surfaced as an error message (the wizard has no separate access banner yet;
+// the standalone Connect modal carries the full Spec 075 remediation surface).
+async function startConnect(clientId: string) {
+  previewBusy[clientId] = true
+  delete previewErrors[clientId]
+  try {
+    const res = await api.getConnectPreview(clientId)
+    if (res.success && res.data) {
+      previews[clientId] = res.data
+    } else {
+      previewErrors[clientId] = res.error || 'Failed to load preview'
+    }
+  } catch (err) {
+    previewErrors[clientId] = (err as Error).message
+  } finally {
+    previewBusy[clientId] = false
+  }
+}
+
+// Cancel dismisses the preview WITHOUT writing anything.
+function cancelPreview(clientId: string) {
+  delete previews[clientId]
+  delete previewErrors[clientId]
+}
+
+// Confirm proceeds; an existing same-named entry implies force=true (the user
+// saw the overwrite warning in the preview).
+async function confirmConnect(clientId: string) {
+  const force = previews[clientId]?.entry_exists === true
+  delete previews[clientId]
+  delete previewErrors[clientId]
+  await connectOne(clientId, force)
+}
+
+async function connectOne(clientId: string, force = false) {
   busyClients[clientId] = true
   connectMessage.value = ''
   try {
-    const res = await api.connectClient(clientId)
+    const res = await api.connectClient(clientId, 'mcpproxy', force)
     if (res.success && res.data) {
       connectMessageOk.value = true
       connectMessage.value = res.data.message || `Connected ${clientId}`
@@ -1149,8 +1210,21 @@ onMounted(() => {
 // Inlined as a functional component to keep this file self-contained while
 // the row layout stays consistent across all three lists.
 const ClientRow: FunctionalComponent<
-  { client: ClientStatus; busy?: boolean; backupPath?: string | null; copiedBackup?: boolean },
-  { connect: (id: string) => void; 'copy-backup': (id: string) => void }
+  {
+    client: ClientStatus
+    busy?: boolean
+    backupPath?: string | null
+    copiedBackup?: boolean
+    preview?: ConnectPreview
+    previewBusy?: boolean
+    previewError?: string
+  },
+  {
+    connect: (id: string) => void
+    'copy-backup': (id: string) => void
+    confirm: (id: string) => void
+    cancel: (id: string) => void
+  }
 > = (props, { emit: rowEmit }) => {
   const c = props.client
   const row = h(
@@ -1176,13 +1250,13 @@ const ClientRow: FunctionalComponent<
                   'button',
                   {
                     class: 'btn btn-primary btn-xs',
-                    disabled: props.busy,
+                    disabled: props.busy || props.previewBusy,
                     'data-test': `connect-${c.id}`,
                     onClick: () => rowEmit('connect', c.id),
                   },
-                  props.busy
+                  props.busy || props.previewBusy
                     ? [h('span', { class: 'loading loading-spinner loading-xs' })]
-                    : ['Connect']
+                    : ['Review & connect']
                 ),
       ]),
     ]
@@ -1218,13 +1292,109 @@ const ClientRow: FunctionalComponent<
             : 'No prior config file existed, so no backup was needed.'
         )
       : null
+
+  // Spec 078 US1 / FR-001,003,004: preview the exact change before writing.
+  // Only this entry is added; everything else in the file is untouched. The
+  // Connect/Cancel buttons gate the actual write (Cancel writes nothing).
+  const p = props.preview
+  const previewPanel = p
+    ? h(
+        'div',
+        {
+          class: 'mt-2 rounded-lg bg-base-200/60 border border-base-300 px-3 py-2 space-y-2',
+          'data-test': `client-preview-${c.id}`,
+        },
+        [
+          h('p', { class: 'text-xs opacity-70 leading-relaxed' }, [
+            'Only this entry is added to ',
+            h('code', { class: 'font-mono text-[11px] break-all', title: p.config_path }, p.config_path),
+            '. Everything else in the file stays untouched, and a timestamped backup is created first.',
+          ]),
+          p.entry_exists
+            ? h(
+                'p',
+                { class: 'text-xs text-warning leading-relaxed', 'data-test': `client-preview-overwrite-${c.id}` },
+                `An entry named "${p.server_name}" already exists — connecting will overwrite it (a backup is saved first).`
+              )
+            : p.access_state === 'malformed'
+              ? h(
+                  'p',
+                  { class: 'text-xs text-warning leading-relaxed', 'data-test': `client-preview-malformed-${c.id}` },
+                  `Your current config could not be parsed, so connecting would fail rather than modify an unreadable file. Fix or remove ${p.config_path} first, then try again.`
+                )
+              : p.access_state === 'absent'
+                ? h(
+                    'p',
+                    { class: 'text-xs opacity-60 leading-relaxed', 'data-test': `client-preview-no-file-${c.id}` },
+                    'This file will be created; there is no prior file to back up.'
+                  )
+                : null,
+          h('div', {}, [
+            h('div', { class: 'text-[11px] font-semibold uppercase tracking-wider text-success/80 mb-1' }, '+ will be added'),
+            h(
+              'pre',
+              {
+                class: 'text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-success px-2 py-1.5 leading-relaxed',
+                'data-test': `client-preview-entry-${c.id}`,
+              },
+              p.entry_text
+            ),
+          ]),
+          p.contains_api_key
+            ? h(
+                'p',
+                { class: 'text-[11px] opacity-60 leading-relaxed', 'data-test': `client-preview-apikey-${c.id}` },
+                'This entry includes your API key (shown masked). The real key is written into the config so the client can authenticate.'
+              )
+            : null,
+          h('div', { class: 'flex items-center gap-2 pt-0.5' }, [
+            h(
+              'button',
+              {
+                class: 'btn btn-primary btn-xs',
+                disabled: props.busy || p.access_state === 'malformed',
+                'data-test': `client-preview-confirm-${c.id}`,
+                onClick: () => rowEmit('confirm', c.id),
+              },
+              props.busy ? [h('span', { class: 'loading loading-spinner loading-xs' })] : ['Connect']
+            ),
+            h(
+              'button',
+              {
+                class: 'btn btn-ghost btn-xs',
+                disabled: props.busy,
+                'data-test': `client-preview-cancel-${c.id}`,
+                onClick: () => rowEmit('cancel', c.id),
+              },
+              'Cancel'
+            ),
+          ]),
+        ]
+      )
+    : null
+
+  // Non-denial preview fetch failure (the wizard has no separate access banner;
+  // the standalone Connect modal carries the full Spec 075 remediation surface).
+  const previewErrorLine =
+    !p && props.previewError
+      ? h(
+          'p',
+          { class: 'mt-2 text-xs text-error', 'data-test': `client-preview-error-${c.id}` },
+          props.previewError
+        )
+      : null
+
+  const children = [row]
+  if (backupLine) children.push(backupLine)
+  if (previewPanel) children.push(previewPanel)
+  if (previewErrorLine) children.push(previewErrorLine)
   return h(
     'div',
     {
       class: 'p-2 rounded-lg border border-base-300',
       'data-test': `client-row-${c.id}`,
     },
-    backupLine ? [row, backupLine] : [row]
+    children
   )
 }
 ClientRow.props = {
@@ -1232,6 +1402,9 @@ ClientRow.props = {
   busy: { type: Boolean, default: false },
   backupPath: { type: String, default: undefined },
   copiedBackup: { type: Boolean, default: false },
+  preview: { type: Object, default: undefined },
+  previewBusy: { type: Boolean, default: false },
+  previewError: { type: String, default: undefined },
 }
-ClientRow.emits = ['connect', 'copy-backup']
+ClientRow.emits = ['connect', 'copy-backup', 'confirm', 'cancel']
 </script>
