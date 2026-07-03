@@ -347,7 +347,8 @@ epics:
         depends_on: []
       - id: upgrade-nudge-surfacing
         title: "US1 remainder: dismissible Web UI banner + update_check config block"
-        status: todo
+        status: done
+        pr: "#805"
         depends_on: [upgrade-nudge-status-log]
       - id: upgrade-nudge-channel
         title: "US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"
@@ -379,7 +380,8 @@ epics:
         depends_on: []
       - id: connect-trust-undo
         title: "US2: one-click undo/disconnect in wizard"
-        status: todo
+        status: done
+        pr: "#804"
         depends_on: []
       - id: connect-trust-tcc-copy
         title: "US2: pre-emptive macOS TCC explanation in wizard"
