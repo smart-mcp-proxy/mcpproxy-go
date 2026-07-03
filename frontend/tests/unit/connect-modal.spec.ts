@@ -8,11 +8,33 @@ vi.mock('@/services/api', () => ({
   default: {
     getConnectStatus: vi.fn(),
     getConnectClientStatus: vi.fn(),
+    getConnectPreview: vi.fn(),
     connectClient: vi.fn(),
     disconnectClient: vi.fn(),
     getOnboardingState: vi.fn(),
   },
 }))
+
+// Spec 078 US1: a generic accessible preview (create case). Individual tests
+// override entry_exists / access_state as needed.
+function previewOk(overrides: Record<string, unknown> = {}) {
+  return {
+    success: true,
+    data: {
+      client: 'cursor',
+      config_path: '/Users/test/.cursor/mcp.json',
+      format: 'json',
+      server_key: 'mcpServers',
+      server_name: 'mcpproxy',
+      entry: { type: 'http', url: 'http://127.0.0.1:8080/mcp' },
+      entry_text: '{\n  "mcpproxy": {\n    "type": "http",\n    "url": "http://127.0.0.1:8080/mcp"\n  }\n}',
+      entry_exists: false,
+      contains_api_key: false,
+      access_state: 'accessible',
+      ...overrides,
+    },
+  }
+}
 
 describe('ConnectModal', () => {
   let pinia: any
@@ -22,12 +44,15 @@ describe('ConnectModal', () => {
     setActivePinia(pinia)
     ;(api.getConnectStatus as any).mockReset()
     ;(api.getConnectClientStatus as any).mockReset()
+    ;(api.getConnectPreview as any).mockReset()
     ;(api.connectClient as any).mockReset()
     ;(api.disconnectClient as any).mockReset()
     ;(api.getOnboardingState as any).mockReset()
     // Default: no content-resolved connections (most tests exercise the
     // stat-only listing only). Individual tests override as needed.
     ;(api.getOnboardingState as any).mockResolvedValue({ success: true, data: null })
+    // Spec 078 US1: Connect now previews first; default to an accessible create.
+    ;(api.getConnectPreview as any).mockResolvedValue(previewOk())
   })
 
   it('renders an OpenCode row', async () => {
@@ -126,10 +151,10 @@ describe('ConnectModal', () => {
     await wrapper.setProps({ show: true })
     await flushPromises()
 
-    // A real one-click Connect button must be offered (not greyed out).
+    // A real Review & connect button must be offered (not greyed out).
     const connectButton = wrapper.find('button.btn-primary.btn-xs')
     expect(connectButton.exists()).toBe(true)
-    expect(connectButton.text()).toContain('Connect')
+    expect(connectButton.text()).toContain('Review & connect')
 
     // The bridge note must be surfaced to the user.
     expect(wrapper.text()).toContain('mcp-remote stdio bridge')
@@ -162,7 +187,7 @@ describe('ConnectModal', () => {
     // Fresh install: no config file yet, but the bridge Connect must still appear.
     const connectButton = wrapper.find('button.btn-primary.btn-xs')
     expect(connectButton.exists()).toBe(true)
-    expect(connectButton.text()).toContain('Connect')
+    expect(connectButton.text()).toContain('Review & connect')
     expect(wrapper.text()).not.toContain('Config not found')
   })
 
@@ -265,10 +290,10 @@ describe('ConnectModal', () => {
     expect(codexRow.exists()).toBe(true)
     expect(codexRow.text()).toContain('Disconnect')
 
-    // cursor is genuinely not connected -> Connect button still offered.
+    // cursor is genuinely not connected -> Review & connect button still offered.
     const connectButtons = wrapper.findAll('button.btn-primary.btn-xs')
     expect(connectButtons.length).toBe(1)
-    expect(connectButtons[0].text()).toContain('Connect')
+    expect(connectButtons[0].text()).toContain('Review & connect')
   })
 
   // Spec 075 (MCP-2833) US1: the stat-only listing reports access_state=unknown
@@ -301,8 +326,8 @@ describe('ConnectModal', () => {
     expect(wrapper.find('[data-test="connect-denied-banner"]').exists()).toBe(false)
     // Explicit, no-eager-read affordance to verify access on demand.
     expect(wrapper.find('[data-test="connect-check-access"]').exists()).toBe(true)
-    // Connect remains offered.
-    expect(wrapper.find('button.btn-primary.btn-xs').text()).toContain('Connect')
+    // Review & connect remains offered.
+    expect(wrapper.find('button.btn-primary.btn-xs').text()).toContain('Review & connect')
   })
 
   // Spec 075 US2: a permission-denied client surfaces a distinct, actionable
@@ -369,6 +394,251 @@ describe('ConnectModal', () => {
 
     expect(wrapper.find('[data-test="connect-malformed-badge"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="connect-denied-banner"]').exists()).toBe(false)
+  })
+
+  // Spec 078 US2 / FR-006: a successful connect must surface the timestamped
+  // backup path returned by the API — the strongest "you can undo this" signal.
+  it('surfaces the timestamped backup path after a successful connect', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'cursor',
+        name: 'Cursor',
+        config_path: '/Users/test/.cursor/mcp.json',
+        exists: true,
+        connected: false,
+        supported: true,
+        icon: 'cursor',
+      }],
+    })
+    ;(api.connectClient as any).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        client: 'cursor',
+        config_path: '/Users/test/.cursor/mcp.json',
+        backup_path: '/Users/test/.cursor/mcp.json.bak.20260702-101530',
+        server_name: 'mcpproxy',
+        action: 'added',
+        message: 'MCPProxy registered in Cursor as mcpproxy',
+      },
+    })
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // Spec 078 US1: click Review & connect → preview panel → confirm (Connect) writes.
+    await wrapper.find('[data-test="connect-start-cursor"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-preview-confirm-cursor"]').trigger('click')
+    await flushPromises()
+
+    const backup = wrapper.find('[data-test="connect-backup-path"]')
+    expect(backup.exists()).toBe(true)
+    expect(backup.text()).toContain('A backup of your previous config was saved to')
+    expect(backup.text()).toContain('/Users/test/.cursor/mcp.json.bak.20260702-101530')
+    // The "no prior file" variant must not render simultaneously.
+    expect(wrapper.find('[data-test="connect-no-backup"]').exists()).toBe(false)
+
+    // One-click copy of the backup path (same affordance pattern as tccutil).
+    const copyBtn = wrapper.find('[data-test="connect-copy-backup"]')
+    expect(copyBtn.exists()).toBe(true)
+    await copyBtn.trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('/Users/test/.cursor/mcp.json.bak.20260702-101530')
+  })
+
+  // Spec 078 US2 acceptance 2: a connect that created a brand-new config file
+  // has nothing to back up — say so explicitly, never show a blank path.
+  it('states that there was no prior file to back up when connect created the config', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'claude-desktop',
+        name: 'Claude Desktop',
+        config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+        exists: false,
+        connected: false,
+        supported: true,
+        bridge: true,
+        icon: 'claude-desktop',
+      }],
+    })
+    ;(api.connectClient as any).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        client: 'claude-desktop',
+        config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+        // no backup_path: the file did not exist before the write
+        server_name: 'mcpproxy',
+        action: 'added',
+        message: 'MCPProxy registered in Claude Desktop as mcpproxy',
+      },
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    // Spec 078 US1: preview then confirm for the bridge (no-prior-file) case.
+    await wrapper.find('[data-test="connect-start-claude-desktop"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-test="connect-preview-confirm-claude-desktop"]').trigger('click')
+    await flushPromises()
+
+    const noBackup = wrapper.find('[data-test="connect-no-backup"]')
+    expect(noBackup.exists()).toBe(true)
+    expect(noBackup.text()).toContain('No prior config file existed, so no backup was needed.')
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(false)
+  })
+
+  // Spec 078 US2: disconnect also writes a backup first — surface it too.
+  it('surfaces the backup path after a successful disconnect', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [{
+        id: 'opencode',
+        name: 'OpenCode',
+        config_path: '/Users/test/.config/opencode/opencode.json',
+        exists: true,
+        connected: true,
+        supported: true,
+        icon: 'opencode',
+      }],
+    })
+    ;(api.disconnectClient as any).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        client: 'opencode',
+        config_path: '/Users/test/.config/opencode/opencode.json',
+        backup_path: '/Users/test/.config/opencode/opencode.json.bak.20260702-110000',
+        server_name: 'mcpproxy',
+        action: 'removed',
+        message: 'MCPProxy removed from OpenCode',
+      },
+    })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    await wrapper.find('button.btn-ghost.text-error').trigger('click')
+    await flushPromises()
+
+    const backup = wrapper.find('[data-test="connect-backup-path"]')
+    expect(backup.exists()).toBe(true)
+    expect(backup.text()).toContain('opencode.json.bak.20260702-110000')
+  })
+
+  // Spec 078 US2 / SC-005: Connect All must surface EVERY successful client's
+  // backup outcome, not just the last one — 100% of successful connects that
+  // modified an existing config display their backup path.
+  it('Connect All surfaces a per-client backup line for every successful connect', async () => {
+    ;(api.getConnectStatus as any).mockResolvedValue({
+      success: true,
+      data: [
+        {
+          id: 'cursor',
+          name: 'Cursor',
+          config_path: '/Users/test/.cursor/mcp.json',
+          exists: true,
+          connected: false,
+          supported: true,
+          icon: 'cursor',
+        },
+        {
+          id: 'codex',
+          name: 'Codex CLI',
+          config_path: '/Users/test/.codex/config.toml',
+          exists: true,
+          connected: false,
+          supported: true,
+          icon: 'codex',
+        },
+        {
+          // Bridge client with no config file: connect creates it → no backup.
+          id: 'claude-desktop',
+          name: 'Claude Desktop',
+          config_path: '/Users/test/Library/Application Support/Claude/claude_desktop_config.json',
+          exists: false,
+          connected: false,
+          supported: true,
+          bridge: true,
+          icon: 'claude-desktop',
+        },
+      ],
+    })
+    ;(api.connectClient as any).mockImplementation((id: string) => {
+      const backups: Record<string, string | undefined> = {
+        cursor: '/Users/test/.cursor/mcp.json.bak.20260702-101530',
+        codex: '/Users/test/.codex/config.toml.bak.20260702-101531',
+        'claude-desktop': undefined,
+      }
+      return Promise.resolve({
+        success: true,
+        data: {
+          success: true,
+          client: id,
+          config_path: '',
+          backup_path: backups[id],
+          server_name: 'mcpproxy',
+          action: 'added',
+          message: `MCPProxy registered in ${id}`,
+        },
+      })
+    })
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+
+    const wrapper = mount(ConnectModal, {
+      props: { show: false },
+      global: { plugins: [pinia] },
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    const connectAllBtn = wrapper
+      .findAll('button')
+      .find(b => b.text().includes('Connect All'))!
+    expect(connectAllBtn).toBeTruthy()
+    await connectAllBtn.trigger('click')
+    await flushPromises()
+
+    expect(api.connectClient).toHaveBeenCalledTimes(3)
+
+    // Every modified-config client shows ITS backup path.
+    const cursorRow = wrapper.find('[data-test="connect-bulk-backup-cursor"]')
+    expect(cursorRow.exists()).toBe(true)
+    expect(cursorRow.text()).toContain('/Users/test/.cursor/mcp.json.bak.20260702-101530')
+    const codexRow = wrapper.find('[data-test="connect-bulk-backup-codex"]')
+    expect(codexRow.exists()).toBe(true)
+    expect(codexRow.text()).toContain('/Users/test/.codex/config.toml.bak.20260702-101531')
+    // The no-prior-file client states its case explicitly.
+    const desktopRow = wrapper.find('[data-test="connect-bulk-backup-claude-desktop"]')
+    expect(desktopRow.exists()).toBe(true)
+    expect(desktopRow.text()).toContain('No prior config file existed')
+
+    // The single-result backup line must not duplicate the last client's path.
+    expect(wrapper.find('[data-test="connect-backup-path"]').exists()).toBe(false)
+
+    // Per-row copy copies THAT client's path.
+    await wrapper.find('[data-test="connect-bulk-copy-cursor"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith('/Users/test/.cursor/mcp.json.bak.20260702-101530')
   })
 
   // Spec 075 US1/US2: the explicit per-client "Check access" action reads one

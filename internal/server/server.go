@@ -420,22 +420,50 @@ func (s *Server) forwardRuntimeStatus() {
 	}
 }
 
-// listenForRoutingModeRefresh subscribes to server events and refreshes routing mode
-// tool sets when upstream servers change (Spec 031).
+// listenForRoutingModeRefresh subscribes to server events and refreshes routing
+// mode tool sets when upstream servers change (Spec 031), and re-applies the
+// security scanner's opt-in deep-scan gate on config hot-reload (Spec 077 US3).
 func (s *Server) listenForRoutingModeRefresh() {
 	eventCh := s.runtime.SubscribeEvents()
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
-		if evt.Type == runtime.EventTypeServersChanged {
+		switch evt.Type {
+		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
 				zap.String("event_type", string(evt.Type)))
 			if s.mcpProxy != nil {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 			}
+		case runtime.EventTypeConfigReloaded:
+			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
+			// must re-gate the scanner so a security.deep_scan.* toggle takes
+			// effect without a restart. Fires on both reload paths, which both
+			// emit config.reloaded.
+			s.reapplyScannerSecurityConfig()
 		}
 	}
+}
+
+// reapplyScannerSecurityConfig re-applies the opt-in deep-scan gate (and the
+// engine-wide default isolation mode) to the running scanner service from the
+// live config, so a config hot-reload takes effect without a restart (Spec 077
+// US3). Mirrors the startup wiring; idempotent and nil-safe.
+func (s *Server) reapplyScannerSecurityConfig() {
+	if s.securityScanner == nil {
+		return
+	}
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return
+	}
+	s.securityScanner.ApplySecurityConfig(cfg.Security)
+	if cfg.DockerIsolation != nil {
+		s.securityScanner.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
+	}
+	s.logger.Debug("Re-applied security scanner config on hot-reload",
+		zap.Bool("deep_scan_enabled", s.securityScanner.DeepScanEnabled()))
 }
 
 // Start starts the MCP proxy server
@@ -1927,7 +1955,19 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	})
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
-		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
+		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey).
+			WithRequireMCPAuth(cfg.RequireMCPAuth).
+			// Read listen/api_key/require_mcp_auth LIVE so a runtime toggle (the
+			// /mcp middleware already honors require_mcp_auth per-request) is
+			// reflected in what connect writes, instead of the startup snapshot
+			// that would re-leak the API key after auth is turned off (Spec 078).
+			WithConfigProvider(func() (string, string, bool) {
+				c := s.runtime.Config()
+				if c == nil {
+					return "", "", false
+				}
+				return c.Listen, c.APIKey, c.RequireMCPAuth
+			})
 		httpAPIServer.SetConnectService(connectSvc)
 
 		// Spec 046: wire the onboarding-funnel provider on the telemetry
@@ -1959,9 +1999,23 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
-		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerDisableNoNewPrivileges {
-			secService.SetScannerDisableNoNewPrivileges(true)
+		// Spec 077 US3: gate the opt-in deep-scan layer (Docker scanners + source
+		// extraction). Off by default — only the deterministic in-process baseline
+		// runs. The deprecated top-level scanner_* keys are migrated into
+		// security.deep_scan on load, so the effective accessors read the unified
+		// surface here (T031). This exact call is re-run on every config.reloaded
+		// (reapplyScannerSecurityConfig) so a deep-scan toggle hot-reloads without
+		// a restart — startup and reload configure the scanner identically.
+		// ApplySecurityConfig is nil-safe (audit FIX 1): a nil Config or a nil
+		// Config.Security (DefaultConfig never initializes the security block)
+		// still forces the deep-scan layer OFF — no Docker scanners, no
+		// published-package-source fetch — so the disabled-path gates apply
+		// unconditionally rather than only when a security block exists.
+		var secCfg *config.SecurityConfig
+		if cfg != nil {
+			secCfg = cfg.Security
 		}
+		secService.ApplySecurityConfig(secCfg)
 		// MCP-34.4 / D3 option (b): tell the scanner which isolation mode is
 		// active. Under "sandbox"/"none" the host runs no Docker for scanner
 		// plugins, so they degrade cleanly (skip + "degraded" scan summary)
@@ -1992,11 +2046,6 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			im := core.NewIsolationManager(liveCfg.DockerIsolation)
 			return string(im.ResolveMode(sc))
 		})
-		// Published-package-source fetch is enabled by default; only an explicit
-		// false in config disables it (MCP-2206).
-		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerFetchPackageSource != nil && !*cfg.Security.ScannerFetchPackageSource {
-			secService.SetFetchPackageSource(false)
-		}
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
 			cfg:        cfg,
@@ -2874,6 +2923,24 @@ func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context,
 			Info:      summary.FindingCounts.Info,
 			Total:     summary.FindingCounts.Total,
 		}
+	}
+	// Surface the opt-in deep-scan layer status (Spec 077 US3). Always emitted
+	// on a computed summary; when the layer is off it reports enabled=false
+	// plus any enabled-but-skipped Docker scanners (audit FIX 3a).
+	if summary.DeepScan != nil {
+		ds := &contracts.DeepScanDescriptor{
+			Enabled:   summary.DeepScan.Enabled,
+			Ran:       summary.DeepScan.Ran,
+			Available: summary.DeepScan.Available,
+		}
+		for _, f := range summary.DeepScan.ScannersFailed {
+			ds.ScannersFailed = append(ds.ScannersFailed, contracts.DeepScanScannerFailure{
+				ID:     f.ID,
+				Reason: f.Reason,
+			})
+		}
+		ds.SkippedScanners = append(ds.SkippedScanners, summary.DeepScan.SkippedScanners...)
+		out.DeepScan = ds
 	}
 	return out
 }

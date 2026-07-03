@@ -63,23 +63,34 @@ When a server is unquarantined (approved):
 
 ### Security Analysis
 
-When a quarantined server's tool is called, MCPProxy returns:
+When a tool from a quarantined server is called, MCPProxy **blocks the call** and
+returns a structured security response instead of invoking it — so the tool's
+description can be reviewed before it ever runs:
 
 ```json
 {
-  "status": "quarantined",
-  "server": "suspicious-server",
-  "analysis": {
-    "tool_count": 15,
-    "suspicious_patterns": [
-      "Tool 'fetch_data' description contains external URL",
-      "Tool 'execute' has overly broad permissions"
-    ],
-    "risk_level": "medium",
-    "recommendation": "Review tool descriptions before approving"
+  "status": "QUARANTINED_SERVER_BLOCKED",
+  "serverName": "suspicious-server",
+  "toolName": "fetch_data",
+  "message": "🔒 SECURITY BLOCK: Server 'suspicious-server' is currently in quarantine for security review. Tool calls are blocked to prevent potential Tool Poisoning Attacks (TPAs).",
+  "instructions": "To use tools from this server, please: 1) Review the server and its tools for malicious content, 2) Use the 'upstream_servers' tool with operation 'list_quarantined' to inspect tools, 3) remove from quarantine if verified safe",
+  "toolAnalysis": {
+    "name": "fetch_data",
+    "description": "…",
+    "inputSchema": { "…": "…" },
+    "serverName": "suspicious-server",
+    "analysis": "SECURITY ANALYSIS: This tool is from a quarantined server. Please carefully review the description and input schema for potential hidden instructions, embedded prompts, or suspicious behavior patterns."
   }
 }
 ```
+
+The actual pattern **detection** — hidden-Unicode smuggling, cross-server
+shadowing, decoded shell payloads, injection/exfiltration phrases, and embedded
+secrets — is performed by the deterministic offline detect engine that backs the
+built-in `tpa-descriptions` scanner. Its findings appear in the scan report
+(`mcpproxy security report <server>`), each carrying a `rule_id`, `severity`,
+`threat_level`, `confidence`, and the contributing check `signals`. See
+[Tool Scanner](/features/tool-scanner) for the full rule reference.
 
 ## Managing Quarantine
 
@@ -150,15 +161,24 @@ Before approving a server, verify:
 
 ## Detection Patterns
 
-MCPProxy checks for these suspicious patterns:
+Tool-description analysis is performed by the deterministic, fully-offline
+**detect engine** that backs the built-in `tpa-descriptions` scanner. It runs
+**seven checks across two tiers** — four **hard** checks that auto-quarantine and
+block approval, and three **soft** checks that raise a human-review item:
 
-| Pattern | Risk Level | Description |
-|---------|------------|-------------|
-| External URLs in descriptions | Medium | May indicate data exfiltration |
-| Credential keywords | High | Mentions of "password", "token", "key" |
-| Execution commands | High | Shell execution capabilities |
-| Hidden instructions | Critical | Base64 encoded or obfuscated content |
-| Overly broad permissions | Medium | Access to all files or network |
+| Check | Tier | Catches |
+|-------|------|---------|
+| `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling |
+| `shadowing.cross_server` | hard | Distinctive tool-name collision or cross-server reference |
+| `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
+| `phrase.injection` | hard | Curated instruction-override / exfiltration directives |
+| `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides |
+| `capability.mismatch` | soft | Compute/string tool touching `~/.ssh` etc.; unexplained data-sink param |
+| `secret.embedded` | soft | Hardcoded live credential (confidence-scored, placeholders dropped) |
+
+Each check is deterministic and reliability is enforced by a CI eval gate. See
+[Tool Scanner](/features/tool-scanner) for the full rule reference, the two-tier
+model, normalization, and the eval gate.
 
 ## Best Practices
 

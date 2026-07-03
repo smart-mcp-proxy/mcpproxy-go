@@ -152,6 +152,18 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "observability")
 	}
 
+	// Security scanner settings, incl. the opt-in deep-scan layer (Spec 077 US3
+	// — hot-reloadable). The scanner service is (re)configured from cfg.Security
+	// on the config.reloaded event, so a lone security.deep_scan.* edit MUST be
+	// reported as a change (not "No configuration changes detected") and drive
+	// that re-apply — otherwise toggling deep scan via config edit / API apply
+	// only takes effect on restart. Deep compare covers deep_scan.{enabled,
+	// fetch_package_source,disable_no_new_privileges,scanners} plus the deprecated
+	// top-level scanner_* keys.
+	if !reflect.DeepEqual(oldCfg.Security, newCfg.Security) {
+		result.ChangedFields = append(result.ChangedFields, "security")
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false

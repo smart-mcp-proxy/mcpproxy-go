@@ -43,9 +43,41 @@ type Engine struct {
 	// run — D3 option (b). Set via Service.SetIsolationMode.
 	isolationMode string
 
+	// deepScanEnabled gates the opt-in "deep scan" layer (Spec 077 US3): the
+	// Docker-based scanner plugins plus published-package-source extraction.
+	// Default false (FR-006) — only the deterministic in-process baseline scanner
+	// runs, with zero Docker invoked. When false, resolveScanners drops every
+	// Docker-based (non-in-process) scanner entirely so no container is launched
+	// and no deep-scanner failure can degrade the baseline verdict (FR-007/008).
+	// Set via Service.SetDeepScan from security.deep_scan.enabled.
+	deepScanEnabled bool
+
+	// deepScanScanners optionally restricts which deep scanners may run when
+	// deepScanEnabled is true (security.deep_scan.scanners). Nil/empty ⇒ every
+	// enabled deep scanner is eligible. Ignored when deepScanEnabled is false.
+	deepScanScanners map[string]bool
+
 	// Track active scans (one per server)
 	mu          sync.Mutex
 	activeScans map[string]*ScanJob // keyed by server name
+}
+
+// deepScanAllowed reports whether a scanner is eligible to run given the
+// deep-scan gate (Spec 077 US3). The in-process baseline scanner is ALWAYS
+// allowed — it is the zero-dependency default. A Docker-based (deep) scanner is
+// allowed only when the deep-scan layer is enabled and, when a per-scanner
+// allow-list is configured, the scanner is on it.
+func (e *Engine) deepScanAllowed(s *ScannerPlugin) bool {
+	if s.InProcess {
+		return true
+	}
+	if !e.deepScanEnabled {
+		return false
+	}
+	if len(e.deepScanScanners) == 0 {
+		return true
+	}
+	return e.deepScanScanners[s.ID]
 }
 
 // NewEngine creates a new scan orchestration engine
@@ -248,8 +280,9 @@ func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([
 		// run at all. Skip them with an honest, mode-specific reason (pointing
 		// at the snap-docker/AppArmor failure doc) instead of the misleading
 		// "pull the image locally" guidance below — there is nothing to pull.
-		// They stay in the resolved set (recorded as failed), which downgrades
-		// the scan summary to "degraded" rather than a silent all-clear.
+		// They stay in the resolved set (recorded as failed) and are surfaced
+		// via the informational deep-scan descriptor (Spec 077 US3); this never
+		// degrades the baseline verdict.
 		// `isolationMode` is per-server resolved, so a server pinned to
 		// isolation.mode:docker still runs Docker scanners under a global
 		// sandbox default, and vice versa.
@@ -285,6 +318,13 @@ func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([
 			if s.Status != ScannerStatusInstalled && s.Status != ScannerStatusConfigured && s.Status != ScannerStatusError && s.Status != ScannerStatusPulling {
 				return nil, fmt.Errorf("scanner %s is not enabled (status: %s)", id, s.Status)
 			}
+			// Spec 077 US3: drop Docker deep scanners entirely when the
+			// deep-scan layer is off (or the scanner is not on the allow-list)
+			// so no container is invoked and no failure can degrade the
+			// baseline. The in-process baseline is always allowed.
+			if !e.deepScanAllowed(s) {
+				continue
+			}
 			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
 		}
 		return result, nil
@@ -294,6 +334,11 @@ func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([
 	// user sees what happened to them in the scan report.
 	var result []resolvedScanner
 	for _, s := range all {
+		// Spec 077 US3 deep-scan gate: skip Docker deep scanners while the
+		// opt-in layer is off. Baseline (in-process) always runs.
+		if !e.deepScanAllowed(s) {
+			continue
+		}
 		switch s.Status {
 		case ScannerStatusInstalled, ScannerStatusConfigured:
 			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
@@ -766,8 +811,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 		agg.Reports = append(agg.Reports, *r)
 	}
 
-	// Classify findings that lack threat_type/threat_level (legacy data)
+	// Classify findings that lack threat_type/threat_level (legacy data). This
+	// must run before MergeFindings so consensus (which keys on threat_type) and
+	// severity backfill see fully-classified findings.
 	ClassifyAllFindings(agg.Findings)
+
+	// Spec 077 (T021, FR-010/FR-011/FR-012): collapse the per-scanner findings
+	// into a single unified list. Findings sharing (rule_id, location) merge into
+	// one entry whose Sources lists every contributing scanner; cross-source
+	// agreement on the same (location, threat_type) raises confidence.
+	agg.Findings = MergeFindings(agg.Findings)
 
 	// Flag findings that belong in the Supply Chain Audit (CVEs) UI section.
 	// Match only real CVE/package vulnerabilities so AI-scanner output from Pass 2
@@ -778,6 +831,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
+
+	// Spec 077 FR-014 verdict purity: the report-level verdict uses the SAME
+	// tier-driven, baseline-only derivation as the server-list summary
+	// (GetScanSummary via deriveBaselineVerdict), so the report page can never
+	// disagree with the server verdict — a tierless deep-scan/external
+	// "dangerous" finding never moves it. Summary above keeps the RAW
+	// threat-level counts for transparency; verdict-bearing UI reads these.
+	verdict, counts := deriveBaselineVerdict(agg.Findings)
+	agg.Verdict = verdict
+	agg.FindingCounts = &counts
 
 	// ScannersRun = number of successful reports
 	agg.ScannersRun = len(reports)

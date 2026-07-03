@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/dockernaming"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -23,12 +24,23 @@ import (
 type SourceResolver struct {
 	logger *zap.Logger
 
-	// fetchPackageSource, when true (the default), allows the resolver to fetch
-	// the PUBLISHED source of a package-runner server (npx/uvx) — without
-	// executing it — as a last resort before falling back to a
-	// tool-definitions-only scan. Air-gapped deployments can disable this via
-	// security.scanner_fetch_package_source=false to forbid network egress.
+	// fetchPackageSource, when true, allows the resolver to fetch the PUBLISHED
+	// source of a package-runner server (npx/uvx) — without executing it — as a
+	// last resort before falling back to a tool-definitions-only scan. This is a
+	// facet of the opt-in deep-scan layer (Spec 077 US3): the server layer keeps
+	// it false unless security.deep_scan.enabled is true, and even then honors
+	// security.deep_scan.fetch_package_source (default true) so air-gapped
+	// deployments can forbid the network egress. With deep scan off it is always
+	// false, so no published-package-source fetch happens by default.
 	fetchPackageSource bool
+
+	// resolveCalls / resolveFullSourceCalls count invocations of Resolve and
+	// ResolveFullSource. They exist so tests can assert the Spec 077 US3
+	// invariant that neither runs while the opt-in deep-scan layer is off (no
+	// Docker lookup / extraction / package fetch by default). Atomic so the
+	// Pass-2 goroutine's ResolveFullSource increment is race-free.
+	resolveCalls           atomic.Int64
+	resolveFullSourceCalls atomic.Int64
 }
 
 // NewSourceResolver creates a new SourceResolver
@@ -102,6 +114,7 @@ type ResolvedSource struct {
 //  3. Use directory containing the server command
 //  4. For HTTP servers, return URL for mcp_connection scanners
 func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
+	r.resolveCalls.Add(1)
 	// HTTP/SSE servers: scanners connect via URL
 	if info.Protocol == "http" || info.Protocol == "sse" || info.Protocol == "streamable-http" {
 		if info.URL != "" {
@@ -901,6 +914,7 @@ func (r *SourceResolver) dockerExecCapture(ctx context.Context, containerID, scr
 // all dependencies (site-packages, node_modules, UV archives, etc.).
 // This is used for Pass 2 (supply chain audit) to scan the complete filesystem.
 func (r *SourceResolver) ResolveFullSource(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
+	r.resolveFullSourceCalls.Add(1)
 	// HTTP/SSE servers: no filesystem to scan
 	if info.Protocol == "http" || info.Protocol == "sse" || info.Protocol == "streamable-http" {
 		if info.URL != "" {

@@ -531,3 +531,24 @@ func TestPrintReportTableFullCoverageNoDegradedMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestScannerEnableHint verifies audit FIX 3b at the CLI layer: the hint the
+// core attaches to a scanner-enable response (Docker scanner enabled while
+// security.deep_scan.enabled=false) is extracted and surfaced; responses
+// without a hint (deep scan on, in-process scanner, older cores) yield "".
+func TestScannerEnableHint(t *testing.T) {
+	withHint := []byte(`{"success":true,"data":{"status":"enabled","id":"mcp-scan",` +
+		`"hint":"scanner enabled, but it will not run until security.deep_scan.enabled=true"}}`)
+	if got := scannerEnableHint(withHint); !strings.Contains(got, "security.deep_scan.enabled=true") {
+		t.Errorf("expected the deep-scan hint to be extracted, got %q", got)
+	}
+
+	noHint := []byte(`{"success":true,"data":{"status":"enabled","id":"tpa-descriptions"}}`)
+	if got := scannerEnableHint(noHint); got != "" {
+		t.Errorf("expected no hint, got %q", got)
+	}
+
+	if got := scannerEnableHint([]byte(`not-json`)); got != "" {
+		t.Errorf("malformed body must yield no hint, got %q", got)
+	}
+}

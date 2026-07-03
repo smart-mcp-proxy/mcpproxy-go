@@ -70,6 +70,16 @@ mcpproxy security enable mcp-ai-scanner
 
 (`install` is a hidden alias for `enable`, kept for backward compatibility.)
 
+> **Docker-based scanners belong to the opt-in deep-scan layer (Spec 077).**
+> Enabling a Docker scanner pulls its image but does **not** by itself make it
+> run: the whole deep-scan layer is gated behind `security.deep_scan.enabled`
+> (default `false`). While that switch is off, `security enable <docker-scanner>`
+> prints a reminder — `scanner enabled, but it will not run until
+> security.deep_scan.enabled=true` — and only the built-in, Docker-less
+> `tpa-descriptions` baseline scanner actually runs. Set
+> `security.deep_scan.enabled: true` to turn the layer on. See
+> [Configuration](#configuration) below.
+
 ### 3. Configure API keys (if the scanner needs them)
 
 Only a subset of scanners requires an API key. `mcp-scan` (Snyk Agent Scan) needs a free token from Snyk; `mcp-ai-scanner` can use an optional Anthropic API key or Claude Code OAuth token for richer analysis but works in pattern-only mode without one.
@@ -118,7 +128,7 @@ MCPProxy ships with a bundled registry of 8 scanners. The bundled list lives in 
 | `nova-proximity` | MCPProxy (NOVA-inspired rules) | source | — | Keyword-based, fully offline. Very fast. |
 | `ramparts` | Javelin | source | — | Rust-based YARA scanner. Runs fully offline: v0.8.x scans a live MCP endpoint, so MCPProxy replays the captured tool definitions to it over stdio (the upstream is never re-executed). *(`amd64`-only image; runs under emulation on arm64 — see [Scanner Images](/features/scanner-images).)* |
 | `semgrep-mcp` | Semgrep | source | — | Static analysis with MCP-specific rules. Uses the upstream `returntocorp/semgrep:latest` image. |
-| `tpa-descriptions` | MCPProxy | source | — | **Built-in, Docker-less, always on.** In-process analysis of tool descriptions/schemas via the deterministic offline [detect engine (Spec 076)](/features/tool-scanner): six checks across two tiers — **hard** (hidden-Unicode smuggling, cross-server shadowing, decode-to-shell payloads) auto-quarantine; **soft** (prompt-injection directives, capability-mismatch, embedded secrets) raise a review item. Each finding carries a `confidence` score and the contributing check `signals`. **It currently also runs a set of still-active legacy TPA keyword rules** (`tpa_hidden_instructions`, `prompt_injection_in_description`, `data_exfiltration_in_description`) that produce their own **dangerous, approval-blocking** findings — so the detect engine's "soft never auto-quarantines" rule applies to its own signals, not to those legacy rules (which can still block on the same phrases). Fully offline (no network/filesystem/Docker), deterministic, and runs for any connected server — including remote `http`/`sse` servers with no source or Docker. See [Tool Scanner](/features/tool-scanner) for the full rule reference, the legacy-rule coexistence, and the CI eval gate. |
+| `tpa-descriptions` | MCPProxy | source | — | **Built-in, Docker-less, always on.** In-process analysis of tool descriptions/schemas via the deterministic offline [detect engine (Spec 076/077)](/features/tool-scanner): seven checks across two tiers — **hard** (hidden-Unicode smuggling, cross-server shadowing, decode-to-shell payloads, curated injection/exfiltration phrases) auto-quarantine and block approval; **soft** (prompt-injection directives, capability-mismatch, embedded secrets) raise a review item. Each finding carries a `confidence` score and the contributing check `signals`. Since Spec 077 the detect engine is the **sole in-process detector** — the duplicated legacy TPA keyword rules were removed and their approval-blocking posture folded into the hard-tier `phrase.injection` check. Fully offline (no network/filesystem/Docker), deterministic, and runs for any connected server — including remote `http`/`sse` servers with no source or Docker. See [Tool Scanner](/features/tool-scanner) for the full rule reference and the CI eval gate. |
 | `trivy-mcp` | Aqua Security | source, container_image | — | Filesystem + CVE scan. Uses the upstream `ghcr.io/aquasecurity/trivy:latest` image. |
 
 See [Scanner Images](/features/scanner-images) for the image sources and why vendor images are preferred over custom wrappers.
@@ -265,7 +275,7 @@ Package-runner servers (`npx`, `uvx`, plus `pnpm dlx` / `yarn dlx`, `pipx run`, 
 
 Extraction is hardened against path traversal (zip-slip), symlink escape, and decompression bombs (bounded file count and total size). The whole fetch (download + extract) is bounded by a timeout, so a hung or throttled registry cannot stall the scan. If the toolchain is missing, the host is offline, or the fetch fails or times out, resolution falls through to **tool definitions only** with no regression.
 
-This fallback is **enabled by default**. Air-gapped deployments that must forbid the scanner's network egress can disable it with `security.scanner_fetch_package_source: false` — package-runner servers without local source then scan tool definitions only.
+**This fallback runs only under the opt-in deep-scan layer (Spec 077).** Published-package fetch — like every Docker-based scanner — is part of the heavy deep-scan layer, so it runs only when `security.deep_scan.enabled: true`. With deep scan off (the default), package-runner servers without local source scan **tool definitions only**, and no network fetch is attempted. When deep scan is on, the fetch is enabled by default and can be turned off (for air-gapped deployments that must forbid the scanner's network egress) with `security.deep_scan.fetch_package_source: false`. The deprecated top-level `security.scanner_fetch_package_source` key still parses and is migrated into `security.deep_scan.fetch_package_source` on load.
 
 ## SARIF normalization
 
@@ -287,26 +297,45 @@ MCPProxy also augments each finding with a user-facing `threat_type` (`tool_pois
 ```json
 {
   "security": {
-    "auto_scan_quarantined": false,
     "scan_timeout_default": "60s",
     "integrity_check_interval": "1h",
     "integrity_check_on_restart": false,
     "scanner_registry_url": "",
     "runtime_read_only": false,
-    "runtime_tmpfs_size": "100M"
+    "runtime_tmpfs_size": "100M",
+    "deep_scan": {
+      "enabled": false,
+      "fetch_package_source": true,
+      "disable_no_new_privileges": false,
+      "scanners": []
+    }
   }
 }
 ```
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `auto_scan_quarantined` | `false` | Auto-scan newly quarantined servers as soon as they're added. |
 | `scan_timeout_default` | `60s` | Per-scanner timeout. The blocking CLI `security scan` computes a hard ceiling as `scan_timeout_default × scanner_count + 30s`, clamped between 15 and 30 minutes. |
 | `integrity_check_interval` | `1h` | Periodic integrity check interval (when running as a daemon with integrity checks enabled). |
 | `integrity_check_on_restart` | `false` | Re-verify integrity baseline every time an approved server is restarted. |
 | `scanner_registry_url` | `""` | Remote scanner registry URL (opt-in). When empty, only the bundled registry is used. |
 | `runtime_read_only` | `false` | Run approved server containers with `--read-only` and a tmpfs overlay. (P2 feature, requires Docker isolation.) |
 | `runtime_tmpfs_size` | `100M` | Tmpfs size for read-only runtime containers. |
+
+### The `security.deep_scan` block (Spec 077)
+
+The deterministic, offline `tpa-descriptions` baseline scanner always runs and is the sole source of the approval verdict. **Every heavier scan capability — the Docker-based scanner plugins and published-package-source extraction — lives behind the opt-in `security.deep_scan` block.** The whole layer is off by default; a deep-scan failure is surfaced as an informational note and **never** blocks approval or degrades the baseline verdict (FR-007/FR-008).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `deep_scan.enabled` | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
+| `deep_scan.fetch_package_source` | `true` (when deep scan is on) | Whether the scanner fetches (never executes) the published source of `npx`/`uvx` package-runner servers when no local source is available. Set `false` for air-gapped deployments. Only consulted when `deep_scan.enabled` is `true`. |
+| `deep_scan.disable_no_new_privileges` | `false` | Omits `--security-opt no-new-privileges` from scanner container runs — the snap-docker/AppArmor escape hatch for hosts where the default flag makes every scanner fail with EPERM. |
+| `deep_scan.scanners` | `[]` | Optional allow-list restricting which deep scanners may run (by scanner id). Empty ⇒ all enabled deep scanners are eligible. |
+
+**Deprecated-key migration.** Configs that still carry the old top-level `security.scanner_fetch_package_source` or `security.scanner_disable_no_new_privileges` keys continue to parse and are folded into `deep_scan.fetch_package_source` / `deep_scan.disable_no_new_privileges` on load (then cleared, so the config serializes only `deep_scan.*`). The old `security.auto_scan_quarantined` key was removed; a config still carrying it loads without error and the key is ignored.
+
+The block is hot-reloaded: toggling `deep_scan.enabled` in `mcp_config.json` takes effect on the next scan without a restart.
 
 ### Environment variables
 
@@ -343,7 +372,7 @@ The Security page at `/security` in the Web UI mirrors the CLI and provides:
 
 ## Related reading
 
-- [Tool Scanner (Spec 076)](/features/tool-scanner) — the built-in offline detect engine behind `tpa-descriptions`: the six checks, two-tier model, and CI eval gate
+- [Tool Scanner (Spec 076/077)](/features/tool-scanner) — the built-in offline detect engine behind `tpa-descriptions`: the seven checks, two-tier model, and CI eval gate
 - [Security Commands](/cli/security-commands) — exhaustive CLI reference
 - [Scanner Images](/features/scanner-images) — where each Docker image comes from
 - [Security Quarantine](/features/security-quarantine) — the underlying quarantine mechanism that scanners gate

@@ -83,6 +83,44 @@ func TestDetectConfigChanges_DiscoveryHealthIntervals(t *testing.T) {
 	})
 }
 
+// TestDetectConfigChanges_DeepScanSecurity (Spec 077 US3 / Codex finding #1):
+// a lone security.deep_scan.* edit must be detected as a hot-reloadable change so
+// ApplyConfig emits config.reloaded and the scanner service is re-gated without a
+// restart. Without this the change fell through as "no changes detected".
+func TestDetectConfigChanges_DeepScanSecurity(t *testing.T) {
+	mk := func(enabled bool) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			Security: &config.SecurityConfig{
+				DeepScan: &config.DeepScanConfig{Enabled: enabled},
+			},
+		}
+	}
+
+	t.Run("deep_scan.enabled toggle detected", func(t *testing.T) {
+		result := DetectConfigChanges(mk(false), mk(true))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "security")
+		assert.False(t, result.RequiresRestart, "deep-scan toggle is hot-reloadable")
+		assert.True(t, result.AppliedImmediately)
+	})
+
+	t.Run("unchanged security not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(true), mk(true))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "security")
+	})
+
+	t.Run("scanners allow-list change detected", func(t *testing.T) {
+		old := mk(true)
+		next := mk(true)
+		next.Security.DeepScan.Scanners = []string{"trivy"}
+		result := DetectConfigChanges(old, next)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "security")
+	})
+}
+
 func TestDetectConfigChanges(t *testing.T) {
 	baseConfig := &config.Config{
 		Listen:            "127.0.0.1:8080",

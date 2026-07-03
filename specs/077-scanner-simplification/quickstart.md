@@ -12,8 +12,11 @@ mcpproxy security scan <server> -o json
 ```
 
 Expect: a definitive `status` of `clean`/`warning`/`dangerous`, `deep_scan.enabled=false`,
-`deep_scan.ran=false`, and **no** `degraded`/`failed` state. Run it twice and diff —
-findings and verdict MUST be identical (determinism, SC-002).
+`deep_scan.ran=false`, and **no** `degraded`/`failed` state. The `deep_scan` descriptor
+is always present; with the layer off, any Docker scanner you enabled anyway is listed
+under `deep_scan.skipped_scanners` (and `mcpproxy security enable <docker-scanner>`
+prints a reminder that it will not run until `security.deep_scan.enabled=true`).
+Run it twice and diff — findings and verdict MUST be identical (determinism, SC-002).
 
 ## 2. A poisoned tool is blocked; a benign near-miss is not (US1 / SC-003)
 

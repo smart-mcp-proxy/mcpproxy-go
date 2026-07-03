@@ -96,25 +96,25 @@
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Dangerous</div>
-            <div class="stat-value text-lg text-error">{{ report.summary?.dangerous ?? 0 }}</div>
+            <div class="stat-value text-lg text-error">{{ threatCounts.dangerous }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Warnings</div>
-            <div class="stat-value text-lg text-warning">{{ report.summary?.warnings ?? 0 }}</div>
+            <div class="stat-value text-lg text-warning">{{ threatCounts.warnings }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Info</div>
-            <div class="stat-value text-lg text-info">{{ report.summary?.info_level ?? 0 }}</div>
+            <div class="stat-value text-lg text-info">{{ threatCounts.info }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Total</div>
-            <div class="stat-value text-lg">{{ report.summary?.total ?? 0 }}</div>
+            <div class="stat-value text-lg">{{ threatCounts.total }}</div>
           </div>
         </div>
       </div>
@@ -128,6 +128,24 @@
           The risk score is an experimental heuristic combining findings from multiple scanners using logarithmic aggregation.
           There is no industry standard for scoring MCP security risks. Treat the score as directional guidance, not a definitive safety assessment.
         </span>
+      </div>
+
+      <!-- Deep scan (opt-in) availability — Spec 077 US3. Informational ONLY:
+           a failed or unavailable deep scanner NEVER changes the baseline
+           verdict above, so it is rendered as info, never an error. -->
+      <div v-if="report.deep_scan && report.deep_scan.enabled" class="alert alert-info">
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <div>
+          <div class="font-semibold">Deep scan (optional)</div>
+          <span v-if="(report.deep_scan.scanners_failed?.length ?? 0) > 0" class="text-sm">
+            {{ report.deep_scan.scanners_failed!.length }} deep scanner(s) were unavailable this run
+            ({{ report.deep_scan.scanners_failed!.map((f: { id: string; reason: string }) => f.id).join(', ') }}).
+            This does not affect the baseline verdict shown above.
+          </span>
+          <span v-else class="text-sm">Deep scan ran. Its findings are merged into the report above.</span>
+        </div>
       </div>
 
       <!-- Scan incomplete warnings -->
@@ -188,8 +206,18 @@
                   >
                     {{ finding.threat_level }}
                   </span>
+                  <span v-if="finding.severity" class="badge badge-xs badge-outline shrink-0 uppercase">
+                    {{ finding.severity }}
+                  </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="findingHasConsensus(finding)"
+                    class="badge badge-xs badge-primary badge-outline shrink-0"
+                    :title="`Flagged independently by ${findingSources(finding).length} scanners`"
+                  >
+                    consensus &times;{{ findingSources(finding).length }}
                   </span>
                   <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
                     {{ finding.package_name }}
@@ -229,9 +257,9 @@
                         <span class="text-base-content/50">Location:</span>
                         <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
-                      <div v-if="finding.scanner">
-                        <span class="text-base-content/50">Scanner:</span>
-                        <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
+                      <div v-if="findingSources(finding).length">
+                        <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
+                        <span class="ml-1">{{ findingSourcesLabel(finding) }}</span>
                       </div>
                     </div>
                     <a
@@ -285,8 +313,18 @@
                   >
                     {{ finding.threat_level }}
                   </span>
+                  <span v-if="finding.severity" class="badge badge-xs badge-outline shrink-0 uppercase">
+                    {{ finding.severity }}
+                  </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="findingHasConsensus(finding)"
+                    class="badge badge-xs badge-primary badge-outline shrink-0"
+                    :title="`Flagged independently by ${findingSources(finding).length} scanners`"
+                  >
+                    consensus &times;{{ findingSources(finding).length }}
                   </span>
                   <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
                     {{ finding.package_name }}
@@ -325,9 +363,9 @@
                         <span class="text-base-content/50">Location:</span>
                         <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
-                      <div v-if="finding.scanner">
-                        <span class="text-base-content/50">Scanner:</span>
-                        <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
+                      <div v-if="findingSources(finding).length">
+                        <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
+                        <span class="ml-1">{{ findingSourcesLabel(finding) }}</span>
                       </div>
                     </div>
                     <a
@@ -537,7 +575,7 @@
             </div>
             <div class="flex gap-2">
               <button
-                v-if="serverAdminState === 'enabled' && report.summary?.dangerous > 0"
+                v-if="serverAdminState === 'enabled' && reportStatus === 'dangerous'"
                 @click="quarantineServer"
                 :disabled="actionLoading"
                 class="btn btn-error btn-sm"
@@ -615,20 +653,62 @@ function scannerDisplayName(id: string): string {
   return scannerNames[id] || id
 }
 
+// Spec 077 unified report — a finding's contributing sources. Prefers the
+// merged `sources` list; falls back to the single `scanner` id for legacy
+// findings that predate multi-source attribution.
+function findingSources(finding: SecurityScanFinding): string[] {
+  if (finding.sources && finding.sources.length > 0) return finding.sources
+  if (finding.scanner) return [finding.scanner]
+  return []
+}
+
+// True when ≥2 independent scanners agreed on a finding (consensus).
+function findingHasConsensus(finding: SecurityScanFinding): boolean {
+  return findingSources(finding).length > 1
+}
+
+function findingSourcesLabel(finding: SecurityScanFinding): string {
+  return findingSources(finding).map(scannerDisplayName).join(', ')
+}
+
 // Scan context from the aggregated report (populated from job's ScanContext)
 const scanContext = computed(() => {
   return report.value?.scan_context || null
 })
 
-// Status display
+// Status display. Spec 077 FR-014 verdict purity: the badge shows the
+// tier-driven, baseline-only `verdict` computed server-side with the SAME
+// predicate as the server-list status, so this page can never say "dangerous"
+// while the server list says "clean" (a tierless deep-scan/external finding
+// never moves the verdict). Raw summary counts remain only as a fallback for
+// reports served by a core that predates the verdict field.
 const reportStatus = computed(() => {
   if (!report.value) return 'unknown'
   if (report.value.scan_complete === false) return 'incomplete'
   if (report.value.empty_scan) return 'empty'
   if (!report.value.findings || report.value.findings.length === 0) return 'clean'
+  if (report.value.verdict) return report.value.verdict
   if (report.value.summary?.dangerous > 0) return 'dangerous'
   if (report.value.summary?.warnings > 0) return 'warnings'
   return 'clean'
+})
+
+// Threat tiles use the tier-driven buckets (finding_counts) matching the
+// server list exactly (Spec 077 FR-014): a tierless deep-scan "dangerous"
+// finding counts as a warning on BOTH surfaces. Falls back to the raw
+// threat-level summary for pre-Spec-077 payloads.
+const threatCounts = computed(() => {
+  const r = report.value
+  const fc = r?.finding_counts
+  if (fc) {
+    return { dangerous: fc.dangerous ?? 0, warnings: fc.warning ?? 0, info: fc.info ?? 0, total: fc.total ?? 0 }
+  }
+  return {
+    dangerous: r?.summary?.dangerous ?? 0,
+    warnings: r?.summary?.warnings ?? 0,
+    info: r?.summary?.info_level ?? 0,
+    total: r?.summary?.total ?? 0,
+  }
 })
 
 const statusBadgeClass = computed(() => {
@@ -782,8 +862,15 @@ async function quarantineServer() {
 
 // F-04: Go through the security-aware approval path instead of the legacy
 // unquarantine endpoint. hasUnresolvedCritical disables the primary Approve
-// button so the user must use Force Approve explicitly.
+// button so the user must use Force Approve explicitly. It mirrors the
+// backend approval gate (Spec 077 FR-021: hard-tier BASELINE findings only)
+// via the tier-driven finding_counts — a tierless deep-scan/external finding
+// or a non-blocking soft finding with "critical" severity must not lock the
+// Approve button when the backend would accept. Raw summary.critical is only
+// a fallback for payloads that predate finding_counts.
 const hasUnresolvedCritical = computed(() => {
+  const fc = report.value?.finding_counts
+  if (fc) return (fc.dangerous ?? 0) > 0
   return (report.value?.summary?.critical ?? 0) > 0
 })
 

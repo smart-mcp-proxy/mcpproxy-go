@@ -372,6 +372,46 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 - **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
 - **Tray Integration**: Tray app automatically manages API keys for core communication
 
+### Security Scanner (`security`)
+
+The deterministic, offline `tpa-descriptions` baseline scanner always runs and is
+the sole source of the approval verdict. The heavier Docker-based scanner plugins
+and published-package-source extraction live behind the **opt-in `security.deep_scan`
+block** — off by default, best-effort, and unable to change the baseline verdict
+(Spec 077).
+
+```json
+{
+  "security": {
+    "scan_timeout_default": "60s",
+    "integrity_check_interval": "1h",
+    "integrity_check_on_restart": false,
+    "scanner_registry_url": "",
+    "deep_scan": {
+      "enabled": false,
+      "fetch_package_source": true,
+      "disable_no_new_privileges": false,
+      "scanners": []
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `deep_scan.enabled` | boolean | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
+| `deep_scan.fetch_package_source` | boolean | `true` (when deep scan is on) | Whether the scanner fetches (never executes) the published source of `npx`/`uvx` package-runner servers when no local source is available. Set `false` for air-gapped deployments. |
+| `deep_scan.disable_no_new_privileges` | boolean | `false` | Omits `--security-opt no-new-privileges` from scanner container runs (snap-docker/AppArmor escape hatch). |
+| `deep_scan.scanners` | string[] | `[]` | Optional allow-list of deep scanner ids. Empty ⇒ all enabled deep scanners are eligible. |
+
+**Deprecated-key migration.** The old top-level `security.scanner_fetch_package_source`
+and `security.scanner_disable_no_new_privileges` keys still parse and are migrated
+into `security.deep_scan.*` on load. The former `security.auto_scan_quarantined`
+key was **removed**; a config still carrying it loads without error and the key is
+ignored.
+
+See [Security Scanner Plugins](features/security-scanner-plugins.md#configuration) for the full scanner configuration reference.
+
 ---
 
 ## Tokenizer Configuration

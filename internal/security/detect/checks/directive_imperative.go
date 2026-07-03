@@ -45,8 +45,15 @@ type directiveFamily struct {
 // lowercase, contraction-expanded, lightly-stemmed forms (e.g. "instruction"
 // matches the stemmed "instructions"). Built once at init.
 var directiveFamilies = []directiveFamily{
-	{ // Hidden-instruction / role-injection tags: <IMPORTANT>, <system>, …
-		re:   regexp.MustCompile(`<\s*(important|system|secret|critical|admin|instruction|developer|assistant)\b`),
+	{ // Hidden-instruction / role-injection tags: <IMPORTANT>, <system>, <hidden>,
+		// <system_prompt>, … "hidden" restores the legacy tpa <hidden> marker (Spec 077
+		// US1, Codex round-2 finding C). The optional (?:[_-]\w+)* suffix lets a
+		// compound tag name match — <system_prompt> / <developer-note> — which a bare
+		// `\b` after the keyword misses because "_" is a word char (Codex round-3
+		// finding #3). It does NOT loosen to prefixes: "<systematic>" still fails (no
+		// separator), so the keyword must be a whole tag-name token or the head of an
+		// underscore/hyphen-joined one.
+		re:   regexp.MustCompile(`<\s*(?:important|system|secret|critical|admin|instruction|developer|assistant|hidden)(?:[_-]\w+)*\b`),
 		base: 0.7,
 		what: "hidden-instruction tag",
 	},
@@ -55,10 +62,30 @@ var directiveFamilies = []directiveFamily{
 		base: 0.65,
 		what: "instruction-override directive",
 	},
+	{ // Injected new-instruction preamble (legacy tpa restore, Spec 077 US1 Codex
+		// round-3 finding #2): "new instructions:", "updated directions:",
+		// "additional instructions:". The colon anchor keeps it to the smuggled-header
+		// shape — a benign "follow the new instructions carefully" (no colon) does not
+		// match. SOFT: benignly phrasable ("returns the new instructions: …"), so
+		// review-only. (Normalization leaves the trailing "instructions:" token
+		// unstemmed because the colon blocks the plural-strip, so \w* absorbs the "s".)
+		re:   regexp.MustCompile(`\b(?:new|updated|revised|additional|further|latest|real|actual|hidden|secret) (?:instruction|direction|command|rule|order)\w*\s*:`),
+		base: 0.5,
+		what: "injected instruction preamble",
+	},
 	{ // Secrecy imperative: "do not tell the user", "must not reveal".
 		re:   regexp.MustCompile(`\b(?:do not|must not|never) (?:tell|inform|reveal|disclos\w*|mention|notify|warn|expose)\b`),
 		base: 0.6,
 		what: "secrecy imperative",
+	},
+	{ // Covert-secrecy directive (legacy tpa restore, Spec 077 US1 Codex round-2
+		// finding C): coercion to act behind the user's back — "without telling the
+		// user", "without informing the user", "hide this from …", "keep this
+		// hidden/secret". Matched on NORMALIZED text (stemmed: "telling"→"tell").
+		// Benignly phrasable in rare cases, so SOFT (review, never auto-quarantine).
+		re:   regexp.MustCompile(`\b(?:without (?:tell|inform|notify|alert|warn)\w* (?:the )?(?:user|caller|human|operator|client)|(?:hide|conceal) (?:this|it|that)(?: \w+)? from|keep (?:this|it|that)(?: \w+)? (?:hidden|secret|conceal\w*|private|quiet|confidential))\b`),
+		base: 0.6,
+		what: "covert-secrecy directive",
 	},
 	{ // Exfiltration imperative: "reveal your system prompt", "send the api key".
 		re:   regexp.MustCompile(`\b(?:reveal|expose|print|output|send|leak|disclos\w*) (?:your |the |all )?(?:system prompt|api key\w*|secret\w*|password\w*|credential\w*|private key)\b`),
@@ -69,6 +96,30 @@ var directiveFamilies = []directiveFamily{
 		re:   regexp.MustCompile(`\bbefore (?:you )?(?:us\w*|call\w*|invok\w*|run\w*|execut\w*|access\w*) (?:this )?tool\b`),
 		base: 0.55,
 		what: "tool-preamble injection",
+	},
+	{ // Tool-priority coercion (legacy tpa): "always call this tool first",
+		// "before using any other tool". Broader than tool-preamble and benignly
+		// phrasable ("call this tool first to authenticate"), so it lives in the
+		// SOFT tier (review, never auto-quarantine). "always" stems to "alway".
+		re:   regexp.MustCompile(`\b(?:(?:alway\w* )?(?:call|us\w*|invok\w*|run\w*) this tool (?:first|before)|before (?:us\w*|call\w*|invok\w*|run\w*) any other tool)\b`),
+		base: 0.5,
+		what: "tool-priority coercion",
+	},
+	{ // Jailbreak / mode-override triggers (legacy tpa): "developer mode",
+		// "jailbreak", "ignore your guidelines". Kept SOFT because "developer mode"
+		// has legitimate uses; a genuine guardrail-override is separately caught at
+		// the HARD tier by phrase.injection.
+		re:   regexp.MustCompile(`\b(?:developer mode|jailbreak\w*|dan mode|do anything now|unrestricted mode|ignore your guidelin\w*)\b`),
+		base: 0.5,
+		what: "jailbreak trigger",
+	},
+	{ // Data-forwarding to an external sink (legacy tpa): "upload the file to an
+		// external endpoint", "post the contents to a remote server". Requires an
+		// external/remote-flavoured target so benign "uploads the file to the
+		// storage bucket" does not match. SOFT: it informs review without blocking.
+		re:   regexp.MustCompile(`\b(?:upload|post|send|transmit|forward|exfiltrat\w*|leak|dump) (?:the |all |your )?(?:file|content|data|output|result|conversation|log|record|payload)\w* to (?:an? |the |our )?(?:external|remote|third.?party|attacker|adversar\w*|off.?site|another server|http|ftp)`),
+		base: 0.5,
+		what: "external data-forwarding directive",
 	},
 }
 

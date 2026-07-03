@@ -13,7 +13,10 @@ The roadmap models cross-spec **epics → tasks** with a dependency DAG, executi
 ```bash
 python3 scripts/gen-roadmap.py     # writes ROADMAP.md
 scripts/gen-roadmap                # convenience wrapper (same thing)
-python3 scripts/gen-roadmap.py --check   # CI canary: fail if stale
+python3 scripts/gen-roadmap.py --check          # CI canary: fail if ROADMAP.md is stale
+python3 scripts/gen-roadmap.py --check-github   # cross-check statuses vs live GitHub PR state,
+                                                # spec links, and status sanity (add --strict
+                                                # to fail on warnings; needs an authenticated gh)
 ```
 
 ## roadmap.yaml schema (short form)
@@ -58,6 +61,7 @@ graph TD
   end
   subgraph sg_windows_tray["Windows native tray app"]
     windows_tray["Windows native tray app<br/>MCP-43"]
+    windows_tray_funnel_qa["Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work)"]
     windows_tray_window["WebView2 native window + profile submenu<br/>MCP-43"]
   end
   subgraph sg_ux_audit["Web UI + macOS app UX audit"]
@@ -86,6 +90,35 @@ graph TD
     scanner_simpl_unified_report["US2: single merged report + cross-scanner consensus confidence"]
     scanner_simpl_deep_optin["US3: opt-in deep scan (off by default), never blocks/degrades baseline; config migration"]
     scanner_simpl_notifications["US4: collapse scan-notification storm into one debounced settled event (MCP-2207)"]
+    scanner_simpl_deepscan_fixes["Deep-scan trust fixes: nil-Security gating bug (source fetch runs with deep scan off on default configs), FR-014 verdict inversion (Dangerous deep finding < Warning), surface silently-skipped Docker scanners (non-nil deep_scan descriptor + CLI hint on security enable)"]
+  end
+  subgraph sg_upgrade_nudge["Upgrade awareness & guided update"]
+    upgrade_nudge["Upgrade awareness & guided update"]
+    upgrade_nudge_status_log["US1 slice: update availability in mcpproxy status + deduped startup log"]
+    upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + update_check config block"]
+    upgrade_nudge_channel["US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"]
+    upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no prerelease downgrade nudges"]
+  end
+  subgraph sg_connect_trust["Connect step trust: preview, visible backup, one-click undo"]
+    connect_trust["Connect step trust: preview, visible backup, one-click undo"]
+    connect_trust_preview["US1: preview API + wizard diff UI (exact entry, API-key masking)"]
+    connect_trust_backup_visibility["US1: surface backup_path in Web UI + retention policy"]
+    connect_trust_undo["US2: one-click undo/disconnect in wizard"]
+    connect_trust_tcc_copy["US2: pre-emptive macOS TCC explanation in wizard"]
+  end
+  subgraph sg_telemetry_identity["Telemetry identity & data quality (machine_id + CI-filter hardening)"]
+    telemetry_identity["Telemetry identity & data quality (machine_id + CI-filter hardening)"]
+    telemetry_machineid_client["Hashed machine_id in heartbeat (schema v6)"]
+    telemetry_machineid_worker["Worker migration: machine_id column + extraction (repo mcpproxy-telemetry)"]
+    telemetry_machineid_dash["Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"]
+    telemetry_snapshot_alerting["Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"]
+  end
+  subgraph sg_planning_hygiene["Planning/docs truth automation"]
+    planning_hygiene["Planning/docs truth automation"]
+    hygiene_roadmap_github_check["gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links"]
+    hygiene_tasks_reconcile["CI rule: PR touching specs/<id> implementation paths must update tasks.md"]
+    hygiene_docs_facts["Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check"]
+    hygiene_quickstart_contract["Run top quickstart.md scenario per spec as contract test in test-api-e2e.sh"]
   end
   marketplace["Server marketplace<br/>MCP-37"]
   siem["Audit SIEM integration<br/>MCP-39"]
@@ -110,6 +143,7 @@ graph TD
   scanner_v2_soft_checks --> scanner_v2_consensus
   scanner_v2_hard_checks --> scanner_v2_eval_gate
   scanner_v2_eval_gate --> scanner_v2_docs
+  windows_tray_funnel_qa --> windows_tray_window
   ux_audit --> action_log_transparency
   action_log_glance_view --> action_log_retention_tie_in
   ux_audit --> analytics_dashboard
@@ -120,6 +154,12 @@ graph TD
   scanner_simpl_baseline --> scanner_simpl_deep_optin
   scanner_simpl_unified_report --> scanner_simpl_deep_optin
   scanner_simpl_unified_report --> scanner_simpl_notifications
+  scanner_simpl_deep_optin --> scanner_simpl_deepscan_fixes
+  upgrade_nudge_status_log --> upgrade_nudge_surfacing
+  upgrade_nudge_surfacing --> upgrade_nudge_channel
+  upgrade_nudge_surfacing --> upgrade_nudge_quiet
+  telemetry_machineid_client --> telemetry_machineid_worker
+  telemetry_machineid_worker --> telemetry_machineid_dash
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
@@ -127,11 +167,11 @@ graph TD
   classDef blocked fill:#a40e26,stroke:#5c0712,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   classDef parked fill:#30363d,stroke:#161b22,color:#9da7b3,stroke-dasharray:4 3;
-  class profiles_v2,profiles_v2_indexes,profiles_v2_set_profile,profiles_v2_profile_pin,profiles_v2_tray_switcher,sandbox_isolation,sandbox_spike,sandbox_mode_config,sandbox_launcher,sandbox_scanner_parity,sandbox_snap_docker_it,ts_code_exec_ga,ts_code_exec_cookbook,scanner_v2,scanner_v2_foundation,scanner_v2_hard_checks,scanner_v2_soft_checks,scanner_v2_consensus,scanner_v2_eval_gate,scanner_v2_docs done;
-  class scanner_simplification in_progress;
+  class profiles_v2,profiles_v2_indexes,profiles_v2_set_profile,profiles_v2_profile_pin,profiles_v2_tray_switcher,sandbox_isolation,sandbox_spike,sandbox_mode_config,sandbox_launcher,sandbox_scanner_parity,sandbox_snap_docker_it,ts_code_exec_ga,ts_code_exec_cookbook,scanner_v2,scanner_v2_foundation,scanner_v2_hard_checks,scanner_v2_soft_checks,scanner_v2_consensus,scanner_v2_eval_gate,scanner_v2_docs,registries_official_protocol,scanner_simplification,scanner_simpl_baseline,scanner_simpl_unified_report,scanner_simpl_deep_optin,scanner_simpl_notifications,scanner_simpl_deepscan_fixes,upgrade_nudge_status_log,connect_trust_preview,connect_trust_backup_visibility,telemetry_machineid_client,hygiene_roadmap_github_check done;
+  class upgrade_nudge,connect_trust,telemetry_identity in_progress;
   class windows_tray,windows_tray_window in_review;
   class mcp_2026_upgrade blocked;
-  class ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,registries_official_protocol,scanner_simpl_baseline,scanner_simpl_unified_report,scanner_simpl_deep_optin,scanner_simpl_notifications,security_gateway_cd,discovery_eval_harness todo;
+  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust_undo,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,planning_hygiene,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract,security_gateway_cd,discovery_eval_harness todo;
   class marketplace,siem,paid_tier,sdk_v1_migration,sso parked;
 ```
 
@@ -139,23 +179,27 @@ graph TD
 
 | Epic | Status | Assignee | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- | --- |
-| Scanner simplification (deterministic default, opt-in deep scan) | In progress | unassigned | P1 | 0/42 (0%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
+| Upgrade awareness & guided update | In progress | unassigned | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
+| Connect step trust: preview, visible backup, one-click undo | In progress | unassigned | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
+| Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | unassigned | P1 | — |  |  |
 | Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 25/60 (42%) | [002-windows-installer](./specs/002-windows-installer/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | Blocked |  | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
-| Web UI + macOS app UX audit | Todo | unassigned | P0 | — | [064-glass-cockpit](./specs/064-glass-cockpit/) |  |
-| Action log / transparency — info at a glance | Todo | unassigned | P0 | 63/66 (95%) | [024-expand-activity-log](./specs/024-expand-activity-log/) |  |
+| Web UI + macOS app UX audit | Todo | unassigned | P0 | — |  |  |
+| Action log / transparency — info at a glance | Todo | unassigned | P0 | — |  |  |
 | Analytics dashboard as default page | Todo | unassigned | P1 | 16/26 (62%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Registries — easier search + add-server | Todo | unassigned | P1 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
+| Planning/docs truth automation | Todo | unassigned | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo |  | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo |  | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
-| Server marketplace `MCP-37` | Todo (parked) |  | P3 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
+| Server marketplace `MCP-37` | Todo (parked) |  | P3 | — |  |  |
 | Audit SIEM integration `MCP-39` | Todo (parked) |  | P3 | — |  |  |
 | Paid-tier MVP (billing / seats / license) `MCP-40` | Todo (parked) |  | P3 | — |  |  |
 | SDK v1 migration | Todo (parked) |  | P3 | — |  |  |
 | SSO (server edition) | Todo (parked) |  | P3 | — |  |  |
 | Profiles v2 (per-profile tool views) `MCP-33` | Done | BackendEngineer | P1 | — |  |  |
-| Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | BackendEngineer | P1 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
+| Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | BackendEngineer | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | BackendEngineer | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
+| Scanner simplification (deterministic default, opt-in deep scan) | Done | unassigned | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | TypeScript code-execution GA + cookbook `MCP-38` | Done | BackendEngineer | P2 | 19/19 (100%) | [033-typescript-code-execution](./specs/033-typescript-code-execution/) |  |
 
 ## Per-spec progress (recomputed from `specs/<NNN>/tasks.md`)
@@ -239,4 +283,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [074-discovery-intervals](./specs/074-discovery-intervals/) | `drafted` | 0/19 (0%) |
 | [075-macos-tcc-connect](./specs/075-macos-tcc-connect/) | `in-flight` | 11/30 (37%) |
 | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) | `in-flight` | 22/24 (92%) |
-| [077-scanner-simplification](./specs/077-scanner-simplification/) | `drafted` | 0/42 (0%) |
+| [077-scanner-simplification](./specs/077-scanner-simplification/) | `in-flight` | 38/42 (90%) |
+| [078-connect-trust-preview](./specs/078-connect-trust-preview/) | — | — |
+| [079-upgrade-nudge](./specs/079-upgrade-nudge/) | — | — |

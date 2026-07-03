@@ -42,6 +42,15 @@ export interface SecurityScanSummary {
   risk_score: number
   status: SecurityScanStatus
   finding_counts?: SecurityScanFindingCounts
+  // Scanner coverage for the primary (baseline) scan pass — informational only.
+  // Spec 077 US3 (FR-008/FR-014): status derives SOLELY from baseline findings;
+  // a failed Docker deep scanner never downgrades the verdict.
+  scanners_run?: number
+  scanners_failed?: number
+  scanners_total?: number
+  // Opt-in deep-scan layer status (Spec 077 US3), always emitted on a computed
+  // summary (enabled=false when off). Informational — never influences status.
+  deep_scan?: DeepScanDescriptor
 }
 
 // Security scan finding (Spec 039)
@@ -66,6 +75,11 @@ export interface SecurityScanFinding {
   scan_pass?: number            // 1 = security scan, 2 = supply chain audit
   evidence?: string             // Text/content that triggered the finding
   supply_chain_audit?: boolean  // True for real CVE/package findings — routes to the Supply Chain (CVEs) section regardless of scan_pass
+  // Spec 077 unified report — additive fields.
+  sources?: string[]            // Contributing scanner ids; ≥2 means scanners agreed (consensus)
+  tier?: string                 // "hard" (gates approval) | "soft" (review-only)
+  confidence?: number           // 0.0–1.0; raised when independent sources agree
+  signals?: string[]            // Deterministic detect check ids that fired
 }
 
 export interface SecurityScanReport {
@@ -74,7 +88,14 @@ export interface SecurityScanReport {
   status: SecurityScanStatus
   risk_score: number
   findings: SecurityScanFinding[]
-  finding_counts: SecurityScanFindingCounts
+  // Tier-driven, baseline-only verdict (Spec 077 FR-014): 'dangerous' only for
+  // hard-tier baseline findings; tierless deep-scan/external findings never
+  // move it. Verdict-bearing UI must read this, NOT summary (raw counts).
+  verdict?: 'clean' | 'warnings' | 'dangerous'
+  // Tier-driven buckets matching SecurityScanSummary.finding_counts (a tierless
+  // 'dangerous' finding buckets as warning — informs, never gates).
+  finding_counts?: SecurityScanFindingCounts
+  // Raw threat-level/severity counts across ALL findings — transparency only.
   summary: SecurityScanReportSummary
   scanned_at: string
   duration_ms?: number
@@ -89,6 +110,22 @@ export interface SecurityScanReport {
   pass1_complete?: boolean  // Security scan (fast) done
   pass2_complete?: boolean  // Supply chain audit done
   pass2_running?: boolean   // Supply chain audit in progress
+  // Opt-in deep-scan availability (Spec 077 US3). Informational only — a failed
+  // or unavailable deep scanner never changes the baseline verdict/status.
+  deep_scan?: DeepScanDescriptor
+}
+
+// DeepScanDescriptor reports the informational status of the opt-in "deep scan"
+// layer (Docker-based scanners + source extraction) separately from the
+// baseline verdict (Spec 077 US3). Rendered as a quiet info note, never an error.
+export interface DeepScanDescriptor {
+  enabled: boolean
+  ran: boolean
+  available: boolean
+  scanners_failed?: { id: string; reason: string }[]
+  // Docker scanners the user enabled that are skipped because deep scan is off.
+  // Only populated when enabled=false (the descriptor is always emitted).
+  skipped_scanners?: string[]
 }
 
 // Scan job summary for history listing
@@ -826,6 +863,24 @@ export interface ConnectResult {
   action: string
   message: string
   error?: string
+}
+
+// Spec 078 US1: the exact change a connect would make, returned WITHOUT writing
+// the file or creating a backup. entry/entry_text carry a MASKED apikey;
+// contains_api_key flags that a credential is written; entry_exists marks the
+// overwrite (force) case; access_state degrades per Spec 075.
+export interface ConnectPreview {
+  client: string
+  config_path: string
+  format: 'json' | 'toml'
+  server_key: string
+  server_name: string
+  entry: Record<string, unknown>
+  entry_text: string
+  entry_exists: boolean
+  contains_api_key: boolean
+  bridge?: boolean
+  access_state?: AccessState
 }
 
 // Onboarding wizard types (Spec 046)

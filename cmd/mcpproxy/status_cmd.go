@@ -34,7 +34,20 @@ type StatusInfo struct {
 	SocketPath        string                   `json:"socket_path,omitempty"`
 	ConfigPath        string                   `json:"config_path,omitempty"`
 	Version           string                   `json:"version,omitempty"`
+	Update            *StatusUpdateInfo        `json:"update,omitempty"`
 	ServerEditionInfo *ServerEditionStatusInfo `json:"server_edition,omitempty"`
+}
+
+// StatusUpdateInfo mirrors the `update` object of GET /api/v1/info
+// (internal/updatecheck.InfoResponseUpdate) for status output. The daemon's
+// background checker is the single source of truth; status only renders it.
+type StatusUpdateInfo struct {
+	Available     bool   `json:"available"`
+	LatestVersion string `json:"latest_version,omitempty"`
+	ReleaseURL    string `json:"release_url,omitempty"`
+	CheckedAt     string `json:"checked_at,omitempty"` // RFC 3339, as serialized by the daemon
+	IsPrerelease  bool   `json:"is_prerelease,omitempty"`
+	CheckError    string `json:"check_error,omitempty"`
 }
 
 // ServerEditionStatusInfo holds server-edition-specific status information.
@@ -212,6 +225,7 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 		if url, ok := infoData["web_ui_url"].(string); ok {
 			info.WebUIURL = url
 		}
+		info.Update = extractStatusUpdate(infoData)
 	}
 
 	// Construct Web UI URL if not provided by daemon
@@ -268,6 +282,61 @@ func extractServerCounts(stats map[string]interface{}) *ServerCounts {
 	}
 
 	return counts
+}
+
+// extractStatusUpdate pulls the `update` object out of the /api/v1/info
+// payload. Returns nil when the daemon did not report update state.
+func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
+	updateData, ok := infoData["update"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	u := &StatusUpdateInfo{}
+	if v, ok := updateData["available"].(bool); ok {
+		u.Available = v
+	}
+	if v, ok := updateData["latest_version"].(string); ok {
+		u.LatestVersion = v
+	}
+	if v, ok := updateData["release_url"].(string); ok {
+		u.ReleaseURL = v
+	}
+	if v, ok := updateData["checked_at"].(string); ok {
+		u.CheckedAt = v
+	}
+	if v, ok := updateData["is_prerelease"].(bool); ok {
+		u.IsPrerelease = v
+	}
+	if v, ok := updateData["check_error"].(string); ok {
+		u.CheckError = v
+	}
+	return u
+}
+
+// statusVersionSuffix renders the update annotation appended to the Version
+// line, mirroring doctor's presentation. A failed or not-yet-completed check
+// renders nothing (quiet on failure; the error stays in JSON for diagnostics).
+//
+// TODO(spec-079/FR-002): extend the annotation with the human-readable
+// "N releases / M weeks behind" delta once internal/updatecheck computes it
+// (requires the release list + publish dates, not just the latest release;
+// additive per FR-021). This function is the single rendering point.
+func statusVersionSuffix(u *StatusUpdateInfo) string {
+	if u == nil || u.CheckError != "" {
+		return ""
+	}
+	if u.Available && u.LatestVersion != "" {
+		if u.ReleaseURL != "" {
+			return fmt.Sprintf(" (update available: %s — %s)", u.LatestVersion, u.ReleaseURL)
+		}
+		return fmt.Sprintf(" (update available: %s)", u.LatestVersion)
+	}
+	if u.LatestVersion != "" {
+		// A successful check confirmed we are current.
+		return " (latest)"
+	}
+	return ""
 }
 
 // statusMaskAPIKey returns a masked version of the API key showing first and last 4 chars.
@@ -374,7 +443,7 @@ func printStatusTable(info *StatusInfo) {
 	fmt.Printf("  %-12s %s\n", "Edition:", info.Edition)
 
 	if info.Version != "" {
-		fmt.Printf("  %-12s %s\n", "Version:", info.Version)
+		fmt.Printf("  %-12s %s%s\n", "Version:", info.Version, statusVersionSuffix(info.Update))
 	}
 
 	fmt.Printf("  %-12s %s\n", "Listen:", info.ListenAddr)
