@@ -255,6 +255,98 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 	s.writeSuccess(w, result)
 }
 
+// UndoConnectRequest is the JSON body for POST /api/v1/connect/{client}/undo.
+type UndoConnectRequest struct {
+	ServerName string `json:"server_name,omitempty"` // Defaults to "mcpproxy"
+	// BackupName is the bare filename (filepath.Base) of the backup returned as
+	// backup_path by the preceding connect — a name, never a path. Undo resolves
+	// the full path server-side by joining it with the client's own config
+	// directory, so a client-supplied value can never contribute a directory
+	// component (traversal is impossible by construction). Empty means the
+	// connect created the file (no prior file existed), so undo removes it.
+	BackupName string `json:"backup_name,omitempty"`
+}
+
+// handleUndoConnectClient godoc
+// @Summary     Undo a connect, restoring the pre-connect config
+// @Description Reverts the connect that produced the named backup (Spec 078 US3):
+// @Description restores the client config byte-for-byte from that backup, or — when
+// @Description backup_name is empty because the connect created the file — deletes the
+// @Description created file. backup_name is the bare filename of the backup the connect
+// @Description returned (never a path); undo resolves the full path server-side inside
+// @Description the client's own config directory, so a client value cannot escape it.
+// @Description Refuses with 409 when the config changed since the connect (undo never
+// @Description clobbers later edits; use DELETE /connect/{client} for a surgical entry
+// @Description removal instead). Takes its own safety backup first; its path is returned
+// @Description as backup_path in the result.
+// @Tags        connect
+// @Accept      json
+// @Produce     json
+// @Security    ApiKeyAuth
+// @Security    ApiKeyQuery
+// @Param       client path   string             true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       body   body   UndoConnectRequest false "Undo parameters (server_name, backup_name = the bare filename of the backup the preceding connect returned)"
+// @Success     200    {object} contracts.APIResponse "ConnectResult (action restored|deleted)"
+// @Failure     400    {object} contracts.ErrorResponse "Bad request (e.g. backup_name is a path, or not a backup of this client's config)"
+// @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
+// @Failure     404    {object} contracts.ErrorResponse "Unknown client or backup no longer exists"
+// @Failure     409    {object} contracts.ErrorResponse "Config changed since connect; undo refused"
+// @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
+// @Router      /api/v1/connect/{client}/undo [post]
+func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request) {
+	svc := s.getConnectService()
+	if svc == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, "connect service not available")
+		return
+	}
+
+	clientID := chi.URLParam(r, "client")
+	if clientID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "client ID is required")
+		return
+	}
+
+	var req UndoConnectRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+			return
+		}
+	}
+
+	result, err := svc.Undo(clientID, req.ServerName, req.BackupName)
+	if err != nil {
+		if s.writeIfAccessDenied(w, r, err) {
+			return
+		}
+		if connect.FindClient(clientID) == nil {
+			s.writeError(w, r, http.StatusNotFound, err.Error())
+			return
+		}
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if !result.Success {
+		switch result.Action {
+		case "not_found":
+			s.writeError(w, r, http.StatusNotFound, result.Message)
+			return
+		case "conflict":
+			// Mirror the connect already_exists shape: the typed result rides
+			// along so the UI can distinguish the refusal from a hard failure.
+			s.writeJSON(w, http.StatusConflict, map[string]interface{}{
+				"success": false,
+				"data":    result,
+				"error":   result.Message,
+			})
+			return
+		}
+	}
+
+	s.writeSuccess(w, result)
+}
+
 // writeIfAccessDenied maps a permission-denied client-config access to a 403
 // response whose body carries the remediation text. It returns true when it
 // handled the error (a typed *connect.AccessError), so callers can stop. This

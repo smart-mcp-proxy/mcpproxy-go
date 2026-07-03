@@ -773,6 +773,7 @@ func (s *Server) setupRoutes() {
 		r.Get("/connect/{client}", s.handleGetConnectClientStatus)
 		r.Get("/connect/{client}/preview", s.handleConnectClientPreview)
 		r.Post("/connect/{client}", s.handleConnectClient)
+		r.Post("/connect/{client}/undo", s.handleUndoConnectClient)
 		r.Delete("/connect/{client}", s.handleDisconnectClient)
 
 		// Onboarding wizard (Spec 046)

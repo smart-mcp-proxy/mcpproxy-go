@@ -254,7 +254,7 @@ Add mcpproxy as a remote MCP server via Settings → Connectors → Add Custom C
 
 #### Option A: Free Plan — JSON Configuration
 
-> **💡 Built-in wizard:** mcpproxy's **Connect** wizard (Web UI / tray) can write this bridge configuration for you — pick **Claude Desktop**, click **Review & connect** to see the exact entry that will be written (a timestamped backup is created first), then confirm with **Connect**. It registers the `npx -y mcp-remote` bridge shown below (Node.js required). The manual steps remain available if you prefer to edit the file yourself.
+> **💡 Built-in wizard:** mcpproxy's **Connect** wizard (Web UI / tray) can write this bridge configuration for you — pick **Claude Desktop**, click **Review & connect** to see the exact entry that will be written (a timestamped backup is created first), then confirm with **Connect**. It registers the `npx -y mcp-remote` bridge shown below (Node.js required). The manual steps remain available if you prefer to edit the file yourself. Changed your mind? The wizard offers a one-click **Undo** right next to the backup path it just showed: it reverts the connect by restoring the config byte-for-byte from that backup (or removing the file if the connect created it), and it refuses — rather than clobbering your edits — if the file changed in the meantime. Backups are never overwritten: two operations in the same second get distinct names (`.bak.<timestamp>-1`, `-2`, …), and none are deleted automatically.
 
 1. Create the config file if it doesn't exist:
 

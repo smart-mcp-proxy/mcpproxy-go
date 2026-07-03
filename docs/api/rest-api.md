@@ -661,17 +661,18 @@ additive-compatible and gains two fields:
 A client that is installed but not yet content-checked reads as
 `exists=true, connected=false, access_state="unknown"`. Resolving `connected`
 requires an explicit per-client read (the per-client status route below,
-connect/disconnect, or the CLI `mcpproxy connect` command), which is the only
-place a privacy prompt may legitimately appear.
+connect/disconnect, or the CLI `mcpproxy connect` command), which is where a
+privacy prompt may legitimately appear.
 
 #### GET /api/v1/connect/{client}
 
 On-demand single-client status. Reads the one client's config **at request
 time** and returns a full `ClientStatus` with `access_state` resolved to
 `accessible | absent | malformed | denied` and `connected` set accordingly.
-This is the sole Connect endpoint that opens a client config file, so on macOS
-it is the only place an App-Data privacy prompt may legitimately appear (scoped
-to this user action). Unknown client → `404`. A denial is reported **in-band**
+This — like the other per-client routes below (preview, connect/disconnect,
+undo) — opens the client's config file at request time, so on macOS an App-Data
+privacy prompt may legitimately appear here (scoped to this user action), never
+from the overall listing. Unknown client → `404`. A denial is reported **in-band**
 (`200` with `access_state="denied"` + `remediation`), not as an HTTP error.
 
 ```bash
@@ -683,6 +684,63 @@ curl "http://127.0.0.1:8080/api/v1/connect/claude-desktop?apikey=your-api-key"
 Connect/disconnect are unchanged except that a permission-denied config access
 now returns **`403 Forbidden`** whose error body carries the remediation text
 (distinct from a generic `400` or a `404` not-found).
+
+Every connect/disconnect that modifies an **existing** config file first writes
+a timestamped backup next to it (`<config>.bak.<YYYYMMDD-HHMMSS>`, same
+directory and file mode) and returns its path as `backup_path` in the result.
+When two operations land in the same second, a numeric suffix keeps every
+backup distinct (`<config>.bak.<YYYYMMDD-HHMMSS>-1`, `-2`, …) — a backup is
+never overwritten. Backups accumulate one per operation and are **never
+deleted automatically**; there is no retention bound, so an undo (below) can
+always find its backup.
+
+#### GET /api/v1/connect/{client}/preview
+
+Returns the exact change a subsequent connect would make — target config path,
+format (`json`/`toml`), server key, entry name, and the exact entry contents —
+**without** modifying the file or creating a backup (Spec 078 US1). An embedded
+API key is masked in the payload (`contains_api_key` flags that a credential is
+written); `entry_exists` distinguishes a create from an overwrite of a
+same-named entry. Reads the config on demand to classify create-vs-overwrite,
+so on macOS this may raise an App-Data prompt; a denial returns `403` +
+remediation. Optional `?server_name=` mirrors the name a subsequent connect
+would use.
+
+#### POST /api/v1/connect/{client}/undo
+
+One-click undo of the immediately-preceding connect (Spec 078 US3). Body:
+
+```json
+{ "server_name": "mcpproxy", "backup_name": "<basename of backup_path from the connect result>" }
+```
+
+`backup_name` is the **bare filename** of the backup the connect returned in
+`backup_path` — a name, never a path. The server resolves the full path itself
+inside that client's own config directory (derived from the client registry, not
+the request), so a caller-supplied value can never contribute a directory
+component and cannot escape the config dir (defense against path injection).
+
+- **`backup_name` set** — restores the config **byte-for-byte** from that
+  backup. This is the only revert that can bring back a pre-existing
+  same-named entry that a `force=true` connect overwrote (surgical
+  `DELETE /connect/{client}` cannot).
+- **`backup_name` empty** — the connect created the file (its result carried no
+  `backup_path`); undo deletes the created file, restoring the "no file" state.
+
+Safety semantics:
+
+- Undo **refuses with `409 Conflict`** when the config changed since the
+  connect (it verifies the current file is byte-identical to what that connect
+  wrote) — it never clobbers later edits. Fall back to
+  `DELETE /connect/{client}` for a surgical entry removal.
+- A vanished backup returns `404`; a `backup_name` that is a path (contains a
+  directory separator) or does not match `<config>.bak.*` for that client
+  returns `400`.
+- Undo takes its **own safety backup** of the current file before restoring or
+  deleting, returned as `backup_path` in the result
+  (`action` = `restored` or `deleted`).
+- A macOS App-Data denial returns `403` + remediation, like the other
+  per-client routes.
 
 ##### macOS App Data privacy & Connect
 
@@ -698,7 +756,8 @@ tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy
 ```
 
 The overall `GET /api/v1/connect` listing never triggers this prompt (it is
-content-read-free); only the per-client read above can.
+content-read-free); only the per-client routes above (status, preview,
+connect/disconnect, undo) can.
 
 ### Real-time Updates
 
