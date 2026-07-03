@@ -793,7 +793,7 @@ Get application info, version, and update availability.
 | `listen_addr` | string | Server listen address |
 | `endpoints.http` | string | HTTP API endpoint address |
 | `endpoints.socket` | string | Unix socket path (empty if disabled) |
-| `update` | object | Update information (may be null if not checked yet) |
+| `update` | object | Update information (may be null if not checked yet; omitted entirely when update checking is disabled via `update_check.enabled: false` or `MCPPROXY_DISABLE_AUTO_UPDATE=true`) |
 | `update.available` | boolean | Whether a newer version is available |
 | `update.latest_version` | string | Latest version available on GitHub |
 | `update.release_url` | string | URL to the GitHub release page |
@@ -802,7 +802,7 @@ Get application info, version, and update availability.
 | `update.check_error` | string | Error message if update check failed |
 
 :::tip Update Checking
-MCPProxy automatically checks for updates every 4 hours. The update information is exposed via this endpoint and used by the tray application and web UI to show update notifications.
+MCPProxy automatically checks for updates every 4 hours. The update information is exposed via this endpoint and used by the tray application and web UI to show update notifications. Use `?refresh=true` to force an immediate re-check. Checking is controlled by the `update_check` config block (`enabled`, `channel`) — see [Version Updates](/features/version-updates); when disabled, `?refresh=true` performs no check and the `update` object is omitted.
 :::
 
 ### Docker
