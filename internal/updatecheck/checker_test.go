@@ -211,6 +211,29 @@ func TestChecker_SetConfig_DisabledSkipsCheckAndHidesInfo(t *testing.T) {
 	}
 }
 
+// TestChecker_CheckSkipsNetworkWhenDisabled verifies the low-level check()
+// loop path re-reads the enabled flag before hitting the network, so a disable
+// racing an in-flight tick or a re-enable-triggered goroutine performs no
+// GitHub request (FR-015: disabled means no network check on any surface).
+func TestChecker_CheckSkipsNetworkWhenDisabled(t *testing.T) {
+	checker := New(zaptest.NewLogger(t), "v1.0.0")
+
+	calls := 0
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		calls++
+		return &GitHubRelease{TagName: "v1.1.0"}, nil
+	})
+
+	checker.SetConfig(false, false)
+
+	// Directly exercise the loop's check() (bypasses the CheckNow gate).
+	checker.check()
+
+	if calls != 0 {
+		t.Errorf("check function invoked %d times, want 0 when disabled", calls)
+	}
+}
+
 // TestChecker_SetConfig_ReEnableRestoresChecks verifies a hot-reload flip back
 // to enabled=true makes CheckNow work again without a restart (FR-012).
 func TestChecker_SetConfig_ReEnableRestoresChecks(t *testing.T) {

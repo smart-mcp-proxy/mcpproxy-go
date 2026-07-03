@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
@@ -307,8 +308,15 @@ func (a *ServerAdapter) ReloadConfiguration() error {
 	return fmt.Errorf("ReloadConfiguration not yet supported via API")
 }
 
-// GetConfigPath returns the configuration file path
+// GetConfigPath returns the configuration file path core is running with.
+// The tray passes MCPPROXY_TRAY_CONFIG_PATH to core as --config (see
+// buildCoreArgs in main.go), so tray-side config consumers — e.g. the Spec 079
+// update_check gate — must resolve to that same override, not a hardcoded
+// default. Falls back to the default ~/.mcpproxy path when unset.
 func (a *ServerAdapter) GetConfigPath() string {
+	if cfg := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_CONFIG_PATH")); cfg != "" {
+		return cfg
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "~/.mcpproxy/mcp_config.json" // fallback

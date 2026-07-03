@@ -244,7 +244,18 @@ func (c *Checker) check() {
 
 	c.mu.RLock()
 	gen := c.cfgGen
+	enabled := c.enabledLocked()
 	c.mu.RUnlock()
+
+	// Re-read enabled under the same lock as gen: a disable racing after the
+	// caller's outer Enabled() gate (loop tick, or a re-enable-triggered
+	// goroutine from SetConfig) must not fire a network request. The
+	// generation guard already drops any stale result; this avoids the request
+	// entirely (FR-015: disabled means no network check on any surface).
+	if !enabled {
+		c.logger.Debug("Skipping update check: update checking disabled")
+		return
+	}
 
 	release, err := c.checkFunc()
 	if err != nil {
