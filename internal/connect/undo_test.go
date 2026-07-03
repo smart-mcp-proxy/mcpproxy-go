@@ -247,6 +247,38 @@ func TestUndo_RejectsForeignBackupPath(t *testing.T) {
 	}
 }
 
+// A path that keeps the "<config>.bak." prefix but traverses out of the config
+// directory (e.g. "<config>.bak.x/../../secret.json") must be rejected before
+// any read — a prefix-only check would let undo read/restore an arbitrary file.
+func TestUndo_RejectsBackupPathTraversal(t *testing.T) {
+	home := t.TempDir()
+	svc := NewServiceWithHome("127.0.0.1:8080", "", home)
+	res, err := svc.Connect("claude-code", "mcpproxy", false)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	// Craft a traversal path that still starts with "<config>.bak." so a
+	// prefix-only guard would admit it, then climbs back out to a foreign file.
+	secret := filepath.Join(home, "secret.json")
+	if err := os.WriteFile(secret, []byte(`{"secret":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(filepath.Dir(res.ConfigPath), secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traversal := res.ConfigPath + ".bak.x/../" + rel
+
+	_, err = svc.Undo("claude-code", "mcpproxy", traversal)
+	if err == nil {
+		t.Fatal("undo must reject a traversal backup path that escapes the config directory")
+	}
+	if !strings.Contains(err.Error(), "backup") {
+		t.Fatalf("error should mention the backup path problem: %v", err)
+	}
+}
+
 func TestUndo_MissingConfigFileRefuses(t *testing.T) {
 	home := t.TempDir()
 	svc := NewServiceWithHome("127.0.0.1:8080", "", home)

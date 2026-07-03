@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -50,10 +51,18 @@ func (s *Service) Undo(clientID, serverName, backupPath string) (*ConnectResult,
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	// The backup must be a backup OF THIS client's config: undo must not become
-	// an arbitrary-file-restore primitive for API callers.
-	if backupPath != "" && !strings.HasPrefix(backupPath, cfgPath+".bak.") {
-		return nil, fmt.Errorf("invalid backup path %q: not a backup of %s", backupPath, cfgPath)
+	// The backup must be a real backup OF THIS client's config, living beside it:
+	// undo must not become an arbitrary-file-restore primitive for API callers.
+	// A prefix-only check is not enough — a path like "<cfg>.bak.x/../../secret"
+	// keeps the prefix yet escapes the directory, so anchor on the cleaned path's
+	// parent directory and basename (both traversal-proof).
+	if backupPath != "" {
+		cleaned := filepath.Clean(backupPath)
+		if filepath.Dir(cleaned) != filepath.Dir(cfgPath) ||
+			!strings.HasPrefix(filepath.Base(cleaned), filepath.Base(cfgPath)+".bak.") {
+			return nil, fmt.Errorf("invalid backup path %q: not a backup of %s", backupPath, cfgPath)
+		}
+		backupPath = cleaned
 	}
 
 	res, err := s.undo(client, cfgPath, serverName, backupPath)
