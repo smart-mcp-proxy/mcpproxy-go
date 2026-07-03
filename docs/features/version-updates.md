@@ -85,11 +85,16 @@ Both keys are **hot-reloadable**: editing the config file or applying it via
 switching channels) triggers a prompt re-check instead of waiting for the next
 4-hour tick.
 
-`enabled: false` also gates the Go tray's built-in daily self-update check (it
-reads the same config file before checking), so no surface performs a network
-check while disabled. The tray's own check still selects prereleases via
-`MCPPROXY_ALLOW_PRERELEASE_UPDATES` only — converging it fully onto the shared
-checker (including `channel`) is a separate Spec 079 work item (FR-001a).
+`enabled: false` also gates the Go tray's built-in daily self-update check, so
+no surface performs a network check while disabled. The tray does **not** read
+`mcp_config.json` itself (it holds no state); instead it asks the core via
+`GET /api/v1/info` before checking — the core omits the `update` object when
+update checking is disabled, and the tray then skips its own network check. If
+the core is unreachable the tray skips that tick and retries, rather than
+falling open to a check the operator may have disabled. The tray's own check
+still selects prereleases via `MCPPROXY_ALLOW_PRERELEASE_UPDATES` only —
+converging it fully onto the shared checker (including `channel`) is a separate
+Spec 079 work item (FR-001a).
 
 ### Environment Variables
 

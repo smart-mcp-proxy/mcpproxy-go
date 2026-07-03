@@ -6,8 +6,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -911,56 +909,76 @@ func TestBuildConnectionURL(t *testing.T) {
 	})
 }
 
-// TestUpdateCheckEnabledByConfig verifies the tray's own self-update check is
-// gated by the update_check config block (Spec 079 FR-015: enabled=false means
-// no network check on any surface, including the tray's independent check).
-func TestUpdateCheckEnabledByConfig(t *testing.T) {
-	logger := zaptest.NewLogger(t).Sugar()
+// TestCheckForUpdates_GatedByCoreAPI verifies the tray's legacy GitHub
+// self-update check is gated by asking the CORE (via /api/v1/info), never by
+// reading mcp_config.json. Per the tray-holds-no-state rule the tray owns no
+// config; the core's update_check config is the single source of truth (Spec
+// 079 FR-015). The injected selfUpdateFunc stands in for the network path so
+// the test can assert whether it runs without hitting GitHub.
+func TestCheckForUpdates_GatedByCoreAPI(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_AUTO_UPDATE", "")
 
-	writeConfig := func(t *testing.T, content string) string {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "mcp_config.json")
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatalf("write config: %v", err)
+	newApp := func(listenAddr string, state ConnectionState, ran *bool) *App {
+		return &App{
+			server:          &MockServerInterface{listenAddress: listenAddr},
+			logger:          zaptest.NewLogger(t).Sugar(),
+			version:         "1.0.0",
+			connectionState: state,
+			selfUpdateFunc:  func() { *ran = true },
 		}
-		return path
 	}
 
-	t.Run("disabled by config", func(t *testing.T) {
-		app := &App{logger: logger, configPath: writeConfig(t,
-			`{"listen":"127.0.0.1:8080","update_check":{"enabled":false}}`)}
-		if app.updateCheckEnabledByConfig() {
-			t.Error("updateCheckEnabledByConfig() = true, want false with update_check.enabled=false")
+	t.Run("core reports update -> self-update runs", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"version":"v1.0.0","update":{"available":true,"latest_version":"v1.1.0","release_url":"https://example.com/release"}}}`))
+		}))
+		defer srv.Close()
+
+		ran := false
+		app := newApp(strings.TrimPrefix(srv.URL, "http://"), ConnectionStateConnected, &ran)
+		app.checkForUpdates()
+		if !ran {
+			t.Error("self-update did not run when the core reported an available update")
 		}
 	})
 
-	t.Run("explicitly enabled", func(t *testing.T) {
-		app := &App{logger: logger, configPath: writeConfig(t,
-			`{"listen":"127.0.0.1:8080","update_check":{"enabled":true}}`)}
-		if !app.updateCheckEnabledByConfig() {
-			t.Error("updateCheckEnabledByConfig() = false, want true with update_check.enabled=true")
+	t.Run("core omits update -> skipped, no network call", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"version":"v1.0.0"}}`))
+		}))
+		defer srv.Close()
+
+		ran := false
+		app := newApp(strings.TrimPrefix(srv.URL, "http://"), ConnectionStateConnected, &ran)
+		app.checkForUpdates()
+		if ran {
+			t.Error("self-update ran even though the core omitted the update object (checking disabled)")
 		}
 	})
 
-	t.Run("absent block defaults to enabled", func(t *testing.T) {
-		app := &App{logger: logger, configPath: writeConfig(t,
-			`{"listen":"127.0.0.1:8080"}`)}
-		if !app.updateCheckEnabledByConfig() {
-			t.Error("updateCheckEnabledByConfig() = false, want true when update_check block is absent")
+	t.Run("core unreachable -> skipped", func(t *testing.T) {
+		// Stand up a server then close it so the address is routable-looking
+		// but the request fails: the tray must skip, not fall open.
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		addr := strings.TrimPrefix(srv.URL, "http://")
+		srv.Close()
+
+		ran := false
+		app := newApp(addr, ConnectionStateConnected, &ran)
+		app.checkForUpdates()
+		if ran {
+			t.Error("self-update ran even though the core was unreachable")
 		}
 	})
 
-	t.Run("no config path fails open", func(t *testing.T) {
-		app := &App{logger: logger}
-		if !app.updateCheckEnabledByConfig() {
-			t.Error("updateCheckEnabledByConfig() = false, want true when no config path is known")
-		}
-	})
-
-	t.Run("unreadable config fails open", func(t *testing.T) {
-		app := &App{logger: logger, configPath: filepath.Join(t.TempDir(), "missing.json")}
-		if !app.updateCheckEnabledByConfig() {
-			t.Error("updateCheckEnabledByConfig() = false, want true when config cannot be loaded")
+	t.Run("not connected -> skipped", func(t *testing.T) {
+		ran := false
+		app := newApp(":8080", ConnectionStateDisconnected, &ran)
+		app.checkForUpdates()
+		if ran {
+			t.Error("self-update ran even though the tray was not connected to the core")
 		}
 	})
 }

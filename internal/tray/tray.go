@@ -142,6 +142,12 @@ type App struct {
 	latestReleaseURL string
 	updateCheckMu    sync.RWMutex
 
+	// selfUpdateFunc, when non-nil, replaces the legacy GitHub self-update flow
+	// that runs after the core-API update-check gate. Tests inject it to assert
+	// whether the network path runs once the gate passes; production leaves it
+	// nil so performSelfUpdate runs.
+	selfUpdateFunc func()
+
 	// Config path for opening from menu
 	configPath string
 
@@ -1035,31 +1041,13 @@ func (a *App) onExit() {
 	}
 }
 
-// updateCheckEnabledByConfig reports whether the update_check config block
-// permits update checking (Spec 079 FR-015: enabled=false means no network
-// check on any surface, including this tray's own self-update check). It reads
-// the same config file the core uses. Fail-open on a missing/unreadable config
-// (matching the pre-079 default-enabled behavior); the environment kill-switch
-// MCPPROXY_DISABLE_AUTO_UPDATE is checked separately by the caller and wins
-// regardless (FR-014 precedence: env > config).
-func (a *App) updateCheckEnabledByConfig() bool {
-	path := a.configPath
-	if path == "" && a.server != nil {
-		path = a.server.GetConfigPath()
-	}
-	if path == "" {
-		return true
-	}
-	cfg, err := config.LoadFromFile(path)
-	if err != nil {
-		a.logger.Debugw("Could not load config for update-check gate; assuming enabled",
-			"config_path", path, "error", err)
-		return true
-	}
-	return cfg.UpdateCheck.IsEnabled()
-}
-
-// checkForUpdates checks for new releases on GitHub
+// checkForUpdates gates the tray's legacy GitHub self-update check on the
+// core's decision, then runs it. Per the tray-holds-no-state rule the tray must
+// never read mcp_config.json itself; instead it asks the core (via the same
+// /api/v1/info endpoint checkUpdateFromAPI uses) whether update checking is on.
+// The core's update_check config is thus the single source of truth (Spec 079
+// FR-015). The environment kill-switch MCPPROXY_DISABLE_AUTO_UPDATE is checked
+// first and wins regardless (FR-014 precedence: env > config).
 func (a *App) checkForUpdates() {
 	// Check if auto-update is disabled by environment variable
 	if os.Getenv("MCPPROXY_DISABLE_AUTO_UPDATE") == trueStr {
@@ -1067,14 +1055,38 @@ func (a *App) checkForUpdates() {
 		return
 	}
 
-	// Spec 079 FR-015: update_check.enabled=false means no network check on
-	// any surface — including this tray-owned release check, which is
-	// independent of the core's internal/updatecheck checker.
-	if !a.updateCheckEnabledByConfig() {
-		a.logger.Info("Auto-update disabled by config (update_check.enabled=false)")
+	// Ask the core whether an update check should run. The core omits the
+	// update object when update_check.enabled=false (or when no update exists),
+	// so its answer gates this tray-owned GitHub check without the tray reading
+	// the config file.
+	info, reachable := a.fetchCoreUpdateInfo()
+	if !reachable {
+		// Core unreachable: skip this tick rather than fall open to a network
+		// check the operator may have disabled via config. The 24h ticker
+		// retries; env kill-switch semantics are unchanged.
+		a.logger.Debug("Core unreachable for update-check gate; skipping tray self-update check this tick")
+		return
+	}
+	if info == nil {
+		// Core answered but omitted the update object: update checking is
+		// disabled (update_check.enabled=false, Spec 079 FR-015) or no update
+		// exists. Either way the tray must not run its own network check.
+		a.logger.Info("Update checking disabled or no update reported by core; skipping tray self-update check")
 		return
 	}
 
+	if a.selfUpdateFunc != nil {
+		a.selfUpdateFunc()
+		return
+	}
+	a.performSelfUpdate()
+}
+
+// performSelfUpdate runs the legacy tray-owned GitHub self-update flow (asset
+// resolution + download/apply). It only runs after checkForUpdates confirms via
+// the core that update checking is enabled. Full FR-001a convergence onto the
+// core's resolved asset is out of scope; the GitHub resolution stays here.
+func (a *App) performSelfUpdate() {
 	// Disable auto-update for app bundles by default (DMG installation should be manual)
 	if a.isAppBundle() && os.Getenv("MCPPROXY_UPDATE_APP_BUNDLE") != trueStr {
 		a.logger.Info("Auto-update disabled for app bundle installations (use DMG for updates)")
@@ -1859,11 +1871,29 @@ func (a *App) startUpdateChecker() {
 	}
 }
 
-// checkUpdateFromAPI queries the core's /api/v1/info endpoint for update information
-func (a *App) checkUpdateFromAPI() {
+// coreUpdateInfo mirrors the update object the core exposes at /api/v1/info.
+type coreUpdateInfo struct {
+	Available     bool   `json:"available"`
+	LatestVersion string `json:"latest_version"`
+	ReleaseURL    string `json:"release_url"`
+	IsPrerelease  bool   `json:"is_prerelease"`
+}
+
+// fetchCoreUpdateInfo queries the core's /api/v1/info endpoint. It returns the
+// update object and whether the core was reachable and answered successfully:
+//   - reachable=false → the core could not be reached / did not answer OK; the
+//     caller cannot infer anything and should skip (not fall open).
+//   - reachable=true, info=nil → the core omitted the update object, meaning
+//     update checking is disabled (update_check.enabled=false, Spec 079 FR-015)
+//     or no update exists.
+//   - reachable=true, info!=nil → the core reported update details.
+//
+// This lets the tray use the core as the single source of truth for update
+// checking without ever reading mcp_config.json itself.
+func (a *App) fetchCoreUpdateInfo() (info *coreUpdateInfo, reachable bool) {
 	// Only check when connected
 	if a.getConnectionState() != ConnectionStateConnected {
-		return
+		return nil, false
 	}
 
 	// Build URL to core's API
@@ -1879,7 +1909,7 @@ func (a *App) checkUpdateFromAPI() {
 	host, port, err := net.SplitHostPort(listenAddr)
 	if err != nil {
 		a.logger.Debug("Failed to parse listen address for update check", zap.Error(err))
-		return
+		return nil, false
 	}
 	if host == "" || host == "0.0.0.0" {
 		host = "127.0.0.1"
@@ -1892,38 +1922,44 @@ func (a *App) checkUpdateFromAPI() {
 	resp, err := client.Get(apiURL)
 	if err != nil {
 		a.logger.Debug("Failed to fetch update info from core", zap.Error(err))
-		return
+		return nil, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		a.logger.Debug("Unexpected status from core info endpoint", zap.Int("status", resp.StatusCode))
-		return
+		return nil, false
 	}
 
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Version string `json:"version"`
-			Update  *struct {
-				Available     bool   `json:"available"`
-				LatestVersion string `json:"latest_version"`
-				ReleaseURL    string `json:"release_url"`
-				IsPrerelease  bool   `json:"is_prerelease"`
-			} `json:"update"`
+			Version string          `json:"version"`
+			Update  *coreUpdateInfo `json:"update"`
 		} `json:"data"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		a.logger.Debug("Failed to parse update info from core", zap.Error(err))
-		return
+		return nil, false
 	}
 
 	if !response.Success {
+		return nil, false
+	}
+
+	return response.Data.Update, true
+}
+
+// checkUpdateFromAPI queries the core's /api/v1/info endpoint and reflects the
+// result onto the tray's update nudge menu item.
+func (a *App) checkUpdateFromAPI() {
+	update, reachable := a.fetchCoreUpdateInfo()
+	if !reachable {
 		return
 	}
 
-	if response.Data.Update == nil {
+	if update == nil {
 		// The core omits the update object entirely when update checking is
 		// disabled (update_check.enabled=false, Spec 079 FR-015). Treat the
 		// absence as "no update": clear state and hide any previously shown
@@ -1945,19 +1981,19 @@ func (a *App) checkUpdateFromAPI() {
 	// Update internal state
 	a.updateCheckMu.Lock()
 	wasAvailable := a.updateAvailable
-	a.updateAvailable = response.Data.Update.Available
-	a.latestVersion = response.Data.Update.LatestVersion
-	a.latestReleaseURL = response.Data.Update.ReleaseURL
+	a.updateAvailable = update.Available
+	a.latestVersion = update.LatestVersion
+	a.latestReleaseURL = update.ReleaseURL
 	a.updateCheckMu.Unlock()
 
 	// Update menu visibility
-	if response.Data.Update.Available {
+	if update.Available {
 		if !wasAvailable {
 			a.logger.Info("Update available",
 				zap.String("current", a.version),
-				zap.String("latest", response.Data.Update.LatestVersion))
+				zap.String("latest", update.LatestVersion))
 		}
-		a.showUpdateMenuItem(response.Data.Update.LatestVersion, response.Data.Update.IsPrerelease)
+		a.showUpdateMenuItem(update.LatestVersion, update.IsPrerelease)
 	} else {
 		a.hideUpdateMenuItem()
 	}
