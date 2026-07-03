@@ -1,8 +1,10 @@
 package updatecheck
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
@@ -175,5 +177,153 @@ func TestChecker_CompareVersions(t *testing.T) {
 				t.Errorf("compareVersions(%q, %q) = %v, want %v", tc.current, tc.latest, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- Spec 079 US1: update_check config block (FR-012/FR-014/FR-015) ---
+
+// TestChecker_SetConfig_DisabledSkipsCheckAndHidesInfo verifies that
+// update_check.enabled=false gates BOTH the manual CheckNow path and the
+// surfaced version info: no network check runs and GetVersionInfo returns nil
+// so /api/v1/info omits the update object entirely (FR-015).
+func TestChecker_SetConfig_DisabledSkipsCheckAndHidesInfo(t *testing.T) {
+	checker := New(zaptest.NewLogger(t), "v1.0.0")
+
+	calls := 0
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		calls++
+		return &GitHubRelease{TagName: "v1.1.0"}, nil
+	})
+
+	checker.SetConfig(false, false)
+
+	if got := checker.CheckNow(); got != nil {
+		t.Errorf("CheckNow() = %+v, want nil when disabled by config", got)
+	}
+	if calls != 0 {
+		t.Errorf("check function invoked %d times, want 0 when disabled", calls)
+	}
+	if got := checker.GetVersionInfo(); got != nil {
+		t.Errorf("GetVersionInfo() = %+v, want nil when disabled by config", got)
+	}
+	if checker.Enabled() {
+		t.Error("Enabled() = true, want false after SetConfig(false, ...)")
+	}
+}
+
+// TestChecker_SetConfig_ReEnableRestoresChecks verifies a hot-reload flip back
+// to enabled=true makes CheckNow work again without a restart (FR-012).
+func TestChecker_SetConfig_ReEnableRestoresChecks(t *testing.T) {
+	checker := New(zaptest.NewLogger(t), "v1.0.0")
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		return &GitHubRelease{TagName: "v1.1.0"}, nil
+	})
+
+	checker.SetConfig(false, false)
+	if checker.CheckNow() != nil {
+		t.Fatal("expected nil CheckNow while disabled")
+	}
+
+	checker.SetConfig(true, false)
+	info := checker.CheckNow()
+	if info == nil {
+		t.Fatal("CheckNow() = nil after re-enable, want version info")
+	}
+	if !info.UpdateAvailable || info.LatestVersion != "v1.1.0" {
+		t.Errorf("unexpected info after re-enable: %+v", info)
+	}
+}
+
+// TestChecker_EnvDisableWinsOverConfig verifies the documented precedence
+// (FR-014): the MCPPROXY_DISABLE_AUTO_UPDATE environment kill-switch always
+// wins over update_check.enabled=true in the config file.
+func TestChecker_EnvDisableWinsOverConfig(t *testing.T) {
+	t.Setenv(EnvDisableAutoUpdate, "true")
+
+	checker := New(zaptest.NewLogger(t), "v1.0.0")
+	checker.SetConfig(true, false)
+
+	if checker.Enabled() {
+		t.Error("Enabled() = true, want false: env kill-switch must win over config")
+	}
+	calls := 0
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		calls++
+		return &GitHubRelease{TagName: "v1.1.0"}, nil
+	})
+	if got := checker.CheckNow(); got != nil {
+		t.Errorf("CheckNow() = %+v, want nil when env-disabled", got)
+	}
+	if calls != 0 {
+		t.Errorf("check function invoked %d times, want 0 when env-disabled", calls)
+	}
+}
+
+// TestChecker_IncludePrereleases_Resolution verifies channel resolution:
+// default stable, config channel=rc opts in, and the
+// MCPPROXY_ALLOW_PRERELEASE_UPDATES env override wins over a stable config
+// channel (FR-013/FR-014).
+func TestChecker_IncludePrereleases_Resolution(t *testing.T) {
+	t.Run("default is stable", func(t *testing.T) {
+		checker := New(zaptest.NewLogger(t), "v1.0.0")
+		if checker.IncludePrereleases() {
+			t.Error("IncludePrereleases() = true by default, want false (stable channel)")
+		}
+	})
+
+	t.Run("config rc channel opts in", func(t *testing.T) {
+		checker := New(zaptest.NewLogger(t), "v1.0.0")
+		checker.SetConfig(true, true)
+		if !checker.IncludePrereleases() {
+			t.Error("IncludePrereleases() = false, want true after SetConfig(_, true)")
+		}
+	})
+
+	t.Run("env override wins over stable config", func(t *testing.T) {
+		t.Setenv(EnvAllowPrereleaseUpdates, "true")
+		checker := New(zaptest.NewLogger(t), "v1.0.0")
+		checker.SetConfig(true, false)
+		if !checker.IncludePrereleases() {
+			t.Error("IncludePrereleases() = false, want true: env override must win")
+		}
+	})
+}
+
+// TestChecker_HotReload_ReEnableTriggersImmediateCheck verifies that when the
+// background loop is running but config-disabled, flipping enabled=true via
+// hot-reload triggers a prompt re-check instead of waiting up to a full
+// 4-hour interval (FR-012 acceptance scenario 1).
+func TestChecker_HotReload_ReEnableTriggersImmediateCheck(t *testing.T) {
+	// Nop logger: the Start goroutine may log its shutdown line after the
+	// test returns, which zaptest would flag as a log-after-test panic.
+	checker := New(zap.NewNop(), "v1.0.0")
+	checker.SetCheckInterval(time.Hour) // never ticks during the test
+
+	checked := make(chan struct{}, 4)
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		checked <- struct{}{}
+		return &GitHubRelease{TagName: "v1.1.0"}, nil
+	})
+
+	checker.SetConfig(false, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go checker.Start(ctx)
+
+	// Disabled: the loop must not run the initial check.
+	select {
+	case <-checked:
+		t.Fatal("check ran while disabled by config")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	checker.SetConfig(true, false)
+
+	select {
+	case <-checked:
+		// prompt re-check happened
+	case <-time.After(2 * time.Second):
+		t.Fatal("re-enabling via SetConfig did not trigger a prompt re-check")
 	}
 }

@@ -232,6 +232,8 @@ components:
         tray_endpoint:
           description: Tray endpoint override (unix:// or npipe://)
           type: string
+        update_check:
+          $ref: '#/components/schemas/config.UpdateCheckConfig'
       type: object
     config.CustomPattern:
       properties:
@@ -940,6 +942,30 @@ components:
           description: SampleRate is the head-based trace sampling ratio in [0,1].
             Default 0.1.
           type: number
+      type: object
+    config.UpdateCheckConfig:
+      description: |-
+        Update-check settings (Spec 079 FR-012): config-file control of the
+        background upgrade-awareness checker (internal/updatecheck). nil =
+        enabled on the stable channel (existing default behavior). The existing
+        environment switches keep working and WIN over these keys (FR-014):
+        MCPPROXY_DISABLE_AUTO_UPDATE=true force-disables even when
+        enabled=true, and MCPPROXY_ALLOW_PRERELEASE_UPDATES=true force-selects
+        the rc channel even when channel=stable.
+      properties:
+        channel:
+          description: |-
+            Channel selects which releases are offered as updates: "stable"
+            (default; prereleases never offered) or "rc" (prereleases included).
+            Empty resolves to stable. Validated in ValidateDetailed.
+          type: string
+        enabled:
+          description: |-
+            Enabled gates all update checking. Tri-state: nil/absent = enabled
+            (default true, matching pre-079 behavior). When false, no network
+            check is performed and no upgrade nudge appears on any surface
+            (FR-015) — /api/v1/info omits the update object entirely.
+          type: boolean
       type: object
     configimport.FailedServer:
       properties:

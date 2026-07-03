@@ -36,6 +36,19 @@ type Checker struct {
 	// exactly once per process, not on every periodic tick (Spec 079 FR-004).
 	announcedVersion string
 
+	// cfgEnabled / cfgPrerelease mirror the update_check config block (Spec
+	// 079 FR-012): enabled (default true) and channel ("rc" ⇒ prereleases).
+	// The environment switches win over them — see Enabled /
+	// IncludePrereleases. Mutated by SetConfig on config hot-reload.
+	cfgEnabled    bool
+	cfgPrerelease bool
+
+	// started/startCtx record that the background loop is running so a
+	// SetConfig re-enable can trigger a prompt re-check instead of waiting
+	// up to a full checkInterval.
+	started  bool
+	startCtx context.Context
+
 	// For testing: allows injection of a custom check function
 	checkFunc func() (*GitHubRelease, error)
 }
@@ -49,18 +62,82 @@ func New(logger *zap.Logger, version string) *Checker {
 		version:       version,
 		checkInterval: DefaultCheckInterval,
 		githubClient:  githubClient,
+		cfgEnabled:    true, // update_check.enabled defaults to true (Spec 079 FR-012)
 		versionInfo: &VersionInfo{
 			CurrentVersion: version,
 		},
 	}
 
-	// Default check function uses GitHub client
+	// Default check function uses GitHub client; the channel is resolved per
+	// check so a config hot-reload (stable ⇄ rc) takes effect immediately.
 	c.checkFunc = func() (*GitHubRelease, error) {
-		allowPrerelease := os.Getenv(EnvAllowPrereleaseUpdates) == "true"
-		return c.githubClient.GetRelease(allowPrerelease)
+		return c.githubClient.GetRelease(c.IncludePrereleases())
 	}
 
 	return c
+}
+
+// SetConfig applies the update_check config block (Spec 079 FR-012):
+// enabled gates both the background poll and CheckNow; includePrereleases
+// selects the release channel (stable vs rc).
+//
+// Precedence (FR-014, documented in docs/features/version-updates.md): the
+// environment switches win over config — MCPPROXY_DISABLE_AUTO_UPDATE=true
+// force-disables even with enabled=true, and
+// MCPPROXY_ALLOW_PRERELEASE_UPDATES=true force-includes prereleases even with
+// channel=stable. The spec leaves precedence open; env-wins is the safe
+// operator-override reading.
+//
+// Safe to call at any time (config hot-reload). When the background loop is
+// running, a change that leaves checking enabled (re-enable or channel
+// switch) triggers a prompt background re-check instead of waiting up to a
+// full checkInterval.
+func (c *Checker) SetConfig(enabled, includePrereleases bool) {
+	c.mu.Lock()
+	changed := c.cfgEnabled != enabled || c.cfgPrerelease != includePrereleases
+	c.cfgEnabled = enabled
+	c.cfgPrerelease = includePrereleases
+	started := c.started
+	ctx := c.startCtx
+	c.mu.Unlock()
+
+	if !changed {
+		return
+	}
+	if !enabled {
+		c.logger.Info("Update checks disabled by config (update_check.enabled=false)")
+		return
+	}
+	c.logger.Info("Update check config applied",
+		zap.Bool("enabled", enabled),
+		zap.Bool("include_prereleases", includePrereleases))
+	if started && ctx != nil && ctx.Err() == nil && c.Enabled() {
+		go c.check()
+	}
+}
+
+// Enabled reports whether update checking is effectively enabled: the
+// MCPPROXY_DISABLE_AUTO_UPDATE environment kill-switch wins over the config
+// value (Spec 079 FR-014 precedence: env > config).
+func (c *Checker) Enabled() bool {
+	if os.Getenv(EnvDisableAutoUpdate) == "true" {
+		return false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfgEnabled
+}
+
+// IncludePrereleases reports whether prerelease versions are offered:
+// MCPPROXY_ALLOW_PRERELEASE_UPDATES=true wins over the config channel
+// (Spec 079 FR-014 precedence: env > config); otherwise channel=rc opts in.
+func (c *Checker) IncludePrereleases() bool {
+	if os.Getenv(EnvAllowPrereleaseUpdates) == "true" {
+		return true
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfgPrerelease
 }
 
 // Start begins the background update checker.
@@ -85,8 +162,20 @@ func (c *Checker) Start(ctx context.Context) {
 		zap.String("version", c.version),
 		zap.Duration("interval", c.checkInterval))
 
-	// Perform initial check in a separate goroutine to avoid blocking startup
-	go c.check()
+	c.mu.Lock()
+	c.started = true
+	c.startCtx = ctx
+	c.mu.Unlock()
+
+	// Perform initial check in a separate goroutine to avoid blocking startup.
+	// When disabled by config the loop stays alive but idle, so a hot-reload
+	// flip to enabled=true resumes checking without a restart (Spec 079
+	// FR-012); SetConfig triggers the prompt re-check on that transition.
+	if c.Enabled() {
+		go c.check()
+	} else {
+		c.logger.Info("Update checks disabled by config; loop idle until re-enabled (update_check.enabled)")
+	}
 
 	// Start periodic checks
 	ticker := time.NewTicker(c.checkInterval)
@@ -98,14 +187,24 @@ func (c *Checker) Start(ctx context.Context) {
 			c.logger.Info("Update checker stopped")
 			return
 		case <-ticker.C:
-			c.check()
+			if c.Enabled() {
+				c.check()
+			}
 		}
 	}
 }
 
 // GetVersionInfo returns the current version information.
-// Thread-safe.
+// Thread-safe. Returns nil when update checking is disabled (config or env):
+// with no check running there is no meaningful update state, and FR-015
+// requires zero nudge on every surface — /api/v1/info then omits the update
+// object entirely, so the Web UI banner/badge and CLI annotations naturally
+// disappear.
 func (c *Checker) GetVersionInfo() *VersionInfo {
+	if !c.Enabled() {
+		return nil
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -227,7 +326,15 @@ func (c *Checker) SetCheckFunc(fn func() (*GitHubRelease, error)) {
 // CheckNow performs an immediate update check against GitHub.
 // This bypasses the periodic check interval and updates the cached version info.
 // Returns the updated VersionInfo after the check completes.
+// When update checking is disabled (update_check.enabled=false or
+// MCPPROXY_DISABLE_AUTO_UPDATE=true) no network check is performed and nil is
+// returned (Spec 079 FR-015: disabled means no check and no nudge anywhere,
+// including the manual /api/v1/info?refresh=true path).
 func (c *Checker) CheckNow() *VersionInfo {
+	if !c.Enabled() {
+		c.logger.Debug("Immediate update check skipped: update checking disabled")
+		return nil
+	}
 	c.logger.Debug("Performing immediate update check")
 	c.check()
 	return c.GetVersionInfo()

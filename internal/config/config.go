@@ -268,6 +268,15 @@ type Config struct {
 	// Observability settings (Spec 069): usage aggregate cache/persistence cadence.
 	Observability *ObservabilityConfig `json:"observability,omitempty" mapstructure:"observability"`
 
+	// Update-check settings (Spec 079 FR-012): config-file control of the
+	// background upgrade-awareness checker (internal/updatecheck). nil =
+	// enabled on the stable channel (existing default behavior). The existing
+	// environment switches keep working and WIN over these keys (FR-014):
+	// MCPPROXY_DISABLE_AUTO_UPDATE=true force-disables even when
+	// enabled=true, and MCPPROXY_ALLOW_PRERELEASE_UPDATES=true force-selects
+	// the rc channel even when channel=stable.
+	UpdateCheck *UpdateCheckConfig `json:"update_check,omitempty" mapstructure:"update-check"`
+
 	// Routing mode (Spec 031): how MCP tools are exposed to clients
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
@@ -1045,6 +1054,56 @@ func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
 	return c.StrictServerValidation
 }
 
+// Update-check release channels (Spec 079 FR-013). "stable" follows GitHub
+// releases/latest and never offers prereleases; "rc" additionally offers
+// prerelease tags (v*-rc.*, v*-next.*) published to the GitHub pre-release
+// channel — the config-file equivalent of MCPPROXY_ALLOW_PRERELEASE_UPDATES.
+const (
+	UpdateChannelStable = "stable"
+	UpdateChannelRC     = "rc"
+)
+
+// UpdateCheckConfig is the `update_check` config block (Spec 079 FR-012).
+// It gates the background update poll and the manual re-check
+// (/api/v1/info?refresh=true) and selects the release channel. Hot-reloadable:
+// the runtime re-applies it to the running checker on config reload.
+type UpdateCheckConfig struct {
+	// Enabled gates all update checking. Tri-state: nil/absent = enabled
+	// (default true, matching pre-079 behavior). When false, no network
+	// check is performed and no upgrade nudge appears on any surface
+	// (FR-015) — /api/v1/info omits the update object entirely.
+	Enabled *bool `json:"enabled,omitempty" mapstructure:"enabled"`
+
+	// Channel selects which releases are offered as updates: "stable"
+	// (default; prereleases never offered) or "rc" (prereleases included).
+	// Empty resolves to stable. Validated in ValidateDetailed.
+	Channel string `json:"channel,omitempty" mapstructure:"channel"`
+}
+
+// IsEnabled reports whether update checking is enabled by config. Nil-safe:
+// a missing block or missing key defaults to enabled (Spec 079 FR-012).
+func (u *UpdateCheckConfig) IsEnabled() bool {
+	if u == nil || u.Enabled == nil {
+		return true
+	}
+	return *u.Enabled
+}
+
+// ResolvedChannel returns the effective release channel, defaulting empty to
+// stable. Nil-safe.
+func (u *UpdateCheckConfig) ResolvedChannel() string {
+	if u == nil || u.Channel == "" {
+		return UpdateChannelStable
+	}
+	return u.Channel
+}
+
+// IncludePrereleases reports whether the configured channel offers
+// prereleases (channel=rc). Nil-safe.
+func (u *UpdateCheckConfig) IncludePrereleases() bool {
+	return u.ResolvedChannel() == UpdateChannelRC
+}
+
 // ObservabilityConfig controls the Spec 069 usage aggregate cadence plus the
 // MCP-32 metrics/tracing exporters.
 type ObservabilityConfig struct {
@@ -1592,6 +1651,16 @@ func (c *Config) ValidateDetailed() []ValidationError {
 				Message: fmt.Sprintf("invalid routing mode: %s (must be retrieve_tools, direct, or code_execution)", c.RoutingMode),
 			})
 		}
+	}
+
+	// Validate update-check channel (Spec 079 FR-012/FR-013). Empty is allowed
+	// (resolves to stable); only a non-empty unknown value is invalid.
+	if c.UpdateCheck != nil && c.UpdateCheck.Channel != "" &&
+		c.UpdateCheck.Channel != UpdateChannelStable && c.UpdateCheck.Channel != UpdateChannelRC {
+		errors = append(errors, ValidationError{
+			Field:   "update_check.channel",
+			Message: fmt.Sprintf("invalid channel: %s (must be %q or %q)", c.UpdateCheck.Channel, UpdateChannelStable, UpdateChannelRC),
+		})
 	}
 
 	// Validate global isolation mode (MCP-34.2). Empty is allowed (back-compat
