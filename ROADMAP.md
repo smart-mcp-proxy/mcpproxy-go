@@ -113,6 +113,10 @@ graph TD
     telemetry_machineid_dash["Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"]
     telemetry_snapshot_alerting["Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"]
   end
+  subgraph sg_tray_api_purity["Tray↔core decoupling: socket/REST API only, no config-file reads"]
+    tray_api_purity["Tray↔core decoupling: socket/REST API only, no config-file reads"]
+    tray_oauth_config_read["Go tray OAuth login path loads mcp_config.json directly (internal/tray/tray.go:~1734 config.LoadFromFile via GetConfigPath) — replace with REST (server config / OAuth endpoints), then remove GetConfigPath from the tray server interface if no consumers remain"]
+  end
   subgraph sg_planning_hygiene["Planning/docs truth automation"]
     planning_hygiene["Planning/docs truth automation"]
     hygiene_roadmap_github_check["gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links"]
@@ -171,7 +175,7 @@ graph TD
   class upgrade_nudge,connect_trust,telemetry_identity in_progress;
   class windows_tray,windows_tray_window in_review;
   class mcp_2026_upgrade blocked;
-  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust_undo,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,planning_hygiene,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract,security_gateway_cd,discovery_eval_harness todo;
+  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust_undo,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,tray_api_purity,tray_oauth_config_read,planning_hygiene,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract,security_gateway_cd,discovery_eval_harness todo;
   class marketplace,siem,paid_tier,sdk_v1_migration,sso parked;
 ```
 
@@ -188,6 +192,7 @@ graph TD
 | Action log / transparency — info at a glance | Todo | unassigned | P0 | — |  |  |
 | Analytics dashboard as default page | Todo | unassigned | P1 | 16/26 (62%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Registries — easier search + add-server | Todo | unassigned | P1 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
+| Tray↔core decoupling: socket/REST API only, no config-file reads | Todo | unassigned | P2 | — |  |  |
 | Planning/docs truth automation | Todo | unassigned | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo |  | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo |  | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
