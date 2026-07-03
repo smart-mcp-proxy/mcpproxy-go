@@ -164,6 +164,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "security")
 	}
 
+	// Update-check settings (Spec 079 FR-012 — hot-reloadable). ApplyConfig
+	// re-gates the running updatecheck.Checker when this field is reported,
+	// so an update_check.{enabled,channel} edit takes effect without a
+	// restart (and is not swallowed as "No configuration changes detected").
+	if !reflect.DeepEqual(oldCfg.UpdateCheck, newCfg.UpdateCheck) {
+		result.ChangedFields = append(result.ChangedFields, "update_check")
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false

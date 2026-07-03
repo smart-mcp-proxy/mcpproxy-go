@@ -409,6 +409,18 @@ export const useSystemStore = defineStore('system', () => {
       const response = await api.getInfo({ refresh: true })
       if (response.success && response.data) {
         info.value = response.data
+        // Spec 079 FR-015: when update checking is disabled
+        // (update_check.enabled=false or MCPPROXY_DISABLE_AUTO_UPDATE), the
+        // daemon performs no check and omits the update object — say so
+        // instead of a misleading "latest version" toast.
+        if (!response.data.update) {
+          addToast({
+            type: 'info',
+            title: 'Update checks are disabled',
+            message: 'Enable update_check in the configuration to check for updates.',
+          })
+          return { ok: true }
+        }
         updateCheckedAt.value = response.data.update?.checked_at ?? new Date().toISOString()
         const checkErr = response.data.update?.check_error
         if (checkErr) {

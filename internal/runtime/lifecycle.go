@@ -1056,6 +1056,10 @@ func (r *Runtime) ReloadConfiguration() error {
 		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
 	}
 
+	// Spec 079 FR-012: re-gate the update checker on the disk-reload path too
+	// (ApplyConfig covers the API path). SetConfig no-ops when unchanged.
+	r.applyUpdateCheckConfig(newSnapshot.Config)
+
 	go r.postConfigReload()
 
 	r.logger.Info("Configuration reload completed",

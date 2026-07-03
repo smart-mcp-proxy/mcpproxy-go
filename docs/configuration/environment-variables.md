@@ -111,14 +111,19 @@ The tray application doesn't read the config file directly. It launches the core
 | `MCPPROXY_TRAY_ENDPOINT` | Override tray-core communication endpoint (unix:///path/socket.sock or npipe:////./pipe/name) | Auto-detect |
 | `MCPPROXY_TRAY_INSPECT_ADDR` | Address for tray instrumentation/debug server | - |
 
-### Auto-Update Settings (Tray)
+### Auto-Update Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks | `false` |
-| `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install | `false` |
-| `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates | `false` |
-| `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS) | `false` |
+| `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks (core + tray) | `false` |
+| `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install (tray) | `false` |
+| `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates (core + tray) | `false` |
+| `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS tray) | `false` |
+
+Update checking can also be controlled from the config file via the
+`update_check` block (`enabled`, `channel`) — see
+[Version Updates](/features/version-updates). When both are set, the
+environment variables **win** over the config keys.
 
 ### Setting Tray Variables on macOS
 

@@ -4,6 +4,8 @@ package tray
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -905,4 +907,115 @@ func TestBuildConnectionURL(t *testing.T) {
 			t.Fatalf("expected empty string for invalid listen address, got %s", got)
 		}
 	})
+}
+
+// TestCheckForUpdates_GatedByCoreAPI verifies the tray's legacy GitHub
+// self-update check is gated by asking the CORE (via /api/v1/info), never by
+// reading mcp_config.json. Per the tray-holds-no-state rule the tray owns no
+// config; the core's update_check config is the single source of truth (Spec
+// 079 FR-015). The injected selfUpdateFunc stands in for the network path so
+// the test can assert whether it runs without hitting GitHub.
+func TestCheckForUpdates_GatedByCoreAPI(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_AUTO_UPDATE", "")
+
+	newApp := func(listenAddr string, state ConnectionState, ran *bool) *App {
+		return &App{
+			server:          &MockServerInterface{listenAddress: listenAddr},
+			logger:          zaptest.NewLogger(t).Sugar(),
+			version:         "1.0.0",
+			connectionState: state,
+			selfUpdateFunc:  func() { *ran = true },
+		}
+	}
+
+	t.Run("core reports update -> self-update runs", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"version":"v1.0.0","update":{"available":true,"latest_version":"v1.1.0","release_url":"https://example.com/release"}}}`))
+		}))
+		defer srv.Close()
+
+		ran := false
+		app := newApp(strings.TrimPrefix(srv.URL, "http://"), ConnectionStateConnected, &ran)
+		app.checkForUpdates()
+		if !ran {
+			t.Error("self-update did not run when the core reported an available update")
+		}
+	})
+
+	t.Run("core omits update -> skipped, no network call", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"version":"v1.0.0"}}`))
+		}))
+		defer srv.Close()
+
+		ran := false
+		app := newApp(strings.TrimPrefix(srv.URL, "http://"), ConnectionStateConnected, &ran)
+		app.checkForUpdates()
+		if ran {
+			t.Error("self-update ran even though the core omitted the update object (checking disabled)")
+		}
+	})
+
+	t.Run("core unreachable -> skipped", func(t *testing.T) {
+		// Stand up a server then close it so the address is routable-looking
+		// but the request fails: the tray must skip, not fall open.
+		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		addr := strings.TrimPrefix(srv.URL, "http://")
+		srv.Close()
+
+		ran := false
+		app := newApp(addr, ConnectionStateConnected, &ran)
+		app.checkForUpdates()
+		if ran {
+			t.Error("self-update ran even though the core was unreachable")
+		}
+	})
+
+	t.Run("not connected -> skipped", func(t *testing.T) {
+		ran := false
+		app := newApp(":8080", ConnectionStateDisconnected, &ran)
+		app.checkForUpdates()
+		if ran {
+			t.Error("self-update ran even though the tray was not connected to the core")
+		}
+	})
+}
+
+// TestCheckUpdateFromAPI_ClearsStaleNudgeWhenDisabled verifies that when the
+// core omits the update object from /api/v1/info (update checking disabled via
+// hot-reload, Spec 079 FR-015), the tray clears any previously shown update
+// state instead of leaving a stale "New version available" nudge until
+// restart.
+func TestCheckUpdateFromAPI_ClearsStaleNudgeWhenDisabled(t *testing.T) {
+	// Core stub: /api/v1/info without an update object (checker disabled).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"version":"v1.0.0"}}`))
+	}))
+	defer srv.Close()
+
+	app := &App{
+		server:          &MockServerInterface{listenAddress: strings.TrimPrefix(srv.URL, "http://")},
+		logger:          zaptest.NewLogger(t).Sugar(),
+		version:         "1.0.0",
+		connectionState: ConnectionStateConnected,
+		// Simulate a previously shown nudge.
+		updateAvailable:  true,
+		latestVersion:    "v1.1.0",
+		latestReleaseURL: "https://example.com/release",
+	}
+
+	app.checkUpdateFromAPI()
+
+	app.updateCheckMu.RLock()
+	defer app.updateCheckMu.RUnlock()
+	if app.updateAvailable {
+		t.Error("updateAvailable = true after core stopped reporting updates, want false")
+	}
+	if app.latestVersion != "" || app.latestReleaseURL != "" {
+		t.Errorf("stale update state retained: latestVersion=%q latestReleaseURL=%q",
+			app.latestVersion, app.latestReleaseURL)
+	}
 }

@@ -17,7 +17,8 @@ Complete reference for MCPProxy configuration file (`mcp_config.json`). This doc
 11. [Code Execution](#code-execution)
 12. [Feature Flags](#feature-flags)
 13. [Registries](#registries)
-14. [Complete Example](#complete-example)
+14. [Update Check](#update-check)
+15. [Complete Example](#complete-example)
 
 ---
 
@@ -1030,6 +1031,49 @@ restarts without a full re-scan.
 
 Both fields are optional, accept Go duration strings (e.g. `"10s"`, `"1m"`),
 and are hot-reloadable. Non-positive values fall back to the defaults.
+
+---
+
+## Update Check
+
+Controls the background upgrade-awareness checker (Spec 079). MCPProxy
+periodically queries GitHub Releases and surfaces "update available" on
+`mcpproxy status` / `doctor`, a startup log line, the Web UI (sidebar badge +
+dismissible banner), and the trays. Checks never block and fail silently when
+offline.
+
+```json
+{
+  "update_check": {
+    "enabled": true,
+    "channel": "stable"
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch for update checking. When `false`, no network check is performed (background poll *and* the manual `/api/v1/info?refresh=true` re-check) and no upgrade nudge appears on any surface — the `update` object is omitted from `/api/v1/info`. |
+| `channel` | string | `"stable"` | Release channel: `"stable"` (GitHub `releases/latest`; prereleases never offered) or `"rc"` (prerelease tags such as `v0.47.0-rc.1` included). |
+
+Both keys are optional and hot-reloadable: editing them (config file or
+`POST /api/v1/config/apply`) takes effect without a restart, and re-enabling
+triggers a prompt re-check.
+
+**Environment-variable precedence** — the existing switches keep working and
+**win over** the config keys (operator override):
+
+| Variable | Effect |
+|----------|--------|
+| `MCPPROXY_DISABLE_AUTO_UPDATE=true` | Force-disables update checking even when `update_check.enabled` is `true`. |
+| `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` | Force-selects the prerelease (`rc`) channel even when `update_check.channel` is `stable`. |
+
+The env vars only widen in one direction (disable checks / enable
+prereleases); they cannot force-enable checking that config disabled — with
+`update_check.enabled: false`, checks stay off regardless of environment.
+
+See [Version Updates](features/version-updates.md) for where updates are
+surfaced.
 
 ---
 
