@@ -684,6 +684,56 @@ Connect/disconnect are unchanged except that a permission-denied config access
 now returns **`403 Forbidden`** whose error body carries the remediation text
 (distinct from a generic `400` or a `404` not-found).
 
+Every connect/disconnect that modifies an **existing** config file first writes
+a timestamped backup next to it (`<config>.bak.<YYYYMMDD-HHMMSS>`, same
+directory and file mode) and returns its path as `backup_path` in the result.
+When two operations land in the same second, a numeric suffix keeps every
+backup distinct (`<config>.bak.<YYYYMMDD-HHMMSS>-1`, `-2`, …) — a backup is
+never overwritten. Backups accumulate one per operation and are **never
+deleted automatically**; there is no retention bound, so an undo (below) can
+always find its backup.
+
+#### GET /api/v1/connect/{client}/preview
+
+Returns the exact change a subsequent connect would make — target config path,
+format (`json`/`toml`), server key, entry name, and the exact entry contents —
+**without** modifying the file or creating a backup (Spec 078 US1). An embedded
+API key is masked in the payload (`contains_api_key` flags that a credential is
+written); `entry_exists` distinguishes a create from an overwrite of a
+same-named entry. Reads the config on demand to classify create-vs-overwrite,
+so on macOS this may raise an App-Data prompt; a denial returns `403` +
+remediation. Optional `?server_name=` mirrors the name a subsequent connect
+would use.
+
+#### POST /api/v1/connect/{client}/undo
+
+One-click undo of the immediately-preceding connect (Spec 078 US3). Body:
+
+```json
+{ "server_name": "mcpproxy", "backup_path": "<backup_path from the connect result>" }
+```
+
+- **`backup_path` set** — restores the config **byte-for-byte** from that
+  backup. This is the only revert that can bring back a pre-existing
+  same-named entry that a `force=true` connect overwrote (surgical
+  `DELETE /connect/{client}` cannot).
+- **`backup_path` empty** — the connect created the file (its result carried no
+  `backup_path`); undo deletes the created file, restoring the "no file" state.
+
+Safety semantics:
+
+- Undo **refuses with `409 Conflict`** when the config changed since the
+  connect (it verifies the current file is byte-identical to what that connect
+  wrote) — it never clobbers later edits. Fall back to
+  `DELETE /connect/{client}` for a surgical entry removal.
+- A vanished backup returns `404`; a backup path that is not a
+  `<config>.bak.*` sibling of that client's config returns `400`.
+- Undo takes its **own safety backup** of the current file before restoring or
+  deleting, returned as `backup_path` in the result
+  (`action` = `restored` or `deleted`).
+- A macOS App-Data denial returns `403` + remediation, like the other
+  per-client routes.
+
 ##### macOS App Data privacy & Connect
 
 On macOS, client configs (Claude Desktop, Cursor, VS Code, …) live under another

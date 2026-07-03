@@ -73,10 +73,16 @@
                 :preview="previews[c.id]"
                 :preview-busy="previewBusy[c.id]"
                 :preview-error="previewErrors[c.id]"
+                :undo-preview="undoPreviews[c.id]"
+                :undo-open="undoOpen[c.id]"
+                :undo-busy="undoBusy[c.id]"
                 @copy-backup="copyBackupPath"
                 @connect="startConnect"
                 @confirm="confirmConnect"
                 @cancel="cancelPreview"
+                @undo="startUndo"
+                @confirm-undo="confirmUndo"
+                @cancel-undo="cancelUndo"
               />
             </div>
 
@@ -93,10 +99,16 @@
                 :preview="previews[c.id]"
                 :preview-busy="previewBusy[c.id]"
                 :preview-error="previewErrors[c.id]"
+                :undo-preview="undoPreviews[c.id]"
+                :undo-open="undoOpen[c.id]"
+                :undo-busy="undoBusy[c.id]"
                 @copy-backup="copyBackupPath"
                 @connect="startConnect"
                 @confirm="confirmConnect"
                 @cancel="cancelPreview"
+                @undo="startUndo"
+                @confirm-undo="confirmUndo"
+                @cancel-undo="cancelUndo"
               />
             </div>
 
@@ -117,10 +129,16 @@
                   :preview="previews[c.id]"
                   :preview-busy="previewBusy[c.id]"
                   :preview-error="previewErrors[c.id]"
+                  :undo-preview="undoPreviews[c.id]"
+                  :undo-open="undoOpen[c.id]"
+                  :undo-busy="undoBusy[c.id]"
                   @copy-backup="copyBackupPath"
                   @connect="startConnect"
                   @confirm="confirmConnect"
                   @cancel="cancelPreview"
+                  @undo="startUndo"
+                  @confirm-undo="confirmUndo"
+                  @cancel-undo="cancelUndo"
                 />
               </div>
             </details>
@@ -553,6 +571,13 @@ const copiedBackupClient = ref<string | null>(null)
 const previews = reactive<Record<string, ConnectPreview>>({})
 const previewBusy = reactive<Record<string, boolean>>({})
 const previewErrors = reactive<Record<string, string>>({})
+// Spec 078 US3: session-scoped one-click undo. undoPreviews snapshots the
+// preview the user confirmed, so the revert panel can show the change about to
+// be reverted (FR-009) without another config read. undoOpen[id] shows the
+// confirm panel; the actual restore only happens on its confirm button.
+const undoPreviews = reactive<Record<string, ConnectPreview>>({})
+const undoOpen = reactive<Record<string, boolean>>({})
+const undoBusy = reactive<Record<string, boolean>>({})
 const addServerOpen = ref(false)
 const serverAddedJustNow = ref(false)
 
@@ -736,6 +761,10 @@ watch(() => props.show, async (open) => {
     // confirm/cancel panel from a previous wizard session.
     for (const k of Object.keys(previews)) delete previews[k]
     for (const k of Object.keys(previewErrors)) delete previewErrors[k]
+    // Spec 078 US3: undo is session-scoped (it reverts the connect performed
+    // in THIS wizard session) — a reopened wizard starts without undo state.
+    for (const k of Object.keys(undoPreviews)) delete undoPreviews[k]
+    for (const k of Object.keys(undoOpen)) delete undoOpen[k]
     await onboarding.fetchState()
     await Promise.all([
       fetchClients(),
@@ -1093,13 +1122,14 @@ function cancelPreview(clientId: string) {
 // Confirm proceeds; an existing same-named entry implies force=true (the user
 // saw the overwrite warning in the preview).
 async function confirmConnect(clientId: string) {
-  const force = previews[clientId]?.entry_exists === true
+  const preview = previews[clientId]
+  const force = preview?.entry_exists === true
   delete previews[clientId]
   delete previewErrors[clientId]
-  await connectOne(clientId, force)
+  await connectOne(clientId, force, preview)
 }
 
-async function connectOne(clientId: string, force = false) {
+async function connectOne(clientId: string, force = false, preview?: ConnectPreview) {
   busyClients[clientId] = true
   connectMessage.value = ''
   try {
@@ -1110,6 +1140,10 @@ async function connectOne(clientId: string, force = false) {
       // Spec 078 US2: keep the backup path so the row can surface it; an
       // empty/absent backup_path on success means no prior file existed.
       connectBackups[clientId] = res.data.backup_path || null
+      // Spec 078 US3: remember what was written so the Undo panel can show
+      // the change it is about to revert (FR-009).
+      if (preview) undoPreviews[clientId] = preview
+      delete undoOpen[clientId]
       await fetchClients()
       // Spec 046 — record connect-step completion for telemetry funnel.
       // Only the first successful connect transitions the status; subsequent
@@ -1148,6 +1182,54 @@ async function copyBackupPath(clientId: string) {
     }, 2000)
   } catch {
     // Clipboard unavailable: the full path is already rendered in the row.
+  }
+}
+
+// Spec 078 US3 / FR-009: Undo shows the change to be reverted first; the
+// restore only runs from the panel's confirm button.
+function startUndo(clientId: string) {
+  undoOpen[clientId] = true
+}
+
+function cancelUndo(clientId: string) {
+  delete undoOpen[clientId]
+}
+
+async function confirmUndo(clientId: string) {
+  undoBusy[clientId] = true
+  connectMessage.value = ''
+  try {
+    const res = await api.undoConnectClient(clientId, 'mcpproxy', connectBackups[clientId] ?? null)
+    if (res.success && res.data) {
+      connectMessageOk.value = true
+      connectMessage.value = res.data.message || `Undid the ${clientId} connect`
+      delete connectBackups[clientId]
+      delete undoPreviews[clientId]
+      delete undoOpen[clientId]
+      await fetchClients()
+      // Telemetry (FR-016): connect_step completion is a one-time funnel
+      // transition and is deliberately NOT retracted on undo — the user did
+      // complete the step; undo is a reversal of the file change, not of the
+      // funnel event.
+      await onboarding.fetchState()
+      systemStore.addToast({
+        type: 'info',
+        title: 'Connect undone',
+        message: `${clientId} restored to its pre-connect state`,
+      })
+    } else {
+      // Honest refusal (e.g. the config changed since the connect): show the
+      // backend's message and keep the row's state so the user can decide.
+      connectMessageOk.value = false
+      connectMessage.value = res.error ?? 'Failed to undo the connect'
+      delete undoOpen[clientId]
+    }
+  } catch (err) {
+    connectMessageOk.value = false
+    connectMessage.value = (err as Error).message
+    delete undoOpen[clientId]
+  } finally {
+    undoBusy[clientId] = false
   }
 }
 
@@ -1218,12 +1300,18 @@ const ClientRow: FunctionalComponent<
     preview?: ConnectPreview
     previewBusy?: boolean
     previewError?: string
+    undoPreview?: ConnectPreview
+    undoOpen?: boolean
+    undoBusy?: boolean
   },
   {
     connect: (id: string) => void
     'copy-backup': (id: string) => void
     confirm: (id: string) => void
     cancel: (id: string) => void
+    undo: (id: string) => void
+    'confirm-undo': (id: string) => void
+    'cancel-undo': (id: string) => void
   }
 > = (props, { emit: rowEmit }) => {
   const c = props.client
@@ -1264,6 +1352,19 @@ const ClientRow: FunctionalComponent<
   // Spec 078 US2 / FR-006: after a connect performed in this wizard session,
   // surface the timestamped backup (or the honest "no prior file" case) right
   // in the row. undefined = no connect happened for this client yet.
+  // Spec 078 US3: the same line carries the one-click Undo affordance —
+  // reverting is offered exactly where the change was reported.
+  const undoButton = h(
+    'button',
+    {
+      class: 'btn btn-ghost btn-xs shrink-0 text-error',
+      disabled: props.undoBusy,
+      'data-test': `client-undo-${c.id}`,
+      title: 'Revert this connect: restore the config to its pre-connect state',
+      onClick: () => rowEmit('undo', c.id),
+    },
+    'Undo'
+  )
   const backupLine =
     props.backupPath !== undefined
       ? h(
@@ -1278,20 +1379,100 @@ const ClientRow: FunctionalComponent<
                   'A backup of your previous config was saved to ',
                   h('code', { class: 'font-mono', title: props.backupPath }, props.backupPath),
                 ]),
-                h(
-                  'button',
-                  {
-                    class: 'btn btn-ghost btn-xs shrink-0',
-                    'data-test': `client-copy-backup-${c.id}`,
-                    title: 'Copy the backup path to the clipboard',
-                    onClick: () => rowEmit('copy-backup', c.id),
-                  },
-                  props.copiedBackup ? 'Copied ✓' : 'Copy path'
-                ),
+                h('span', { class: 'flex items-center shrink-0' }, [
+                  h(
+                    'button',
+                    {
+                      class: 'btn btn-ghost btn-xs shrink-0',
+                      'data-test': `client-copy-backup-${c.id}`,
+                      title: 'Copy the backup path to the clipboard',
+                      onClick: () => rowEmit('copy-backup', c.id),
+                    },
+                    props.copiedBackup ? 'Copied ✓' : 'Copy path'
+                  ),
+                  undoButton,
+                ]),
               ]
-            : 'No prior config file existed, so no backup was needed.'
+            : [
+                h(
+                  'span',
+                  { class: 'min-w-0 leading-relaxed' },
+                  'No prior config file existed, so no backup was needed.'
+                ),
+                undoButton,
+              ]
         )
       : null
+
+  // Spec 078 US3 / FR-009: before reverting, show the change that will be
+  // undone (the entry the confirmed preview wrote). Confirm/Keep gate the
+  // actual restore; Keep changes nothing.
+  const up = props.undoPreview
+  const undoPanel = props.undoOpen
+    ? h(
+        'div',
+        {
+          class: 'mt-2 rounded-lg bg-base-200/60 border border-error/40 px-3 py-2 space-y-2',
+          'data-test': `client-undo-panel-${c.id}`,
+        },
+        [
+          h(
+            'p',
+            { class: 'text-xs opacity-70 leading-relaxed' },
+            props.backupPath
+              ? [
+                  'Undo restores ',
+                  h('code', { class: 'font-mono text-[11px] break-all' }, up?.config_path ?? c.config_path),
+                  ' to its exact pre-connect state from the backup (a safety copy of the current file is saved first).',
+                ]
+              : [
+                  'Undo removes ',
+                  h('code', { class: 'font-mono text-[11px] break-all' }, up?.config_path ?? c.config_path),
+                  ' — it did not exist before mcpproxy connected (a safety copy is saved first).',
+                ]
+          ),
+          up
+            ? h('div', {}, [
+                h(
+                  'div',
+                  { class: 'text-[11px] font-semibold uppercase tracking-wider text-error/80 mb-1' },
+                  '− will be reverted'
+                ),
+                h(
+                  'pre',
+                  {
+                    class: 'text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-error px-2 py-1.5 leading-relaxed',
+                    'data-test': `client-undo-entry-${c.id}`,
+                  },
+                  up.entry_text
+                ),
+              ])
+            : null,
+          h('div', { class: 'flex items-center gap-2 pt-0.5' }, [
+            h(
+              'button',
+              {
+                class: 'btn btn-error btn-xs',
+                disabled: props.undoBusy,
+                'data-test': `client-undo-confirm-${c.id}`,
+                onClick: () => rowEmit('confirm-undo', c.id),
+              },
+              props.undoBusy ? [h('span', { class: 'loading loading-spinner loading-xs' })] : ['Undo connect']
+            ),
+            h(
+              'button',
+              {
+                class: 'btn btn-ghost btn-xs',
+                disabled: props.undoBusy,
+                'data-test': `client-undo-cancel-${c.id}`,
+                onClick: () => rowEmit('cancel-undo', c.id),
+              },
+              'Keep'
+            ),
+          ]),
+        ]
+      )
+    : null
 
   // Spec 078 US1 / FR-001,003,004: preview the exact change before writing.
   // Only this entry is added; everything else in the file is untouched. The
@@ -1386,6 +1567,7 @@ const ClientRow: FunctionalComponent<
 
   const children = [row]
   if (backupLine) children.push(backupLine)
+  if (undoPanel) children.push(undoPanel)
   if (previewPanel) children.push(previewPanel)
   if (previewErrorLine) children.push(previewErrorLine)
   return h(
@@ -1405,6 +1587,9 @@ ClientRow.props = {
   preview: { type: Object, default: undefined },
   previewBusy: { type: Boolean, default: false },
   previewError: { type: String, default: undefined },
+  undoPreview: { type: Object, default: undefined },
+  undoOpen: { type: Boolean, default: false },
+  undoBusy: { type: Boolean, default: false },
 }
-ClientRow.emits = ['connect', 'copy-backup', 'confirm', 'cancel']
+ClientRow.emits = ['connect', 'copy-backup', 'confirm', 'cancel', 'undo', 'confirm-undo', 'cancel-undo']
 </script>

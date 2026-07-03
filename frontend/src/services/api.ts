@@ -1188,6 +1188,21 @@ class APIService {
     })
   }
 
+  // Spec 078 US3: one-click undo of the immediately-preceding connect.
+  // backupPath is the backup_path that connect returned (null = no prior file
+  // existed, so undo removes the file connect created). The backend refuses
+  // with 409 when the config changed since the connect (never clobbers edits).
+  async undoConnectClient(
+    clientId: string,
+    serverName = 'mcpproxy',
+    backupPath: string | null = null
+  ): Promise<APIResponse<ConnectResult>> {
+    return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}/undo`, {
+      method: 'POST',
+      body: JSON.stringify({ server_name: serverName, backup_path: backupPath ?? '' }),
+    })
+  }
+
   async disconnectClient(clientId: string, serverName = 'mcpproxy'): Promise<APIResponse<ConnectResult>> {
     return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'DELETE',

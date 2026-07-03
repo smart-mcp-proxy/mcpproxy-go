@@ -2665,6 +2665,18 @@ components:
         profile:
           type: string
       type: object
+    httpapi.UndoConnectRequest:
+      properties:
+        backup_path:
+          description: |-
+            BackupPath is the backup_path returned by the preceding connect for this
+            client. Empty means the connect created the file (no prior file existed),
+            so undo removes the created file.
+          type: string
+        server_name:
+          description: Defaults to "mcpproxy"
+          type: string
+      type: object
     management.BulkOperationResult:
       properties:
         errors:
@@ -3730,6 +3742,75 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Preview the change a connect would make (no write)
+      tags:
+      - connect
+  /api/v1/connect/{client}/undo:
+    post:
+      description: |-
+        Reverts the connect that produced the given backup_path (Spec 078 US3):
+        restores the client config byte-for-byte from that backup, or — when
+        backup_path is empty because the connect created the file — deletes the
+        created file. Refuses with 409 when the config changed since the connect
+        (undo never clobbers later edits; use DELETE /connect/{client} for a
+        surgical entry removal instead). Takes its own safety backup first;
+        its path is returned as backup_path in the result.
+      parameters:
+      - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
+          codex, gemini, opencode)
+        in: path
+        name: client
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.UndoConnectRequest'
+        description: Undo parameters (server_name, backup_path from the preceding
+          connect)
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.APIResponse'
+          description: ConnectResult (action restored|deleted)
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request (e.g. backup path not a backup of this client's
+            config)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Permission denied (macOS App-Data block)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Unknown client or backup no longer exists
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Config changed since connect; undo refused
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Undo a connect, restoring the pre-connect config
       tags:
       - connect
   /api/v1/diagnostics:

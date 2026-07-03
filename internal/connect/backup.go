@@ -1,15 +1,27 @@
 package connect
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 )
 
+// backupNow is the clock seam for backup naming (overridden in tests to force
+// same-second collisions deterministically).
+var backupNow = time.Now
+
 // backupFile creates a timestamped backup of the given file.
 // Returns the backup path, or empty string if the source file does not exist.
+//
+// Backup names have second granularity (<config>.bak.<YYYYMMDD-HHMMSS>), so two
+// operations within one second would collide and the second would silently
+// overwrite the first — destroying the very backup a later undo needs (Spec 078
+// US3). On collision a numeric suffix is appended (-1, -2, …), keeping the
+// timestamped name as a prefix so existing backups still sort/glob together.
 //
 // All failure paths wrap their OS cause with %w, so a permission denial here
 // (e.g. macOS TCC App-Data) preserves fs.ErrPermission up the call chain and is
@@ -24,18 +36,26 @@ func backupFile(path string) (string, error) {
 		return "", fmt.Errorf("stat %s: %w", path, err)
 	}
 
-	ts := time.Now().Format("20060102-150405")
-	backupPath := fmt.Sprintf("%s.bak.%s", path, ts)
-
 	src, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("open source for backup: %w", err)
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(backupPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
-	if err != nil {
-		return "", fmt.Errorf("create backup file: %w", err)
+	// Uniqueness on same-second collision: O_EXCL guarantees a fresh file, so an
+	// existing backup is never truncated even under a create/create race.
+	ts := backupNow().Format("20060102-150405")
+	backupPath := fmt.Sprintf("%s.bak.%s", path, ts)
+	var dst *os.File
+	for n := 1; ; n++ {
+		dst, err = os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode())
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("create backup file: %w", err)
+		}
+		backupPath = fmt.Sprintf("%s.bak.%s-%d", path, ts, n)
 	}
 	defer dst.Close()
 

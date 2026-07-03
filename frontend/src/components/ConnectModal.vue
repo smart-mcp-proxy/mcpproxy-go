@@ -240,6 +240,69 @@
         >
           No prior config file existed, so no backup was needed.
         </div>
+        <!-- Spec 078 US3: one-click undo of the connect just performed (session-
+             scoped). Clicking Undo first shows the change to be reverted
+             (FR-009); the restore only runs on the panel's confirm. -->
+        <div
+          v-if="resultSuccess && lastConnect && !undoPanelOpen"
+          data-test="connect-undo-offer"
+          class="mt-2 flex items-center justify-between gap-2 rounded-lg bg-base-200 px-3 py-2"
+        >
+          <span class="text-xs opacity-70">Changed your mind? You can revert this connect.</span>
+          <button
+            data-test="connect-undo"
+            @click="undoPanelOpen = true"
+            class="btn btn-ghost btn-xs shrink-0 text-error"
+            :disabled="undoBusy"
+            title="Revert this connect: restore the config to its pre-connect state"
+          >
+            Undo
+          </button>
+        </div>
+        <div
+          v-if="resultSuccess && lastConnect && undoPanelOpen"
+          data-test="connect-undo-panel"
+          class="mt-2 rounded-lg bg-base-200/60 border border-error/40 px-3 py-2 space-y-2"
+        >
+          <p class="text-xs opacity-70 leading-relaxed">
+            <template v-if="lastConnect.backupPath">
+              Undo restores
+              <code class="font-mono text-[11px] break-all">{{ lastConnect.configPath }}</code>
+              to its exact pre-connect state from the backup (a safety copy of the current file is saved first).
+            </template>
+            <template v-else>
+              Undo removes
+              <code class="font-mono text-[11px] break-all">{{ lastConnect.configPath }}</code>
+              — it did not exist before mcpproxy connected (a safety copy is saved first).
+            </template>
+          </p>
+          <div v-if="lastConnect.preview">
+            <div class="text-[11px] font-semibold uppercase tracking-wider text-error/80 mb-1">− will be reverted</div>
+            <pre
+              data-test="connect-undo-entry"
+              class="text-[11px] font-mono whitespace-pre-wrap break-all rounded bg-base-300/60 border-l-2 border-error px-2 py-1.5 leading-relaxed"
+            >{{ lastConnect.preview.entry_text }}</pre>
+          </div>
+          <div class="flex items-center gap-2 pt-0.5">
+            <button
+              data-test="connect-undo-confirm"
+              @click="confirmUndo"
+              class="btn btn-error btn-xs"
+              :disabled="undoBusy"
+            >
+              <span v-if="undoBusy" class="loading loading-spinner loading-xs"></span>
+              <span v-else>Undo connect</span>
+            </button>
+            <button
+              data-test="connect-undo-cancel"
+              @click="undoPanelOpen = false"
+              class="btn btn-ghost btn-xs"
+              :disabled="undoBusy"
+            >
+              Keep
+            </button>
+          </div>
+        </div>
         <!-- Spec 078 US2 / SC-005: Connect All renders EVERY successful
              client's backup outcome — one line per client, each with its own
              copy affordance — instead of only the last connect's path. -->
@@ -341,6 +404,19 @@ const copiedClient = ref<string | null>(null)
 const previews = ref<Record<string, ConnectPreview>>({})
 const previewLoading = reactive<Record<string, boolean>>({})
 const previewError = ref<Record<string, string>>({})
+// Spec 078 US3: the connect performed last in THIS modal session, so a one-
+// click Undo can revert it. preview is the confirmed preview snapshot (what
+// was written), shown again in the undo panel before reverting (FR-009).
+// null = no undoable connect (none yet, undone, disconnected, or bulk run).
+const lastConnect = ref<{
+  id: string
+  serverName: string
+  configPath: string
+  backupPath: string | null
+  preview?: ConnectPreview
+} | null>(null)
+const undoPanelOpen = ref(false)
+const undoBusy = ref(false)
 
 // MCP-2952: `GET /api/v1/connect` is stat-only (#706/MCP-2829) and reports
 // connected=false for every client. Merge the content-resolved
@@ -457,20 +533,34 @@ function clearPreview(clientId: string) {
 // Confirm proceeds with the connect. If an entry already exists, confirming
 // implies force=true (the user saw the overwrite warning in the preview).
 async function confirmConnect(clientId: string) {
-  const force = previews.value[clientId]?.entry_exists === true
+  const preview = previews.value[clientId]
+  const force = preview?.entry_exists === true
   bulkBackups.value = []
   copiedBulkClient.value = null
-  await connect(clientId, force)
+  const outcome = await connect(clientId, force)
+  // Spec 078 US3: a successful single connect becomes undoable in this session.
+  if (outcome.ok) {
+    lastConnect.value = {
+      id: clientId,
+      serverName: 'mcpproxy',
+      configPath: outcome.configPath,
+      backupPath: outcome.backupPath,
+      preview,
+    }
+    undoPanelOpen.value = false
+  }
   clearPreview(clientId)
 }
 
 // Returns the outcome so connectAll can accumulate per-client backup results
 // (ok=true with backupPath string = backup created; null = no prior file).
-async function connect(clientId: string, force = false): Promise<{ ok: boolean; backupPath: string | null }> {
+async function connect(clientId: string, force = false): Promise<{ ok: boolean; backupPath: string | null; configPath: string }> {
   loading.clients[clientId] = true
   resultMessage.value = ''
   resultBackupPath.value = undefined
   copiedBackup.value = false
+  lastConnect.value = null
+  undoPanelOpen.value = false
 
   try {
     const response = await api.connectClient(clientId, 'mcpproxy', force)
@@ -486,7 +576,7 @@ async function connect(clientId: string, force = false): Promise<{ ok: boolean; 
         title: 'Client Connected',
         message: `MCPProxy registered in ${clientId}`,
       })
-      return { ok: true, backupPath }
+      return { ok: true, backupPath, configPath: response.data.config_path }
     }
     resultMessage.value = response.error || 'Failed to connect'
     resultSuccess.value = false
@@ -500,7 +590,43 @@ async function connect(clientId: string, force = false): Promise<{ ok: boolean; 
   } finally {
     loading.clients[clientId] = false
   }
-  return { ok: false, backupPath: null }
+  return { ok: false, backupPath: null, configPath: '' }
+}
+
+// Spec 078 US3: revert the last connect performed in this modal session. The
+// backend refuses (409) when the config changed since the connect — surfaced
+// honestly as the error message; it never clobbers later edits.
+async function confirmUndo() {
+  const target = lastConnect.value
+  if (!target) return
+  undoBusy.value = true
+  try {
+    const response = await api.undoConnectClient(target.id, target.serverName, target.backupPath)
+    if (response.success && response.data) {
+      resultMessage.value = response.data.message || `Reverted the ${target.id} connect`
+      resultSuccess.value = true
+      resultBackupPath.value = undefined
+      lastConnect.value = null
+      undoPanelOpen.value = false
+      await fetchClients()
+      void onboarding.fetchState()
+      systemStore.addToast({
+        type: 'info',
+        title: 'Connect undone',
+        message: `${target.id} restored to its pre-connect state`,
+      })
+    } else {
+      resultMessage.value = response.error || 'Failed to undo the connect'
+      resultSuccess.value = false
+      undoPanelOpen.value = false
+    }
+  } catch (err) {
+    resultMessage.value = err instanceof Error ? err.message : 'Unknown error'
+    resultSuccess.value = false
+    undoPanelOpen.value = false
+  } finally {
+    undoBusy.value = false
+  }
 }
 
 async function disconnect(clientId: string) {
@@ -510,6 +636,9 @@ async function disconnect(clientId: string) {
   copiedBackup.value = false
   bulkBackups.value = []
   copiedBulkClient.value = null
+  // A disconnect supersedes any pending session undo (the entry is gone).
+  lastConnect.value = null
+  undoPanelOpen.value = false
 
   try {
     const client = clients.value.find(c => c.id === clientId)
@@ -657,6 +786,8 @@ function close() {
   copiedBulkClient.value = null
   previews.value = {}
   previewError.value = {}
+  lastConnect.value = null
+  undoPanelOpen.value = false
   emit('close')
 }
 
@@ -674,6 +805,8 @@ watch(() => props.show, (newVal) => {
     copiedBulkClient.value = null
     previews.value = {}
     previewError.value = {}
+    lastConnect.value = null
+    undoPanelOpen.value = false
   }
 })
 </script>
