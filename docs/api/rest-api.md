@@ -711,14 +711,20 @@ would use.
 One-click undo of the immediately-preceding connect (Spec 078 US3). Body:
 
 ```json
-{ "server_name": "mcpproxy", "backup_path": "<backup_path from the connect result>" }
+{ "server_name": "mcpproxy", "backup_name": "<basename of backup_path from the connect result>" }
 ```
 
-- **`backup_path` set** — restores the config **byte-for-byte** from that
+`backup_name` is the **bare filename** of the backup the connect returned in
+`backup_path` — a name, never a path. The server resolves the full path itself
+inside that client's own config directory (derived from the client registry, not
+the request), so a caller-supplied value can never contribute a directory
+component and cannot escape the config dir (defense against path injection).
+
+- **`backup_name` set** — restores the config **byte-for-byte** from that
   backup. This is the only revert that can bring back a pre-existing
   same-named entry that a `force=true` connect overwrote (surgical
   `DELETE /connect/{client}` cannot).
-- **`backup_path` empty** — the connect created the file (its result carried no
+- **`backup_name` empty** — the connect created the file (its result carried no
   `backup_path`); undo deletes the created file, restoring the "no file" state.
 
 Safety semantics:
@@ -727,8 +733,9 @@ Safety semantics:
   connect (it verifies the current file is byte-identical to what that connect
   wrote) — it never clobbers later edits. Fall back to
   `DELETE /connect/{client}` for a surgical entry removal.
-- A vanished backup returns `404`; a backup path that is not a
-  `<config>.bak.*` sibling of that client's config returns `400`.
+- A vanished backup returns `404`; a `backup_name` that is a path (contains a
+  directory separator) or does not match `<config>.bak.*` for that client
+  returns `400`.
 - Undo takes its **own safety backup** of the current file before restoring or
   deleting, returned as `backup_path` in the result
   (`action` = `restored` or `deleted`).

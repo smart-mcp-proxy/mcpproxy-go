@@ -10,13 +10,16 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Undo reverts the connect that produced backupPath, restoring the client
-// config to its exact pre-connect state (Spec 078 US3 / FR-008):
+// Undo reverts the connect that produced the named backup, restoring the client
+// config to its exact pre-connect state (Spec 078 US3 / FR-008). backupName is
+// the bare filename (filepath.Base) of the backup the connect returned, NOT a
+// path — undo resolves the full path itself against the client's own config
+// directory (see the resolution/validation below):
 //
-//   - backupPath != "": the config is restored byte-for-byte from that backup —
+//   - backupName != "": the config is restored byte-for-byte from that backup —
 //     this is the only revert that can bring back a pre-existing same-named
 //     entry a force-connect overwrote (surgical disconnect cannot).
-//   - backupPath == "": the preceding connect created the file (no prior file
+//   - backupName == "": the preceding connect created the file (no prior file
 //     existed, ConnectResult.backup_path was empty); undo deletes the file so
 //     the pre-connect "no file" state is restored.
 //
@@ -35,7 +38,7 @@ import (
 // address / API key / require_mcp_auth changed since the connect: the entry the
 // service would write today no longer matches the one on disk, so mcpproxy can
 // no longer prove the file is untouched.
-func (s *Service) Undo(clientID, serverName, backupPath string) (*ConnectResult, error) {
+func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult, error) {
 	client := FindClient(clientID)
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
@@ -51,18 +54,24 @@ func (s *Service) Undo(clientID, serverName, backupPath string) (*ConnectResult,
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	// The backup must be a real backup OF THIS client's config, living beside it:
-	// undo must not become an arbitrary-file-restore primitive for API callers.
-	// A prefix-only check is not enough — a path like "<cfg>.bak.x/../../secret"
-	// keeps the prefix yet escapes the directory, so anchor on the cleaned path's
-	// parent directory and basename (both traversal-proof).
-	if backupPath != "" {
-		cleaned := filepath.Clean(backupPath)
-		if filepath.Dir(cleaned) != filepath.Dir(cfgPath) ||
-			!strings.HasPrefix(filepath.Base(cleaned), filepath.Base(cfgPath)+".bak.") {
-			return nil, fmt.Errorf("invalid backup path %q: not a backup of %s", backupPath, cfgPath)
+	// Resolve the backup path entirely server-side: the request carries only a
+	// bare FILENAME (backupName), never a path. Undo joins it with THIS client's
+	// own config directory — derived from the client registry, never from the
+	// request — so a client-supplied value can never contribute a directory
+	// component. That makes traversal impossible by construction (undo must not
+	// become an arbitrary-file-restore primitive): we reject anything whose
+	// filepath.Base is not identical to the input, and require the strict
+	// "<config-basename>.bak." prefix the connect write produced.
+	backupPath := ""
+	if backupName != "" {
+		base := filepath.Base(backupName)
+		if base != backupName {
+			return nil, fmt.Errorf("invalid backup name %q: must be a bare filename, not a path", backupName)
 		}
-		backupPath = cleaned
+		if !strings.HasPrefix(base, filepath.Base(cfgPath)+".bak.") {
+			return nil, fmt.Errorf("invalid backup name %q: not a backup of %s", backupName, filepath.Base(cfgPath))
+		}
+		backupPath = filepath.Join(filepath.Dir(cfgPath), base)
 	}
 
 	res, err := s.undo(client, cfgPath, serverName, backupPath)

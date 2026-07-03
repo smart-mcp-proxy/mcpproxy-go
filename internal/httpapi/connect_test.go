@@ -426,7 +426,7 @@ func TestHandleUndoConnectClient_RestoresFile(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res.BackupPath)
 
-	body, _ := json.Marshal(UndoConnectRequest{ServerName: "mcpproxy", BackupPath: res.BackupPath})
+	body, _ := json.Marshal(UndoConnectRequest{ServerName: "mcpproxy", BackupName: filepath.Base(res.BackupPath)})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
@@ -458,13 +458,19 @@ func TestHandleUndoConnectClient_ConflictWhenDrifted(t *testing.T) {
 	svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
 	srv.SetConnectService(svc)
 
+	// Pre-write a config so the connect produces a real (non-empty) backup — the
+	// realistic restore-drift path.
+	cfgPath := connect.ConfigPath("claude-code", home)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cfgPath), 0o755))
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`{"mcpServers":{"other":{"url":"http://x"}}}`), 0o644))
+
 	res, err := svc.Connect("claude-code", "mcpproxy", false)
 	require.NoError(t, err)
-	cfgPath := res.ConfigPath
+	require.NotEmpty(t, res.BackupPath)
 	drifted := []byte(`{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp"},"mine":{"url":"http://y"}}}`)
 	require.NoError(t, os.WriteFile(cfgPath, drifted, 0o644))
 
-	body, _ := json.Marshal(UndoConnectRequest{ServerName: "mcpproxy", BackupPath: res.BackupPath})
+	body, _ := json.Marshal(UndoConnectRequest{ServerName: "mcpproxy", BackupName: filepath.Base(res.BackupPath)})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
@@ -500,7 +506,7 @@ func TestHandleUndoConnectClient_MissingBackupReturns404(t *testing.T) {
 	res, err := svc.Connect("claude-code", "mcpproxy", false)
 	require.NoError(t, err)
 
-	body, _ := json.Marshal(UndoConnectRequest{BackupPath: res.ConfigPath + ".bak.19990101-000000"})
+	body, _ := json.Marshal(UndoConnectRequest{BackupName: filepath.Base(res.ConfigPath) + ".bak.19990101-000000"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
@@ -508,6 +514,40 @@ func TestHandleUndoConnectClient_MissingBackupReturns404(t *testing.T) {
 	srv.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestHandleUndoConnectClient_RejectsPathBackupName asserts a backup_name that
+// carries a directory component (traversal attempt) is rejected with 400 before
+// any file is touched — undo resolves the path server-side from a bare name.
+func TestHandleUndoConnectClient_RejectsPathBackupName(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+	srv := NewServer(mockCtrl, logger, nil)
+	home := t.TempDir()
+	svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
+	srv.SetConnectService(svc)
+
+	res, err := svc.Connect("claude-code", "mcpproxy", false)
+	require.NoError(t, err)
+
+	// A name that keeps the ".bak." prefix but escapes the config dir.
+	body, _ := json.Marshal(UndoConnectRequest{
+		BackupName: filepath.Base(res.ConfigPath) + ".bak.x/../../secret.json",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.False(t, resp.Success)
+	assert.Contains(t, resp.Error, "backup name")
 }
 
 // TestHandleUndoConnectClient_DeniedReturns403 mirrors the other per-client
@@ -526,7 +566,7 @@ func TestHandleUndoConnectClient_DeniedReturns403(t *testing.T) {
 	svc := connect.NewServiceWithReader("127.0.0.1:8080", "", home, denyingReader)
 	srv.SetConnectService(svc)
 
-	body, _ := json.Marshal(UndoConnectRequest{BackupPath: cfgPath + ".bak.20260702-000000"})
+	body, _ := json.Marshal(UndoConnectRequest{BackupName: filepath.Base(cfgPath) + ".bak.20260702-000000"})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")
@@ -573,7 +613,7 @@ func TestHandleUndoConnectClient_NoPriorFileDeletes(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, res.BackupPath, "no prior file: connect returns no backup")
 
-	body, _ := json.Marshal(UndoConnectRequest{ServerName: "mcpproxy", BackupPath: ""})
+	body, _ := json.Marshal(UndoConnectRequest{ServerName: "mcpproxy", BackupName: ""})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/connect/claude-code/undo", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", "test-key")

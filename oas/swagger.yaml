@@ -2675,11 +2675,14 @@ components:
       type: object
     httpapi.UndoConnectRequest:
       properties:
-        backup_path:
+        backup_name:
           description: |-
-            BackupPath is the backup_path returned by the preceding connect for this
-            client. Empty means the connect created the file (no prior file existed),
-            so undo removes the created file.
+            BackupName is the bare filename (filepath.Base) of the backup returned as
+            backup_path by the preceding connect — a name, never a path. Undo resolves
+            the full path server-side by joining it with the client's own config
+            directory, so a client-supplied value can never contribute a directory
+            component (traversal is impossible by construction). Empty means the
+            connect created the file (no prior file existed), so undo removes it.
           type: string
         server_name:
           description: Defaults to "mcpproxy"
@@ -3755,13 +3758,16 @@ paths:
   /api/v1/connect/{client}/undo:
     post:
       description: |-
-        Reverts the connect that produced the given backup_path (Spec 078 US3):
+        Reverts the connect that produced the named backup (Spec 078 US3):
         restores the client config byte-for-byte from that backup, or — when
-        backup_path is empty because the connect created the file — deletes the
-        created file. Refuses with 409 when the config changed since the connect
-        (undo never clobbers later edits; use DELETE /connect/{client} for a
-        surgical entry removal instead). Takes its own safety backup first;
-        its path is returned as backup_path in the result.
+        backup_name is empty because the connect created the file — deletes the
+        created file. backup_name is the bare filename of the backup the connect
+        returned (never a path); undo resolves the full path server-side inside
+        the client's own config directory, so a client value cannot escape it.
+        Refuses with 409 when the config changed since the connect (undo never
+        clobbers later edits; use DELETE /connect/{client} for a surgical entry
+        removal instead). Takes its own safety backup first; its path is returned
+        as backup_path in the result.
       parameters:
       - description: Client ID (claude-code, claude-desktop, cursor, windsurf, vscode,
           codex, gemini, opencode)
@@ -3775,8 +3781,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/httpapi.UndoConnectRequest'
-        description: Undo parameters (server_name, backup_path from the preceding
-          connect)
+        description: Undo parameters (server_name, backup_name = the bare filename
+          of the backup the preceding connect returned)
       responses:
         "200":
           content:
@@ -3789,8 +3795,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Bad request (e.g. backup path not a backup of this client's
-            config)
+          description: Bad request (e.g. backup_name is a path, or not a backup of
+            this client's config)
         "403":
           content:
             application/json:

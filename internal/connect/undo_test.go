@@ -46,7 +46,7 @@ func TestUndo_RestoresByteIdenticalPreConnectFile(t *testing.T) {
 		t.Fatalf("connect result unexpected: %+v", res)
 	}
 
-	undo, err := svc.Undo("claude-code", "mcpproxy", res.BackupPath)
+	undo, err := svc.Undo("claude-code", "mcpproxy", filepath.Base(res.BackupPath))
 	if err != nil {
 		t.Fatalf("undo: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestUndo_TOML_RestoresByteIdentical(t *testing.T) {
 		t.Fatalf("connect result unexpected: %+v", res)
 	}
 
-	undo, err := svc.Undo("codex", "mcpproxy", res.BackupPath)
+	undo, err := svc.Undo("codex", "mcpproxy", filepath.Base(res.BackupPath))
 	if err != nil {
 		t.Fatalf("undo: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestUndo_RefusesWhenFileDriftedSinceConnect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	undo, err := svc.Undo("claude-code", "mcpproxy", res.BackupPath)
+	undo, err := svc.Undo("claude-code", "mcpproxy", filepath.Base(res.BackupPath))
 	if err != nil {
 		t.Fatalf("undo returned hard error, want refusal result: %v", err)
 	}
@@ -214,7 +214,9 @@ func TestUndo_BackupMissingReturnsNotFound(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	cfgPath := res.ConfigPath
-	missing := cfgPath + ".bak.19990101-000000"
+	// A well-formed but non-existent backup NAME (bare filename, correct prefix)
+	// must resolve to not_found, not a hard error.
+	missing := filepath.Base(cfgPath) + ".bak.19990101-000000"
 
 	undo, err := svc.Undo("claude-code", "mcpproxy", missing)
 	if err != nil {
@@ -225,32 +227,35 @@ func TestUndo_BackupMissingReturnsNotFound(t *testing.T) {
 	}
 }
 
-func TestUndo_RejectsForeignBackupPath(t *testing.T) {
+// The request carries a bare backup FILENAME; an absolute path must be rejected
+// outright — undo must not become an arbitrary-file-restore primitive, and the
+// directory is always the client's own config dir, never the caller's.
+func TestUndo_RejectsAbsoluteBackupPath(t *testing.T) {
 	home := t.TempDir()
 	svc := NewServiceWithHome("127.0.0.1:8080", "", home)
 	if _, err := svc.Connect("claude-code", "mcpproxy", false); err != nil {
 		t.Fatalf("connect: %v", err)
 	}
 
-	// A path that is not a backup of THIS client's config must be rejected —
-	// the endpoint must not become an arbitrary-file-restore primitive.
+	// An absolute path is not a bare filename (filepath.Base != input).
 	foreign := filepath.Join(home, "evil.json")
 	if err := os.WriteFile(foreign, []byte(`{}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err := svc.Undo("claude-code", "mcpproxy", foreign)
 	if err == nil {
-		t.Fatal("undo must reject a backup path outside <config>.bak.*")
+		t.Fatal("undo must reject an absolute backup path")
 	}
 	if !strings.Contains(err.Error(), "backup") {
-		t.Fatalf("error should mention the backup path problem: %v", err)
+		t.Fatalf("error should mention the backup name problem: %v", err)
 	}
 }
 
-// A path that keeps the "<config>.bak." prefix but traverses out of the config
-// directory (e.g. "<config>.bak.x/../../secret.json") must be rejected before
-// any read — a prefix-only check would let undo read/restore an arbitrary file.
-func TestUndo_RejectsBackupPathTraversal(t *testing.T) {
+// A backup name that carries any directory separator or traversal component
+// (e.g. "<config>.bak.x/../../secret.json") must be rejected before any read:
+// resolution joins the name with the client's own config dir, so only a bare
+// filename is ever admitted (traversal impossible by construction).
+func TestUndo_RejectsBackupNameWithSeparators(t *testing.T) {
 	home := t.TempDir()
 	svc := NewServiceWithHome("127.0.0.1:8080", "", home)
 	res, err := svc.Connect("claude-code", "mcpproxy", false)
@@ -258,8 +263,8 @@ func TestUndo_RejectsBackupPathTraversal(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 
-	// Craft a traversal path that still starts with "<config>.bak." so a
-	// prefix-only guard would admit it, then climbs back out to a foreign file.
+	// Keep the "<config>.bak." prefix but climb out via separators — a prefix-
+	// only guard would admit it; the bare-filename guard must not.
 	secret := filepath.Join(home, "secret.json")
 	if err := os.WriteFile(secret, []byte(`{"secret":true}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -268,14 +273,14 @@ func TestUndo_RejectsBackupPathTraversal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	traversal := res.ConfigPath + ".bak.x/../" + rel
+	traversal := filepath.Base(res.ConfigPath) + ".bak.x/../" + rel
 
 	_, err = svc.Undo("claude-code", "mcpproxy", traversal)
 	if err == nil {
-		t.Fatal("undo must reject a traversal backup path that escapes the config directory")
+		t.Fatal("undo must reject a backup name that contains path separators")
 	}
 	if !strings.Contains(err.Error(), "backup") {
-		t.Fatalf("error should mention the backup path problem: %v", err)
+		t.Fatalf("error should mention the backup name problem: %v", err)
 	}
 }
 
@@ -290,7 +295,8 @@ func TestUndo_MissingConfigFileRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	undo, err := svc.Undo("claude-code", "mcpproxy", res.BackupPath)
+	// No prior file existed, so the connect returned an empty backup name.
+	undo, err := svc.Undo("claude-code", "mcpproxy", "")
 	if err != nil {
 		t.Fatalf("undo: %v", err)
 	}
