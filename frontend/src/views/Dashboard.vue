@@ -3,6 +3,9 @@
     <!-- Telemetry Notice Banner -->
     <TelemetryBanner />
 
+    <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
+    <UpdateBanner />
+
     <!-- Overview ↔ Usage switcher (Spec 069 T016) -->
     <div role="tablist" class="tabs tabs-boxed w-fit" data-test="dashboard-view-switcher">
       <a
@@ -430,6 +433,7 @@ import api from '@/services/api'
 import logoSvg from '@/assets/logo.svg'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import TelemetryBanner from '@/components/TelemetryBanner.vue'
+import UpdateBanner from '@/components/UpdateBanner.vue'
 import TokenPieChart from '@/components/TokenPieChart.vue'
 import ConnectModal from '@/components/ConnectModal.vue'
 import AddServerModal from '@/components/AddServerModal.vue'

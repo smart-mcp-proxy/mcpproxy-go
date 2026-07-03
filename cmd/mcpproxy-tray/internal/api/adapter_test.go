@@ -645,3 +645,30 @@ func TestHealthDataFlow_EndToEnd(t *testing.T) {
 	status := adapter.GetStatus().(map[string]interface{})
 	assert.Equal(t, 1, status["connected_servers"], "Status should use health.level for connected count")
 }
+
+// =============================================================================
+// ServerAdapter.GetConfigPath Tests
+// =============================================================================
+
+// The tray launches core with --config <MCPPROXY_TRAY_CONFIG_PATH> (see
+// buildCoreArgs in main.go). GetConfigPath must resolve to that SAME path so
+// tray-side config consumers (e.g. the Spec 079 update_check gate) read the
+// config core is actually using — not a hardcoded default.
+func TestServerAdapter_GetConfigPath_HonorsTrayConfigPathEnv(t *testing.T) {
+	const custom = "/tmp/custom-tray-config/mcp_config.json"
+	t.Setenv("MCPPROXY_TRAY_CONFIG_PATH", custom)
+
+	adapter := NewServerAdapter(NewMockClient())
+
+	assert.Equal(t, custom, adapter.GetConfigPath())
+}
+
+func TestServerAdapter_GetConfigPath_DefaultWhenEnvUnset(t *testing.T) {
+	t.Setenv("MCPPROXY_TRAY_CONFIG_PATH", "")
+
+	adapter := NewServerAdapter(NewMockClient())
+
+	got := adapter.GetConfigPath()
+	assert.Contains(t, got, "mcp_config.json")
+	assert.NotEqual(t, "", got)
+}

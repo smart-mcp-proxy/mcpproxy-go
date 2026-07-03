@@ -38,6 +38,10 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "features": {
     "enable_web_ui": true
   },
+  "update_check": {
+    "enabled": true,
+    "channel": "stable"
+  },
   "mcpServers": []
 }
 ```
@@ -111,6 +115,23 @@ Both cadences are configurable globally, and can be overridden per server (see [
 | `code_execution_timeout_ms` | integer | `120000` | Execution timeout in milliseconds |
 | `code_execution_max_tool_calls` | integer | `0` | Maximum tool calls (0 = unlimited) |
 | `code_execution_pool_size` | integer | `10` | VM pool size for code execution |
+
+### Update Check Settings
+
+Controls the background upgrade-awareness checker. Both keys are optional and
+hot-reloadable (no restart needed).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `update_check.enabled` | boolean | `true` | Master switch. When `false`, no network check runs (background poll and manual re-check) and no upgrade nudge appears on any surface — the `update` object is omitted from `/api/v1/info`. |
+| `update_check.channel` | string | `"stable"` | Release channel: `"stable"` (prereleases never offered) or `"rc"` (prerelease tags like `v0.47.0-rc.1` included). |
+
+The existing environment switches keep working and **win over** these keys:
+`MCPPROXY_DISABLE_AUTO_UPDATE=true` force-disables checking, and
+`MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` force-selects the prerelease channel.
+They only widen in one direction — they cannot re-enable checking that the
+config disabled. See [Version Updates](/features/version-updates) for where
+updates are surfaced.
 
 ### MCP Servers
 

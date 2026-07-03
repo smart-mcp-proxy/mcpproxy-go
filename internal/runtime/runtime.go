@@ -1314,6 +1314,14 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
 	}
 
+	// Apply update-check settings (Spec 079 FR-012 — hot-reloadable). The
+	// checker gates its poll + CheckNow on the flag internally; a
+	// disabled→enabled flip (or channel switch) triggers a prompt background
+	// re-check. Safe while holding r.mu: SetConfig only touches checker state.
+	if contains(result.ChangedFields, "update_check") {
+		r.applyUpdateCheckConfig(newCfg)
+	}
+
 	// Capture app context, config path, and config copy while we still hold the lock
 	appCtx := r.appCtx
 	cfgPathCopy := r.cfgPath
@@ -2352,7 +2360,23 @@ func (r *Runtime) SetVersion(version string) {
 	}
 
 	r.updateChecker = updatecheck.New(r.logger, version)
+	// Gate the checker on the update_check config block before its background
+	// loop starts (Spec 079 FR-012); the env switches win inside the checker.
+	r.applyUpdateCheckConfig(r.Config())
 	r.logger.Info("Update checker initialized", zap.String("version", version))
+}
+
+// applyUpdateCheckConfig pushes the update_check config block (Spec 079
+// FR-012) onto the running update checker. Called at init (SetVersion) and on
+// both config hot-reload paths (ApplyConfig + disk ReloadConfiguration) so an
+// update_check.{enabled,channel} edit takes effect without a restart.
+// Nil-safe and idempotent; the checker itself resolves env-var precedence.
+func (r *Runtime) applyUpdateCheckConfig(cfg *config.Config) {
+	if r.updateChecker == nil || cfg == nil {
+		return
+	}
+	uc := cfg.UpdateCheck
+	r.updateChecker.SetConfig(uc.IsEnabled(), uc.IncludePrereleases())
 }
 
 // GetVersionInfo returns the current version information from the update checker.

@@ -383,3 +383,43 @@ func TestFormatChangedFields(t *testing.T) {
 		})
 	}
 }
+
+// TestDetectConfigChanges_UpdateCheck (Spec 079 FR-012): an update_check
+// {enabled,channel} edit must be detected as a hot-reloadable change so
+// ApplyConfig re-gates the running updatecheck.Checker without a restart —
+// otherwise a lone update_check edit reports "No configuration changes
+// detected" and only takes effect on restart.
+func TestDetectConfigChanges_UpdateCheck(t *testing.T) {
+	boolPtr := func(b bool) *bool { return &b }
+	mk := func(uc *config.UpdateCheckConfig) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			UpdateCheck: uc,
+		}
+	}
+
+	t.Run("enabled flip detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(&config.UpdateCheckConfig{Enabled: boolPtr(false)}),
+		)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "update_check")
+		assert.False(t, result.RequiresRestart, "update_check change is hot-reloadable")
+	})
+
+	t.Run("channel switch detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(&config.UpdateCheckConfig{Channel: config.UpdateChannelStable}),
+			mk(&config.UpdateCheckConfig{Channel: config.UpdateChannelRC}),
+		)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "update_check")
+	})
+
+	t.Run("no change not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk(nil))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "update_check")
+	})
+}

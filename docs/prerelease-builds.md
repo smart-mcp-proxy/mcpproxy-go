@@ -69,7 +69,7 @@ The GitHub release is created with `prerelease: true`, so it does **not** become
 - Does not deploy docs or trigger marketing automation (`deploy-docs`, `trigger-marketing-update` guarded).
 - Not offered as an update on **stable channels**:
   - The macOS tray uses GitHub `releases/latest`, which excludes prereleases (`native/macos/MCPProxy/MCPProxy/Services/UpdateService.swift`), plus a semver downgrade guard so an `-rc` is never treated as "newer" than the matching stable.
-  - The backend/tray update check is stable-only by default (`internal/tray/tray.go` → `releases/latest`). Set `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` to opt in to RC update offers.
+  - The backend/tray update check is stable-only by default (`internal/tray/tray.go` → `releases/latest`). Set `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` to opt in to RC update offers; the core checker can also opt in via `"update_check": { "channel": "rc" }` in `mcp_config.json` (Spec 079 — the Go tray's own self-update check gates on the core's decision by querying `GET /api/v1/info` rather than reading the config file, and selects prereleases via `MCPPROXY_ALLOW_PRERELEASE_UPDATES`; converging it fully onto the shared checker is FR-001a).
 
 ### Installing an RC
 

@@ -37,6 +37,12 @@ The sidebar displays the current version at the bottom. When an update is availa
 - A small "update available" badge appears next to the version
 - Click to view the release notes
 
+The dashboard additionally shows a **dismissible update banner** ("Update
+available: vX — you are running vY") with a release-notes link. Dismissal is
+**per version**: dismissing the banner for v1.3.0 keeps it hidden for v1.3.0
+(persisted in the browser), but the banner reappears when a newer release
+becomes available. The banner is non-modal and never blocks the UI.
+
 ### CLI Doctor Command
 
 The `mcpproxy doctor` command shows version information:
@@ -55,6 +61,41 @@ Download: https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0
 
 ## Configuration
 
+### Config File (`update_check`)
+
+Update checking is controlled from `mcp_config.json` via the `update_check`
+block:
+
+```json
+{
+  "update_check": {
+    "enabled": true,
+    "channel": "stable"
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch. When `false`, no network check is performed (background poll and the manual re-check) and no upgrade nudge appears on any surface — the `update` object is omitted from `/api/v1/info`. |
+| `channel` | string | `"stable"` | Release channel: `"stable"` (GitHub `releases/latest`; prereleases never offered) or `"rc"` (prerelease tags such as `v0.47.0-rc.1` included). |
+
+Both keys are **hot-reloadable**: editing the config file or applying it via
+`POST /api/v1/config/apply` takes effect without a restart. Re-enabling (or
+switching channels) triggers a prompt re-check instead of waiting for the next
+4-hour tick.
+
+`enabled: false` also gates the Go tray's built-in daily self-update check, so
+no surface performs a network check while disabled. The tray does **not** read
+`mcp_config.json` itself (it holds no state); instead it asks the core via
+`GET /api/v1/info` before checking — the core omits the `update` object when
+update checking is disabled, and the tray then skips its own network check. If
+the core is unreachable the tray skips that tick and retries, rather than
+falling open to a check the operator may have disabled. The tray's own check
+still selects prereleases via `MCPPROXY_ALLOW_PRERELEASE_UPDATES` only —
+converging it fully onto the shared checker (including `channel`) is a separate
+Spec 079 work item (FR-001a).
+
 ### Environment Variables
 
 | Variable | Description | Default |
@@ -62,13 +103,33 @@ Download: https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0
 | `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable background update checks entirely | `false` |
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Include prerelease/beta versions in update checks | `false` |
 
+### Precedence (env vs config)
+
+The environment switches **win over** the `update_check` config keys — they
+are the operator override:
+
+- `MCPPROXY_DISABLE_AUTO_UPDATE=true` disables checking even when
+  `update_check.enabled` is `true`.
+- `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` selects the prerelease channel even
+  when `update_check.channel` is `"stable"`.
+
+The env vars only widen in one direction (disable checks / include
+prereleases). They cannot re-enable checking that the config disabled: with
+`update_check.enabled: false`, no check runs regardless of environment.
+
 ### Examples
 
 ```bash
-# Disable update checking
+# Disable update checking (config file — persistent, hot-reloads)
+#   "update_check": { "enabled": false }
+
+# Disable update checking (environment — wins over config)
 MCPPROXY_DISABLE_AUTO_UPDATE=true mcpproxy serve
 
-# Enable prerelease updates (for beta testers)
+# Opt in to prerelease (RC) updates via config
+#   "update_check": { "channel": "rc" }
+
+# Enable prerelease updates via environment (for beta testers)
 MCPPROXY_ALLOW_PRERELEASE_UPDATES=true mcpproxy serve
 ```
 
@@ -127,7 +188,7 @@ When running a development build (version shows as "development"), update checki
 ### Update check not working
 
 1. Ensure you have internet connectivity
-2. Check if `MCPPROXY_DISABLE_AUTO_UPDATE` is set
+2. Check if `MCPPROXY_DISABLE_AUTO_UPDATE` is set, or `update_check.enabled` is `false` in `mcp_config.json`
 3. Run `mcpproxy doctor` to see current version status
 4. Check logs for any GitHub API errors:
    ```bash
@@ -136,7 +197,8 @@ When running a development build (version shows as "development"), update checki
 
 ### Prerelease not showing
 
-By default, prerelease versions are excluded. To enable:
+By default, prerelease versions are excluded. To enable, set
+`"update_check": { "channel": "rc" }` in `mcp_config.json`, or:
 
 ```bash
 export MCPPROXY_ALLOW_PRERELEASE_UPDATES=true

@@ -151,6 +151,7 @@ When the daemon is running, `status` surfaces the result of the background updat
 - **Update available**: `Version: v1.2.0 (update available: v1.3.0 — <release URL>)`
 - **Up to date**: `Version: v1.3.0 (latest)`
 - **Check failed or not yet completed** (offline, rate-limited): the version is shown without any annotation. In JSON output the `update.check_error` field retains the failure reason for diagnostics.
+- **Update checking disabled** (`update_check.enabled: false` in the config, or `MCPPROXY_DISABLE_AUTO_UPDATE=true`): the daemon performs no check and omits the `update` object entirely, so the version is shown without any annotation.
 
 In machine-readable output (`-o json`/`-o yaml`) the `update` object also carries `checked_at` (when the last successful check ran, so consumers can judge staleness) and `is_prerelease` (whether the offered version is a prerelease), matching the `/api/v1/info` contract.
 
