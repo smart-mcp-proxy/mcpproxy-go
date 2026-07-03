@@ -661,17 +661,18 @@ additive-compatible and gains two fields:
 A client that is installed but not yet content-checked reads as
 `exists=true, connected=false, access_state="unknown"`. Resolving `connected`
 requires an explicit per-client read (the per-client status route below,
-connect/disconnect, or the CLI `mcpproxy connect` command), which is the only
-place a privacy prompt may legitimately appear.
+connect/disconnect, or the CLI `mcpproxy connect` command), which is where a
+privacy prompt may legitimately appear.
 
 #### GET /api/v1/connect/{client}
 
 On-demand single-client status. Reads the one client's config **at request
 time** and returns a full `ClientStatus` with `access_state` resolved to
 `accessible | absent | malformed | denied` and `connected` set accordingly.
-This is the sole Connect endpoint that opens a client config file, so on macOS
-it is the only place an App-Data privacy prompt may legitimately appear (scoped
-to this user action). Unknown client → `404`. A denial is reported **in-band**
+This — like the other per-client routes below (preview, connect/disconnect,
+undo) — opens the client's config file at request time, so on macOS an App-Data
+privacy prompt may legitimately appear here (scoped to this user action), never
+from the overall listing. Unknown client → `404`. A denial is reported **in-band**
 (`200` with `access_state="denied"` + `remediation`), not as an HTTP error.
 
 ```bash
@@ -748,7 +749,8 @@ tccutil reset SystemPolicyAppData com.smartmcpproxy.mcpproxy
 ```
 
 The overall `GET /api/v1/connect` listing never triggers this prompt (it is
-content-read-free); only the per-client read above can.
+content-read-free); only the per-client routes above (status, preview,
+connect/disconnect, undo) can.
 
 ### Real-time Updates
 
