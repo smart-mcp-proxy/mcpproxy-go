@@ -212,8 +212,16 @@ type Config struct {
 	// resolves to — a non-routable address (loopback, RFC1918/CGNAT private,
 	// link-local incl. the 169.254.169.254 cloud-metadata endpoint), so a
 	// malicious or typo'd registry source cannot turn the daemon into a
-	// request-forgery vector against internal services. Set true ONLY when you
-	// intentionally run a trusted registry mirror on an internal/private address.
+	// request-forgery vector against internal services.
+	//
+	// This opt-out is BLANKET (all-or-nothing): setting it true disables the
+	// guard for EVERY non-routable range at once — loopback, RFC1918/CGNAT
+	// private, link-local AND the 169.254.169.254 cloud-metadata endpoint. There
+	// is no way to allow only loopback; enabling it for a localhost dev registry
+	// also re-opens the cloud-metadata SSRF vector. Set true ONLY when you
+	// intentionally run a trusted registry mirror on an internal/private address,
+	// ideally on a host with no cloud-metadata exposure. The change takes effect
+	// only on daemon (re)start or config reload.
 	AllowPrivateRegistryFetch bool `json:"allow_private_registry_fetch,omitempty" mapstructure:"allow-private-registry-fetch"`
 
 	// Deprecated: Features flags are unused and have no runtime effect. Kept for backward compatibility.
