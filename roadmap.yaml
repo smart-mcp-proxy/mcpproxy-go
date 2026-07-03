@@ -1,0 +1,483 @@
+# roadmap.yaml — git-native roadmap for mcpproxy-go
+#
+# This file is the SOURCE OF TRUTH for the cross-spec roadmap: epics, their
+# child tasks, the dependency DAG between them, and execution state that a
+# tasks.md checkbox cannot express (status beyond done/not-done, assignee,
+# priority, blocked-by edges, external tracker ids, PR links).
+#
+# `tasks.md` answers "how much of spec NNN is checked off?". This file answers
+# "what are we building next, what blocks what, and who owns it?".
+#
+# Regenerate the human-readable view after editing:
+#     python3 scripts/gen-roadmap.py        # writes ROADMAP.md
+#     # or: scripts/gen-roadmap              # same thing (wrapper)
+#
+# Validate this file against ground truth (does not write ROADMAP.md):
+#     python3 scripts/gen-roadmap.py --check-github   # PR state vs status,
+#         # dangling spec: links, status sanity. Add --strict to fail on
+#         # warnings. Needs an authenticated `gh`; exits 2 if gh is missing.
+#
+# ── Schema ──────────────────────────────────────────────────────────────────
+# version:  schema version (int).
+# epics:    list of epic objects. Each epic:
+#   id:          REQUIRED. Stable slug, unique across epics AND tasks. Used as
+#                the DAG node id and as a depends_on target.
+#   title:       REQUIRED. Human label.
+#   status:      REQUIRED. one of: todo | in_progress | in_review | blocked | done
+#   assignee:    optional. Owner (agent/role/person).
+#   priority:    optional. P0 (highest) .. P3.
+#   spec:        optional. Path to a specs/<NNN> folder (drives progress badge).
+#   pr:          optional. PR ref, e.g. "#761" or a list of refs.
+#   mcp:         optional. External tracker id mirroring MCP-xxxx vocabulary.
+#   depends_on:  optional. List of epic/task ids that must land first (DAG edge).
+#   parked:      optional bool. true = intentionally on hold (still status: todo).
+#   note:        optional. One-line context.
+#   tasks:       optional. List of child task objects. Each task has the same
+#                fields as an epic except `tasks`. A task's depends_on may point
+#                at sibling tasks or at other epics.
+#
+# Conventions:
+#  - depends_on edges flow PREREQUISITE -> DEPENDENT (drawn A --> B = "A unblocks B").
+#  - Keep ids slug-cased and stable; renaming an id breaks inbound depends_on.
+#  - `done` epics keep their PR refs as provenance.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 1
+
+epics:
+  # ── DONE ────────────────────────────────────────────────────────────────
+  - id: profiles-v2
+    title: Profiles v2 (per-profile tool views)
+    status: done
+    assignee: BackendEngineer
+    priority: P1
+    mcp: MCP-33
+    # No epic-level spec link: Profiles v2 shipped via the PRs below, not via a
+    # speckit tasks.md. (specs/057-in-proxy-profiles is a SEPARATE, still-draft
+    # "permanent URLs" spec at 0/25 — linking it here showed a false "drafted"
+    # badge on a done epic. Provenance lives in the per-task PR refs.)
+    depends_on: []
+    note: "Stateful profiles: per-profile Bleve indexes, set_profile, token profile_pin, tray + Web UI switchers. Shipped via #756/#761/#766/#767."
+    tasks:
+      - id: profiles-v2-indexes
+        title: Per-profile Bleve indexes (T1)
+        status: done
+        assignee: BackendEngineer
+        mcp: MCP-3240
+        pr: "#756"
+        depends_on: []
+      - id: profiles-v2-set-profile
+        title: set_profile tool + session resolver + REST (T2)
+        status: done
+        assignee: BackendEngineer
+        mcp: MCP-3241
+        pr: "#761"
+        depends_on: [profiles-v2-indexes]
+      - id: profiles-v2-profile-pin
+        title: Per-agent-token profile_pin (T3)
+        status: done
+        assignee: BackendEngineer
+        mcp: MCP-3242
+        pr: "#766"
+        spec: specs/028-agent-tokens
+        depends_on: [profiles-v2-set-profile]
+      - id: profiles-v2-tray-switcher
+        title: Tray profile switcher Go + Swift (T5)
+        status: done
+        assignee: BackendEngineer
+        mcp: MCP-3244
+        pr: "#767"
+        depends_on: [profiles-v2-set-profile]
+
+  - id: sandbox-isolation
+    title: Non-Docker sandbox isolation (Landlock)
+    status: done
+    assignee: BackendEngineer
+    priority: P1
+    mcp: MCP-34
+    depends_on: []
+    note: "Landlock LSM + setrlimit native sandbox for stdio upstreams; no userns (Ubuntu 24.04 safe). Originated from roadmap item #11 (no dedicated spec — 054 is the unrelated security-gateway spec). Code in internal/sandbox/; PRs #754/#759/#768/#781/#782."
+    tasks:
+      - id: sandbox-spike
+        title: Landlock sandbox spike (MCP-34.1)
+        status: done
+        mcp: MCP-3232
+        pr: "#754"
+        depends_on: []
+      - id: sandbox-mode-config
+        title: isolation.mode enum + resolver (MCP-34.2)
+        status: done
+        mcp: MCP-3233
+        pr: "#759"
+        depends_on: [sandbox-spike]
+      - id: sandbox-launcher
+        title: Native sandbox launcher Landlock+rlimits (MCP-34.3)
+        status: done
+        mcp: MCP-3234
+        pr: "#768"
+        depends_on: [sandbox-mode-config]
+      - id: sandbox-scanner-parity
+        title: Scanner-flow parity under sandbox (MCP-34.4)
+        status: done
+        mcp: MCP-3235
+        pr: "#781"
+        depends_on: [sandbox-launcher, scanner-v2]
+      - id: sandbox-snap-docker-it
+        title: snap-docker integration tests + CI (MCP-34.5)
+        status: done
+        mcp: MCP-3236
+        pr: "#782"
+        depends_on: [sandbox-scanner-parity]
+
+  - id: ts-code-exec-ga
+    title: TypeScript code-execution GA + cookbook
+    status: done
+    assignee: BackendEngineer
+    priority: P2
+    mcp: MCP-38
+    spec: specs/033-typescript-code-execution
+    depends_on: []
+    note: "TS runtime graduated from preview (shipped v0.45.0); MCP-38 = docs/spec + cookbook only."
+    tasks:
+      - id: ts-code-exec-cookbook
+        title: Cookbook (10 TS recipes) + GA docs
+        status: done
+        mcp: MCP-38
+        pr: "#753"
+        depends_on: []
+
+  - id: scanner-v2
+    title: Spec 076 deterministic offline tool-scanner
+    status: done
+    assignee: BackendEngineer
+    priority: P1
+    mcp: MCP-3574
+    spec: specs/076-deterministic-tool-scanner
+    depends_on: []
+    note: "Deterministic offline signal pipeline replaces ~10%-recall scanner; scan-eval --gate (recall>=0.90 / FP<=5%) in CI."
+    tasks:
+      - id: scanner-v2-foundation
+        title: detect-engine foundation (T1)
+        status: done
+        mcp: MCP-3575
+        pr: "#769"
+        depends_on: []
+      - id: scanner-v2-hard-checks
+        title: 3 hard checks + scanner wiring (US1 MVP)
+        status: done
+        mcp: MCP-3576
+        pr: "#770"
+        depends_on: [scanner-v2-foundation]
+      - id: scanner-v2-soft-checks
+        title: 3 soft checks + patterns confidence (US2)
+        status: done
+        mcp: MCP-3577
+        pr: "#775"
+        depends_on: [scanner-v2-foundation]
+      - id: scanner-v2-consensus
+        title: Consensus risk-score + report transparency (US4)
+        status: done
+        mcp: MCP-3578
+        pr: "#776"
+        depends_on: [scanner-v2-hard-checks, scanner-v2-soft-checks]
+      - id: scanner-v2-eval-gate
+        title: Eval corpus + CI recall/FP gate (US3)
+        status: done
+        mcp: MCP-3579
+        pr: "#777"
+        depends_on: [scanner-v2-hard-checks]
+      - id: scanner-v2-docs
+        title: Tool-scanner detect-engine docs (T22)
+        status: done
+        mcp: MCP-3683
+        pr: "#780"
+        depends_on: [scanner-v2-eval-gate]
+
+  # ── IN REVIEW ───────────────────────────────────────────────────────────
+  - id: windows-tray
+    title: Windows native tray app
+    status: in_review
+    assignee: BackendEngineer
+    priority: P2
+    mcp: MCP-43
+    spec: specs/002-windows-installer
+    depends_on: []
+    note: "Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first."
+    tasks:
+      - id: windows-tray-funnel-qa
+        title: "Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work)"
+        status: todo
+        priority: P2
+        depends_on: []
+      - id: windows-tray-window
+        title: WebView2 native window + profile submenu
+        status: in_review
+        mcp: MCP-43
+        depends_on: [windows-tray-funnel-qa]
+
+  # ── BACKLOG: personal-edition polish (NEW priorities) ─────────────────────
+  - id: ux-audit
+    title: Web UI + macOS app UX audit
+    status: todo
+    assignee: unassigned
+    priority: P0
+    depends_on: []
+    note: "End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push. (No spec yet — 064 is the unrelated agent-fleet glass-cockpit spec.)"
+    tasks:
+      - id: ux-audit-webui-sweep
+        title: Web UI heuristic + Playwright UX sweep
+        status: todo
+        depends_on: []
+      - id: ux-audit-macos-sweep
+        title: macOS tray app UX sweep (settings parity, flows)
+        status: todo
+        spec: specs/037-macos-swift-tray
+        depends_on: []
+
+  - id: action-log-transparency
+    title: Action log / transparency — info at a glance
+    status: todo
+    assignee: unassigned
+    priority: P0
+    depends_on: [ux-audit]
+    note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
+    tasks:
+      - id: action-log-glance-view
+        title: At-a-glance action log view (top signals, health)
+        status: todo
+        spec: specs/019-activity-webui
+        depends_on: []
+      - id: action-log-retention-tie-in
+        title: Tie activity retention/size into the glance view
+        status: todo
+        spec: specs/073-activity-size-retention
+        depends_on: [action-log-glance-view]
+
+  - id: analytics-dashboard
+    title: Analytics dashboard as default page
+    status: todo
+    assignee: unassigned
+    priority: P1
+    spec: specs/069-observability-usage-graphs
+    depends_on: [ux-audit]
+    note: "Per-server / per-tool token-drain graphs; make the dashboard the default landing page."
+    tasks:
+      - id: analytics-token-drain-graphs
+        title: Per-server / per-tool token-drain graphs
+        status: todo
+        spec: specs/069-observability-usage-graphs
+        depends_on: []
+      - id: analytics-default-landing
+        title: Make dashboard the default landing page
+        status: todo
+        spec: specs/039-connect-and-dashboard
+        depends_on: [analytics-token-drain-graphs]
+
+  - id: registries-search-add
+    title: Registries — easier search + add-server
+    status: todo
+    assignee: unassigned
+    priority: P1
+    spec: specs/070-registry-easy-upstream-add
+    depends_on: [ux-audit]
+    note: "Lower the friction of finding a server in a registry and adding it; lean on the official registry protocol work."
+    tasks:
+      - id: registries-search-ux
+        title: Improved registry search UX
+        status: todo
+        spec: specs/070-registry-easy-upstream-add
+        depends_on: []
+      - id: registries-official-protocol
+        title: Official registry protocol integration
+        status: done
+        spec: specs/071-official-registry-protocol
+        note: "Spec 071 shipped 12/12 (official MCP registry v0.1 protocol adopted, #572)."
+        depends_on: []
+
+  - id: scanner-simplification
+    title: Scanner simplification (deterministic default, opt-in deep scan)
+    status: done
+    assignee: unassigned
+    priority: P1
+    spec: specs/077-scanner-simplification
+    depends_on: [scanner-v2]
+    note: "Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. COMPLETE: US1 #786, US2 #792, US4 #794, US3 + deep-scan trust fixes + docs truth sweep (T037-T039) #793 — all merged; shipped in v0.47.0-rc.2. Remaining 4 unchecked tasks in tasks.md are documented scope-outs. First of the 5 personal-edition polish verticals."
+    tasks:
+      - id: scanner-simpl-baseline
+        title: "US1: deterministic offline baseline default + curated hard phrase_injection check (delete duplicate legacy rules)"
+        status: done
+        pr: "#786"
+        depends_on: []
+      - id: scanner-simpl-unified-report
+        title: "US2: single merged report + cross-scanner consensus confidence"
+        status: done
+        pr: "#792"
+        depends_on: [scanner-simpl-baseline]
+      - id: scanner-simpl-deep-optin
+        title: "US3: opt-in deep scan (off by default), never blocks/degrades baseline; config migration"
+        status: done
+        pr: "#793"
+        depends_on: [scanner-simpl-baseline, scanner-simpl-unified-report]
+      - id: scanner-simpl-notifications
+        title: "US4: collapse scan-notification storm into one debounced settled event (MCP-2207)"
+        status: done
+        pr: "#794"
+        depends_on: [scanner-simpl-unified-report]
+      - id: scanner-simpl-deepscan-fixes
+        title: "Deep-scan trust fixes: nil-Security gating bug (source fetch runs with deep scan off on default configs), FR-014 verdict inversion (Dangerous deep finding < Warning), surface silently-skipped Docker scanners (non-nil deep_scan descriptor + CLI hint on security enable)"
+        status: done
+        pr: "#793"
+        priority: P1
+        depends_on: [scanner-simpl-deep-optin]
+
+  # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
+  - id: upgrade-nudge
+    title: Upgrade awareness & guided update
+    status: in_progress
+    assignee: unassigned
+    priority: P0
+    spec: specs/079-upgrade-nudge
+    depends_on: []
+    note: "Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI."
+    tasks:
+      - id: upgrade-nudge-status-log
+        title: "US1 slice: update availability in mcpproxy status + deduped startup log"
+        status: done
+        pr: "#798"
+        depends_on: []
+      - id: upgrade-nudge-surfacing
+        title: "US1 remainder: dismissible Web UI banner + update_check config block"
+        status: todo
+        depends_on: [upgrade-nudge-status-log]
+      - id: upgrade-nudge-channel
+        title: "US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"
+        status: todo
+        depends_on: [upgrade-nudge-surfacing]
+      - id: upgrade-nudge-quiet
+        title: "US3: operator control + CI/offline quiet + no prerelease downgrade nudges"
+        status: todo
+        depends_on: [upgrade-nudge-surfacing]
+
+  - id: connect-trust
+    title: "Connect step trust: preview, visible backup, one-click undo"
+    status: in_progress
+    assignee: unassigned
+    priority: P0
+    spec: specs/078-connect-trust-preview
+    depends_on: []
+    note: "72.4% of wizard-engaged users skip the connect step; completers retain ~50% at two weeks vs 6% for non-engaged. Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
+    tasks:
+      - id: connect-trust-preview
+        title: "US1: preview API + wizard diff UI (exact entry, API-key masking)"
+        status: done
+        pr: "#802"
+        depends_on: []
+      - id: connect-trust-backup-visibility
+        title: "US1: surface backup_path in Web UI + retention policy"
+        status: done
+        pr: "#799"
+        depends_on: []
+      - id: connect-trust-undo
+        title: "US2: one-click undo/disconnect in wizard"
+        status: todo
+        depends_on: []
+      - id: connect-trust-tcc-copy
+        title: "US2: pre-emptive macOS TCC explanation in wizard"
+        status: todo
+        depends_on: []
+
+  - id: telemetry-identity
+    title: "Telemetry identity & data quality (machine_id + CI-filter hardening)"
+    status: in_progress
+    assignee: unassigned
+    priority: P1
+    depends_on: []
+    note: "Heartbeat lacks a stable identity, so active-install counts are inflated by CI/dev churn and launch_source is 79% unknown. Add a hashed machine_id (schema v6) and harden the worker/dashboard cohort filters. Spans repos mcpproxy-go (client), mcpproxy-telemetry (worker), mcpproxy-dash (dashboard)."
+    tasks:
+      - id: telemetry-machineid-client
+        title: "Hashed machine_id in heartbeat (schema v6)"
+        status: done
+        pr: "https://github.com/smart-mcp-proxy/mcpproxy-go/pull/796"
+        depends_on: []
+      - id: telemetry-machineid-worker
+        title: "Worker migration: machine_id column + extraction (repo mcpproxy-telemetry)"
+        status: todo
+        depends_on: [telemetry-machineid-client]
+      - id: telemetry-machineid-dash
+        title: "Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"
+        status: todo
+        depends_on: [telemetry-machineid-worker]
+      - id: telemetry-snapshot-alerting
+        title: "Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"
+        status: todo
+        depends_on: []
+
+  - id: planning-hygiene
+    title: Planning/docs truth automation
+    status: todo
+    assignee: unassigned
+    priority: P2
+    depends_on: []
+    note: "Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests."
+    tasks:
+      - id: hygiene-roadmap-github-check
+        title: "gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links"
+        status: done
+        pr: "#800"
+        depends_on: []
+      - id: hygiene-tasks-reconcile
+        title: "CI rule: PR touching specs/<id> implementation paths must update tasks.md"
+        status: todo
+        depends_on: []
+      - id: hygiene-docs-facts
+        title: "Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check"
+        status: todo
+        depends_on: []
+      - id: hygiene-quickstart-contract
+        title: "Run top quickstart.md scenario per spec as contract test in test-api-e2e.sh"
+        status: todo
+        depends_on: []
+
+  # ── PARKED epics (intentionally on hold) ──────────────────────────────────
+  - id: marketplace
+    title: Server marketplace
+    status: todo
+    parked: true
+    priority: P3
+    mcp: MCP-37
+    depends_on: []
+    note: "PARKED. ~60% already ships (browse/search/one-click add). No spec yet; gaps tracked as MCP-3246..3250 (tray entries, metadata, telemetry). (070 is the registries-search-add spec, not a marketplace spec.)"
+
+  - id: siem
+    title: Audit SIEM integration
+    status: todo
+    parked: true
+    priority: P3
+    mcp: MCP-39
+    depends_on: []
+    note: "PARKED. Splunk HEC / Elastic _bulk / syslog shippers reusing JSONL export pipeline."
+
+  - id: paid-tier
+    title: Paid-tier MVP (billing / seats / license)
+    status: todo
+    parked: true
+    priority: P3
+    mcp: MCP-40
+    depends_on: []
+    note: "PARKED. Server-edition revenue motion: Ed25519 license tokens, seats, Stripe checkout. Behind //go:build server."
+
+  - id: sdk-v1-migration
+    title: SDK v1 migration
+    status: todo
+    parked: true
+    priority: P3
+    depends_on: []
+    note: "PARKED. Migrate to the v1 MCP Go SDK surface."
+
+  - id: sso
+    title: SSO (server edition)
+    status: todo
+    parked: true
+    priority: P3
+    depends_on: []
+    note: "PARKED. Single sign-on for the multi-user server edition."

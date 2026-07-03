@@ -89,6 +89,10 @@ type Runtime struct {
 	// GET /api/v1/servers.
 	coalescer *serversChangedCoalescer
 
+	// Spec 077 US4 (MCP-2207): debounces the per-scanner security-scan
+	// lifecycle storm into one settled event per server per scan.
+	scanNotify *scanNotifyDebouncer
+
 	// Phase 6: Supervisor for state reconciliation (lock-free reads via StateView)
 	supervisor *supervisor.Supervisor
 
@@ -281,6 +285,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
 	rt.coalescer.start(appCtx)
+
+	// Spec 077 US4 (MCP-2207): collapse the per-scanner scan-notification storm
+	// into one settled event per server. 750ms bridges the rapid lifecycle
+	// signals of a reconnect storm without noticeably delaying the result.
+	rt.scanNotify = newScanNotifyDebouncer(rt, 750*time.Millisecond)
 
 	return rt, nil
 }
@@ -1215,6 +1224,14 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 			Success: false,
 		}, fmt.Errorf("configuration validation failed: %v", validationErrors[0].Error())
 	}
+
+	// Normalize the submitted config the same way LoadFromFile does before we
+	// diff/save it (Spec 077 US3): fold the deprecated security.scanner_* keys
+	// into security.deep_scan. The /api/v1/config/apply path bypasses
+	// LoadFromFile, so without this an API apply carrying the deprecated keys
+	// would re-serialize them instead of the unified deep_scan surface (SC-007).
+	// Idempotent + nil-safe.
+	config.MigrateDeepScanConfig(newCfg)
 
 	// Detect changes and determine if restart is required
 	result := DetectConfigChanges(r.cfg, newCfg)

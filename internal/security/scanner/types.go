@@ -210,6 +210,18 @@ const (
 	ThreatLevelInfo      = "info"      // Low CVEs, informational
 )
 
+// Finding tiers (Spec 077). A hard-tier baseline finding gates approval
+// (auto-quarantine / dangerous verdict); a soft-tier finding is review-only.
+// The tier mirrors detect.TierHard/TierSoft and is set from detect output when
+// a finding comes from the deterministic baseline engine (see
+// detectFindingToScanFinding). Empty for findings that predate the two-tier
+// model (legacy/external scanners) — those keep their existing threat_level
+// semantics.
+const (
+	TierHard = "hard"
+	TierSoft = "soft"
+)
+
 // ScanFinding represents an individual security finding
 type ScanFinding struct {
 	RuleID           string  `json:"rule_id"`
@@ -243,6 +255,16 @@ type ScanFinding struct {
 	// finding (e.g. "unicode.hidden", "directive.imperative"), giving operators
 	// transparency into why a tool was flagged (Spec 076, FR-010). Additive.
 	Signals []string `json:"signals,omitempty"`
+	// Tier is "hard" or "soft" (Spec 077). A hard baseline finding gates
+	// approval and drives a "dangerous" verdict; a soft finding is review-only.
+	// Set from detect output for baseline findings; empty for legacy/external
+	// findings that predate the two-tier model. Additive, back-compat.
+	Tier string `json:"tier,omitempty"`
+	// Sources lists the contributing scanner ids for this finding (e.g.
+	// "tpa-descriptions", "cisco-mcp-scanner"). When two scanners agree on the
+	// same issue the merged finding lists both (Spec 077 FR-013). ≥1 for
+	// findings produced under Spec 077; empty for legacy findings. Additive.
+	Sources []string `json:"sources,omitempty"`
 }
 
 // ScanReport represents aggregated scan results for a server
@@ -259,18 +281,32 @@ type ScanReport struct {
 
 // AggregatedReport combines results from all scanners for a single scan job
 type AggregatedReport struct {
-	JobID          string        `json:"job_id"`
-	ServerName     string        `json:"server_name"`
-	Findings       []ScanFinding `json:"findings"`
-	RiskScore      int           `json:"risk_score"`
-	Summary        ReportSummary `json:"summary"`
-	ScannedAt      time.Time     `json:"scanned_at"`
-	Reports        []ScanReport  `json:"reports"`
-	ScannersRun    int           `json:"scanners_run"`    // How many scanners actually produced results
-	ScannersFailed int           `json:"scanners_failed"` // How many scanners failed
-	ScannersTotal  int           `json:"scanners_total"`  // Total scanners attempted
-	ScanComplete   bool          `json:"scan_complete"`   // True only if at least one scanner succeeded
-	EmptyScan      bool          `json:"empty_scan"`      // True when scanners ran but had no files to analyze
+	JobID      string        `json:"job_id"`
+	ServerName string        `json:"server_name"`
+	Findings   []ScanFinding `json:"findings"`
+	RiskScore  int           `json:"risk_score"`
+	// Summary carries the RAW threat-level / severity counts across ALL
+	// findings (baseline + deep-scan/external) for transparency. It is NOT a
+	// verdict — verdict-bearing UI must read Verdict/FindingCounts below.
+	Summary ReportSummary `json:"summary"`
+	// Verdict is the tier-driven, baseline-only verdict for this report
+	// (Spec 077 FR-014): "dangerous" (≥1 hard-tier baseline finding),
+	// "warnings" (≥1 soft-tier baseline finding), else "clean". It is derived
+	// by the SAME predicate as the server-list summary (GetScanSummary), so
+	// the report page can never disagree with the server verdict — a tierless
+	// deep-scan/external finding never moves it, regardless of threat_level.
+	Verdict string `json:"verdict"`
+	// FindingCounts buckets findings identically to ScanSummary.FindingCounts
+	// (hard-tier → dangerous; tierless "dangerous" → warning: informs, never
+	// gates), keeping the report page consistent with the server list.
+	FindingCounts  *FindingCounts `json:"finding_counts,omitempty"`
+	ScannedAt      time.Time      `json:"scanned_at"`
+	Reports        []ScanReport   `json:"reports"`
+	ScannersRun    int            `json:"scanners_run"`    // How many scanners actually produced results
+	ScannersFailed int            `json:"scanners_failed"` // How many scanners failed
+	ScannersTotal  int            `json:"scanners_total"`  // Total scanners attempted
+	ScanComplete   bool           `json:"scan_complete"`   // True only if at least one scanner succeeded
+	EmptyScan      bool           `json:"empty_scan"`      // True when scanners ran but had no files to analyze
 	// Two-pass scan tracking
 	Pass1Complete bool `json:"pass1_complete"` // Security scan (fast) done
 	Pass2Complete bool `json:"pass2_complete"` // Supply chain audit done
@@ -278,6 +314,11 @@ type AggregatedReport struct {
 	// Scan context from the primary job (for report page display)
 	ScanContext     *ScanContext       `json:"scan_context,omitempty"`
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses,omitempty"` // Per-scanner execution logs
+	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077 US3),
+	// mirrored from ScanSummary so the report page can render the informational
+	// deep-scan banner. Informational only — a failed or unavailable deep scanner
+	// never changes the baseline verdict. nil/omitted when deep scan is disabled.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
 }
 
 // ReportSummary provides counts by severity and threat level

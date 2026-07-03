@@ -39,6 +39,12 @@ type mockSecurityController struct {
 	scanAllErr   error
 	cancelAllErr error
 	queueRunning bool
+
+	deepScanEnabled bool
+}
+
+func (m *mockSecurityController) DeepScanEnabled() bool {
+	return m.deepScanEnabled
 }
 
 func (m *mockSecurityController) ListScanners(_ context.Context) ([]*scanner.ScannerPlugin, error) {
@@ -263,6 +269,62 @@ func TestSecurityHandlerInstallScanner(t *testing.T) {
 	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "enabled", resp["status"])
 	assert.Equal(t, "mcp-scan", resp["id"])
+}
+
+// TestSecurityHandlerEnableScannerDeepScanOffHint locks audit FIX 3b: enabling
+// a Docker-based scanner while security.deep_scan.enabled=false must return an
+// explicit hint (the scanner will not run until the layer is enabled) instead
+// of silently succeeding. No hint when deep scan is on, and none for the
+// in-process baseline scanner (it always runs).
+func TestSecurityHandlerEnableScannerDeepScanOffHint(t *testing.T) {
+	dockerScanner := &scanner.ScannerPlugin{
+		ID: "mcp-scan", Name: "MCP Scan", DockerImage: "test/mcp-scan:latest",
+		Status: scanner.ScannerStatusAvailable,
+	}
+	inprocScanner := &scanner.ScannerPlugin{
+		ID: "tpa-descriptions", Name: "TPA", InProcess: true,
+		Status: scanner.ScannerStatusInstalled,
+	}
+
+	enable := func(t *testing.T, srv *Server, id string) map[string]string {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/v1/security/scanners/"+id+"/enable", nil)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		var resp map[string]string
+		secParseData(t, w.Body, &resp)
+		return resp
+	}
+
+	t.Run("docker scanner with deep scan off gets hint", func(t *testing.T) {
+		secCtrl := &mockSecurityController{
+			scanners:        []*scanner.ScannerPlugin{dockerScanner},
+			deepScanEnabled: false,
+		}
+		resp := enable(t, newTestServerWithSecurity(t, secCtrl), "mcp-scan")
+		assert.Equal(t, "enabled", resp["status"])
+		require.NotEmpty(t, resp["hint"], "enabling a Docker scanner with deep scan off must not be silent")
+		assert.Contains(t, resp["hint"], "security.deep_scan.enabled=true")
+	})
+
+	t.Run("docker scanner with deep scan on gets no hint", func(t *testing.T) {
+		secCtrl := &mockSecurityController{
+			scanners:        []*scanner.ScannerPlugin{dockerScanner},
+			deepScanEnabled: true,
+		}
+		resp := enable(t, newTestServerWithSecurity(t, secCtrl), "mcp-scan")
+		assert.Empty(t, resp["hint"])
+	})
+
+	t.Run("in-process scanner gets no hint even with deep scan off", func(t *testing.T) {
+		secCtrl := &mockSecurityController{
+			scanners:        []*scanner.ScannerPlugin{inprocScanner},
+			deepScanEnabled: false,
+		}
+		resp := enable(t, newTestServerWithSecurity(t, secCtrl), "tpa-descriptions")
+		assert.Empty(t, resp["hint"])
+	})
 }
 
 func TestSecurityHandlerInstallScannerError(t *testing.T) {

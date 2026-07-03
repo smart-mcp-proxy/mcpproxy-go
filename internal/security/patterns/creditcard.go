@@ -24,12 +24,12 @@ func normalizeCreditCard(s string) string {
 func creditCardPattern() *Pattern {
 	// Known test card numbers (stored normalized - digits only)
 	knownTestCards := []string{
-		"4111111111111111",  // Visa test
-		"4242424242424242",  // Stripe Visa test
-		"5555555555554444",  // Mastercard test
-		"378282246310005",   // Amex test
-		"6011111111111117",  // Discover test
-		"3566002020360505",  // JCB test
+		"4111111111111111", // Visa test
+		"4242424242424242", // Stripe Visa test
+		"5555555555554444", // Mastercard test
+		"378282246310005",  // Amex test
+		"6011111111111117", // Discover test
+		"3566002020360505", // JCB test
 	}
 
 	builder := NewPattern("credit_card").
@@ -37,6 +37,7 @@ func creditCardPattern() *Pattern {
 		WithCategory(CategoryCreditCard).
 		WithSeverity(SeverityCritical).
 		WithDescription("Credit card number").
+		WithConfidence(0.95). // Luhn + prefix validated → high confidence (Spec 076 T015)
 		WithValidator(validateCreditCard).
 		WithNormalizer(normalizeCreditCard).
 		WithKnownExamples(knownTestCards...)

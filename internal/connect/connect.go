@@ -62,9 +62,55 @@ type Service struct {
 	listenAddr string // e.g. "127.0.0.1:8080"
 	apiKey     string // optional API key
 	homeDir    string // override for testing; empty means use os.UserHomeDir
+	// requireMCPAuth mirrors config.RequireMCPAuth. When false (the default),
+	// the /mcp endpoint accepts unauthenticated requests, so connect writes NO
+	// credential into client configs — embedding the REST-admin API key there
+	// would leak it for no benefit (Spec 078 security fix). When true, the
+	// credential is written via an HTTP header where the client config supports
+	// one, falling back to the ?apikey= query only where it cannot.
+	requireMCPAuth bool
+	// configProvider, when set, supplies the LIVE listen address, API key, and
+	// require_mcp_auth on every call instead of the startup snapshot above. The
+	// /mcp auth middleware already honors require_mcp_auth live (server.go), so
+	// the long-lived HTTP connect service must too — otherwise a runtime toggle
+	// leaves a stale snapshot that re-introduces the API-key leak this fix closes
+	// (auth turned off, but connect still embeds the key) or writes keyless
+	// entries that cannot authenticate (auth turned on). Nil for CLI one-shots,
+	// where the freshly-loaded config is already current (Spec 078).
+	configProvider func() (listenAddr, apiKey string, requireMCPAuth bool)
 	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
 	// tests inject a permission-denied error or a call counter through it.
 	readFile func(string) ([]byte, error)
+}
+
+// WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
+// which decides whether connect embeds a credential in client configs at all.
+// Threaded from config.RequireMCPAuth at the wiring sites, alongside listenAddr
+// and apiKey. Returns the receiver for chaining.
+func (s *Service) WithRequireMCPAuth(v bool) *Service {
+	s.requireMCPAuth = v
+	return s
+}
+
+// WithConfigProvider installs a live-config accessor so the service reflects
+// runtime changes to listen/api_key/require_mcp_auth (hot-reloaded via the file
+// watcher or the wizard's require_mcp_auth toggle) rather than a startup
+// snapshot. Wired only for the long-lived HTTP server; CLI one-shots leave it
+// nil. Returns the receiver for chaining.
+func (s *Service) WithConfigProvider(fn func() (listenAddr, apiKey string, requireMCPAuth bool)) *Service {
+	s.configProvider = fn
+	return s
+}
+
+// resolveConfig returns the effective listen address, API key, and
+// require_mcp_auth: live from the provider when one is installed, otherwise the
+// startup snapshot. All credential/URL construction routes through here so a
+// runtime toggle is honored consistently (Spec 078).
+func (s *Service) resolveConfig() (listenAddr, apiKey string, requireMCPAuth bool) {
+	if s.configProvider != nil {
+		return s.configProvider()
+	}
+	return s.listenAddr, s.apiKey, s.requireMCPAuth
 }
 
 // NewService creates a Service that will inject the given listen address
@@ -110,18 +156,64 @@ func (s *Service) read(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// mcpURL builds the MCPProxy MCP endpoint URL.
-func (s *Service) mcpURL() string {
-	addr := s.listenAddr
+// baseURL builds the credential-free MCPProxy MCP endpoint URL. This is the
+// anchor used both to construct client entries and to recognize existing ones
+// (with or without a trailing ?apikey= query), so matching works across the
+// pre- and post-Spec-078 entry shapes.
+func (s *Service) baseURL() string {
+	addr, _, _ := s.resolveConfig()
 	// If listen address starts with ":" (no host), default to localhost
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
 	}
-	base := fmt.Sprintf("http://%s/mcp", addr)
-	if s.apiKey != "" {
-		base += "?apikey=" + url.QueryEscape(s.apiKey)
+	return fmt.Sprintf("http://%s/mcp", addr)
+}
+
+// serverEntryParams carries everything buildServerEntry needs. credential is the
+// value to embed in the entry (as an X-API-Key header, a --header bridge arg, or
+// an ?apikey= query, per client). It is empty when no credential should be
+// written (require_mcp_auth off, or no key) and may hold the mask token in a
+// preview.
+type serverEntryParams struct {
+	baseURL    string
+	credential string
+}
+
+// entryParams resolves the credential to embed. When require_mcp_auth is off, or
+// no API key is set, credential stays empty so connect writes a clean, keyless
+// entry. When masked is true the real key is replaced with the display mask for
+// previews (the real key never leaves the core in a preview payload).
+func (s *Service) entryParams(masked bool) serverEntryParams {
+	_, apiKey, requireMCPAuth := s.resolveConfig()
+	cred := ""
+	if requireMCPAuth && apiKey != "" {
+		cred = apiKey
+		if masked {
+			cred = apiKeyMask
+		}
 	}
-	return base
+	return serverEntryParams{baseURL: s.baseURL(), credential: cred}
+}
+
+// containsCredential reports whether connect will write a credential into the
+// client config for the current configuration.
+func (s *Service) containsCredential() bool {
+	_, apiKey, requireMCPAuth := s.resolveConfig()
+	return requireMCPAuth && apiKey != ""
+}
+
+// credentialQuery appends the credential as an ?apikey= query to base, for the
+// clients whose config cannot express an HTTP header. The real key is
+// URL-escaped; the display mask is left literal so the preview renders cleanly.
+func credentialQuery(base, credential string) string {
+	if credential == "" {
+		return base
+	}
+	v := credential
+	if credential != apiKeyMask {
+		v = url.QueryEscape(credential)
+	}
+	return base + "?apikey=" + v
 }
 
 // defaultServerName is the key used in client config files.
@@ -290,14 +382,12 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 		}
 	}
 
-	mcpURL := s.mcpURL()
-
 	var res *ConnectResult
 	var err error
 	if client.Format == "toml" {
-		res, err = s.connectTOML(client, cfgPath, serverName, mcpURL, force)
+		res, err = s.connectTOML(client, cfgPath, serverName, force)
 	} else {
-		res, err = s.connectJSON(client, cfgPath, serverName, mcpURL, force)
+		res, err = s.connectJSON(client, cfgPath, serverName, force)
 	}
 	// A permission denial anywhere in the read/backup/write chain (the errors
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
@@ -337,7 +427,7 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 // ---------- JSON helpers ----------
 
 // connectJSON adds or updates the mcpproxy entry in a JSON config file.
-func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL string, force bool) (*ConnectResult, error) {
+func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool) (*ConnectResult, error) {
 	// Read existing config or start fresh
 	data, perm, err := s.readOrCreateJSON(cfgPath)
 	if err != nil {
@@ -367,7 +457,7 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 	}
 
 	if client.ID == "opencode" {
-		if adoptedName, found := findEquivalentJSONServerName(serversMap, mcpURL, serverName); found && adoptedName != serverName {
+		if adoptedName, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found && adoptedName != serverName {
 			if !force {
 				return &ConnectResult{
 					Success:    true,
@@ -389,8 +479,9 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Build the entry
-	entry := buildServerEntry(client.ID, mcpURL)
+	// Build the entry from the credential-aware params (no credential unless
+	// require_mcp_auth is on).
+	entry := buildServerEntry(client.ID, s.entryParams(false))
 	serversMap[serverName] = entry
 	data[serversKey] = serversMap
 
@@ -504,7 +595,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 // ---------- TOML helpers (Codex) ----------
 
 // connectTOML adds or updates the mcpproxy entry in a TOML config file (Codex).
-func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL string, force bool) (*ConnectResult, error) {
+func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, force bool) (*ConnectResult, error) {
 	data, perm, err := s.readOrCreateTOML(cfgPath)
 	if err != nil {
 		return nil, err
@@ -541,10 +632,9 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL str
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Build Codex entry
-	entry := map[string]interface{}{
-		"url": mcpURL,
-	}
+	// Build Codex entry via the shared constructor so what connect writes is
+	// exactly what preview renders (Spec 078 FR-002).
+	entry := buildServerEntry(client.ID, s.entryParams(false))
 	serversMap[serverName] = entry
 	data["mcp_servers"] = serversMap
 
@@ -738,8 +828,7 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	return nil
 }
 
-func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, requestedServerName string) (string, bool) {
-	baseURL := strings.SplitN(mcpURL, "?", 2)[0]
+func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, requestedServerName string) (string, bool) {
 	for name, rawEntry := range serversMap {
 		entry, ok := rawEntry.(map[string]interface{})
 		if !ok {
@@ -750,7 +839,9 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, req
 			if !ok {
 				continue
 			}
-			if entryURL == mcpURL || entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
+			// Match both a clean base URL and a legacy ?apikey= variant so an
+			// upgrade adopts/updates the existing entry rather than duplicating.
+			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
 		}
@@ -786,8 +877,9 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		return "", false, true
 	}
 
-	mcpURL := s.mcpURL()
-	baseURL := fmt.Sprintf("http://%s/mcp", s.listenAddr)
+	// Anchor on the credential-free base URL so both new clean entries and
+	// legacy entries carrying a ?apikey= query are recognized (Spec 078).
+	baseURL := s.baseURL()
 
 	for name, v := range serversMap {
 		entry, ok := v.(map[string]interface{})
@@ -798,7 +890,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		// Check various URL fields used by different clients
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
-				if u == mcpURL || u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+				if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
 					return name, true, true
 				}
 			}
@@ -807,7 +899,7 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		// Stdio-bridge clients (e.g. Claude Desktop) have no URL field; the
 		// mcpproxy endpoint lives in the command args. Detect by inspecting
 		// args so a bridge written under a custom server name is still found.
-		if entryPointsToBridge(entry, mcpURL, baseURL) {
+		if entryPointsToBridge(entry, baseURL) {
 			return name, true, true
 		}
 
@@ -821,8 +913,9 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 }
 
 // entryPointsToBridge reports whether a JSON config entry is an mcp-remote
-// stdio bridge targeting our MCP endpoint, regardless of the entry key.
-func entryPointsToBridge(entry map[string]interface{}, mcpURL, baseURL string) bool {
+// stdio bridge targeting our MCP endpoint, regardless of the entry key. Matches
+// both the clean base URL (new entries) and a legacy ?apikey= variant.
+func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 	rawArgs, ok := entry["args"].([]interface{})
 	if !ok {
 		return false
@@ -837,7 +930,7 @@ func entryPointsToBridge(entry map[string]interface{}, mcpURL, baseURL string) b
 		if s == "mcp-remote" {
 			hasBridgePkg = true
 		}
-		if s == mcpURL || s == baseURL || strings.HasPrefix(s, baseURL+"?") {
+		if s == baseURL || strings.HasPrefix(s, baseURL+"?") {
 			pointsToUs = true
 		}
 	}
@@ -872,8 +965,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK b
 		return "", false, true
 	}
 
-	mcpURL := s.mcpURL()
-	baseURL := fmt.Sprintf("http://%s/mcp", s.listenAddr)
+	baseURL := s.baseURL()
 
 	for name, v := range serversMap {
 		entry, ok := v.(map[string]interface{})
@@ -881,7 +973,7 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK b
 			continue
 		}
 		if u, ok := entry["url"].(string); ok {
-			if u == mcpURL || u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+			if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
 				return name, true, true
 			}
 		}

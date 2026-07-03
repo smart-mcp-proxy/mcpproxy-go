@@ -77,6 +77,59 @@ func (s *Server) handleGetConnectClientStatus(w http.ResponseWriter, r *http.Req
 	s.writeSuccess(w, status)
 }
 
+// handleConnectClientPreview godoc
+// @Summary     Preview the change a connect would make (no write)
+// @Description Returns the exact entry a subsequent connect would add to the client's
+// @Description config — target path, server key, entry name, and entry contents — WITHOUT
+// @Description modifying the file or creating a backup (Spec 078 US1). The embedded API key
+// @Description is masked in the payload; contains_api_key flags that a credential is written.
+// @Description entry_exists distinguishes a create from an overwrite of a same-named entry.
+// @Description Reads the config on demand to classify create-vs-overwrite, so on macOS this
+// @Description may raise an App-Data privacy prompt; a denial returns 403 + remediation.
+// @Tags        connect
+// @Produce     json
+// @Security    ApiKeyAuth
+// @Security    ApiKeyQuery
+// @Param       client      path  string true  "Client ID (claude-code, claude-desktop, cursor, windsurf, vscode, codex, gemini, opencode)"
+// @Param       server_name query string false "Entry name to preview (defaults to mcpproxy); mirror the value passed to POST connect"
+// @Success     200    {object} contracts.APIResponse "ConnectPreview"
+// @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
+// @Failure     404    {object} contracts.ErrorResponse "Unknown client"
+// @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
+// @Router      /api/v1/connect/{client}/preview [get]
+func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Request) {
+	svc := s.getConnectService()
+	if svc == nil {
+		s.writeError(w, r, http.StatusServiceUnavailable, "connect service not available")
+		return
+	}
+
+	clientID := chi.URLParam(r, "client")
+	if clientID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "client ID is required")
+		return
+	}
+
+	// Honor an optional server_name so a caller can preview the exact entry name
+	// a subsequent POST connect (which accepts server_name) will write; defaults
+	// to "mcpproxy" when omitted, matching Connect (Spec 078 FR-002).
+	preview, err := svc.Preview(clientID, r.URL.Query().Get("server_name"))
+	if err != nil {
+		// A macOS App-Data (TCC) denial during the on-demand read surfaces as
+		// 403 + remediation, matching connect/disconnect (Spec 078 FR-012).
+		if s.writeIfAccessDenied(w, r, err) {
+			return
+		}
+		if connect.FindClient(clientID) == nil {
+			s.writeError(w, r, http.StatusNotFound, err.Error())
+			return
+		}
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.writeSuccess(w, preview)
+}
+
 // handleConnectClient godoc
 // @Summary     Connect MCPProxy to a client
 // @Description Register MCPProxy as an MCP server in the specified client's configuration file.

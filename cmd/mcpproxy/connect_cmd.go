@@ -76,7 +76,7 @@ func runConnect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	svc := connect.NewService(cfg.Listen, cfg.APIKey)
+	svc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth)
 
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	formatter, err := clioutput.NewFormatter(format)
@@ -114,7 +114,7 @@ func runDisconnect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	svc := connect.NewService(cfg.Listen, cfg.APIKey)
+	svc := connect.NewService(cfg.Listen, cfg.APIKey).WithRequireMCPAuth(cfg.RequireMCPAuth)
 
 	format := clioutput.ResolveFormat(globalOutputFormat, globalJSONOutput)
 	formatter, err := clioutput.NewFormatter(format)

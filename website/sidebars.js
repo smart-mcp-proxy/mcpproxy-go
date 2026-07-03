@@ -71,6 +71,7 @@ const sidebars = {
         'features/oauth-authentication',
         'features/code-execution',
         'features/security-quarantine',
+        'features/tool-scanner',
         'features/search-discovery',
         'features/version-updates',
       ],

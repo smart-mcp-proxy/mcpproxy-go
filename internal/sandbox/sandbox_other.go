@@ -10,6 +10,10 @@ package sandbox
 // Note: macOS/Windows already have their own first-class sandbox stories
 // (Seatbelt / Docker Desktop / Windows containers); this package targets the
 // Linux snap-docker gap specifically (see package doc).
+// Available reports whether the native sandbox primitive can be enforced. It is
+// always false off Linux: Landlock is a Linux-only LSM.
+func Available() bool { return false }
+
 func Apply(spec Spec) (Report, error) {
 	// No filesystem allowlist requested → nothing to enforce, same as Linux.
 	if !spec.wantsLandlock() {

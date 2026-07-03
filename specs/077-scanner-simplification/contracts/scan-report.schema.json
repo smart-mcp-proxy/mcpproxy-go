@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/schemas/077/scan-report.json",
+  "title": "ScanReport",
+  "description": "Unified per-server security scan report. Baseline verdict is independent of deep-scan availability (Spec 077).",
+  "type": "object",
+  "required": ["server", "status", "findings", "deep_scan"],
+  "additionalProperties": true,
+  "properties": {
+    "server": { "type": "string", "description": "Server name." },
+    "status": {
+      "type": "string",
+      "enum": ["clean", "warning", "dangerous"],
+      "description": "Verdict derived from BASELINE findings only. No 'degraded'/'failed' from deep-scan gaps (FR-014)."
+    },
+    "risk_score": { "type": "number", "minimum": 0 },
+    "scanned_at": { "type": "string", "format": "date-time" },
+    "findings": {
+      "type": "array",
+      "description": "Merged + deduplicated across all scanners that ran. No (rule_id, location) duplicates (FR-010/FR-011).",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "deep_scan": { "$ref": "#/$defs/deepScanDescriptor" }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["rule_id", "location", "severity", "tier", "sources"],
+      "additionalProperties": true,
+      "properties": {
+        "rule_id": { "type": "string" },
+        "location": { "type": "string", "description": "server:tool; dedup key with rule_id." },
+        "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
+        "tier": { "type": "string", "enum": ["hard", "soft"], "description": "Only hard baseline findings gate approval (FR-021)." },
+        "threat_type": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "description": "Higher when independent sources agree (FR-012)." },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "Contributing scanner ids; all sources of a merged finding."
+        },
+        "message": { "type": "string" }
+      }
+    },
+    "deepScanDescriptor": {
+      "type": "object",
+      "required": ["enabled", "ran", "available"],
+      "additionalProperties": false,
+      "description": "Informational only; MUST NOT influence status (FR-008).",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ran": { "type": "boolean" },
+        "available": { "type": "boolean" },
+        "scanners_failed": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": {
+              "id": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

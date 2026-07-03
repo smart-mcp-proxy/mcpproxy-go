@@ -32,9 +32,52 @@ type Engine struct {
 	// docker × AppArmor transition would otherwise deny entrypoint exec.
 	disableNoNewPrivileges bool
 
+	// isolationMode is the engine-wide DEFAULT isolation mode ("docker",
+	// "sandbox", "none", or "" == docker for back-compat), used only when a
+	// ScanRequest does not carry a per-server IsolationMode. The per-server
+	// resolved mode on the request takes precedence (MCP-34.4) so a server with
+	// an explicit isolation.mode override gets the right scanner behaviour.
+	// Scanner *plugins* are Docker-based (Spec 039); under "sandbox"/"none" the
+	// host runs no Docker for scanners, so Docker-based scanners are cleanly
+	// skipped (prefailed with an honest reason) while in-process scanners still
+	// run — D3 option (b). Set via Service.SetIsolationMode.
+	isolationMode string
+
+	// deepScanEnabled gates the opt-in "deep scan" layer (Spec 077 US3): the
+	// Docker-based scanner plugins plus published-package-source extraction.
+	// Default false (FR-006) — only the deterministic in-process baseline scanner
+	// runs, with zero Docker invoked. When false, resolveScanners drops every
+	// Docker-based (non-in-process) scanner entirely so no container is launched
+	// and no deep-scanner failure can degrade the baseline verdict (FR-007/008).
+	// Set via Service.SetDeepScan from security.deep_scan.enabled.
+	deepScanEnabled bool
+
+	// deepScanScanners optionally restricts which deep scanners may run when
+	// deepScanEnabled is true (security.deep_scan.scanners). Nil/empty ⇒ every
+	// enabled deep scanner is eligible. Ignored when deepScanEnabled is false.
+	deepScanScanners map[string]bool
+
 	// Track active scans (one per server)
 	mu          sync.Mutex
 	activeScans map[string]*ScanJob // keyed by server name
+}
+
+// deepScanAllowed reports whether a scanner is eligible to run given the
+// deep-scan gate (Spec 077 US3). The in-process baseline scanner is ALWAYS
+// allowed — it is the zero-dependency default. A Docker-based (deep) scanner is
+// allowed only when the deep-scan layer is enabled and, when a per-scanner
+// allow-list is configured, the scanner is on it.
+func (e *Engine) deepScanAllowed(s *ScannerPlugin) bool {
+	if s.InProcess {
+		return true
+	}
+	if !e.deepScanEnabled {
+		return false
+	}
+	if len(e.deepScanScanners) == 0 {
+		return true
+	}
+	return e.deepScanScanners[s.ID]
 }
 
 // NewEngine creates a new scan orchestration engine
@@ -58,6 +101,20 @@ type ScanRequest struct {
 	Env            map[string]string // Additional environment variables
 	ScanContext    *ScanContext      // Context metadata (set by service)
 	ScanPass       int               // 1 = security scan (fast), 2 = supply chain audit (background)
+	// IsolationMode is THIS server's resolved isolation mode ("docker",
+	// "sandbox", "none", or "" to fall back to the engine's service-wide
+	// default). Set per-server by the Service so the Docker-scanner skip
+	// (MCP-34.4) follows the scanned server's effective mode — a per-server
+	// isolation.mode override beats the global mode (internal/upstream/core
+	// IsolationManager.ResolveMode). Under "sandbox"/"none" Docker scanner
+	// plugins are skipped; under "docker" they run.
+	IsolationMode string
+	// PeerTools is a cross-server snapshot (other servers' current tool
+	// definitions, keyed by server name) used by the in-process tpa-descriptions
+	// scanner to build a multi-server RegistryView so the deterministic
+	// shadowing.cross_server check can detect impersonation/collisions across
+	// servers. Populated by the Service; nil for callers that don't supply it.
+	PeerTools map[string][]map[string]interface{}
 }
 
 // ScanCallback receives scan lifecycle events
@@ -94,8 +151,11 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		return existing, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, existing.ID)
 	}
 
-	// Determine which scanners to use
-	resolved, err := e.resolveScanners(req.ScannerIDs)
+	// Determine which scanners to use. The Docker-scanner skip (MCP-34.4)
+	// follows THIS server's resolved isolation mode (per-server override beats
+	// the global default); fall back to the engine-wide default when the
+	// request didn't carry one.
+	resolved, err := e.resolveScanners(req.ScannerIDs, e.effectiveIsolationMode(req.IsolationMode))
 	if err != nil {
 		e.mu.Unlock()
 		return nil, err
@@ -180,7 +240,30 @@ type resolvedScanner struct {
 // executeScan loop records it as a failed scanner in the job. That way the
 // aggregated scan report shows "X of Y scanners failed" instead of pretending
 // nothing is wrong.
-func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, error) {
+// effectiveIsolationMode resolves the isolation mode to use for a scan: the
+// per-server mode carried on the ScanRequest when present, otherwise the
+// engine-wide default set via Service.SetIsolationMode. This is what lets the
+// Docker-scanner skip (MCP-34.4) honour a per-server isolation.mode override.
+func (e *Engine) effectiveIsolationMode(requestMode string) string {
+	if requestMode != "" {
+		return requestMode
+	}
+	return e.isolationMode
+}
+
+// resolveScanners determines which scanners to use.
+//
+// Unlike the old behaviour (silently dropping scanners with missing Docker
+// images), this now includes every enabled scanner in the result. When a
+// scanner's image is absent locally it is flagged with prefail so the
+// executeScan loop records it as a failed scanner in the job. That way the
+// aggregated scan report shows "X of Y scanners failed" instead of pretending
+// nothing is wrong.
+//
+// isolationMode is THIS server's resolved isolation mode (per-server override
+// already applied by the caller); under "sandbox"/"none" Docker scanner plugins
+// are skipped (MCP-34.4).
+func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([]resolvedScanner, error) {
 	all := e.registry.List()
 
 	// Helper: check whether a scanner's image is present locally. Returns a
@@ -191,6 +274,22 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 		// local Docker (MCP-2082).
 		if s.InProcess {
 			return ""
+		}
+		// MCP-34.4 / D3 option (b): under a non-Docker isolation mode the host
+		// runs no Docker for scanner plugins, so Docker-based scanners cannot
+		// run at all. Skip them with an honest, mode-specific reason (pointing
+		// at the snap-docker/AppArmor failure doc) instead of the misleading
+		// "pull the image locally" guidance below — there is nothing to pull.
+		// They stay in the resolved set (recorded as failed) and are surfaced
+		// via the informational deep-scan descriptor (Spec 077 US3); this never
+		// degrades the baseline verdict.
+		// `isolationMode` is per-server resolved, so a server pinned to
+		// isolation.mode:docker still runs Docker scanners under a global
+		// sandbox default, and vice versa.
+		if mode := isolationMode; mode == "sandbox" || mode == "none" {
+			return fmt.Sprintf("Docker-based scanner %s skipped: isolation mode %q runs no Docker containers, so Docker scanner plugins cannot run for this server. "+
+				"In-process scanners still ran. To run Docker scanners, set isolation.mode to \"docker\" for this server on a host with a working Docker daemon. "+
+				"See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.", s.ID, mode)
 		}
 		if e.docker == nil {
 			return ""
@@ -219,6 +318,13 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 			if s.Status != ScannerStatusInstalled && s.Status != ScannerStatusConfigured && s.Status != ScannerStatusError && s.Status != ScannerStatusPulling {
 				return nil, fmt.Errorf("scanner %s is not enabled (status: %s)", id, s.Status)
 			}
+			// Spec 077 US3: drop Docker deep scanners entirely when the
+			// deep-scan layer is off (or the scanner is not on the allow-list)
+			// so no container is invoked and no failure can degrade the
+			// baseline. The in-process baseline is always allowed.
+			if !e.deepScanAllowed(s) {
+				continue
+			}
 			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
 		}
 		return result, nil
@@ -228,6 +334,11 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 	// user sees what happened to them in the scan report.
 	var result []resolvedScanner
 	for _, s := range all {
+		// Spec 077 US3 deep-scan gate: skip Docker deep scanners while the
+		// opt-in layer is off. Baseline (in-process) always runs.
+		if !e.deepScanAllowed(s) {
+			continue
+		}
 		switch s.Status {
 		case ScannerStatusInstalled, ScannerStatusConfigured:
 			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
@@ -700,8 +811,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 		agg.Reports = append(agg.Reports, *r)
 	}
 
-	// Classify findings that lack threat_type/threat_level (legacy data)
+	// Classify findings that lack threat_type/threat_level (legacy data). This
+	// must run before MergeFindings so consensus (which keys on threat_type) and
+	// severity backfill see fully-classified findings.
 	ClassifyAllFindings(agg.Findings)
+
+	// Spec 077 (T021, FR-010/FR-011/FR-012): collapse the per-scanner findings
+	// into a single unified list. Findings sharing (rule_id, location) merge into
+	// one entry whose Sources lists every contributing scanner; cross-source
+	// agreement on the same (location, threat_type) raises confidence.
+	agg.Findings = MergeFindings(agg.Findings)
 
 	// Flag findings that belong in the Supply Chain Audit (CVEs) UI section.
 	// Match only real CVE/package vulnerabilities so AI-scanner output from Pass 2
@@ -712,6 +831,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
+
+	// Spec 077 FR-014 verdict purity: the report-level verdict uses the SAME
+	// tier-driven, baseline-only derivation as the server-list summary
+	// (GetScanSummary via deriveBaselineVerdict), so the report page can never
+	// disagree with the server verdict — a tierless deep-scan/external
+	// "dangerous" finding never moves it. Summary above keeps the RAW
+	// threat-level counts for transparency; verdict-bearing UI reads these.
+	verdict, counts := deriveBaselineVerdict(agg.Findings)
+	agg.Verdict = verdict
+	agg.FindingCounts = &counts
 
 	// ScannersRun = number of successful reports
 	agg.ScannersRun = len(reports)

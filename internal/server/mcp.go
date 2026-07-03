@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
@@ -1220,6 +1221,17 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		args["include_disabled"] = true
 	}
 
+	// serverDiscoverable applies the agent-scope (Spec 049 FR-007) and profile
+	// (Spec 057) filters BEFORE classification so an agent never learns a tool
+	// exists on a server it cannot access. Shared by the callable-result loop
+	// and the quarantined-tool discovery pass below so the two never drift.
+	serverDiscoverable := func(serverName string) bool {
+		if enforceAgentScope && authCtx != nil && !authCtx.CanAccessServer(serverName) {
+			return false
+		}
+		return profileScope.Allows(serverName)
+	}
+
 	var callableResults []*config.SearchResult
 	var disabledEntries []contracts.LockedToolEntry
 	droppedCount := 0
@@ -1234,15 +1246,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 
-		// Agent-scope filtering happens BEFORE classification (Spec 049 FR-007)
-		// so an agent never learns a locked tool exists on a server it cannot
-		// access.
-		if enforceAgentScope && !authCtx.CanAccessServer(serverName) {
-			continue
-		}
-		// Spec 057: profile filter — runs independently of agent-scope so that
-		// unauthenticated /mcp/p/<slug> connections (AdminContext) are still filtered.
-		if !profileScope.Allows(serverName) {
+		if !serverDiscoverable(serverName) {
 			continue
 		}
 
@@ -1262,6 +1266,34 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		callableResults = append(callableResults, result)
 	}
 	results = callableResults
+
+	// Quarantined tools are deliberately absent from the search index: their
+	// untrusted descriptions/schemas are withheld so a Tool Poisoning Attack
+	// payload is never exposed to the agent. The loop above therefore can never
+	// surface them, and an agent searching for a capability a quarantined server
+	// provides would be told "no such tool". Enumerate those tools from
+	// authoritative state (server-level quarantine + tool-level pending/changed
+	// approvals) and prepend name-only locked entries (no description/schema) so
+	// the agent learns the capability EXISTS but needs the user's approval.
+	//
+	// `seen` dedupes against tools the loop already handled — primarily for the
+	// brief window after a runtime quarantine toggle when a tool may still
+	// linger in the index — so a tool is never both a callable result and a
+	// locked entry, and droppedCount isn't double-counted. Matches are PREPENDED
+	// so the shared min(limit,10) cap below can't truncate them away in favor of
+	// index hits. The count feeds the zero-result nudge even without the flag.
+	seen := make(map[string]bool, len(callableResults)+len(disabledEntries))
+	for _, r := range callableResults {
+		seen[r.Tool.Name] = true
+	}
+	for _, e := range disabledEntries {
+		seen[e.Name] = true
+	}
+	quarantinedMatches := p.collectQuarantinedToolMatches(query, serverDiscoverable, seen, p.serverToolNames)
+	droppedCount += len(quarantinedMatches)
+	if includeDisabled {
+		disabledEntries = append(quarantinedMatches, disabledEntries...)
+	}
 
 	// Spec 035 F4: Resolve annotations for each result and apply annotation-based filtering
 	// before building the MCP tool response. This allows agents to self-restrict discovery.
@@ -5295,6 +5327,9 @@ func disabledToolRemediation(status contracts.DisabledToolStatus) string {
 	switch status {
 	case contracts.DisabledStatusServerDisabled:
 		return "Its server is disabled. Ask the user to enable the server first."
+	case contracts.DisabledStatusServerQuarantined:
+		return "Its server is quarantined for security review. Its tools cannot be called " +
+			"until the user reviews and approves the server in the mcpproxy UI or system tray."
 	case contracts.DisabledStatusByConfig:
 		return "Locked by operator policy in mcp_config.json (enabled_tools/disabled_tools). " +
 			"The user cannot enable this from the UI; ask the operator to change the server config."
@@ -5306,6 +5341,136 @@ func disabledToolRemediation(status contracts.DisabledToolStatus) string {
 	default:
 		return "Reason undetermined; check server logs."
 	}
+}
+
+// maxQuarantinedMatches bounds how many quarantined tools the discovery
+// second-pass collects before stopping. The response itself is capped lower
+// (min(limit,10)); this just bounds work on the opt-in path.
+const maxQuarantinedMatches = 50
+
+// collectQuarantinedToolMatches finds tools that exist but are quarantined and
+// whose name matches the query, returning lean locked entries (no description
+// or schema — those are withheld because a quarantined tool's description is a
+// potential Tool Poisoning Attack payload). It covers both quarantine layers:
+//   - server-level quarantine: every tool on a Quarantined server is locked
+//     (status server_quarantined);
+//   - tool-level quarantine: pending/changed approval records on a trusted
+//     server (status pending_approval).
+//
+// Quarantined tools are not in the search index, so this is the only path that
+// can surface them to discovery. allowServer mirrors the agent-scope/profile
+// filtering applied to the index results so an agent never learns a tool
+// exists on a server it cannot access.
+//
+// Inputs:
+//   - allowServer / seen: the discovery scope filter and the set of "server:tool"
+//     keys the index loop already handled (callable or locked), so a tool is
+//     never surfaced twice.
+//   - toolNamesFor: resolves a server's live tool names (injected for testing;
+//     production passes p.serverToolNames).
+//
+// A tool that is also denied by operator config (enabled_tools/disabled_tools)
+// is skipped rather than advertised as merely "pending approval": approving it
+// in the UI would not make it callable, so surfacing it would send the agent
+// down a remediation that can never succeed.
+func (p *MCPProxyServer) collectQuarantinedToolMatches(query string, allowServer func(string) bool, seen map[string]bool, toolNamesFor func(string) []string) []contracts.LockedToolEntry {
+	tokens := queryTokens(query)
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	servers, err := p.storage.ListUpstreams()
+	if err != nil {
+		p.logger.Debug("collectQuarantinedToolMatches: failed to list upstreams", zap.Error(err))
+		return nil
+	}
+
+	var matches []contracts.LockedToolEntry
+	// add records a quarantined tool; returns false once the work cap is hit.
+	add := func(sc *config.ServerConfig, toolName string, status contracts.DisabledToolStatus) bool {
+		key := sc.Name + ":" + toolName
+		if seen[key] || !toolNameMatchesQuery(toolName, tokens) {
+			return true
+		}
+		if p.isToolConfigDenied(sc.Name, toolName, sc) {
+			return true // operator policy, not quarantine — don't advertise as approvable
+		}
+		seen[key] = true
+		matches = append(matches, contracts.LockedToolEntry{Name: key, Server: sc.Name, Status: status})
+		return len(matches) < maxQuarantinedMatches
+	}
+
+	for _, sc := range servers {
+		if sc == nil || !sc.Enabled || !allowServer(sc.Name) {
+			continue
+		}
+
+		if sc.Quarantined {
+			for _, toolName := range toolNamesFor(sc.Name) {
+				if !add(sc, toolName, contracts.DisabledStatusServerQuarantined) {
+					return matches
+				}
+			}
+			continue
+		}
+
+		approvals, aerr := p.storage.ListToolApprovals(sc.Name)
+		if aerr != nil {
+			continue
+		}
+		for _, a := range approvals {
+			if a == nil || a.Disabled {
+				continue
+			}
+			if a.Status != storage.ToolApprovalStatusPending && a.Status != storage.ToolApprovalStatusChanged {
+				continue
+			}
+			if !add(sc, a.ToolName, contracts.DisabledStatusPendingApproval) {
+				return matches
+			}
+		}
+	}
+	return matches
+}
+
+// queryTokens lowercases the query and splits it into alphanumeric tokens, used
+// for a lightweight name match against quarantined tools (which are not in the
+// BM25 index and so can't be ranked normally). Tokens of length >= 2 are kept so
+// short-but-meaningful capability keywords ("ci", "ui", "qa", "db", "os") still
+// match; if the query has only single-character fields they are kept as a
+// fallback rather than returning nothing.
+func queryTokens(query string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	tokens := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if len(f) >= 2 {
+			tokens = append(tokens, f)
+		}
+	}
+	if len(tokens) == 0 {
+		for _, f := range fields {
+			if f != "" {
+				tokens = append(tokens, f)
+			}
+		}
+	}
+	return tokens
+}
+
+// toolNameMatchesQuery reports whether a quarantined tool's name is relevant to
+// the query: any query token appears in the lowercased tool name. Tool names
+// usually carry the capability keywords (e.g. "emulator_build_web"), so this is
+// enough to surface "this exists but is quarantined" without the description.
+func toolNameMatchesQuery(toolName string, tokens []string) bool {
+	lower := strings.ToLower(toolName)
+	for _, tok := range tokens {
+		if strings.Contains(lower, tok) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *config.ToolAnnotations {
