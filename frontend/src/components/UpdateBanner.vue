@@ -45,9 +45,21 @@ import { useSystemStore } from '@/stores/system'
 const STORAGE_KEY = 'update-banner-dismissed-version'
 
 const systemStore = useSystemStore()
+
+// localStorage can throw (blocked storage in embedded/private contexts);
+// degrade to session-only dismissal instead of breaking component setup
+// (precedent: stores/system.ts wraps storage access the same way).
+function readDismissedVersion(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
 // Read eagerly (not in onMounted) so a dismissed version never flashes the
 // banner on the first render.
-const dismissedVersion = ref(localStorage.getItem(STORAGE_KEY) ?? '')
+const dismissedVersion = ref(readDismissedVersion())
 
 const latestVersion = computed(() => systemStore.latestVersion)
 const currentVersion = computed(() => systemStore.version)
@@ -62,6 +74,10 @@ const visible = computed(
 
 function dismiss() {
   dismissedVersion.value = latestVersion.value
-  localStorage.setItem(STORAGE_KEY, latestVersion.value)
+  try {
+    localStorage.setItem(STORAGE_KEY, latestVersion.value)
+  } catch {
+    // Storage unavailable — dismissal still holds for this session via the ref.
+  }
 }
 </script>

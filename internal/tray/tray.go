@@ -1035,11 +1035,43 @@ func (a *App) onExit() {
 	}
 }
 
+// updateCheckEnabledByConfig reports whether the update_check config block
+// permits update checking (Spec 079 FR-015: enabled=false means no network
+// check on any surface, including this tray's own self-update check). It reads
+// the same config file the core uses. Fail-open on a missing/unreadable config
+// (matching the pre-079 default-enabled behavior); the environment kill-switch
+// MCPPROXY_DISABLE_AUTO_UPDATE is checked separately by the caller and wins
+// regardless (FR-014 precedence: env > config).
+func (a *App) updateCheckEnabledByConfig() bool {
+	path := a.configPath
+	if path == "" && a.server != nil {
+		path = a.server.GetConfigPath()
+	}
+	if path == "" {
+		return true
+	}
+	cfg, err := config.LoadFromFile(path)
+	if err != nil {
+		a.logger.Debugw("Could not load config for update-check gate; assuming enabled",
+			"config_path", path, "error", err)
+		return true
+	}
+	return cfg.UpdateCheck.IsEnabled()
+}
+
 // checkForUpdates checks for new releases on GitHub
 func (a *App) checkForUpdates() {
 	// Check if auto-update is disabled by environment variable
 	if os.Getenv("MCPPROXY_DISABLE_AUTO_UPDATE") == trueStr {
 		a.logger.Info("Auto-update disabled by environment variable")
+		return
+	}
+
+	// Spec 079 FR-015: update_check.enabled=false means no network check on
+	// any surface — including this tray-owned release check, which is
+	// independent of the core's internal/updatecheck checker.
+	if !a.updateCheckEnabledByConfig() {
+		a.logger.Info("Auto-update disabled by config (update_check.enabled=false)")
 		return
 	}
 
@@ -1887,7 +1919,26 @@ func (a *App) checkUpdateFromAPI() {
 		return
 	}
 
-	if !response.Success || response.Data.Update == nil {
+	if !response.Success {
+		return
+	}
+
+	if response.Data.Update == nil {
+		// The core omits the update object entirely when update checking is
+		// disabled (update_check.enabled=false, Spec 079 FR-015). Treat the
+		// absence as "no update": clear state and hide any previously shown
+		// nudge so a hot-reload disable doesn't leave a stale
+		// "New version available" menu item until tray restart.
+		a.updateCheckMu.Lock()
+		wasAvailable := a.updateAvailable
+		a.updateAvailable = false
+		a.latestVersion = ""
+		a.latestReleaseURL = ""
+		a.updateCheckMu.Unlock()
+		if wasAvailable {
+			a.logger.Info("Update checking disabled on core; clearing update nudge")
+		}
+		a.hideUpdateMenuItem()
 		return
 	}
 

@@ -85,6 +85,12 @@ Both keys are **hot-reloadable**: editing the config file or applying it via
 switching channels) triggers a prompt re-check instead of waiting for the next
 4-hour tick.
 
+`enabled: false` also gates the Go tray's built-in daily self-update check (it
+reads the same config file before checking), so no surface performs a network
+check while disabled. The tray's own check still selects prereleases via
+`MCPPROXY_ALLOW_PRERELEASE_UPDATES` only — converging it fully onto the shared
+checker (including `channel`) is a separate Spec 079 work item (FR-001a).
+
 ### Environment Variables
 
 | Variable | Description | Default |

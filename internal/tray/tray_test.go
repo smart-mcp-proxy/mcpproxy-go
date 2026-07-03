@@ -4,6 +4,10 @@ package tray
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -905,4 +909,95 @@ func TestBuildConnectionURL(t *testing.T) {
 			t.Fatalf("expected empty string for invalid listen address, got %s", got)
 		}
 	})
+}
+
+// TestUpdateCheckEnabledByConfig verifies the tray's own self-update check is
+// gated by the update_check config block (Spec 079 FR-015: enabled=false means
+// no network check on any surface, including the tray's independent check).
+func TestUpdateCheckEnabledByConfig(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+
+	writeConfig := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "mcp_config.json")
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		return path
+	}
+
+	t.Run("disabled by config", func(t *testing.T) {
+		app := &App{logger: logger, configPath: writeConfig(t,
+			`{"listen":"127.0.0.1:8080","update_check":{"enabled":false}}`)}
+		if app.updateCheckEnabledByConfig() {
+			t.Error("updateCheckEnabledByConfig() = true, want false with update_check.enabled=false")
+		}
+	})
+
+	t.Run("explicitly enabled", func(t *testing.T) {
+		app := &App{logger: logger, configPath: writeConfig(t,
+			`{"listen":"127.0.0.1:8080","update_check":{"enabled":true}}`)}
+		if !app.updateCheckEnabledByConfig() {
+			t.Error("updateCheckEnabledByConfig() = false, want true with update_check.enabled=true")
+		}
+	})
+
+	t.Run("absent block defaults to enabled", func(t *testing.T) {
+		app := &App{logger: logger, configPath: writeConfig(t,
+			`{"listen":"127.0.0.1:8080"}`)}
+		if !app.updateCheckEnabledByConfig() {
+			t.Error("updateCheckEnabledByConfig() = false, want true when update_check block is absent")
+		}
+	})
+
+	t.Run("no config path fails open", func(t *testing.T) {
+		app := &App{logger: logger}
+		if !app.updateCheckEnabledByConfig() {
+			t.Error("updateCheckEnabledByConfig() = false, want true when no config path is known")
+		}
+	})
+
+	t.Run("unreadable config fails open", func(t *testing.T) {
+		app := &App{logger: logger, configPath: filepath.Join(t.TempDir(), "missing.json")}
+		if !app.updateCheckEnabledByConfig() {
+			t.Error("updateCheckEnabledByConfig() = false, want true when config cannot be loaded")
+		}
+	})
+}
+
+// TestCheckUpdateFromAPI_ClearsStaleNudgeWhenDisabled verifies that when the
+// core omits the update object from /api/v1/info (update checking disabled via
+// hot-reload, Spec 079 FR-015), the tray clears any previously shown update
+// state instead of leaving a stale "New version available" nudge until
+// restart.
+func TestCheckUpdateFromAPI_ClearsStaleNudgeWhenDisabled(t *testing.T) {
+	// Core stub: /api/v1/info without an update object (checker disabled).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"version":"v1.0.0"}}`))
+	}))
+	defer srv.Close()
+
+	app := &App{
+		server:          &MockServerInterface{listenAddress: strings.TrimPrefix(srv.URL, "http://")},
+		logger:          zaptest.NewLogger(t).Sugar(),
+		version:         "1.0.0",
+		connectionState: ConnectionStateConnected,
+		// Simulate a previously shown nudge.
+		updateAvailable:  true,
+		latestVersion:    "v1.1.0",
+		latestReleaseURL: "https://example.com/release",
+	}
+
+	app.checkUpdateFromAPI()
+
+	app.updateCheckMu.RLock()
+	defer app.updateCheckMu.RUnlock()
+	if app.updateAvailable {
+		t.Error("updateAvailable = true after core stopped reporting updates, want false")
+	}
+	if app.latestVersion != "" || app.latestReleaseURL != "" {
+		t.Errorf("stale update state retained: latestVersion=%q latestReleaseURL=%q",
+			app.latestVersion, app.latestReleaseURL)
+	}
 }

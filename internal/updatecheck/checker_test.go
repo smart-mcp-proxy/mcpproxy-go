@@ -327,3 +327,79 @@ func TestChecker_HotReload_ReEnableTriggersImmediateCheck(t *testing.T) {
 		t.Fatal("re-enabling via SetConfig did not trigger a prompt re-check")
 	}
 }
+
+// TestChecker_SetConfig_ChannelSwitchDropsStaleCache verifies that a config
+// change (e.g. rc → stable channel switch) drops previously cached version
+// info, so GetVersionInfo never briefly serves a wrong-channel (prerelease)
+// result before the re-check completes (FR-013).
+func TestChecker_SetConfig_ChannelSwitchDropsStaleCache(t *testing.T) {
+	checker := New(zaptest.NewLogger(t), "v1.0.0")
+	checker.SetConfig(true, true) // rc channel
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		return &GitHubRelease{TagName: "v1.1.0-rc.1", Prerelease: true}, nil
+	})
+
+	info := checker.CheckNow()
+	if info == nil || !info.UpdateAvailable || info.LatestVersion != "v1.1.0-rc.1" {
+		t.Fatalf("precondition failed, want cached rc info, got %+v", info)
+	}
+
+	// Switch to the stable channel; not started, so no background re-check
+	// runs — GetVersionInfo must already be clean.
+	checker.SetConfig(true, false)
+
+	got := checker.GetVersionInfo()
+	if got == nil {
+		t.Fatal("GetVersionInfo() = nil, want fresh (empty) info while enabled")
+	}
+	if got.UpdateAvailable || got.LatestVersion != "" || got.IsPrerelease {
+		t.Errorf("stale cache served after channel switch: %+v", got)
+	}
+	if got.CurrentVersion != "v1.0.0" {
+		t.Errorf("CurrentVersion = %q, want v1.0.0", got.CurrentVersion)
+	}
+}
+
+// TestChecker_InFlightCheckDiscardedAfterDisable verifies that a check already
+// in flight when SetConfig(false) lands neither publishes its result nor emits
+// the "Update available" announce log (FR-015: disabled means no nudge on any
+// surface, including logs).
+func TestChecker_InFlightCheckDiscardedAfterDisable(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	checker := New(zap.New(core), "v1.0.0")
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		close(entered)
+		<-release
+		return &GitHubRelease{TagName: "v1.1.0"}, nil
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		checker.CheckNow()
+	}()
+
+	<-entered
+	checker.SetConfig(false, false) // disable while the check is in flight
+	close(release)
+	<-done
+
+	if got := logs.FilterMessage("Update available").Len(); got != 0 {
+		t.Errorf("got %d 'Update available' logs after disable, want 0", got)
+	}
+
+	// The stale result must not have been cached (inspect directly: while
+	// disabled GetVersionInfo returns nil by design).
+	checker.mu.RLock()
+	cached := checker.versionInfo
+	checker.mu.RUnlock()
+	if cached == nil {
+		t.Fatal("versionInfo = nil, want cleared placeholder")
+	}
+	if cached.UpdateAvailable || cached.LatestVersion != "" {
+		t.Errorf("in-flight result was published after disable: %+v", cached)
+	}
+}

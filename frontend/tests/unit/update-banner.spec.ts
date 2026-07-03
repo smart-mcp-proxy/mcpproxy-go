@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 
@@ -80,5 +80,38 @@ describe('UpdateBanner (Spec 079 FR-005)', () => {
     const banner = wrapper.find('[data-test="update-banner"]')
     expect(banner.exists()).toBe(true)
     expect(banner.text()).toContain('v1.4.0')
+  })
+
+  it('still renders and dismisses (session-only) when localStorage is blocked', async () => {
+    // Blocked storage (embedded/private contexts) throws on access; the
+    // banner must degrade to session-only dismissal, not break setup.
+    // Scoped to the banner's key so unrelated store setup (theme, api key)
+    // keeps working in this test.
+    const realGet = Storage.prototype.getItem
+    const realSet = Storage.prototype.setItem
+    const getSpy = vi
+      .spyOn(Storage.prototype, 'getItem')
+      .mockImplementation(function (this: Storage, key: string) {
+        if (key === STORAGE_KEY) throw new Error('storage blocked')
+        return realGet.call(this, key)
+      })
+    const setSpy = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(function (this: Storage, key: string, value: string) {
+        if (key === STORAGE_KEY) throw new Error('storage blocked')
+        realSet.call(this, key, value)
+      })
+    try {
+      const { wrapper } = mountBanner({ available: true, latest_version: 'v1.3.0' })
+      const banner = wrapper.find('[data-test="update-banner"]')
+      expect(banner.exists()).toBe(true)
+      expect(banner.text()).toContain('v1.3.0')
+
+      await wrapper.find('[data-test="update-banner-dismiss"]').trigger('click')
+      expect(wrapper.find('[data-test="update-banner"]').exists()).toBe(false)
+    } finally {
+      getSpy.mockRestore()
+      setSpy.mockRestore()
+    }
   })
 })

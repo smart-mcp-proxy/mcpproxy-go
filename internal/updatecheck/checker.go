@@ -49,6 +49,12 @@ type Checker struct {
 	started  bool
 	startCtx context.Context
 
+	// cfgGen is bumped on every effective SetConfig change. A check captures
+	// the generation it started under and its result is dropped if the config
+	// changed while it was in flight, so a disable or channel switch can never
+	// be raced by a stale publish/announce (FR-013/FR-015).
+	cfgGen uint64
+
 	// For testing: allows injection of a custom check function
 	checkFunc func() (*GitHubRelease, error)
 }
@@ -99,6 +105,13 @@ func (c *Checker) SetConfig(enabled, includePrereleases bool) {
 	c.cfgPrerelease = includePrereleases
 	started := c.started
 	ctx := c.startCtx
+	if changed {
+		c.cfgGen++
+		// Drop results cached under the previous config so a re-enable or a
+		// channel switch never briefly serves stale (possibly wrong-channel)
+		// info before the prompt re-check completes (FR-013).
+		c.versionInfo = &VersionInfo{CurrentVersion: c.version}
+	}
 	c.mu.Unlock()
 
 	if !changed {
@@ -120,11 +133,17 @@ func (c *Checker) SetConfig(enabled, includePrereleases bool) {
 // MCPPROXY_DISABLE_AUTO_UPDATE environment kill-switch wins over the config
 // value (Spec 079 FR-014 precedence: env > config).
 func (c *Checker) Enabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.enabledLocked()
+}
+
+// enabledLocked mirrors Enabled for callers already holding c.mu (RWMutex is
+// not reentrant).
+func (c *Checker) enabledLocked() bool {
 	if os.Getenv(EnvDisableAutoUpdate) == "true" {
 		return false
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.cfgEnabled
 }
 
@@ -223,20 +242,32 @@ func (c *Checker) GetVersionInfo() *VersionInfo {
 func (c *Checker) check() {
 	c.logger.Debug("Checking for updates")
 
+	c.mu.RLock()
+	gen := c.cfgGen
+	c.mu.RUnlock()
+
 	release, err := c.checkFunc()
 	if err != nil {
 		c.logger.Debug("Update check failed", zap.Error(err))
-		c.updateVersionInfo(nil, err.Error())
+		c.updateVersionInfo(nil, err.Error(), gen)
 		return
 	}
 
-	c.updateVersionInfo(release, "")
+	c.updateVersionInfo(release, "", gen)
 }
 
-// updateVersionInfo updates the cached version information.
-func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string) {
+// updateVersionInfo updates the cached version information. gen is the config
+// generation the check started under; results from a check that raced a
+// SetConfig change (disable, channel switch) are dropped so nothing stale is
+// published or announced after the change (FR-013/FR-015).
+func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if gen != c.cfgGen || !c.enabledLocked() {
+		c.logger.Debug("Discarding update-check result from a stale config generation")
+		return
+	}
 
 	now := time.Now()
 
