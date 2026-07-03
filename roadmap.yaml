@@ -412,6 +412,20 @@ epics:
         status: todo
         depends_on: []
 
+  - id: tray-api-purity
+    title: "Tray↔core decoupling: socket/REST API only, no config-file reads"
+    status: todo
+    assignee: unassigned
+    priority: P2
+    depends_on: []
+    note: "Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-03 audit: Swift tray clean (opens config in editor only, never parses); Go tray's update-check gate was caught reading mcp_config.json in PR #805 review and reworked to core-API gating — but one pre-existing violation remains."
+    tasks:
+      - id: tray-oauth-config-read
+        title: "Go tray OAuth login path loads mcp_config.json directly (internal/tray/tray.go:~1734 config.LoadFromFile via GetConfigPath) — replace with REST (server config / OAuth endpoints), then remove GetConfigPath from the tray server interface if no consumers remain"
+        status: todo
+        priority: P2
+        depends_on: []
+
   - id: planning-hygiene
     title: Planning/docs truth automation
     status: todo
