@@ -14,6 +14,10 @@ const (
 	EventTypeConfigSaved EventType = "config.saved"
 	// EventTypeSecretsChanged is emitted when secrets are added, updated, or deleted.
 	EventTypeSecretsChanged EventType = "secrets.changed"
+	// EventTypeActiveProfileChanged is emitted when the server-level default
+	// active profile changes (Profiles v2). UI surfaces (Web UI, tray) refetch
+	// GET /api/v1/profiles/active to reflect a switch made by another client.
+	EventTypeActiveProfileChanged EventType = "active_profile.changed"
 	// EventTypeOAuthTokenRefreshed is emitted when proactive token refresh succeeds.
 	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
 	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.
@@ -56,6 +60,11 @@ const (
 	EventTypeSecurityScanCompleted EventType = "security.scan_completed"
 	// EventTypeSecurityScanFailed is emitted when a scanner fails.
 	EventTypeSecurityScanFailed EventType = "security.scan_failed"
+	// EventTypeSecurityScanSettled is the single, debounced terminal event that
+	// Spec 077 US4 (MCP-2207) emits per server per scan. It collapses the
+	// per-scanner scan_started/progress/completed/failed storm — including
+	// repeats from reconnect storms — into one settled result.
+	EventTypeSecurityScanSettled EventType = "security.scan_settled"
 	// EventTypeSecurityIntegrityAlert is emitted for integrity violations.
 	EventTypeSecurityIntegrityAlert EventType = "security.integrity_alert"
 	// EventTypeSecurityScannerChanged is emitted when a scanner plugin's state

@@ -17,6 +17,7 @@ type AuthContext struct {
 	TokenPrefix    string   // First 12 chars of raw token (empty for admin)
 	AllowedServers []string // Servers this token can access (nil = all for admin)
 	Permissions    []string // Permission tiers (nil = all for admin)
+	ProfilePin     string   // Profile this agent token is pinned to (Profiles v2 T3; empty if unpinned)
 
 	// Multi-user OAuth fields (server edition). Empty for non-user auth types.
 	UserID      string // User's unique ULID identifier

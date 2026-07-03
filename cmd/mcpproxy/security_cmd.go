@@ -134,6 +134,10 @@ func newSecurityEnableCmd() *cobra.Command {
 		Short: "Enable a security scanner",
 		Long: `Enable a security scanner by pulling its Docker image.
 
+Docker-based scanners belong to the opt-in deep-scan layer (Spec 077): they
+only run during scans when security.deep_scan.enabled=true in mcp_config.json.
+Enabling one here while deep scan is off prints a reminder.
+
 Examples:
   mcpproxy security enable mcp-scan
   mcpproxy security enable cisco-mcp-scanner`,
@@ -455,7 +459,29 @@ func runSecurityInstall(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Scanner %q enabled successfully.\n", scannerID)
+	// Audit FIX 3b: if the core reports that the scanner belongs to the opt-in
+	// deep-scan layer and that layer is off, tell the user — otherwise the
+	// scanner is enabled but silently never runs.
+	if hint := scannerEnableHint(respBody); hint != "" {
+		fmt.Printf("Note: %s\n", hint)
+	}
 	return nil
+}
+
+// scannerEnableHint extracts the optional "hint" field from a successful
+// POST /security/scanners/{id}/enable response ({"success":true,"data":
+// {"status":"enabled","id":...,"hint":...}}). Returns "" when the response
+// carries no hint (older cores, deep scan already enabled, in-process scanner).
+func scannerEnableHint(respBody []byte) string {
+	var wrapper struct {
+		Data struct {
+			Hint string `json:"hint"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &wrapper); err != nil {
+		return ""
+	}
+	return wrapper.Data.Hint
 }
 
 func runSecurityRemove(_ *cobra.Command, args []string) error {
@@ -2069,6 +2095,25 @@ func printFindingsList(findings []interface{}) {
 			}
 			if len(parts) > 0 {
 				fmt.Println("         Threat:   " + strings.Join(parts, " · "))
+			}
+		}
+
+		// Deterministic-scanner transparency (Spec 076 US4): the combined
+		// confidence and the independent checks that contributed to this
+		// finding, so an operator can see WHY a tool was flagged and that
+		// agreement among checks raised its score.
+		if conf, ok := finding["confidence"].(float64); ok && conf > 0 {
+			fmt.Printf("         Confidence: %.2f\n", conf)
+		}
+		if rawSignals, ok := finding["signals"].([]interface{}); ok && len(rawSignals) > 0 {
+			names := make([]string, 0, len(rawSignals))
+			for _, s := range rawSignals {
+				if name, ok := s.(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+			if len(names) > 0 {
+				fmt.Println("         Signals:  " + strings.Join(names, ", "))
 			}
 		}
 

@@ -51,6 +51,7 @@ func TestSaveServerSyncPreservesAllFields(t *testing.T) {
 		Updated:     time.Now(),
 		Isolation: &config.IsolationConfig{
 			Enabled:     config.BoolPtr(true),
+			Mode:        func() *config.IsolationMode { m := config.IsolationModeSandbox; return &m }(),
 			Image:       "python:3.11",
 			NetworkMode: "bridge",
 			ExtraArgs:   []string{"-v", "/host:/container"},
@@ -119,6 +120,10 @@ func TestSaveServerSyncPreservesAllFields(t *testing.T) {
 	}
 	if record.Isolation.IsEnabled() != serverConfig.Isolation.IsEnabled() {
 		t.Errorf("Isolation.Enabled mismatch: got %v, want %v", record.Isolation.IsEnabled(), serverConfig.Isolation.IsEnabled())
+	}
+	// MCP-34.2: per-server isolation.mode must survive the BBolt round-trip.
+	if !reflect.DeepEqual(record.Isolation.Mode, serverConfig.Isolation.Mode) {
+		t.Errorf("Isolation.Mode mismatch: got %v, want %v", record.Isolation.Mode, serverConfig.Isolation.Mode)
 	}
 	if record.Isolation.Image != serverConfig.Isolation.Image {
 		t.Errorf("Isolation.Image mismatch: got %s, want %s", record.Isolation.Image, serverConfig.Isolation.Image)
@@ -345,6 +350,9 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// through UpstreamRecord so REST/UI-set overrides survive a restart.
 		"HealthCheckInterval":   true,
 		"ToolDiscoveryInterval": true,
+		// MCP-3322: per-server init_timeout override; round-tripped through
+		// UpstreamRecord so REST/UI/CLI-set deadlines survive a restart.
+		"InitTimeout": true,
 	}
 
 	// Get all fields from ServerConfig

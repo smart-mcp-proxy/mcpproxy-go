@@ -117,6 +117,8 @@ Users manage agent tokens through the MCPProxy web dashboard. The UI provides a 
 - What happens when the maximum token count is reached? The system enforces a maximum of 100 agent tokens per instance and rejects creation requests with a clear error.
 - What happens when a token with `allowed_servers: ["*"]` is used after new servers are added? The wildcard includes all non-quarantined servers dynamically — new servers are automatically accessible.
 - What happens when the token's expiry is set beyond the maximum (365 days)? The system rejects the request and informs the user of the maximum allowed expiry.
+- What happens when a token is pinned to a profile (`profile_pin`) and the agent tries to switch profiles? The pin is server-enforced: `set_profile` to any other slug is rejected, and a `/mcp/p/<other>` URL returns 403. The pinned profile is the highest-precedence resolution source (above URL scope and session `set_profile`).
+- What happens when a pinned profile is later removed from the configuration? Creation validates the slug exists, but a later config change is **warn-skipped** at request time (logged, not hard-failed): profile resolution degrades to URL/session/none while the pin still blocks switching away — the token cannot silently widen its scope.
 
 ## Requirements *(mandatory)*
 
@@ -142,11 +144,12 @@ Users manage agent tokens through the MCPProxy web dashboard. The UI provides a 
 - **FR-018**: System MUST support agent token authentication via both `Authorization: Bearer` and `X-API-Key` headers.
 - **FR-019**: System MUST provide a web UI for token management including creation with server selection, permission picker, expiry setting, and revocation.
 - **FR-020**: System MUST support activity log filtering by agent name and authentication type.
+- **FR-021** (Profiles v2 T3): System MUST support an optional per-token `profile_pin`. When set, the token operates ONLY within its pinned profile: `set_profile` to a different slug MUST be rejected, a `/mcp/p/<other>` URL MUST return 403, and the pin MUST be the highest-precedence profile-resolution source (above URL scope and session `set_profile`). The pinned slug MUST be validated against configured profiles at creation time; a later config change MUST warn-skip (not hard-fail). Tokens without a pin retain unchanged behavior.
 
 ### Key Entities
 
-- **Agent Token**: A scoped credential with name, hashed secret, prefix, allowed server list, permission list, expiry timestamp, creation timestamp, last-used timestamp, and revocation status.
-- **Auth Context**: The resolved authentication identity for a request — includes auth type (admin/agent), agent name (if applicable), allowed servers, and permissions.
+- **Agent Token**: A scoped credential with name, hashed secret, prefix, allowed server list, permission list, expiry timestamp, creation timestamp, last-used timestamp, revocation status, and an optional `profile_pin` binding it to a single profile (Profiles v2 T3).
+- **Auth Context**: The resolved authentication identity for a request — includes auth type (admin/agent), agent name (if applicable), allowed servers, permissions, and the agent token's `profile_pin` (if any).
 - **Token Scope**: The combination of allowed servers and permitted tool call tiers that define what an agent can do.
 
 ## Success Criteria *(mandatory)*
@@ -159,6 +162,7 @@ Users manage agent tokens through the MCPProxy web dashboard. The UI provides a 
 - **SC-004**: Activity log entries for agent requests include sufficient identity information to determine which agent performed which action.
 - **SC-005**: Zero breaking changes for existing users — all existing API key authentication and MCP functionality works identically after the feature is deployed.
 - **SC-006**: Token secrets cannot be recovered from storage — only the one-time display at creation reveals the secret.
+- **SC-007** (Profiles v2 T3): A profile-pinned token is provably confined to its profile — `set_profile("other")` is rejected, `/mcp/p/<other>` returns 403, and the pinned profile works; unpinned tokens are unaffected (covered by automated tests).
 
 ## Assumptions
 

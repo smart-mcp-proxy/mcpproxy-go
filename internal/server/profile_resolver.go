@@ -4,7 +4,9 @@ import (
 	"context"
 
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
@@ -22,11 +24,14 @@ func sessionIDFromContext(ctx context.Context) string {
 }
 
 // profilePinFromContext returns the agent-token profile_pin bound to the
-// request, or "" when the token is unpinned. Profiles v2 T3 (per-agent-token
-// profile_pin, Spec 028) will populate this from the auth context; until then
-// the hook is intentionally inert and always returns "", so the precedence
-// chain below degrades to URL > session > none.
-func profilePinFromContext(_ context.Context) string {
+// request, or "" when the token is unpinned. The pin is set on the AuthContext
+// by the MCP auth middleware after validating an agent token (Profiles v2 T3,
+// Spec 028). Only agent-token contexts can carry a pin; admin / user / tray
+// contexts are never pinned.
+func profilePinFromContext(ctx context.Context) string {
+	if ac := auth.AuthContextFromContext(ctx); ac != nil && ac.Type == auth.AuthTypeAgent {
+		return ac.ProfilePin
+	}
 	return ""
 }
 
@@ -72,11 +77,19 @@ func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope 
 // configured profile is treated as stale: it is cleared and resolution falls
 // through to "none".
 func (p *MCPProxyServer) resolveActiveProfile(ctx context.Context) (string, *profile.ProfileScope) {
-	// 1. Agent-token pin (T3 hook). When present it is authoritative and bounds
-	//    everything below; a non-matching pin slug falls through (defensive).
+	// 1. Agent-token pin (T3). When present it is authoritative and bounds
+	//    everything below. If the pinned profile was removed from config after
+	//    the token was minted, we warn-skip rather than hard-fail (parity with
+	//    the unknown-server warn-skip): resolution degrades to URL/session/none,
+	//    while the set_profile and /mcp/p/<slug> guards still pin the token by
+	//    its stored slug so it cannot silently widen scope by switching.
 	if pin := profilePinFromContext(ctx); pin != "" {
 		if scope := p.profileScopeForSlug(pin); scope != nil {
 			return pin, scope
+		}
+		if p.logger != nil {
+			p.logger.Warn("agent-token profile_pin no longer matches any configured profile; falling through",
+				zap.String("profile_pin", pin))
 		}
 	}
 

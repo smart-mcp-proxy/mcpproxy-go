@@ -58,6 +58,10 @@ func (d Duration) Duration() time.Duration {
 const (
 	defaultHealthCheckInterval   = 30 * time.Second
 	defaultToolDiscoveryInterval = 5 * time.Minute
+	// defaultInitTimeout is the deadline applied to a stdio/HTTP upstream's MCP
+	// `initialize` handshake when no per-server or global override is set
+	// (MCP-3322 / GH #760). It preserves the historical ~30s behaviour.
+	defaultInitTimeout = 30 * time.Second
 )
 
 // resolveInterval applies the per-server → global → default precedence for an
@@ -97,6 +101,23 @@ func (c *Config) ResolveToolDiscoveryInterval(sc *ServerConfig) time.Duration {
 	return resolveInterval(server, c.ToolDiscoveryInterval, defaultToolDiscoveryInterval)
 }
 
+// ResolveInitTimeout resolves the effective MCP `initialize` handshake deadline
+// for a server: per-server override → global → 30s default (MCP-3322 / GH #760).
+// Unlike the discovery intervals, a resolved value <= 0 maps to the default
+// rather than "disabled" — a zero/negative connect deadline would let a stuck
+// upstream hang the connect path forever, so we always keep a real ceiling.
+func (c *Config) ResolveInitTimeout(sc *ServerConfig) time.Duration {
+	var server *Duration
+	if sc != nil {
+		server = sc.InitTimeout
+	}
+	resolved := resolveInterval(server, c.InitTimeout, defaultInitTimeout)
+	if resolved <= 0 {
+		return defaultInitTimeout
+	}
+	return resolved
+}
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen       string `json:"listen" mapstructure:"listen"`
@@ -126,6 +147,15 @@ type Config struct {
 	// in Validate(): health-check ∈ {0} ∪ [5s,1h]; tool-discovery ∈ {0} ∪ [30s,24h].
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health-check-interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool-discovery-interval" swaggertype:"string"`
+
+	// InitTimeout is the global default deadline for an upstream's MCP
+	// `initialize` handshake (MCP-3322 / GH #760). *Duration tri-state: nil =
+	// inherit the built-in 30s default; a positive value = that deadline. A
+	// per-server InitTimeout overrides this. Resolved by ResolveInitTimeout;
+	// validated to {0} ∪ [1s, 30m] in Validate(). Servers doing legitimate
+	// first-run warmup (cache/index build) before answering `initialize` can
+	// raise this so they are not killed mid-startup.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init-timeout" swaggertype:"string"`
 
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
@@ -375,6 +405,14 @@ type ServerConfig struct {
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health_check_interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool_discovery_interval" swaggertype:"string"`
 
+	// InitTimeout overrides the global init_timeout for this server's MCP
+	// `initialize` handshake deadline (MCP-3322 / GH #760). *Duration tri-state:
+	// nil = inherit the global value (or 30s default), positive = that deadline.
+	// Resolved by Config.ResolveInitTimeout; validated to {0} ∪ [1s, 30m]. Raise
+	// this for upstreams that do legitimate first-run warmup (e.g. caching many
+	// channels/users) before responding to `initialize`.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init_timeout" swaggertype:"string"`
+
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
@@ -407,9 +445,43 @@ type OAuthConfig struct {
 	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
 }
 
+// IsolationMode selects how an stdio MCP server's process is isolated (MCP-34.2).
+//
+//   - "docker"  — run the server inside a Docker container (the original behavior).
+//   - "sandbox" — run under a native OS sandbox (Landlock LSM + rlimits on Linux;
+//     see MCP-34). No daemon required.
+//   - "none"    — no isolation; the server process runs directly on the host.
+//
+// The empty string means "unset": back-compat code falls back to the legacy
+// boolean Enabled flag (enabled:true ⇒ docker, enabled:false ⇒ none).
+type IsolationMode string
+
+const (
+	// IsolationModeDocker runs the server inside a Docker container.
+	IsolationModeDocker IsolationMode = "docker"
+	// IsolationModeSandbox runs the server under a native OS sandbox (Landlock/rlimits).
+	IsolationModeSandbox IsolationMode = "sandbox"
+	// IsolationModeNone disables isolation; the process runs directly.
+	IsolationModeNone IsolationMode = "none"
+)
+
+// IsValid reports whether the mode is a recognized value. The empty string
+// ("unset") is treated as valid because the global config falls back to the
+// legacy Enabled bool; callers that require an explicit mode should check for
+// emptiness separately.
+func (m IsolationMode) IsValid() bool {
+	switch m {
+	case IsolationModeDocker, IsolationModeSandbox, IsolationModeNone, "":
+		return true
+	default:
+		return false
+	}
+}
+
 // DockerIsolationConfig represents global Docker isolation settings
 type DockerIsolationConfig struct {
-	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation
+	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation (legacy; superseded by Mode)
+	Mode              IsolationMode     `json:"mode,omitempty" mapstructure:"mode"`                            // Isolation mode: "docker" | "sandbox" | "none". Empty falls back to Enabled (MCP-34.2)
 	EnableCacheVolume bool              `json:"enable_cache_volume" mapstructure:"enable_cache_volume"`        // Mount shared cache volumes for faster restarts (default: true)
 	DefaultImages     map[string]string `json:"default_images" mapstructure:"default_images"`                  // Map of runtime type to Docker image
 	Registry          string            `json:"registry,omitempty" mapstructure:"registry"`                    // Custom registry (defaults to docker.io)
@@ -425,14 +497,34 @@ type DockerIsolationConfig struct {
 
 // IsolationConfig represents per-server isolation settings
 type IsolationConfig struct {
-	Enabled     *bool    `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global)
-	Image       string   `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
-	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
-	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
-	WorkingDir  string   `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
-	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
-	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
-	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+	Enabled     *bool          `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global; legacy, superseded by Mode)
+	Mode        *IsolationMode `json:"mode,omitempty" mapstructure:"mode"`                   // Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2). Unset per-server inherits the global mode; unset globally falls back to the legacy "enabled" flag (true ⇒ docker, false ⇒ none)
+	Image       string         `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
+	NetworkMode string         `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
+	ExtraArgs   []string       `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
+	WorkingDir  string         `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
+	LogDriver   string         `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
+	LogMaxSize  string         `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
+	LogMaxFiles string         `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+}
+
+// ResolvedMode returns the effective global isolation mode, applying back-compat
+// mapping from the legacy Enabled bool (MCP-34.2):
+//
+//   - an explicit Mode always wins;
+//   - otherwise enabled:true ⇒ docker, enabled:false ⇒ none;
+//   - a nil config resolves to none.
+func (dic *DockerIsolationConfig) ResolvedMode() IsolationMode {
+	if dic == nil {
+		return IsolationModeNone
+	}
+	if dic.Mode != "" {
+		return dic.Mode
+	}
+	if dic.Enabled {
+		return IsolationModeDocker
+	}
+	return IsolationModeNone
 }
 
 // IsEnabled returns true if isolation is explicitly enabled, false otherwise.
@@ -1463,6 +1555,9 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	}
 
 	// Validate global discovery/health-check intervals (spec 074, FR-008).
+	if e := validateIntervalBound("init_timeout", c.InitTimeout, time.Second, 30*time.Minute); e != nil {
+		errors = append(errors, *e)
+	}
 	if e := validateIntervalBound("health_check_interval", c.HealthCheckInterval, 5*time.Second, time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
@@ -1507,10 +1602,27 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		}
 	}
 
+	// Validate global isolation mode (MCP-34.2). Empty is allowed (back-compat
+	// fallback to the Enabled bool); only a non-empty unknown value is invalid.
+	if c.DockerIsolation != nil && !c.DockerIsolation.Mode.IsValid() {
+		errors = append(errors, ValidationError{
+			Field:   "docker_isolation.mode",
+			Message: fmt.Sprintf("invalid isolation mode: %s (must be docker, sandbox, or none)", c.DockerIsolation.Mode),
+		})
+	}
+
 	// Validate server configurations
 	serverNames := make(map[string]bool)
 	for i, server := range c.Servers {
 		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+
+		// Validate per-server isolation mode override (MCP-34.2).
+		if server.Isolation != nil && server.Isolation.Mode != nil && !server.Isolation.Mode.IsValid() {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("%s.isolation.mode", fieldPrefix),
+				Message: fmt.Sprintf("invalid isolation mode: %s (must be docker, sandbox, or none)", *server.Isolation.Mode),
+			})
+		}
 
 		// Validate server name
 		if server.Name == "" {
@@ -1584,6 +1696,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, *e)
 		}
 		if e := validateIntervalBound(fieldPrefix+".tool_discovery_interval", server.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+			errors = append(errors, *e)
+		}
+		// MCP-3322: per-server MCP `initialize` handshake deadline override.
+		if e := validateIntervalBound(fieldPrefix+".init_timeout", server.InitTimeout, time.Second, 30*time.Minute); e != nil {
 			errors = append(errors, *e)
 		}
 	}
@@ -1892,7 +2008,6 @@ func (c *Config) GetAnonymousID() string {
 
 // SecurityConfig represents security scanner configuration (Spec 039)
 type SecurityConfig struct {
-	AutoScanQuarantined     bool     `json:"auto_scan_quarantined" mapstructure:"auto-scan-quarantined"`
 	ScanTimeoutDefault      Duration `json:"scan_timeout_default,omitempty" mapstructure:"scan-timeout-default" swaggertype:"string"`
 	IntegrityCheckInterval  Duration `json:"integrity_check_interval,omitempty" mapstructure:"integrity-check-interval" swaggertype:"string"`
 	IntegrityCheckOnRestart bool     `json:"integrity_check_on_restart" mapstructure:"integrity-check-on-restart"`
@@ -1900,6 +2015,11 @@ type SecurityConfig struct {
 	RuntimeReadOnly         bool     `json:"runtime_read_only" mapstructure:"runtime-read-only"`
 	RuntimeTmpfsSize        string   `json:"runtime_tmpfs_size,omitempty" mapstructure:"runtime-tmpfs-size"`
 
+	// Deprecated (Spec 077 US3): migrated on load into DeepScan.DisableNoNewPrivileges
+	// (see migrateDeepScanConfig). Retained only so existing configs that still carry
+	// the top-level key parse; consumers MUST read the effective value via
+	// SecurityConfig.IsDisableNoNewPrivileges. Cleared after migration.
+	//
 	// ScannerDisableNoNewPrivileges, when true, omits the
 	// `--security-opt no-new-privileges` flag from scanner container runs.
 	//
@@ -1917,6 +2037,11 @@ type SecurityConfig struct {
 	// distro-packaged docker.
 	ScannerDisableNoNewPrivileges bool `json:"scanner_disable_no_new_privileges,omitempty" mapstructure:"scanner-disable-no-new-privileges"`
 
+	// Deprecated (Spec 077 US3): migrated on load into DeepScan.FetchPackageSource
+	// (see migrateDeepScanConfig). Retained only so existing configs that still carry
+	// the top-level key parse; consumers MUST read the effective value via
+	// SecurityConfig.EffectiveFetchPackageSource. Cleared after migration.
+	//
 	// ScannerFetchPackageSource controls whether the scanner fetches the
 	// PUBLISHED source of package-runner servers (npx/uvx) — without executing
 	// it — when no local source is available (no Docker container, no local
@@ -1938,4 +2063,119 @@ type SecurityConfig struct {
 	// forbid the scanner's network egress; such servers then fall back to the
 	// tool-definitions-only scan with no regression.
 	ScannerFetchPackageSource *bool `json:"scanner_fetch_package_source,omitempty" mapstructure:"scanner-fetch-package-source"`
+
+	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
+	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
+	// keys (migrated on load) and gates the heavy Docker-based scanners + source
+	// extraction. Disabled by default (FR-006): only the deterministic in-process
+	// baseline scanner runs. A deep-scan failure NEVER changes the baseline verdict
+	// (FR-007/FR-008).
+	DeepScan *DeepScanConfig `json:"deep_scan,omitempty" mapstructure:"deep-scan"`
+}
+
+// DeepScanConfig configures the opt-in "deep scan" layer (Spec 077 US3):
+// Docker-based scanner plugins plus published-package-source extraction. The
+// whole layer is off by default; when disabled only the deterministic
+// in-process baseline scanner runs and no Docker is invoked. A deep-scan
+// failure is surfaced as an informational note and never degrades the baseline
+// verdict.
+type DeepScanConfig struct {
+	// Enabled is the master opt-in for the heavy layer (FR-006). Default false.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+
+	// FetchPackageSource controls whether the scanner fetches the PUBLISHED
+	// source of package-runner servers (npx/uvx) — without executing it — when
+	// no local source is available. Absorbs the deprecated top-level
+	// scanner_fetch_package_source. Default (nil) is ENABLED within deep scan.
+	FetchPackageSource *bool `json:"fetch_package_source,omitempty" mapstructure:"fetch-package-source" swaggertype:"boolean"`
+
+	// DisableNoNewPrivileges, when true, omits the `--security-opt
+	// no-new-privileges` flag from scanner container runs (snap-docker/AppArmor
+	// escape hatch). Absorbs the deprecated top-level
+	// scanner_disable_no_new_privileges. Default false.
+	DisableNoNewPrivileges bool `json:"disable_no_new_privileges,omitempty" mapstructure:"disable-no-new-privileges"`
+
+	// Scanners optionally restricts which deep scanners may run under the
+	// umbrella (by scanner id). Empty ⇒ all enabled deep scanners are eligible.
+	Scanners []string `json:"scanners,omitempty" mapstructure:"scanners"`
+}
+
+// IsDeepScanEnabled reports whether the opt-in deep-scan layer is turned on.
+// Nil-safe: a nil SecurityConfig or nil DeepScan means disabled (the default).
+func (sc *SecurityConfig) IsDeepScanEnabled() bool {
+	return sc != nil && sc.DeepScan != nil && sc.DeepScan.Enabled
+}
+
+// DeepScanScanners returns the optional per-scanner allow-list for the deep-scan
+// layer, or nil when unset (all enabled deep scanners are eligible).
+func (sc *SecurityConfig) DeepScanScanners() []string {
+	if sc != nil && sc.DeepScan != nil {
+		return sc.DeepScan.Scanners
+	}
+	return nil
+}
+
+// EffectiveFetchPackageSource resolves the package-source-fetch setting from the
+// deep_scan block first, falling back to the deprecated top-level key for
+// configs loaded before migration. Nil ⇒ default (enabled).
+func (sc *SecurityConfig) EffectiveFetchPackageSource() *bool {
+	if sc == nil {
+		return nil
+	}
+	if sc.DeepScan != nil && sc.DeepScan.FetchPackageSource != nil {
+		return sc.DeepScan.FetchPackageSource
+	}
+	return sc.ScannerFetchPackageSource
+}
+
+// IsDisableNoNewPrivileges resolves the no-new-privileges escape hatch from the
+// deep_scan block first, falling back to the deprecated top-level key.
+func (sc *SecurityConfig) IsDisableNoNewPrivileges() bool {
+	if sc == nil {
+		return false
+	}
+	if sc.DeepScan != nil && sc.DeepScan.DisableNoNewPrivileges {
+		return true
+	}
+	return sc.ScannerDisableNoNewPrivileges
+}
+
+// MigrateDeepScanConfig runs the Spec 077 US3 deep-scan config migration on an
+// already-parsed config. LoadFromFile applies it automatically (via
+// initializeRegistries); the /api/v1/config/apply path bypasses LoadFromFile, so
+// it calls this explicitly to normalize an API-submitted config identically to a
+// file load before diffing/saving (SC-007). Idempotent + nil-safe.
+func MigrateDeepScanConfig(cfg *Config) {
+	migrateDeepScanConfig(cfg)
+}
+
+// migrateDeepScanConfig folds the deprecated top-level scanner_fetch_package_source
+// and scanner_disable_no_new_privileges keys into the unified security.deep_scan
+// block (Spec 077 FR-017) so existing configs load unchanged and behave
+// identically after migration (SC-007). The removed auto_scan_quarantined key has
+// no struct field, so it is silently ignored on unmarshal (FR-016). Idempotent:
+// only fills deep_scan fields left unset, then clears the legacy keys so a
+// re-serialized config exposes only the new surface. Runs on every load and
+// hot-reload via initializeRegistries.
+func migrateDeepScanConfig(cfg *Config) {
+	if cfg == nil || cfg.Security == nil {
+		return
+	}
+	sc := cfg.Security
+	if sc.ScannerFetchPackageSource == nil && !sc.ScannerDisableNoNewPrivileges {
+		return // nothing legacy to migrate
+	}
+	if sc.DeepScan == nil {
+		sc.DeepScan = &DeepScanConfig{}
+	}
+	if sc.DeepScan.FetchPackageSource == nil && sc.ScannerFetchPackageSource != nil {
+		v := *sc.ScannerFetchPackageSource
+		sc.DeepScan.FetchPackageSource = &v
+	}
+	if !sc.DeepScan.DisableNoNewPrivileges && sc.ScannerDisableNoNewPrivileges {
+		sc.DeepScan.DisableNoNewPrivileges = true
+	}
+	// Clear the legacy keys so the migrated config serializes only deep_scan.*.
+	sc.ScannerFetchPackageSource = nil
+	sc.ScannerDisableNoNewPrivileges = false
 }

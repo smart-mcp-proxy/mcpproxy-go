@@ -353,6 +353,15 @@ func (r *Runtime) emitSecretsChanged(operation string, secretName string, extra 
 	r.publishEvent(newEvent(EventTypeSecretsChanged, payload))
 }
 
+// EmitActiveProfileChanged emits an event when the server-level default active
+// profile changes (Profiles v2). UI surfaces subscribe and refetch
+// GET /api/v1/profiles/active so a switch made by one client (Web UI, tray, CLI)
+// is reflected everywhere. An empty profile means "all servers".
+func (r *Runtime) EmitActiveProfileChanged(profile string) {
+	payload := map[string]any{"active_profile": profile}
+	r.publishEvent(newEvent(EventTypeActiveProfileChanged, payload))
+}
+
 // EmitOAuthTokenRefreshed emits an event when proactive token refresh succeeds.
 // This is used by the RefreshManager to notify subscribers of successful token refresh.
 func (r *Runtime) EmitOAuthTokenRefreshed(serverName string, expiresAt time.Time) {
@@ -576,44 +585,54 @@ func (r *Runtime) EmitSensitiveDataDetected(activityID string, detectionCount in
 	r.publishEvent(newEvent(EventTypeSensitiveDataDetected, payload))
 }
 
-// EmitSecurityScanStarted emits an event when a security scan begins (Spec 039).
-func (r *Runtime) EmitSecurityScanStarted(serverName string, scanners []string, jobID string) {
-	payload := map[string]any{
-		"server_name": serverName,
-		"scanners":    scanners,
-		"job_id":      jobID,
-	}
-	r.publishEvent(newEvent(EventTypeSecurityScanStarted, payload))
+// EmitSecurityScanStarted feeds the scan-notification debouncer (Spec 077 US4,
+// MCP-2207). The started signal is intentionally dropped: it is part of the
+// per-scanner storm the debouncer collapses. The service still invalidates its
+// summary cache independently so the UI shows "scanning" while the scan runs.
+func (r *Runtime) EmitSecurityScanStarted(serverName string, _ []string, _ string) {
+	// No-op for notifications: a single settled event replaces the whole
+	// per-scanner lifecycle. Kept to satisfy the scanner EventEmitter contract.
+	_ = serverName
 }
 
-// EmitSecurityScanProgress emits an event for scanner progress updates (Spec 039).
-func (r *Runtime) EmitSecurityScanProgress(serverName, scannerID, status string, progress int) {
-	payload := map[string]any{
-		"server_name": serverName,
-		"scanner_id":  scannerID,
-		"status":      status,
-		"progress":    progress,
-	}
-	r.publishEvent(newEvent(EventTypeSecurityScanProgress, payload))
-}
+// EmitSecurityScanProgress is dropped: intermediate per-scanner progress is the
+// noise the settled-event model eliminates (Spec 077 US4).
+func (r *Runtime) EmitSecurityScanProgress(_, _, _ string, _ int) {}
 
-// EmitSecurityScanCompleted emits an event when a security scan completes (Spec 039).
+// EmitSecurityScanCompleted records a terminal scan result for the debouncer,
+// which publishes exactly one settled event per server per scan (Spec 077 US4).
 func (r *Runtime) EmitSecurityScanCompleted(serverName string, findingsSummary map[string]int) {
+	if r.scanNotify != nil {
+		r.scanNotify.noteTerminal(serverName, "completed", findingsSummary, "")
+		return
+	}
+	// Fallback (no debouncer wired, e.g. some tests): publish directly so the
+	// terminal result is not silently lost.
+	r.publishScanSettled(serverName, "completed", findingsSummary, "")
+}
+
+// EmitSecurityScanFailed records a terminal failure for the debouncer. Under
+// Spec 077 the baseline verdict is derived elsewhere; here we only ensure the
+// storm still collapses to a single settled event (Spec 077 US4).
+func (r *Runtime) EmitSecurityScanFailed(serverName, _, errMsg string) {
+	if r.scanNotify != nil {
+		r.scanNotify.noteTerminal(serverName, "failed", nil, errMsg)
+		return
+	}
+	r.publishScanSettled(serverName, "failed", nil, errMsg)
+}
+
+// publishScanSettled emits the single debounced terminal scan event.
+func (r *Runtime) publishScanSettled(serverName, status string, findingsSummary map[string]int, errMsg string) {
 	payload := map[string]any{
 		"server_name":      serverName,
+		"status":           status,
 		"findings_summary": findingsSummary,
 	}
-	r.publishEvent(newEvent(EventTypeSecurityScanCompleted, payload))
-}
-
-// EmitSecurityScanFailed emits an event when a scanner fails (Spec 039).
-func (r *Runtime) EmitSecurityScanFailed(serverName, scannerID, errMsg string) {
-	payload := map[string]any{
-		"server_name": serverName,
-		"scanner_id":  scannerID,
-		"error":       errMsg,
+	if errMsg != "" {
+		payload["error"] = errMsg
 	}
-	r.publishEvent(newEvent(EventTypeSecurityScanFailed, payload))
+	r.publishEvent(newEvent(EventTypeSecurityScanSettled, payload))
 }
 
 // EmitSecurityIntegrityAlert emits an event for integrity violations (Spec 039).

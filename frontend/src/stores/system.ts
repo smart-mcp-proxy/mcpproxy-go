@@ -185,6 +185,19 @@ export const useSystemStore = defineStore('system', () => {
       }
     })
 
+    // Spec 077 US4 (MCP-2207): a single debounced settled event per server per
+    // scan replaces the per-scanner scan_started/progress/completed/failed
+    // storm. Forward it so scan-status consumers can refresh once per scan.
+    es.addEventListener('security.scan_settled', (event) => {
+      try {
+        const data = JSON.parse(event.data)
+        const payload = data.payload || data
+        window.dispatchEvent(new CustomEvent('mcpproxy:scan-settled', { detail: payload }))
+      } catch (error) {
+        console.error('Failed to parse SSE security.scan_settled event:', error)
+      }
+    })
+
     // Listen for activity events (tool calls, policy decisions, etc.)
     es.addEventListener('activity.tool_call.started', (event) => {
       try {

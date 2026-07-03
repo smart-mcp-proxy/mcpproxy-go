@@ -697,6 +697,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
+        // Profile switcher (Profiles v2 T5) — only shown when profiles are
+        // configured. Lists "All servers" (clears the profile) plus each profile
+        // with its tool count; the active selection carries a checkmark. Clicking
+        // switches the server-level default active profile via REST; a switch made
+        // by another client arrives over SSE (`active_profile.changed`) and
+        // repaints this submenu.
+        if !appState.profiles.isEmpty {
+            let activeLabel = appState.activeProfile.isEmpty ? "All servers" : appState.activeProfile
+            let profileMenuItem = NSMenuItem(title: "Profile: \(activeLabel)", action: nil, keyEquivalent: "")
+            let profileSubmenu = NSMenu()
+
+            let allItem = NSMenuItem(title: "All servers", action: #selector(switchProfile(_:)), keyEquivalent: "")
+            allItem.target = self
+            allItem.representedObject = ""
+            allItem.state = appState.activeProfile.isEmpty ? .on : .off
+            profileSubmenu.addItem(allItem)
+            profileSubmenu.addItem(.separator())
+
+            for profile in appState.profiles {
+                let item = NSMenuItem(title: "\(profile.name) (\(profile.toolCount) tools)",
+                                      action: #selector(switchProfile(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = profile.name
+                item.state = profile.name == appState.activeProfile ? .on : .off
+                profileSubmenu.addItem(item)
+            }
+
+            profileMenuItem.submenu = profileSubmenu
+            menu.addItem(profileMenuItem)
+            menu.addItem(.separator())
+        }
+
         // Actions
         let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
         addServer.target = self
@@ -873,6 +905,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @objc private func restartServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         Task { try? await appState.apiClient?.restartServer(id) }
+    }
+
+    /// Switch the server-level default active profile (Profiles v2 T5). The
+    /// represented object is the profile slug ("" clears it / all servers). The
+    /// explicit refresh gives immediate feedback; the core also emits
+    /// `active_profile.changed` over SSE which repaints every client.
+    @objc private func switchProfile(_ sender: NSMenuItem) {
+        guard let slug = sender.representedObject as? String else { return }
+        Task {
+            try? await appState.apiClient?.setActiveProfile(slug)
+            await coreManager?.refreshProfiles()
+        }
     }
 
     @objc private func loginServer(_ sender: NSMenuItem) {

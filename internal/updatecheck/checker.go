@@ -31,6 +31,11 @@ type Checker struct {
 	mu          sync.RWMutex
 	versionInfo *VersionInfo
 
+	// announcedVersion is the latest version already announced at Info level.
+	// It dedupes the "Update available" log so a given version is announced
+	// exactly once per process, not on every periodic tick (Spec 079 FR-004).
+	announcedVersion string
+
 	// For testing: allows injection of a custom check function
 	checkFunc func() (*GitHubRelease, error)
 }
@@ -158,12 +163,24 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string) {
 		CheckError:      "",
 	}
 
-	if updateAvailable {
+	switch {
+	case updateAvailable && latestVersion != c.announcedVersion:
+		// Announce each newly detected version exactly once per process;
+		// subsequent ticks for the same version log at Debug only.
+		// TODO(spec-079/FR-002): include the "N releases / M weeks behind"
+		// delta here once the checker fetches the release list + publish
+		// dates (a later 079 slice extending VersionInfo, additive per
+		// FR-021).
+		c.announcedVersion = latestVersion
 		c.logger.Info("Update available",
 			zap.String("current", c.version),
 			zap.String("latest", latestVersion),
 			zap.String("url", release.HTMLURL))
-	} else {
+	case updateAvailable:
+		c.logger.Debug("Update still available",
+			zap.String("current", c.version),
+			zap.String("latest", latestVersion))
+	default:
 		c.logger.Debug("Running latest version",
 			zap.String("version", c.version))
 	}

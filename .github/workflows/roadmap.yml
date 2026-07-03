@@ -1,0 +1,51 @@
+name: roadmap
+
+# Keep ROADMAP.md in sync with roadmap.yaml and the per-spec tasks.md badges.
+# ROADMAP.md is a generated file (scripts/gen-roadmap.py); this canary fails the
+# build if it is stale so the roadmap never silently drifts. Regenerate locally
+# with `python3 scripts/gen-roadmap.py` and commit the result.
+
+on:
+  pull_request:
+    paths:
+      - 'roadmap.yaml'
+      - 'ROADMAP.md'
+      - 'scripts/gen-roadmap.py'
+      - 'specs/**/tasks.md'
+      - '.github/workflows/roadmap.yml'
+  push:
+    branches: [main, next]
+    paths:
+      - 'roadmap.yaml'
+      - 'ROADMAP.md'
+      - 'scripts/gen-roadmap.py'
+      - 'specs/**/tasks.md'
+      - '.github/workflows/roadmap.yml'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  roadmap-check:
+    name: roadmap-up-to-date
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML
+        run: pip install pyyaml
+      - name: Verify ROADMAP.md is up to date
+        run: python3 scripts/gen-roadmap.py --check
+      # Non-blocking: report roadmap.yaml drift vs live GitHub PR state, dangling
+      # spec: links, and status sanity. `gh` is preinstalled on GitHub runners;
+      # GH_TOKEN authenticates it. continue-on-error so drift is surfaced in the
+      # log without failing the build (roadmap.yaml is hand-maintained).
+      - name: Cross-check roadmap.yaml vs GitHub (advisory)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/gen-roadmap.py --check-github

@@ -302,20 +302,20 @@ func TestEnsureAnonymousID(t *testing.T) {
 	}
 }
 
-// TestSchemaVersionV5 verifies that HeartbeatPayload carries schema_version=5
-// once the MCP-2745 docker-isolation visibility fields ship. This is a tripwire
-// against accidental downgrades.
-func TestSchemaVersionV5(t *testing.T) {
-	if SchemaVersion != 5 {
-		t.Fatalf("SchemaVersion = %d, want 5", SchemaVersion)
+// TestSchemaVersionV6 verifies that HeartbeatPayload carries schema_version=6
+// once the machine_id field ships. This is a tripwire against accidental
+// downgrades.
+func TestSchemaVersionV6(t *testing.T) {
+	if SchemaVersion != 6 {
+		t.Fatalf("SchemaVersion = %d, want 6", SchemaVersion)
 	}
 
 	cfg := &config.Config{}
 	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
 	svc.SetRuntimeStats(&mockRuntimeStats{})
 	payload := svc.BuildPayload()
-	if payload.SchemaVersion != 5 {
-		t.Errorf("payload.SchemaVersion = %d, want 5", payload.SchemaVersion)
+	if payload.SchemaVersion != 6 {
+		t.Errorf("payload.SchemaVersion = %d, want 6", payload.SchemaVersion)
 	}
 }
 
@@ -475,8 +475,8 @@ func TestAnonymousIDStable_V2ToV3(t *testing.T) {
 	if p1.AnonymousID != p2.AnonymousID {
 		t.Errorf("anonymous_id drifted between builds: %q vs %q", p1.AnonymousID, p2.AnonymousID)
 	}
-	// SchemaVersion is 5 after MCP-2745's docker-isolation visibility additions.
-	if p1.SchemaVersion != 5 {
-		t.Errorf("schema_version = %d, want 5 (MCP-2745 docker telemetry)", p1.SchemaVersion)
+	// SchemaVersion is 6 after the machine_id addition.
+	if p1.SchemaVersion != 6 {
+		t.Errorf("schema_version = %d, want 6 (machine_id addition)", p1.SchemaVersion)
 	}
 }

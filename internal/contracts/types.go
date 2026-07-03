@@ -3,6 +3,8 @@ package contracts
 
 import (
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // APIResponse is the standard wrapper for all API responses
@@ -59,8 +61,14 @@ type Server struct {
 	// the payload), so the Web UI toggle (MCP-2932) can distinguish unset from
 	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
 	// AddServerRequest.
-	AutoApproveToolChanges *bool                `json:"auto_approve_tool_changes,omitempty"`
-	SecurityScan           *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
+	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
+	// the per-server MCP `initialize` handshake deadline override. Serialized as
+	// a duration string (e.g. "120s"); nil/omitted means "inherit the global
+	// default". Surfaced on the GET path so clients can read back a configured
+	// override; PATCH/POST accept it via AddServerRequest.
+	InitTimeout  *config.Duration     `json:"init_timeout,omitempty" swaggertype:"string"`
+	SecurityScan *SecurityScanSummary `json:"security_scan,omitempty"` // Latest security scan results summary
 	// Spec 044 — structured diagnostic error and stable error code. Both
 	// are populated when the server is in a failed state and the error
 	// has been classified by internal/diagnostics. Healthy servers omit
@@ -104,14 +112,46 @@ type DiagnosticFixStep struct {
 type SecurityScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"` // 0-100
-	Status        string         `json:"status"`     // "clean", "degraded", "warnings", "dangerous", "failed", "not_scanned", "scanning"
+	Status        string         `json:"status"`     // "clean", "warnings", "dangerous", "failed", "not_scanned", "scanning"
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
-	// Scanner coverage for the primary scan pass. "degraded" status means
-	// ScannersFailed > 0, so the risk score reflects an incomplete scan and a
-	// low score should not be read as a trustworthy all-clear (MCP-2401).
+	// Scanner coverage for the primary (baseline) scan pass — informational only.
+	// Spec 077 US3 (FR-008/FR-014): Status is derived SOLELY from the
+	// deterministic baseline findings; a failed Docker deep scanner no longer
+	// downgrades a clean verdict. That failure is surfaced via DeepScan instead.
 	ScannersRun    int `json:"scanners_run"`
 	ScannersFailed int `json:"scanners_failed"`
 	ScannersTotal  int `json:"scanners_total"`
+	// DeepScan reports the opt-in "deep scan" layer status (Spec 077 US3),
+	// SEPARATELY from the baseline verdict above. Always emitted on a computed
+	// summary — when deep scan is off (the default) it reports enabled=false
+	// plus any enabled-but-skipped Docker scanners. It never influences Status.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
+}
+
+// DeepScanDescriptor reports the informational status of the opt-in "deep scan"
+// layer (Docker-based scanners + source extraction) separately from the
+// baseline verdict (Spec 077 US3, FR-008). A disabled, unavailable, or failed
+// deep scan is a quiet note — it never downgrades an otherwise clean baseline
+// and never gates approval.
+//
+// Invariant: when Enabled is false, Ran and Available are false and
+// ScannersFailed is empty; SkippedScanners is only populated in that disabled
+// state.
+type DeepScanDescriptor struct {
+	Enabled        bool                     `json:"enabled"`
+	Ran            bool                     `json:"ran"`
+	Available      bool                     `json:"available"`
+	ScannersFailed []DeepScanScannerFailure `json:"scanners_failed,omitempty"`
+	// SkippedScanners lists Docker scanners the user enabled that are skipped
+	// because security.deep_scan.enabled is false (informational).
+	SkippedScanners []string `json:"skipped_scanners,omitempty"`
+}
+
+// DeepScanScannerFailure names a single deep scanner that could not run and why.
+// It is informational only and never affects the baseline verdict.
+type DeepScanScannerFailure struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // FindingCounts groups findings by user-facing threat category.
@@ -223,16 +263,21 @@ type Tool struct {
 }
 
 // DisabledToolStatus is the single machine-branchable reason a tool exists but
-// is not callable (Spec 049). Exactly one value per locked tool, assigned by
-// fixed first-match precedence (server-off → config → user → pending → unknown).
+// is not callable (Spec 049). Exactly one value per locked tool. The
+// classifier (classifyServerToolStatus) assigns the index-discoverable reasons
+// by fixed first-match precedence (server-off → config → user → pending →
+// unknown). DisabledStatusServerQuarantined is assigned separately by the
+// quarantined-tool discovery pass (quarantined tools are never in the index),
+// not by the classifier.
 type DisabledToolStatus = string
 
 const (
-	DisabledStatusServerDisabled  DisabledToolStatus = "server_disabled"
-	DisabledStatusByConfig        DisabledToolStatus = "disabled_by_config"
-	DisabledStatusByUser          DisabledToolStatus = "disabled_by_user"
-	DisabledStatusPendingApproval DisabledToolStatus = "pending_approval"
-	DisabledStatusUnknown         DisabledToolStatus = "disabled_unknown"
+	DisabledStatusServerDisabled    DisabledToolStatus = "server_disabled"
+	DisabledStatusServerQuarantined DisabledToolStatus = "server_quarantined"
+	DisabledStatusByConfig          DisabledToolStatus = "disabled_by_config"
+	DisabledStatusByUser            DisabledToolStatus = "disabled_by_user"
+	DisabledStatusPendingApproval   DisabledToolStatus = "pending_approval"
+	DisabledStatusUnknown           DisabledToolStatus = "disabled_unknown"
 )
 
 // LockedToolEntry is the lean discovery shape for a non-callable tool returned

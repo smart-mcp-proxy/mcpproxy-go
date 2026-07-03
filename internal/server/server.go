@@ -39,6 +39,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 	"github.com/smart-mcp-proxy/mcpproxy-go/web"
 )
@@ -275,6 +276,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 				TokenPrefix:    agentToken.TokenPrefix,
 				AllowedServers: agentToken.AllowedServers,
 				Permissions:    agentToken.Permissions,
+				ProfilePin:     agentToken.ProfilePin,
 			}
 			ctx := auth.WithAuthContext(r.Context(), authCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -418,22 +420,50 @@ func (s *Server) forwardRuntimeStatus() {
 	}
 }
 
-// listenForRoutingModeRefresh subscribes to server events and refreshes routing mode
-// tool sets when upstream servers change (Spec 031).
+// listenForRoutingModeRefresh subscribes to server events and refreshes routing
+// mode tool sets when upstream servers change (Spec 031), and re-applies the
+// security scanner's opt-in deep-scan gate on config hot-reload (Spec 077 US3).
 func (s *Server) listenForRoutingModeRefresh() {
 	eventCh := s.runtime.SubscribeEvents()
 	defer s.runtime.UnsubscribeEvents(eventCh)
 
 	for evt := range eventCh {
-		if evt.Type == runtime.EventTypeServersChanged {
+		switch evt.Type {
+		case runtime.EventTypeServersChanged:
 			s.logger.Debug("servers changed, refreshing routing mode tools",
 				zap.String("event_type", string(evt.Type)))
 			if s.mcpProxy != nil {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 			}
+		case runtime.EventTypeConfigReloaded:
+			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
+			// must re-gate the scanner so a security.deep_scan.* toggle takes
+			// effect without a restart. Fires on both reload paths, which both
+			// emit config.reloaded.
+			s.reapplyScannerSecurityConfig()
 		}
 	}
+}
+
+// reapplyScannerSecurityConfig re-applies the opt-in deep-scan gate (and the
+// engine-wide default isolation mode) to the running scanner service from the
+// live config, so a config hot-reload takes effect without a restart (Spec 077
+// US3). Mirrors the startup wiring; idempotent and nil-safe.
+func (s *Server) reapplyScannerSecurityConfig() {
+	if s.securityScanner == nil {
+		return
+	}
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return
+	}
+	s.securityScanner.ApplySecurityConfig(cfg.Security)
+	if cfg.DockerIsolation != nil {
+		s.securityScanner.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
+	}
+	s.logger.Debug("Re-applied security scanner config on hot-reload",
+		zap.Bool("deep_scan_enabled", s.securityScanner.DeepScanEnabled()))
 }
 
 // Start starts the MCP proxy server
@@ -1233,6 +1263,14 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
+	// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
+	// existing pointer when the request omits the field, so this nil-guard is
+	// the second half of the nil-preserve contract.
+	if updates.InitTimeout != nil {
+		existing.InitTimeout = updates.InitTimeout
+	}
+
 	// Isolation is PATCH-semantic: nil means "leave unchanged"; a
 	// present struct means "replace". Within the struct, the caller
 	// only populates fields they want to set (handled upstream by
@@ -1671,6 +1709,19 @@ func (s *Server) profileMiddleware(next http.Handler) http.Handler {
 		slug = strings.TrimPrefix(slug, "/mcp/p") // handle /mcp/p with no trailing slash
 		slug = strings.Trim(slug, "/")
 
+		// Profiles v2 T3: a profile-pinned agent token may only operate within its
+		// pinned profile. A request to any other /mcp/p/<slug> is forbidden (403),
+		// regardless of whether that slug is a real profile. Auth has already run
+		// (mcpAuthMiddleware wraps this handler), so the pin is on the context.
+		if pin := profilePinFromContext(r.Context()); pin != "" && pin != slug {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": fmt.Sprintf("agent token is pinned to profile '%s' and cannot access profile '%s'", pin, slug),
+			})
+			return
+		}
+
 		// Look up profile by slug (lock-free snapshot).
 		var found *config.ProfileConfig
 		for i := range cfg.Profiles {
@@ -1904,7 +1955,19 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	})
 	// Wire client connect service
 	if cfg := s.runtime.Config(); cfg != nil {
-		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey)
+		connectSvc := connect.NewService(cfg.Listen, cfg.APIKey).
+			WithRequireMCPAuth(cfg.RequireMCPAuth).
+			// Read listen/api_key/require_mcp_auth LIVE so a runtime toggle (the
+			// /mcp middleware already honors require_mcp_auth per-request) is
+			// reflected in what connect writes, instead of the startup snapshot
+			// that would re-leak the API key after auth is turned off (Spec 078).
+			WithConfigProvider(func() (string, string, bool) {
+				c := s.runtime.Config()
+				if c == nil {
+					return "", "", false
+				}
+				return c.Listen, c.APIKey, c.RequireMCPAuth
+			})
 		httpAPIServer.SetConnectService(connectSvc)
 
 		// Spec 046: wire the onboarding-funnel provider on the telemetry
@@ -1936,14 +1999,53 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		secRegistry := scanner.NewRegistry(dataDir, s.logger)
 		secDocker := scanner.NewDockerRunner(s.logger)
 		secService := scanner.NewService(sm, secRegistry, secDocker, dataDir, s.logger)
-		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerDisableNoNewPrivileges {
-			secService.SetScannerDisableNoNewPrivileges(true)
+		// Spec 077 US3: gate the opt-in deep-scan layer (Docker scanners + source
+		// extraction). Off by default — only the deterministic in-process baseline
+		// runs. The deprecated top-level scanner_* keys are migrated into
+		// security.deep_scan on load, so the effective accessors read the unified
+		// surface here (T031). This exact call is re-run on every config.reloaded
+		// (reapplyScannerSecurityConfig) so a deep-scan toggle hot-reloads without
+		// a restart — startup and reload configure the scanner identically.
+		// ApplySecurityConfig is nil-safe (audit FIX 1): a nil Config or a nil
+		// Config.Security (DefaultConfig never initializes the security block)
+		// still forces the deep-scan layer OFF — no Docker scanners, no
+		// published-package-source fetch — so the disabled-path gates apply
+		// unconditionally rather than only when a security block exists.
+		var secCfg *config.SecurityConfig
+		if cfg != nil {
+			secCfg = cfg.Security
 		}
-		// Published-package-source fetch is enabled by default; only an explicit
-		// false in config disables it (MCP-2206).
-		if cfg != nil && cfg.Security != nil && cfg.Security.ScannerFetchPackageSource != nil && !*cfg.Security.ScannerFetchPackageSource {
-			secService.SetFetchPackageSource(false)
+		secService.ApplySecurityConfig(secCfg)
+		// MCP-34.4 / D3 option (b): tell the scanner which isolation mode is
+		// active. Under "sandbox"/"none" the host runs no Docker for scanner
+		// plugins, so they degrade cleanly (skip + "degraded" scan summary)
+		// instead of failing with a misleading "pull the image" message.
+		//
+		// Two layers: SetIsolationMode is the engine-wide default; the resolver
+		// is per-server so a server pinned to isolation.mode:docker still runs
+		// Docker scanners under a global sandbox default (and vice versa),
+		// matching the per-server isolation resolver and the docs.
+		if cfg != nil && cfg.DockerIsolation != nil {
+			secService.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
 		}
+		secService.SetIsolationModeResolver(func(serverName string) string {
+			liveCfg := s.runtime.Config()
+			if liveCfg == nil || liveCfg.DockerIsolation == nil {
+				return ""
+			}
+			var sc *config.ServerConfig
+			for _, candidate := range liveCfg.Servers {
+				if candidate != nil && candidate.Name == serverName {
+					sc = candidate
+					break
+				}
+			}
+			if sc == nil {
+				return "" // unknown server → fall back to the engine-wide default
+			}
+			im := core.NewIsolationManager(liveCfg.DockerIsolation)
+			return string(im.ResolveMode(sc))
+		})
 		secService.SetEmitter(s.runtime)
 		secService.SetServerInfoProvider(&configServerInfoProvider{
 			cfg:        cfg,
@@ -2571,6 +2673,15 @@ func (s *Server) NotifySecretsChanged(ctx context.Context, operation, secretName
 	return s.runtime.NotifySecretsChanged(ctx, operation, secretName)
 }
 
+// EmitActiveProfileChanged broadcasts an active_profile.changed event so UI
+// surfaces (Web UI, tray) reflect a default-profile switch made by another
+// client (Profiles v2 T2/T5). The REST handler invokes this via an optional
+// capability assertion, so adding it here does not widen the httpapi
+// ServerController interface.
+func (s *Server) EmitActiveProfileChanged(profile string) {
+	s.runtime.EmitActiveProfileChanged(profile)
+}
+
 // GetCurrentConfig returns the current configuration
 func (s *Server) GetCurrentConfig() interface{} {
 	return s.runtime.GetCurrentConfig()
@@ -2813,6 +2924,24 @@ func (a *scanSummaryEnricherAdapter) GetSecurityScanSummary(ctx context.Context,
 			Total:     summary.FindingCounts.Total,
 		}
 	}
+	// Surface the opt-in deep-scan layer status (Spec 077 US3). Always emitted
+	// on a computed summary; when the layer is off it reports enabled=false
+	// plus any enabled-but-skipped Docker scanners (audit FIX 3a).
+	if summary.DeepScan != nil {
+		ds := &contracts.DeepScanDescriptor{
+			Enabled:   summary.DeepScan.Enabled,
+			Ran:       summary.DeepScan.Ran,
+			Available: summary.DeepScan.Available,
+		}
+		for _, f := range summary.DeepScan.ScannersFailed {
+			ds.ScannersFailed = append(ds.ScannersFailed, contracts.DeepScanScannerFailure{
+				ID:     f.ID,
+				Reason: f.Reason,
+			})
+		}
+		ds.SkippedScanners = append(ds.SkippedScanners, summary.DeepScan.SkippedScanners...)
+		out.DeepScan = ds
+	}
 	return out
 }
 
@@ -2886,6 +3015,26 @@ func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[stri
 		return p.server.GetServerTools(serverName)
 	}
 	return nil, fmt.Errorf("server tools not available")
+}
+
+// GetAllServerTools implements scanner's optional allServerToolsProvider: it
+// returns every configured server's current tool definitions, keyed by server
+// name, so a scan can build a cross-server snapshot for the shadowing check.
+// Best-effort: servers that error or expose no tools are skipped, never fatal.
+func (p *configServerInfoProvider) GetAllServerTools() (map[string][]map[string]interface{}, error) {
+	cfg := p.currentConfig()
+	if cfg == nil || p.server == nil {
+		return nil, nil
+	}
+	all := make(map[string][]map[string]interface{}, len(cfg.Servers))
+	for _, sc := range cfg.Servers {
+		tools, err := p.server.GetServerTools(sc.Name)
+		if err != nil || len(tools) == 0 {
+			continue
+		}
+		all[sc.Name] = tools
+	}
+	return all, nil
 }
 
 // EnsureConnected attempts to connect a disconnected server so tool definitions

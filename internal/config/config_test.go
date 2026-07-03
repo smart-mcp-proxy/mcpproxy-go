@@ -1610,3 +1610,70 @@ func TestToolMetadata_OutputSchemaJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data2), "output_schema_json", "empty OutputSchemaJSON should be omitted")
 }
+
+// TestMigrateDeepScanConfig verifies the Spec 077 US3 config migration:
+// the deprecated top-level scanner_fetch_package_source /
+// scanner_disable_no_new_privileges keys are folded into the unified
+// security.deep_scan block on load, the removed auto_scan_quarantined key is
+// ignored, and a round-trip through JSON preserves the migrated shape.
+func TestMigrateDeepScanConfig(t *testing.T) {
+	fetch := false
+	original := &Config{
+		Security: &SecurityConfig{
+			ScannerFetchPackageSource:     &fetch,
+			ScannerDisableNoNewPrivileges: true,
+		},
+	}
+
+	migrateDeepScanConfig(original)
+
+	require.NotNil(t, original.Security.DeepScan, "deep_scan block must be created by migration")
+	require.NotNil(t, original.Security.DeepScan.FetchPackageSource, "fetch_package_source must migrate into deep_scan")
+	assert.False(t, *original.Security.DeepScan.FetchPackageSource, "fetch_package_source value must be preserved")
+	assert.True(t, original.Security.DeepScan.DisableNoNewPrivileges, "disable_no_new_privileges must migrate into deep_scan")
+
+	// Legacy top-level keys must be cleared so the migrated config serializes
+	// only the new deep_scan.* surface (no duplicate/stale keys).
+	assert.Nil(t, original.Security.ScannerFetchPackageSource, "legacy scanner_fetch_package_source must be cleared after migration")
+	assert.False(t, original.Security.ScannerDisableNoNewPrivileges, "legacy scanner_disable_no_new_privileges must be cleared after migration")
+
+	// Effective accessors must read the migrated values.
+	assert.True(t, original.Security.IsDisableNoNewPrivileges(), "effective disable-no-new-privileges must reflect migrated value")
+	if got := original.Security.EffectiveFetchPackageSource(); assert.NotNil(t, got) {
+		assert.False(t, *got, "effective fetch-package-source must reflect migrated value")
+	}
+
+	// Round-trip: marshal then unmarshal, migrate again (idempotent), and
+	// confirm the deep_scan values survive and legacy keys do not reappear.
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "scanner_fetch_package_source", "migrated config must not serialize the legacy key")
+	assert.NotContains(t, string(data), "scanner_disable_no_new_privileges", "migrated config must not serialize the legacy key")
+	assert.Contains(t, string(data), "deep_scan", "migrated config must serialize the deep_scan block")
+
+	var restored Config
+	require.NoError(t, json.Unmarshal(data, &restored))
+	migrateDeepScanConfig(&restored)
+	require.NotNil(t, restored.Security.DeepScan)
+	require.NotNil(t, restored.Security.DeepScan.FetchPackageSource)
+	assert.False(t, *restored.Security.DeepScan.FetchPackageSource)
+	assert.True(t, restored.Security.DeepScan.DisableNoNewPrivileges)
+}
+
+// TestMigrateDeepScanConfigIgnoresAutoScanQuarantined proves that a config file
+// carrying the removed auto_scan_quarantined key loads without error and the
+// key is simply dropped (Spec 077 FR-016).
+func TestMigrateDeepScanConfigIgnoresAutoScanQuarantined(t *testing.T) {
+	jsonData := `{"security":{"auto_scan_quarantined":true,"scanner_disable_no_new_privileges":true}}`
+	var cfg Config
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &cfg), "config with removed key must still unmarshal")
+	migrateDeepScanConfig(&cfg)
+	require.NotNil(t, cfg.Security)
+	require.NotNil(t, cfg.Security.DeepScan)
+	assert.True(t, cfg.Security.DeepScan.DisableNoNewPrivileges)
+
+	// The removed key must not round-trip back out (no struct field to hold it).
+	data, err := json.Marshal(&cfg)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "auto_scan_quarantined", "removed key must not serialize")
+}

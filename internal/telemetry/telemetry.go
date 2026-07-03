@@ -37,13 +37,33 @@ import (
 // three new diagnostics codes surfaced via error_code_counts_24h
 // (MCPX_DOCKER_CLI_NOT_FOUND / MCPX_DOCKER_EXEC_NOT_FOUND /
 // MCPX_DOCKER_OCI_RUNTIME). Additive only — v3/v4 consumers ignore them.
-const SchemaVersion = 5
+//
+// v6 (schema bump from 5): adds machine_id — a stable, non-reversible hash of
+// the OS machine id (HMAC-SHA256 keyed by the OS machine id, scoped by an
+// app-specific key). It lets the dashboard dedup installs whose anonymous_id
+// churns every run (ephemeral Docker layers, throwaway HOMEs, CI). Additive
+// and forward-compatible: v3/v4/v5 consumers ignore it, and the ingest worker
+// stores payload_json wholesale without rejecting unknown fields or higher
+// schema versions.
+const SchemaVersion = 6
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
 type HeartbeatPayload struct {
 	// v1 fields (preserved unchanged)
-	AnonymousID          string `json:"anonymous_id"`
+	AnonymousID string `json:"anonymous_id"`
+	// MachineID (schema v6) is a stable, non-reversible hash of the OS machine
+	// id — HMAC-SHA256 keyed by the OS machine id, scoped by an app-specific key
+	// (see machine_id.go). Unlike anonymous_id (a UUID persisted in the config
+	// file, which is regenerated on every run in ephemeral environments —
+	// throwaway HOMEs, Docker layers, CI), this value is stable per physical
+	// machine, letting the dashboard dedup ephemeral installs. Empty/omitted
+	// when the OS machine id cannot be read (containers without /etc/machine-id,
+	// permission errors, exotic platforms); the backend treats empty as
+	// "unknown". The raw machine id is NEVER transmitted — only the salted hash.
+	// It rides the same opt-out gate as every other field (the whole heartbeat
+	// is suppressed when telemetry is disabled).
+	MachineID            string `json:"machine_id,omitempty"`
 	Version              string `json:"version"`
 	Edition              string `json:"edition"`
 	OS                   string `json:"os"`
@@ -549,6 +569,10 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
 		SchemaVersion:  SchemaVersion,
 		CurrentVersion: s.version,
+		// Schema v6: stable, non-reversible machine-id hash. Cached after the
+		// first call so repeated heartbeats do not re-probe the OS. Empty when
+		// the OS machine id is unreadable — never blocks the heartbeat.
+		MachineID: resolveMachineID(),
 	}
 
 	if s.config.Telemetry != nil {

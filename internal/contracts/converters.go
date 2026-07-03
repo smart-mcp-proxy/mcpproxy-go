@@ -36,6 +36,9 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		// MCP-2940: surface the per-server auto-approve intent (tri-state *bool)
 		// so the Web UI toggle reflects the persisted value.
 		AutoApproveToolChanges: cfg.AutoApproveToolChanges,
+		// MCP-3322: surface the per-server init_timeout override so callers can
+		// read back a configured handshake deadline.
+		InitTimeout: cfg.InitTimeout,
 	}
 
 	// Convert OAuth config if present
@@ -186,6 +189,14 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if autoApprove, ok := generic["auto_approve_tool_changes"].(bool); ok {
 			v := autoApprove
 			server.AutoApproveToolChanges = &v
+		}
+		// MCP-3322: init_timeout serializes as a duration string (e.g. "120s").
+		// Parse it back into a *config.Duration so the GET payload round-trips.
+		if initTimeout, ok := generic["init_timeout"].(string); ok && initTimeout != "" {
+			if d, err := time.ParseDuration(initTimeout); err == nil {
+				v := config.Duration(d)
+				server.InitTimeout = &v
+			}
 		}
 		if connected, ok := generic["connected"].(bool); ok {
 			server.Connected = connected

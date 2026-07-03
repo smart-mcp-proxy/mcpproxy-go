@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 
@@ -560,6 +561,98 @@ func TestHandleGetServers_ExposesAutoApproveToolChanges(t *testing.T) {
 	require.NotNil(t, resp.Data.Servers[0].AutoApproveToolChanges,
 		"auto_approve_tool_changes must appear in the GET payload")
 	assert.True(t, *resp.Data.Servers[0].AutoApproveToolChanges)
+}
+
+// TestHandlePatchServer_InitTimeout verifies the per-server init_timeout
+// override (MCP-3322) plumbs through PATCH with tri-state *Duration
+// nil-preserve semantics: a present value is applied, an omitted field
+// preserves the existing pointer.
+func TestHandlePatchServer_InitTimeout(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	durPtr := func(d time.Duration) *config.Duration { v := config.Duration(d); return &v }
+
+	newServer := func() *config.ServerConfig {
+		return &config.ServerConfig{
+			Name:        "slack",
+			Protocol:    "stdio",
+			Command:     "docker",
+			Enabled:     true,
+			Quarantined: false,
+		}
+	}
+
+	patch := func(t *testing.T, existing *config.ServerConfig, body string) *config.ServerConfig {
+		t.Helper()
+		mockCtrl := &mockPatchServerController{apiKey: "test-key", existingServer: existing}
+		srv := NewServer(mockCtrl, logger, nil)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/slack", bytes.NewReader([]byte(body)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates, "UpdateServer should have been called")
+		return mockCtrl.capturedUpdates
+	}
+
+	t.Run("explicit value sets the pointer", func(t *testing.T) {
+		updates := patch(t, newServer(), `{"init_timeout":"120s"}`)
+		require.NotNil(t, updates.InitTimeout, "pointer must be set when the request provides it")
+		assert.Equal(t, 120*time.Second, updates.InitTimeout.Duration())
+	})
+
+	t.Run("omitting preserves nil existing", func(t *testing.T) {
+		updates := patch(t, newServer(), `{"args":["new-arg"]}`)
+		assert.Nil(t, updates.InitTimeout, "omitting the field must preserve the unset (nil) value")
+	})
+
+	t.Run("omitting preserves a prior value", func(t *testing.T) {
+		existing := newServer()
+		existing.InitTimeout = durPtr(120 * time.Second)
+		updates := patch(t, existing, `{"args":["new-arg"]}`)
+		require.NotNil(t, updates.InitTimeout, "omitting the field must preserve the existing pointer")
+		assert.Equal(t, 120*time.Second, updates.InitTimeout.Duration())
+	})
+}
+
+// TestHandleGetServers_ExposesInitTimeout verifies the GET /api/v1/servers
+// payload surfaces init_timeout so a configured override round-trips (MCP-3322).
+func TestHandleGetServers_ExposesInitTimeout(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		allServers: []map[string]interface{}{
+			{
+				"id":           "slack",
+				"name":         "slack",
+				"enabled":      true,
+				"quarantined":  false,
+				"init_timeout": "120s",
+			},
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var resp struct {
+		Data struct {
+			Servers []struct {
+				Name        string `json:"name"`
+				InitTimeout string `json:"init_timeout"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Servers, 1)
+	assert.Equal(t, "2m0s", resp.Data.Servers[0].InitTimeout,
+		"init_timeout must appear in the GET payload as a duration string")
 }
 
 // TestHandleConvertConfigToSecret_ServerNotFound verifies the 404 path

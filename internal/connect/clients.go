@@ -180,51 +180,87 @@ func ConfigPath(clientID, homeDir string) string {
 	}
 }
 
-// buildServerEntry returns the JSON-serializable map that should be inserted
-// into the client's config file for the given mcpproxy URL.
-func buildServerEntry(clientID, mcpURL string) map[string]interface{} {
+// buildServerEntry returns the JSON/TOML-serializable map inserted into the
+// client's config for the mcpproxy endpoint. When p.credential is set (only when
+// require_mcp_auth is on), it is written via the carrier each client actually
+// supports — an X-API-Key header where the config schema allows one, the
+// mcp-remote --header bridge arg for Claude Desktop, and the ?apikey= query only
+// for clients whose config cannot express a header (Codex). When p.credential is
+// empty (the default), a clean, keyless entry is written.
+//
+// Server-side ExtractToken accepts, in order, the X-API-Key header, an
+// Authorization: Bearer token, and the ?apikey= query, so the header carrier and
+// the query fallback authenticate identically.
+func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
-	case "claude-code":
-		return map[string]interface{}{
+	case "claude-code", "vscode":
+		// Claude Code (~/.claude.json) and VS Code (mcp.json) "type":"http"
+		// entries support a "headers" object.
+		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
-			"url":  mcpURL,
-		}
+			"url":  p.baseURL,
+		}, p.credential)
 	case "claude-desktop":
 		// Claude Desktop only speaks stdio, so bridge to mcpproxy's HTTP
-		// endpoint with mcp-remote run via npx.
+		// endpoint with mcp-remote via npx. mcp-remote forwards the credential
+		// with --header. The value carries NO space after the colon: Claude
+		// Desktop / Cursor don't escape spaces in args and mangle the header
+		// (geelen/mcp-remote README) — mcpproxy's hex/token keys are space-free.
+		args := []string{"-y", "mcp-remote", p.baseURL}
+		if p.credential != "" {
+			args = append(args, "--header", "X-API-Key:"+p.credential)
+		}
 		return map[string]interface{}{
 			"command": "npx",
-			"args":    []string{"-y", "mcp-remote", mcpURL},
+			"args":    args,
 		}
 	case "cursor":
-		return map[string]interface{}{
-			"url":  mcpURL,
+		// Cursor mcp.json remote entries support a "headers" object.
+		return withAPIKeyHeader(map[string]interface{}{
+			"url":  p.baseURL,
 			"type": "sse",
-		}
+		}, p.credential)
 	case "windsurf":
-		return map[string]interface{}{
-			"serverUrl": mcpURL,
+		// Windsurf mcp_config.json serverUrl entries support a "headers" object.
+		return withAPIKeyHeader(map[string]interface{}{
+			"serverUrl": p.baseURL,
 			"type":      "sse",
-		}
-	case "vscode":
-		return map[string]interface{}{
-			"type": "http",
-			"url":  mcpURL,
-		}
+		}, p.credential)
 	case "gemini":
-		return map[string]interface{}{
-			"httpUrl": mcpURL,
-		}
+		// Gemini CLI settings.json httpUrl entries support a "headers" object.
+		return withAPIKeyHeader(map[string]interface{}{
+			"httpUrl": p.baseURL,
+		}, p.credential)
 	case "opencode":
-		return map[string]interface{}{
+		// OpenCode opencode.json "type":"remote" entries support a "headers" object.
+		return withAPIKeyHeader(map[string]interface{}{
 			"type": "remote",
-			"url":  mcpURL,
+			"url":  p.baseURL,
+		}, p.credential)
+	case "codex":
+		// Codex speaks TOML; the entry is a single url key under
+		// [mcp_servers.<name>]. Its HTTP transport only accepts header VALUES
+		// indirectly via env-var names (http_headers / bearer_token_env_var), so
+		// a literal X-API-Key header can't be written — fall back to the ?apikey=
+		// query, which mcpproxy's /mcp accepts. Constructed here (not inline in
+		// connectTOML) so preview and write share one source of truth (FR-002).
+		return map[string]interface{}{
+			"url": credentialQuery(p.baseURL, p.credential),
 		}
 	default:
-		// Fallback: generic HTTP entry
+		// Fallback: generic HTTP entry with the query carrier (no known schema).
 		return map[string]interface{}{
 			"type": "http",
-			"url":  mcpURL,
+			"url":  credentialQuery(p.baseURL, p.credential),
 		}
 	}
+}
+
+// withAPIKeyHeader adds an X-API-Key header object to a JSON client entry when a
+// credential is present, and returns the entry unchanged otherwise.
+func withAPIKeyHeader(entry map[string]interface{}, credential string) map[string]interface{} {
+	if credential != "" {
+		entry["headers"] = map[string]interface{}{"X-API-Key": credential}
+	}
+	return entry
 }

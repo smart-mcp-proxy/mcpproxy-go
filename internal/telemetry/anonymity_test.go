@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/denisbrodbeck/machineid"
 )
 
 // TestScanForPII_BlockedPrefix_UsersPath asserts that a payload containing a
@@ -149,6 +151,41 @@ func TestPopulateBlockedValuesFrom(t *testing.T) {
 		if c > 1 {
 			t.Errorf("BlockedValues has duplicate %q (count=%d)", v, c)
 		}
+	}
+}
+
+// TestScanForPII_RawMachineIDBlocked asserts that when the raw OS machine id is
+// added to BlockedValues (defense-in-depth, as the telemetry service does for
+// hostname/tokens), a payload accidentally carrying the raw id is rejected. The
+// hashed machine_id we DO emit is unrelated to the raw value and passes. Skips
+// when the OS machine id is unreadable on this host.
+func TestScanForPII_RawMachineIDBlocked(t *testing.T) {
+	raw, err := machineid.ID()
+	if err != nil || len(raw) < 3 {
+		t.Skipf("OS machine id unavailable on this host (%v); skipping", err)
+	}
+
+	prev := BlockedValues
+	BlockedValues = []string{raw}
+	defer func() { BlockedValues = prev }()
+
+	// A payload leaking the raw id must be caught.
+	leak := []byte(`{"anonymous_id":"abc","machine_id":"` + raw + `"}`)
+	if scanErr := ScanForPII(leak); scanErr == nil {
+		t.Fatalf("expected violation when raw machine id present, got nil")
+	} else if !errors.Is(scanErr, ErrAnonymityViolation) {
+		t.Fatalf("expected ErrAnonymityViolation, got %v", scanErr)
+	}
+
+	// The hashed value we actually emit must NOT contain the raw id and must
+	// pass the scan.
+	hashed := protectedMachineID()
+	if hashed != "" && strings.Contains(hashed, raw) {
+		t.Fatalf("hashed machine_id leaked the raw id")
+	}
+	clean := []byte(`{"anonymous_id":"abc","machine_id":"` + hashed + `"}`)
+	if scanErr := ScanForPII(clean); scanErr != nil {
+		t.Errorf("hashed machine_id payload should pass scan, got %v", scanErr)
 	}
 }
 

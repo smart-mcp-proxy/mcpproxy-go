@@ -131,3 +131,50 @@ func TestHandleSetActiveProfileBadBody(t *testing.T) {
 	w, _ := doJSON(t, srv, http.MethodPut, "/api/v1/profiles/active", []byte(`not json`))
 	require.Equal(t, http.StatusBadRequest, w.Code)
 }
+
+// profileEventRecorder records EmitActiveProfileChanged calls so we can assert
+// the handler notifies other clients (via SSE) only on an actual change.
+type profileEventRecorder struct {
+	mockProfilesController
+	emitted []string
+}
+
+func (m *profileEventRecorder) EmitActiveProfileChanged(profile string) {
+	m.emitted = append(m.emitted, profile)
+}
+
+func TestSetActiveProfileEmitsChangeEvent(t *testing.T) {
+	cfg := &config.Config{
+		APIKey: "test-key",
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "research", Servers: []string{"research-srv"}},
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	rec := &profileEventRecorder{mockProfilesController: mockProfilesController{apiKey: "test-key", cfg: cfg}}
+	srv := NewServer(rec, zap.NewNop().Sugar(), nil)
+
+	// Setting a new profile emits one change event.
+	w, _ := doJSON(t, srv, http.MethodPut, "/api/v1/profiles/active", []byte(`{"profile":"research"}`))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, []string{"research"}, rec.emitted)
+
+	// Setting the same profile again is a no-op — no duplicate event.
+	w, _ = doJSON(t, srv, http.MethodPut, "/api/v1/profiles/active", []byte(`{"profile":"research"}`))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, []string{"research"}, rec.emitted)
+
+	// Clearing emits an empty-string change event.
+	w, _ = doJSON(t, srv, http.MethodPut, "/api/v1/profiles/active", []byte(`{"profile":""}`))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, []string{"research", ""}, rec.emitted)
+
+	// A rejected (unknown) profile emits nothing.
+	w, _ = doJSON(t, srv, http.MethodPut, "/api/v1/profiles/active", []byte(`{"profile":"ghost"}`))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	require.Equal(t, []string{"research", ""}, rec.emitted)
+}
