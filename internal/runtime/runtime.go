@@ -2448,6 +2448,21 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 					_ = diagStore.RecordErrorCode(db, code)
 				})
 			}
+
+			// Spec 080 (US2): wire the funnel observability store and record
+			// this process start as activity immediately — the first-install
+			// day stamp must persist on first run (FR-007) and short sessions
+			// that die before the first heartbeat must still count as active
+			// days (FR-008). Local persistence is independent of the opt-out
+			// gate; transmission is gated elsewhere (FR-017 unchanged).
+			if err := telemetry.EnsureFunnelBucket(db); err != nil {
+				r.logger.Warn("Failed to ensure telemetry funnel bucket", zap.Error(err))
+			}
+			funnelStore := telemetry.NewFunnelStore()
+			r.telemetryService.SetFunnelStore(funnelStore, db)
+			if err := funnelStore.RecordActivity(db, time.Now().UTC()); err != nil {
+				r.logger.Debug("Failed to record funnel activity at startup", zap.Error(err))
+			}
 		}
 	}
 

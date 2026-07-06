@@ -166,6 +166,37 @@ type HeartbeatPayload struct {
 	// one of "" (not shown to this install), "completed", or "skipped".
 	WizardServerStep string `json:"wizard_server_step,omitempty"`
 
+	// Spec 080 (US2) — funnel observability fields. All additive and
+	// omitempty so zero-valued payloads stay shape-compatible with v6.
+	// Privacy posture: booleans and non-negative integers only — no
+	// timestamps, no per-day breakdown, no per-server identity.
+
+	// WizardShown is true once the onboarding wizard has rendered at least
+	// once for this install (OnboardingState.FirstShownAt set). Combined
+	// with WizardEngaged it makes "shown but ignored" observable:
+	// wizard_shown=true with wizard_engaged absent/false.
+	WizardShown bool `json:"wizard_shown,omitempty"`
+
+	// WebUIOpened is the lifetime count of embedded Web UI index-document
+	// serves (the UI entrypoint), persisted in BBolt. Independent of the
+	// X-MCPProxy-Client-header-based surface_requests.webui counter: it
+	// counts opening the UI, not SPA API traffic. Asset and API requests
+	// never increment it. Coarse by design (health checkers fetching /
+	// count too); documented as "index serves".
+	WebUIOpened int64 `json:"web_ui_opened,omitempty"`
+
+	// DaysSinceInstall is the whole-day UTC age of the install, from a
+	// persisted first-install day stamp independent of anonymous_id.
+	// Non-negative (clamped at 0 on clock skew). Pointer so day 0 (install
+	// day) is transmitted while "store not wired" is omitted — the same
+	// nil-safety as Activation. No install timestamp is ever transmitted.
+	DaysSinceInstall *int `json:"days_since_install,omitempty"`
+
+	// ActiveDays30d is the number of distinct active UTC days in the
+	// trailing 30-day window (1..30 once any activity is recorded). Only
+	// this cardinality leaves the machine; the per-day set stays local.
+	ActiveDays30d int `json:"active_days_30d,omitempty"`
+
 	// Spec 044 Phase H: diagnostics counter snapshot. Omitted entirely when
 	// all counters are zero (omitempty on the pointer). No PII: only stable
 	// MCPX_* enum strings, non-negative int counts.
@@ -181,6 +212,9 @@ type OnboardingSnapshot struct {
 	WizardEngaged        bool
 	WizardConnectStep    string
 	WizardServerStep     string
+	// WizardShown (Spec 080 US2): the wizard rendered at least once for
+	// this install — derived from OnboardingState.FirstShownAt != nil.
+	WizardShown bool
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -237,6 +271,13 @@ type Service struct {
 	// nil-safety guarantee as activationStore. When nil, Diagnostics is omitted.
 	diagCounterStore DiagnosticsCounterStore
 	diagCounterDB    *bbolt.DB
+
+	// Spec 080 (US2): funnel observability store + DB handle. Optional —
+	// same nil-safety guarantee as activationStore. When nil, web_ui_opened,
+	// days_since_install, and active_days_30d are omitted (short-lived CLI
+	// commands).
+	funnelStore FunnelStore
+	funnelDB    *bbolt.DB
 
 	// Spec 044: optional provider for configured IDE count. Populated by the
 	// runtime from internal/connect at wire-up time. nil-safe.
@@ -330,6 +371,38 @@ func (s *Service) ActivationStore() ActivationStore {
 // store (or nil). Callers pair this with ActivationStore() to perform writes.
 func (s *Service) ActivationDB() *bbolt.DB {
 	return s.activationDB
+}
+
+// SetFunnelStore wires the BBolt-backed funnel observability store (Spec 080
+// US2). Optional; when unset, heartbeat payloads omit web_ui_opened,
+// days_since_install, and active_days_30d. Safe to call once during startup.
+func (s *Service) SetFunnelStore(store FunnelStore, db *bbolt.DB) {
+	s.funnelStore = store
+	s.funnelDB = db
+}
+
+// FunnelStore returns the wired funnel store (or nil).
+func (s *Service) FunnelStore() FunnelStore {
+	return s.funnelStore
+}
+
+// FunnelDB returns the BBolt DB handle associated with the funnel store
+// (or nil).
+func (s *Service) FunnelDB() *bbolt.DB {
+	return s.funnelDB
+}
+
+// RecordWebUIOpen increments the lifetime web_ui_opened counter (Spec 080
+// FR-006). Called by the embedded Web UI handler whenever the index document
+// is served. nil-safe: a no-op when the funnel store is not wired, and a
+// persistence error never propagates to the HTTP path (logged at debug).
+func (s *Service) RecordWebUIOpen() {
+	if s.funnelStore == nil || s.funnelDB == nil {
+		return
+	}
+	if err := s.funnelStore.IncrementWebUIOpened(s.funnelDB); err != nil {
+		s.logger.Debug("Failed to increment web_ui_opened counter", zap.Error(err))
+	}
 }
 
 // SetDiagnosticsCounterStore wires the BBolt-backed diagnostics counter store
@@ -680,6 +753,30 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 			payload.WizardEngaged = snap.WizardEngaged
 			payload.WizardConnectStep = snap.WizardConnectStep
 			payload.WizardServerStep = snap.WizardServerStep
+			// Spec 080 (FR-005): shown-vs-engaged independence — true once
+			// the wizard rendered, regardless of engagement.
+			payload.WizardShown = snap.WizardShown
+		}
+	}
+
+	// Spec 080 (US2): funnel observability. Mark the current UTC day active
+	// (a heartbeat is proof of process activity), then surface the reduced
+	// integers. On any store error the fields are simply omitted — the
+	// heartbeat is never blocked (same posture as Activation).
+	if s.funnelStore != nil && s.funnelDB != nil {
+		now := time.Now().UTC()
+		if err := s.funnelStore.RecordActivity(s.funnelDB, now); err != nil {
+			s.logger.Debug("Failed to record funnel activity day", zap.Error(err))
+		}
+		if st, err := s.funnelStore.Snapshot(s.funnelDB, now); err == nil {
+			payload.WebUIOpened = st.WebUIOpened
+			if st.HasInstallDay {
+				days := st.DaysSinceInstall
+				payload.DaysSinceInstall = &days
+			}
+			payload.ActiveDays30d = st.ActiveDays30d
+		} else {
+			s.logger.Debug("Failed to load funnel state for heartbeat", zap.Error(err))
 		}
 	}
 
