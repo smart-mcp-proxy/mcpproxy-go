@@ -45,6 +45,21 @@ const (
 	OnboardingStateKey = "wizard_state"
 )
 
+// Onboarding step-status values (Spec 046; enum widened by Spec 080 FR-001).
+const (
+	// StepStatusCompleted means the user completed the step inside the wizard.
+	StepStatusCompleted = "completed"
+	// StepStatusCompletedExternal means the wizard's connect step was never
+	// advanced, but at dismissal time the install showed positive evidence of
+	// a connection made outside the wizard (a supported client currently
+	// connected, or an MCP client has ever handshaked). Connect step only
+	// (Spec 080 FR-002).
+	StepStatusCompletedExternal = "completed_external"
+	// StepStatusSkipped means the wizard was dismissed with the step
+	// untouched and no external-connection evidence was established.
+	StepStatusSkipped = "skipped"
+)
+
 // OnboardingState records whether the user has engaged with the first-run
 // wizard, and which steps they completed or skipped. Persisted under
 // OnboardingBucket / OnboardingStateKey. Absence of the record means
@@ -61,7 +76,10 @@ type OnboardingState struct {
 	// EngagedAt is the timestamp of completion or explicit skip.
 	EngagedAt *time.Time `json:"engaged_at,omitempty"`
 
-	// ConnectStepStatus is one of: "", "completed", "skipped".
+	// ConnectStepStatus is one of: "", "completed", "completed_external",
+	// "skipped" (Spec 080 FR-001). "completed_external" records a dismissal
+	// where the connect step was untouched but the install was already
+	// connected outside the wizard (CLI, ConnectModal, manual config).
 	ConnectStepStatus string `json:"connect_step_status,omitempty"`
 
 	// ServerStepStatus is one of: "", "completed", "skipped".

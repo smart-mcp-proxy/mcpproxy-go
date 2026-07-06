@@ -2674,8 +2674,11 @@ components:
       properties:
         connect_step_status:
           description: |-
-            ConnectStepStatus is one of: "", "completed", "skipped". Empty
-            preserves the existing value.
+            ConnectStepStatus is one of: "", "completed", "completed_external",
+            "skipped" (Spec 080 FR-001). Empty preserves the existing value.
+            A "skipped" request for a previously untouched connect step is
+            upgraded server-side to "completed_external" when the install shows
+            positive evidence of an external connection (Spec 080 FR-002).
           type: string
         engaged:
           description: |-

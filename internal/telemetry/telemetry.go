@@ -155,7 +155,11 @@ type HeartbeatPayload struct {
 	WizardEngaged bool `json:"wizard_engaged,omitempty"`
 
 	// WizardConnectStep is the per-step status for "Connect an AI client":
-	// one of "" (not shown to this install), "completed", or "skipped".
+	// one of "" (not shown to this install), "completed",
+	// "completed_external" (Spec 080: connected outside the wizard —
+	// CLI/ConnectModal/manual config — detected at dismissal), or "skipped".
+	// Consumers switching on completed|skipped must treat unknown values as
+	// "other/engaged".
 	WizardConnectStep string `json:"wizard_connect_step,omitempty"`
 
 	// WizardServerStep is the per-step status for "Add an MCP server":
