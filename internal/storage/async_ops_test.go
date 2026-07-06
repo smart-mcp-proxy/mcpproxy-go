@@ -399,3 +399,56 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 
 	t.Logf("ServerConfig has %d fields, all mapped to UpstreamRecord", serverConfigType.NumField())
 }
+
+// TestManagerStopAsyncDrainsThenCloseIsIdempotent guards the split shutdown
+// sequence behind Spec 080 FR-010: StopAsync must stop the async manager AND
+// drain queued operations to the DB (so a caller can perform a final write —
+// the telemetry shutdown marker — strictly after all async DB work), and the
+// subsequent Close must not re-run the drain, double-cancel, or panic. A
+// StopAsync after Close must also be a harmless no-op.
+func TestManagerStopAsyncDrainsThenCloseIsIdempotent(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+	manager, err := NewManager(t.TempDir(), logger)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	// Seed a record, then queue an async write against it.
+	if err := manager.SaveUpstreamServer(&config.ServerConfig{
+		Name:     "drain-test",
+		Protocol: "stdio",
+		Command:  "true",
+		Enabled:  false,
+	}); err != nil {
+		t.Fatalf("SaveUpstreamServer: %v", err)
+	}
+	manager.asyncMgr.EnableServerAsync("drain-test", true)
+
+	// StopAsync must flush the queued write before returning.
+	manager.StopAsync()
+	got, err := manager.GetUpstreamServer("drain-test")
+	if err != nil {
+		t.Fatalf("GetUpstreamServer after StopAsync: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("queued async write not drained by StopAsync")
+	}
+
+	// The DB is still open between StopAsync and Close — this is the window
+	// where the shutdown marker is resolved.
+	if manager.GetDB() == nil {
+		t.Fatal("DB must remain open after StopAsync")
+	}
+
+	// Double StopAsync, then Close (whose internal async stop must no-op).
+	manager.StopAsync()
+	if err := manager.Close(); err != nil {
+		t.Fatalf("Close after StopAsync: %v", err)
+	}
+
+	// StopAsync and Close after Close must not panic.
+	manager.StopAsync()
+	if err := manager.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}

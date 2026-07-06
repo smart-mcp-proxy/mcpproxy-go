@@ -654,27 +654,36 @@ func (r *Runtime) Close() error {
 	}
 
 	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
-	// LAST point the DB is still open — after cache/index cleanup, immediately
-	// before storage closes (cache.Close only stops a goroutine and index.Close
-	// only touches Bleve; neither closes the BBolt DB). Every branch above —
-	// including the container-cleanup verification, whose early exits live
-	// inside verifyContainerCleanup — reaches this point, so a graceful Close
-	// always resolves; conversely a hang/SIGKILL/panic ANYWHERE earlier in
-	// shutdown leaves the marker armed and the next instance honestly reports
-	// previous_shutdown="crash". Idempotent on double Close; on an
-	// already-closed DB the write fails harmlessly (logged at debug) and the
-	// marker is left untouched.
-	if r.prechurnStore != nil && r.storageManager != nil {
-		if db := r.storageManager.GetDB(); db != nil {
-			if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
-				if r.logger != nil {
-					r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
+	// LAST point the DB is still open — i.e. after the async storage manager
+	// has stopped AND drained its queue (those queued operations perform BBolt
+	// writes; StopAsync below runs that drain), immediately before the BBolt
+	// handle closes. Every branch above — including the container-cleanup
+	// verification, whose early exits live inside verifyContainerCleanup —
+	// reaches this point, so a graceful Close always resolves; conversely a
+	// hang/SIGKILL/panic ANYWHERE earlier in shutdown — including mid-drain —
+	// leaves the marker armed and the next instance honestly reports
+	// previous_shutdown="crash". Idempotent on double Close (StopAsync no-ops,
+	// and storageManager.Close's internal async stop no-ops after StopAsync);
+	// on an already-closed DB the marker write fails harmlessly (logged at
+	// debug) and the marker is left untouched.
+	if r.storageManager != nil {
+		// (1) Stop + drain queued async DB operations — the last DB writes
+		// other than the marker resolve itself.
+		r.storageManager.StopAsync()
+
+		// (2) Resolve the marker to clean, now that no other DB work remains.
+		if r.prechurnStore != nil {
+			if db := r.storageManager.GetDB(); db != nil {
+				if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
+					if r.logger != nil {
+						r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
+					}
 				}
 			}
 		}
-	}
 
-	if r.storageManager != nil {
+		// (3) Close the BBolt handle; the async stop inside Close is a no-op,
+		// so no DB work intervenes between the marker resolve and db.Close.
 		if err := r.storageManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close storage manager: %w", err))
 		}

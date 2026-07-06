@@ -43,7 +43,26 @@ func NewManager(dataDir string, logger *zap.SugaredLogger) (*Manager, error) {
 	}, nil
 }
 
-// Close closes the storage manager
+// StopAsync stops the async operation manager, draining any queued
+// operations to the database. It is idempotent: a second call (including
+// the one inside Close) is a no-op, so callers may StopAsync then Close.
+//
+// Use this when a final DB write must happen strictly AFTER all queued
+// async operations have flushed but BEFORE the DB handle closes — e.g.
+// the telemetry shutdown marker (Spec 080 FR-010): StopAsync, write the
+// marker, then Close, which then closes the DB with no intervening work.
+func (m *Manager) StopAsync() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.asyncMgr != nil {
+		m.asyncMgr.Stop()
+	}
+}
+
+// Close closes the storage manager: it stops the async manager (draining
+// queued operations to the DB — a no-op if StopAsync already ran), then
+// closes the underlying BBolt database.
 func (m *Manager) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

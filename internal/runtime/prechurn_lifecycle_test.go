@@ -138,3 +138,42 @@ func TestRuntimeCloseCleanupBranchStillResolvesAndClosesStorage(t *testing.T) {
 		t.Fatalf("close 2: %v", err)
 	}
 }
+
+// TestRuntimeCloseAfterExternalStopAsyncStillResolvesClean guards the split
+// Close sequence (Spec 080 FR-010, review round 3): Close now runs
+// storage.StopAsync (stop + drain queued async DB ops) BEFORE resolving the
+// shutdown marker, then closes the DB — so the marker is truly the last DB
+// write. Driving StopAsync externally first exercises the double-stop path
+// (StopAsync inside Close, then again inside storageManager.Close): it must
+// not panic, and the marker must still resolve to clean.
+func TestRuntimeCloseAfterExternalStopAsyncStillResolvesClean(t *testing.T) {
+	t.Setenv("MCPPROXY_LAUNCHED_BY", "")
+	dataDir := t.TempDir()
+
+	rt, _ := previousShutdownVia(t, dataDir)
+	db := rt.StorageManager().GetDB()
+	if db == nil {
+		t.Fatal("precondition: storage DB must be open")
+	}
+
+	// Worst-case double stop: the async manager is already stopped and
+	// drained before Close runs the same sequence again.
+	rt.StorageManager().StopAsync()
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close after external StopAsync: %v", err)
+	}
+
+	// Storage fully closed…
+	if err := db.View(func(*bbolt.Tx) error { return nil }); !errors.Is(err, berrors.ErrDatabaseNotOpen) {
+		t.Fatalf("expected storage closed after Close, View err = %v", err)
+	}
+
+	// …and the marker resolved: the next instance reports a clean shutdown.
+	rt2, prev := previousShutdownVia(t, dataDir)
+	if prev != "clean" {
+		t.Fatalf("after Close with external StopAsync: expected clean, got %q", prev)
+	}
+	if err := rt2.Close(); err != nil {
+		t.Fatalf("close 2: %v", err)
+	}
+}
