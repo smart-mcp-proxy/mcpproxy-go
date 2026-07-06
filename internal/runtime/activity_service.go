@@ -48,10 +48,19 @@ type ActivityService struct {
 	// background loops (retention, usage flush) and the per-event async
 	// detection goroutines, all of which write to BBolt. startMu/started make
 	// Stop return immediately when Start never ran (done would never close).
+	// stopped is the terminal state (Spec 080, review round 5): production
+	// launches Start via `go` (lifecycle.go), so a fast shutdown can run Stop
+	// BEFORE the Start goroutine is scheduled — Stop marks stopped under
+	// startMu and a later Start becomes a no-op instead of launching BBolt
+	// writers after the shutdown-marker path began. Start's registration
+	// (subscribe + every workersWG.Add) happens entirely under startMu, so a
+	// Stop that loses the race blocks until registration is complete and its
+	// Wait cannot miss a late worker.
 	done      chan struct{}
 	workersWG sync.WaitGroup
 	startMu   sync.Mutex
 	started   bool
+	stopped   bool
 
 	// Retention configuration
 	maxAge        time.Duration
@@ -127,20 +136,29 @@ func (s *ActivityService) SetRetentionConfig(maxAge time.Duration, maxRecords in
 // Start begins listening for activity events and persisting them.
 // It should be called as a goroutine: go svc.Start(ctx, runtime)
 func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
-	// Mark started so Stop knows the done channel WILL close; refuse a second
-	// Start (the done/WaitGroup bookkeeping is single-shot).
+	// Registration runs entirely under startMu (Spec 080 FR-010, review round
+	// 5). If Stop already ran (fast shutdown beat this goroutine — production
+	// launches Start via `go`), the service is terminally stopped: return
+	// without subscribing or launching any BBolt-writing worker. Otherwise
+	// mark started so Stop knows the done channel WILL close, and refuse a
+	// second Start (the done/WaitGroup bookkeeping is single-shot). Holding
+	// startMu through every workersWG.Add below means a concurrent Stop
+	// blocks until registration is complete — its Wait cannot miss a worker.
 	s.startMu.Lock()
+	if s.stopped {
+		s.startMu.Unlock()
+		s.logger.Debug("Activity service Start called after Stop; not starting")
+		return
+	}
 	if s.started {
 		s.startMu.Unlock()
 		s.logger.Warn("Activity service Start called twice; ignoring")
 		return
 	}
 	s.started = true
-	s.startMu.Unlock()
 
 	// Subscribe to runtime events
 	eventCh := rt.SubscribeEvents()
-	defer rt.UnsubscribeEvents(eventCh)
 
 	// Start retention loop in a separate goroutine. Tracked in workersWG: it
 	// prunes activity records (BBolt writes), so Stop must await it.
@@ -158,6 +176,9 @@ func (s *ActivityService) Start(ctx context.Context, rt *Runtime) {
 		defer s.workersWG.Done()
 		s.runUsageFlushLoop(ctx)
 	}()
+	s.startMu.Unlock()
+
+	defer rt.UnsubscribeEvents(eventCh)
 
 	s.logger.Info("Activity service started")
 
@@ -255,8 +276,16 @@ func (s *ActivityService) runRetentionCleanup() {
 // flush runs on ctx.Done inside the event loop, and Stop waits for it, so the
 // flush is captured before the marker resolves. Idempotent, and returns
 // immediately when Start never ran.
+//
+// Stop is also terminal (Spec 080, review round 5): it marks stopped under
+// startMu, so a Start that has not yet registered (production starts the
+// service via `go` in lifecycle.go) becomes a no-op instead of launching
+// retention/usage/persist loops after the shutdown-marker path began. If
+// Start is mid-registration, acquiring startMu here blocks until every
+// workersWG.Add has happened, so the Wait below cannot miss a worker.
 func (s *ActivityService) Stop() {
 	s.startMu.Lock()
+	s.stopped = true
 	started := s.started
 	s.startMu.Unlock()
 	if !started {

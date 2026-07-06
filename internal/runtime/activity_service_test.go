@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -918,4 +919,43 @@ func TestHandleToolCallCompleted_ByteCapture(t *testing.T) {
 	record := records[0]
 	assert.Equal(t, 1500, record.RequestBytes, "RequestBytes must reflect pre-truncation request size")
 	assert.Equal(t, 98304, record.ResponseBytes, "ResponseBytes must reflect pre-truncation response size")
+}
+
+// TestActivityServiceStartAfterStopIsNoOp (Spec 080 FR-010, review round 5):
+// production launches Start via `go r.activityService.Start(...)` in
+// lifecycle.go, so a fast shutdown can run Stop BEFORE the Start goroutine is
+// ever scheduled. Stop must leave a terminal stopped state that turns the
+// late Start into a no-op — no retention/usage/persist loops launched, no
+// storage access. Storage and runtime are nil on purpose: any registration
+// step (SubscribeEvents, initUsageFromStorage, the worker loops) would panic,
+// so a regression fails loudly.
+func TestActivityServiceStartAfterStopIsNoOp(t *testing.T) {
+	svc := NewActivityService(nil, zap.NewNop())
+
+	// Fast shutdown wins the race: Stop runs before Start ever does. It must
+	// return immediately (Start never ran, done never closes).
+	svc.Stop()
+
+	// The delayed Start must return immediately without registering anything.
+	// A non-no-op Start would either panic (nil rt/storage) or block forever
+	// in the event loop (ctx is never cancelled) and trip the timeout below.
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		svc.Start(context.Background(), nil)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start after Stop did not return; it must be a no-op")
+	}
+
+	svc.startMu.Lock()
+	started := svc.started
+	svc.startMu.Unlock()
+	assert.False(t, started, "Start after Stop must not mark the service started")
+
+	// Stop stays idempotent after the no-op Start.
+	svc.Stop()
+	svc.Stop()
 }

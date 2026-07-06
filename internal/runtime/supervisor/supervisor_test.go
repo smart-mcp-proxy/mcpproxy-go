@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -895,4 +896,114 @@ func TestSupervisor_ErrorCodeNotifierSynchronous(t *testing.T) {
 	if !strings.HasPrefix(got, "MCPX_") {
 		t.Fatalf("notifier received a non-MCPX code: %q", got)
 	}
+}
+
+// barrierUpstreamAdapter wraps MockUpstreamAdapter and counts any upstream
+// call that happens after the barrier is armed. Used to prove Stop() is a
+// write barrier for the delayed initial-reconciliation goroutine (Spec 080).
+type barrierUpstreamAdapter struct {
+	*MockUpstreamAdapter
+	barrier    atomic.Bool
+	violations atomic.Int32
+}
+
+func (b *barrierUpstreamAdapter) check() {
+	if b.barrier.Load() {
+		b.violations.Add(1)
+	}
+}
+
+func (b *barrierUpstreamAdapter) AddServer(name string, cfg *config.ServerConfig) error {
+	b.check()
+	return b.MockUpstreamAdapter.AddServer(name, cfg)
+}
+
+func (b *barrierUpstreamAdapter) RemoveServer(name string) error {
+	b.check()
+	return b.MockUpstreamAdapter.RemoveServer(name)
+}
+
+func (b *barrierUpstreamAdapter) ConnectServer(ctx context.Context, name string) error {
+	b.check()
+	return b.MockUpstreamAdapter.ConnectServer(ctx, name)
+}
+
+func (b *barrierUpstreamAdapter) DisconnectServer(name string) error {
+	b.check()
+	return b.MockUpstreamAdapter.DisconnectServer(name)
+}
+
+func (b *barrierUpstreamAdapter) ConnectAll(ctx context.Context) error {
+	b.check()
+	return b.MockUpstreamAdapter.ConnectAll(ctx)
+}
+
+func (b *barrierUpstreamAdapter) GetServerState(name string) (*ServerState, error) {
+	b.check()
+	return b.MockUpstreamAdapter.GetServerState(name)
+}
+
+func (b *barrierUpstreamAdapter) GetAllStates() map[string]*ServerState {
+	b.check()
+	return b.MockUpstreamAdapter.GetAllStates()
+}
+
+func (b *barrierUpstreamAdapter) IsUserLoggedOut(name string) bool {
+	b.check()
+	return b.MockUpstreamAdapter.IsUserLoggedOut(name)
+}
+
+// TestSupervisor_StopBeforeInitialReconcileIsBarrier (Spec 080 FR-010/FR-011,
+// review round 5): Start() arms a delayed (500ms) initial reconciliation.
+// Stop() must be a barrier for it — the goroutine is registered in s.wg and
+// waits on a ctx-aware timer, so Stop() (cancel + wg.Wait) deterministically
+// either cancels it inside the window or waits for the reconcile to finish.
+// Before the fix it was a bare `go func() { time.Sleep(500ms); reconcile() }`:
+// Stop() returned with nothing to wait for, Runtime.Close resolved the clean-
+// shutdown marker, and the goroutine then woke and wrote diagnostics/state
+// (reconcile -> updateStateView -> notifyErrorCode) after the marker — or
+// against a closed DB.
+func TestSupervisor_StopBeforeInitialReconcileIsBarrier(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{
+			{Name: "late-server", Enabled: true},
+		},
+	}
+
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	upstream := &barrierUpstreamAdapter{MockUpstreamAdapter: NewMockUpstreamAdapter()}
+	sup := New(configSvc, upstream, zap.NewNop())
+
+	var stopReturned atomic.Bool
+	var notifierAfterStop atomic.Int32
+	sup.SetErrorCodeNotifier(func(string) {
+		if stopReturned.Load() {
+			notifierAfterStop.Add(1)
+		}
+	})
+
+	sup.Start()
+	sup.Stop() // well inside the 500ms initial-reconcile delay
+
+	// Everything the supervisor owns (reconciliation loop, event forwarding,
+	// exemption cleanup, the initial-reconcile goroutine, in-flight actions)
+	// is joined by Stop() via s.wg / drainActions, so from this point on no
+	// upstream call and no notifier call may ever happen again.
+	upstream.barrier.Store(true)
+	stopReturned.Store(true)
+
+	// Regression net: the pre-fix bare goroutine would wake ~500ms after
+	// Start() and run reconcile() against the stopped supervisor. Wait out the
+	// full window plus slack, then assert the barrier held. With the fix this
+	// sleep is pure idle time — the wg-joined goroutine already exited before
+	// Stop() returned, via the s.ctx.Done() arm of its select.
+	time.Sleep(700 * time.Millisecond)
+
+	require.Zero(t, upstream.violations.Load(),
+		"upstream adapter was called after Supervisor.Stop() returned")
+	require.Zero(t, notifierAfterStop.Load(),
+		"error-code notifier fired after Supervisor.Stop() returned")
 }

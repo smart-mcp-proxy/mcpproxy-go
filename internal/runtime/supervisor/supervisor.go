@@ -240,9 +240,25 @@ func (s *Supervisor) Start() {
 	s.wg.Add(1)
 	go s.exemptionCleanupLoop()
 
-	// Phase 7.1: Trigger initial reconciliation to populate StateView
+	// Phase 7.1: Trigger initial reconciliation to populate StateView.
+	// Registered in s.wg with a ctx-aware timer (Spec 080 FR-010/FR-011,
+	// review round 5): Stop() cancels s.ctx and then waits on s.wg, so it
+	// either cancels this goroutine inside the 500ms warm-up window or waits
+	// for the reconcile to finish. A bare time.Sleep goroutine here could wake
+	// AFTER Stop() returned and write last_error_code/diagnostics via
+	// reconcile()/updateStateView()/notifyErrorCode() — after the clean-
+	// shutdown marker resolved, or against a closed DB.
+	s.wg.Add(1)
 	go func() {
-		time.Sleep(500 * time.Millisecond) // Give servers time to connect
+		defer s.wg.Done()
+		timer := time.NewTimer(500 * time.Millisecond) // Give servers time to connect
+		defer timer.Stop()
+		select {
+		case <-s.ctx.Done():
+			s.logger.Debug("Supervisor stopping before initial reconciliation")
+			return
+		case <-timer.C:
+		}
 		currentConfig := s.configSvc.Current()
 		if err := s.reconcile(currentConfig); err != nil {
 			s.logger.Error("Initial reconciliation failed", zap.Error(err))
