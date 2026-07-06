@@ -238,7 +238,7 @@ epics:
     title: Action log / transparency — info at a glance
     status: todo
     assignee: unassigned
-    priority: P0
+    priority: P1
     depends_on: [ux-audit]
     note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
     tasks:
@@ -366,7 +366,7 @@ epics:
     priority: P0
     spec: specs/078-connect-trust-preview
     depends_on: []
-    note: "72.4% of wizard-engaged users skip the connect step; completers retain ~50% at two weeks vs 6% for non-engaged. Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
+    note: "Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is day-2 return 17.7%, see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
     tasks:
       - id: connect-trust-preview
         title: "US1: preview API + wizard diff UI (exact entry, API-key masking)"
@@ -413,6 +413,62 @@ epics:
         title: "Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"
         status: todo
         depends_on: []
+
+  - id: release-qa-gate
+    title: "Release qualification gate (auto-QA matrix blocks the tag)"
+    status: todo
+    assignee: unassigned
+    priority: P0
+    spec: specs/081-release-qa-gate
+    depends_on: []
+    note: "Attacks the day-2-return cliff (only 17.7% of installs come back a second day) and the one conceded competitor advantage: stability. No release tag until the surface x server-type matrix (MCP/REST/CLI/Web UI x stdio/http/sse/docker/oauth) plus invariants (activity-log/token counters move, quarantine flow, reconnect survival, in-place upgrade) pass automatically; macOS app smoke is advisory until promoted (3 consecutive passes, spec 081 US4). Assembles existing assets: test-api-e2e.sh, Playwright sweep, scan-eval gate, mcpproxy-ui-test."
+    tasks:
+      - id: release-qa-gate-matrix
+        title: "T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags"
+        status: todo
+        priority: P0
+        depends_on: []
+      - id: release-qa-gate-playwright
+        title: "T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"
+        status: todo
+        priority: P2
+        depends_on: [release-qa-gate-matrix]
+      - id: release-qa-gate-macos
+        title: "T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app)"
+        status: todo
+        priority: P3
+        depends_on: [release-qa-gate-matrix]
+      - id: release-qa-gate-consistency
+        title: "T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states)"
+        status: todo
+        priority: P3
+        depends_on: [release-qa-gate-matrix]
+
+  - id: telemetry-v7-churn
+    title: "Telemetry v7: honest funnel + churn instrumentation"
+    status: todo
+    assignee: unassigned
+    priority: P0
+    spec: specs/080-telemetry-v7-churn
+    depends_on: []
+    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). Real cliff = day-2 return 17.7% and retrieve_tools 42% -> real tool call 16%. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 ship independently of identity work; only churn analytics (T4) needs stable identity (machine_id is 0 rows in prod - see telemetry-identity)."
+    tasks:
+      - id: telemetry-v7-wizard-fix
+        title: "T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path"
+        status: todo
+        depends_on: []
+      - id: telemetry-v7-funnel-fields
+        title: "T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d)"
+        status: todo
+        depends_on: []
+      - id: telemetry-v7-prechurn-snapshot
+        title: "T3: pre-churn snapshot (previous_shutdown clean|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death"
+        status: todo
+        depends_on: []
+      - id: telemetry-v7-churn-events
+        title: "T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080)"
+        status: todo
+        depends_on: [telemetry-v7-wizard-fix, telemetry-v7-funnel-fields, telemetry-v7-prechurn-snapshot, telemetry-machineid-worker]
 
   - id: tray-api-purity
     title: "Tray↔core decoupling: socket/REST API only, no config-file reads"

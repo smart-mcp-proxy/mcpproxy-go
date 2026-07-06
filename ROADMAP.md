@@ -113,6 +113,20 @@ graph TD
     telemetry_machineid_dash["Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"]
     telemetry_snapshot_alerting["Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"]
   end
+  subgraph sg_release_qa_gate["Release qualification gate (auto-QA matrix blocks the tag)"]
+    release_qa_gate["Release qualification gate (auto-QA matrix blocks the tag)"]
+    release_qa_gate_matrix["T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags"]
+    release_qa_gate_playwright["T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"]
+    release_qa_gate_macos["T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app)"]
+    release_qa_gate_consistency["T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states)"]
+  end
+  subgraph sg_telemetry_v7_churn["Telemetry v7: honest funnel + churn instrumentation"]
+    telemetry_v7_churn["Telemetry v7: honest funnel + churn instrumentation"]
+    telemetry_v7_wizard_fix["T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path"]
+    telemetry_v7_funnel_fields["T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d)"]
+    telemetry_v7_prechurn_snapshot["T3: pre-churn snapshot (previous_shutdown clean|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death"]
+    telemetry_v7_churn_events["T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080)"]
+  end
   subgraph sg_tray_api_purity["Tray↔core decoupling: socket/REST API only, no config-file reads"]
     tray_api_purity["Tray↔core decoupling: socket/REST API only, no config-file reads"]
     tray_oauth_config_read["Go tray OAuth login path loads mcp_config.json directly (internal/tray/tray.go:~1734 config.LoadFromFile via GetConfigPath) — replace with REST (server config / OAuth endpoints), then remove GetConfigPath from the tray server interface if no consumers remain"]
@@ -164,6 +178,13 @@ graph TD
   upgrade_nudge_surfacing --> upgrade_nudge_quiet
   telemetry_machineid_client --> telemetry_machineid_worker
   telemetry_machineid_worker --> telemetry_machineid_dash
+  release_qa_gate_matrix --> release_qa_gate_playwright
+  release_qa_gate_matrix --> release_qa_gate_macos
+  release_qa_gate_matrix --> release_qa_gate_consistency
+  telemetry_v7_wizard_fix --> telemetry_v7_churn_events
+  telemetry_v7_funnel_fields --> telemetry_v7_churn_events
+  telemetry_v7_prechurn_snapshot --> telemetry_v7_churn_events
+  telemetry_machineid_worker --> telemetry_v7_churn_events
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
@@ -175,7 +196,7 @@ graph TD
   class upgrade_nudge,connect_trust,telemetry_identity in_progress;
   class windows_tray,windows_tray_window in_review;
   class mcp_2026_upgrade blocked;
-  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,tray_api_purity,tray_oauth_config_read,planning_hygiene,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract,security_gateway_cd,discovery_eval_harness todo;
+  class windows_tray_funnel_qa,ux_audit,ux_audit_webui_sweep,ux_audit_macos_sweep,action_log_transparency,action_log_glance_view,action_log_retention_tie_in,analytics_dashboard,analytics_token_drain_graphs,analytics_default_landing,registries_search_add,registries_search_ux,upgrade_nudge_channel,upgrade_nudge_quiet,connect_trust_tcc_copy,telemetry_machineid_worker,telemetry_machineid_dash,telemetry_snapshot_alerting,release_qa_gate,release_qa_gate_matrix,release_qa_gate_playwright,release_qa_gate_macos,release_qa_gate_consistency,telemetry_v7_churn,telemetry_v7_wizard_fix,telemetry_v7_funnel_fields,telemetry_v7_prechurn_snapshot,telemetry_v7_churn_events,tray_api_purity,tray_oauth_config_read,planning_hygiene,hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract,security_gateway_cd,discovery_eval_harness todo;
   class marketplace,siem,paid_tier,sdk_v1_migration,sso parked;
 ```
 
@@ -189,7 +210,9 @@ graph TD
 | Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 25/60 (42%) | [002-windows-installer](./specs/002-windows-installer/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | Blocked |  | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Web UI + macOS app UX audit | Todo | unassigned | P0 | — |  |  |
-| Action log / transparency — info at a glance | Todo | unassigned | P0 | — |  |  |
+| Release qualification gate (auto-QA matrix blocks the tag) | Todo | unassigned | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
+| Telemetry v7: honest funnel + churn instrumentation | Todo | unassigned | P0 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
+| Action log / transparency — info at a glance | Todo | unassigned | P1 | — |  |  |
 | Analytics dashboard as default page | Todo | unassigned | P1 | 16/26 (62%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Registries — easier search + add-server | Todo | unassigned | P1 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Todo | unassigned | P2 | — |  |  |
@@ -291,3 +314,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [077-scanner-simplification](./specs/077-scanner-simplification/) | `in-flight` | 38/42 (90%) |
 | [078-connect-trust-preview](./specs/078-connect-trust-preview/) | — | — |
 | [079-upgrade-nudge](./specs/079-upgrade-nudge/) | — | — |
+| [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
+| [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
