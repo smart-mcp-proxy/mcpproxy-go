@@ -192,7 +192,7 @@ func TestLastErrorCode_PersistsAcrossRestart(t *testing.T) {
 	db, path := openPreChurnTestDB(t)
 	store := NewPreChurnStore()
 
-	if err := store.RecordLastErrorCode(db, "MCPX_UPSTREAM_CONNECT_REFUSED"); err != nil {
+	if err := store.RecordLastErrorCode(db, "MCPX_HTTP_CONN_REFUSED"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 	if err := db.Close(); err != nil {
@@ -204,7 +204,7 @@ func TestLastErrorCode_PersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LastErrorCode after restart: %v", err)
 	}
-	if code != "MCPX_UPSTREAM_CONNECT_REFUSED" {
+	if code != "MCPX_HTTP_CONN_REFUSED" {
 		t.Fatalf("expected code to survive restart, got %q", code)
 	}
 }
@@ -213,7 +213,7 @@ func TestLastErrorCode_MostRecentWins(t *testing.T) {
 	db, _ := openPreChurnTestDB(t)
 	store := NewPreChurnStore()
 
-	for _, c := range []string{"MCPX_DOCKER_PULL_FAILED", "MCPX_OAUTH_REFRESH_FAILED"} {
+	for _, c := range []string{"MCPX_DOCKER_IMAGE_PULL_FAILED", "MCPX_OAUTH_REFRESH_EXPIRED"} {
 		if err := store.RecordLastErrorCode(db, c); err != nil {
 			t.Fatalf("record %s: %v", c, err)
 		}
@@ -222,19 +222,20 @@ func TestLastErrorCode_MostRecentWins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LastErrorCode: %v", err)
 	}
-	if code != "MCPX_OAUTH_REFRESH_FAILED" {
+	if code != "MCPX_OAUTH_REFRESH_EXPIRED" {
 		t.Fatalf("expected most recent code, got %q", code)
 	}
 }
 
-// TestLastErrorCode_EnumOnly asserts that only stable MCPX_* enum shapes are
-// ever persisted — free text, paths, server names, and malformed codes are
-// silently dropped and never overwrite a previously recorded valid code.
+// TestLastErrorCode_EnumOnly asserts that only diagnostics-catalog MCPX_*
+// codes are ever persisted — free text, paths, server names, malformed codes,
+// and MCPX_-shaped strings outside the fixed catalog are silently dropped and
+// never overwrite a previously recorded valid code (FR-012).
 func TestLastErrorCode_EnumOnly(t *testing.T) {
 	db, _ := openPreChurnTestDB(t)
 	store := NewPreChurnStore()
 
-	if err := store.RecordLastErrorCode(db, "MCPX_CONFIG_INVALID"); err != nil {
+	if err := store.RecordLastErrorCode(db, "MCPX_CONFIG_PARSE_ERROR"); err != nil {
 		t.Fatalf("record valid: %v", err)
 	}
 
@@ -248,6 +249,8 @@ func TestLastErrorCode_EnumOnly(t *testing.T) {
 		"MCPX_FOO/../../etc/passwd",    // path chars
 		"MCPX_ERR: server github died", // free text after code
 		"NOT_MCPX_CODE",
+		"MCPX_NOT_IN_CATALOG",           // shape-valid but not a cataloged code (FR-012)
+		"MCPX_UPSTREAM_CONNECT_REFUSED", // plausible-looking but non-existent code
 	}
 	for _, bad := range rejected {
 		if err := store.RecordLastErrorCode(db, bad); err != nil {
@@ -259,7 +262,7 @@ func TestLastErrorCode_EnumOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LastErrorCode: %v", err)
 	}
-	if code != "MCPX_CONFIG_INVALID" {
+	if code != "MCPX_CONFIG_PARSE_ERROR" {
 		t.Fatalf("invalid input overwrote stored code: got %q", code)
 	}
 }
@@ -287,5 +290,22 @@ func TestLastErrorCode_CorruptValueNeverSurfaced(t *testing.T) {
 	}
 	if code != "" {
 		t.Fatalf("corrupt on-disk value surfaced: %q", code)
+	}
+
+	// A shape-valid but non-cataloged code on disk (e.g. written by an older
+	// or newer build) is equally rejected at read time (FR-012).
+	err = db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(PreChurnBucketName)).
+			Put([]byte(prechurnKeyLastErrorCode), []byte("MCPX_UPSTREAM_CONNECT_REFUSED"))
+	})
+	if err != nil {
+		t.Fatalf("inject non-catalog value: %v", err)
+	}
+	code, err = store.LastErrorCode(db)
+	if err != nil {
+		t.Fatalf("LastErrorCode: %v", err)
+	}
+	if code != "" {
+		t.Fatalf("non-catalog on-disk value surfaced: %q", code)
 	}
 }

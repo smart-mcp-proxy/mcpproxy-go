@@ -104,17 +104,17 @@ func TestPayload_LastErrorCodeMostRecentPerHeartbeat(t *testing.T) {
 	store := NewPreChurnStore()
 	svc.SetPreChurn(PreviousShutdownClean, store, db)
 
-	if err := store.RecordLastErrorCode(db, "MCPX_DOCKER_PULL_FAILED"); err != nil {
+	if err := store.RecordLastErrorCode(db, "MCPX_DOCKER_IMAGE_PULL_FAILED"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if got := svc.BuildPayload().LastErrorCode; got != "MCPX_DOCKER_PULL_FAILED" {
+	if got := svc.BuildPayload().LastErrorCode; got != "MCPX_DOCKER_IMAGE_PULL_FAILED" {
 		t.Fatalf("expected first code, got %q", got)
 	}
 
-	if err := store.RecordLastErrorCode(db, "MCPX_OAUTH_REFRESH_FAILED"); err != nil {
+	if err := store.RecordLastErrorCode(db, "MCPX_OAUTH_REFRESH_EXPIRED"); err != nil {
 		t.Fatalf("record 2: %v", err)
 	}
-	if got := svc.BuildPayload().LastErrorCode; got != "MCPX_OAUTH_REFRESH_FAILED" {
+	if got := svc.BuildPayload().LastErrorCode; got != "MCPX_OAUTH_REFRESH_EXPIRED" {
 		t.Fatalf("expected most recent code on next heartbeat, got %q", got)
 	}
 }
@@ -128,7 +128,7 @@ func TestPayload_PreChurnPassesAnonymityScan(t *testing.T) {
 	store := NewPreChurnStore()
 	svc.SetPreChurn(PreviousShutdownCrash, store, db)
 
-	if err := store.RecordLastErrorCode(db, "MCPX_UPSTREAM_CONNECT_REFUSED"); err != nil {
+	if err := store.RecordLastErrorCode(db, "MCPX_HTTP_CONN_REFUSED"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
 
@@ -141,7 +141,7 @@ func TestPayload_PreChurnPassesAnonymityScan(t *testing.T) {
 	if !strings.Contains(js, `"previous_shutdown":"crash"`) {
 		t.Errorf("expected previous_shutdown on the wire, got:\n%s", js)
 	}
-	if !strings.Contains(js, `"last_error_code":"MCPX_UPSTREAM_CONNECT_REFUSED"`) {
+	if !strings.Contains(js, `"last_error_code":"MCPX_HTTP_CONN_REFUSED"`) {
 		t.Errorf("expected last_error_code on the wire, got:\n%s", js)
 	}
 	if err := ScanForPII(data); err != nil {

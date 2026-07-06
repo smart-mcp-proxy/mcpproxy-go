@@ -2674,11 +2674,14 @@ components:
       properties:
         connect_step_status:
           description: |-
-            ConnectStepStatus is one of: "", "completed", "completed_external",
-            "skipped" (Spec 080 FR-001). Empty preserves the existing value.
-            A "skipped" request for a previously untouched connect step is
-            upgraded server-side to "completed_external" when the install shows
-            positive evidence of an external connection (Spec 080 FR-002).
+            ConnectStepStatus is one of: "", "completed", "skipped". Empty
+            preserves the existing value. The stored enum is wider (Spec 080
+            FR-001): a "skipped" request for a previously untouched connect step
+            is upgraded server-side to "completed_external" when the install
+            shows positive evidence of an external connection (Spec 080 FR-002).
+            "completed_external" is NOT accepted from clients — it must never be
+            persisted without that server-verified evidence (edge case: "never
+            guess completed_external without positive evidence").
           type: string
         engaged:
           description: |-

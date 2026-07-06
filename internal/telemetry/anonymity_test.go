@@ -239,6 +239,10 @@ func TestScanForPII_V7FieldViolations(t *testing.T) {
 			payload: `{"anonymous_id":"abc","last_error_code":"mcpx_docker_cli_not_found"}`,
 			field:   "last_error_code",
 		},
+		"last_error_code shape-valid but not in diagnostics catalog": {
+			payload: `{"anonymous_id":"abc","last_error_code":"MCPX_UPSTREAM_CONNECT_REFUSED"}`,
+			field:   "last_error_code",
+		},
 		"wizard_connect_step outside enum": {
 			payload: `{"anonymous_id":"abc","wizard_connect_step":"my custom step"}`,
 			field:   "wizard_connect_step",

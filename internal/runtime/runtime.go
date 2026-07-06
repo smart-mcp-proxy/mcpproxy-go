@@ -602,24 +602,6 @@ func (r *Runtime) Close() error {
 
 	var errs []error
 
-	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" as the
-	// first act of the graceful-shutdown path, while the DB is guaranteed
-	// open. Deliberately BEFORE the container-cleanup phase below: that phase
-	// can take tens of seconds and has early-return branches that skip the
-	// storage close, and a SIGTERM that reached this line must never be
-	// reported as a crash by the next instance. Idempotent on double Close;
-	// on an already-closed DB the write fails harmlessly (logged at debug)
-	// and the marker is left untouched.
-	if r.prechurnStore != nil && r.storageManager != nil {
-		if db := r.storageManager.GetDB(); db != nil {
-			if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
-				if r.logger != nil {
-					r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
-				}
-			}
-		}
-	}
-
 	// Stop OAuth refresh manager first to prevent refresh attempts during shutdown
 	if r.refreshManager != nil {
 		r.refreshManager.Stop()
@@ -656,51 +638,24 @@ func (r *Runtime) Close() error {
 		// Close in test processes, which made internal/runtime exceed CI's
 		// -race timeout). No isolation ⇒ no managed containers ⇒ nothing to verify.
 		if r.upstreamManager.UsesDockerIsolation() && r.upstreamManager.HasDockerContainers() {
-			if r.logger != nil {
-				r.logger.Warn("Docker containers still running after shutdown, verifying cleanup...")
-			}
+			r.verifyContainerCleanup(shutdownCtx)
+		}
+	}
 
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-
-			for attempt := 0; attempt < 15; attempt++ {
-				select {
-				case <-shutdownCtx.Done():
-					if r.logger != nil {
-						r.logger.Error("Cleanup verification timeout")
-					}
-					// Force cleanup as last resort
-					r.upstreamManager.ForceCleanupAllContainers()
-					return nil
-				case <-ticker.C:
-					if !r.upstreamManager.HasDockerContainers() {
-						if r.logger != nil {
-							r.logger.Info("All containers cleaned up successfully", zap.Int("attempts", attempt+1))
-						}
-						return nil
-					}
-					if r.logger != nil {
-						r.logger.Debug("Waiting for container cleanup...", zap.Int("attempt", attempt+1))
-					}
-				}
-			}
-
-			// Timeout reached - force cleanup
-			if r.logger != nil {
-				r.logger.Error("Some containers failed to stop gracefully - forcing cleanup")
-			}
-			r.upstreamManager.ForceCleanupAllContainers()
-
-			// Give force cleanup a moment to complete
-			time.Sleep(2 * time.Second)
-
-			if r.upstreamManager.HasDockerContainers() {
+	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
+	// END of the graceful path, just before storage closes, while the DB is
+	// still open. Every branch above — including the container-cleanup
+	// verification, whose early exits live inside verifyContainerCleanup —
+	// reaches this point, so a graceful Close always resolves; conversely a
+	// hang/SIGKILL/panic DURING shutdown leaves the marker armed and the
+	// next instance honestly reports previous_shutdown="crash". Idempotent
+	// on double Close; on an already-closed DB the write fails harmlessly
+	// (logged at debug) and the marker is left untouched.
+	if r.prechurnStore != nil && r.storageManager != nil {
+		if db := r.storageManager.GetDB(); db != nil {
+			if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
 				if r.logger != nil {
-					r.logger.Error("WARNING: Some containers may still be running after force cleanup")
-				}
-			} else {
-				if r.logger != nil {
-					r.logger.Info("Force cleanup succeeded - all containers removed")
+					r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
 				}
 			}
 		}
@@ -731,6 +686,62 @@ func (r *Runtime) Close() error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// verifyContainerCleanup polls until all Docker-isolation containers are gone,
+// force-cleaning as a last resort on timeout. Extracted from Close so that its
+// early exits (context timeout, all-clean) return HERE instead of returning
+// from Close — every Close path must still reach the shutdown-marker resolve
+// and the cache/index/storage/configSvc close sequence (Spec 080 FR-010;
+// previously these branches leaked all four and skipped the marker).
+func (r *Runtime) verifyContainerCleanup(ctx context.Context) {
+	if r.logger != nil {
+		r.logger.Warn("Docker containers still running after shutdown, verifying cleanup...")
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for attempt := 0; attempt < 15; attempt++ {
+		select {
+		case <-ctx.Done():
+			if r.logger != nil {
+				r.logger.Error("Cleanup verification timeout")
+			}
+			// Force cleanup as last resort
+			r.upstreamManager.ForceCleanupAllContainers()
+			return
+		case <-ticker.C:
+			if !r.upstreamManager.HasDockerContainers() {
+				if r.logger != nil {
+					r.logger.Info("All containers cleaned up successfully", zap.Int("attempts", attempt+1))
+				}
+				return
+			}
+			if r.logger != nil {
+				r.logger.Debug("Waiting for container cleanup...", zap.Int("attempt", attempt+1))
+			}
+		}
+	}
+
+	// Timeout reached - force cleanup
+	if r.logger != nil {
+		r.logger.Error("Some containers failed to stop gracefully - forcing cleanup")
+	}
+	r.upstreamManager.ForceCleanupAllContainers()
+
+	// Give force cleanup a moment to complete
+	time.Sleep(2 * time.Second)
+
+	if r.upstreamManager.HasDockerContainers() {
+		if r.logger != nil {
+			r.logger.Error("WARNING: Some containers may still be running after force cleanup")
+		}
+	} else {
+		if r.logger != nil {
+			r.logger.Info("Force cleanup succeeded - all containers removed")
+		}
+	}
 }
 
 func extractToolCount(stats map[string]interface{}) int {
@@ -2493,10 +2504,17 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			if r.supervisor != nil {
 				prechurnStore := r.prechurnStore
 				r.supervisor.SetErrorCodeNotifier(func(code string) {
-					_ = diagStore.RecordErrorCode(db, code)
+					// Spec 080 FR-012: the pre-churn last_error_code write is
+					// synchronous at the classification site — a crash right
+					// after classification must not lose the final pre-crash
+					// code (that loss window is the one case the field exists
+					// for). Sub-ms BBolt Update; no supervisor re-entry.
 					if prechurnStore != nil {
 						_ = prechurnStore.RecordLastErrorCode(db, code)
 					}
+					// The 24h aggregate counter keeps its pre-existing async
+					// posture: loss-tolerant, off the supervisor's path.
+					go func() { _ = diagStore.RecordErrorCode(db, code) }()
 				})
 			}
 

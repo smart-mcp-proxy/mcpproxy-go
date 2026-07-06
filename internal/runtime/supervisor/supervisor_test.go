@@ -2,6 +2,8 @@ package supervisor
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // MockUpstreamAdapter is a test double for UpstreamAdapter
@@ -850,5 +853,46 @@ func TestSupervisor_InspectionExemption_MultipleServers(t *testing.T) {
 	}
 	if !supervisor.IsInspectionExempted("server3") {
 		t.Error("Expected server3 to still be exempted")
+	}
+}
+
+// TestSupervisor_ErrorCodeNotifierSynchronous asserts Spec 080 FR-012: the
+// error-code notifier fires synchronously at the classification site, so the
+// pre-churn last_error_code write completes before updateStateView returns —
+// a crash immediately after classification cannot lose the final pre-crash
+// code. The unsynchronized `got` variable is deliberate: if the notifier were
+// still dispatched on a goroutine, this assertion would flake and `go test
+// -race` would flag the write.
+func TestSupervisor_ErrorCodeNotifierSynchronous(t *testing.T) {
+	cfg := &config.Config{
+		Listen:  "127.0.0.1:8080",
+		Servers: []*config.ServerConfig{},
+	}
+	configSvc := configsvc.NewService(cfg, "/tmp/config.json", zap.NewNop())
+	defer configSvc.Close()
+
+	mockUpstream := NewMockUpstreamAdapter()
+	defer mockUpstream.Close()
+
+	sup := New(configSvc, mockUpstream, zap.NewNop())
+
+	var got string
+	sup.SetErrorCodeNotifier(func(code string) { got = code })
+
+	sup.updateStateView("srv", &ServerState{
+		Name:    "srv",
+		Config:  &config.ServerConfig{Name: "srv", URL: "http://127.0.0.1:1/mcp", Enabled: true},
+		Enabled: true,
+		ConnectionInfo: &types.ConnectionInfo{
+			State:     types.StateError,
+			LastError: errors.New("dial tcp 127.0.0.1:1: connect: connection refused"),
+		},
+	})
+
+	if got == "" {
+		t.Fatal("notifier did not fire synchronously during updateStateView")
+	}
+	if !strings.HasPrefix(got, "MCPX_") {
+		t.Fatalf("notifier received a non-MCPX code: %q", got)
 	}
 }

@@ -676,6 +676,7 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 
 // updateStateView updates the stateview with current server state.
 func (s *Supervisor) updateStateView(name string, state *ServerState) {
+	var classifiedCode string
 	s.stateView.UpdateServer(name, func(status *stateview.ServerStatus) {
 		oldState := status.State
 		status.Config = state.Config
@@ -736,15 +737,11 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 					transport = transportpkg.DetermineTransportType(state.Config)
 				}
 				classifyAndAttach(status, state.ConnectionInfo.LastError, s.classifierHints(state.Config, transport))
-				// Spec 044 Phase H: notify telemetry counter store.
+				// Spec 044 Phase H / Spec 080 FR-012: capture the classified
+				// code; delivered synchronously after the stateview lock is
+				// released (see notifyErrorCode).
 				if status.Diagnostic != nil {
-					s.callbackMu.RLock()
-					notifier := s.errorCodeNotifier
-					s.callbackMu.RUnlock()
-					if notifier != nil {
-						code := string(status.Diagnostic.Code)
-						go notifier(code)
-					}
+					classifiedCode = string(status.Diagnostic.Code)
 				}
 
 				// Set last error time if available
@@ -776,6 +773,28 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 				zap.Bool("has_conn_info", state.ConnectionInfo != nil))
 		}
 	})
+	s.notifyErrorCode(classifiedCode)
+}
+
+// notifyErrorCode delivers a freshly classified MCPX_* code to the registered
+// error-code notifier, synchronously, outside the stateview lock. Spec 080
+// (US3, FR-012): the pre-churn last_error_code write must complete at the
+// classification site — a crash right after classification is exactly the
+// moment the field exists for, and an async hand-off could lose the final
+// pre-crash code. Locking: callbackMu is released before invoking the
+// callback; callers (reconcile / the event loop) may hold stateMu, which is
+// safe because the telemetry callback only performs BBolt writes and never
+// re-enters the supervisor — no lock cycle, and the write is sub-ms.
+func (s *Supervisor) notifyErrorCode(code string) {
+	if code == "" {
+		return
+	}
+	s.callbackMu.RLock()
+	notifier := s.errorCodeNotifier
+	s.callbackMu.RUnlock()
+	if notifier != nil {
+		notifier(code)
+	}
 }
 
 // SetOnServerConnectedCallback sets a callback to be invoked when a server connects.
@@ -788,8 +807,12 @@ func (s *Supervisor) SetOnServerConnectedCallback(callback func(serverName strin
 
 // SetErrorCodeNotifier registers a callback that fires whenever a diagnostic
 // error code is classified and attached to a server (Spec 044 Phase H). The
-// callback receives the stable MCPX_* code string and runs synchronously in
-// a goroutine to avoid blocking the supervisor's hot path.
+// callback receives the stable MCPX_* code string and is invoked
+// SYNCHRONOUSLY at the classification site (Spec 080 FR-012: the pre-churn
+// last_error_code must be durable before a crash can follow the
+// classification). The callback must be fast (sub-ms) and must not call back
+// into the Supervisor; anything slow or loss-tolerant (e.g. aggregate
+// counters) should offload to a goroutine inside the callback itself.
 func (s *Supervisor) SetErrorCodeNotifier(fn func(code string)) {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()
@@ -957,6 +980,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 			}
 
 			// Update stateview
+			var classifiedCode string
 			s.stateView.UpdateServer(event.ServerName, func(status *stateview.ServerStatus) {
 				oldState := status.State
 				status.Connected = connected
@@ -1034,15 +1058,11 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 							transport = transportpkg.DetermineTransportType(status.Config)
 						}
 						classifyAndAttach(status, connInfo.LastError, s.classifierHints(status.Config, transport))
-						// Spec 044 Phase H: notify telemetry counter store.
+						// Spec 044 Phase H / Spec 080 FR-012: capture the
+						// classified code; delivered synchronously after the
+						// stateview lock is released (see notifyErrorCode).
 						if status.Diagnostic != nil {
-							s.callbackMu.RLock()
-							notifier := s.errorCodeNotifier
-							s.callbackMu.RUnlock()
-							if notifier != nil {
-								code := string(status.Diagnostic.Code)
-								go notifier(code)
-							}
+							classifiedCode = string(status.Diagnostic.Code)
 						}
 
 						if !connInfo.LastRetryTime.IsZero() {
@@ -1055,6 +1075,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					status.RetryCount = connInfo.RetryCount
 				}
 			})
+			s.notifyErrorCode(classifiedCode)
 
 			// Trigger reactive tool discovery when server connects
 			if connected {

@@ -75,11 +75,14 @@ type OnboardingMarkRequest struct {
 	// Once true, the wizard does not auto-show again.
 	Engaged bool `json:"engaged"`
 
-	// ConnectStepStatus is one of: "", "completed", "completed_external",
-	// "skipped" (Spec 080 FR-001). Empty preserves the existing value.
-	// A "skipped" request for a previously untouched connect step is
-	// upgraded server-side to "completed_external" when the install shows
-	// positive evidence of an external connection (Spec 080 FR-002).
+	// ConnectStepStatus is one of: "", "completed", "skipped". Empty
+	// preserves the existing value. The stored enum is wider (Spec 080
+	// FR-001): a "skipped" request for a previously untouched connect step
+	// is upgraded server-side to "completed_external" when the install
+	// shows positive evidence of an external connection (Spec 080 FR-002).
+	// "completed_external" is NOT accepted from clients — it must never be
+	// persisted without that server-verified evidence (edge case: "never
+	// guess completed_external without positive evidence").
 	ConnectStepStatus string `json:"connect_step_status,omitempty"`
 
 	// ServerStepStatus is one of: "", "completed", "skipped". Empty
@@ -134,8 +137,8 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	if !validConnectStepStatus(req.ConnectStepStatus) || !validStepStatus(req.ServerStepStatus) {
-		s.writeError(w, r, http.StatusBadRequest, `step status must be "", "completed", or "skipped" (connect step also accepts "completed_external")`)
+	if !validStepStatus(req.ConnectStepStatus) || !validStepStatus(req.ServerStepStatus) {
+		s.writeError(w, r, http.StatusBadRequest, `step status must be "", "completed", or "skipped"`)
 		return
 	}
 
@@ -229,20 +232,21 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 	return resp, nil
 }
 
-// validStepStatus returns true if v is an allowed step-status value.
+// validStepStatus returns true if v is an allowed step-status REQUEST value.
+// Note the request enum is deliberately narrower than the stored connect-step
+// enum (Spec 080 FR-001): "completed_external" is server-derived only (see
+// nextConnectStepStatus) and is rejected when a client sends it directly —
+// no shipped client produces it, and accepting it would let a caller persist
+// external-connection evidence that was never verified.
 func validStepStatus(v string) bool {
 	return v == "" || v == storage.StepStatusCompleted || v == storage.StepStatusSkipped
 }
 
-// validConnectStepStatus returns true if v is an allowed connect-step status.
-// The connect step carries the widened enum (Spec 080 FR-001): it also
-// accepts "completed_external".
-func validConnectStepStatus(v string) bool {
-	return validStepStatus(v) || v == storage.StepStatusCompletedExternal
-}
-
 // nextConnectStepStatus decides what to persist for the wizard's connect
 // step given its current value and the requested update (Spec 080 US1).
+// requested has passed validStepStatus, so it is "", "completed", or
+// "skipped" — "completed_external" can only ever be produced HERE, from the
+// server-side evidence check, never accepted from a client.
 //
 //   - "completed" and "completed_external" never regress to "skipped" once
 //     recorded, even if clients are later disconnected (FR-004). In-wizard

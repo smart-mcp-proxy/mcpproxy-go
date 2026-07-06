@@ -92,7 +92,6 @@ func TestNextConnectStepStatus(t *testing.T) {
 		{"untouched skip without evidence stays skipped", "", "skipped", noEvidence, "skipped"},
 		// FR-004: completed never regresses.
 		{"completed not regressed by skip", "completed", "skipped", evidence, "completed"},
-		{"completed not regressed by completed_external", "completed", "completed_external", evidence, "completed"},
 		// FR-004: completed_external never regresses to skipped.
 		{"completed_external not regressed by skip", "completed_external", "skipped", noEvidence, "completed_external"},
 		// In-wizard completion after external is an upgrade, not a regression.
@@ -101,8 +100,6 @@ func TestNextConnectStepStatus(t *testing.T) {
 		{"already-skipped not rewritten despite evidence", "skipped", "skipped", evidence, "skipped"},
 		// In-wizard completion applies directly; evidence check irrelevant.
 		{"untouched completed applies directly", "", "completed", noEvidence, "completed"},
-		// Direct external claim is stored as-is.
-		{"untouched completed_external applies directly", "", "completed_external", noEvidence, "completed_external"},
 		// Skipped can still be completed later from the Setup entry.
 		{"skipped upgraded by later in-wizard completion", "skipped", "completed", noEvidence, "completed"},
 		// Empty request preserves current.
@@ -225,17 +222,19 @@ func TestMarkOnboarding_HistoricalSkipNotRewritten(t *testing.T) {
 	assert.Equal(t, storage.StepStatusSkipped, ctrl.saved.ConnectStepStatus)
 }
 
-// TestMarkOnboarding_StatusValidation asserts the request enum: the connect
-// step accepts the widened enum (FR-001) while the server step keeps the
-// original one, and unknown values are rejected for both.
+// TestMarkOnboarding_StatusValidation asserts the request enum: while the
+// STORED connect-step enum is widened with "completed_external" (FR-001),
+// the request enum is not — only the server-side evidence check may produce
+// "completed_external" (edge case: never guess it without positive
+// evidence), so a client sending it directly is rejected, as are unknown
+// values for both steps.
 func TestMarkOnboarding_StatusValidation(t *testing.T) {
-	t.Run("connect step accepts completed_external", func(t *testing.T) {
-		ctrl := &onboardingTestController{}
+	t.Run("connect step rejects completed_external from clients", func(t *testing.T) {
+		ctrl := &onboardingTestController{firstEver: true} // even with evidence present
 		srv := newOnboardingTestServer(t, ctrl)
 		w := postOnboardingMark(t, srv, OnboardingMarkRequest{ConnectStepStatus: "completed_external"})
-		assert.Equal(t, http.StatusOK, w.Code)
-		require.NotNil(t, ctrl.saved)
-		assert.Equal(t, storage.StepStatusCompletedExternal, ctrl.saved.ConnectStepStatus)
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Nil(t, ctrl.saved)
 	})
 
 	t.Run("server step rejects completed_external", func(t *testing.T) {

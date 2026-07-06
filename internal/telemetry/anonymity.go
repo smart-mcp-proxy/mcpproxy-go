@@ -155,8 +155,9 @@ func scanV7Enum(raw *json.RawMessage, field string, allowed ...string) *Anonymit
 // scanV7Fields runs the Spec 080 structural checks (FR-016): every v7 field
 // present in the serialized payload must be a boolean, a non-negative
 // integer, or a member of its documented fixed enum. last_error_code is the
-// tightest gate — only stable MCPX_* codes — so free text, messages, or
-// paths can never ride that field even if a producer-side check regresses.
+// tightest gate — only diagnostics-catalog MCPX_* codes — so free text,
+// messages, or paths can never ride that field even if a producer-side
+// check regresses.
 func scanV7Fields(env *anonymityScanEnvelope) *AnonymityViolation {
 	if v := scanV7Bool(env.WizardShown, "wizard_shown"); v != nil {
 		return v
@@ -187,8 +188,10 @@ func scanV7Fields(env *anonymityScanEnvelope) *AnonymityViolation {
 		if err := json.Unmarshal(*env.LastErrorCode, &code); err != nil {
 			return v7FieldViolation("last_error_code", "must be a string enum")
 		}
-		if len(code) > maxLastErrorCodeLen || !mcpxCodePattern.MatchString(code) {
-			return v7FieldViolation("last_error_code", "must be a stable MCPX_* code")
+		// FR-012: same fixed code set as diagnostics.error_code_counts_24h —
+		// the shape check alone would admit any MCPX_-looking string.
+		if !isValidMCPXCode(code) {
+			return v7FieldViolation("last_error_code", "must be a cataloged MCPX_* diagnostic code")
 		}
 	}
 	return nil

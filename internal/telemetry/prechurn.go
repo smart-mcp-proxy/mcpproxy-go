@@ -4,6 +4,8 @@ import (
 	"regexp"
 
 	"go.etcd.io/bbolt"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 )
 
 // PreChurnBucketName is the BBolt bucket that stores the Spec 080 US3
@@ -47,10 +49,9 @@ const (
 	PreviousShutdownUnknown = ""
 )
 
-// mcpxCodePattern is the only shape RecordLastErrorCode will persist and
-// LastErrorCode will surface: a stable MCPX_* enum constant. Anything else
-// (free text, messages, paths) is silently dropped so PII can never reach
-// the telemetry pipeline through this field (FR-012).
+// mcpxCodePattern is a fast shape pre-filter for RecordLastErrorCode /
+// LastErrorCode: a stable MCPX_* enum constant. It is defense in depth only —
+// the authoritative gate is the diagnostics catalog below.
 var mcpxCodePattern = regexp.MustCompile(`^MCPX_[A-Z0-9_]+$`)
 
 // maxLastErrorCodeLen bounds the persisted code length as defense in depth;
@@ -77,8 +78,9 @@ type PreChurnStore interface {
 	ResolveCleanShutdown(db *bbolt.DB) error
 
 	// RecordLastErrorCode persists code as the most recent diagnostic code,
-	// overwriting any prior value. Only stable MCPX_* enum shapes are
-	// accepted; anything else is silently dropped (FR-012).
+	// overwriting any prior value. Only codes registered in the diagnostics
+	// catalog (the fixed set behind error_code_counts_24h) are accepted;
+	// anything else is silently dropped (FR-012).
 	RecordLastErrorCode(db *bbolt.DB, code string) error
 
 	// LastErrorCode returns the most recently recorded MCPX_* code, or ""
@@ -97,8 +99,15 @@ func NewPreChurnStore() PreChurnStore {
 }
 
 // isValidMCPXCode reports whether code is a transmissible MCPX_* enum value.
+// FR-012: last_error_code draws from the SAME fixed code set as
+// diagnostics.error_code_counts_24h, so beyond the shape pre-filter the code
+// must be registered in the diagnostics catalog. Anything else — free text,
+// messages, paths, or a merely MCPX_-shaped string — is dropped, so neither
+// PII nor undocumented enum values can reach the telemetry pipeline.
 func isValidMCPXCode(code string) bool {
-	return len(code) <= maxLastErrorCodeLen && mcpxCodePattern.MatchString(code)
+	return len(code) <= maxLastErrorCodeLen &&
+		mcpxCodePattern.MatchString(code) &&
+		diagnostics.Has(diagnostics.Code(code))
 }
 
 func (bboltPreChurnStore) ArmShutdownMarker(db *bbolt.DB) (string, error) {

@@ -1,9 +1,13 @@
 package runtime
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
+	"go.etcd.io/bbolt"
+	berrors "go.etcd.io/bbolt/errors"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -87,5 +91,50 @@ func TestRuntimePreviousShutdownLifecycle(t *testing.T) {
 	}
 	if err := rt4.Close(); err != nil {
 		t.Fatalf("close 4: %v", err)
+	}
+}
+
+// TestRuntimeCloseCleanupBranchStillResolvesAndClosesStorage guards the Close
+// restructure behind FR-010: the Docker container-cleanup verification used to
+// contain `return nil` branches that exited Close BEFORE resolving the
+// shutdown marker and closing cache/index/storage/configSvc. Those exits now
+// live inside verifyContainerCleanup and merely return to Close, so even when
+// the cleanup-verification branch bails out early, Close still (a) resolves
+// the marker — the next instance reads previous_shutdown="clean" — and
+// (b) actually closes the storage DB.
+func TestRuntimeCloseCleanupBranchStillResolvesAndClosesStorage(t *testing.T) {
+	t.Setenv("MCPPROXY_LAUNCHED_BY", "")
+	dataDir := t.TempDir()
+
+	rt, _ := previousShutdownVia(t, dataDir)
+	db := rt.StorageManager().GetDB()
+	if db == nil {
+		t.Fatal("precondition: storage DB must be open")
+	}
+
+	// Drive the former early-return branch directly: an already-canceled
+	// context hits the "Cleanup verification timeout" exit immediately
+	// (ticker can't have fired yet). It must return to the caller without
+	// touching the marker or the DB.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rt.verifyContainerCleanup(ctx)
+
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// (b) Storage really closed — the old early returns leaked it open.
+	if err := db.View(func(*bbolt.Tx) error { return nil }); !errors.Is(err, berrors.ErrDatabaseNotOpen) {
+		t.Fatalf("expected storage closed after Close, View err = %v", err)
+	}
+
+	// (a) Marker resolved: the next instance reports a clean shutdown.
+	rt2, prev := previousShutdownVia(t, dataDir)
+	if prev != "clean" {
+		t.Fatalf("after Close through the cleanup branch: expected clean, got %q", prev)
+	}
+	if err := rt2.Close(); err != nil {
+		t.Fatalf("close 2: %v", err)
 	}
 }
