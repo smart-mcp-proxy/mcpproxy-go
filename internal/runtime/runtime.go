@@ -71,18 +71,26 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager    *storage.Manager
-	indexManager      *index.Manager
-	upstreamManager   *upstream.Manager
-	cacheManager      *cache.Manager
-	truncator         *truncate.Truncator
-	secretResolver    *secret.Resolver
-	tokenizer         tokens.Tokenizer
-	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
-	updateChecker     *updatecheck.Checker  // Background version checking
-	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
-	managementService interface{}           // Initialized later to avoid import cycle
-	activityService   *ActivityService      // Activity logging service
+	storageManager   *storage.Manager
+	indexManager     *index.Manager
+	upstreamManager  *upstream.Manager
+	cacheManager     *cache.Manager
+	truncator        *truncate.Truncator
+	secretResolver   *secret.Resolver
+	tokenizer        tokens.Tokenizer
+	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
+	updateChecker    *updatecheck.Checker  // Background version checking
+	telemetryService *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+
+	// Spec 080 (US3): pre-churn snapshot. prechurnStore owns the BBolt
+	// shutdown marker + last_error_code record; previousShutdown is the
+	// outcome of the PREVIOUS process instance, derived exactly once in New
+	// when the marker is armed (FR-010/FR-011) and handed to the telemetry
+	// service in SetTelemetry.
+	prechurnStore     telemetry.PreChurnStore
+	previousShutdown  string
+	managementService interface{}      // Initialized later to avoid import cycle
+	activityService   *ActivityService // Activity logging service
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -145,6 +153,22 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Close any stale sessions from previous runs
 	if err := storageManager.CloseAllActiveSessions(); err != nil {
 		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
+	}
+
+	// Spec 080 (US3, FR-010): derive the previous instance's shutdown outcome
+	// and immediately re-arm the marker. This runs as early in startup as the
+	// DB exists so crash loops are visible (a run that dies right after this
+	// point still reads as a crash next time). Single-writer safety is the
+	// BBolt file lock itself: a second instance fails storage.NewManager with
+	// DatabaseLockedError (exit code 3) and never reaches this code (FR-013).
+	prechurnStore := telemetry.NewPreChurnStore()
+	previousShutdown := telemetry.PreviousShutdownUnknown
+	if db := storageManager.GetDB(); db != nil {
+		if prev, err := prechurnStore.ArmShutdownMarker(db); err != nil {
+			logger.Warn("Failed to arm shutdown marker; previous_shutdown will be omitted", zap.Error(err))
+		} else {
+			previousShutdown = prev
+		}
 	}
 
 	indexManager, err := index.NewManager(cfg.DataDir, logger)
@@ -253,22 +277,24 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	rt := &Runtime{
-		cfg:             cfg,
-		cfgPath:         cfgPath,
-		logger:          logger,
-		configSvc:       configSvc,
-		storageManager:  storageManager,
-		indexManager:    indexManager,
-		upstreamManager: upstreamManager,
-		cacheManager:    cacheManager,
-		truncator:       truncator,
-		secretResolver:  secretResolver,
-		tokenizer:       tokenizer,
-		refreshManager:  refreshManager,
-		activityService: activityService,
-		supervisor:      supervisorInstance,
-		appCtx:          appCtx,
-		appCancel:       appCancel,
+		cfg:              cfg,
+		cfgPath:          cfgPath,
+		logger:           logger,
+		configSvc:        configSvc,
+		storageManager:   storageManager,
+		indexManager:     indexManager,
+		upstreamManager:  upstreamManager,
+		cacheManager:     cacheManager,
+		truncator:        truncator,
+		secretResolver:   secretResolver,
+		tokenizer:        tokenizer,
+		refreshManager:   refreshManager,
+		activityService:  activityService,
+		supervisor:       supervisorInstance,
+		prechurnStore:    prechurnStore,
+		previousShutdown: previousShutdown,
+		appCtx:           appCtx,
+		appCancel:        appCancel,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -575,6 +601,24 @@ func (r *Runtime) Close() error {
 	r.mu.Unlock()
 
 	var errs []error
+
+	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" as the
+	// first act of the graceful-shutdown path, while the DB is guaranteed
+	// open. Deliberately BEFORE the container-cleanup phase below: that phase
+	// can take tens of seconds and has early-return branches that skip the
+	// storage close, and a SIGTERM that reached this line must never be
+	// reported as a crash by the next instance. Idempotent on double Close;
+	// on an already-closed DB the write fails harmlessly (logged at debug)
+	// and the marker is left untouched.
+	if r.prechurnStore != nil && r.storageManager != nil {
+		if db := r.storageManager.GetDB(); db != nil {
+			if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
+				if r.logger != nil {
+					r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
+				}
+			}
+		}
+	}
 
 	// Stop OAuth refresh manager first to prevent refresh attempts during shutdown
 	if r.refreshManager != nil {
@@ -2442,12 +2486,24 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			r.telemetryService.SetDiagnosticsCounterStore(diagStore, db)
 
 			// Wire error-code notifier into supervisor so every classified
-			// DiagnosticError increments the 24h per-code counter.
+			// DiagnosticError increments the 24h per-code counter. Spec 080
+			// (US3, FR-012): the same stream also refreshes last_error_code —
+			// the single most recent MCPX_* code, persisted across restarts so
+			// the post-crash heartbeat carries the pre-crash code.
 			if r.supervisor != nil {
+				prechurnStore := r.prechurnStore
 				r.supervisor.SetErrorCodeNotifier(func(code string) {
 					_ = diagStore.RecordErrorCode(db, code)
+					if prechurnStore != nil {
+						_ = prechurnStore.RecordLastErrorCode(db, code)
+					}
 				})
 			}
+
+			// Spec 080 (US3): hand the startup-derived previous_shutdown value
+			// (stable for this instance, FR-011) and the pre-churn store to
+			// the telemetry service so heartbeats can surface the snapshot.
+			r.telemetryService.SetPreChurn(r.previousShutdown, r.prechurnStore, db)
 
 			// Spec 080 (US2): wire the funnel observability store and record
 			// this process start as activity immediately — the first-install

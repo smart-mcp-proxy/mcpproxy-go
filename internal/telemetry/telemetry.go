@@ -197,6 +197,29 @@ type HeartbeatPayload struct {
 	// this cardinality leaves the machine; the per-day set stays local.
 	ActiveDays30d int `json:"active_days_30d,omitempty"`
 
+	// Spec 080 (US3) — pre-churn snapshot fields. Additive and omitempty so
+	// zero-valued payloads stay shape-compatible with v6. When the churn
+	// pipeline later identifies a churned install, its final heartbeat
+	// already distinguishes "crashed and never came back" from "exited
+	// cleanly and never returned".
+
+	// PreviousShutdown reports how the PREVIOUS process instance ended:
+	// "clean" (graceful-shutdown path resolved the persisted marker) or
+	// "crash" (marker armed at startup but never resolved — SIGKILL, panic,
+	// power loss). Absent on a first-ever run (no prior marker) or when the
+	// store is not wired — a fresh install is never misreported as a crash
+	// (FR-010/FR-013). Computed once at startup and stable across all
+	// heartbeats of the instance (FR-011).
+	PreviousShutdown string `json:"previous_shutdown,omitempty"`
+
+	// LastErrorCode is the most recently observed stable MCPX_* diagnostic
+	// code (same fixed code set as diagnostics.error_code_counts_24h),
+	// persisted across restarts so the post-crash heartbeat carries the
+	// pre-crash code. Enum code only — never message text, stack traces,
+	// server names, or paths. Absent when no error was ever recorded
+	// (FR-012).
+	LastErrorCode string `json:"last_error_code,omitempty"`
+
 	// Spec 044 Phase H: diagnostics counter snapshot. Omitted entirely when
 	// all counters are zero (omitempty on the pointer). No PII: only stable
 	// MCPX_* enum strings, non-negative int counts.
@@ -278,6 +301,16 @@ type Service struct {
 	// commands).
 	funnelStore FunnelStore
 	funnelDB    *bbolt.DB
+
+	// Spec 080 (US3): pre-churn snapshot state. previousShutdown is derived
+	// exactly once at startup by the runtime (ArmShutdownMarker) and copied
+	// here before the heartbeat loop starts, so it is stable across every
+	// heartbeat of this instance (FR-011). The store/DB pair follows the
+	// same nil-safety contract as activationStore: when unset (short-lived
+	// CLI commands), previous_shutdown and last_error_code are omitted.
+	previousShutdown string
+	prechurnStore    PreChurnStore
+	prechurnDB       *bbolt.DB
 
 	// Spec 044: optional provider for configured IDE count. Populated by the
 	// runtime from internal/connect at wire-up time. nil-safe.
@@ -403,6 +436,17 @@ func (s *Service) RecordWebUIOpen() {
 	if err := s.funnelStore.IncrementWebUIOpened(s.funnelDB); err != nil {
 		s.logger.Debug("Failed to increment web_ui_opened counter", zap.Error(err))
 	}
+}
+
+// SetPreChurn wires the Spec 080 US3 pre-churn snapshot: the startup-derived
+// previous_shutdown value (stable for the life of this instance, FR-011) and
+// the BBolt-backed store used to read last_error_code at heartbeat build
+// time. Optional; when unset, both fields are omitted from the payload.
+// Safe to call once during startup, before the heartbeat loop begins.
+func (s *Service) SetPreChurn(previousShutdown string, store PreChurnStore, db *bbolt.DB) {
+	s.previousShutdown = previousShutdown
+	s.prechurnStore = store
+	s.prechurnDB = db
 }
 
 // SetDiagnosticsCounterStore wires the BBolt-backed diagnostics counter store
@@ -777,6 +821,21 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 			payload.ActiveDays30d = st.ActiveDays30d
 		} else {
 			s.logger.Debug("Failed to load funnel state for heartbeat", zap.Error(err))
+		}
+	}
+
+	// Spec 080 (US3): pre-churn snapshot. previous_shutdown was derived once
+	// at startup and never changes for this instance (FR-011); the empty
+	// (unknown / store-not-wired) value is dropped by omitempty (FR-013).
+	// last_error_code is re-read each heartbeat so the field always carries
+	// the MOST RECENT stable MCPX_* code (FR-012); on any store error the
+	// field is simply omitted — the heartbeat is never blocked.
+	payload.PreviousShutdown = s.previousShutdown
+	if s.prechurnStore != nil && s.prechurnDB != nil {
+		if code, err := s.prechurnStore.LastErrorCode(s.prechurnDB); err == nil {
+			payload.LastErrorCode = code
+		} else {
+			s.logger.Debug("Failed to load last_error_code for heartbeat", zap.Error(err))
 		}
 	}
 
