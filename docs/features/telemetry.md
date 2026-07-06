@@ -4,7 +4,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 6** (`schema_version: 6` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 7** (`schema_version: 7` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -25,6 +25,13 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `server_docker_isolated_count` | `2` | How many configured servers the runtime actually wraps in Docker isolation (schema v3) |
 | `feature_flags.docker_isolation_enabled` | `true` | Whether global Docker isolation is turned on (schema v5). Lets us tell "isolation on, 0 matching servers" apart from "isolation off" |
 | `feature_flags.docker_cli_source` | `bundled` | How the `docker` CLI was located — fixed enum `path` / `bundled` / `login_shell` / `absent` (schema v5). The direct signal for "Docker installed but not on the spawn PATH" (issue #696). **Never** the path string itself |
+| `wizard_shown` | `true` | Whether the onboarding wizard ever rendered for this install (schema v7). Makes "shown but ignored" measurable |
+| `wizard_connect_step` | `completed_external` | Onboarding connect-step outcome — fixed enum, widened in v7 (see below) |
+| `web_ui_opened` | `12` | Lifetime count of embedded Web UI entrypoint serves (schema v7) |
+| `days_since_install` | `14` | Whole-day age of the install (schema v7). A day count, never a timestamp |
+| `active_days_30d` | `5` | Distinct UTC days with process activity in the trailing 30 days (schema v7). Only the count — never the per-day breakdown |
+| `previous_shutdown` | `clean` | How the previous process instance ended — fixed enum `clean` / `crash`, absent on first run (schema v7) |
+| `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
 
@@ -64,6 +71,44 @@ The `anonymous_id` above is a UUID persisted in the config file. In **ephemeral 
 - If the OS machine id **cannot be read** (a container without `/etc/machine-id`, a permission error, or an exotic platform), the field is simply **omitted** — the heartbeat is never blocked, and the backend treats an absent value as "unknown".
 
 `machine_id` respects the **same opt-out** as every other field: when telemetry is disabled (see below), the entire heartbeat — including `machine_id` — is never sent.
+
+## Schema v7 — activation funnel & churn fields (Spec 080)
+
+Schema v7 adds seven purely **additive** signals so we can measure whether installs come back after day one — and, when they don't, whether the last session ended cleanly or crashed. Every field keeps the established privacy posture: **booleans, non-negative integers, or documented fixed enums only** — no timestamps, no per-server identity, no free text. The anonymity scanner (`internal/telemetry/anonymity.go`) enforces these shapes on the serialized payload before every send, and all fields use `omitempty`, so a payload with none of them set is shape-identical to a v6 payload except for `schema_version`.
+
+### Widened enum: `wizard_connect_step`
+
+The onboarding connect-step status (a v4 field) gains a fourth value in v7:
+
+| Value | Meaning |
+|-------|---------|
+| *(absent)* | Step never shown to this install |
+| `completed` | User completed the connect step inside the wizard |
+| `completed_external` | **New in v7.** User dismissed the wizard with the connect step untouched, but the install was already connected (via `mcpproxy connect`, the ConnectModal, or manual config). Previously miscounted as `skipped` |
+| `skipped` | User dismissed the wizard with the connect step untouched and **no** connection evidence existed |
+
+**Guidance for consumers**: this is a string enum that may widen again. Code that switches on `completed` / `skipped` must treat **unknown values as "other/engaged"**, never as a skip or an error. Statuses recorded before v7 are never rewritten — segment analyses by `schema_version`.
+
+### New fields
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `wizard_shown` | boolean | `true` once the onboarding wizard has rendered at least once for this install; omitted otherwise. Together with `wizard_engaged` it distinguishes "shown but ignored" from "never shown" | A single boolean about our own UI; carries no user data |
+| `web_ui_opened` | non-negative integer | Lifetime count of serves of the embedded Web UI **entrypoint** (index document). Asset and API requests never increment it; it is independent of `surface_requests.webui`. Coarse by design — health checkers fetching `/` count too | A counter of our own page serves; no URLs, sessions, or timing |
+| `days_since_install` | non-negative integer | Whole-day UTC age of the install, from a persisted first-install day stamp (independent of `anonymous_id`). `0` on install day; clamped at 0 on clock skew. Omitted when the local store isn't available (short-lived CLI commands) | Only a day **count** is transmitted — the install timestamp itself never leaves the machine |
+| `active_days_30d` | non-negative integer (1–30) | Number of distinct UTC days with process activity in the trailing 30-day window. Old days age out | The per-day set is stored locally and **never transmitted** — counters, not timelines |
+| `previous_shutdown` | fixed enum `clean` \| `crash` | How the **previous** process instance ended: `clean` = the graceful-shutdown path ran; `crash` = it didn't (SIGKILL, panic, power loss). Absent on a first-ever run — a fresh install is never reported as a crash. Stable across all heartbeats of the current instance | One enum value about our own process lifecycle; no stack traces, no session timing |
+| `last_error_code` | fixed enum (`MCPX_*`) | The most recently observed stable diagnostic code (same fixed set as `diagnostics.error_code_counts_24h`), persisted across restarts so a post-crash heartbeat carries the pre-crash code. Absent when no error was ever recorded | Only the enum code is stored and sent — **never** error messages, server names, paths, or stack traces. The scanner rejects any non-`MCPX_*` value |
+
+Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` + `last_error_code` let the final heartbeat before an install goes silent distinguish "crashed and never came back" from "exited cleanly and never returned".
+
+All v7 fields ride the **same opt-out** as the rest of the heartbeat: when telemetry is disabled, nothing is transmitted. Local counters may still persist on disk (so re-enabling doesn't fabricate a fresh-install picture), but they never leave the machine.
+
+You can inspect exactly what would be sent — including every v7 field — with:
+
+```bash
+mcpproxy telemetry show-payload
+```
 
 ## One-time opt-out signal
 

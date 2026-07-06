@@ -45,7 +45,31 @@ import (
 // and forward-compatible: v3/v4/v5 consumers ignore it, and the ingest worker
 // stores payload_json wholesale without rejecting unknown fields or higher
 // schema versions.
-const SchemaVersion = 6
+//
+// v7 (schema bump from 6): Spec 080 — honest activation funnel + churn
+// instrumentation. Additive only; v6-and-earlier consumers ignore every
+// addition:
+//   - wizard_connect_step enum widened with "completed_external" (connected
+//     outside the wizard — CLI/ConnectModal/manual config — detected at
+//     dismissal). Consumers switching on completed|skipped must treat
+//     unknown values as "other/engaged".
+//   - wizard_shown (bool): wizard rendered at least once, making "shown but
+//     ignored" observable alongside wizard_engaged.
+//   - web_ui_opened (int64): lifetime count of embedded Web UI index-document
+//     serves, independent of surface_requests.webui.
+//   - days_since_install (*int): whole-day UTC install age from a persisted
+//     first-install day stamp; 0 is transmitted, nil (store not wired) omits.
+//   - active_days_30d (int): count of distinct active UTC days in the
+//     trailing 30-day window; the per-day set never leaves the machine.
+//   - previous_shutdown (enum "clean"|"crash", absent = unknown/first run):
+//     how the PREVIOUS process instance ended, from a persisted marker.
+//   - last_error_code (enum MCPX_*): most recent stable diagnostic code,
+//     persisted across restarts; never message text, names, or paths.
+//
+// All v7 fields are omitempty (zero-valued payloads stay shape-compatible
+// with v6), fixed-enum/boolean/non-negative-integer only (enforced by
+// ScanForPII), and ride the existing opt-out gate.
+const SchemaVersion = 7
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.

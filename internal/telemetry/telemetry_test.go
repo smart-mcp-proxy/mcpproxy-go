@@ -302,20 +302,20 @@ func TestEnsureAnonymousID(t *testing.T) {
 	}
 }
 
-// TestSchemaVersionV6 verifies that HeartbeatPayload carries schema_version=6
-// once the machine_id field ships. This is a tripwire against accidental
-// downgrades.
-func TestSchemaVersionV6(t *testing.T) {
-	if SchemaVersion != 6 {
-		t.Fatalf("SchemaVersion = %d, want 6", SchemaVersion)
+// TestSchemaVersionV7 verifies that HeartbeatPayload carries schema_version=7
+// once the Spec 080 funnel/churn fields ship. This is a tripwire against
+// accidental downgrades.
+func TestSchemaVersionV7(t *testing.T) {
+	if SchemaVersion != 7 {
+		t.Fatalf("SchemaVersion = %d, want 7", SchemaVersion)
 	}
 
 	cfg := &config.Config{}
 	svc := New(cfg, "", "v1.0.0", "personal", zap.NewNop())
 	svc.SetRuntimeStats(&mockRuntimeStats{})
 	payload := svc.BuildPayload()
-	if payload.SchemaVersion != 6 {
-		t.Errorf("payload.SchemaVersion = %d, want 6", payload.SchemaVersion)
+	if payload.SchemaVersion != 7 {
+		t.Errorf("payload.SchemaVersion = %d, want 7", payload.SchemaVersion)
 	}
 }
 
@@ -475,8 +475,8 @@ func TestAnonymousIDStable_V2ToV3(t *testing.T) {
 	if p1.AnonymousID != p2.AnonymousID {
 		t.Errorf("anonymous_id drifted between builds: %q vs %q", p1.AnonymousID, p2.AnonymousID)
 	}
-	// SchemaVersion is 6 after the machine_id addition.
-	if p1.SchemaVersion != 6 {
-		t.Errorf("schema_version = %d, want 6 (machine_id addition)", p1.SchemaVersion)
+	// SchemaVersion is 7 after the Spec 080 funnel/churn additions.
+	if p1.SchemaVersion != 7 {
+		t.Errorf("schema_version = %d, want 7 (Spec 080 additions)", p1.SchemaVersion)
 	}
 }
