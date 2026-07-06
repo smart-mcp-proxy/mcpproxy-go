@@ -150,15 +150,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
 
-	// Close any stale sessions from previous runs
-	if err := storageManager.CloseAllActiveSessions(); err != nil {
-		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
-	}
-
 	// Spec 080 (US3, FR-010): derive the previous instance's shutdown outcome
-	// and immediately re-arm the marker. This runs as early in startup as the
-	// DB exists so crash loops are visible (a run that dies right after this
-	// point still reads as a crash next time). Single-writer safety is the
+	// and immediately re-arm the marker. This is the FIRST DB operation after
+	// storage.NewManager succeeds — before stale-session cleanup or any other
+	// DB work — so a crash/hang anywhere later in startup still reads as a
+	// crash next time (crash loops stay visible). Single-writer safety is the
 	// BBolt file lock itself: a second instance fails storage.NewManager with
 	// DatabaseLockedError (exit code 3) and never reaches this code (FR-013).
 	prechurnStore := telemetry.NewPreChurnStore()
@@ -169,6 +165,11 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		} else {
 			previousShutdown = prev
 		}
+	}
+
+	// Close any stale sessions from previous runs
+	if err := storageManager.CloseAllActiveSessions(); err != nil {
+		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
 	}
 
 	indexManager, err := index.NewManager(cfg.DataDir, logger)
@@ -642,25 +643,6 @@ func (r *Runtime) Close() error {
 		}
 	}
 
-	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
-	// END of the graceful path, just before storage closes, while the DB is
-	// still open. Every branch above — including the container-cleanup
-	// verification, whose early exits live inside verifyContainerCleanup —
-	// reaches this point, so a graceful Close always resolves; conversely a
-	// hang/SIGKILL/panic DURING shutdown leaves the marker armed and the
-	// next instance honestly reports previous_shutdown="crash". Idempotent
-	// on double Close; on an already-closed DB the write fails harmlessly
-	// (logged at debug) and the marker is left untouched.
-	if r.prechurnStore != nil && r.storageManager != nil {
-		if db := r.storageManager.GetDB(); db != nil {
-			if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
-				if r.logger != nil {
-					r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
-				}
-			}
-		}
-	}
-
 	if r.cacheManager != nil {
 		r.cacheManager.Close()
 	}
@@ -668,6 +650,27 @@ func (r *Runtime) Close() error {
 	if r.indexManager != nil {
 		if err := r.indexManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close index manager: %w", err))
+		}
+	}
+
+	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
+	// LAST point the DB is still open — after cache/index cleanup, immediately
+	// before storage closes (cache.Close only stops a goroutine and index.Close
+	// only touches Bleve; neither closes the BBolt DB). Every branch above —
+	// including the container-cleanup verification, whose early exits live
+	// inside verifyContainerCleanup — reaches this point, so a graceful Close
+	// always resolves; conversely a hang/SIGKILL/panic ANYWHERE earlier in
+	// shutdown leaves the marker armed and the next instance honestly reports
+	// previous_shutdown="crash". Idempotent on double Close; on an
+	// already-closed DB the write fails harmlessly (logged at debug) and the
+	// marker is left untouched.
+	if r.prechurnStore != nil && r.storageManager != nil {
+		if db := r.storageManager.GetDB(); db != nil {
+			if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
+				if r.logger != nil {
+					r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
+				}
+			}
 		}
 	}
 
