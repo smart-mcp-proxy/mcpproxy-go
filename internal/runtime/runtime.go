@@ -653,6 +653,20 @@ func (r *Runtime) Close() error {
 		}
 	}
 
+	// Spec 080 (FR-010, review round 4): the ActivityService owns BBolt
+	// writers — activity records, retention pruning, usage-snapshot flushes,
+	// async sensitive-data detection. The appCancel at the top of Close
+	// triggered its flush-on-shutdown; await that flush AND all its worker
+	// goroutines here, BEFORE the async-op drain and the shutdown-marker
+	// resolve below, so no activity write can land after the marker claims
+	// the shutdown was clean (or after the DB closes). This writer-vs-close
+	// race pre-dates Spec 080 (Stop existed but was never called); the marker
+	// invariant makes it observable, so it is closed here. Stop returns
+	// immediately when Start never ran and is itself idempotent.
+	if r.activityService != nil {
+		r.activityService.Stop()
+	}
+
 	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
 	// LAST point the DB is still open — i.e. after the async storage manager
 	// has stopped AND drained its queue (those queued operations perform BBolt
@@ -2524,9 +2538,18 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 					if prechurnStore != nil {
 						_ = prechurnStore.RecordLastErrorCode(db, code)
 					}
-					// The 24h aggregate counter keeps its pre-existing async
-					// posture: loss-tolerant, off the supervisor's path.
-					go func() { _ = diagStore.RecordErrorCode(db, code) }()
+					// The 24h aggregate counter write is synchronous too
+					// (review round 4): an untracked goroutine here could run
+					// after Close resolves the shutdown marker (FR-010) or
+					// after the DB handle closes. Synchronous means the write
+					// completes inside the supervisor's call stack, so
+					// supervisor.Stop() — which joins its goroutines before
+					// Close touches storage — is a hard barrier: after it
+					// returns, no notifier-driven DB write remains. Same
+					// safety argument as above: sub-ms BBolt Update, no
+					// supervisor re-entry, so no lock cycle even when the
+					// caller holds stateMu.
+					_ = diagStore.RecordErrorCode(db, code)
 				})
 			}
 

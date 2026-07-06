@@ -810,9 +810,12 @@ func (s *Supervisor) SetOnServerConnectedCallback(callback func(serverName strin
 // callback receives the stable MCPX_* code string and is invoked
 // SYNCHRONOUSLY at the classification site (Spec 080 FR-012: the pre-churn
 // last_error_code must be durable before a crash can follow the
-// classification). The callback must be fast (sub-ms) and must not call back
-// into the Supervisor; anything slow or loss-tolerant (e.g. aggregate
-// counters) should offload to a goroutine inside the callback itself.
+// classification). The callback must be fast (sub-ms), must not call back
+// into the Supervisor, and must NOT spawn goroutines that outlive the call:
+// Runtime.Close relies on Supervisor.Stop() as a barrier — once Stop returns,
+// no callback-driven DB write may remain in flight, or it could land after
+// the clean-shutdown marker resolves or after the DB closes (Spec 080
+// FR-010).
 func (s *Supervisor) SetErrorCodeNotifier(fn func(code string)) {
 	s.callbackMu.Lock()
 	defer s.callbackMu.Unlock()

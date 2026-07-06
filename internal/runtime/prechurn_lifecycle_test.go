@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"go.etcd.io/bbolt"
 	berrors "go.etcd.io/bbolt/errors"
@@ -137,6 +138,107 @@ func TestRuntimeCloseCleanupBranchStillResolvesAndClosesStorage(t *testing.T) {
 	if err := rt2.Close(); err != nil {
 		t.Fatalf("close 2: %v", err)
 	}
+}
+
+// TestRuntimeCloseWaitsForActivityWritersBeforeMarkerResolve guards the Close
+// ordering added in review round 4 (Spec 080 FR-010): the ActivityService owns
+// BBolt writers (activity records, usage-snapshot flushes, retention pruning,
+// async detection), and before this fix Close only context-cancelled it —
+// its final flush-on-shutdown (persistUsage) raced the shutdown-marker resolve
+// and the DB close, so the flush could be lost or land AFTER the marker
+// claimed "no writes remain". Now Close awaits ActivityService.Stop() before
+// StopAsync/ResolveCleanShutdown/db.Close, so the flush must both survive and
+// precede the clean marker.
+func TestRuntimeCloseWaitsForActivityWritersBeforeMarkerResolve(t *testing.T) {
+	t.Setenv("MCPPROXY_LAUNCHED_BY", "")
+	dataDir := t.TempDir()
+
+	rt, _ := previousShutdownVia(t, dataDir)
+
+	// Start the activity service exactly as StartBackgroundInitialization does.
+	rt.ActivityService().SetEventEmitter(rt)
+	go rt.ActivityService().Start(rt.AppContext(), rt)
+
+	// Emit a completed tool call and wait until the event loop has persisted it
+	// and folded it into the in-memory usage aggregate (Apply runs only after a
+	// successful SaveActivity). Re-emit each attempt: an event published before
+	// Start's SubscribeEvents registers is silently dropped, so a single early
+	// emit could race the service's startup.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rt.EmitActivityToolCallCompleted(
+			"prechurn-srv", "prechurn-tool", "sess-1", "req-1", "mcp",
+			"success", "", 7, nil, "ok", false, "", nil, "", "", 0, 0)
+		if snap := rt.ActivityService().UsageSnapshot(); snap != nil && len(snap.Tools) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the activity event to reach the usage aggregate")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The default flush cadence (30s) cannot fire within this test, so the ONLY
+	// path that persists the aggregate is the flush-on-shutdown — which Close
+	// must wait for before resolving the marker and closing the DB.
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen: the flush landed AND the marker resolved to clean afterwards.
+	rt2, prev := previousShutdownVia(t, dataDir)
+	defer func() { _ = rt2.Close() }()
+	if prev != "clean" {
+		t.Fatalf("after graceful close: expected clean, got %q", prev)
+	}
+	data, err := rt2.StorageManager().LoadUsageSnapshot()
+	if err != nil {
+		t.Fatalf("load usage snapshot: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("usage snapshot missing: shutdown flush did not land before the DB closed")
+	}
+	agg, err := decodeUsageAggregate(data)
+	if err != nil {
+		t.Fatalf("decode usage snapshot: %v", err)
+	}
+	if _, ok := agg.Tools[toolKey("prechurn-srv", "prechurn-tool")]; !ok {
+		t.Fatalf("persisted usage snapshot lacks the recorded tool call; tools = %d", len(agg.Tools))
+	}
+}
+
+// TestActivityServiceStopSafeWhenNeverStartedAndIdempotent: Close() now calls
+// ActivityService.Stop() unconditionally, including on runtimes whose
+// background initialization never ran (every other test in this file) and on
+// double Close. Stop must return immediately when Start never ran, and be
+// idempotent after a normal shutdown.
+func TestActivityServiceStopSafeWhenNeverStartedAndIdempotent(t *testing.T) {
+	t.Setenv("MCPPROXY_LAUNCHED_BY", "")
+	dataDir := t.TempDir()
+
+	rt, _ := previousShutdownVia(t, dataDir)
+
+	// Never started: must not block.
+	doneCh := make(chan struct{})
+	go func() {
+		rt.ActivityService().Stop()
+		close(doneCh)
+	}()
+	select {
+	case <-doneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ActivityService.Stop blocked although Start never ran")
+	}
+
+	// Started, then Close (which stops it), then Stop again: idempotent.
+	// (Runtime.Close itself is not re-runnable — cache.Manager.Close panics on
+	// a second call, a pre-existing constraint — so only Stop is re-invoked.)
+	go rt.ActivityService().Start(rt.AppContext(), rt)
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	rt.ActivityService().Stop() // second stop must not hang or panic
+	rt.ActivityService().Stop() // and a third
 }
 
 // TestRuntimeCloseAfterExternalStopAsyncStillResolvesClean guards the split
