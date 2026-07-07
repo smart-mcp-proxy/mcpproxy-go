@@ -5,6 +5,7 @@ package tray
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -36,6 +37,13 @@ func TestIsHomebrewPath(t *testing.T) {
 // Intel-mac reality: /usr/local/bin/mcpproxy-tray is a symlink into the
 // Cellar. The check must resolve symlinks before matching prefixes.
 func TestIsHomebrewPath_ResolvesSymlinks(t *testing.T) {
+	// Homebrew is macOS/Linux only, and isHomebrewPath matches Unix prefixes
+	// with forward slashes. On Windows filepath.Join produces backslash paths
+	// that can never match, so the symlink-resolution scenario is inapplicable.
+	if runtime.GOOS == "windows" {
+		t.Skip("Homebrew paths are Unix-only; symlink resolution test is inapplicable on Windows")
+	}
+
 	dir := t.TempDir()
 
 	cellarDir := filepath.Join(dir, "usr", "local", "Cellar", "mcpproxy", "0.47.0", "bin")
