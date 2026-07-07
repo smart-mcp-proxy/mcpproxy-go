@@ -334,6 +334,12 @@ func (c *Checker) compareVersions(current, latest string) bool {
 	currentSemver := ensureVPrefix(current)
 	latestSemver := ensureVPrefix(latest)
 
+	// semver.Compare ranks an invalid version below every valid one, which
+	// would flag any published release as an "update" for a dev build.
+	if !semver.IsValid(currentSemver) {
+		return false
+	}
+
 	// semver.Compare returns -1 if current < latest
 	return semver.Compare(currentSemver, latestSemver) < 0
 }
@@ -375,6 +381,14 @@ func (c *Checker) SetCheckFunc(fn func() (*GitHubRelease, error)) {
 func (c *Checker) CheckNow() *VersionInfo {
 	if !c.Enabled() {
 		c.logger.Debug("Immediate update check skipped: update checking disabled")
+		return nil
+	}
+	// Same guard as Start(): a non-semver current version (e.g. "development")
+	// cannot be meaningfully compared, and offering the latest stable release
+	// against it is a downgrade prompt, not an update.
+	if !c.isValidSemver() {
+		c.logger.Debug("Immediate update check skipped: non-semver version",
+			zap.String("version", c.version))
 		return nil
 	}
 	c.logger.Debug("Performing immediate update check")

@@ -79,6 +79,35 @@ func TestChecker_CheckNow_NoUpdate(t *testing.T) {
 	}
 }
 
+// TestChecker_CheckNow_NonSemverVersionSkipsCheck verifies that the forced
+// refresh path has the same non-semver guard as Start(): a "development"
+// build must never run a check, because compareVersions would rank the
+// invalid current version below ANY published release and every surface
+// (Web UI banner, doctor, status) would offer a stable-version "update" —
+// a downgrade prompt on dev/misbuilt binaries.
+func TestChecker_CheckNow_NonSemverVersionSkipsCheck(t *testing.T) {
+	for _, version := range []string{"development", "dev", ""} {
+		t.Run("version_"+version, func(t *testing.T) {
+			checker := New(zaptest.NewLogger(t), version)
+
+			checked := false
+			checker.SetCheckFunc(func() (*GitHubRelease, error) {
+				checked = true
+				return &GitHubRelease{TagName: "v1.1.0", HTMLURL: "https://example.com"}, nil
+			})
+
+			info := checker.CheckNow()
+
+			if checked {
+				t.Error("CheckNow ran a network check for a non-semver version")
+			}
+			if info != nil && info.UpdateAvailable {
+				t.Errorf("UpdateAvailable = true for non-semver version %q", version)
+			}
+		})
+	}
+}
+
 // TestChecker_UpdateAvailableLoggedOncePerVersion verifies the "Update available"
 // Info log is emitted exactly once per detected latest version, not on every
 // periodic tick (FR-004 of specs/079-upgrade-nudge: no repeated log spam).
@@ -168,6 +197,10 @@ func TestChecker_CompareVersions(t *testing.T) {
 		{"1.0.0", "1.1.0", true}, // Without v prefix
 		{"v0.11.1", "v0.11.3", true},
 		{"v0.11.2", "v0.11.2", false},
+		// An invalid current version must never be treated as "older than
+		// everything" — that turns a dev build into a permanent downgrade nudge.
+		{"development", "v1.0.0", false},
+		{"", "v1.0.0", false},
 	}
 
 	for _, tc := range tests {
