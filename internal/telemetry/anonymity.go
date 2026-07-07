@@ -71,12 +71,133 @@ func (v *AnonymityViolation) Is(target error) bool {
 
 // anonymityScanEnvelope extracts env_markers into a strict bool-typed struct
 // so we can catch any widening of EnvMarkers fields to non-bool types in the
-// serialized payload.
+// serialized payload, plus the Spec 080 v7 fields so their boolean /
+// non-negative-integer / fixed-enum contracts are enforced on the wire form.
 type anonymityScanEnvelope struct {
 	EnvMarkers *json.RawMessage `json:"env_markers"`
+
+	// Spec 080 (schema v7) structural checks. RawMessage so each field is
+	// validated individually with a precise violation pattern.
+	WizardShown       *json.RawMessage `json:"wizard_shown"`
+	WizardConnectStep *json.RawMessage `json:"wizard_connect_step"`
+	WebUIOpened       *json.RawMessage `json:"web_ui_opened"`
+	DaysSinceInstall  *json.RawMessage `json:"days_since_install"`
+	ActiveDays30d     *json.RawMessage `json:"active_days_30d"`
+	PreviousShutdown  *json.RawMessage `json:"previous_shutdown"`
+	LastErrorCode     *json.RawMessage `json:"last_error_code"`
 }
 
-// ScanForPII scans a serialized v3 telemetry payload for PII leaks and
+// v7FieldViolation builds the violation for a Spec 080 field that broke its
+// documented shape (boolean, non-negative integer, or fixed enum).
+func v7FieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "v7_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("v7 field %s %s", field, reason),
+	}
+}
+
+// scanV7Bool asserts raw (if present) is a JSON boolean.
+func scanV7Bool(raw *json.RawMessage, field string) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(*raw, &b); err != nil {
+		return v7FieldViolation(field, "must be a boolean")
+	}
+	return nil
+}
+
+// scanV7NonNegativeInt asserts raw (if present) is a non-negative JSON
+// integer — no fractions, no strings, no null.
+func scanV7NonNegativeInt(raw *json.RawMessage, field string) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	// json.Number accepts quoted number strings ("3"); require a bare JSON
+	// number token so strings never masquerade as counters.
+	trimmed := bytes.TrimSpace(*raw)
+	if len(trimmed) == 0 || trimmed[0] == '"' {
+		return v7FieldViolation(field, "must be a number")
+	}
+	var n json.Number
+	if err := json.Unmarshal(trimmed, &n); err != nil {
+		return v7FieldViolation(field, "must be a number")
+	}
+	i, err := n.Int64()
+	if err != nil {
+		return v7FieldViolation(field, "must be a whole integer")
+	}
+	if i < 0 {
+		return v7FieldViolation(field, "must be non-negative")
+	}
+	return nil
+}
+
+// scanV7Enum asserts raw (if present) is a JSON string drawn from allowed.
+func scanV7Enum(raw *json.RawMessage, field string, allowed ...string) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(*raw, &s); err != nil {
+		return v7FieldViolation(field, "must be a string enum")
+	}
+	for _, a := range allowed {
+		if s == a {
+			return nil
+		}
+	}
+	return v7FieldViolation(field, "carries a value outside its documented fixed enum")
+}
+
+// scanV7Fields runs the Spec 080 structural checks (FR-016): every v7 field
+// present in the serialized payload must be a boolean, a non-negative
+// integer, or a member of its documented fixed enum. last_error_code is the
+// tightest gate — only diagnostics-catalog MCPX_* codes — so free text,
+// messages, or paths can never ride that field even if a producer-side
+// check regresses.
+func scanV7Fields(env *anonymityScanEnvelope) *AnonymityViolation {
+	if v := scanV7Bool(env.WizardShown, "wizard_shown"); v != nil {
+		return v
+	}
+	if v := scanV7NonNegativeInt(env.WebUIOpened, "web_ui_opened"); v != nil {
+		return v
+	}
+	if v := scanV7NonNegativeInt(env.DaysSinceInstall, "days_since_install"); v != nil {
+		return v
+	}
+	if v := scanV7NonNegativeInt(env.ActiveDays30d, "active_days_30d"); v != nil {
+		return v
+	}
+	// The widened Spec 080 connect-step enum ("" only appears in synthetic
+	// payloads; omitempty drops it in production).
+	if v := scanV7Enum(env.WizardConnectStep, "wizard_connect_step",
+		"", "completed", "completed_external", "skipped"); v != nil {
+		return v
+	}
+	// "unknown" is spec-allowed on the wire (FR-010) even though the current
+	// producer omits it (PreviousShutdownUnknown == "").
+	if v := scanV7Enum(env.PreviousShutdown, "previous_shutdown",
+		PreviousShutdownClean, PreviousShutdownCrash, "unknown"); v != nil {
+		return v
+	}
+	if env.LastErrorCode != nil {
+		var code string
+		if err := json.Unmarshal(*env.LastErrorCode, &code); err != nil {
+			return v7FieldViolation("last_error_code", "must be a string enum")
+		}
+		// FR-012: same fixed code set as diagnostics.error_code_counts_24h —
+		// the shape check alone would admit any MCPX_-looking string.
+		if !isValidMCPXCode(code) {
+			return v7FieldViolation("last_error_code", "must be a cataloged MCPX_* diagnostic code")
+		}
+	}
+	return nil
+}
+
+// ScanForPII scans a serialized telemetry payload (v3+) for PII leaks and
 // structural violations. Returns nil when the payload is clean; otherwise
 // returns an *AnonymityViolation. The returned error satisfies
 // errors.Is(err, ErrAnonymityViolation).
@@ -86,6 +207,10 @@ type anonymityScanEnvelope struct {
 //  2. Any substring from BlockedValues appears in the payload.
 //  3. env_markers, if present, fails to unmarshal into a strict all-bool
 //     struct — meaning a field widened to a string/number/null.
+//  4. Any Spec 080 v7 field present breaks its documented shape: booleans
+//     (wizard_shown), non-negative integers (web_ui_opened,
+//     days_since_install, active_days_30d), or fixed enums
+//     (wizard_connect_step, previous_shutdown, last_error_code = MCPX_*).
 //
 // The implementation never logs the payload — it only reports which rule
 // tripped and the offending pattern (a small literal). Callers should log at
@@ -138,6 +263,12 @@ func ScanForPII(payloadJSON []byte) error {
 				Reason:  fmt.Sprintf("env_markers has a non-bool or unknown field: %v", err),
 			}
 		}
+	}
+
+	// Rule 4: Spec 080 v7 fields must keep their boolean / non-negative
+	// integer / fixed-enum shapes.
+	if v := scanV7Fields(&env); v != nil {
+		return v
 	}
 
 	return nil

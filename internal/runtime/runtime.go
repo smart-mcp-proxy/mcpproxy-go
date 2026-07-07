@@ -71,18 +71,26 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager    *storage.Manager
-	indexManager      *index.Manager
-	upstreamManager   *upstream.Manager
-	cacheManager      *cache.Manager
-	truncator         *truncate.Truncator
-	secretResolver    *secret.Resolver
-	tokenizer         tokens.Tokenizer
-	refreshManager    *oauth.RefreshManager // Proactive OAuth token refresh
-	updateChecker     *updatecheck.Checker  // Background version checking
-	telemetryService  *telemetry.Service    // Anonymous usage telemetry (Spec 036)
-	managementService interface{}           // Initialized later to avoid import cycle
-	activityService   *ActivityService      // Activity logging service
+	storageManager   *storage.Manager
+	indexManager     *index.Manager
+	upstreamManager  *upstream.Manager
+	cacheManager     *cache.Manager
+	truncator        *truncate.Truncator
+	secretResolver   *secret.Resolver
+	tokenizer        tokens.Tokenizer
+	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
+	updateChecker    *updatecheck.Checker  // Background version checking
+	telemetryService *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+
+	// Spec 080 (US3): pre-churn snapshot. prechurnStore owns the BBolt
+	// shutdown marker + last_error_code record; previousShutdown is the
+	// outcome of the PREVIOUS process instance, derived exactly once in New
+	// when the marker is armed (FR-010/FR-011) and handed to the telemetry
+	// service in SetTelemetry.
+	prechurnStore     telemetry.PreChurnStore
+	previousShutdown  string
+	managementService interface{}      // Initialized later to avoid import cycle
+	activityService   *ActivityService // Activity logging service
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -140,6 +148,23 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
+	}
+
+	// Spec 080 (US3, FR-010): derive the previous instance's shutdown outcome
+	// and immediately re-arm the marker. This is the FIRST DB operation after
+	// storage.NewManager succeeds — before stale-session cleanup or any other
+	// DB work — so a crash/hang anywhere later in startup still reads as a
+	// crash next time (crash loops stay visible). Single-writer safety is the
+	// BBolt file lock itself: a second instance fails storage.NewManager with
+	// DatabaseLockedError (exit code 3) and never reaches this code (FR-013).
+	prechurnStore := telemetry.NewPreChurnStore()
+	previousShutdown := telemetry.PreviousShutdownUnknown
+	if db := storageManager.GetDB(); db != nil {
+		if prev, err := prechurnStore.ArmShutdownMarker(db); err != nil {
+			logger.Warn("Failed to arm shutdown marker; previous_shutdown will be omitted", zap.Error(err))
+		} else {
+			previousShutdown = prev
+		}
 	}
 
 	// Close any stale sessions from previous runs
@@ -253,22 +278,24 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	rt := &Runtime{
-		cfg:             cfg,
-		cfgPath:         cfgPath,
-		logger:          logger,
-		configSvc:       configSvc,
-		storageManager:  storageManager,
-		indexManager:    indexManager,
-		upstreamManager: upstreamManager,
-		cacheManager:    cacheManager,
-		truncator:       truncator,
-		secretResolver:  secretResolver,
-		tokenizer:       tokenizer,
-		refreshManager:  refreshManager,
-		activityService: activityService,
-		supervisor:      supervisorInstance,
-		appCtx:          appCtx,
-		appCancel:       appCancel,
+		cfg:              cfg,
+		cfgPath:          cfgPath,
+		logger:           logger,
+		configSvc:        configSvc,
+		storageManager:   storageManager,
+		indexManager:     indexManager,
+		upstreamManager:  upstreamManager,
+		cacheManager:     cacheManager,
+		truncator:        truncator,
+		secretResolver:   secretResolver,
+		tokenizer:        tokenizer,
+		refreshManager:   refreshManager,
+		activityService:  activityService,
+		supervisor:       supervisorInstance,
+		prechurnStore:    prechurnStore,
+		previousShutdown: previousShutdown,
+		appCtx:           appCtx,
+		appCancel:        appCancel,
 		status: Status{
 			Phase:       PhaseInitializing,
 			Message:     "Runtime is initializing...",
@@ -612,53 +639,7 @@ func (r *Runtime) Close() error {
 		// Close in test processes, which made internal/runtime exceed CI's
 		// -race timeout). No isolation ⇒ no managed containers ⇒ nothing to verify.
 		if r.upstreamManager.UsesDockerIsolation() && r.upstreamManager.HasDockerContainers() {
-			if r.logger != nil {
-				r.logger.Warn("Docker containers still running after shutdown, verifying cleanup...")
-			}
-
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-
-			for attempt := 0; attempt < 15; attempt++ {
-				select {
-				case <-shutdownCtx.Done():
-					if r.logger != nil {
-						r.logger.Error("Cleanup verification timeout")
-					}
-					// Force cleanup as last resort
-					r.upstreamManager.ForceCleanupAllContainers()
-					return nil
-				case <-ticker.C:
-					if !r.upstreamManager.HasDockerContainers() {
-						if r.logger != nil {
-							r.logger.Info("All containers cleaned up successfully", zap.Int("attempts", attempt+1))
-						}
-						return nil
-					}
-					if r.logger != nil {
-						r.logger.Debug("Waiting for container cleanup...", zap.Int("attempt", attempt+1))
-					}
-				}
-			}
-
-			// Timeout reached - force cleanup
-			if r.logger != nil {
-				r.logger.Error("Some containers failed to stop gracefully - forcing cleanup")
-			}
-			r.upstreamManager.ForceCleanupAllContainers()
-
-			// Give force cleanup a moment to complete
-			time.Sleep(2 * time.Second)
-
-			if r.upstreamManager.HasDockerContainers() {
-				if r.logger != nil {
-					r.logger.Error("WARNING: Some containers may still be running after force cleanup")
-				}
-			} else {
-				if r.logger != nil {
-					r.logger.Info("Force cleanup succeeded - all containers removed")
-				}
-			}
+			r.verifyContainerCleanup(shutdownCtx)
 		}
 	}
 
@@ -672,7 +653,69 @@ func (r *Runtime) Close() error {
 		}
 	}
 
+	// Spec 080 (FR-010, review round 4): the ActivityService owns BBolt
+	// writers — activity records, retention pruning, usage-snapshot flushes,
+	// async sensitive-data detection. The appCancel at the top of Close
+	// triggered its flush-on-shutdown; await that flush AND all its worker
+	// goroutines here, BEFORE the async-op drain and the shutdown-marker
+	// resolve below, so no activity write can land after the marker claims
+	// the shutdown was clean (or after the DB closes). This writer-vs-close
+	// race pre-dates Spec 080 (Stop existed but was never called); the marker
+	// invariant makes it observable, so it is closed here. Stop returns
+	// immediately when Start never ran and is itself idempotent.
+	if r.activityService != nil {
+		r.activityService.Stop()
+	}
+
+	// Spec 080 (FR-010, review round 6): the telemetry heartbeat loop is a
+	// BBolt writer too — v7's buildHeartbeat records funnel activity
+	// (funnelStore.RecordActivity) and the first tick clears the
+	// installer-pending activation flag. The appCancel above stops the loop
+	// between ticks and aborts an in-flight HTTP send promptly (the request
+	// carries the loop context), but an in-flight tick must be JOINED, not
+	// just cancelled — otherwise its BBolt write could land after the marker
+	// below claims "clean", or against a closed DB. Stop blocks until the
+	// loop (including any in-flight buildHeartbeat/sendHeartbeat, bounded by
+	// the HTTP client's 10s timeout) has exited; it returns immediately when
+	// Start never ran, is idempotent on double Close, and — like
+	// ActivityService.Stop above — terminally stops the service so a Start
+	// goroutine not yet scheduled (lifecycle.go launches it via `go`) becomes
+	// a no-op instead of writing after this point.
+	if r.telemetryService != nil {
+		r.telemetryService.Stop()
+	}
+
+	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
+	// LAST point the DB is still open — i.e. after the async storage manager
+	// has stopped AND drained its queue (those queued operations perform BBolt
+	// writes; StopAsync below runs that drain), immediately before the BBolt
+	// handle closes. Every branch above — including the container-cleanup
+	// verification, whose early exits live inside verifyContainerCleanup —
+	// reaches this point, so a graceful Close always resolves; conversely a
+	// hang/SIGKILL/panic ANYWHERE earlier in shutdown — including mid-drain —
+	// leaves the marker armed and the next instance honestly reports
+	// previous_shutdown="crash". Idempotent on double Close (StopAsync no-ops,
+	// and storageManager.Close's internal async stop no-ops after StopAsync);
+	// on an already-closed DB the marker write fails harmlessly (logged at
+	// debug) and the marker is left untouched.
 	if r.storageManager != nil {
+		// (1) Stop + drain queued async DB operations — the last DB writes
+		// other than the marker resolve itself.
+		r.storageManager.StopAsync()
+
+		// (2) Resolve the marker to clean, now that no other DB work remains.
+		if r.prechurnStore != nil {
+			if db := r.storageManager.GetDB(); db != nil {
+				if err := r.prechurnStore.ResolveCleanShutdown(db); err != nil {
+					if r.logger != nil {
+						r.logger.Debug("Failed to resolve shutdown marker to clean", zap.Error(err))
+					}
+				}
+			}
+		}
+
+		// (3) Close the BBolt handle; the async stop inside Close is a no-op,
+		// so no DB work intervenes between the marker resolve and db.Close.
 		if err := r.storageManager.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close storage manager: %w", err))
 		}
@@ -687,6 +730,62 @@ func (r *Runtime) Close() error {
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+// verifyContainerCleanup polls until all Docker-isolation containers are gone,
+// force-cleaning as a last resort on timeout. Extracted from Close so that its
+// early exits (context timeout, all-clean) return HERE instead of returning
+// from Close — every Close path must still reach the shutdown-marker resolve
+// and the cache/index/storage/configSvc close sequence (Spec 080 FR-010;
+// previously these branches leaked all four and skipped the marker).
+func (r *Runtime) verifyContainerCleanup(ctx context.Context) {
+	if r.logger != nil {
+		r.logger.Warn("Docker containers still running after shutdown, verifying cleanup...")
+	}
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for attempt := 0; attempt < 15; attempt++ {
+		select {
+		case <-ctx.Done():
+			if r.logger != nil {
+				r.logger.Error("Cleanup verification timeout")
+			}
+			// Force cleanup as last resort
+			r.upstreamManager.ForceCleanupAllContainers()
+			return
+		case <-ticker.C:
+			if !r.upstreamManager.HasDockerContainers() {
+				if r.logger != nil {
+					r.logger.Info("All containers cleaned up successfully", zap.Int("attempts", attempt+1))
+				}
+				return
+			}
+			if r.logger != nil {
+				r.logger.Debug("Waiting for container cleanup...", zap.Int("attempt", attempt+1))
+			}
+		}
+	}
+
+	// Timeout reached - force cleanup
+	if r.logger != nil {
+		r.logger.Error("Some containers failed to stop gracefully - forcing cleanup")
+	}
+	r.upstreamManager.ForceCleanupAllContainers()
+
+	// Give force cleanup a moment to complete
+	time.Sleep(2 * time.Second)
+
+	if r.upstreamManager.HasDockerContainers() {
+		if r.logger != nil {
+			r.logger.Error("WARNING: Some containers may still be running after force cleanup")
+		}
+	} else {
+		if r.logger != nil {
+			r.logger.Info("Force cleanup succeeded - all containers removed")
+		}
+	}
 }
 
 func extractToolCount(stats map[string]interface{}) int {
@@ -2442,11 +2541,54 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 			r.telemetryService.SetDiagnosticsCounterStore(diagStore, db)
 
 			// Wire error-code notifier into supervisor so every classified
-			// DiagnosticError increments the 24h per-code counter.
+			// DiagnosticError increments the 24h per-code counter. Spec 080
+			// (US3, FR-012): the same stream also refreshes last_error_code —
+			// the single most recent MCPX_* code, persisted across restarts so
+			// the post-crash heartbeat carries the pre-crash code.
 			if r.supervisor != nil {
+				prechurnStore := r.prechurnStore
 				r.supervisor.SetErrorCodeNotifier(func(code string) {
+					// Spec 080 FR-012: the pre-churn last_error_code write is
+					// synchronous at the classification site — a crash right
+					// after classification must not lose the final pre-crash
+					// code (that loss window is the one case the field exists
+					// for). Sub-ms BBolt Update; no supervisor re-entry.
+					if prechurnStore != nil {
+						_ = prechurnStore.RecordLastErrorCode(db, code)
+					}
+					// The 24h aggregate counter write is synchronous too
+					// (review round 4): an untracked goroutine here could run
+					// after Close resolves the shutdown marker (FR-010) or
+					// after the DB handle closes. Synchronous means the write
+					// completes inside the supervisor's call stack, so
+					// supervisor.Stop() — which joins its goroutines before
+					// Close touches storage — is a hard barrier: after it
+					// returns, no notifier-driven DB write remains. Same
+					// safety argument as above: sub-ms BBolt Update, no
+					// supervisor re-entry, so no lock cycle even when the
+					// caller holds stateMu.
 					_ = diagStore.RecordErrorCode(db, code)
 				})
+			}
+
+			// Spec 080 (US3): hand the startup-derived previous_shutdown value
+			// (stable for this instance, FR-011) and the pre-churn store to
+			// the telemetry service so heartbeats can surface the snapshot.
+			r.telemetryService.SetPreChurn(r.previousShutdown, r.prechurnStore, db)
+
+			// Spec 080 (US2): wire the funnel observability store and record
+			// this process start as activity immediately — the first-install
+			// day stamp must persist on first run (FR-007) and short sessions
+			// that die before the first heartbeat must still count as active
+			// days (FR-008). Local persistence is independent of the opt-out
+			// gate; transmission is gated elsewhere (FR-017 unchanged).
+			if err := telemetry.EnsureFunnelBucket(db); err != nil {
+				r.logger.Warn("Failed to ensure telemetry funnel bucket", zap.Error(err))
+			}
+			funnelStore := telemetry.NewFunnelStore()
+			r.telemetryService.SetFunnelStore(funnelStore, db)
+			if err := funnelStore.RecordActivity(db, time.Now().UTC()); err != nil {
+				r.logger.Debug("Failed to record funnel activity at startup", zap.Error(err))
 			}
 		}
 	}

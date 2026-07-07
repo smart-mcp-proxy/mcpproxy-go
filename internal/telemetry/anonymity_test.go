@@ -189,6 +189,111 @@ func TestScanForPII_RawMachineIDBlocked(t *testing.T) {
 	}
 }
 
+// TestScanForPII_V7FieldViolations (Spec 080 FR-016) asserts the scanner
+// structurally validates every v7 field on the serialized form: booleans,
+// non-negative integers, and documented fixed enums only. Each case injects
+// one malformed field into an otherwise-clean payload and expects the
+// v7_field_invalid rule to fire with the field name as the pattern.
+func TestScanForPII_V7FieldViolations(t *testing.T) {
+	cases := map[string]struct {
+		payload string
+		field   string
+	}{
+		"wizard_shown non-bool": {
+			payload: `{"anonymous_id":"abc","wizard_shown":"yes"}`,
+			field:   "wizard_shown",
+		},
+		"web_ui_opened negative": {
+			payload: `{"anonymous_id":"abc","web_ui_opened":-1}`,
+			field:   "web_ui_opened",
+		},
+		"web_ui_opened fractional": {
+			payload: `{"anonymous_id":"abc","web_ui_opened":1.5}`,
+			field:   "web_ui_opened",
+		},
+		"web_ui_opened string": {
+			payload: `{"anonymous_id":"abc","web_ui_opened":"3"}`,
+			field:   "web_ui_opened",
+		},
+		"days_since_install negative": {
+			payload: `{"anonymous_id":"abc","days_since_install":-3}`,
+			field:   "days_since_install",
+		},
+		"active_days_30d negative": {
+			payload: `{"anonymous_id":"abc","active_days_30d":-1}`,
+			field:   "active_days_30d",
+		},
+		"previous_shutdown outside enum": {
+			payload: `{"anonymous_id":"abc","previous_shutdown":"terminated by user"}`,
+			field:   "previous_shutdown",
+		},
+		"previous_shutdown non-string": {
+			payload: `{"anonymous_id":"abc","previous_shutdown":1}`,
+			field:   "previous_shutdown",
+		},
+		"last_error_code free text": {
+			payload: `{"anonymous_id":"abc","last_error_code":"connection refused on port 8080"}`,
+			field:   "last_error_code",
+		},
+		"last_error_code lowercase": {
+			payload: `{"anonymous_id":"abc","last_error_code":"mcpx_docker_cli_not_found"}`,
+			field:   "last_error_code",
+		},
+		"last_error_code shape-valid but not in diagnostics catalog": {
+			payload: `{"anonymous_id":"abc","last_error_code":"MCPX_UPSTREAM_CONNECT_REFUSED"}`,
+			field:   "last_error_code",
+		},
+		"wizard_connect_step outside enum": {
+			payload: `{"anonymous_id":"abc","wizard_connect_step":"my custom step"}`,
+			field:   "wizard_connect_step",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := ScanForPII([]byte(tc.payload))
+			if err == nil {
+				t.Fatalf("expected violation for payload %s, got nil", tc.payload)
+			}
+			if !errors.Is(err, ErrAnonymityViolation) {
+				t.Fatalf("expected errors.Is(err, ErrAnonymityViolation)=true, got %v", err)
+			}
+			var v *AnonymityViolation
+			if !errors.As(err, &v) {
+				t.Fatalf("expected *AnonymityViolation, got %T (%v)", err, err)
+			}
+			if v.Rule != "v7_field_invalid" {
+				t.Errorf("expected rule=v7_field_invalid, got %q", v.Rule)
+			}
+			if v.Pattern != tc.field {
+				t.Errorf("expected pattern=%q, got %q", tc.field, v.Pattern)
+			}
+		})
+	}
+}
+
+// TestScanForPII_V7FieldValidValues asserts every documented v7 value shape
+// passes: booleans, non-negative integers (including 0), and each member of
+// the fixed enums — including the widened wizard_connect_step and the
+// spec-allowed "unknown" previous_shutdown.
+func TestScanForPII_V7FieldValidValues(t *testing.T) {
+	payloads := []string{
+		`{"anonymous_id":"abc","schema_version":7,"wizard_shown":true,"web_ui_opened":3,"days_since_install":0,"active_days_30d":30}`,
+		`{"anonymous_id":"abc","schema_version":7,"previous_shutdown":"clean"}`,
+		`{"anonymous_id":"abc","schema_version":7,"previous_shutdown":"crash"}`,
+		`{"anonymous_id":"abc","schema_version":7,"previous_shutdown":"unknown"}`,
+		`{"anonymous_id":"abc","schema_version":7,"last_error_code":"MCPX_DOCKER_CLI_NOT_FOUND"}`,
+		`{"anonymous_id":"abc","schema_version":7,"wizard_connect_step":"completed"}`,
+		`{"anonymous_id":"abc","schema_version":7,"wizard_connect_step":"completed_external"}`,
+		`{"anonymous_id":"abc","schema_version":7,"wizard_connect_step":"skipped"}`,
+		`{"anonymous_id":"abc","schema_version":7,"wizard_connect_step":""}`,
+	}
+	for _, p := range payloads {
+		if err := ScanForPII([]byte(p)); err != nil {
+			t.Errorf("expected valid v7 payload to pass, got %v for:\n%s", err, p)
+		}
+	}
+}
+
 // TestScanForPII_AllBlockedPrefixes covers each of the default blocked
 // prefixes to guard against a regression that silently drops one.
 func TestScanForPII_AllBlockedPrefixes(t *testing.T) {

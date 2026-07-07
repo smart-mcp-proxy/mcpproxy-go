@@ -1984,6 +1984,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 					snap.WizardEngaged = state.Engaged
 					snap.WizardConnectStep = state.ConnectStepStatus
 					snap.WizardServerStep = state.ServerStepStatus
+					// Spec 080 (FR-005): shown once the wizard has rendered,
+					// independent of engagement.
+					snap.WizardShown = state.FirstShownAt != nil
 				}
 				return snap
 			})
@@ -2114,8 +2117,16 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	mux.Handle("/swagger/", swaggerHandler)
 	s.logger.Info("Registered Swagger UI endpoint", zap.String("swagger_endpoint", "/swagger/*"))
 
-	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection
-	webUIHandler := web.NewHandler(s.logger.Sugar())
+	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection.
+	// Spec 080 (FR-006): every serve of the UI entrypoint (index document)
+	// increments the persistent web_ui_opened funnel counter — independent of
+	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe
+	// at both layers: no telemetry service or no funnel store → no-op.
+	webUIHandler := web.NewHandlerWithIndexCallback(s.logger.Sugar(), func() {
+		if ts := s.runtime.TelemetryService(); ts != nil {
+			ts.RecordWebUIOpen()
+		}
+	})
 	selectiveProtectedWebUIHandler := s.createSelectiveWebUIProtectedHandler(http.StripPrefix("/ui", webUIHandler))
 	mux.Handle("/ui/", selectiveProtectedWebUIHandler)
 	// Redirect root to web UI

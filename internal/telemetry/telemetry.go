@@ -45,7 +45,31 @@ import (
 // and forward-compatible: v3/v4/v5 consumers ignore it, and the ingest worker
 // stores payload_json wholesale without rejecting unknown fields or higher
 // schema versions.
-const SchemaVersion = 6
+//
+// v7 (schema bump from 6): Spec 080 — honest activation funnel + churn
+// instrumentation. Additive only; v6-and-earlier consumers ignore every
+// addition:
+//   - wizard_connect_step enum widened with "completed_external" (connected
+//     outside the wizard — CLI/ConnectModal/manual config — detected at
+//     dismissal). Consumers switching on completed|skipped must treat
+//     unknown values as "other/engaged".
+//   - wizard_shown (bool): wizard rendered at least once, making "shown but
+//     ignored" observable alongside wizard_engaged.
+//   - web_ui_opened (int64): lifetime count of embedded Web UI index-document
+//     serves, independent of surface_requests.webui.
+//   - days_since_install (*int): whole-day UTC install age from a persisted
+//     first-install day stamp; 0 is transmitted, nil (store not wired) omits.
+//   - active_days_30d (int): count of distinct active UTC days in the
+//     trailing 30-day window; the per-day set never leaves the machine.
+//   - previous_shutdown (enum "clean"|"crash", absent = unknown/first run):
+//     how the PREVIOUS process instance ended, from a persisted marker.
+//   - last_error_code (enum MCPX_*): most recent stable diagnostic code,
+//     persisted across restarts; never message text, names, or paths.
+//
+// All v7 fields are omitempty (zero-valued payloads stay shape-compatible
+// with v6), fixed-enum/boolean/non-negative-integer only (enforced by
+// ScanForPII), and ride the existing opt-out gate.
+const SchemaVersion = 7
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -155,12 +179,70 @@ type HeartbeatPayload struct {
 	WizardEngaged bool `json:"wizard_engaged,omitempty"`
 
 	// WizardConnectStep is the per-step status for "Connect an AI client":
-	// one of "" (not shown to this install), "completed", or "skipped".
+	// one of "" (not shown to this install), "completed",
+	// "completed_external" (Spec 080: connected outside the wizard —
+	// CLI/ConnectModal/manual config — detected at dismissal), or "skipped".
+	// Consumers switching on completed|skipped must treat unknown values as
+	// "other/engaged".
 	WizardConnectStep string `json:"wizard_connect_step,omitempty"`
 
 	// WizardServerStep is the per-step status for "Add an MCP server":
 	// one of "" (not shown to this install), "completed", or "skipped".
 	WizardServerStep string `json:"wizard_server_step,omitempty"`
+
+	// Spec 080 (US2) — funnel observability fields. All additive and
+	// omitempty so zero-valued payloads stay shape-compatible with v6.
+	// Privacy posture: booleans and non-negative integers only — no
+	// timestamps, no per-day breakdown, no per-server identity.
+
+	// WizardShown is true once the onboarding wizard has rendered at least
+	// once for this install (OnboardingState.FirstShownAt set). Combined
+	// with WizardEngaged it makes "shown but ignored" observable:
+	// wizard_shown=true with wizard_engaged absent/false.
+	WizardShown bool `json:"wizard_shown,omitempty"`
+
+	// WebUIOpened is the lifetime count of embedded Web UI index-document
+	// serves (the UI entrypoint), persisted in BBolt. Independent of the
+	// X-MCPProxy-Client-header-based surface_requests.webui counter: it
+	// counts opening the UI, not SPA API traffic. Asset and API requests
+	// never increment it. Coarse by design (health checkers fetching /
+	// count too); documented as "index serves".
+	WebUIOpened int64 `json:"web_ui_opened,omitempty"`
+
+	// DaysSinceInstall is the whole-day UTC age of the install, from a
+	// persisted first-install day stamp independent of anonymous_id.
+	// Non-negative (clamped at 0 on clock skew). Pointer so day 0 (install
+	// day) is transmitted while "store not wired" is omitted — the same
+	// nil-safety as Activation. No install timestamp is ever transmitted.
+	DaysSinceInstall *int `json:"days_since_install,omitempty"`
+
+	// ActiveDays30d is the number of distinct active UTC days in the
+	// trailing 30-day window (1..30 once any activity is recorded). Only
+	// this cardinality leaves the machine; the per-day set stays local.
+	ActiveDays30d int `json:"active_days_30d,omitempty"`
+
+	// Spec 080 (US3) — pre-churn snapshot fields. Additive and omitempty so
+	// zero-valued payloads stay shape-compatible with v6. When the churn
+	// pipeline later identifies a churned install, its final heartbeat
+	// already distinguishes "crashed and never came back" from "exited
+	// cleanly and never returned".
+
+	// PreviousShutdown reports how the PREVIOUS process instance ended:
+	// "clean" (graceful-shutdown path resolved the persisted marker) or
+	// "crash" (marker armed at startup but never resolved — SIGKILL, panic,
+	// power loss). Absent on a first-ever run (no prior marker) or when the
+	// store is not wired — a fresh install is never misreported as a crash
+	// (FR-010/FR-013). Computed once at startup and stable across all
+	// heartbeats of the instance (FR-011).
+	PreviousShutdown string `json:"previous_shutdown,omitempty"`
+
+	// LastErrorCode is the most recently observed stable MCPX_* diagnostic
+	// code (same fixed code set as diagnostics.error_code_counts_24h),
+	// persisted across restarts so the post-crash heartbeat carries the
+	// pre-crash code. Enum code only — never message text, stack traces,
+	// server names, or paths. Absent when no error was ever recorded
+	// (FR-012).
+	LastErrorCode string `json:"last_error_code,omitempty"`
 
 	// Spec 044 Phase H: diagnostics counter snapshot. Omitted entirely when
 	// all counters are zero (omitempty on the pointer). No PII: only stable
@@ -177,6 +259,9 @@ type OnboardingSnapshot struct {
 	WizardEngaged        bool
 	WizardConnectStep    string
 	WizardServerStep     string
+	// WizardShown (Spec 080 US2): the wizard rendered at least once for
+	// this install — derived from OnboardingState.FirstShownAt != nil.
+	WizardShown bool
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -234,6 +319,23 @@ type Service struct {
 	diagCounterStore DiagnosticsCounterStore
 	diagCounterDB    *bbolt.DB
 
+	// Spec 080 (US2): funnel observability store + DB handle. Optional —
+	// same nil-safety guarantee as activationStore. When nil, web_ui_opened,
+	// days_since_install, and active_days_30d are omitted (short-lived CLI
+	// commands).
+	funnelStore FunnelStore
+	funnelDB    *bbolt.DB
+
+	// Spec 080 (US3): pre-churn snapshot state. previousShutdown is derived
+	// exactly once at startup by the runtime (ArmShutdownMarker) and copied
+	// here before the heartbeat loop starts, so it is stable across every
+	// heartbeat of this instance (FR-011). The store/DB pair follows the
+	// same nil-safety contract as activationStore: when unset (short-lived
+	// CLI commands), previous_shutdown and last_error_code are omitted.
+	previousShutdown string
+	prechurnStore    PreChurnStore
+	prechurnDB       *bbolt.DB
+
 	// Spec 044: optional provider for configured IDE count. Populated by the
 	// runtime from internal/connect at wire-up time. nil-safe.
 	configuredIDECountProvider func() int
@@ -264,6 +366,24 @@ type Service struct {
 	// optedOut latches true once the opt-out beacon has fired; it gates all
 	// further heartbeat emission so no telemetry leaves after the user opts out.
 	optedOut atomic.Bool
+
+	// Shutdown coordination (Spec 080 FR-010, review round 6): the heartbeat
+	// loop is a BBolt writer — buildHeartbeat records funnel activity
+	// (funnelStore.RecordActivity) and the first tick clears the
+	// installer-pending activation flag — so Runtime.Close must be able to
+	// JOIN the loop, not merely context-cancel it, before the clean-shutdown
+	// marker resolves and the DB closes. done closes when the Start body
+	// exits on ANY path (including the disabled-by-env/config/semver early
+	// returns). startMu/started/stopped mirror ActivityService: production
+	// launches Start via `go` (lifecycle.go), so a fast shutdown can run
+	// Stop BEFORE the Start goroutine is scheduled — Stop marks stopped
+	// terminally under startMu and a later Start becomes a no-op instead of
+	// a heartbeat loop writing BBolt after the shutdown-marker path began.
+	// started also refuses a second Start (done is single-shot).
+	done    chan struct{}
+	startMu sync.Mutex
+	started bool
+	stopped bool
 }
 
 // optOutBeaconTimeout bounds the best-effort opt-out beacon send so a slow or
@@ -288,6 +408,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
 		resolvedEnabled:   EffectiveTelemetryEnabled(cfg),
+		done:              make(chan struct{}),
 	}
 }
 
@@ -326,6 +447,49 @@ func (s *Service) ActivationStore() ActivationStore {
 // store (or nil). Callers pair this with ActivationStore() to perform writes.
 func (s *Service) ActivationDB() *bbolt.DB {
 	return s.activationDB
+}
+
+// SetFunnelStore wires the BBolt-backed funnel observability store (Spec 080
+// US2). Optional; when unset, heartbeat payloads omit web_ui_opened,
+// days_since_install, and active_days_30d. Safe to call once during startup.
+func (s *Service) SetFunnelStore(store FunnelStore, db *bbolt.DB) {
+	s.funnelStore = store
+	s.funnelDB = db
+}
+
+// FunnelStore returns the wired funnel store (or nil).
+func (s *Service) FunnelStore() FunnelStore {
+	return s.funnelStore
+}
+
+// FunnelDB returns the BBolt DB handle associated with the funnel store
+// (or nil).
+func (s *Service) FunnelDB() *bbolt.DB {
+	return s.funnelDB
+}
+
+// RecordWebUIOpen increments the lifetime web_ui_opened counter (Spec 080
+// FR-006). Called by the embedded Web UI handler whenever the index document
+// is served. nil-safe: a no-op when the funnel store is not wired, and a
+// persistence error never propagates to the HTTP path (logged at debug).
+func (s *Service) RecordWebUIOpen() {
+	if s.funnelStore == nil || s.funnelDB == nil {
+		return
+	}
+	if err := s.funnelStore.IncrementWebUIOpened(s.funnelDB); err != nil {
+		s.logger.Debug("Failed to increment web_ui_opened counter", zap.Error(err))
+	}
+}
+
+// SetPreChurn wires the Spec 080 US3 pre-churn snapshot: the startup-derived
+// previous_shutdown value (stable for the life of this instance, FR-011) and
+// the BBolt-backed store used to read last_error_code at heartbeat build
+// time. Optional; when unset, both fields are omitted from the payload.
+// Safe to call once during startup, before the heartbeat loop begins.
+func (s *Service) SetPreChurn(previousShutdown string, store PreChurnStore, db *bbolt.DB) {
+	s.previousShutdown = previousShutdown
+	s.prechurnStore = store
+	s.prechurnDB = db
 }
 
 // SetDiagnosticsCounterStore wires the BBolt-backed diagnostics counter store
@@ -400,7 +564,32 @@ func (s *Service) resolveLaunchSource() LaunchSource {
 }
 
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
+// Single-shot: a second Start is refused, and a Start that lost the race
+// against Stop (fast shutdown) is a no-op. See Stop.
 func (s *Service) Start(ctx context.Context) {
+	// Registration under startMu (Spec 080 FR-010, review round 6). If Stop
+	// already ran — production launches Start via `go` (lifecycle.go), so a
+	// fast shutdown can beat this goroutine — the service is terminally
+	// stopped: return without entering a loop that could write BBolt after
+	// Runtime.Close began the shutdown-marker path. Refuse a second Start:
+	// the done bookkeeping is single-shot.
+	s.startMu.Lock()
+	if s.stopped {
+		s.startMu.Unlock()
+		s.logger.Debug("Telemetry service Start called after Stop; not starting")
+		return
+	}
+	if s.started {
+		s.startMu.Unlock()
+		s.logger.Warn("Telemetry service Start called twice; ignoring")
+		return
+	}
+	s.started = true
+	s.startMu.Unlock()
+	// Every exit below — including the disabled early returns — must release
+	// a waiting Stop.
+	defer close(s.done)
+
 	// Spec 042: env vars override config. DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY=false
 	if s.envDisabledReason != EnvDisabledNone {
 		s.logger.Info("Telemetry disabled by environment variable",
@@ -458,6 +647,31 @@ func (s *Service) Start(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// Stop terminally stops the heartbeat loop and waits for it to exit,
+// including any in-flight tick — buildHeartbeat's BBolt writes and
+// sendHeartbeat's HTTP send. The send carries the loop context, so the
+// runtime's appCancel aborts it promptly and the wait is bounded by the HTTP
+// client's timeout; the BBolt writes are never interrupted mid-transaction,
+// only awaited. Callers must cancel the context passed to Start before (or
+// concurrently with) Stop, or Stop blocks until the loop exits on its own.
+// Stop returns immediately when Start never ran, is idempotent, and makes a
+// Start goroutine that has not yet been scheduled a permanent no-op —
+// Runtime.Close relies on this so no telemetry BBolt write can land after
+// the clean-shutdown marker resolves or after the DB closes (Spec 080
+// FR-010, review round 6).
+func (s *Service) Stop() {
+	s.startMu.Lock()
+	s.stopped = true
+	started := s.started
+	s.startMu.Unlock()
+	if !started {
+		return
+	}
+	// Start ran (or is running): its defer guarantees done closes on every
+	// exit path, including the disabled-by-env/config early returns.
+	<-s.done
 }
 
 func (s *Service) sendHeartbeat(ctx context.Context) {
@@ -676,6 +890,45 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 			payload.WizardEngaged = snap.WizardEngaged
 			payload.WizardConnectStep = snap.WizardConnectStep
 			payload.WizardServerStep = snap.WizardServerStep
+			// Spec 080 (FR-005): shown-vs-engaged independence — true once
+			// the wizard rendered, regardless of engagement.
+			payload.WizardShown = snap.WizardShown
+		}
+	}
+
+	// Spec 080 (US2): funnel observability. Mark the current UTC day active
+	// (a heartbeat is proof of process activity), then surface the reduced
+	// integers. On any store error the fields are simply omitted — the
+	// heartbeat is never blocked (same posture as Activation).
+	if s.funnelStore != nil && s.funnelDB != nil {
+		now := time.Now().UTC()
+		if err := s.funnelStore.RecordActivity(s.funnelDB, now); err != nil {
+			s.logger.Debug("Failed to record funnel activity day", zap.Error(err))
+		}
+		if st, err := s.funnelStore.Snapshot(s.funnelDB, now); err == nil {
+			payload.WebUIOpened = st.WebUIOpened
+			if st.HasInstallDay {
+				days := st.DaysSinceInstall
+				payload.DaysSinceInstall = &days
+			}
+			payload.ActiveDays30d = st.ActiveDays30d
+		} else {
+			s.logger.Debug("Failed to load funnel state for heartbeat", zap.Error(err))
+		}
+	}
+
+	// Spec 080 (US3): pre-churn snapshot. previous_shutdown was derived once
+	// at startup and never changes for this instance (FR-011); the empty
+	// (unknown / store-not-wired) value is dropped by omitempty (FR-013).
+	// last_error_code is re-read each heartbeat so the field always carries
+	// the MOST RECENT stable MCPX_* code (FR-012); on any store error the
+	// field is simply omitted — the heartbeat is never blocked.
+	payload.PreviousShutdown = s.previousShutdown
+	if s.prechurnStore != nil && s.prechurnDB != nil {
+		if code, err := s.prechurnStore.LastErrorCode(s.prechurnDB); err == nil {
+			payload.LastErrorCode = code
+		} else {
+			s.logger.Debug("Failed to load last_error_code for heartbeat", zap.Error(err))
 		}
 	}
 

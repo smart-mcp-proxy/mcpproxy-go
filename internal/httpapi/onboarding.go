@@ -76,7 +76,13 @@ type OnboardingMarkRequest struct {
 	Engaged bool `json:"engaged"`
 
 	// ConnectStepStatus is one of: "", "completed", "skipped". Empty
-	// preserves the existing value.
+	// preserves the existing value. The stored enum is wider (Spec 080
+	// FR-001): a "skipped" request for a previously untouched connect step
+	// is upgraded server-side to "completed_external" when the install
+	// shows positive evidence of an external connection (Spec 080 FR-002).
+	// "completed_external" is NOT accepted from clients — it must never be
+	// persisted without that server-verified evidence (edge case: "never
+	// guess completed_external without positive evidence").
 	ConnectStepStatus string `json:"connect_step_status,omitempty"`
 
 	// ServerStepStatus is one of: "", "completed", "skipped". Empty
@@ -151,7 +157,8 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		state.FirstShownAt = &t
 	}
 	if req.ConnectStepStatus != "" {
-		state.ConnectStepStatus = req.ConnectStepStatus
+		state.ConnectStepStatus = nextConnectStepStatus(
+			state.ConnectStepStatus, req.ConnectStepStatus, s.externalConnectionEvidence)
 	}
 	if req.ServerStepStatus != "" {
 		state.ServerStepStatus = req.ServerStepStatus
@@ -225,7 +232,72 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 	return resp, nil
 }
 
-// validStepStatus returns true if v is an allowed step-status value.
+// validStepStatus returns true if v is an allowed step-status REQUEST value.
+// Note the request enum is deliberately narrower than the stored connect-step
+// enum (Spec 080 FR-001): "completed_external" is server-derived only (see
+// nextConnectStepStatus) and is rejected when a client sends it directly —
+// no shipped client produces it, and accepting it would let a caller persist
+// external-connection evidence that was never verified.
 func validStepStatus(v string) bool {
-	return v == "" || v == "completed" || v == "skipped"
+	return v == "" || v == storage.StepStatusCompleted || v == storage.StepStatusSkipped
+}
+
+// nextConnectStepStatus decides what to persist for the wizard's connect
+// step given its current value and the requested update (Spec 080 US1).
+// requested has passed validStepStatus, so it is "", "completed", or
+// "skipped" — "completed_external" can only ever be produced HERE, from the
+// server-side evidence check, never accepted from a client.
+//
+//   - "completed" and "completed_external" never regress to "skipped" once
+//     recorded, even if clients are later disconnected (FR-004). In-wizard
+//     completion may still upgrade "completed_external" to "completed".
+//   - A "skipped" request against a previously untouched step ("" current)
+//     is the wizard-dismissal case: if the install shows positive evidence
+//     of an external connection, record "completed_external" instead
+//     (FR-002). Without evidence, fall back to "skipped" (FR-002a).
+//   - An already-persisted "skipped" is never rewritten retroactively
+//     (FR-003): the evidence check only applies to the untouched step.
+//
+// hasExternalEvidence is evaluated lazily, only for the dismissal case.
+func nextConnectStepStatus(current, requested string, hasExternalEvidence func() bool) string {
+	if requested == "" {
+		return current
+	}
+	switch current {
+	case storage.StepStatusCompleted:
+		// Terminal: strongest status, never changes (FR-004).
+		return storage.StepStatusCompleted
+	case storage.StepStatusCompletedExternal:
+		// Never regresses; in-wizard completion is an allowed upgrade.
+		if requested == storage.StepStatusCompleted {
+			return storage.StepStatusCompleted
+		}
+		return storage.StepStatusCompletedExternal
+	}
+	if requested == storage.StepStatusSkipped && current == "" && hasExternalEvidence() {
+		return storage.StepStatusCompletedExternal
+	}
+	return requested
+}
+
+// externalConnectionEvidence reports whether this install shows positive
+// evidence of an MCP client connection made outside the wizard: at least one
+// supported client currently connected, or an MCP client has ever completed
+// an initialize handshake (Spec 080 FR-002).
+//
+// FR-002a: wizard dismissal must never be blocked or delayed by this check —
+// any failure while gathering evidence downgrades to "no evidence" so the
+// caller records "skipped" exactly as before Spec 080.
+func (s *Server) externalConnectionEvidence() (evidence bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Warnf("onboarding: external-connection evidence check failed, falling back to skipped: %v", r)
+			evidence = false
+		}
+	}()
+	if svc := s.getConnectService(); svc != nil && svc.GetConnectedCount() > 0 {
+		return true
+	}
+	firstEver, _ := s.controller.GetActivationFirstMCPClient()
+	return firstEver
 }
