@@ -38,6 +38,13 @@ func TestDirectToolCallabilityBlock_ServerQuarantined(t *testing.T) {
 	assert.Equal(t, "QUARANTINED_SERVER_BLOCKED", response["status"])
 	assert.Equal(t, "github", response["serverName"])
 	assert.Equal(t, "list_repos", response["toolName"])
+
+	// The remediation must point at operations the agent can actually execute:
+	// list_quarantined/inspect_quarantined live on quarantine_security, and
+	// upstream_servers rejects them with "Unknown operation".
+	instructions, _ := response["instructions"].(string)
+	assert.Contains(t, instructions, "quarantine_security")
+	assert.NotContains(t, instructions, "'upstream_servers' tool with operation 'list_quarantined'")
 }
 
 func TestDirectToolCallabilityBlock_ConfigDeniedTool(t *testing.T) {
