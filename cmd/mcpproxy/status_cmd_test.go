@@ -374,6 +374,29 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestExtractServerCounts(t *testing.T) {
+	// Real /api/v1/status upstream_stats shape (see internal/server/server.go
+	// and internal/upstream/manager.go GetStats builders).
+	stats := map[string]interface{}{
+		"connected_servers":   float64(14),
+		"quarantined_servers": float64(2),
+		"total_servers":       float64(28),
+	}
+
+	counts := extractServerCounts(stats)
+
+	if counts.Connected != 14 {
+		t.Errorf("expected Connected=14, got %d", counts.Connected)
+	}
+	if counts.Quarantined != 2 {
+		t.Errorf("expected Quarantined=2, got %d", counts.Quarantined)
+	}
+	if counts.Total != 28 {
+		t.Errorf("expected Total=28, got %d", counts.Total)
+	}
+}
+
+func TestExtractServerCountsLegacyKeys(t *testing.T) {
+	// Older daemons emitted bare connected/quarantined/total keys.
 	stats := map[string]interface{}{
 		"connected":   float64(5),
 		"quarantined": float64(2),
@@ -395,8 +418,8 @@ func TestExtractServerCounts(t *testing.T) {
 
 func TestExtractServerCountsNoTotal(t *testing.T) {
 	stats := map[string]interface{}{
-		"connected":   float64(3),
-		"quarantined": float64(1),
+		"connected_servers":   float64(3),
+		"quarantined_servers": float64(1),
 	}
 
 	counts := extractServerCounts(stats)

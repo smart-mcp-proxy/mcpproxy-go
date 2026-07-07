@@ -269,19 +269,36 @@ func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) 
 func extractServerCounts(stats map[string]interface{}) *ServerCounts {
 	counts := &ServerCounts{}
 
-	if v, ok := stats["connected"].(float64); ok {
-		counts.Connected = int(v)
-	}
-	if v, ok := stats["quarantined"].(float64); ok {
-		counts.Quarantined = int(v)
-	}
-	if v, ok := stats["total"].(float64); ok {
-		counts.Total = int(v)
+	// The daemon emits connected_servers/quarantined_servers/total_servers
+	// (see the GetStats builders in internal/server and internal/upstream);
+	// bare connected/quarantined/total are accepted for older daemons.
+	counts.Connected = statsInt(stats, "connected_servers", "connected")
+	counts.Quarantined = statsInt(stats, "quarantined_servers", "quarantined")
+	if v, ok := statsIntOK(stats, "total_servers", "total"); ok {
+		counts.Total = v
 	} else {
 		counts.Total = counts.Connected + counts.Quarantined
 	}
 
 	return counts
+}
+
+// statsInt returns the first of the given keys present in stats as an int.
+func statsInt(stats map[string]interface{}, keys ...string) int {
+	v, _ := statsIntOK(stats, keys...)
+	return v
+}
+
+func statsIntOK(stats map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch v := stats[key].(type) {
+		case float64:
+			return int(v), true
+		case int:
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // extractStatusUpdate pulls the `update` object out of the /api/v1/info

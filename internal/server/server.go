@@ -733,6 +733,7 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 
 			connectedCount := 0
 			connectingCount := 0
+			quarantinedCount := 0
 			totalTools := 0
 
 			serverStats := make(map[string]interface{}, len(snapshot.Servers))
@@ -819,17 +820,21 @@ func (s *Server) GetUpstreamStats() map[string]interface{} {
 				if connecting {
 					connectingCount++
 				}
+				if status.Quarantined {
+					quarantinedCount++
+				}
 				totalTools += status.ToolCount
 
 				serverStats[name] = entry
 			}
 
 			return map[string]interface{}{
-				"connected_servers":  connectedCount,
-				"connecting_servers": connectingCount,
-				"total_servers":      len(snapshot.Servers),
-				"servers":            serverStats,
-				"total_tools":        totalTools,
+				"connected_servers":   connectedCount,
+				"connecting_servers":  connectingCount,
+				"quarantined_servers": quarantinedCount,
+				"total_servers":       len(snapshot.Servers),
+				"servers":             serverStats,
+				"total_tools":         totalTools,
 			}
 		}
 	}
