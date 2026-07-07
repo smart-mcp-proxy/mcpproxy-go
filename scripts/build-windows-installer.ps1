@@ -48,7 +48,7 @@ Write-Host "  Building mcpproxy.exe..." -ForegroundColor White
 $env:CGO_ENABLED = "0"
 $CoreBinary = Join-Path $BinDir "mcpproxy.exe"
 $CoreCmd = Join-Path $RepoRoot "cmd/mcpproxy"
-go build -buildvcs=false -ldflags "-s -w -X main.version=$Version" -o $CoreBinary $CoreCmd
+go build -buildvcs=false -ldflags "-s -w -X main.version=$Version -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=$Version" -o $CoreBinary $CoreCmd
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  Failed to build mcpproxy.exe" -ForegroundColor Red
@@ -61,7 +61,7 @@ Write-Host "  Building mcpproxy-tray.exe..." -ForegroundColor White
 $env:CGO_ENABLED = "1"
 $TrayBinary = Join-Path $BinDir "mcpproxy-tray.exe"
 $TrayCmd = Join-Path $RepoRoot "cmd/mcpproxy-tray"
-go build -buildvcs=false -ldflags "-s -w -X main.version=$Version -H windowsgui" -o $TrayBinary $TrayCmd
+go build -buildvcs=false -ldflags "-s -w -X main.version=$Version -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=$Version -H windowsgui" -o $TrayBinary $TrayCmd
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "  Failed to build mcpproxy-tray.exe" -ForegroundColor Red
