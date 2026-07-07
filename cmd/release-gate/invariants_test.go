@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -523,6 +524,13 @@ func TestBuildGateConfig_DockerIsolationShape(t *testing.T) {
 }
 
 func TestFreePortAndCopyFile(t *testing.T) {
+	// The exec-bit assertion below (0o100) is Unix-only; Windows has no Unix
+	// permission bits, so copyFile cannot set an owner-execute bit there. The
+	// gate driver runs exclusively on the ubuntu-latest runner, so this staging
+	// helper is only ever exercised on Linux.
+	if runtime.GOOS == "windows" {
+		t.Skip("copyFile exec-bit staging is Linux-only gate infra (gate runs on ubuntu-latest)")
+	}
 	p, err := freePort()
 	if err != nil || p == 0 {
 		t.Fatalf("freePort: %d %v", p, err)

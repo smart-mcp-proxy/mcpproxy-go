@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +16,18 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// skipIfWindows guards the exec/signal-based transport tests. The fixture binary
+// is Linux-only gate infrastructure — it is built and run exclusively on the
+// ubuntu-latest gate runner and inside the linux/amd64 Docker image, never on
+// Windows. The tests spawn the real process and exercise Unix signal/restart
+// semantics (SIGTERM) that Windows does not support, so they are skipped there.
+func skipIfWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mcpfixture exec/signal transport tests are Linux-only gate infra (gate runs on ubuntu-latest)")
+	}
+}
 
 // fixtureBin is the compiled fixture binary, built once in TestMain. The
 // transport tests exercise the real executable (exec-based) so the SIGTERM →
@@ -173,6 +186,7 @@ func roundTrip(t *testing.T, c *client.Client) pingResult {
 // --- stdio -----------------------------------------------------------------
 
 func TestStdioRoundTripAndRestart(t *testing.T) {
+	skipIfWindows(t)
 	newStdioClient := func() *client.Client {
 		c, err := client.NewStdioMCPClient(fixtureBin, nil, "--transport", "stdio")
 		if err != nil {
@@ -199,6 +213,7 @@ func TestStdioRoundTripAndRestart(t *testing.T) {
 }
 
 func TestStdioSIGTERMExitsCleanly(t *testing.T) {
+	skipIfWindows(t)
 	cmd := exec.Command(fixtureBin, "--transport", "stdio")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -220,12 +235,14 @@ func TestStdioSIGTERMExitsCleanly(t *testing.T) {
 // --- http / sse ------------------------------------------------------------
 
 func TestHTTPRoundTripAndRestart(t *testing.T) {
+	skipIfWindows(t)
 	testNetworkTransport(t, transportHTTP, func(port int) (*client.Client, error) {
 		return client.NewStreamableHttpClient(fmt.Sprintf("http://127.0.0.1:%d/mcp", port))
 	})
 }
 
 func TestSSERoundTripAndRestart(t *testing.T) {
+	skipIfWindows(t)
 	testNetworkTransport(t, transportSSE, func(port int) (*client.Client, error) {
 		return client.NewSSEMCPClient(fmt.Sprintf("http://127.0.0.1:%d/sse", port))
 	})
