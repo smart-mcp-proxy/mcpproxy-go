@@ -366,6 +366,24 @@ type Service struct {
 	// optedOut latches true once the opt-out beacon has fired; it gates all
 	// further heartbeat emission so no telemetry leaves after the user opts out.
 	optedOut atomic.Bool
+
+	// Shutdown coordination (Spec 080 FR-010, review round 6): the heartbeat
+	// loop is a BBolt writer — buildHeartbeat records funnel activity
+	// (funnelStore.RecordActivity) and the first tick clears the
+	// installer-pending activation flag — so Runtime.Close must be able to
+	// JOIN the loop, not merely context-cancel it, before the clean-shutdown
+	// marker resolves and the DB closes. done closes when the Start body
+	// exits on ANY path (including the disabled-by-env/config/semver early
+	// returns). startMu/started/stopped mirror ActivityService: production
+	// launches Start via `go` (lifecycle.go), so a fast shutdown can run
+	// Stop BEFORE the Start goroutine is scheduled — Stop marks stopped
+	// terminally under startMu and a later Start becomes a no-op instead of
+	// a heartbeat loop writing BBolt after the shutdown-marker path began.
+	// started also refuses a second Start (done is single-shot).
+	done    chan struct{}
+	startMu sync.Mutex
+	started bool
+	stopped bool
 }
 
 // optOutBeaconTimeout bounds the best-effort opt-out beacon send so a slow or
@@ -390,6 +408,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
 		resolvedEnabled:   EffectiveTelemetryEnabled(cfg),
+		done:              make(chan struct{}),
 	}
 }
 
@@ -545,7 +564,32 @@ func (s *Service) resolveLaunchSource() LaunchSource {
 }
 
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
+// Single-shot: a second Start is refused, and a Start that lost the race
+// against Stop (fast shutdown) is a no-op. See Stop.
 func (s *Service) Start(ctx context.Context) {
+	// Registration under startMu (Spec 080 FR-010, review round 6). If Stop
+	// already ran — production launches Start via `go` (lifecycle.go), so a
+	// fast shutdown can beat this goroutine — the service is terminally
+	// stopped: return without entering a loop that could write BBolt after
+	// Runtime.Close began the shutdown-marker path. Refuse a second Start:
+	// the done bookkeeping is single-shot.
+	s.startMu.Lock()
+	if s.stopped {
+		s.startMu.Unlock()
+		s.logger.Debug("Telemetry service Start called after Stop; not starting")
+		return
+	}
+	if s.started {
+		s.startMu.Unlock()
+		s.logger.Warn("Telemetry service Start called twice; ignoring")
+		return
+	}
+	s.started = true
+	s.startMu.Unlock()
+	// Every exit below — including the disabled early returns — must release
+	// a waiting Stop.
+	defer close(s.done)
+
 	// Spec 042: env vars override config. DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY=false
 	if s.envDisabledReason != EnvDisabledNone {
 		s.logger.Info("Telemetry disabled by environment variable",
@@ -603,6 +647,31 @@ func (s *Service) Start(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// Stop terminally stops the heartbeat loop and waits for it to exit,
+// including any in-flight tick — buildHeartbeat's BBolt writes and
+// sendHeartbeat's HTTP send. The send carries the loop context, so the
+// runtime's appCancel aborts it promptly and the wait is bounded by the HTTP
+// client's timeout; the BBolt writes are never interrupted mid-transaction,
+// only awaited. Callers must cancel the context passed to Start before (or
+// concurrently with) Stop, or Stop blocks until the loop exits on its own.
+// Stop returns immediately when Start never ran, is idempotent, and makes a
+// Start goroutine that has not yet been scheduled a permanent no-op —
+// Runtime.Close relies on this so no telemetry BBolt write can land after
+// the clean-shutdown marker resolves or after the DB closes (Spec 080
+// FR-010, review round 6).
+func (s *Service) Stop() {
+	s.startMu.Lock()
+	s.stopped = true
+	started := s.started
+	s.startMu.Unlock()
+	if !started {
+		return
+	}
+	// Start ran (or is running): its defer guarantees done closes on every
+	// exit path, including the disabled-by-env/config early returns.
+	<-s.done
 }
 
 func (s *Service) sendHeartbeat(ctx context.Context) {

@@ -667,6 +667,24 @@ func (r *Runtime) Close() error {
 		r.activityService.Stop()
 	}
 
+	// Spec 080 (FR-010, review round 6): the telemetry heartbeat loop is a
+	// BBolt writer too — v7's buildHeartbeat records funnel activity
+	// (funnelStore.RecordActivity) and the first tick clears the
+	// installer-pending activation flag. The appCancel above stops the loop
+	// between ticks and aborts an in-flight HTTP send promptly (the request
+	// carries the loop context), but an in-flight tick must be JOINED, not
+	// just cancelled — otherwise its BBolt write could land after the marker
+	// below claims "clean", or against a closed DB. Stop blocks until the
+	// loop (including any in-flight buildHeartbeat/sendHeartbeat, bounded by
+	// the HTTP client's 10s timeout) has exited; it returns immediately when
+	// Start never ran, is idempotent on double Close, and — like
+	// ActivityService.Stop above — terminally stops the service so a Start
+	// goroutine not yet scheduled (lifecycle.go launches it via `go`) becomes
+	// a no-op instead of writing after this point.
+	if r.telemetryService != nil {
+		r.telemetryService.Stop()
+	}
+
 	// Spec 080 (US3, FR-010): resolve the shutdown marker to "clean" at the
 	// LAST point the DB is still open — i.e. after the async storage manager
 	// has stopped AND drained its queue (those queued operations perform BBolt

@@ -241,6 +241,67 @@ func TestActivityServiceStopSafeWhenNeverStartedAndIdempotent(t *testing.T) {
 	rt.ActivityService().Stop() // and a third
 }
 
+// TestRuntimeCloseWaitsForTelemetryLoopBeforeMarkerResolve guards the Close
+// ordering added in review round 6 (Spec 080 FR-010): the telemetry heartbeat
+// loop is a BBolt writer too — v7's buildHeartbeat records funnel activity
+// (funnelStore.RecordActivity) — and before this fix Close only
+// context-cancelled the goroutine launched by lifecycle.go
+// (`go telemetryService.Start(appCtx)`) without joining it, so an in-flight
+// tick could write after the marker resolved to clean or against a closed DB.
+// Close now calls telemetryService.Stop() before StopAsync/ResolveCleanShutdown/
+// db.Close. This test drives the exact production launch shape: Close may beat
+// the Start goroutine entirely (the Stop-before-Start race) or catch the loop
+// mid-initial-delay; either way the service must be TERMINALLY stopped before
+// the marker resolves — proven by a post-Close Start returning immediately
+// instead of entering the heartbeat loop (which would park in its 5-minute
+// initial delay and could later write BBolt). The in-flight-tick join itself
+// is proven deterministically at the service level in
+// internal/telemetry/shutdown_test.go (TestServiceStopJoinsInFlightHeartbeatTick).
+func TestRuntimeCloseWaitsForTelemetryLoopBeforeMarkerResolve(t *testing.T) {
+	t.Setenv("MCPPROXY_LAUNCHED_BY", "")
+	// Clear env vars that would disable telemetry (CI sets CI=true): the loop
+	// must actually start so Close has something to join.
+	t.Setenv("CI", "")
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+	dataDir := t.TempDir()
+
+	rt, _ := previousShutdownVia(t, dataDir)
+	svc := rt.TelemetryService()
+
+	// Launch exactly as StartBackgroundInitialization does.
+	go svc.Start(rt.AppContext())
+
+	if err := rt.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Terminal stop: Start after Close must be a no-op that returns
+	// immediately. If Close had only cancelled (not joined/terminally
+	// stopped), this Start would run the loop and hang in its initial delay.
+	startReturned := make(chan struct{})
+	go func() {
+		svc.Start(context.Background())
+		close(startReturned)
+	}()
+	select {
+	case <-startReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("telemetry Start after Close did not no-op; the loop could write BBolt after the shutdown marker resolved")
+	}
+
+	// Stop stays idempotent after Close (double-Close path).
+	svc.Stop()
+	svc.Stop()
+
+	// The marker resolved to clean with the telemetry loop joined first.
+	rt2, prev := previousShutdownVia(t, dataDir)
+	defer func() { _ = rt2.Close() }()
+	if prev != "clean" {
+		t.Fatalf("after graceful close with telemetry running: expected clean, got %q", prev)
+	}
+}
+
 // TestRuntimeCloseAfterExternalStopAsyncStillResolvesClean guards the split
 // Close sequence (Spec 080 FR-010, review round 3): Close now runs
 // storage.StopAsync (stop + drain queued async DB ops) BEFORE resolving the
