@@ -153,13 +153,62 @@ Response includes an `update` field when version information is available:
       "latest_version": "v1.3.0",
       "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
       "checked_at": "2025-01-15T10:30:00Z",
-      "is_prerelease": false
+      "is_prerelease": false,
+      "install_channel": "homebrew",
+      "update_command": "brew upgrade mcpproxy"
     }
   }
 }
 ```
 
 See [REST API Documentation](../api/rest-api.md#get-apiv1info) for complete details.
+
+## How the Install Channel Is Detected
+
+MCPProxy identifies how it was installed so it can show the right update
+instruction for your setup (`install_channel` in `/api/v1/info`, plus the
+guided command in `mcpproxy status`, `mcpproxy doctor`, and the Web UI
+banner).
+
+Detection prefers a **build-time channel marker** stamped into
+single-channel artifacts at packaging time (the Docker image and the Windows
+installer). When no marker is present — the release archives feed the
+tarball, Homebrew, and DMG channels from one binary — runtime heuristics run
+in decreasing confidence order:
+
+1. **Homebrew**: the (symlink-resolved) executable path lives under a
+   Homebrew prefix (`/opt/homebrew/`, a `Cellar/` path, or
+   `/home/linuxbrew/.linuxbrew`).
+2. **Docker**: `/.dockerenv` exists.
+3. **deb / rpm**: on Linux, the executable is exactly `/usr/bin/mcpproxy`
+   **and** the owning package manager's database confirms it
+   (`/var/lib/dpkg/info/mcpproxy.list` for deb; an rpm database for rpm).
+   Both signals are required — a binary merely copied to `/usr/bin` (e.g. an
+   AUR or manual install) stays `unknown`.
+4. **DMG**: on macOS, the executable runs from an `.app/Contents/MacOS`
+   bundle.
+5. **go install**: the Go toolchain stamped a real module version into the
+   binary's build info while no release version was stamped via ldflags.
+6. Otherwise the channel is **`unknown`**.
+
+Ambiguity always resolves to `unknown`: MCPProxy never guesses a channel,
+because a wrong update command is worse than a generic instruction.
+
+### Update Commands per Channel
+
+| Channel | `update_command` | Guidance shown instead |
+|---------|------------------|------------------------|
+| `homebrew` | `brew upgrade mcpproxy` | — |
+| `deb` | `sudo apt update && sudo apt install --only-upgrade mcpproxy` | — |
+| `rpm` | `sudo dnf upgrade mcpproxy` | — |
+| `go-install` | `go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest` | — |
+| `dmg` | — | Download the latest DMG (release page is deep-linked) |
+| `windows-installer` | — | Download the latest Windows installer |
+| `docker` | — | Pull or rebuild the newer image for your deployment |
+| `tarball` / `unknown` | — | Download the latest release from the releases page |
+
+Every surface always deep-links the release notes for the latest version,
+whether or not a command is available.
 
 ## Updating MCPProxy
 
