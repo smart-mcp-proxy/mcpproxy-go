@@ -64,6 +64,41 @@ func TestStatusVersionSuffix(t *testing.T) {
 			update:   &StatusUpdateInfo{},
 			expected: "",
 		},
+		{
+			// Spec 079 US2 (FR-009): channels with a safe one-line command
+			// surface it right on the Version line.
+			name: "update available with channel command",
+			update: &StatusUpdateInfo{
+				Available:      true,
+				LatestVersion:  "v0.48.0",
+				ReleaseURL:     "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0",
+				InstallChannel: "homebrew",
+				UpdateCommand:  "brew upgrade mcpproxy",
+			},
+			expected: " (update available: v0.48.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0 — Run: brew upgrade mcpproxy)",
+		},
+		{
+			// No-command channel gets the channel-appropriate guidance line
+			// instead of a possibly-wrong command (FR-009).
+			name: "update available with guidance-only channel",
+			update: &StatusUpdateInfo{
+				Available:      true,
+				LatestVersion:  "v0.48.0",
+				ReleaseURL:     "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0",
+				InstallChannel: "dmg",
+			},
+			expected: " (update available: v0.48.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0 — Download the latest DMG from the releases page)",
+		},
+		{
+			// Older daemons omit install_channel: render exactly as before.
+			name: "update available without channel info keeps legacy format",
+			update: &StatusUpdateInfo{
+				Available:     true,
+				LatestVersion: "v0.48.0",
+				ReleaseURL:    "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0",
+			},
+			expected: " (update available: v0.48.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -178,6 +213,28 @@ func TestExtractStatusUpdate(t *testing.T) {
 		}
 		if !u.IsPrerelease {
 			t.Error("expected IsPrerelease=true")
+		}
+	})
+
+	t.Run("install channel and update command parsed", func(t *testing.T) {
+		infoData := map[string]interface{}{
+			"update": map[string]interface{}{
+				"available":       true,
+				"latest_version":  "v0.48.0",
+				"install_channel": "homebrew",
+				"update_command":  "brew upgrade mcpproxy",
+			},
+		}
+
+		u := extractStatusUpdate(infoData)
+		if u == nil {
+			t.Fatal("expected non-nil update info")
+		}
+		if u.InstallChannel != "homebrew" {
+			t.Errorf("expected InstallChannel homebrew, got %q", u.InstallChannel)
+		}
+		if u.UpdateCommand != "brew upgrade mcpproxy" {
+			t.Errorf("expected UpdateCommand, got %q", u.UpdateCommand)
 		}
 	})
 
