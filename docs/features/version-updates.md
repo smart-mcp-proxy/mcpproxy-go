@@ -215,6 +215,15 @@ because a wrong update command is worse than a generic instruction.
 Every surface always deep-links the release notes for the latest version,
 whether or not a command is available.
 
+**Prerelease targets** (the `rc` channel or
+`MCPPROXY_ALLOW_PRERELEASE_UPDATES=true`) are the exception: prereleases are
+published only to the GitHub pre-release channel, so the package-manager
+commands above would not deliver them (`brew`/`apt`/`dnf` serve stable
+artifacts, and Go's `@latest` resolves to the newest stable). When the offered
+version is a prerelease, only `go-install` gets a command — pinned to the
+exact version (`…/cmd/mcpproxy@v0.48.0-rc.1`) — and every other channel falls
+back to the release-page guidance.
+
 ## Updating MCPProxy
 
 ### Homebrew (macOS/Linux)

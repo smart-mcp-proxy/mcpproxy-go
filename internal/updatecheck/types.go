@@ -41,7 +41,9 @@ type VersionInfo struct {
 	// UpdateCommand is the exact one-line update command for InstallChannel.
 	// Only set when UpdateAvailable is true AND the channel has a safe
 	// command (homebrew, deb, rpm, go-install); empty otherwise (Spec 079
-	// FR-009, additive per FR-021).
+	// FR-009, additive per FR-021). When the offered version is a
+	// prerelease, only go-install gets a command (version-pinned) — the
+	// package-manager channels serve stable artifacts only.
 	UpdateCommand string `json:"update_command,omitempty"`
 }
 

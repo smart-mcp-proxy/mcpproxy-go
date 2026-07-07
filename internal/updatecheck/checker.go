@@ -307,9 +307,17 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, g
 	// update_command only accompanies an actual update on channels with a
 	// safe one-line command (Spec 079 FR-009; empty for dmg/windows-installer/
 	// tarball/docker/unknown — surfaces render guidance text instead).
+	// Prerelease targets are special: the package-manager channels only serve
+	// stable artifacts, so their generic commands would not deliver the
+	// advertised rc — only go-install gets a version-pinned command
+	// (PrereleaseUpdateCommand).
 	updateCommand := ""
 	if updateAvailable {
-		updateCommand = UpdateCommand(c.installChannel)
+		if release.Prerelease {
+			updateCommand = PrereleaseUpdateCommand(c.installChannel, latestVersion)
+		} else {
+			updateCommand = UpdateCommand(c.installChannel)
+		}
 	}
 
 	c.versionInfo = &VersionInfo{

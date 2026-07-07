@@ -34,6 +34,40 @@ func TestUpdateCommand_NoCommandChannels(t *testing.T) {
 	}
 }
 
+func TestPrereleaseUpdateCommand(t *testing.T) {
+	// Prereleases live only on the GitHub pre-release channel: the Homebrew
+	// tap and apt/dnf repos serve stable artifacts, and `go install @latest`
+	// resolves to the newest stable. Only go-install can pin the exact
+	// version; every other channel must stay silent (FR-009).
+	t.Run("go-install pins the exact prerelease version", func(t *testing.T) {
+		want := "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@v0.48.0-rc.1"
+		if got := PrereleaseUpdateCommand(ChannelGoInstall, "v0.48.0-rc.1"); got != want {
+			t.Errorf("PrereleaseUpdateCommand(go-install) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("version without v prefix is normalized", func(t *testing.T) {
+		want := "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@v0.48.0-rc.1"
+		if got := PrereleaseUpdateCommand(ChannelGoInstall, "0.48.0-rc.1"); got != want {
+			t.Errorf("PrereleaseUpdateCommand(go-install) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("go-install without a version stays silent", func(t *testing.T) {
+		if got := PrereleaseUpdateCommand(ChannelGoInstall, ""); got != "" {
+			t.Errorf("PrereleaseUpdateCommand(go-install, \"\") = %q, want empty", got)
+		}
+	})
+
+	t.Run("package-manager channels never get a prerelease command", func(t *testing.T) {
+		for _, channel := range []string{ChannelHomebrew, ChannelDeb, ChannelRPM, ChannelDMG, ChannelWindowsInstaller, ChannelTarball, ChannelDocker, ChannelUnknown, ""} {
+			if got := PrereleaseUpdateCommand(channel, "v0.48.0-rc.1"); got != "" {
+				t.Errorf("PrereleaseUpdateCommand(%q) = %q, want empty", channel, got)
+			}
+		}
+	})
+}
+
 func TestGuidanceLine_PerChannel(t *testing.T) {
 	const url = "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0"
 

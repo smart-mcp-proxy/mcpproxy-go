@@ -24,6 +24,21 @@ func UpdateCommand(channel string) string {
 	}
 }
 
+// PrereleaseUpdateCommand returns the one-line update command when the
+// offered release is a prerelease. Prereleases are published only to the
+// GitHub pre-release channel (docs/prerelease-builds.md) — the Homebrew tap
+// and apt/dnf repos serve stable artifacts, and Go's `@latest` module query
+// resolves to the newest stable release — so the generic UpdateCommand
+// output would not deliver the advertised version (FR-009: never emit a
+// command that could be wrong). Only go-install can name the exact version;
+// every other channel returns "" and falls back to guidance/release-URL.
+func PrereleaseUpdateCommand(channel, version string) string {
+	if channel == ChannelGoInstall && version != "" {
+		return "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@" + ensureVPrefix(version)
+	}
+	return ""
+}
+
 // GuidanceLine returns a human-readable guided-update line for channels that
 // have no safe one-line command, deep-linking the release when releaseURL is
 // provided (FR-010). Channels with a real command (see UpdateCommand) return

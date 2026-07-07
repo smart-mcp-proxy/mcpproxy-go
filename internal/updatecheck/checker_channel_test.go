@@ -136,6 +136,42 @@ func TestChecker_PrereleaseOnStableChannelPins(t *testing.T) {
 			t.Errorf("UpdateCommand = %q, want %q", info.UpdateCommand, "brew upgrade mcpproxy")
 		}
 	})
+
+	// Prerelease targets: the package-manager channels only serve stable
+	// artifacts (and `go install @latest` resolves to the newest stable), so
+	// a generic command would not deliver the advertised rc (FR-009).
+	t.Run("prerelease target on homebrew: no command", func(t *testing.T) {
+		checker := New(zap.NewNop(), "v0.47.0")
+		setTestChannel(checker, ChannelHomebrew)
+		checker.SetCheckFunc(func() (*GitHubRelease, error) {
+			return &GitHubRelease{TagName: "v0.48.0-rc.1", HTMLURL: "https://example.com/v0.48.0-rc.1", Prerelease: true}, nil
+		})
+
+		info := checker.CheckNow()
+		if info == nil || !info.UpdateAvailable {
+			t.Fatal("expected update available")
+		}
+		if info.UpdateCommand != "" {
+			t.Errorf("UpdateCommand = %q, want empty for a prerelease target (brew serves stable only)", info.UpdateCommand)
+		}
+	})
+
+	t.Run("prerelease target on go-install: version-pinned command", func(t *testing.T) {
+		checker := New(zap.NewNop(), "v0.47.0")
+		setTestChannel(checker, ChannelGoInstall)
+		checker.SetCheckFunc(func() (*GitHubRelease, error) {
+			return &GitHubRelease{TagName: "v0.48.0-rc.1", HTMLURL: "https://example.com/v0.48.0-rc.1", Prerelease: true}, nil
+		})
+
+		info := checker.CheckNow()
+		if info == nil || !info.UpdateAvailable {
+			t.Fatal("expected update available")
+		}
+		want := "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@v0.48.0-rc.1"
+		if info.UpdateCommand != want {
+			t.Errorf("UpdateCommand = %q, want %q (pinned, @latest would resolve to stable)", info.UpdateCommand, want)
+		}
+	})
 }
 
 // FR-021 contract: adding install_channel/update_command must not remove or

@@ -41,6 +41,16 @@
           <span v-else class="text-success">Copied</span>
         </button>
       </div>
+      <!-- Guidance fallback for channels that intentionally have no safe
+           command (dmg/windows-installer/docker/tarball/unknown), mirroring
+           internal/updatecheck.GuidanceLine so the Web UI matches the status/
+           doctor surfaces (FR-009/FR-010). The Release notes link above is
+           the deep link, so the text references it generically. -->
+      <div
+        v-else-if="guidance"
+        class="mt-2 text-sm"
+        data-test="update-banner-guidance"
+      >{{ guidance }}</div>
     </div>
     <button
       class="btn btn-sm btn-ghost btn-square"
@@ -87,6 +97,30 @@ const releaseUrl = computed(() => systemStore.info?.update?.release_url ?? '')
 // Spec 079 US2: channel-aware one-line update command (empty when the
 // detected channel has no safe command, FR-009).
 const updateCommand = computed(() => systemStore.updateCommand)
+const installChannel = computed(() => systemStore.installChannel)
+
+// Guidance for no-command channels — mirrors internal/updatecheck.GuidanceLine
+// (keep the two in sync). Channels with a real command return '' so the
+// banner never renders both; '' (older daemon) renders nothing.
+const guidance = computed(() => {
+  if (updateCommand.value) return ''
+  switch (installChannel.value) {
+    case 'dmg':
+      return 'Download the latest DMG from the releases page.'
+    case 'windows-installer':
+      return 'Download the latest Windows installer from the releases page.'
+    case 'docker':
+      return 'Pull or rebuild the newer image for your deployment.'
+    case 'homebrew':
+    case 'deb':
+    case 'rpm':
+    case 'go-install':
+    case '':
+      return ''
+    default: // tarball, unknown, anything unrecognized
+      return 'Download the latest release from the releases page.'
+  }
+})
 
 const copied = ref(false)
 let copiedTimer: ReturnType<typeof setTimeout> | undefined
