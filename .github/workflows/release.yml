@@ -1055,8 +1055,21 @@ jobs:
             ghcr.io/smart-mcp-proxy/mcpproxy-server:${{ github.ref_name }}
             ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
 
+  # Spec 081: release qualification gate. Runs the server-type matrix +
+  # invariants + assembled suites and produces one pass/fail verdict. The
+  # `release` job (and therefore every public-facing job that cascades from it)
+  # depends on this, so a red gate publishes nothing (FR-002). Guarded to the
+  # same stable-only condition as `release` so the expensive gate does not also
+  # run on RC tags here — prerelease.yml owns the RC gate. If the gate is
+  # skipped (non-stable ref), `release` is skipped too (never un-gated).
+  qa-gate:
+    uses: ./.github/workflows/release-qa-gate.yml
+    permissions:
+      contents: read
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+
   release:
-    needs: [build, sign-windows, generate-notes]  # add build-docker when server MVP is ready
+    needs: [build, sign-windows, generate-notes, qa-gate]  # add build-docker when server MVP is ready
     runs-on: ubuntu-latest
     environment: production
     # Explicit guard (belt-and-suspenders on top of the cascade from needs:) — RC tags

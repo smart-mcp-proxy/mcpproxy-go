@@ -1,0 +1,419 @@
+name: Release QA Gate
+
+# Spec 081 T1 — Release Qualification Gate.
+#
+# One reusable workflow that assembles the existing suites (test-api-e2e.sh,
+# go race tests, scan-eval --gate) with the new server-type matrix
+# (stdio/http/sse/docker/oauth: connect, list, call, reconnect) and the US2
+# invariant checks (activity-log request-id correlation, counter deltas,
+# quarantine end-to-end, upgrade-in-place). It produces ONE machine-readable
+# verdict (gate-report.json) via internal/gatereport; the `verdict` job exits
+# per that verdict so a caller (`release.yml` / `prerelease.yml`) that lists
+# this workflow in a publish job's `needs:` publishes nothing on a red gate
+# (FR-001, FR-002, FR-004).
+#
+# Triggered as a reusable workflow (workflow_call) by the publishers, or
+# manually against any ref (workflow_dispatch — a dry run that publishes
+# nothing and never counts as qualification for a later tag, FR-001a).
+#
+# T2/T3/T4 extension slots (reserved manifest entries, recorded as
+# not-run/"not-implemented-yet" until their stage lands):
+#   reserved/web-ui-sweep        — T2 Playwright sweep against the candidate
+#   reserved/macos-smoke         — T3 macOS tray smoke (advisory, FR-019/020)
+#   reserved/surface-consistency — T4 REST/CLI/Web-UI/tray state agreement
+# See docs/development/release-gate.md.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Ref to qualify (defaults to the caller's triggering commit)"
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to qualify (dry run — publishes nothing, FR-001a)"
+        required: false
+        type: string
+  # TEMP: remove before merge — gives the 081-release-qa-gate-t1 branch real CI
+  # so the gate wiring is exercised end-to-end on push. The gate is meant to run
+  # only via workflow_call (publishers) and workflow_dispatch (dry run).
+  push:
+    branches: [081-release-qa-gate-t1]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+  NODE_VERSION: "22"
+  # Shared report directory: every job writes its fragment here and uploads it;
+  # the verdict job merges them against the hardcoded gatereport manifest.
+  GATE_REPORT_DIR: gate-report
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build the candidate binaries ONCE (frontend build + embed + go build) and
+  # share them with the suite/matrix jobs (reuses e2e-tests.yml's build-once,
+  # download-everywhere artifact pattern). The candidate `mcpproxy` is the
+  # release-representative headless core (embedded frontend, version stamped so
+  # it never self-reports "development").
+  # ---------------------------------------------------------------------------
+  build-candidate:
+    name: Build candidate binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: cd frontend && npm ci && npm run build
+
+      - name: Copy frontend dist to embed location
+        shell: bash
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend/dist
+          cp -r frontend/dist/. web/frontend/dist/
+          # Recreate the tracked .gitkeep so //go:embed all:frontend/dist always
+          # has something to embed (matches release.yml / the Makefile target).
+          touch web/frontend/dist/.gitkeep
+
+      - name: Build candidate + fixtures + gate driver
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.ref || github.ref_name }}"
+          # -X paths must use the full module path or the ldflag is silently
+          # ignored and the binary self-reports "development" (see v0.47.0 QA).
+          LDFLAGS="-s -w -X main.version=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
+          mkdir -p dist-bin
+          # Candidate headless core (nogui matches the E2E build; no tray deps).
+          go build -tags nogui -ldflags "${LDFLAGS}" -o dist-bin/mcpproxy       ./cmd/mcpproxy
+          go build                                    -o dist-bin/mcpfixture    ./cmd/mcpfixture
+          go build                                    -o dist-bin/oauthserver   ./tests/oauthserver/cmd/server
+          go build                                    -o dist-bin/release-gate  ./cmd/release-gate
+          ./dist-bin/mcpproxy --version || true
+          ls -la dist-bin
+
+      - name: Upload candidate artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gate-candidate
+          path: dist-bin/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # FR-003 suite: REST API E2E via the UNMODIFIED scripts/test-api-e2e.sh.
+  # ---------------------------------------------------------------------------
+  suite-api-e2e:
+    name: Suite — API E2E
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Set up Node.js  # test-api-e2e.sh launches npx-based fixtures
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Ensure jq is present
+        run: jq --version
+
+      - name: Download candidate binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: gate-candidate
+          path: dist-bin
+
+      - name: Stage binaries
+        run: |
+          chmod +x dist-bin/*
+          # test-api-e2e.sh expects the built core at ./mcpproxy (unmodified).
+          cp dist-bin/mcpproxy ./mcpproxy
+
+      - name: Run API E2E suite
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name suite/api-e2e --report-dir "${GATE_REPORT_DIR}" \
+            -- bash scripts/test-api-e2e.sh
+
+      - name: Upload report fragment
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gate-fragment-api-e2e
+          path: ${{ env.GATE_REPORT_DIR }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # FR-003 suite: race tests — personal (internal/...) + server edition.
+  # NOTE: FR-003 pins the full non-short entry points. If the full race suite
+  # empirically exceeds this job's budget on standard runners, fall back to
+  # `go test -short -race ...` HERE and note the FR-003 deviation loudly — the
+  # heavy property/timing tests still run unguarded in e2e-tests.yml's
+  # stress-tests job, so coverage is preserved.
+  # ---------------------------------------------------------------------------
+  suite-race:
+    name: Suite — race (personal + server)
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download gate driver
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: gate-candidate
+          path: dist-bin
+
+      - name: Stage gate driver
+        run: chmod +x dist-bin/*
+
+      - name: Race — personal (internal/...)
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name suite/unit-race --report-dir "${GATE_REPORT_DIR}" \
+            -- go test -race ./internal/...
+
+      - name: Race — server edition
+        if: always()  # always run so its fragment lands even if the personal suite failed
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name suite/server-race --report-dir "${GATE_REPORT_DIR}" \
+            -- go test -tags server -race ./internal/serveredition/...
+
+      - name: Upload report fragment
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gate-fragment-race
+          path: ${{ env.GATE_REPORT_DIR }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # FR-003 + FR-015 suite: scanner eval gate — runs UNCONDITIONALLY on the tag
+  # commit (independent of which paths the release changed). The eval.yml D2 job
+  # is path-filtered; this re-runs the exact same offline gate so the
+  # recall >= 0.90 / FP <= 0.05 guarantee holds for every shipped release.
+  # (The bare entry point in FR-003 omits the required --corpus flag; the full
+  # invocation below matches eval.yml so the gate actually runs.)
+  # ---------------------------------------------------------------------------
+  suite-scan-eval:
+    name: Suite — scan-eval gate
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download gate driver
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: gate-candidate
+          path: dist-bin
+
+      - name: Stage gate driver
+        run: chmod +x dist-bin/*
+
+      - name: Run scan-eval gate
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name suite/scan-eval --report-dir "${GATE_REPORT_DIR}" \
+            -- go run ./cmd/scan-eval \
+                 --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
+                 --gate --min-recall 0.90 --max-fp 0.05
+
+      - name: Upload report fragment
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gate-fragment-scan-eval
+          path: ${{ env.GATE_REPORT_DIR }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # US1 + US2: server-type matrix (stdio/http/sse/docker/oauth) + invariants.
+  # matrix leaves the candidate core running (state-file) so invariants can
+  # attach to the SAME live instance and assert over the matrix traffic; both
+  # driver invocations therefore run in ONE shell step so the backgrounded core
+  # survives between them. The upgrade-in-place check downloads the previous
+  # released binary from GitHub (needs network + GITHUB_TOKEN for API limits).
+  # ---------------------------------------------------------------------------
+  matrix-invariants:
+    name: Matrix + invariants
+    needs: build-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go  # build-fixture-image.sh builds the static fixture binary
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download candidate binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: gate-candidate
+          path: dist-bin
+
+      - name: Stage binaries
+        run: chmod +x dist-bin/*
+
+      - name: Docker preflight  # FR-009: the docker cell must fail (not skip) without Docker
+        run: |
+          docker version
+          docker info
+
+      - name: Build fixture Docker image (FR-006/FR-009)
+        run: scripts/gate/build-fixture-image.sh
+
+      - name: Run matrix + invariants
+        env:
+          # Auth the upgrade-in-place check's GitHub API lookup (FR-014).
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          WORK="${RUNNER_TEMP}/gate-work"
+          mkdir -p "$WORK" "${GATE_REPORT_DIR}"
+          # Matrix leaves the core running; --state-file lives OUTSIDE the report
+          # dir so the merger never mistakes it for a report fragment.
+          ./dist-bin/release-gate matrix \
+            --binary ./dist-bin/mcpproxy \
+            --fixture ./dist-bin/mcpfixture \
+            --oauth-server ./dist-bin/oauthserver \
+            --report-dir "${GATE_REPORT_DIR}" \
+            --state-file "${WORK}/gate-state.json" \
+            --work-dir "$WORK"
+          MATRIX_RC=$?
+          echo "matrix exit=${MATRIX_RC}"
+          # Attach to the live core; run invariants + upgrade-in-place.
+          ./dist-bin/release-gate invariants \
+            --state-file "${WORK}/gate-state.json" \
+            --report-dir "${GATE_REPORT_DIR}"
+          INV_RC=$?
+          echo "invariants exit=${INV_RC}"
+          # Surface a red job when either failed; fragments (written regardless)
+          # feed the verdict job, which is the source of truth.
+          if [ "${MATRIX_RC}" -ne 0 ] || [ "${INV_RC}" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload report fragment
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gate-fragment-matrix-invariants
+          path: ${{ env.GATE_REPORT_DIR }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Merge every fragment against the hardcoded gatereport manifest → one
+  # verdict. Runs even if upstream jobs failed (if: always()) so a missing
+  # blocking fragment is recorded as a FAIL (FR-004, fail-closed) rather than
+  # letting the reusable workflow conclude green. This job's exit code IS the
+  # gate verdict the publishers depend on.
+  # ---------------------------------------------------------------------------
+  verdict:
+    name: Gate verdict
+    needs: [build-candidate, suite-api-e2e, suite-race, suite-scan-eval, matrix-invariants]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download gate driver
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: gate-candidate
+          path: dist-bin
+        continue-on-error: true  # if build-candidate failed there is no driver
+
+      - name: Download all report fragments
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: gate-fragment-*
+          path: ${{ env.GATE_REPORT_DIR }}
+          merge-multiple: true
+        continue-on-error: true  # no fragments → merger fails every blocking entry
+
+      - name: Merge fragments and compute verdict
+        run: |
+          set -euo pipefail
+          mkdir -p "${GATE_REPORT_DIR}"
+          if [ ! -x dist-bin/release-gate ]; then
+            echo "::error::candidate build failed — no gate driver; the gate cannot qualify this ref"
+            exit 1
+          fi
+          chmod +x dist-bin/release-gate
+          ./dist-bin/release-gate report \
+            --report-dir "${GATE_REPORT_DIR}" \
+            --out "${GATE_REPORT_DIR}/gate-report.json"
+
+      - name: Upload gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: gate-report
+          path: ${{ env.GATE_REPORT_DIR }}/gate-report.json
+          retention-days: 14
+          if-no-files-found: warn
