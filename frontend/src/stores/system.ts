@@ -70,6 +70,10 @@ export const useSystemStore = defineStore('system', () => {
   const version = computed(() => info.value?.version ?? '')
   const updateAvailable = computed(() => info.value?.update?.available ?? false)
   const latestVersion = computed(() => info.value?.update?.latest_version ?? '')
+  // Spec 079 US2: detected install channel + channel-aware one-line update
+  // command (empty when the channel has no safe command, FR-009).
+  const installChannel = computed(() => info.value?.update?.install_channel ?? '')
+  const updateCommand = computed(() => info.value?.update?.update_command ?? '')
 
   // Routing mode
   const routingMode = computed(() => routing.value?.routing_mode ?? status.value?.routing_mode ?? 'retrieve_tools')
@@ -485,6 +489,8 @@ export const useSystemStore = defineStore('system', () => {
     version,
     updateAvailable,
     latestVersion,
+    installChannel,
+    updateCommand,
     routingMode,
     sidebarCollapsed,
 

@@ -21,6 +21,26 @@
         class="link link-hover underline"
         data-test="update-banner-release-link"
       >Release notes</a>
+      <!-- Spec 079 US2 (FR-009): the exact one-line command for the detected
+           install channel, copyable. Absent for channels without a safe
+           command (dmg/windows-installer/tarball/docker/unknown). -->
+      <div v-if="updateCommand" class="mt-2 flex items-center gap-2">
+        <code
+          class="rounded bg-base-200 px-2 py-1 font-mono text-sm text-base-content"
+          data-test="update-banner-command"
+        >{{ updateCommand }}</code>
+        <button
+          class="btn btn-xs btn-ghost"
+          :aria-label="copied ? 'Copied' : 'Copy update command'"
+          data-test="update-banner-copy"
+          @click="copyCommand"
+        >
+          <svg v-if="!copied" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+          <span v-else class="text-success">Copied</span>
+        </button>
+      </div>
     </div>
     <button
       class="btn btn-sm btn-ghost btn-square"
@@ -64,6 +84,26 @@ const dismissedVersion = ref(readDismissedVersion())
 const latestVersion = computed(() => systemStore.latestVersion)
 const currentVersion = computed(() => systemStore.version)
 const releaseUrl = computed(() => systemStore.info?.update?.release_url ?? '')
+// Spec 079 US2: channel-aware one-line update command (empty when the
+// detected channel has no safe command, FR-009).
+const updateCommand = computed(() => systemStore.updateCommand)
+
+const copied = ref(false)
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
+
+async function copyCommand() {
+  try {
+    await navigator.clipboard.writeText(updateCommand.value)
+    copied.value = true
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => {
+      copied.value = false
+    }, 2000)
+  } catch {
+    // Clipboard unavailable (insecure context / permissions) — the command
+    // stays visible for manual selection; no error surface needed (FR-006).
+  }
+}
 
 const visible = computed(
   () =>
