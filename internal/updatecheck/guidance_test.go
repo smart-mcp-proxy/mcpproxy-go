@@ -138,12 +138,16 @@ func TestGuidanceLine_PerChannel(t *testing.T) {
 	}
 }
 
-func TestGuidanceLine_EmptyForCommandChannels(t *testing.T) {
-	// Channels with a real one-line command surface that command instead;
-	// GuidanceLine stays empty so callers do not render both.
+func TestGuidanceLine_CommandChannelsFallBackToGenericLine(t *testing.T) {
+	// Callers only invoke GuidanceLine when no update_command accompanies the
+	// update. For the command channels that happens exactly when the offered
+	// version is a prerelease (their package managers serve stable artifacts
+	// only, so the command was suppressed) — they must fall back to the
+	// generic release-page line, not to silence.
 	for _, channel := range []string{ChannelHomebrew, ChannelDeb, ChannelRPM, ChannelGoInstall} {
-		if got := GuidanceLine(channel, "https://example.com"); got != "" {
-			t.Errorf("GuidanceLine(%q) = %q, want empty (channel has a command)", channel, got)
+		got := GuidanceLine(channel, "https://example.com/v0.48.0-rc.1")
+		if !strings.Contains(got, "latest release") || !strings.Contains(got, "https://example.com/v0.48.0-rc.1") {
+			t.Errorf("GuidanceLine(%q) = %q, want the generic release-page line", channel, got)
 		}
 	}
 }

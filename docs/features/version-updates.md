@@ -194,6 +194,9 @@ in decreasing confidence order:
    writes that directory).
 5. **go install**: the Go toolchain stamped a real module version into the
    binary's build info while no release version was stamped via ldflags.
+   For this channel the checker also adopts that module version as its
+   current version (the ldflags default would read "development" and
+   disable update checks entirely).
 6. Otherwise the channel is **`unknown`**.
 
 Ambiguity always resolves to `unknown`: MCPProxy never guesses a channel,

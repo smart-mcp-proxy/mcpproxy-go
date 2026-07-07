@@ -318,6 +318,53 @@ func TestDetectChannel_GoInstall(t *testing.T) {
 	})
 }
 
+func TestPromoteGoInstallVersion(t *testing.T) {
+	buildInfo := func(mainVersion string) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			bi := &debug.BuildInfo{}
+			bi.Main.Version = mainVersion
+			return bi, true
+		}
+	}
+
+	t.Run("go-install promotes tagged module version", func(t *testing.T) {
+		// Without the promotion, c.version stays "development" and
+		// Start/CheckNow skip checks — the go-install channel would never
+		// see update info at all.
+		got := promoteGoInstallVersion("development", ChannelGoInstall, buildInfo("v0.47.0"))
+		if got != "v0.47.0" {
+			t.Errorf("promoteGoInstallVersion() = %q, want %q", got, "v0.47.0")
+		}
+	})
+
+	t.Run("go-install promotes pseudo-version", func(t *testing.T) {
+		pseudo := "v0.47.1-0.20260701123456-abcdef123456"
+		got := promoteGoInstallVersion("development", ChannelGoInstall, buildInfo(pseudo))
+		if got != pseudo {
+			t.Errorf("promoteGoInstallVersion() = %q, want %q", got, pseudo)
+		}
+	})
+
+	t.Run("other channels keep the ldflags version", func(t *testing.T) {
+		got := promoteGoInstallVersion("v0.47.0", ChannelHomebrew, buildInfo("v0.46.0"))
+		if got != "v0.47.0" {
+			t.Errorf("promoteGoInstallVersion() = %q, want %q", got, "v0.47.0")
+		}
+	})
+
+	t.Run("unusable build info keeps the original version", func(t *testing.T) {
+		for name, rbi := range map[string]func() (*debug.BuildInfo, bool){
+			"no build info": func() (*debug.BuildInfo, bool) { return nil, false },
+			"devel version": buildInfo("(devel)"),
+			"empty version": buildInfo(""),
+		} {
+			if got := promoteGoInstallVersion("development", ChannelGoInstall, rbi); got != "development" {
+				t.Errorf("%s: promoteGoInstallVersion() = %q, want %q", name, got, "development")
+			}
+		}
+	})
+}
+
 func TestDetectChannel_ExecPathErrorFallsThrough(t *testing.T) {
 	d := testDetector()
 	d.execPath = func() (string, error) { return "", errors.New("no exec path") }

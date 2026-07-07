@@ -39,10 +39,15 @@ func PrereleaseUpdateCommand(channel, version string) string {
 	return ""
 }
 
-// GuidanceLine returns a human-readable guided-update line for channels that
-// have no safe one-line command, deep-linking the release when releaseURL is
-// provided (FR-010). Channels with a real command (see UpdateCommand) return
-// "" so callers never render both.
+// GuidanceLine returns a human-readable guided-update line for updates that
+// carry no safe one-line command, deep-linking the release when releaseURL is
+// provided (FR-010). Callers must only invoke it when no update_command
+// accompanies the update (all callers gate on that), so it never renders next
+// to a command. The command channels (homebrew, deb, rpm, go-install) still
+// reach this function when the offered version is a prerelease — their
+// package managers serve stable artifacts only, so the command was suppressed
+// (see PrereleaseUpdateCommand) — and get the generic release-page line
+// rather than nothing.
 func GuidanceLine(channel, releaseURL string) string {
 	target := "the releases page"
 	if releaseURL != "" {
@@ -59,9 +64,7 @@ func GuidanceLine(channel, releaseURL string) string {
 		// can be named — the user owns the image reference in their
 		// deployment.
 		return fmt.Sprintf("Pull or rebuild the newer image for your deployment (see %s)", target)
-	case ChannelHomebrew, ChannelDeb, ChannelRPM, ChannelGoInstall:
-		return ""
-	default: // tarball, unknown, anything unrecognized
+	default: // tarball, unknown, prerelease-suppressed command channels, anything unrecognized
 		return fmt.Sprintf("Download the latest release from %s", target)
 	}
 }

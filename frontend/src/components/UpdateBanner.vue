@@ -99,9 +99,11 @@ const releaseUrl = computed(() => systemStore.info?.update?.release_url ?? '')
 const updateCommand = computed(() => systemStore.updateCommand)
 const installChannel = computed(() => systemStore.installChannel)
 
-// Guidance for no-command channels — mirrors internal/updatecheck.GuidanceLine
-// (keep the two in sync). Channels with a real command return '' so the
-// banner never renders both; '' (older daemon) renders nothing.
+// Guidance for updates without a safe command — mirrors
+// internal/updatecheck.GuidanceLine (keep the two in sync). Rendered only
+// when no update_command was provided; command channels reach the default
+// branch when the offered version is a prerelease (their command was
+// suppressed backend-side). '' (older daemon) renders nothing.
 const guidance = computed(() => {
   if (updateCommand.value) return ''
   switch (installChannel.value) {
@@ -111,13 +113,9 @@ const guidance = computed(() => {
       return 'Download the latest Windows installer from the releases page.'
     case 'docker':
       return 'Pull or rebuild the newer image for your deployment.'
-    case 'homebrew':
-    case 'deb':
-    case 'rpm':
-    case 'go-install':
     case '':
       return ''
-    default: // tarball, unknown, anything unrecognized
+    default: // tarball, unknown, prerelease-suppressed command channels, …
       return 'Download the latest release from the releases page.'
   }
 })

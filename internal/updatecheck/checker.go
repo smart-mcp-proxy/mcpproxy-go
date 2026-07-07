@@ -3,6 +3,7 @@ package updatecheck
 import (
 	"context"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -69,6 +70,10 @@ func New(logger *zap.Logger, version string) *Checker {
 	githubClient := NewGitHubClient(logger)
 
 	installChannel := DetectChannel(version)
+	// go-install builds carry no ldflags version; promote the build-info
+	// module version so isValidSemver does not disable checks for them
+	// (see promoteGoInstallVersion).
+	version = promoteGoInstallVersion(version, installChannel, debug.ReadBuildInfo)
 
 	c := &Checker{
 		logger:         logger,

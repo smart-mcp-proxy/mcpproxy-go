@@ -90,6 +90,19 @@ func TestStatusVersionSuffix(t *testing.T) {
 			expected: " (update available: v0.48.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0 — Download the latest DMG from the releases page)",
 		},
 		{
+			// A prerelease target on a command channel: the daemon suppresses
+			// the command (package managers serve stable only), and the
+			// generic release-page guidance renders instead of nothing.
+			name: "prerelease-suppressed command channel falls back to guidance",
+			update: &StatusUpdateInfo{
+				Available:      true,
+				LatestVersion:  "v0.48.0-rc.1",
+				ReleaseURL:     "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0-rc.1",
+				InstallChannel: "homebrew",
+			},
+			expected: " (update available: v0.48.0-rc.1 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v0.48.0-rc.1 — Download the latest release from the releases page)",
+		},
+		{
 			// Older daemons omit install_channel: render exactly as before.
 			name: "update available without channel info keeps legacy format",
 			update: &StatusUpdateInfo{

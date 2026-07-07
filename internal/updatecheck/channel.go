@@ -220,6 +220,30 @@ func (d *channelDetector) resolvedExecPath() string {
 	return path
 }
 
+// promoteGoInstallVersion returns the module version recorded in build info
+// for go-install builds. Their ldflags version is the non-semver
+// "development" default (nothing stamps -X for `go install`), which would
+// make Start/CheckNow treat the binary as a dev build and skip update checks
+// entirely — the go-install channel command would be unreachable. The Go
+// toolchain records the exact module version (tagged or pseudo-version, both
+// valid semver) in build info; promote it so go-install users get real
+// checks. For every other channel, or when build info is unusable, the
+// original version is returned unchanged.
+func promoteGoInstallVersion(version, channel string, readBuildInfo func() (*debug.BuildInfo, bool)) string {
+	if channel != ChannelGoInstall {
+		return version
+	}
+	bi, ok := readBuildInfo()
+	if !ok || bi == nil {
+		return version
+	}
+	v := bi.Main.Version
+	if v == "" || v == "(devel)" || !semver.IsValid(v) {
+		return version
+	}
+	return v
+}
+
 func (d *channelDetector) isGoInstall() bool {
 	// A stamped ldflags version means a packaged build, not `go install`.
 	if semver.IsValid(ensureVPrefix(d.ldflagsVersion)) {
