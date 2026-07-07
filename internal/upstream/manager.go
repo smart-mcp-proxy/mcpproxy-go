@@ -1526,6 +1526,7 @@ func (m *Manager) GetStats() map[string]interface{} {
 	// Now process clients without holding lock to avoid deadlock
 	connectedCount := 0
 	connectingCount := 0
+	quarantinedCount := 0
 	serverStatus := make(map[string]interface{})
 
 	for id, client := range clientsCopy {
@@ -1542,6 +1543,9 @@ func (m *Manager) GetStats() map[string]interface{} {
 		name, url, protocol := "", "", ""
 		if cfg := client.GetConfig(); cfg != nil {
 			name, url, protocol = cfg.Name, cfg.URL, cfg.Protocol
+			if cfg.Quarantined {
+				quarantinedCount++
+			}
 		}
 
 		status := map[string]interface{}{
@@ -1595,11 +1599,12 @@ func (m *Manager) GetStats() map[string]interface{} {
 	totalTools := m.GetTotalToolCount()
 
 	return map[string]interface{}{
-		"connected_servers":  connectedCount,
-		"connecting_servers": connectingCount,
-		"total_servers":      totalCount,
-		"servers":            serverStatus,
-		"total_tools":        totalTools,
+		"connected_servers":   connectedCount,
+		"connecting_servers":  connectingCount,
+		"quarantined_servers": quarantinedCount,
+		"total_servers":       totalCount,
+		"servers":             serverStatus,
+		"total_tools":         totalTools,
 	}
 }
 
