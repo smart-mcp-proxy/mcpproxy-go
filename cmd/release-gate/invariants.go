@@ -203,9 +203,11 @@ func takeCounterSnapshot(ctx context.Context, c *Client) (*counterSnapshot, erro
 //   - /api/v1/telemetry/payload: pinned to builtin_tool_calls only — pure
 //     in-process counters that move with call_tool_*/retrieve_tools traffic
 //     regardless of whether heartbeat SENDING is enabled. Network-dependent
-//     fields are deliberately excluded. If the telemetry service itself is
-//     unavailable (503) at both snapshots, that sub-check is recorded as
-//     skipped with a reason (FR-004) rather than asserted.
+//     fields are deliberately excluded. If the telemetry service is unavailable
+//     (503) at the boot baseline, that sub-check is recorded as skipped with a
+//     reason (FR-004 environment skip). If it is healthy at the baseline but
+//     disappears under matrix traffic, that is a regression and the sub-check
+//     FAILS rather than being masked as a skip.
 func checkCountersMoved(ctx context.Context, c *Client, before *counterSnapshot, timeout time.Duration) ([]gatereport.Step, *counterSnapshot, error) {
 	if before == nil {
 		return nil, nil, fmt.Errorf("no baseline counter snapshot recorded by the matrix run")
@@ -218,9 +220,15 @@ func checkCountersMoved(ctx context.Context, c *Client, before *counterSnapshot,
 		if err != nil {
 			return nil, nil, err
 		}
+		// The telemetry sub-check only skips when telemetry was unavailable at
+		// the baseline (no reference point). If it was available at baseline we
+		// must wait for it to actually move — a mid-run disappearance is a
+		// regression, not a reason to stop polling early.
+		telemetryMoved := !before.TelemetryAvailable ||
+			(after.TelemetryAvailable && after.TelemetryBuiltin > before.TelemetryBuiltin)
 		moved := after.TokensToolListSize > before.TokensToolListSize &&
 			after.UsageCalls > before.UsageCalls &&
-			(!before.TelemetryAvailable || !after.TelemetryAvailable || after.TelemetryBuiltin > before.TelemetryBuiltin)
+			telemetryMoved
 		if moved || time.Now().After(deadline) {
 			break
 		}
@@ -250,16 +258,25 @@ func checkCountersMoved(ctx context.Context, c *Client, before *counterSnapshot,
 		fmt.Sprintf("usage call total %d -> %d", before.UsageCalls, after.UsageCalls))
 
 	switch {
-	case before.TelemetryAvailable && after.TelemetryAvailable:
+	case !before.TelemetryAvailable:
+		// Telemetry was already unavailable at the boot baseline: this
+		// environment has telemetry disabled, so there is nothing to assert
+		// (FR-004 environment skip).
+		steps = append(steps, gatereport.Step{
+			Name:   "telemetry-builtin-tool-calls-increase",
+			Status: gatereport.StatusSkipped,
+			Reason: "telemetry payload unavailable (503) at baseline — telemetry service disabled in this environment; counter not asserted",
+		})
+	case after.TelemetryAvailable:
 		addStep("telemetry-builtin-tool-calls-increase",
 			after.TelemetryBuiltin > before.TelemetryBuiltin,
 			fmt.Sprintf("builtin_tool_calls total %d -> %d", before.TelemetryBuiltin, after.TelemetryBuiltin))
 	default:
-		steps = append(steps, gatereport.Step{
-			Name:   "telemetry-builtin-tool-calls-increase",
-			Status: gatereport.StatusSkipped,
-			Reason: "telemetry payload unavailable (503) — telemetry service disabled in this environment; counter not asserted",
-		})
+		// Telemetry was healthy at the baseline but the endpoint went
+		// unavailable (503) under matrix traffic — a real regression, not an
+		// environment skip. Fail rather than mask it.
+		addStep("telemetry-builtin-tool-calls-increase", false,
+			fmt.Sprintf("telemetry payload became unavailable after a healthy baseline (builtin_tool_calls baseline %d) — endpoint regressed under matrix traffic", before.TelemetryBuiltin))
 	}
 
 	if len(failures) > 0 {

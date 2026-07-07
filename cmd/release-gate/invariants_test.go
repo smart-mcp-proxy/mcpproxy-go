@@ -246,6 +246,44 @@ func TestCheckCountersMoved_TelemetryUnavailable_SkippedNotFailed(t *testing.T) 
 	}
 }
 
+func TestCheckCountersMoved_TelemetryRegressesAfterHealthyBaseline_Fails(t *testing.T) {
+	// Telemetry is healthy at the boot baseline but goes 503 under matrix
+	// traffic. That is a regression, not an environment skip — the sub-check
+	// must FAIL rather than be masked as skipped.
+	fake := &countersFake{toolList: 0, calls: 0, builtin: 3, telemetry: 0}
+	c := fake.client(t)
+	before, err := takeCounterSnapshot(context.Background(), c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !before.TelemetryAvailable {
+		t.Fatal("fake telemetry should be available at baseline")
+	}
+	fake.mu.Lock()
+	fake.toolList, fake.calls = 100, 5
+	fake.telemetry = http.StatusServiceUnavailable
+	fake.mu.Unlock()
+
+	steps, _, err := checkCountersMoved(context.Background(), c, before, 0)
+	if err == nil || !strings.Contains(err.Error(), "flat counters") {
+		t.Fatalf("expected failure when telemetry disappears after a healthy baseline, got %v", err)
+	}
+	var telemetryFailed bool
+	for _, s := range steps {
+		if s.Name == "telemetry-builtin-tool-calls-increase" {
+			if s.Status == gatereport.StatusSkipped {
+				t.Errorf("telemetry regression must not be skipped: %+v", s)
+			}
+			if s.Status == gatereport.StatusFail {
+				telemetryFailed = true
+			}
+		}
+	}
+	if !telemetryFailed {
+		t.Errorf("telemetry sub-check must be recorded as failed, steps=%+v", steps)
+	}
+}
+
 // ============================================================================
 // FR-013 negative: a pre-approved (never-quarantined) server fails the
 // quarantine invariant.
