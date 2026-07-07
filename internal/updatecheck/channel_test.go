@@ -18,6 +18,7 @@ func testDetector() *channelDetector {
 		evalSymlinks:   func(p string) (string, error) { return p, nil },
 		statFile:       func(string) error { return os.ErrNotExist },
 		readBuildInfo:  func() (*debug.BuildInfo, bool) { return nil, false },
+		rpmOwnsBinary:  func() bool { return false },
 	}
 }
 
@@ -134,7 +135,7 @@ func TestDetectChannel_DebRequiresBothSignals(t *testing.T) {
 }
 
 func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
-	t.Run("path + rpmdb.sqlite -> rpm", func(t *testing.T) {
+	t.Run("path + rpmdb.sqlite + rpm ownership -> rpm", func(t *testing.T) {
 		d := testDetector()
 		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
 		d.statFile = func(p string) error {
@@ -143,12 +144,13 @@ func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
 			}
 			return os.ErrNotExist
 		}
+		d.rpmOwnsBinary = func() bool { return true }
 		if got := d.detect(); got != ChannelRPM {
 			t.Errorf("detect() = %q, want %q", got, ChannelRPM)
 		}
 	})
 
-	t.Run("path + legacy Packages db -> rpm", func(t *testing.T) {
+	t.Run("path + legacy Packages db + rpm ownership -> rpm", func(t *testing.T) {
 		d := testDetector()
 		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
 		d.statFile = func(p string) error {
@@ -157,8 +159,27 @@ func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
 			}
 			return os.ErrNotExist
 		}
+		d.rpmOwnsBinary = func() bool { return true }
 		if got := d.detect(); got != ChannelRPM {
 			t.Errorf("detect() = %q, want %q", got, ChannelRPM)
+		}
+	})
+
+	t.Run("rpm db present but package does not own the binary -> unknown", func(t *testing.T) {
+		// Manual tarball copy to /usr/bin/mcpproxy on Fedora: the host RPM
+		// database exists, but `rpm -qf` disowns the file. Suggesting
+		// `dnf upgrade mcpproxy` here would be wrong (FR-009).
+		d := testDetector()
+		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
+		d.statFile = func(p string) error {
+			if p == "/var/lib/rpm/rpmdb.sqlite" {
+				return nil
+			}
+			return os.ErrNotExist
+		}
+		d.rpmOwnsBinary = func() bool { return false }
+		if got := d.detect(); got != ChannelUnknown {
+			t.Errorf("detect() = %q, want %q", got, ChannelUnknown)
 		}
 	})
 
@@ -174,6 +195,7 @@ func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
 			}
 			return nil
 		}
+		d.rpmOwnsBinary = func() bool { return true }
 		if got := d.detect(); got != ChannelUnknown {
 			t.Errorf("detect() = %q, want %q", got, ChannelUnknown)
 		}
@@ -189,6 +211,42 @@ func TestDetectChannel_DMG(t *testing.T) {
 	if got := d.detect(); got != ChannelDMG {
 		t.Errorf("detect() = %q, want %q", got, ChannelDMG)
 	}
+
+	t.Run("tray-staged core path -> dmg", func(t *testing.T) {
+		// DMG reality: the tray stages the bundled core into Application
+		// Support and runs it from there — that process is the one serving
+		// /api/v1/info, so it must still classify as dmg.
+		d := testDetector()
+		d.goos = "darwin"
+		d.execPath = func() (string, error) {
+			return "/Users/dev/Library/Application Support/mcpproxy/bin/mcpproxy", nil
+		}
+		if got := d.detect(); got != ChannelDMG {
+			t.Errorf("detect() = %q, want %q", got, ChannelDMG)
+		}
+	})
+
+	t.Run("bundled core under Resources/bin -> dmg", func(t *testing.T) {
+		d := testDetector()
+		d.goos = "darwin"
+		d.execPath = func() (string, error) {
+			return "/Applications/MCPProxy.app/Contents/Resources/bin/mcpproxy", nil
+		}
+		if got := d.detect(); got != ChannelDMG {
+			t.Errorf("detect() = %q, want %q", got, ChannelDMG)
+		}
+	})
+
+	t.Run("staged-core path on linux is not dmg", func(t *testing.T) {
+		d := testDetector()
+		d.goos = "linux"
+		d.execPath = func() (string, error) {
+			return "/home/dev/Library/Application Support/mcpproxy/bin/mcpproxy", nil
+		}
+		if got := d.detect(); got != ChannelUnknown {
+			t.Errorf("detect() = %q, want %q", got, ChannelUnknown)
+		}
+	})
 
 	t.Run("app bundle path on linux is not dmg", func(t *testing.T) {
 		d := testDetector()

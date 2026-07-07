@@ -1,11 +1,14 @@
 package updatecheck
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 )
@@ -70,6 +73,10 @@ type channelDetector struct {
 	evalSymlinks  func(string) (string, error)
 	statFile      func(string) error // nil error ⇒ the path exists
 	readBuildInfo func() (*debug.BuildInfo, bool)
+	// rpmOwnsBinary reports whether the mcpproxy RPM package owns
+	// /usr/bin/mcpproxy (see rpmOwnsUsrBinMcpproxy). Only consulted on Linux
+	// when the binary runs from /usr/bin/mcpproxy and an RPM database exists.
+	rpmOwnsBinary func() bool
 }
 
 func newChannelDetector(ldflagsVersion string) *channelDetector {
@@ -84,7 +91,29 @@ func newChannelDetector(ldflagsVersion string) *channelDetector {
 			return err
 		},
 		readBuildInfo: debug.ReadBuildInfo,
+		rpmOwnsBinary: rpmOwnsUsrBinMcpproxy,
 	}
+}
+
+// rpmProbeTimeout bounds the one-shot `rpm -qf` ownership query run at
+// startup on RPM-based hosts. rpm answers from a local database, so 3s is
+// generous; on expiry the probe fails closed to ChannelUnknown.
+const rpmProbeTimeout = 3 * time.Second
+
+// rpmOwnsUsrBinMcpproxy reports whether the mcpproxy RPM package owns
+// /usr/bin/mcpproxy. The RPM database existing (checked by the caller) only
+// proves the host is RPM-based — a manual tarball copy to /usr/bin/mcpproxy on
+// Fedora would otherwise be misclassified as an rpm install and shown a wrong
+// `dnf upgrade` command (FR-009: never guess). Any failure — rpm binary
+// missing, file unowned, timeout — degrades to false, i.e. ChannelUnknown.
+func rpmOwnsUsrBinMcpproxy() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), rpmProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "rpm", "-qf", "--qf", "%{NAME}", "/usr/bin/mcpproxy").Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "mcpproxy"
 }
 
 // DetectChannel identifies the install channel of the running binary.
@@ -124,14 +153,19 @@ func (d *channelDetector) detect() string {
 	}
 
 	// (3) deb/rpm: require BOTH the package-manager-owned install path AND
-	// that package manager's database evidence. AUR/manual installs share
-	// /usr/bin/mcpproxy but have neither DB entry and must fall to unknown;
-	// both DBs matching is ambiguous and also falls to unknown. This branch
-	// is terminal for the /usr/bin/mcpproxy path: never guess (FR-009).
+	// package-specific ownership evidence. dpkg keeps a per-package file list
+	// (mcpproxy.list); rpm has no per-package file to stat, so the database
+	// presence (host is RPM-based) is confirmed with an `rpm -qf` ownership
+	// query — the DB alone would misclassify a manual tarball copy to
+	// /usr/bin/mcpproxy on any RPM distro. AUR/manual installs have neither
+	// and must fall to unknown; both matching is ambiguous and also falls to
+	// unknown. This branch is terminal for the /usr/bin/mcpproxy path: never
+	// guess (FR-009).
 	if d.goos == "linux" && path == "/usr/bin/mcpproxy" {
 		hasDeb := d.statFile("/var/lib/dpkg/info/mcpproxy.list") == nil
-		hasRPM := d.statFile("/var/lib/rpm/rpmdb.sqlite") == nil ||
+		rpmDBPresent := d.statFile("/var/lib/rpm/rpmdb.sqlite") == nil ||
 			d.statFile("/var/lib/rpm/Packages") == nil
+		hasRPM := rpmDBPresent && d.rpmOwnsBinary()
 		switch {
 		case hasDeb && !hasRPM:
 			return ChannelDeb
@@ -142,8 +176,19 @@ func (d *channelDetector) detect() string {
 		}
 	}
 
-	// (4) macOS app bundle ⇒ DMG install.
-	if d.goos == "darwin" && strings.Contains(path, ".app/Contents/MacOS") {
+	// (4) macOS DMG install. Three shapes, because the tray stages the
+	// bundled core out of the app bundle before running it
+	// (cmd/mcpproxy-tray stageBundledCore):
+	//   - .app/Contents/MacOS       — the tray itself / direct bundle exec
+	//   - .app/Contents/Resources/bin — the bundled core run in place
+	//   - ~/Library/Application Support/mcpproxy/bin/mcpproxy — the staged
+	//     core, which is the process that actually serves /api/v1/info for
+	//     DMG installs; that directory is written only by the tray's
+	//     bundle-staging path, so it uniquely implies a DMG install.
+	if d.goos == "darwin" &&
+		(strings.Contains(path, ".app/Contents/MacOS") ||
+			strings.Contains(path, ".app/Contents/Resources/bin") ||
+			strings.HasSuffix(path, "/Library/Application Support/mcpproxy/bin/mcpproxy")) {
 		return ChannelDMG
 	}
 

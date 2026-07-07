@@ -181,12 +181,17 @@ in decreasing confidence order:
    `/home/linuxbrew/.linuxbrew`).
 2. **Docker**: `/.dockerenv` exists.
 3. **deb / rpm**: on Linux, the executable is exactly `/usr/bin/mcpproxy`
-   **and** the owning package manager's database confirms it
-   (`/var/lib/dpkg/info/mcpproxy.list` for deb; an rpm database for rpm).
-   Both signals are required — a binary merely copied to `/usr/bin` (e.g. an
-   AUR or manual install) stays `unknown`.
-4. **DMG**: on macOS, the executable runs from an `.app/Contents/MacOS`
-   bundle.
+   **and** the owning package manager confirms it owns the file
+   (`/var/lib/dpkg/info/mcpproxy.list` for deb; for rpm, an rpm database
+   exists **and** a one-shot `rpm -qf /usr/bin/mcpproxy` query names the
+   `mcpproxy` package). Both signals are required — a binary merely copied to
+   `/usr/bin` (e.g. an AUR or manual install), even on an RPM-based distro,
+   stays `unknown`.
+4. **DMG**: on macOS, the executable runs from an `.app/Contents/MacOS` or
+   `.app/Contents/Resources/bin` bundle path, or is the tray-staged core at
+   `~/Library/Application Support/mcpproxy/bin/mcpproxy` (the process that
+   actually serves the API for DMG installs; only the tray's bundle-staging
+   writes that directory).
 5. **go install**: the Go toolchain stamped a real module version into the
    binary's build info while no release version was stamped via ldflags.
 6. Otherwise the channel is **`unknown`**.
