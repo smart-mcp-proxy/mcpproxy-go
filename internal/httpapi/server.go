@@ -1055,6 +1055,23 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 	// Get version from build info or environment
 	version := GetBuildVersion()
 
+	// Update information - refresh if requested
+	refresh := r.URL.Query().Get("refresh") == "true"
+	var versionInfo *updatecheck.VersionInfo
+	if refresh {
+		versionInfo = s.controller.RefreshVersionInfo()
+	} else {
+		versionInfo = s.controller.GetVersionInfo()
+	}
+	if versionInfo != nil && versionInfo.CurrentVersion != "" {
+		// The checker's current version is the ldflags build version for
+		// every packaged build, but for go-install builds it is promoted to
+		// the module version recorded in build info (Spec 079 US2) — the
+		// ldflags default would render "development" on the status/Web UI
+		// surfaces next to a real go-install update command.
+		version = versionInfo.CurrentVersion
+	}
+
 	response := map[string]interface{}{
 		"version":     version,
 		"web_ui_url":  webUIURL,
@@ -1063,15 +1080,6 @@ func (s *Server) handleGetInfo(w http.ResponseWriter, r *http.Request) {
 			"http":   listenAddr,
 			"socket": getSocketPath(), // Returns socket path if enabled, empty otherwise
 		},
-	}
-
-	// Add update information - refresh if requested
-	refresh := r.URL.Query().Get("refresh") == "true"
-	var versionInfo *updatecheck.VersionInfo
-	if refresh {
-		versionInfo = s.controller.RefreshVersionInfo()
-	} else {
-		versionInfo = s.controller.GetVersionInfo()
 	}
 	if versionInfo != nil {
 		response["update"] = versionInfo.ToAPIResponse()

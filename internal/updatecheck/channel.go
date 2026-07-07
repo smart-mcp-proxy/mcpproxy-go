@@ -152,20 +152,30 @@ func (d *channelDetector) detect() string {
 		return ChannelDocker
 	}
 
-	// (3) deb/rpm: require BOTH the package-manager-owned install path AND
-	// package-specific ownership evidence. dpkg keeps a per-package file list
-	// (mcpproxy.list); rpm has no per-package file to stat, so the database
-	// presence (host is RPM-based) is confirmed with an `rpm -qf` ownership
-	// query — the DB alone would misclassify a manual tarball copy to
-	// /usr/bin/mcpproxy on any RPM distro. AUR/manual installs have neither
-	// and must fall to unknown; both matching is ambiguous and also falls to
-	// unknown. This branch is terminal for the /usr/bin/mcpproxy path: never
-	// guess (FR-009).
+	// (3) deb/rpm: require the package-manager-owned install path AND
+	// package-specific ownership evidence AND the MCPProxy repository being
+	// configured. dpkg keeps a per-package file list (mcpproxy.list); rpm has
+	// no per-package file to stat, so the database presence (host is
+	// RPM-based) is confirmed with an `rpm -qf` ownership query — the DB
+	// alone would misclassify a manual tarball copy to /usr/bin/mcpproxy on
+	// any RPM distro. The repo-config file (the documented setup writes
+	// /etc/apt/sources.list.d/mcpproxy.list resp. /etc/yum.repos.d/
+	// mcpproxy.repo) is required because the apt/dnf update commands only
+	// work against apt.mcpproxy.app / rpm.mcpproxy.app: a standalone .deb/
+	// .rpm downloaded from a GitHub release is dpkg/rpm-owned but has no
+	// upgrade candidate, so it degrades to unknown and gets the release-page
+	// guidance instead of a no-op command. AUR/manual installs have neither
+	// signal and must fall to unknown; both package managers matching is
+	// ambiguous and also falls to unknown. This branch is terminal for the
+	// /usr/bin/mcpproxy path: never guess (FR-009).
 	if d.goos == "linux" && path == "/usr/bin/mcpproxy" {
-		hasDeb := d.statFile("/var/lib/dpkg/info/mcpproxy.list") == nil
+		hasDeb := d.statFile("/var/lib/dpkg/info/mcpproxy.list") == nil &&
+			d.statFile("/etc/apt/sources.list.d/mcpproxy.list") == nil
 		rpmDBPresent := d.statFile("/var/lib/rpm/rpmdb.sqlite") == nil ||
 			d.statFile("/var/lib/rpm/Packages") == nil
-		hasRPM := rpmDBPresent && d.rpmOwnsBinary()
+		hasRPM := rpmDBPresent &&
+			d.statFile("/etc/yum.repos.d/mcpproxy.repo") == nil &&
+			d.rpmOwnsBinary()
 		switch {
 		case hasDeb && !hasRPM:
 			return ChannelDeb

@@ -96,8 +96,26 @@ func TestDetectChannel_Docker(t *testing.T) {
 
 func TestDetectChannel_DebRequiresBothSignals(t *testing.T) {
 	dpkgList := "/var/lib/dpkg/info/mcpproxy.list"
+	aptRepo := "/etc/apt/sources.list.d/mcpproxy.list"
 
-	t.Run("path + dpkg entry -> deb", func(t *testing.T) {
+	t.Run("path + dpkg entry + apt repo -> deb", func(t *testing.T) {
+		d := testDetector()
+		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
+		d.statFile = func(p string) error {
+			if p == dpkgList || p == aptRepo {
+				return nil
+			}
+			return os.ErrNotExist
+		}
+		if got := d.detect(); got != ChannelDeb {
+			t.Errorf("detect() = %q, want %q", got, ChannelDeb)
+		}
+	})
+
+	t.Run("standalone GitHub .deb without the apt repo -> unknown", func(t *testing.T) {
+		// dpkg owns the binary, but without apt.mcpproxy.app configured the
+		// apt upgrade command would be a no-op — degrade to unknown so the
+		// release-page guidance is shown instead (FR-009).
 		d := testDetector()
 		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
 		d.statFile = func(p string) error {
@@ -106,8 +124,8 @@ func TestDetectChannel_DebRequiresBothSignals(t *testing.T) {
 			}
 			return os.ErrNotExist
 		}
-		if got := d.detect(); got != ChannelDeb {
-			t.Errorf("detect() = %q, want %q", got, ChannelDeb)
+		if got := d.detect(); got != ChannelUnknown {
+			t.Errorf("detect() = %q, want %q", got, ChannelUnknown)
 		}
 	})
 
@@ -135,11 +153,13 @@ func TestDetectChannel_DebRequiresBothSignals(t *testing.T) {
 }
 
 func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
-	t.Run("path + rpmdb.sqlite + rpm ownership -> rpm", func(t *testing.T) {
+	yumRepo := "/etc/yum.repos.d/mcpproxy.repo"
+
+	t.Run("path + rpmdb.sqlite + yum repo + rpm ownership -> rpm", func(t *testing.T) {
 		d := testDetector()
 		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
 		d.statFile = func(p string) error {
-			if p == "/var/lib/rpm/rpmdb.sqlite" {
+			if p == "/var/lib/rpm/rpmdb.sqlite" || p == yumRepo {
 				return nil
 			}
 			return os.ErrNotExist
@@ -150,11 +170,11 @@ func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
 		}
 	})
 
-	t.Run("path + legacy Packages db + rpm ownership -> rpm", func(t *testing.T) {
+	t.Run("path + legacy Packages db + yum repo + rpm ownership -> rpm", func(t *testing.T) {
 		d := testDetector()
 		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
 		d.statFile = func(p string) error {
-			if p == "/var/lib/rpm/Packages" {
+			if p == "/var/lib/rpm/Packages" || p == yumRepo {
 				return nil
 			}
 			return os.ErrNotExist
@@ -172,12 +192,30 @@ func TestDetectChannel_RPMRequiresBothSignals(t *testing.T) {
 		d := testDetector()
 		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
 		d.statFile = func(p string) error {
-			if p == "/var/lib/rpm/rpmdb.sqlite" {
+			if p == "/var/lib/rpm/rpmdb.sqlite" || p == yumRepo {
 				return nil
 			}
 			return os.ErrNotExist
 		}
 		d.rpmOwnsBinary = func() bool { return false }
+		if got := d.detect(); got != ChannelUnknown {
+			t.Errorf("detect() = %q, want %q", got, ChannelUnknown)
+		}
+	})
+
+	t.Run("standalone GitHub .rpm without the yum repo -> unknown", func(t *testing.T) {
+		// rpm owns the binary, but without rpm.mcpproxy.app configured the
+		// dnf upgrade command has no candidate — degrade to unknown so the
+		// release-page guidance is shown instead (FR-009).
+		d := testDetector()
+		d.execPath = func() (string, error) { return "/usr/bin/mcpproxy", nil }
+		d.statFile = func(p string) error {
+			if p == "/var/lib/rpm/rpmdb.sqlite" {
+				return nil
+			}
+			return os.ErrNotExist
+		}
+		d.rpmOwnsBinary = func() bool { return true }
 		if got := d.detect(); got != ChannelUnknown {
 			t.Errorf("detect() = %q, want %q", got, ChannelUnknown)
 		}

@@ -180,13 +180,19 @@ in decreasing confidence order:
    Homebrew prefix (`/opt/homebrew/`, a `Cellar/` path, or
    `/home/linuxbrew/.linuxbrew`).
 2. **Docker**: `/.dockerenv` exists.
-3. **deb / rpm**: on Linux, the executable is exactly `/usr/bin/mcpproxy`
-   **and** the owning package manager confirms it owns the file
+3. **deb / rpm**: on Linux, the executable is exactly `/usr/bin/mcpproxy`,
+   the owning package manager confirms it owns the file
    (`/var/lib/dpkg/info/mcpproxy.list` for deb; for rpm, an rpm database
    exists **and** a one-shot `rpm -qf /usr/bin/mcpproxy` query names the
-   `mcpproxy` package). Both signals are required — a binary merely copied to
-   `/usr/bin` (e.g. an AUR or manual install), even on an RPM-based distro,
-   stays `unknown`.
+   `mcpproxy` package), **and** the MCPProxy repository is configured
+   (`/etc/apt/sources.list.d/mcpproxy.list` resp.
+   `/etc/yum.repos.d/mcpproxy.repo`, as written by the documented setup).
+   The repo signal matters because the apt/dnf commands only work against
+   `apt.mcpproxy.app` / `rpm.mcpproxy.app`: a standalone `.deb`/`.rpm`
+   downloaded from a GitHub release is dpkg/rpm-owned but has no upgrade
+   candidate, so it stays `unknown` and gets release-page guidance. A binary
+   merely copied to `/usr/bin` (e.g. an AUR or manual install) also stays
+   `unknown`.
 4. **DMG**: on macOS, the executable runs from an `.app/Contents/MacOS` or
    `.app/Contents/Resources/bin` bundle path, or is the tray-staged core at
    `~/Library/Application Support/mcpproxy/bin/mcpproxy` (the process that
