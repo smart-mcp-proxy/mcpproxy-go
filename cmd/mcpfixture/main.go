@@ -152,13 +152,22 @@ func main() {
 func newFixtureServer() *server.MCPServer {
 	s := server.NewMCPServer(fixtureName, fixtureVersion, server.WithToolCapabilities(false))
 
+	// Both tools are annotated read-only: without annotations the MCP spec
+	// default is destructiveHint=true and mcpproxy's intent validation
+	// (Spec 018) would reject them through call_tool_read.
 	s.AddTool(mcp.NewTool("echo",
 		mcp.WithDescription("Returns the provided arguments back as JSON text."),
 		mcp.WithString("text", mcp.Description("Text to echo back.")),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(false),
 	), handleEcho)
 
 	s.AddTool(mcp.NewTool("ping",
 		mcp.WithDescription("Returns pong with a per-process monotonically increasing counter and a per-process instance id."),
+		mcp.WithReadOnlyHintAnnotation(true),
+		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithOpenWorldHintAnnotation(false),
 	), handlePing)
 
 	return s
