@@ -19,7 +19,7 @@ ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 RUN CGO_ENABLED=0 go build \
     -tags server \
-    -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION} -s -w" \
+    -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck.buildChannel=docker -s -w" \
     -o /mcpproxy ./cmd/mcpproxy
 
 # Runtime stage
