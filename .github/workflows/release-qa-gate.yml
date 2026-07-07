@@ -36,11 +36,6 @@ on:
         description: "Ref to qualify (dry run — publishes nothing, FR-001a)"
         required: false
         type: string
-  # TEMP: remove before merge — gives the 081-release-qa-gate-t1 branch real CI
-  # so the gate wiring is exercised end-to-end on push. The gate is meant to run
-  # only via workflow_call (publishers) and workflow_dispatch (dry run).
-  push:
-    branches: [081-release-qa-gate-t1]
 
 permissions:
   contents: read
