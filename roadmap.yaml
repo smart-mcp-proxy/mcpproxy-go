@@ -446,24 +446,27 @@ epics:
 
   - id: telemetry-v7-churn
     title: "Telemetry v7: honest funnel + churn instrumentation"
-    status: todo
+    status: in_progress
     assignee: unassigned
     priority: P0
     spec: specs/080-telemetry-v7-churn
     depends_on: []
-    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). Real cliff = day-2 return 17.7% and retrieve_tools 42% -> real tool call 16%. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 ship independently of identity work; only churn analytics (T4) needs stable identity (machine_id is 0 rows in prod - see telemetry-identity)."
+    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). Real cliff = day-2 return 17.7% and retrieve_tools 42% -> real tool call 16%. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity)."
     tasks:
       - id: telemetry-v7-wizard-fix
         title: "T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path"
-        status: todo
+        status: done
+        pr: "#813"
         depends_on: []
       - id: telemetry-v7-funnel-fields
         title: "T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d)"
-        status: todo
+        status: done
+        pr: "#813"
         depends_on: []
       - id: telemetry-v7-prechurn-snapshot
         title: "T3: pre-churn snapshot (previous_shutdown clean|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death"
-        status: todo
+        status: done
+        pr: "#813"
         depends_on: []
       - id: telemetry-v7-churn-events
         title: "T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080)"
