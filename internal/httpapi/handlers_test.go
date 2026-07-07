@@ -45,7 +45,7 @@ func TestHandleAddServer(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
 
 		var resp struct {
-			Success bool                          `json:"success"`
+			Success bool                           `json:"success"`
 			Data    contracts.ServerActionResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -77,6 +77,89 @@ func TestHandleAddServer(t *testing.T) {
 		srv.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
+	})
+
+	t.Run("carries per-server isolation opt-out through on create", func(t *testing.T) {
+		// Regression: the add handler used to drop req.Isolation entirely, so a
+		// stdio server added via POST could not opt OUT of isolation when global
+		// docker_isolation.enabled=true — it was force-wrapped in a container
+		// (with the host command path) and failed to start. The add path must
+		// map Isolation exactly like the PATCH/update path.
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockAddServerController{apiKey: "test-key"}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		optOut := false
+		reqBody := AddServerRequest{
+			Name:      "test-isolation-optout",
+			Command:   "/usr/local/bin/mcpfixture",
+			Args:      []string{"--transport", "stdio"},
+			Protocol:  "stdio",
+			Isolation: &IsolationRequest{Enabled: &optOut},
+		}
+		body, _ := json.Marshal(reqBody)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
+		require.NotNil(t, mockCtrl.captured, "controller.AddServer was not called")
+		require.NotNil(t, mockCtrl.captured.Isolation, "per-server isolation override was dropped on create")
+		require.NotNil(t, mockCtrl.captured.Isolation.Enabled)
+		assert.False(t, *mockCtrl.captured.Isolation.Enabled, "isolation.enabled=false must be carried through on create")
+	})
+
+	t.Run("carries per-server isolation image override through on create", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockAddServerController{apiKey: "test-key"}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		on := true
+		image := "mcpfixture:gate"
+		reqBody := AddServerRequest{
+			Name:      "test-isolation-image",
+			Command:   "/mcpfixture",
+			Args:      []string{"--transport", "stdio"},
+			Protocol:  "stdio",
+			Isolation: &IsolationRequest{Enabled: &on, Image: &image},
+		}
+		body, _ := json.Marshal(reqBody)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, mockCtrl.captured)
+		require.NotNil(t, mockCtrl.captured.Isolation)
+		assert.Equal(t, "mcpfixture:gate", mockCtrl.captured.Isolation.Image)
+	})
+
+	t.Run("leaves isolation nil when the request omits it", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockAddServerController{apiKey: "test-key"}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		reqBody := AddServerRequest{Name: "test-no-isolation", URL: "https://example.com/mcp", Protocol: "http"}
+		body, _ := json.Marshal(reqBody)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+		require.NotNil(t, mockCtrl.captured)
+		assert.Nil(t, mockCtrl.captured.Isolation, "omitted isolation must stay nil (do-not-touch semantics)")
 	})
 
 	t.Run("rejects duplicate server", func(t *testing.T) {
@@ -160,7 +243,7 @@ func TestHandleRemoveServer(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code, "Expected 200 OK")
 
 		var resp struct {
-			Success bool                          `json:"success"`
+			Success bool                           `json:"success"`
 			Data    contracts.ServerActionResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -194,6 +277,7 @@ type mockAddServerController struct {
 	baseController
 	apiKey       string
 	existsServer string
+	captured     *config.ServerConfig
 }
 
 func (m *mockAddServerController) GetCurrentConfig() any {
@@ -206,6 +290,7 @@ func (m *mockAddServerController) AddServer(_ context.Context, cfg *config.Serve
 	if cfg.Name == m.existsServer {
 		return fmt.Errorf("server '%s' already exists", cfg.Name)
 	}
+	m.captured = cfg
 	return nil
 }
 
