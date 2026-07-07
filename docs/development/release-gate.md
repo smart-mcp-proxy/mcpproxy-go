@@ -6,13 +6,13 @@ end-to-end invariants, then produces **one** machine-readable pass/fail verdict.
 Artifact publication depends on that verdict, so a red gate means no release —
 mechanically, with no human checklist in the loop.
 
-- **Workflow**: [`.github/workflows/release-qa-gate.yml`](../../.github/workflows/release-qa-gate.yml)
-- **Driver**: [`cmd/release-gate`](../../cmd/release-gate) (Go)
-- **Report schema + merger**: [`internal/gatereport`](../../internal/gatereport)
-- **Fixtures**: [`cmd/mcpfixture`](../../cmd/mcpfixture) (deterministic MCP server,
-  reused as a Docker image via [`scripts/gate/build-fixture-image.sh`](../../scripts/gate/build-fixture-image.sh))
-  and [`tests/oauthserver`](../../tests/oauthserver) (mock OAuth 2.1 + PKCE IdP).
-- **Spec**: [`specs/081-release-qa-gate/spec.md`](../../specs/081-release-qa-gate/spec.md)
+- **Workflow**: [`.github/workflows/release-qa-gate.yml`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/.github/workflows/release-qa-gate.yml)
+- **Driver**: [`cmd/release-gate`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/cmd/release-gate) (Go)
+- **Report schema + merger**: [`internal/gatereport`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/internal/gatereport)
+- **Fixtures**: [`cmd/mcpfixture`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/cmd/mcpfixture) (deterministic MCP server,
+  reused as a Docker image via [`scripts/gate/build-fixture-image.sh`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/scripts/gate/build-fixture-image.sh))
+  and [`tests/oauthserver`](https://github.com/smart-mcp-proxy/mcpproxy-go/tree/main/tests/oauthserver) (mock OAuth 2.1 + PKCE IdP).
+- **Spec**: [`specs/081-release-qa-gate/spec.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/081-release-qa-gate/spec.md)
 
 ## What the gate runs (T1)
 
@@ -62,7 +62,7 @@ and list it in the publish job's `needs:`:
 Because both the gate job and the publish job share the same trigger condition,
 a **skipped** gate (non-qualifying ref) skips the publish job too — it can never
 silently un-gate a release. The invariant is enforced by an audit test,
-[`cmd/release-gate/workflow_audit_test.go`](../../cmd/release-gate/workflow_audit_test.go),
+[`cmd/release-gate/workflow_audit_test.go`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/cmd/release-gate/workflow_audit_test.go),
 which parses both publisher workflows and asserts every artifact-publishing
 job's transitive `needs` closure includes the `qa-gate` job (FR-022 / SC-004).
 Statically disabled jobs (`if: false…`, e.g. the server-edition `build-docker`)
