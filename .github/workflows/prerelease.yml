@@ -757,8 +757,19 @@ jobs:
           name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
           path: installers-artifact/*
 
+  # Spec 081: release qualification gate (same reusable workflow as release.yml).
+  # Guarded to prerelease TAG refs only — skipped on `next` branch pushes,
+  # consistent with the `release` job's own tag condition, so branch CI is not
+  # burdened with the full gate. A red gate blocks the prerelease publish
+  # (FR-002); a skipped gate (branch push) skips `release` too (never un-gated).
+  qa-gate:
+    uses: ./.github/workflows/release-qa-gate.yml
+    permissions:
+      contents: read
+    if: startsWith(github.ref, 'refs/tags/v') && (contains(github.ref, '-rc.') || contains(github.ref, '-next.'))
+
   release:
-    needs: build
+    needs: [build, qa-gate]
     runs-on: ubuntu-latest
     environment: staging
     # Only create releases for tag pushes, not branch pushes

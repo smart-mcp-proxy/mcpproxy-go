@@ -41,6 +41,7 @@ API_KEY=""
 TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
+TESTS_SKIPPED=0
 
 echo -e "${GREEN}MCPProxy API E2E Tests${NC}"
 echo "=============================="
@@ -110,6 +111,16 @@ log_pass() {
 log_fail() {
     echo -e "${RED}[FAIL]${NC} $1"
     TESTS_FAILED=$((TESTS_FAILED + 1))
+}
+
+# log_skip: non-blocking outcome for tests whose subject is an external,
+# third-party dependency (e.g. the live public MCP registry). A release-blocking
+# gate must not be held hostage by a third party's uptime, so a confirmed outage
+# of the *external* service is recorded as skipped, NOT failed. Reachable-but-wrong
+# responses still hard-fail via log_fail, preserving proxy-regression coverage.
+log_skip() {
+    echo -e "${YELLOW}[SKIP]${NC} $1"
+    TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
 }
 
 # Extract API key from server logs
@@ -775,23 +786,54 @@ else
         "jq -e '.success == true and .data.registries != null and .data.total > 0' < '$TEST_RESULTS_FILE' >/dev/null"
 fi
 
+# Tests 26/27 proxy to the LIVE public "official" MCP registry. When that
+# third-party service is slow/down we log_skip instead of log_fail — a
+# release-blocking gate must not depend on a third party's uptime. But a
+# success:false is ONLY treated as an outage when there is transport-level
+# evidence: curl itself failed/timed out (rc != 0 or empty body), or the proxy's
+# error envelope names an upstream fetch/transport failure. A success:false whose
+# .error is anything else is a real proxy-side regression (same writeError path
+# the handler uses for its own bugs) and must hard-fail — otherwise the gate
+# would silently skip an API regression it exists to catch.
+registry_is_outage() {
+    # $1 = curl rc, $2 = response body
+    local rc="$1" body="$2"
+    if [ "$rc" -ne 0 ] || [ -z "$body" ]; then
+        return 0
+    fi
+    if echo "$body" | jq -e '.success == false' >/dev/null 2>&1; then
+        local err
+        err=$(echo "$body" | jq -r '.error // ""' 2>/dev/null)
+        if echo "$err" | grep -qiE 'timeout|timed out|deadline exceeded|connection refused|no such host|no route to host|network is unreachable|i/o timeout|tls handshake|EOF|temporarily|unreachable|dial tcp|refused|reset by peer|502|503|504|bad gateway|gateway timeout|upstream|server misbehaving'; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 # Test 26: Search registry servers (Phase 7)
 log_test "GET /api/v1/registries/{id}/servers"
 RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/official/servers?limit=5")
+CURL_RC=$?
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
-if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.registry_id == "official"' >/dev/null; then
+if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.registry_id == "official"' >/dev/null 2>&1; then
     log_pass "GET /api/v1/registries/{id}/servers - Response has servers array and registry_id"
+elif registry_is_outage "$CURL_RC" "$RESPONSE"; then
+    log_skip "GET /api/v1/registries/{id}/servers - external 'official' registry unreachable (curl rc=$CURL_RC); not a proxy regression"
 else
     log_fail "GET /api/v1/registries/{id}/servers - Expected server search results" \
         "jq -e '.success == true and .data.servers != null and .data.registry_id == \"official\"' < '$TEST_RESULTS_FILE' >/dev/null"
 fi
 
-# Test 27: Search registry servers with query (Phase 7)
+# Test 27: Search registry servers with query (Phase 7) — same external dependency.
 log_test "GET /api/v1/registries/{id}/servers with query parameter"
 RESPONSE=$(curl -s --max-time 10 $CURL_CA_OPTS -H "X-API-Key: $API_KEY" "${API_BASE}/registries/official/servers?q=github&limit=3")
+CURL_RC=$?
 echo "$RESPONSE" > "$TEST_RESULTS_FILE"
-if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.query == "github"' >/dev/null; then
+if echo "$RESPONSE" | jq -e '.success == true and .data.servers != null and .data.query == "github"' >/dev/null 2>&1; then
     log_pass "GET /api/v1/registries/{id}/servers?q=github - Response has query field"
+elif registry_is_outage "$CURL_RC" "$RESPONSE"; then
+    log_skip "GET /api/v1/registries/{id}/servers?q=github - external 'official' registry unreachable (curl rc=$CURL_RC); not a proxy regression"
 else
     log_fail "GET /api/v1/registries/{id}/servers?q=github - Expected query parameter in response" \
         "jq -e '.success == true and .data.servers != null and .data.query == \"github\"' < '$TEST_RESULTS_FILE' >/dev/null"
@@ -1107,6 +1149,7 @@ echo "============"
 echo -e "Tests run: ${BLUE}$TESTS_RUN${NC}"
 echo -e "Tests passed: ${GREEN}$TESTS_PASSED${NC}"
 echo -e "Tests failed: ${RED}$TESTS_FAILED${NC}"
+echo -e "Tests skipped: ${YELLOW}$TESTS_SKIPPED${NC}"
 
 if [ $TESTS_FAILED -eq 0 ]; then
     echo ""

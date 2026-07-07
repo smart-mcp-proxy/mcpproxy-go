@@ -28,6 +28,13 @@ func (s *OAuthTestServer) createMCPServer() *mcpserver.MCPServer {
 				mcp.Required(),
 				mcp.Description("The message to echo"),
 			),
+			// Read-only annotations: without them the MCP-spec default is
+			// destructiveHint=true and mcpproxy's intent validation (Spec 018)
+			// rejects the tool through call_tool_read (Spec 081 gate uses the
+			// read path).
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(false),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args, ok := request.Params.Arguments.(map[string]interface{})
@@ -43,6 +50,9 @@ func (s *OAuthTestServer) createMCPServer() *mcpserver.MCPServer {
 	mcpSrv.AddTool(
 		mcp.NewTool("get_time",
 			mcp.WithDescription("Returns the current server time"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(false),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultText(fmt.Sprintf("Current time: %s", time.Now().Format(time.RFC3339))), nil

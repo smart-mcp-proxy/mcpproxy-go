@@ -1500,6 +1500,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.InitTimeout != nil {
 		serverConfig.InitTimeout = req.InitTimeout
 	}
+	// Carry the per-server Docker isolation override through on create. The
+	// AddServerRequest has always declared (and documented) an Isolation
+	// field, but only the PATCH/update path mapped it — on create it was
+	// silently dropped, so a caller could not, for example, opt a host-run
+	// stdio server OUT of isolation when global docker_isolation.enabled=true
+	// (the server would be forced into a container and fail to start). Mirror
+	// the update path's toConfig() mapping so the field means the same thing
+	// on both verbs.
+	if req.Isolation != nil {
+		serverConfig.Isolation = req.Isolation.toConfig()
+	}
 
 	// Add server via controller
 	logger := s.getRequestLogger(r) // T019: Use request-scoped logger
