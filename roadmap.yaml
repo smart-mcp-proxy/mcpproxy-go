@@ -352,7 +352,9 @@ epics:
         depends_on: [upgrade-nudge-status-log]
       - id: upgrade-nudge-channel
         title: "US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"
-        status: todo
+        status: done
+        pr: "#818"
+        note: "Install-channel detector (build marker + conservative heuristics; ambiguity->unknown), guided command only for brew/deb/rpm/go-install (generic fallback elsewhere, zero wrong-command risk), additive API fields (FR-021), status/doctor/banner surfaces; markers stamped in Docker + Windows-installer build paths only (single-binary matrix intentionally unstamped)."
         depends_on: [upgrade-nudge-surfacing]
       - id: upgrade-nudge-quiet
         title: "US3: operator control + CI/offline quiet + no prerelease downgrade nudges"
@@ -403,7 +405,9 @@ epics:
         depends_on: []
       - id: telemetry-machineid-worker
         title: "Worker migration: machine_id column + extraction (repo mcpproxy-telemetry)"
-        status: todo
+        status: done
+        pr: "mcpproxy-telemetry#3"
+        note: "Verified LIVE in prod 2026-07-07: remote D1 migration 0006 applied, worker deployed 2026-07-03 (right after 53811ed), v7 heartbeats populating machine_id 100% (64-char HMAC hex, distinct installs), vitest 129/129. No further worker work needed; dashboard consumption is the remaining child."
         depends_on: [telemetry-machineid-client]
       - id: telemetry-machineid-dash
         title: "Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"
@@ -416,7 +420,7 @@ epics:
 
   - id: release-qa-gate
     title: "Release qualification gate (auto-QA matrix blocks the tag)"
-    status: todo
+    status: in_progress
     assignee: unassigned
     priority: P0
     spec: specs/081-release-qa-gate
@@ -425,8 +429,10 @@ epics:
     tasks:
       - id: release-qa-gate-matrix
         title: "T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags"
-        status: todo
+        status: done
+        pr: "#819"
         priority: P0
+        note: "release-qa-gate.yml (reusable) gates all publish jobs in release.yml + prerelease.yml; cmd/mcpfixture (stdio/http/sse) + docker fixture image, cmd/release-gate driver (matrix+invariants+upgrade-in-place), internal/gatereport merger (no silent skips, reserved T2/T3/T4 not-run slots). Gate ran green end-to-end in CI. Found+fixed a real bug: POST /api/v1/servers dropped per-server isolation override. Deviations documented: FR-003 suite-race uses -short+-skip variant; FR-011 caller X-Request-Id not persisted on tool_call activity (driver correlates via nonce+core id)."
         depends_on: []
       - id: release-qa-gate-playwright
         title: "T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"
