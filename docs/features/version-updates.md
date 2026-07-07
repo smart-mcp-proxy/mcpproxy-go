@@ -153,13 +153,85 @@ Response includes an `update` field when version information is available:
       "latest_version": "v1.3.0",
       "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
       "checked_at": "2025-01-15T10:30:00Z",
-      "is_prerelease": false
+      "is_prerelease": false,
+      "install_channel": "homebrew",
+      "update_command": "brew upgrade mcpproxy"
     }
   }
 }
 ```
 
 See [REST API Documentation](../api/rest-api.md#get-apiv1info) for complete details.
+
+## How the Install Channel Is Detected
+
+MCPProxy identifies how it was installed so it can show the right update
+instruction for your setup (`install_channel` in `/api/v1/info`, plus the
+guided command in `mcpproxy status`, `mcpproxy doctor`, and the Web UI
+banner).
+
+Detection prefers a **build-time channel marker** stamped into
+single-channel artifacts at packaging time (the Docker image and the Windows
+installer). When no marker is present — the release archives feed the
+tarball, Homebrew, and DMG channels from one binary — runtime heuristics run
+in decreasing confidence order:
+
+1. **Homebrew**: the (symlink-resolved) executable path lives under a
+   Homebrew prefix (`/opt/homebrew/`, a `Cellar/` path, or
+   `/home/linuxbrew/.linuxbrew`).
+2. **Docker**: `/.dockerenv` exists.
+3. **deb / rpm**: on Linux, the executable is exactly `/usr/bin/mcpproxy`,
+   the owning package manager confirms it owns the file
+   (`/var/lib/dpkg/info/mcpproxy.list` for deb; for rpm, an rpm database
+   exists **and** a one-shot `rpm -qf /usr/bin/mcpproxy` query names the
+   `mcpproxy` package), **and** the MCPProxy repository is configured
+   (`/etc/apt/sources.list.d/mcpproxy.list` resp.
+   `/etc/yum.repos.d/mcpproxy.repo`, as written by the documented setup).
+   The repo signal matters because the apt/dnf commands only work against
+   `apt.mcpproxy.app` / `rpm.mcpproxy.app`: a standalone `.deb`/`.rpm`
+   downloaded from a GitHub release is dpkg/rpm-owned but has no upgrade
+   candidate, so it stays `unknown` and gets release-page guidance. A binary
+   merely copied to `/usr/bin` (e.g. an AUR or manual install) also stays
+   `unknown`.
+4. **DMG**: on macOS, the executable runs from an `.app/Contents/MacOS` or
+   `.app/Contents/Resources/bin` bundle path, or is the tray-staged core at
+   `~/Library/Application Support/mcpproxy/bin/mcpproxy` (the process that
+   actually serves the API for DMG installs; only the tray's bundle-staging
+   writes that directory).
+5. **go install**: the Go toolchain stamped a real module version into the
+   binary's build info while no release version was stamped via ldflags.
+   For this channel the checker also adopts that module version as its
+   current version (the ldflags default would read "development" and
+   disable update checks entirely).
+6. Otherwise the channel is **`unknown`**.
+
+Ambiguity always resolves to `unknown`: MCPProxy never guesses a channel,
+because a wrong update command is worse than a generic instruction.
+
+### Update Commands per Channel
+
+| Channel | `update_command` | Guidance shown instead |
+|---------|------------------|------------------------|
+| `homebrew` | `brew upgrade mcpproxy` | — |
+| `deb` | `sudo apt update && sudo apt install --only-upgrade mcpproxy` | — |
+| `rpm` | `sudo dnf upgrade mcpproxy` | — |
+| `go-install` | `go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest` | — |
+| `dmg` | — | Download the latest DMG (release page is deep-linked) |
+| `windows-installer` | — | Download the latest Windows installer |
+| `docker` | — | Pull or rebuild the newer image for your deployment |
+| `tarball` / `unknown` | — | Download the latest release from the releases page |
+
+Every surface always deep-links the release notes for the latest version,
+whether or not a command is available.
+
+**Prerelease targets** (the `rc` channel or
+`MCPPROXY_ALLOW_PRERELEASE_UPDATES=true`) are the exception: prereleases are
+published only to the GitHub pre-release channel, so the package-manager
+commands above would not deliver them (`brew`/`apt`/`dnf` serve stable
+artifacts, and Go's `@latest` resolves to the newest stable). When the offered
+version is a prerelease, only `go-install` gets a command — pinned to the
+exact version (`…/cmd/mcpproxy@v0.48.0-rc.1`) — and every other channel falls
+back to the release-page guidance.
 
 ## Updating MCPProxy
 

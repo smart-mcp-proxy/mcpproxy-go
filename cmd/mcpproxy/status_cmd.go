@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
 
 // StatusInfo holds the collected status data for display.
@@ -42,12 +43,14 @@ type StatusInfo struct {
 // (internal/updatecheck.InfoResponseUpdate) for status output. The daemon's
 // background checker is the single source of truth; status only renders it.
 type StatusUpdateInfo struct {
-	Available     bool   `json:"available"`
-	LatestVersion string `json:"latest_version,omitempty"`
-	ReleaseURL    string `json:"release_url,omitempty"`
-	CheckedAt     string `json:"checked_at,omitempty"` // RFC 3339, as serialized by the daemon
-	IsPrerelease  bool   `json:"is_prerelease,omitempty"`
-	CheckError    string `json:"check_error,omitempty"`
+	Available      bool   `json:"available"`
+	LatestVersion  string `json:"latest_version,omitempty"`
+	ReleaseURL     string `json:"release_url,omitempty"`
+	CheckedAt      string `json:"checked_at,omitempty"` // RFC 3339, as serialized by the daemon
+	IsPrerelease   bool   `json:"is_prerelease,omitempty"`
+	CheckError     string `json:"check_error,omitempty"`
+	InstallChannel string `json:"install_channel,omitempty"` // Spec 079 FR-008
+	UpdateCommand  string `json:"update_command,omitempty"`  // Spec 079 FR-009
 }
 
 // ServerEditionStatusInfo holds server-edition-specific status information.
@@ -328,6 +331,12 @@ func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
 	if v, ok := updateData["check_error"].(string); ok {
 		u.CheckError = v
 	}
+	if v, ok := updateData["install_channel"].(string); ok {
+		u.InstallChannel = v
+	}
+	if v, ok := updateData["update_command"].(string); ok {
+		u.UpdateCommand = v
+	}
 	return u
 }
 
@@ -344,10 +353,24 @@ func statusVersionSuffix(u *StatusUpdateInfo) string {
 		return ""
 	}
 	if u.Available && u.LatestVersion != "" {
-		if u.ReleaseURL != "" {
-			return fmt.Sprintf(" (update available: %s — %s)", u.LatestVersion, u.ReleaseURL)
+		// Spec 079 US2 (FR-009): append the channel's exact one-line update
+		// command, or the channel-appropriate guidance when no command is
+		// safe. Older daemons omit install_channel — render the legacy form.
+		action := ""
+		switch {
+		case u.UpdateCommand != "":
+			action = " — Run: " + u.UpdateCommand
+		case u.InstallChannel != "":
+			// The release URL already appears in the suffix; pass "" so the
+			// guidance says "the releases page" instead of repeating it.
+			if g := updatecheck.GuidanceLine(u.InstallChannel, ""); g != "" {
+				action = " — " + g
+			}
 		}
-		return fmt.Sprintf(" (update available: %s)", u.LatestVersion)
+		if u.ReleaseURL != "" {
+			return fmt.Sprintf(" (update available: %s — %s%s)", u.LatestVersion, u.ReleaseURL, action)
+		}
+		return fmt.Sprintf(" (update available: %s%s)", u.LatestVersion, action)
 	}
 	if u.LatestVersion != "" {
 		// A successful check confirmed we are current.

@@ -392,6 +392,12 @@ jobs:
           CGO_LDFLAGS: "-mmacosx-version-min=13.0"
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
+          # NOTE (Spec 079): the updatecheck.buildChannel install-channel marker is
+          # intentionally NOT stamped here — this one matrix binary feeds the tarball,
+          # Homebrew, and DMG artifacts, so any single channel value would be wrong for
+          # some consumers. Those installs rely on runtime heuristics
+          # (internal/updatecheck/channel.go); only single-channel pipelines stamp it
+          # (Dockerfile -> docker, scripts/build-windows-installer.ps1 -> windows-installer).
           LDFLAGS="-s -w -X main.version=${VERSION} -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=${VERSION}"
 
           # Determine clean binary name and build flags

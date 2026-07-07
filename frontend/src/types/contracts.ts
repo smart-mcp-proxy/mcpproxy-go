@@ -325,6 +325,12 @@ export interface UpdateInfo {
   checked_at?: string; // ISO date string
   is_prerelease?: boolean;
   check_error?: string;
+  // Spec 079 US2 (additive per FR-021): detected install channel (homebrew,
+  // dmg, deb, rpm, docker, go-install, windows-installer, tarball, unknown).
+  install_channel?: string;
+  // One-line update command for the channel; only present when an update is
+  // available and the channel has a safe command (FR-009).
+  update_command?: string;
 }
 
 export interface InfoResponse {

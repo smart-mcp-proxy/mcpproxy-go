@@ -683,9 +683,24 @@ func TestInfoEndpointIncludesUpdateInfo(t *testing.T) {
 	updateInfo, ok := data["update"].(map[string]interface{})
 	assert.True(t, ok, "update should be a map")
 
-	// Verify update info structure
-	assert.Contains(t, updateInfo, "available", "update info should have available field")
-	assert.Contains(t, updateInfo, "latest_version", "update info should have latest_version field")
+	// Verify update info structure. Spec 079 FR-021 contract: the six
+	// pre-existing update fields MUST survive the additive
+	// install_channel/update_command extension.
+	for _, key := range []string{
+		"available", "latest_version", "release_url", "checked_at", "is_prerelease", "check_error",
+	} {
+		assert.Contains(t, updateInfo, key, "update info must retain existing field %q (FR-021)", key)
+	}
+
+	// The two additive Spec 079 US2 fields.
+	assert.Equal(t, "homebrew", updateInfo["install_channel"], "update info should carry the detected install channel")
+	assert.Equal(t, "brew upgrade mcpproxy", updateInfo["update_command"], "update info should carry the channel update command when an update is available")
+
+	// The top-level version must match the checker's current version: they
+	// are identical for packaged builds, and for go-install builds the
+	// checker promotes the build-info module version while the ldflags
+	// default would read "development" (Spec 079 US2).
+	assert.Equal(t, "v1.0.0", data["version"], "top-level version should prefer the checker's current version")
 }
 
 // MockControllerWithUpdateInfo extends MockServerController with update info
@@ -694,11 +709,17 @@ type MockControllerWithUpdateInfo struct {
 }
 
 func (m *MockControllerWithUpdateInfo) GetVersionInfo() *updatecheck.VersionInfo {
+	checkedAt := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	return &updatecheck.VersionInfo{
 		CurrentVersion:  "v1.0.0",
 		LatestVersion:   "v1.1.0",
 		UpdateAvailable: true,
 		ReleaseURL:      "https://github.com/user/mcpproxy-go/releases/tag/v1.1.0",
+		CheckedAt:       &checkedAt,
+		IsPrerelease:    true,
+		CheckError:      "transient: rate limited",
+		InstallChannel:  updatecheck.ChannelHomebrew,
+		UpdateCommand:   updatecheck.UpdateCommand(updatecheck.ChannelHomebrew),
 	}
 }
 

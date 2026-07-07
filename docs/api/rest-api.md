@@ -837,7 +837,9 @@ Get application info, version, and update availability.
       "latest_version": "v1.3.0",
       "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
       "checked_at": "2025-01-15T10:30:00Z",
-      "is_prerelease": false
+      "is_prerelease": false,
+      "install_channel": "homebrew",
+      "update_command": "brew upgrade mcpproxy"
     }
   }
 }
@@ -859,6 +861,8 @@ Get application info, version, and update availability.
 | `update.checked_at` | string | ISO 8601 timestamp of last update check |
 | `update.is_prerelease` | boolean | Whether the latest version is a prerelease |
 | `update.check_error` | string | Error message if update check failed |
+| `update.install_channel` | string | Detected install channel: `homebrew`, `dmg`, `deb`, `rpm`, `docker`, `go-install`, `windows-installer`, `tarball`, or `unknown`. Always present once detected, even when no update is available. See [Version Updates](/features/version-updates) for how detection works. |
+| `update.update_command` | string | Exact one-line update command for the detected channel. Only present when an update is available **and** the channel has a safe command (`homebrew`, `deb`, `rpm`, `go-install`); omitted for `dmg`/`windows-installer`/`tarball`/`docker`/`unknown` so a possibly-wrong command is never suggested. |
 
 :::tip Update Checking
 MCPProxy automatically checks for updates every 4 hours. The update information is exposed via this endpoint and used by the tray application and web UI to show update notifications. Use `?refresh=true` to force an immediate re-check. Checking is controlled by the `update_check` config block (`enabled`, `channel`) — see [Version Updates](/features/version-updates); when disabled, `?refresh=true` performs no check and the `update` object is omitted.

@@ -2330,6 +2330,10 @@ components:
         checked_at:
           description: When the update check was performed
           type: string
+        install_channel:
+          description: Detected install channel (homebrew, dmg, deb, rpm, docker,
+            go-install, windows-installer, tarball, unknown) — Spec 079 FR-008
+          type: string
         is_prerelease:
           description: Whether the latest version is a prerelease
           type: boolean
@@ -2338,6 +2342,10 @@ components:
           type: string
         release_url:
           description: URL to the release page
+          type: string
+        update_command:
+          description: One-line update command for the channel; only set when an update
+            is available and the channel has one — Spec 079 FR-009
           type: string
       type: object
     contracts.UpstreamError:

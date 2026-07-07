@@ -1121,12 +1121,14 @@ type HealthStatus struct {
 
 // UpdateInfo represents version update check information
 type UpdateInfo struct {
-	Available     bool       `json:"available"`                // Whether an update is available
-	LatestVersion string     `json:"latest_version,omitempty"` // Latest version available (e.g., "v1.2.3")
-	ReleaseURL    string     `json:"release_url,omitempty"`    // URL to the release page
-	CheckedAt     *time.Time `json:"checked_at,omitempty"`     // When the update check was performed
-	IsPrerelease  bool       `json:"is_prerelease,omitempty"`  // Whether the latest version is a prerelease
-	CheckError    string     `json:"check_error,omitempty"`    // Error message if update check failed
+	Available      bool       `json:"available"`                 // Whether an update is available
+	LatestVersion  string     `json:"latest_version,omitempty"`  // Latest version available (e.g., "v1.2.3")
+	ReleaseURL     string     `json:"release_url,omitempty"`     // URL to the release page
+	CheckedAt      *time.Time `json:"checked_at,omitempty"`      // When the update check was performed
+	IsPrerelease   bool       `json:"is_prerelease,omitempty"`   // Whether the latest version is a prerelease
+	CheckError     string     `json:"check_error,omitempty"`     // Error message if update check failed
+	InstallChannel string     `json:"install_channel,omitempty"` // Detected install channel (homebrew, dmg, deb, rpm, docker, go-install, windows-installer, tarball, unknown) — Spec 079 FR-008
+	UpdateCommand  string     `json:"update_command,omitempty"`  // One-line update command for the channel; only set when an update is available and the channel has one — Spec 079 FR-009
 }
 
 // InfoEndpoints represents the available API endpoints

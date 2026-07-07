@@ -30,6 +30,21 @@ type VersionInfo struct {
 	// CheckError contains the error message if the last check failed.
 	// Empty string if no error.
 	CheckError string `json:"check_error,omitempty"`
+
+	// InstallChannel identifies the distribution channel of the running
+	// binary (homebrew, dmg, deb, rpm, docker, go-install,
+	// windows-installer, tarball, or unknown). Detected once at startup and
+	// always populated, even when no update is available (Spec 079 FR-008,
+	// additive per FR-021).
+	InstallChannel string `json:"install_channel,omitempty"`
+
+	// UpdateCommand is the exact one-line update command for InstallChannel.
+	// Only set when UpdateAvailable is true AND the channel has a safe
+	// command (homebrew, deb, rpm, go-install); empty otherwise (Spec 079
+	// FR-009, additive per FR-021). When the offered version is a
+	// prerelease, only go-install gets a command (version-pinned) — the
+	// package-manager channels serve stable artifacts only.
+	UpdateCommand string `json:"update_command,omitempty"`
 }
 
 // GitHubRelease represents a release from the GitHub Releases API.
@@ -94,6 +109,13 @@ type InfoResponseUpdate struct {
 
 	// CheckError is set if the last check failed
 	CheckError string `json:"check_error,omitempty"`
+
+	// InstallChannel is the detected distribution channel (Spec 079 FR-008)
+	InstallChannel string `json:"install_channel,omitempty"`
+
+	// UpdateCommand is the channel's one-line update command, only present
+	// when an update is available and the channel has one (Spec 079 FR-009)
+	UpdateCommand string `json:"update_command,omitempty"`
 }
 
 // ToAPIResponse converts VersionInfo to the API response format.
@@ -102,11 +124,13 @@ func (v *VersionInfo) ToAPIResponse() *InfoResponseUpdate {
 		return nil
 	}
 	return &InfoResponseUpdate{
-		Available:     v.UpdateAvailable,
-		LatestVersion: v.LatestVersion,
-		ReleaseURL:    v.ReleaseURL,
-		CheckedAt:     v.CheckedAt,
-		IsPrerelease:  v.IsPrerelease,
-		CheckError:    v.CheckError,
+		Available:      v.UpdateAvailable,
+		LatestVersion:  v.LatestVersion,
+		ReleaseURL:     v.ReleaseURL,
+		CheckedAt:      v.CheckedAt,
+		IsPrerelease:   v.IsPrerelease,
+		CheckError:     v.CheckError,
+		InstallChannel: v.InstallChannel,
+		UpdateCommand:  v.UpdateCommand,
 	}
 }

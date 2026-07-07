@@ -1216,16 +1216,30 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 		runtime.GOOS, runtime.GOARCH, latestSuffix, versionedSuffix)
 }
 
-// isHomebrewInstallation checks if this is a Homebrew installation
+// isHomebrewInstallation checks if this is a Homebrew installation.
+// Self-update is suppressed for Homebrew installs so it never conflicts with
+// the package manager (Spec 079 FR-011).
 func (a *App) isHomebrewInstallation() bool {
 	execPath, err := os.Executable()
 	if err != nil {
 		return false
 	}
 
-	// Check if running from Homebrew path
+	return isHomebrewPath(execPath)
+}
+
+// isHomebrewPath reports whether the executable path belongs to a Homebrew
+// prefix. Symlinks are resolved first: on Intel macs the binary is exposed as
+// /usr/local/bin/mcpproxy-tray, a symlink into /usr/local/Cellar/…, which the
+// raw-path checks would miss (Spec 079 US2 gap fix).
+func isHomebrewPath(execPath string) bool {
+	if resolved, err := filepath.EvalSymlinks(execPath); err == nil && resolved != "" {
+		execPath = resolved
+	}
+
 	return strings.Contains(execPath, "/opt/homebrew/") ||
 		strings.Contains(execPath, "/usr/local/Homebrew/") ||
+		strings.Contains(execPath, "/usr/local/Cellar/") ||
 		strings.Contains(execPath, "/home/linuxbrew/")
 }
 

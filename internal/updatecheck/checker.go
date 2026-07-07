@@ -3,6 +3,7 @@ package updatecheck
 import (
 	"context"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -30,6 +31,11 @@ type Checker struct {
 
 	mu          sync.RWMutex
 	versionInfo *VersionInfo
+
+	// installChannel is the distribution channel detected once at New()
+	// (Spec 079 FR-008); stamped onto every VersionInfo so /api/v1/info
+	// always carries install_channel, even with no update available.
+	installChannel string
 
 	// announcedVersion is the latest version already announced at Info level.
 	// It dedupes the "Update available" log so a given version is announced
@@ -63,14 +69,22 @@ type Checker struct {
 func New(logger *zap.Logger, version string) *Checker {
 	githubClient := NewGitHubClient(logger)
 
+	installChannel := DetectChannel(version)
+	// go-install builds carry no ldflags version; promote the build-info
+	// module version so isValidSemver does not disable checks for them
+	// (see promoteGoInstallVersion).
+	version = promoteGoInstallVersion(version, installChannel, debug.ReadBuildInfo)
+
 	c := &Checker{
-		logger:        logger,
-		version:       version,
-		checkInterval: DefaultCheckInterval,
-		githubClient:  githubClient,
-		cfgEnabled:    true, // update_check.enabled defaults to true (Spec 079 FR-012)
+		logger:         logger,
+		version:        version,
+		checkInterval:  DefaultCheckInterval,
+		githubClient:   githubClient,
+		cfgEnabled:     true, // update_check.enabled defaults to true (Spec 079 FR-012)
+		installChannel: installChannel,
 		versionInfo: &VersionInfo{
 			CurrentVersion: version,
+			InstallChannel: installChannel,
 		},
 	}
 
@@ -110,7 +124,7 @@ func (c *Checker) SetConfig(enabled, includePrereleases bool) {
 		// Drop results cached under the previous config so a re-enable or a
 		// channel switch never briefly serves stale (possibly wrong-channel)
 		// info before the prompt re-check completes (FR-013).
-		c.versionInfo = &VersionInfo{CurrentVersion: c.version}
+		c.versionInfo = &VersionInfo{CurrentVersion: c.version, InstallChannel: c.installChannel}
 	}
 	c.mu.Unlock()
 
@@ -230,6 +244,7 @@ func (c *Checker) GetVersionInfo() *VersionInfo {
 	if c.versionInfo == nil {
 		return &VersionInfo{
 			CurrentVersion: c.version,
+			InstallChannel: c.installChannel,
 		}
 	}
 
@@ -294,6 +309,22 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, g
 	latestVersion := release.TagName
 	updateAvailable := c.compareVersions(c.version, latestVersion)
 
+	// update_command only accompanies an actual update on channels with a
+	// safe one-line command (Spec 079 FR-009; empty for dmg/windows-installer/
+	// tarball/docker/unknown — surfaces render guidance text instead).
+	// Prerelease targets are special: the package-manager channels only serve
+	// stable artifacts, so their generic commands would not deliver the
+	// advertised rc — only go-install gets a version-pinned command
+	// (PrereleaseUpdateCommand).
+	updateCommand := ""
+	if updateAvailable {
+		if release.Prerelease {
+			updateCommand = PrereleaseUpdateCommand(c.installChannel, latestVersion)
+		} else {
+			updateCommand = UpdateCommand(c.installChannel)
+		}
+	}
+
 	c.versionInfo = &VersionInfo{
 		CurrentVersion:  c.version,
 		LatestVersion:   latestVersion,
@@ -302,6 +333,8 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, g
 		CheckedAt:       &now,
 		IsPrerelease:    release.Prerelease,
 		CheckError:      "",
+		InstallChannel:  c.installChannel,
+		UpdateCommand:   updateCommand,
 	}
 
 	switch {

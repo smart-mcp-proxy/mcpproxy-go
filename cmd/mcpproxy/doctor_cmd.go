@@ -14,7 +14,28 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
+
+// doctorUpdateActionLine renders the guided-update action for the /api/v1/info
+// update object (Spec 079 US2, FR-009): the channel's exact one-line command
+// when one exists, the channel-appropriate guidance otherwise, or "" when the
+// daemon reported no install channel (older daemons). The release URL is
+// already printed on the Download line, so guidance uses the generic
+// "releases page" wording.
+func doctorUpdateActionLine(updateInfo map[string]interface{}) string {
+	if cmd := getStringField(updateInfo, "update_command"); cmd != "" {
+		return "Run: " + cmd
+	}
+	channel := getStringField(updateInfo, "install_channel")
+	if channel == "" {
+		return ""
+	}
+	if guidance := updatecheck.GuidanceLine(channel, ""); guidance != "" {
+		return "Update: " + guidance
+	}
+	return ""
+}
 
 var (
 	doctorCmd = &cobra.Command{
@@ -301,6 +322,10 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 						fmt.Printf("Version: %s (update available: %s)\n", version, latestVersion)
 						if releaseURL != "" {
 							fmt.Printf("Download: %s\n", releaseURL)
+						}
+						// Spec 079 US2 (FR-009): channel-aware guided update.
+						if action := doctorUpdateActionLine(updateInfo); action != "" {
+							fmt.Println(action)
 						}
 					} else {
 						fmt.Printf("Version: %s (latest)\n", version)
