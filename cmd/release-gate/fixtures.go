@@ -24,6 +24,11 @@ type fixtureProc struct {
 	Cmd     *exec.Cmd
 	LogPath string
 	logFile *os.File
+	// exited is closed by the reaper goroutine once the process has been
+	// reaped (cmd.Wait returned). It is the liveness source of truth —
+	// Cmd.ProcessState is only populated by cmd.Wait, so without a reaper a
+	// self-exited fixture would linger as a zombie and read as "alive".
+	exited chan struct{}
 }
 
 func startFixture(name, binary string, args []string, port int, logPath string) (*fixtureProc, error) {
@@ -38,17 +43,26 @@ func startFixture(name, binary string, args []string, port int, logPath string) 
 		logFile.Close()
 		return nil, fmt.Errorf("start fixture %s: %w", name, err)
 	}
-	return &fixtureProc{Name: name, Binary: binary, Args: args, Port: port, Cmd: cmd, LogPath: logPath, logFile: logFile}, nil
+	f := &fixtureProc{Name: name, Binary: binary, Args: args, Port: port, Cmd: cmd, LogPath: logPath, logFile: logFile, exited: make(chan struct{})}
+	// Reap the process whether it exits on its own (crash) or is killed. This
+	// is the single owner of cmd.Wait; kill() must not Wait again.
+	go func() {
+		_ = cmd.Wait()
+		close(f.exited)
+	}()
+	return f, nil
 }
 
 // kill force-terminates the fixture (SIGKILL — FR-007d requires forcible
-// termination) and reaps it.
+// termination) and waits for the reaper goroutine to reap it.
 func (f *fixtureProc) kill() {
 	if f == nil || f.Cmd == nil || f.Cmd.Process == nil {
 		return
 	}
 	_ = f.Cmd.Process.Kill()
-	_, _ = f.Cmd.Process.Wait()
+	if f.exited != nil {
+		<-f.exited // the reaper goroutine owns cmd.Wait
+	}
 	if f.logFile != nil {
 		f.logFile.Close()
 		f.logFile = nil
@@ -64,9 +78,23 @@ func (f *fixtureProc) restart() (*fixtureProc, error) {
 	return startFixture(f.Name, f.Binary, f.Args, f.Port, f.LogPath)
 }
 
-// alive reports whether the fixture process is still running.
+// alive reports whether the fixture process is still running. It consults the
+// reaper's exited channel rather than Cmd.ProcessState so a fixture that dies
+// on its own (not via kill) is detected — otherwise prepareRetry would never
+// restore a crashed fixture before a cell retry.
 func (f *fixtureProc) alive() bool {
-	return f != nil && f.Cmd != nil && f.Cmd.ProcessState == nil
+	if f == nil || f.Cmd == nil || f.Cmd.Process == nil {
+		return false
+	}
+	if f.exited == nil {
+		return true
+	}
+	select {
+	case <-f.exited:
+		return false
+	default:
+		return true
+	}
 }
 
 // waitTCP polls until the address accepts connections.
