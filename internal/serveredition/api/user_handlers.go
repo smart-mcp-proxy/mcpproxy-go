@@ -33,6 +33,7 @@ type tokenStore interface {
 	ListAgentTokens() ([]auth.AgentToken, error)
 	GetAgentTokenByName(name string) (*auth.AgentToken, error)
 	RevokeAgentToken(name string) error
+	DeleteAgentToken(name string) error
 	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 }
 
@@ -61,6 +62,7 @@ func (h *UserHandlers) RegisterRoutes(r chi.Router) {
 		r.Get("/", h.listUserTokens)
 		r.Post("/", h.createUserToken)
 		r.Delete("/{name}", h.revokeUserToken)
+		r.Delete("/{name}/permanent", h.deleteUserToken)
 		r.Post("/{name}/regenerate", h.regenerateUserToken)
 	})
 }
@@ -76,6 +78,7 @@ func (h *UserHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 	r.Get(prefix+"/user/tokens", h.listUserTokens)
 	r.Post(prefix+"/user/tokens", h.createUserToken)
 	r.Delete(prefix+"/user/tokens/{name}", h.revokeUserToken)
+	r.Delete(prefix+"/user/tokens/{name}/permanent", h.deleteUserToken)
 	r.Post(prefix+"/user/tokens/{name}/regenerate", h.regenerateUserToken)
 }
 
@@ -659,6 +662,52 @@ func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Infow("user token revoked", "user_id", userID, "name", name)
 	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("Token %q revoked", name)})
+}
+
+// deleteUserToken permanently removes an agent token owned by the authenticated
+// user, freeing its name for reuse (unlike revoke, which is a soft delete).
+func (h *UserHandlers) deleteUserToken(w http.ResponseWriter, r *http.Request) {
+	userID, err := getUserID(r)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+
+	if h.tokenStore == nil {
+		writeError(w, http.StatusInternalServerError, "Token store not available")
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Token name is required")
+		return
+	}
+
+	// Verify the token belongs to this user.
+	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	if err != nil {
+		h.logger.Errorw("failed to get token for delete", "user_id", userID, "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to get token")
+		return
+	}
+	if existing == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+		return
+	}
+	if existing.UserID != userID {
+		writeError(w, http.StatusForbidden, "Cannot delete another user's token")
+		return
+	}
+
+	if err := h.tokenStore.DeleteAgentToken(name); err != nil {
+		h.logger.Errorw("failed to delete token", "user_id", userID, "name", name, "error", err)
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete token: %v", err))
+		return
+	}
+
+	h.logger.Infow("user token deleted", "user_id", userID, "name", name)
+	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("Token %q deleted", name)})
 }
 
 // regenerateUserToken regenerates an agent token owned by the authenticated user.

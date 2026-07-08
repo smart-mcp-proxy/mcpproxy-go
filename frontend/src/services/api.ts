@@ -1101,6 +1101,13 @@ class APIService {
     })
   }
 
+  // Permanently delete a token, freeing its name for reuse (unlike revoke, a soft delete).
+  async deleteAgentToken(name: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/tokens/${encodeURIComponent(name)}/permanent`, {
+      method: 'DELETE',
+    })
+  }
+
   async regenerateAgentToken(name: string): Promise<APIResponse<{ name: string; token: string }>> {
     return this.request<{ name: string; token: string }>(`/api/v1/tokens/${encodeURIComponent(name)}/regenerate`, {
       method: 'POST',

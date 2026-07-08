@@ -231,10 +231,21 @@ mcpproxy token show deploy-bot
 
 ### Revoke a Token
 
-Immediately invalidates the token:
+Immediately invalidates the token. Revoke is a **soft delete**: the record is kept
+(so the token name stays reserved) and any further use is rejected:
 
 ```bash
 mcpproxy token revoke deploy-bot
+```
+
+### Delete a Token
+
+Permanently removes the token, freeing its name for reuse. Unlike revoke, delete
+removes the record entirely — after deleting, you can create a new token with the
+same name:
+
+```bash
+mcpproxy token delete deploy-bot   # aliases: rm, remove
 ```
 
 ### Regenerate a Token
@@ -280,7 +291,8 @@ Agent tokens can also be managed via the REST API (requires admin API key):
 | `POST` | `/api/v1/tokens` | Create a new agent token |
 | `GET` | `/api/v1/tokens` | List all tokens |
 | `GET` | `/api/v1/tokens/{name}` | Get token details |
-| `DELETE` | `/api/v1/tokens/{name}` | Revoke a token |
+| `DELETE` | `/api/v1/tokens/{name}` | Revoke a token (soft delete; name stays reserved) |
+| `DELETE` | `/api/v1/tokens/{name}/permanent` | Permanently delete a token (frees the name for reuse) |
 | `POST` | `/api/v1/tokens/{name}/regenerate` | Regenerate token secret |
 
 ### Create Token via API

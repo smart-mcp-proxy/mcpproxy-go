@@ -761,6 +761,7 @@ func (s *Server) setupRoutes() {
 			r.Route("/{name}", func(r chi.Router) {
 				r.Get("/", s.handleGetToken)
 				r.Delete("/", s.handleRevokeToken)
+				r.Delete("/permanent", s.handleDeleteToken)
 				r.Post("/regenerate", s.handleRegenerateToken)
 			})
 		})

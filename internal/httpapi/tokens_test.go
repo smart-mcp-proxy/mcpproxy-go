@@ -24,6 +24,7 @@ type mockTokenStore struct {
 	tokens     map[string]auth.AgentToken
 	createErr  error
 	revokeErr  error
+	deleteErr  error
 	regenToken *auth.AgentToken
 	regenErr   error
 }
@@ -72,6 +73,17 @@ func (m *mockTokenStore) RevokeAgentToken(name string) error {
 	}
 	t.Revoked = true
 	m.tokens[name] = t
+	return nil
+}
+
+func (m *mockTokenStore) DeleteAgentToken(name string) error {
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	if _, ok := m.tokens[name]; !ok {
+		return fmt.Errorf("agent token %q not found", name)
+	}
+	delete(m.tokens, name)
 	return nil
 }
 
@@ -626,6 +638,59 @@ func TestRevokeToken_NotFound(t *testing.T) {
 
 	w := doRequest(t, srv, http.MethodDelete, "/api/v1/tokens/nonexistent", nil)
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestDeleteToken(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServer(t, store, nil)
+
+	// Create a token
+	body := createTokenRequest{
+		Name:        "delete-me",
+		Permissions: []string{"read"},
+	}
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens", body)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// Permanently delete it
+	w = doRequest(t, srv, http.MethodDelete, "/api/v1/tokens/delete-me/permanent", nil)
+	assert.Equal(t, http.StatusNoContent, w.Code)
+
+	// Verify it's gone
+	stored, err := store.GetAgentTokenByName("delete-me")
+	require.NoError(t, err)
+	assert.Nil(t, stored)
+}
+
+func TestDeleteToken_NotFound(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServer(t, store, nil)
+
+	w := doRequest(t, srv, http.MethodDelete, "/api/v1/tokens/nonexistent/permanent", nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+// TestDeleteToken_FreesNameForReuse verifies the issue #820 flow end-to-end at
+// the API layer: revoke reserves the name, delete frees it for reuse.
+func TestDeleteToken_FreesNameForReuse(t *testing.T) {
+	store := newMockTokenStore()
+	srv := newTestTokenServer(t, store, nil)
+
+	body := createTokenRequest{Name: "reusable", Permissions: []string{"read"}}
+	w := doRequest(t, srv, http.MethodPost, "/api/v1/tokens", body)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// Revoke keeps the name reserved -> re-create conflicts.
+	w = doRequest(t, srv, http.MethodDelete, "/api/v1/tokens/reusable", nil)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	w = doRequest(t, srv, http.MethodPost, "/api/v1/tokens", body)
+	assert.Equal(t, http.StatusConflict, w.Code)
+
+	// Permanent delete frees the name -> re-create succeeds.
+	w = doRequest(t, srv, http.MethodDelete, "/api/v1/tokens/reusable/permanent", nil)
+	require.Equal(t, http.StatusNoContent, w.Code)
+	w = doRequest(t, srv, http.MethodPost, "/api/v1/tokens", body)
+	assert.Equal(t, http.StatusCreated, w.Code)
 }
 
 func TestRegenerateToken(t *testing.T) {
