@@ -95,6 +95,32 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/tokens/{name}/permanent:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Agent token name
+
+    delete:
+      summary: Permanently delete an agent token
+      description: >-
+        Permanently removes the agent token, deleting its record entirely and
+        freeing its name for reuse. Unlike revoke (a soft delete that keeps the
+        record so the name stays reserved), delete removes the token completely.
+      operationId: deleteAgentToken
+      security:
+        - apiKey: []
+      responses:
+        '204':
+          description: Token deleted successfully
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/tokens/{name}/regenerate:
     parameters:
       - name: name

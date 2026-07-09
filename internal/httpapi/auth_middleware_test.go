@@ -24,10 +24,11 @@ type testTokenStore struct {
 	validateFunc func(rawToken string, hmacKey []byte) (*auth.AgentToken, error)
 }
 
-func (s *testTokenStore) CreateAgentToken(_ auth.AgentToken, _ string, _ []byte) error   { return nil }
-func (s *testTokenStore) ListAgentTokens() ([]auth.AgentToken, error)                    { return nil, nil }
-func (s *testTokenStore) GetAgentTokenByName(_ string) (*auth.AgentToken, error)          { return nil, nil }
-func (s *testTokenStore) RevokeAgentToken(_ string) error                                 { return nil }
+func (s *testTokenStore) CreateAgentToken(_ auth.AgentToken, _ string, _ []byte) error { return nil }
+func (s *testTokenStore) ListAgentTokens() ([]auth.AgentToken, error)                  { return nil, nil }
+func (s *testTokenStore) GetAgentTokenByName(_ string) (*auth.AgentToken, error)       { return nil, nil }
+func (s *testTokenStore) RevokeAgentToken(_ string) error                              { return nil }
+func (s *testTokenStore) DeleteAgentToken(_ string) error                              { return nil }
 func (s *testTokenStore) RegenerateAgentToken(_ string, _ string, _ []byte) (*auth.AgentToken, error) {
 	return nil, nil
 }
@@ -398,4 +399,3 @@ func TestAPIKeyAuth_NoTokenStore_RejectsAgentToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code,
 		"Agent token should be rejected when token store is not configured")
 }
-

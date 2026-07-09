@@ -12,7 +12,7 @@ import (
 // Bucket names for agent token storage.
 const (
 	AgentTokensBucket     = "agent_tokens"      //nolint:gosec // bucket name, not a credential
-	AgentTokenNamesBucket = "agent_token_names"  //nolint:gosec // bucket name, not a credential
+	AgentTokenNamesBucket = "agent_token_names" //nolint:gosec // bucket name, not a credential
 )
 
 // CreateAgentToken stores a new agent token. It hashes the raw token using
@@ -222,6 +222,47 @@ func (m *Manager) RevokeAgentToken(name string) error {
 		}
 
 		return tokenBucket.Put(hash, updatedData)
+	})
+}
+
+// DeleteAgentToken permanently removes an agent token, deleting both the record
+// in the "agent_tokens" bucket and the name->hash mapping in "agent_token_names".
+// Unlike RevokeAgentToken (a soft delete that keeps the record), this frees the
+// name so a new token can be created with the same name. Returns an error if the
+// token does not exist.
+func (m *Manager) DeleteAgentToken(name string) error {
+	if name == "" {
+		return fmt.Errorf("agent token name cannot be empty")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		nameBucket := tx.Bucket([]byte(AgentTokenNamesBucket))
+		if nameBucket == nil {
+			return fmt.Errorf("agent token %q not found", name)
+		}
+
+		hash := nameBucket.Get([]byte(name))
+		if hash == nil {
+			return fmt.Errorf("agent token %q not found", name)
+		}
+
+		// Delete the name->hash mapping first so the name is freed even if the
+		// record is somehow missing.
+		if err := nameBucket.Delete([]byte(name)); err != nil {
+			return fmt.Errorf("failed to delete agent token name mapping: %w", err)
+		}
+
+		tokenBucket := tx.Bucket([]byte(AgentTokensBucket))
+		if tokenBucket != nil {
+			if err := tokenBucket.Delete(hash); err != nil {
+				return fmt.Errorf("failed to delete agent token: %w", err)
+			}
+		}
+
+		return nil
 	})
 }
 

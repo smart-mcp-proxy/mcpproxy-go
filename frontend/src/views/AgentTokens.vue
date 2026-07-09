@@ -198,6 +198,17 @@
                   </svg>
                   Revoke
                 </button>
+                <button
+                  v-if="token.revoked || isExpired(token)"
+                  @click="handleDelete(token.name)"
+                  class="btn btn-xs btn-error"
+                  title="Permanently delete token and free its name for reuse"
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  Delete
+                </button>
               </div>
             </td>
           </tr>
@@ -639,6 +650,38 @@ async function handleRevoke(name: string) {
       type: 'error',
       title: 'Revoke Failed',
       message: err.message || 'Failed to revoke token',
+    })
+  }
+}
+
+// Permanently delete a (revoked or expired) token, freeing its name for reuse
+async function handleDelete(name: string) {
+  if (!confirm(`Permanently delete token "${name}"? This removes it completely and frees the name for reuse. This action cannot be undone.`)) {
+    return
+  }
+
+  try {
+    const response = await apiClient.deleteAgentToken(name)
+    if (response.success || !response.error) {
+      await loadTokens()
+
+      systemStore.addToast({
+        type: 'success',
+        title: 'Token Deleted',
+        message: `Token "${name}" has been permanently deleted`,
+      })
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Delete Failed',
+        message: response.error || 'Failed to delete token',
+      })
+    }
+  } catch (err: any) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Delete Failed',
+      message: err.message || 'Failed to delete token',
     })
   }
 }

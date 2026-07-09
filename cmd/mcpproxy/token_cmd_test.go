@@ -23,7 +23,32 @@ func TestGetTokenCommand(t *testing.T) {
 	assert.True(t, names["list"], "should have 'list' subcommand")
 	assert.True(t, names["show"], "should have 'show' subcommand")
 	assert.True(t, names["revoke"], "should have 'revoke' subcommand")
+	assert.True(t, names["delete"], "should have 'delete' subcommand")
 	assert.True(t, names["regenerate"], "should have 'regenerate' subcommand")
+}
+
+func TestGetTokenCommand_IncludesDelete(t *testing.T) {
+	cmd := GetTokenCommand()
+
+	// Find the delete subcommand
+	var deleteCmd *cobra.Command
+	for _, sub := range cmd.Commands() {
+		if sub.Name() == "delete" {
+			deleteCmd = sub
+			break
+		}
+	}
+
+	assert.NotNil(t, deleteCmd, "delete subcommand must exist")
+	assert.Equal(t, "delete <name>", deleteCmd.Use)
+	assert.Contains(t, deleteCmd.Short, "delete")
+	assert.NotEmpty(t, deleteCmd.Long)
+	assert.Contains(t, deleteCmd.Aliases, "rm", "delete should alias 'rm'")
+
+	// Verify it requires exactly 1 argument
+	assert.Error(t, deleteCmd.Args(deleteCmd, []string{}), "should reject zero args")
+	assert.NoError(t, deleteCmd.Args(deleteCmd, []string{"my-token"}), "should accept one arg")
+	assert.Error(t, deleteCmd.Args(deleteCmd, []string{"a", "b"}), "should reject two args")
 }
 
 func TestGetTokenCommand_IncludesRegenerate(t *testing.T) {
@@ -76,7 +101,7 @@ func TestGetMapString(t *testing.T) {
 
 	assert.Equal(t, "deploy-bot", getMapString(m, "name"))
 	assert.Equal(t, "", getMapString(m, "count"))       // not a string
-	assert.Equal(t, "", getMapString(m, "nonexistent"))  // missing key
+	assert.Equal(t, "", getMapString(m, "nonexistent")) // missing key
 }
 
 func TestJoinInterfaceSlice(t *testing.T) {

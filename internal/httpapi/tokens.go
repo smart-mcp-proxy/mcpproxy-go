@@ -22,6 +22,7 @@ type TokenStore interface {
 	ListAgentTokens() ([]auth.AgentToken, error)
 	GetAgentTokenByName(name string) (*auth.AgentToken, error)
 	RevokeAgentToken(name string) error
+	DeleteAgentToken(name string) error
 	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
 	ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.AgentToken, error)
 	UpdateAgentTokenLastUsed(name string) error
@@ -286,6 +287,36 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Errorf("Failed to revoke agent token: %v", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to revoke token")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleDeleteToken handles DELETE /api/v1/tokens/{name}/permanent
+// It permanently removes a token (unlike revoke, which is a soft delete),
+// freeing the name so it can be reused for a new token.
+func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdminAuth(w, r) {
+		return
+	}
+	if !s.requireTokenStore(w, r) {
+		return
+	}
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Token name is required")
+		return
+	}
+
+	if err := s.tokenStore.DeleteAgentToken(name); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+			return
+		}
+		s.logger.Errorf("Failed to delete agent token: %v", err)
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to delete token")
 		return
 	}
 

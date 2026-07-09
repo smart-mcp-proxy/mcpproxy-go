@@ -49,6 +49,7 @@ Examples:
 	tokenCmd.AddCommand(newTokenListCmd())
 	tokenCmd.AddCommand(newTokenShowCmd())
 	tokenCmd.AddCommand(newTokenRevokeCmd())
+	tokenCmd.AddCommand(newTokenDeleteCmd())
 	tokenCmd.AddCommand(newTokenRegenerateCmd())
 
 	return tokenCmd
@@ -392,6 +393,54 @@ func runTokenRevoke(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Token %q has been revoked.\n", name)
+	return nil
+}
+
+func newTokenDeleteCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:     "delete <name>",
+		Aliases: []string{"rm", "remove"},
+		Short:   "Permanently delete an agent token",
+		Long: `Permanently delete an agent token, removing it entirely and freeing its
+name for reuse. Unlike revoke (a soft delete that keeps the record so the name
+stays reserved), delete removes the token completely.
+
+Examples:
+  mcpproxy token delete deploy-bot`,
+		Args: cobra.ExactArgs(1),
+		RunE: runTokenDelete,
+	}
+}
+
+func runTokenDelete(_ *cobra.Command, args []string) error {
+	client, _, err := newTokenCLIClient()
+	if err != nil {
+		return err
+	}
+
+	name := args[0]
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := client.DoRaw(ctx, http.MethodDelete, "/api/v1/tokens/"+name+"/permanent", nil)
+	if err != nil {
+		return fmt.Errorf("failed to delete token: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("token %q not found", name)
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return parseAPIError(respBody, resp.StatusCode, "delete token")
+	}
+
+	fmt.Printf("Token %q has been permanently deleted.\n", name)
 	return nil
 }
 
