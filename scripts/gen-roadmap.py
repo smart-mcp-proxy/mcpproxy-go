@@ -67,6 +67,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 try:
     import yaml
@@ -843,9 +844,30 @@ def check_github(data: dict, strict: bool) -> int:
 
 # ── archive sweep (--archive) ───────────────────────────────────────────────
 # An epic block starts at indent 2 ("  - id: slug"); child tasks sit at indent 6
-# and so never match. Section banners ("  # ── DONE ──") separate groups.
-EPIC_START_RE = re.compile(r"^  - id: (\S+)\s*$")
+# and so never match. A trailing comment or quotes on the id are tolerated.
+# Section banners ("  # ── DONE ──") separate groups.
+#
+# This is a REGEX over YAML, which cannot know about block scalars: a `note: |`
+# whose body happens to contain a line like "  - id: x" would look like an epic
+# start. `assert_blocks_match_yaml` is the guard — the ids this regex finds must
+# equal the ids PyYAML parses, or we refuse to touch the file.
+EPIC_START_RE = re.compile(r"""^  - id:\s*["']?([^"'\s#]+)["']?\s*(?:\#.*)?$""")
 SECTION_HDR_RE = re.compile(r"^  # ─")
+
+
+def atomic_write(path: str, text: str) -> None:
+    """Write via a temp file in the same directory + rename, so a crash never
+    leaves a half-written roadmap or archive behind."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".gen-roadmap.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def epic_pr_numbers(epic: dict) -> list[int]:
@@ -910,6 +932,25 @@ def find_epic_blocks(text: str) -> list[tuple[str, int, int]]:
     return blocks
 
 
+def assert_blocks_match_yaml(raw: str, epics: list[dict]) -> str:
+    """Return an error string if the regex's view of the file disagrees with
+    PyYAML's, else "".
+
+    The sweep cuts raw text by line number, so a phantom `- id:` (e.g. inside a
+    `note: |` block scalar) or an epic the regex fails to see would slice a
+    block at the wrong boundary. Comparing the two id lists — in order — is a
+    cheap, total invariant: if they match, every block boundary is anchored to
+    a real epic.
+    """
+    seen = [b[0] for b in find_epic_blocks(raw)]
+    want = [e["id"] for e in epics]
+    if seen == want:
+        return ""
+    return (f"text-scan found epics {seen}\n       but PyYAML parsed {want}.\n"
+            "       A `- id:` inside a block scalar, or an unrecognised epic "
+            "line, would make the sweep cut at the wrong boundary.")
+
+
 def prune_empty_sections(lines: list[str]) -> list[str]:
     """Drop a section banner that no longer has any epic under it, and collapse
     the blank-line runs the excision leaves behind."""
@@ -955,6 +996,12 @@ def sweep_archive(min_age_days: int, dry_run: bool) -> int:
         raw = fh.read()
     data = yaml.safe_load(raw)
     epics = data.get("epics", [])
+
+    # Refuse to cut text we cannot see the same way the YAML parser does.
+    mismatch = assert_blocks_match_yaml(raw, epics)
+    if mismatch:
+        sys.stderr.write(f"error: refusing to sweep — {mismatch}\n")
+        return 1
 
     use_gh, gh_reason = gh_available()
     if not use_gh and min_age_days > 0:
@@ -1054,13 +1101,13 @@ def sweep_archive(min_age_days: int, dry_run: bool) -> int:
         sys.stderr.write("error: archive would contain duplicate epic ids; aborting.\n")
         return 1
 
-    with open(ROADMAP_YAML, "w", encoding="utf-8") as fh:
-        fh.write(new_raw)
-    with open(ROADMAP_ARCHIVE_YAML, "w", encoding="utf-8") as fh:
-        fh.write(archive_text)
-
-    with open(ROADMAP_MD, "w", encoding="utf-8") as fh:
-        fh.write(render(reparsed, load_archive()))
+    # Write the ARCHIVE first, then the working set. The sweep is a move across
+    # two files with no transaction: if we die in between, the epics must be
+    # duplicated (recoverable, and the next --archive is a no-op for them)
+    # rather than lost. Each write is itself atomic via rename.
+    atomic_write(ROADMAP_ARCHIVE_YAML, archive_text)
+    atomic_write(ROADMAP_YAML, new_raw)
+    atomic_write(ROADMAP_MD, render(reparsed, load_archive()))
 
     print(f"archived {len(chosen)} epic(s); roadmap.yaml now has "
           f"{len(reparsed.get('epics', []))}. Regenerated ROADMAP.md.")
