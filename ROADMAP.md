@@ -83,7 +83,7 @@ graph LR
 Each epic's child tasks, their internal dependency graph, and tracker/PR links — **collapsed by default**, expand the ones you care about. Full metadata (priority, spec progress) is in the [Epics](#epics) table below.
 
 <details>
-<summary>🔵 Upgrade awareness & guided update — In progress · P0</summary>
+<summary>🔵 Upgrade awareness &amp; guided update — In progress · P0</summary>
 
 > Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI.
 
@@ -241,7 +241,7 @@ graph LR
 </details>
 
 <details>
-<summary>🔵 Telemetry identity & data quality (machine_id + CI-filter hardening) — In progress · P1</summary>
+<summary>🔵 Telemetry identity &amp; data quality (machine_id + CI-filter hardening) — In progress · P1</summary>
 
 > Heartbeat lacks a stable identity, so active-install counts are inflated by CI/dev churn and launch_source is 79% unknown. Add a hashed machine_id (schema v6) and harden the worker/dashboard cohort filters. Spans repos mcpproxy-go (client), mcpproxy-telemetry (worker), mcpproxy-dash (dashboard).
 

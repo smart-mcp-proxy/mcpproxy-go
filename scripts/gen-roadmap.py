@@ -48,11 +48,13 @@ Usage:
                     it references is MERGED, and the NEWEST of those merges is at
                     least --min-age-days old (default 14 — "shipped and two weeks
                     cold"). Epics carrying `keep: true` are never swept; epics
-                    with no PR refs cannot be dated and are skipped unless
-                    --min-age-days 0. Needs an authenticated `gh` unless
-                    --min-age-days 0.
+                    with no PR refs cannot be dated and are skipped. Needs an
+                    authenticated `gh` unless --force-undated.
     --min-age-days  Cool-off window for --archive (default 14).
     --dry-run       With --archive, print what would move and change nothing.
+    --force-undated With --archive, sweep without `gh`. PR merge state is NOT
+                    verified; shipped_on is stamped "unknown". --min-age-days 0
+                    waives the cool-off, never the merge check.
 
 Pure stdlib + PyYAML (already used by scripts/check-settings-parity.py).
 Idempotent: running twice with no source change produces identical output.
@@ -61,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import html
 import json
 import os
 import re
@@ -200,6 +203,80 @@ def all_ids(epics: list[dict]) -> set[str]:
     return ids
 
 
+def id_list(epics: list[dict]) -> list[str]:
+    """Every epic and task id, in file order, WITH duplicates preserved."""
+    out: list[str] = []
+    for epic in epics:
+        out.append(epic["id"])
+        for t in epic.get("tasks") or []:
+            out.append(t["id"])
+    return out
+
+
+def duplicate_ids(epics: list[dict]) -> list[str]:
+    """Ids declared more than once. The schema says ids are unique across epics
+    AND tasks; YAML happily accepts duplicates because these are list items,
+    not mapping keys, so nothing else enforces it.
+
+    A duplicate epic id is a data-loss hazard for --archive: the sweep keys raw
+    text blocks by id, so one block silently overwrites the other while both
+    line ranges are cut from the source.
+    """
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for i in id_list(epics):
+        if i in seen and i not in dupes:
+            dupes.append(i)
+        seen.add(i)
+    return dupes
+
+
+def node_id_collisions(epics: list[dict]) -> list[tuple[str, str]]:
+    """Distinct ids that sanitise to the same Mermaid node id (`a-b` and `a_b`
+    both become `a_b`), which would merge two nodes and their edges."""
+    by_node: dict[str, list[str]] = {}
+    for i in sorted(all_ids(epics)):
+        by_node.setdefault(node_id(i), []).append(i)
+    return [(v[0], v[1]) for v in by_node.values() if len(v) > 1]
+
+
+def find_cycles(epics: list[dict]) -> list[list[str]]:
+    """Every dependency cycle, self-loops included. depends_on is supposed to
+    describe a DAG; existence checks alone let `a -> b -> a` through and the
+    rendered graph then claims a prerequisite chain that can never start."""
+    adj: dict[str, list[str]] = {}
+    for item in id_list(epics):
+        adj.setdefault(item, [])
+    for epic in epics:
+        for dep in epic.get("depends_on") or []:
+            adj.setdefault(dep, []).append(epic["id"])
+        for t in epic.get("tasks") or []:
+            for dep in t.get("depends_on") or []:
+                adj.setdefault(dep, []).append(t["id"])
+
+    cycles: list[list[str]] = []
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {n: WHITE for n in adj}
+
+    def walk(node: str, stack: list[str]) -> None:
+        colour[node] = GREY
+        stack.append(node)
+        for nxt in adj.get(node, []):
+            if colour.get(nxt, WHITE) == GREY:          # back edge → cycle
+                cyc = stack[stack.index(nxt):] + [nxt]
+                if cyc not in cycles:
+                    cycles.append(cyc)
+            elif colour.get(nxt, WHITE) == WHITE:
+                walk(nxt, stack)
+        stack.pop()
+        colour[node] = BLACK
+
+    for n in list(adj):
+        if colour.get(n, WHITE) == WHITE:
+            walk(n, [])
+    return cycles
+
+
 # ── DAG rendering ────────────────────────────────────────────────────────────
 # The roadmap has two zoom levels — ~24 epics and ~70 tasks — and cramming both
 # into one Mermaid `graph TD` renders as an illegible postage stamp on GitHub.
@@ -227,9 +304,23 @@ def truncate(text: str, limit: int) -> str:
 
 
 def node_box(label: str) -> str:
-    """A default-rectangle Mermaid node body: `["label"]`, quotes escaped so
-    parens/slashes/em dashes survive."""
-    return f'["{label.replace(chr(34), chr(39))}"]'
+    """A default-rectangle Mermaid node body: `["label"]`. Quotes and brackets
+    are neutralised — either terminates the node body early and corrupts the
+    graph — so parens/slashes/em dashes survive."""
+    safe = label.replace('"', "'").replace("[", "(").replace("]", ")")
+    return f'["{safe}"]'
+
+
+def md_cell(text: str) -> str:
+    """Escape a value bound for a Markdown table cell: a raw `|` opens a new
+    column and a newline ends the row."""
+    return " ".join(str(text).split()).replace("|", "\\|")
+
+
+def html_text(text: str) -> str:
+    """Escape a value interpolated into raw HTML (a <summary>): a title holding
+    `</summary>` would otherwise break the collapsible block open."""
+    return html.escape(str(text), quote=False)
 
 
 def epic_owner_map(epics: list[dict]) -> dict[str, str]:
@@ -320,7 +411,7 @@ def render_standalone_epics(epics: list[dict]) -> str:
         prio = epic.get("priority")
         meta = " · ".join(x for x in (STATUS_LABEL.get(epic.get("status", "todo")), prio,
                                       "parked" if epic.get("parked") else None) if x)
-        rows.append(f"- {STATUS_EMOJI[st]} **{epic['title']}** — {meta}")
+        rows.append(f"- {STATUS_EMOJI[st]} **{md_cell(epic['title'])}** — {meta}")
     return "\n".join(rows)
 
 
@@ -367,8 +458,7 @@ def render_epic_task_table(epic: dict) -> str:
         pr = fmt_pr(t.get("pr"))
         if pr:
             refs.append(pr)
-        title = t["title"].replace("|", "\\|")
-        rows.append(f"| {title} | {cell} | {' '.join(refs) or '—'} |")
+        rows.append(f"| {md_cell(t['title'])} | {cell} | {' '.join(refs) or '—'} |")
     return "\n".join(rows)
 
 
@@ -393,13 +483,14 @@ def render_epic_details(epics: list[dict]) -> str:
             head.append(epic["priority"])
         if epic.get("mcp"):
             head.append(epic["mcp"])
-        summary = f"{STATUS_EMOJI.get(status_of(epic), '')} {epic['title']} — {' · '.join(head)}"
+        summary = (f"{STATUS_EMOJI.get(status_of(epic), '')} {html_text(epic['title'])}"
+                   f" — {html_text(' · '.join(head))}")
 
         out.append("<details>")
         out.append(f"<summary>{summary}</summary>")
         out.append("")  # blank line: GitHub needs it to render markdown inside <details>
         if epic.get("note"):
-            out.append(f"> {epic['note']}")
+            out.append(f"> {md_cell(epic['note'])}")
             out.append("")
         links = []
         if epic.get("spec"):
@@ -443,7 +534,7 @@ def render_status_table(epics: list[dict]) -> str:
         spec_cell = f"[{os.path.basename(spec)}](./{spec}/)" if spec else ""
         pr = fmt_pr(epic.get("pr"))
         mcp = epic.get("mcp")
-        epic_cell = epic["title"] + (f" `{mcp}`" if mcp else "")
+        epic_cell = md_cell(epic["title"]) + (f" `{mcp}`" if mcp else "")
         rows.append(
             f"| {epic_cell} | {st} | {epic.get('priority', '')} | "
             f"{progress or '—'} | {spec_cell} | {pr} |"
@@ -477,7 +568,7 @@ def render_archive_table(archive: dict) -> str:
                    key=lambda s: int(s[1:]))
         )
         mcp = epic.get("mcp")
-        title = epic["title"] + (f" `{mcp}`" if mcp else "")
+        title = md_cell(epic["title"]) + (f" `{mcp}`" if mcp else "")
         rows.append(
             f"| {title} | {epic.get('shipped_on', '—')} | "
             f"{epic.get('archived_on', '—')} | {prs or '—'} |"
@@ -741,6 +832,33 @@ def check_spec_links(items: list[dict]) -> list[Finding]:
     return out
 
 
+def check_id_integrity(data: dict, archive: dict) -> list[Finding]:
+    """Ids must be unique (across both files), and must not collide once
+    sanitised for Mermaid. Both are silent corruptors otherwise."""
+    out: list[Finding] = []
+    both = (data.get("epics") or []) + (archive.get("epics") or [])
+    for dup in duplicate_ids(both):
+        out.append(Finding("ERROR", f"id {dup}",
+            "declared more than once across roadmap.yaml/roadmap.archive.yaml. "
+            "Ids must be unique across epics AND tasks; a duplicate epic id "
+            "makes --archive silently drop one of the two blocks."))
+    for a, b in node_id_collisions(both):
+        out.append(Finding("ERROR", f"id {a}",
+            f"sanitises to the same Mermaid node id as '{b}' — the two would "
+            f"render as one node and inherit each other's edges."))
+    return out
+
+
+def check_cycles(data: dict) -> list[Finding]:
+    """depends_on must describe a DAG."""
+    out: list[Finding] = []
+    for cyc in find_cycles(data.get("epics") or []):
+        kind = "self-loop" if len(cyc) == 2 else "cycle"
+        out.append(Finding("ERROR", f"depends_on {kind}",
+            " → ".join(cyc) + " — depends_on must be acyclic."))
+    return out
+
+
 def check_dangling_deps(items: list[dict], archive: dict) -> list[Finding]:
     """Every depends_on target must name a known id.
 
@@ -827,8 +945,11 @@ def check_github(data: dict, strict: bool) -> int:
         findings += check_pr_status(items, REPO_SLUG, cache)
 
     # spec + status + DAG checks are offline and always run.
+    archive = load_archive()
     findings += check_spec_links(items)
-    findings += check_dangling_deps(items, load_archive())
+    findings += check_id_integrity(data, archive)
+    findings += check_cycles(data)
+    findings += check_dangling_deps(items, archive)
     findings += check_status_sanity(items)
 
     if not ok:
@@ -852,7 +973,9 @@ def check_github(data: dict, strict: bool) -> int:
 # start. `assert_blocks_match_yaml` is the guard — the ids this regex finds must
 # equal the ids PyYAML parses, or we refuse to touch the file.
 EPIC_START_RE = re.compile(r"""^  - id:\s*["']?([^"'\s#]+)["']?\s*(?:\#.*)?$""")
-SECTION_HDR_RE = re.compile(r"^  # ─")
+# Only the generated banner shape ("  # ── TITLE ──…"), never any indent-2
+# comment that merely starts with a box-drawing glyph.
+SECTION_HDR_RE = re.compile(r"^  # ──\s")
 
 
 def atomic_write(path: str, text: str) -> None:
@@ -892,12 +1015,17 @@ def _parse_merged_at(value: str) -> _dt.datetime | None:
 
 def epic_shipped_on(epic: dict, cache: dict, use_gh: bool) -> tuple[_dt.datetime | None, str]:
     """(newest merge datetime, blocker). blocker is '' when the epic is datable
-    and every referenced PR is merged; otherwise it explains why not."""
+    and every referenced PR is merged; otherwise it explains why not.
+
+    use_gh=False means --force-undated: we cannot see PR state at all, so the
+    epic is archived on its `done` status alone and stamped `shipped_on:
+    unknown`. That is the ONLY path that skips merge validation.
+    """
     nums = epic_pr_numbers(epic)
-    if not nums:
-        return (None, "no PR refs to date it")
     if not use_gh:
         return (None, "")
+    if not nums:
+        return (None, "no PR refs to date it")
     newest: _dt.datetime | None = None
     for n in nums:
         st = gh_pr_state(n, REPO_SLUG, cache)
@@ -982,16 +1110,53 @@ def prune_empty_sections(lines: list[str]) -> list[str]:
 
 
 def stamp_block(block: str, shipped_on: str, archived_on: str) -> str:
-    """Inject shipped_on/archived_on right after the epic's `- id:` line."""
+    """Inject shipped_on/archived_on right after the epic's `- id:` line, using
+    the block's own line ending so a CRLF source does not gain mixed endings."""
     lines = block.splitlines(keepends=True)
     if any(l.startswith("    archived_on:") for l in lines):
         return block  # already stamped; never double-stamp
+    eol = "\r\n" if lines[0].endswith("\r\n") else "\n"
     head, rest = lines[0], lines[1:]
-    stamp = [f"    shipped_on: {shipped_on}\n", f"    archived_on: {archived_on}\n"]
+    stamp = [f"    shipped_on: {shipped_on}{eol}",
+             f"    archived_on: {archived_on}{eol}"]
     return "".join([head] + stamp + rest)
 
 
-def sweep_archive(min_age_days: int, dry_run: bool) -> int:
+def archive_append_target(archive_text: str) -> str:
+    """Return an error string if `archive_text` is not safe to append an epic
+    block to, else "".
+
+    The append is raw-text, so the file must end with a bare `epics:` key
+    (empty archive) or with epic blocks under it. `epics: []` or `epics: null`
+    would turn the appended block into a syntax error, and a trailing comment
+    would swallow it.
+    """
+    try:
+        parsed = yaml.safe_load(archive_text)
+    except yaml.YAMLError as e:
+        return f"existing roadmap.archive.yaml does not parse: {e}"
+    if not isinstance(parsed, dict) or "epics" not in parsed:
+        return "existing roadmap.archive.yaml has no top-level `epics:` key"
+    epics = parsed.get("epics")
+    if epics not in (None, []) and not isinstance(epics, list):
+        return "existing roadmap.archive.yaml `epics:` is not a list"
+    if isinstance(epics, list) and epics:
+        # Must end inside the block sequence, not after a comment or a new key.
+        last = [l for l in archive_text.splitlines() if l.strip()][-1]
+        if not last.startswith("    ") and not last.startswith("  - "):
+            return (f"existing roadmap.archive.yaml ends with {last!r}, not "
+                    f"inside the epics list — appending would corrupt it")
+        seen, want = [b[0] for b in find_epic_blocks(archive_text)], [e["id"] for e in epics]
+        if seen != want:
+            return f"archive text-scan {seen} disagrees with parsed ids {want}"
+    else:
+        if not re.search(r"^epics:[ \t]*$", archive_text, flags=re.M):
+            return ("existing roadmap.archive.yaml has an empty `epics:` written "
+                    "as a flow/null value; rewrite it as a bare `epics:` line")
+    return ""
+
+
+def sweep_archive(min_age_days: int, dry_run: bool, force_undated: bool = False) -> int:
     with open(ROADMAP_YAML, encoding="utf-8") as fh:
         raw = fh.read()
     data = yaml.safe_load(raw)
@@ -1003,13 +1168,32 @@ def sweep_archive(min_age_days: int, dry_run: bool) -> int:
         sys.stderr.write(f"error: refusing to sweep — {mismatch}\n")
         return 1
 
-    use_gh, gh_reason = gh_available()
-    if not use_gh and min_age_days > 0:
+    # Blocks are keyed by id below; a duplicate would clobber one of them while
+    # both line ranges get cut. Refuse rather than lose an epic.
+    dupes = duplicate_ids(epics)
+    if dupes:
         sys.stderr.write(
-            f"error: --archive needs an authenticated `gh` to date merges "
-            f"({gh_reason}). Re-run with --min-age-days 0 to sweep without "
-            f"the cool-off check.\n")
+            f"error: refusing to sweep — duplicate id(s) {dupes} in "
+            f"roadmap.yaml. Ids must be unique across epics and tasks.\n")
+        return 1
+
+    # `gh` is what proves a PR is MERGED. Without it we cannot tell a shipped
+    # epic from one whose PR is still open, so the sweep is refused unless the
+    # operator explicitly accepts that with --force-undated. (--min-age-days 0
+    # waives the COOL-OFF, never the merge check.)
+    use_gh, gh_reason = gh_available()
+    if not use_gh and not force_undated:
+        sys.stderr.write(
+            f"error: --archive needs an authenticated `gh` to verify that each "
+            f"epic's PRs are merged ({gh_reason}). --min-age-days 0 waives the "
+            f"cool-off, not the merge check. Pass --force-undated to sweep "
+            f"anyway on `done` status alone (stamps shipped_on: unknown).\n")
         return 2
+    if force_undated and use_gh:
+        use_gh = False  # honour the operator's explicit choice
+    if not use_gh:
+        print("warning: --force-undated — PR merge state is NOT verified; "
+              "epics are archived on `done` status alone.\n")
 
     today = _dt.datetime.now(_dt.timezone.utc)
     cache: dict = {}
@@ -1089,6 +1273,10 @@ def sweep_archive(min_age_days: int, dry_run: bool) -> int:
     if os.path.isfile(ROADMAP_ARCHIVE_YAML):
         with open(ROADMAP_ARCHIVE_YAML, encoding="utf-8") as fh:
             archive_text = fh.read().rstrip("\n") + "\n"
+        problem = archive_append_target(archive_text)
+        if problem:
+            sys.stderr.write(f"error: refusing to sweep — {problem}.\n")
+            return 1
     else:
         archive_text = ARCHIVE_HEADER + "\nversion: 1\n\nepics:\n"
     for epic, shipped in chosen:
@@ -1134,10 +1322,13 @@ def main() -> int:
                          f"every done epic and needs no gh)")
     ap.add_argument("--dry-run", action="store_true",
                     help="with --archive, report the sweep and change nothing")
+    ap.add_argument("--force-undated", action="store_true",
+                    help="with --archive, sweep without `gh`: PR merge state is "
+                         "NOT verified and shipped_on is stamped 'unknown'")
     args = ap.parse_args()
 
     if args.archive:
-        return sweep_archive(args.min_age_days, args.dry_run)
+        return sweep_archive(args.min_age_days, args.dry_run, args.force_undated)
 
     with open(ROADMAP_YAML, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
