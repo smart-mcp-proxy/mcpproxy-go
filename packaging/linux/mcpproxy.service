@@ -23,7 +23,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ReadWritePaths=/var/lib/mcpproxy
+ReadWritePaths=/var/lib/mcpproxy /etc/mcpproxy
 
 # Allow binding to privileged ports if user reconfigures listen address
 AmbientCapabilities=CAP_NET_BIND_SERVICE
