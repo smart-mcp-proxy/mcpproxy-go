@@ -670,8 +670,8 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 37/64 (58%) |
 | [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 73/101 (72%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
-| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 41/65 (63%) |
-| [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 92/103 (89%) |
+| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 43/65 (66%) |
+| [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 93/103 (90%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
 | [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 43/87 (49%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 24/36 (67%) |
@@ -687,7 +687,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [018-intent-declaration](./specs/018-intent-declaration/) | `shipped` | 69/69 (100%) |
 | [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 72/73 (99%) |
 | [020-oauth-login-feedback](./specs/020-oauth-login-feedback/) | — | — |
-| [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 33/42 (79%) |
+| [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 35/42 (83%) |
 | [022-oauth-redirect-uri-persistence](./specs/022-oauth-redirect-uri-persistence/) | `in-flight` | 23/25 (92%) |
 | [023-oauth-state-persistence](./specs/023-oauth-state-persistence/) | `shipped` | 38/39 (97%) |
 | [023-smart-config-patch](./specs/023-smart-config-patch/) | `shipped` | 52/53 (98%) |
