@@ -409,13 +409,18 @@ graph LR
 graph LR
   hygiene_roadmap_github_check["gen-roadmap --check-github: cross-check roadm…"]
   hygiene_tasks_reconcile["CI rule: PR touching specs/<id> implementatio…"]
+  hygiene_spec_evidence_check["scripts/check-spec-evidence.py: deterministic…"]
+  hygiene_spec_gardener["Weekly cloud routine: LLM judges only the res…"]
   hygiene_docs_facts["Generate volatile CLAUDE.md/README facts (Go…"]
   hygiene_quickstart_contract["Run top quickstart.md scenario per spec as co…"]
 
+  hygiene_spec_evidence_check --> hygiene_spec_gardener
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class hygiene_roadmap_github_check done;
+  class hygiene_roadmap_github_check,hygiene_spec_evidence_check done;
+  class hygiene_spec_gardener in_progress;
   class hygiene_tasks_reconcile,hygiene_docs_facts,hygiene_quickstart_contract todo;
 ```
 
@@ -423,6 +428,8 @@ graph LR
 | --- | --- | --- |
 | gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links | 🟢 Done | #800 |
 | CI rule: PR touching specs/<id> implementation paths must update tasks.md | ⚪ Todo | — |
+| scripts/check-spec-evidence.py: deterministic check that every TICKED task cites code that exists | 🟢 Done | — |
+| Weekly cloud routine: LLM judges only the residue the evidence-check cannot decide, opens/updates one propose-only PR | 🔵 In progress | — |
 | Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check | ⚪ Todo | — |
 | Run top quickstart.md scenario per spec as contract test in test-api-e2e.sh | ⚪ Todo | — |
 

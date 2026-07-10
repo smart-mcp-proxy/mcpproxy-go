@@ -486,6 +486,18 @@ epics:
         title: "CI rule: PR touching specs/<id> implementation paths must update tasks.md"
         status: todo
         depends_on: []
+      - id: hygiene-spec-evidence-check
+        title: "scripts/check-spec-evidence.py: deterministic check that every TICKED task cites code that exists"
+        status: done
+        priority: P1
+        note: "Report-only by design. A bare path-existence gate would be ~98% noise: of the 51 missing paths cited by ticked tasks, 50 NEVER existed in git history (speckit cites planned paths; code lands elsewhere). Classifies RELOCATED (stale path, high/medium confidence) vs REMOVED vs UNRESOLVED, and demotes path complaints when a distinctive cited symbol is found. Also surfaces `possibly_built` (unticked, evidence present). --json feeds hygiene-spec-gardener."
+        depends_on: []
+      - id: hygiene-spec-gardener
+        title: "Weekly cloud routine: LLM judges only the residue the evidence-check cannot decide, opens/updates one propose-only PR"
+        status: in_progress
+        priority: P2
+        note: "Claude cloud routine 'spec-roadmap gardener' (trig_014GkHno4XSTobu8ViJV7Sno), Mondays 05:07 UTC. Branch claude/spec-gardener (the `claude/` prefix is what the cloud git-proxy allows to push without unrestricted-branch-push). Guardrails: never pushes main; never auto-applies un-ticks (they go in the PR body for a human); evidence required per tick; adversarial refutation pass; 40-tick cap per run. Blocked in practice until check-spec-evidence.py lands on main — the routine no-ops until then."
+        depends_on: [hygiene-spec-evidence-check]
       - id: hygiene-docs-facts
         title: "Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check"
         status: todo
