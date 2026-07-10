@@ -153,9 +153,8 @@ epics:
     assignee: BackendEngineer
     priority: P2
     mcp: MCP-43
-    spec: specs/002-windows-installer
     depends_on: []
-    note: "Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first."
+    note: "No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first."
     tasks:
       - id: windows-tray-funnel-qa
         title: "Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work)"
@@ -193,32 +192,45 @@ epics:
     assignee: unassigned
     priority: P1
     depends_on: [ux-audit]
-    note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
+    note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Vision pillar 'feel control → transparency' — the activity log is a headline feature, polish it and bring it to the tray menu. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
     tasks:
       - id: action-log-glance-view
         title: At-a-glance action log view (top signals, health)
         status: todo
-        spec: specs/019-activity-webui
+        note: "No spec: link on purpose — 019-activity-webui is the SHIPPED backend+table (72/73 after the 2026-07-10 truth-sync) and would paint this unbuilt UX task ~99% green."
+        depends_on: []
+      - id: action-log-tray-menu
+        title: Activity in the tray menu (recent tool calls + security events, jump to full log)
+        status: todo
+        priority: P1
+        note: "Both trays (Go/systray + Swift) via core REST/SSE only — tray holds no state (see tray-api-purity)."
+        depends_on: [action-log-glance-view]
+      - id: tray-menu-open-telemetry
+        title: "tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h"
+        status: todo
+        priority: P2
+        note: "Menu opens are invisible today: since Spec 048 menuWillOpen rebuilds from SSE state with zero REST calls, and surface_requests['tray'] counts header-stamped REST calls, not opens. Go tray excluded (fyne systray has no open event). Pure counter — passes payload_privacy_test rules. Gives the open-rate baseline for judging action-log-tray-menu."
         depends_on: []
       - id: action-log-retention-tie-in
         title: Tie activity retention/size into the glance view
         status: todo
-        spec: specs/073-activity-size-retention
+        note: "No spec: link on purpose — 073-activity-size-retention is the SHIPPED retention backend (13/14); this task is the glance-view tie-in on top of it."
         depends_on: [action-log-glance-view]
 
   - id: analytics-dashboard
     title: Analytics dashboard as default page
-    status: todo
+    status: in_progress
     assignee: unassigned
     priority: P1
     spec: specs/069-observability-usage-graphs
     depends_on: [ux-audit]
-    note: "Per-server / per-tool token-drain graphs; make the dashboard the default landing page."
+    note: "Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done; only the default-landing half remains."
     tasks:
       - id: analytics-token-drain-graphs
         title: Per-server / per-tool token-drain graphs
-        status: todo
+        status: done
         spec: specs/069-observability-usage-graphs
+        note: "Shipped (spec 069 25/26; remaining task is a Playwright sweep, not a feature). Status corrected by the 2026-07-10 spec-vs-code truth-sync."
         depends_on: []
       - id: analytics-default-landing
         title: Make dashboard the default landing page
@@ -228,17 +240,18 @@ epics:
 
   - id: registries-search-add
     title: Registries — easier search + add-server
-    status: todo
+    status: done
     assignee: unassigned
     priority: P1
     spec: specs/070-registry-easy-upstream-add
-    depends_on: [ux-audit]
-    note: "Lower the friction of finding a server in a registry and adding it; lean on the official registry protocol work."
+    depends_on: []
+    note: "Lower the friction of finding a server in a registry and adding it; lean on the official registry protocol work. 2026-07-10 truth-sync: both children shipped — spec 070 is 21/24 (the 3 open tasks are pre-PR chores: worktree baseline, run gates, apply gate decisions) and 071 is 12/12. depends_on [ux-audit] dropped: a done epic cannot depend on a todo one."
     tasks:
       - id: registries-search-ux
         title: Improved registry search UX
-        status: todo
+        status: done
         spec: specs/070-registry-easy-upstream-add
+        note: "Shipped (spec 070 21/24; remaining tasks are process chores, not features). Status corrected by the 2026-07-10 spec-vs-code truth-sync."
         depends_on: []
       - id: registries-official-protocol
         title: Official registry protocol integration
@@ -283,6 +296,27 @@ epics:
         priority: P1
         depends_on: [scanner-simpl-deep-optin]
 
+  - id: tpa-db
+    title: "tpa-db: versioned TPA signature database for the offline scanner"
+    status: todo
+    assignee: unassigned
+    priority: P1
+    depends_on: [scanner-simplification]
+    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate."
+    tasks:
+      - id: tpa-db-format
+        title: "Signature DB format + loader (versioned, signed, bundled default)"
+        status: todo
+        depends_on: []
+      - id: tpa-db-corpus
+        title: "Seed corpus: catalog known public TPA campaigns/patterns into the DB"
+        status: todo
+        depends_on: [tpa-db-format]
+      - id: tpa-db-refresh
+        title: "Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated"
+        status: todo
+        depends_on: [tpa-db-format]
+
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
@@ -321,7 +355,7 @@ epics:
     priority: P0
     spec: specs/078-connect-trust-preview
     depends_on: []
-    note: "Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is day-2 return 17.7%, see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
+    note: "Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
     tasks:
       - id: connect-trust-preview
         title: "US1: preview API + wizard diff UI (exact entry, API-key masking)"
@@ -378,7 +412,7 @@ epics:
     priority: P0
     spec: specs/081-release-qa-gate
     depends_on: []
-    note: "Attacks the day-2-return cliff (only 17.7% of installs come back a second day) and the one conceded competitor advantage: stability. No release tag until the surface x server-type matrix (MCP/REST/CLI/Web UI x stdio/http/sse/docker/oauth) plus invariants (activity-log/token counters move, quarantine flow, reconnect survival, in-place upgrade) pass automatically; macOS app smoke is advisory until promoted (3 consecutive passes, spec 081 US4). Assembles existing assets: test-api-e2e.sh, Playwright sweep, scan-eval gate, mcpproxy-ui-test."
+    note: "Attacks the return cliff (48% of installs are one-and-done; day-1 return 31% — corrected 2026-07-10, identity-deduped; the earlier '17.7% day-2' figure was un-deduped anonymous_id churn) and the one conceded competitor advantage: stability. No release tag until the surface x server-type matrix (MCP/REST/CLI/Web UI x stdio/http/sse/docker/oauth) plus invariants (activity-log/token counters move, quarantine flow, reconnect survival, in-place upgrade) pass automatically; macOS app smoke is advisory until promoted (3 consecutive passes, spec 081 US4). Assembles existing assets: test-api-e2e.sh, Playwright sweep, scan-eval gate, mcpproxy-ui-test."
     tasks:
       - id: release-qa-gate-matrix
         title: "T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags"
@@ -410,7 +444,7 @@ epics:
     priority: P0
     spec: specs/080-telemetry-v7-churn
     depends_on: []
-    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). Real cliff = day-2 return 17.7% and retrieve_tools 42% -> real tool call 16%. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity)."
+    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity)."
     tasks:
       - id: telemetry-v7-wizard-fix
         title: "T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path"
@@ -426,6 +460,12 @@ epics:
         title: "T3: pre-churn snapshot (previous_shutdown clean|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death"
         status: done
         pr: "#813"
+        depends_on: []
+      - id: telemetry-v7-realcall-flag
+        title: "first_real_tool_call_ever activation flag (symmetric to first_retrieve_tools_call_ever) so the retrieve->call funnel step is measurable lifetime-vs-lifetime"
+        status: todo
+        priority: P1
+        note: "Root cause of the debunked 42%->16% cliff: retrieve step had a lifetime BBolt flag, real-call step only windowed per-day counters. Stamp from handleCallToolVariant (internal/server/mcp.go:1558, same path as RecordUpstreamTool); pure boolean in the activation bucket, additive to schema."
         depends_on: []
       - id: telemetry-v7-churn-events
         title: "T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080)"

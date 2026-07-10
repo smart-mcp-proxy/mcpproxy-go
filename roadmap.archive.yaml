@@ -25,9 +25,10 @@ epics:
     priority: P1
     mcp: MCP-33
     # No epic-level spec link: Profiles v2 shipped via the PRs below, not via a
-    # speckit tasks.md. (specs/057-in-proxy-profiles is a SEPARATE, still-draft
-    # "permanent URLs" spec at 0/25 — linking it here showed a false "drafted"
-    # badge on a done epic. Provenance lives in the per-task PR refs.)
+    # speckit tasks.md. (specs/057-in-proxy-profiles is a SEPARATE "permanent
+    # URLs" spec — 20/25 after the 2026-07-10 truth-sync, 0/25 before it — so
+    # linking it here would attribute the wrong progress to this epic.
+    # Provenance lives in the per-task PR refs.)
     depends_on: []
     note: "Stateful profiles: per-profile Bleve indexes, set_profile, token profile_pin, tray + Web UI switchers. Shipped via #756/#761/#766/#767."
     tasks:

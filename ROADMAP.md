@@ -40,27 +40,27 @@ graph LR
   ux_audit["Web UI + macOS app UX audit"]
   action_log_transparency["Action log / transparency — info at a g…"]
   analytics_dashboard["Analytics dashboard as default page"]
-  registries_search_add["Registries — easier search + add-server"]
   scanner_simplification["Scanner simplification (deterministic d…"]
+  tpa_db["tpa-db: versioned TPA signature databas…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
   ux_audit --> analytics_dashboard
-  ux_audit --> registries_search_add
   scanner_v2 --> scanner_simplification
+  scanner_simplification --> tpa_db
   telemetry_identity --> telemetry_v7_churn
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,scanner_simplification done;
-  class telemetry_identity,telemetry_v7_churn in_progress;
-  class ux_audit,action_log_transparency,analytics_dashboard,registries_search_add todo;
+  class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
+  class ux_audit,action_log_transparency,tpa_db todo;
 ```
 
-**Independent epics** (14) — no cross-epic prerequisites; each stands alone:
+**Independent epics** (15) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Upgrade awareness & guided update** — In progress · P0
 - 🔵 **Connect step trust: preview, visible backup, one-click undo** — In progress · P0
@@ -76,6 +76,7 @@ graph LR
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
 - ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
+- 🟢 **Registries — easier search + add-server** — Done · P1
 
 ## Epic details
 
@@ -117,7 +118,7 @@ graph LR
 <details>
 <summary>🔵 Connect step trust: preview, visible backup, one-click undo — In progress · P0</summary>
 
-> Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is day-2 return 17.7%, see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
+> Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
 
 Spec: [078-connect-trust-preview](./specs/078-connect-trust-preview/)
 
@@ -147,7 +148,7 @@ graph LR
 <details>
 <summary>🔵 Release qualification gate (auto-QA matrix blocks the tag) — In progress · P0</summary>
 
-> Attacks the day-2-return cliff (only 17.7% of installs come back a second day) and the one conceded competitor advantage: stability. No release tag until the surface x server-type matrix (MCP/REST/CLI/Web UI x stdio/http/sse/docker/oauth) plus invariants (activity-log/token counters move, quarantine flow, reconnect survival, in-place upgrade) pass automatically; macOS app smoke is advisory until promoted (3 consecutive passes, spec 081 US4). Assembles existing assets: test-api-e2e.sh, Playwright sweep, scan-eval gate, mcpproxy-ui-test.
+> Attacks the return cliff (48% of installs are one-and-done; day-1 return 31% — corrected 2026-07-10, identity-deduped; the earlier '17.7% day-2' figure was un-deduped anonymous_id churn) and the one conceded competitor advantage: stability. No release tag until the surface x server-type matrix (MCP/REST/CLI/Web UI x stdio/http/sse/docker/oauth) plus invariants (activity-log/token counters move, quarantine flow, reconnect survival, in-place upgrade) pass automatically; macOS app smoke is advisory until promoted (3 consecutive passes, spec 081 US4). Assembles existing assets: test-api-e2e.sh, Playwright sweep, scan-eval gate, mcpproxy-ui-test.
 
 Spec: [081-release-qa-gate](./specs/081-release-qa-gate/)
 
@@ -180,7 +181,7 @@ graph LR
 <details>
 <summary>🔵 Telemetry v7: honest funnel + churn instrumentation — In progress · P0</summary>
 
-> 2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). Real cliff = day-2 return 17.7% and retrieve_tools 42% -> real tool call 16%. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity).
+> 2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity).
 
 Spec: [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/)
 
@@ -189,6 +190,7 @@ graph LR
   telemetry_v7_wizard_fix["T1: wizard metric fix - on dismiss record con…"]
   telemetry_v7_funnel_fields["T2: funnel observability fields (wizard_shown…"]
   telemetry_v7_prechurn_snapshot["T3: pre-churn snapshot (previous_shutdown cle…"]
+  telemetry_v7_realcall_flag["first_real_tool_call_ever activation flag (sy…"]
   telemetry_v7_churn_events["T4: cross-repo churn_events materialization +…"]
 
   telemetry_v7_wizard_fix --> telemetry_v7_churn_events
@@ -198,7 +200,7 @@ graph LR
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class telemetry_v7_wizard_fix,telemetry_v7_funnel_fields,telemetry_v7_prechurn_snapshot done;
-  class telemetry_v7_churn_events todo;
+  class telemetry_v7_realcall_flag,telemetry_v7_churn_events todo;
 ```
 
 | Task | Status | Refs |
@@ -206,7 +208,35 @@ graph LR
 | T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path | 🟢 Done | #813 |
 | T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d) | 🟢 Done | #813 |
 | T3: pre-churn snapshot (previous_shutdown clean\|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death | 🟢 Done | #813 |
+| first_real_tool_call_ever activation flag (symmetric to first_retrieve_tools_call_ever) so the retrieve->call funnel step is measurable lifetime-vs-lifetime | ⚪ Todo | — |
 | T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080) | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Analytics dashboard as default page — In progress · P1</summary>
+
+> Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done; only the default-landing half remains.
+
+Spec: [069-observability-usage-graphs](./specs/069-observability-usage-graphs/)
+
+```mermaid
+graph LR
+  analytics_token_drain_graphs["Per-server / per-tool token-drain graphs"]
+  analytics_default_landing["Make dashboard the default landing page"]
+
+  analytics_token_drain_graphs --> analytics_default_landing
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class analytics_token_drain_graphs done;
+  class analytics_default_landing todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Per-server / per-tool token-drain graphs | 🟢 Done | — |
+| Make dashboard the default landing page | ⚪ Todo | — |
 
 </details>
 
@@ -243,9 +273,7 @@ graph LR
 <details>
 <summary>🟡 Windows native tray app — In review · P2 · MCP-43</summary>
 
-> Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first.
-
-Spec: [002-windows-installer](./specs/002-windows-installer/)
+> No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first.
 
 ```mermaid
 graph LR
@@ -301,74 +329,54 @@ graph LR
 <details>
 <summary>⚪ Action log / transparency — info at a glance — Todo · P1</summary>
 
-> Surface the most important activity/security/connection signals at a glance; reduce digging. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver).
+> Surface the most important activity/security/connection signals at a glance; reduce digging. Vision pillar 'feel control → transparency' — the activity log is a headline feature, polish it and bring it to the tray menu. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver).
 
 ```mermaid
 graph LR
   action_log_glance_view["At-a-glance action log view (top signals, hea…"]
+  action_log_tray_menu["Activity in the tray menu (recent tool calls…"]
+  tray_menu_open_telemetry["tray_menu_opened counter: Swift menuWillOpen…"]
   action_log_retention_tie_in["Tie activity retention/size into the glance v…"]
 
+  action_log_glance_view --> action_log_tray_menu
   action_log_glance_view --> action_log_retention_tie_in
 
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class action_log_glance_view,action_log_retention_tie_in todo;
+  class action_log_glance_view,action_log_tray_menu,tray_menu_open_telemetry,action_log_retention_tie_in todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | At-a-glance action log view (top signals, health) | ⚪ Todo | — |
+| Activity in the tray menu (recent tool calls + security events, jump to full log) | ⚪ Todo | — |
+| tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
 
 </details>
 
 <details>
-<summary>⚪ Analytics dashboard as default page — Todo · P1</summary>
+<summary>⚪ tpa-db: versioned TPA signature database for the offline scanner — Todo · P1</summary>
 
-> Per-server / per-tool token-drain graphs; make the dashboard the default landing page.
-
-Spec: [069-observability-usage-graphs](./specs/069-observability-usage-graphs/)
+> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate.
 
 ```mermaid
 graph LR
-  analytics_token_drain_graphs["Per-server / per-tool token-drain graphs"]
-  analytics_default_landing["Make dashboard the default landing page"]
+  tpa_db_format["Signature DB format + loader (versioned, sign…"]
+  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
+  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
 
-  analytics_token_drain_graphs --> analytics_default_landing
+  tpa_db_format --> tpa_db_corpus
+  tpa_db_format --> tpa_db_refresh
 
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class analytics_token_drain_graphs,analytics_default_landing todo;
+  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
-| Per-server / per-tool token-drain graphs | ⚪ Todo | — |
-| Make dashboard the default landing page | ⚪ Todo | — |
-
-</details>
-
-<details>
-<summary>⚪ Registries — easier search + add-server — Todo · P1</summary>
-
-> Lower the friction of finding a server in a registry and adding it; lean on the official registry protocol work.
-
-Spec: [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/)
-
-```mermaid
-graph LR
-  registries_search_ux["Improved registry search UX"]
-  registries_official_protocol["Official registry protocol integration"]
-
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class registries_official_protocol done;
-  class registries_search_ux todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| Improved registry search UX | ⚪ Todo | — |
-| Official registry protocol integration | 🟢 Done | — |
+| Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
+| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
+| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
 
 </details>
 
@@ -544,6 +552,30 @@ graph LR
 </details>
 
 <details>
+<summary>🟢 Registries — easier search + add-server — Done · P1</summary>
+
+> Lower the friction of finding a server in a registry and adding it; lean on the official registry protocol work. 2026-07-10 truth-sync: both children shipped — spec 070 is 21/24 (the 3 open tasks are pre-PR chores: worktree baseline, run gates, apply gate decisions) and 071 is 12/12. depends_on [ux-audit] dropped: a done epic cannot depend on a todo one.
+
+Spec: [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/)
+
+```mermaid
+graph LR
+  registries_search_ux["Improved registry search UX"]
+  registries_official_protocol["Official registry protocol integration"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class registries_search_ux,registries_official_protocol done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Improved registry search UX | 🟢 Done | — |
+| Official registry protocol integration | 🟢 Done | — |
+
+</details>
+
+<details>
 <summary>🟢 Scanner simplification (deterministic default, opt-in deep scan) — Done · P1</summary>
 
 > Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. COMPLETE: US1 #786, US2 #792, US4 #794, US3 + deep-scan trust fixes + docs truth sweep (T037-T039) #793 — all merged; shipped in v0.47.0-rc.2. Remaining 4 unchecked tasks in tasks.md are documented scope-outs. First of the 5 personal-edition polish verticals.
@@ -586,13 +618,13 @@ graph LR
 | Connect step trust: preview, visible backup, one-click undo | In progress | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P0 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
+| Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
-| Windows native tray app `MCP-43` | In review | P2 | 35/60 (58%) | [002-windows-installer](./specs/002-windows-installer/) |  |
+| Windows native tray app `MCP-43` | In review | P2 | — |  |  |
 | MCP protocol upgrade to 2026-07-28 revision | Blocked | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
-| Analytics dashboard as default page | Todo | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
-| Registries — easier search + add-server | Todo | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
+| tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — |  |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Todo | P2 | — |  |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
@@ -604,6 +636,7 @@ graph LR
 | SSO (server edition) | Todo (parked) | P3 | — |  |  |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
+| Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 
 ## Shipped (archived)
