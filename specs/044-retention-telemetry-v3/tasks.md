@@ -33,7 +33,7 @@ description: "Task list for feature 044-retention-telemetry-v3"
 **Purpose**: Minor scaffolding. The existing `internal/telemetry` package already has v3 schema version and the build system is mature — no structural setup needed.
 
 - [ ] T001 Confirm `SchemaVersion = 3` constant in `internal/telemetry/telemetry.go` remains 3 (spec 044 extends v3, does not re-bump); add a short comment noting spec 044 additions above the constant.
-- [ ] T002 Add a new BBolt bucket-name constant `ActivationBucketName = "activation"` in `internal/telemetry/activation.go` (file created in Phase 2).
+- [x] T002 Add a new BBolt bucket-name constant `ActivationBucketName = "activation"` in `internal/telemetry/activation.go` (file created in Phase 2).
 - [ ] T003 [P] Extend `docs/features/telemetry.md` skeleton with placeholder sections "Environment Classification", "Activation Tracking", and "Launch Source" (content filled in polish phase).
 
 ---
@@ -44,13 +44,13 @@ description: "Task list for feature 044-retention-telemetry-v3"
 
 CRITICAL: No user story work begins until this phase is complete.
 
-- [ ] T004 Create `internal/telemetry/env_kind.go` defining the `EnvKind` enum type (string alias) with constants `EnvKindInteractive`, `EnvKindCI`, `EnvKindCloudIDE`, `EnvKindContainer`, `EnvKindHeadless`, `EnvKindUnknown`; export `AllEnvKinds()` helper for validation.
-- [ ] T005 Create `internal/telemetry/launch_source.go` defining `LaunchSource` enum type with constants `LaunchSourceInstaller`, `LaunchSourceTray`, `LaunchSourceLoginItem`, `LaunchSourceCLI`, `LaunchSourceUnknown`; export `AllLaunchSources()`.
-- [ ] T006 [P] Create `internal/telemetry/env_markers.go` defining the `EnvMarkers` struct with exactly five boolean fields (`HasCIEnv`, `HasCloudIDEEnv`, `IsContainer`, `HasTTY`, `HasDisplay`) and their JSON tags per data-model.md.
-- [ ] T007 [P] Create `internal/telemetry/activation.go` stub: define `ActivationState` struct per data-model.md, `ActivationBucketName` constant, and an `ActivationStore` interface with methods `Load(db *bbolt.DB) (ActivationState, error)`, `Save(db *bbolt.DB, st ActivationState) error`, `MarkFirstConnectedServer`, `MarkFirstMCPClient`, `MarkFirstRetrieveToolsCall`, `RecordMCPClient(name string)`, `IncrementRetrieveToolsCall()`, `AddTokensSaved(n int)`, `SetInstallerPending(v bool)`, `IsInstallerPending() bool`.
-- [ ] T008 Create `internal/telemetry/anonymity.go` with `ScanForPII(payloadJSON []byte) error` and `AnonymityBlockedPrefixes = []string{"/Users/", "/home/", "C:\\Users\\", "/var/folders/"}`; function returns a typed error identifying which prefix or env-var value was detected.
-- [ ] T009 Write failing test file `internal/telemetry/anonymity_test.go` with cases: (a) payload containing `/Users/alice/` fails, (b) payload with `GITHUB_TOKEN` value fails, (c) clean payload passes, (d) payload with non-boolean `env_markers.has_ci_env` fails.
-- [ ] T010 Implement `ScanForPII` to satisfy T009 by using a combination of `bytes.Contains` for prefix checks and `json.Unmarshal` into a strict `EnvMarkers` struct to catch type mismatches.
+- [x] T004 Create `internal/telemetry/env_kind.go` defining the `EnvKind` enum type (string alias) with constants `EnvKindInteractive`, `EnvKindCI`, `EnvKindCloudIDE`, `EnvKindContainer`, `EnvKindHeadless`, `EnvKindUnknown`; export `AllEnvKinds()` helper for validation.
+- [x] T005 Create `internal/telemetry/launch_source.go` defining `LaunchSource` enum type with constants `LaunchSourceInstaller`, `LaunchSourceTray`, `LaunchSourceLoginItem`, `LaunchSourceCLI`, `LaunchSourceUnknown`; export `AllLaunchSources()`.
+- [x] T006 [P] Create `internal/telemetry/env_markers.go` defining the `EnvMarkers` struct with exactly five boolean fields (`HasCIEnv`, `HasCloudIDEEnv`, `IsContainer`, `HasTTY`, `HasDisplay`) and their JSON tags per data-model.md.
+- [x] T007 [P] Create `internal/telemetry/activation.go` stub: define `ActivationState` struct per data-model.md, `ActivationBucketName` constant, and an `ActivationStore` interface with methods `Load(db *bbolt.DB) (ActivationState, error)`, `Save(db *bbolt.DB, st ActivationState) error`, `MarkFirstConnectedServer`, `MarkFirstMCPClient`, `MarkFirstRetrieveToolsCall`, `RecordMCPClient(name string)`, `IncrementRetrieveToolsCall()`, `AddTokensSaved(n int)`, `SetInstallerPending(v bool)`, `IsInstallerPending() bool`.
+- [x] T008 Create `internal/telemetry/anonymity.go` with `ScanForPII(payloadJSON []byte) error` and `AnonymityBlockedPrefixes = []string{"/Users/", "/home/", "C:\\Users\\", "/var/folders/"}`; function returns a typed error identifying which prefix or env-var value was detected.
+- [x] T009 Write failing test file `internal/telemetry/anonymity_test.go` with cases: (a) payload containing `/Users/alice/` fails, (b) payload with `GITHUB_TOKEN` value fails, (c) clean payload passes, (d) payload with non-boolean `env_markers.has_ci_env` fails.
+- [x] T010 Implement `ScanForPII` to satisfy T009 by using a combination of `bytes.Contains` for prefix checks and `json.Unmarshal` into a strict `EnvMarkers` struct to catch type mismatches.
 
 **Checkpoint**: Foundation complete. Tests for T009 pass. User-story phases can begin in parallel.
 
@@ -64,18 +64,18 @@ CRITICAL: No user story work begins until this phase is complete.
 
 ### Tests (write first — must fail before implementation)
 
-- [ ] T011 [P] [US1] Create `internal/telemetry/env_kind_test.go` table-driven test: one row per decision-tree branch (interactive-mac, interactive-linux-tty, interactive-linux-display, ci-github, ci-gitlab, ci-jenkins, cloud-ide-codespaces, cloud-ide-gitpod, container-dockerenv, container-containerenv, container-envvar, headless-linux, unknown-fallback). Each row injects a fake env map + fake file prober + fake TTY checker.
-- [ ] T012 [P] [US1] Add test to `internal/telemetry/env_kind_test.go` verifying `DetectEnvKindOnce()` returns the same value across 100 concurrent goroutines and that the underlying `DetectEnvKind` is invoked exactly once.
-- [ ] T013 [P] [US1] Add test to `internal/telemetry/env_kind_test.go` verifying `EnvMarkers` populated by detection contains the exact booleans from the decision tree (has_ci_env true when CI var present, is_container true when `/.dockerenv` exists, etc.).
+- [x] T011 [P] [US1] Create `internal/telemetry/env_kind_test.go` table-driven test: one row per decision-tree branch (interactive-mac, interactive-linux-tty, interactive-linux-display, ci-github, ci-gitlab, ci-jenkins, cloud-ide-codespaces, cloud-ide-gitpod, container-dockerenv, container-containerenv, container-envvar, headless-linux, unknown-fallback). Each row injects a fake env map + fake file prober + fake TTY checker.
+- [x] T012 [P] [US1] Add test to `internal/telemetry/env_kind_test.go` verifying `DetectEnvKindOnce()` returns the same value across 100 concurrent goroutines and that the underlying `DetectEnvKind` is invoked exactly once.
+- [x] T013 [P] [US1] Add test to `internal/telemetry/env_kind_test.go` verifying `EnvMarkers` populated by detection contains the exact booleans from the decision tree (has_ci_env true when CI var present, is_container true when `/.dockerenv` exists, etc.).
 
 ### Implementation
 
-- [ ] T014 [US1] Implement `DetectEnvKind(env map[string]string, fs FileProber, osName string, ttyChecker TTYChecker) (EnvKind, EnvMarkers)` in `internal/telemetry/env_kind.go` following the ordered decision tree from research.md R1.
-- [ ] T015 [US1] Implement `DetectEnvKindOnce()` wrapper in `internal/telemetry/env_kind.go` using `sync.Once` to cache the result at package scope; expose `ResetEnvKindForTest()` behind a build tag `//go:build testing` (or as an unexported symbol called only from `_test.go`).
-- [ ] T016 [US1] Add a small `defaultFileProber` that wraps `os.Stat` and a `defaultTTYChecker` that wraps `golang.org/x/term.IsTerminal(int(os.Stdin.Fd()))` in `internal/telemetry/env_kind.go`.
-- [ ] T017 [US1] Extend `telemetry.HeartbeatPayload` in `internal/telemetry/telemetry.go` with `EnvKind string` and `EnvMarkers *EnvMarkers` fields per data-model.md.
-- [ ] T018 [US1] Update `telemetry.Service.buildPayload` (or equivalent in `telemetry.go`) to call `DetectEnvKindOnce()` and populate `EnvKind` + `EnvMarkers`.
-- [ ] T019 [US1] Extend `internal/httpapi/server.go` `/api/v1/status` handler to include `env_kind` and `env_markers` from the telemetry service (read-only snapshot per FR-018).
+- [x] T014 [US1] Implement `DetectEnvKind(env map[string]string, fs FileProber, osName string, ttyChecker TTYChecker) (EnvKind, EnvMarkers)` in `internal/telemetry/env_kind.go` following the ordered decision tree from research.md R1.
+- [x] T015 [US1] Implement `DetectEnvKindOnce()` wrapper in `internal/telemetry/env_kind.go` using `sync.Once` to cache the result at package scope; expose `ResetEnvKindForTest()` behind a build tag `//go:build testing` (or as an unexported symbol called only from `_test.go`).
+- [x] T016 [US1] Add a small `defaultFileProber` that wraps `os.Stat` and a `defaultTTYChecker` that wraps `golang.org/x/term.IsTerminal(int(os.Stdin.Fd()))` in `internal/telemetry/env_kind.go`.
+- [x] T017 [US1] Extend `telemetry.HeartbeatPayload` in `internal/telemetry/telemetry.go` with `EnvKind string` and `EnvMarkers *EnvMarkers` fields per data-model.md.
+- [x] T018 [US1] Update `telemetry.Service.buildPayload` (or equivalent in `telemetry.go`) to call `DetectEnvKindOnce()` and populate `EnvKind` + `EnvMarkers`.
+- [x] T019 [US1] Extend `internal/httpapi/server.go` `/api/v1/status` handler to include `env_kind` and `env_markers` from the telemetry service (read-only snapshot per FR-018).
 - [ ] T020 [US1] Run `go test -race ./internal/telemetry/...` and confirm T011–T013 pass.
 
 **Checkpoint**: US1 shippable. `env_kind` + `env_markers` flow end-to-end.
@@ -90,14 +90,14 @@ CRITICAL: No user story work begins until this phase is complete.
 
 ### Tests (write first)
 
-- [ ] T021 [P] [US4] Extend `internal/telemetry/payload_privacy_test.go` with a test that builds a full v3 payload and scans it with `ScanForPII`; test passes when no prefix matches.
-- [ ] T022 [P] [US4] Add a test to `internal/telemetry/payload_privacy_test.go` that corrupts a payload with a synthetic `"env_markers":{"has_ci_env":"yes"}` (string instead of bool) and asserts `ScanForPII` or the strict unmarshal rejects it.
-- [ ] T023 [P] [US4] Add a test to `internal/telemetry/telemetry_test.go` comparing `anonymous_id` between a v2 build and a v3 build for the same fixture — assert byte-identical (FR-017).
+- [x] T021 [P] [US4] Extend `internal/telemetry/payload_privacy_test.go` with a test that builds a full v3 payload and scans it with `ScanForPII`; test passes when no prefix matches.
+- [x] T022 [P] [US4] Add a test to `internal/telemetry/payload_privacy_test.go` that corrupts a payload with a synthetic `"env_markers":{"has_ci_env":"yes"}` (string instead of bool) and asserts `ScanForPII` or the strict unmarshal rejects it.
+- [x] T023 [P] [US4] Add a test to `internal/telemetry/telemetry_test.go` comparing `anonymous_id` between a v2 build and a v3 build for the same fixture — assert byte-identical (FR-017).
 
 ### Implementation
 
-- [ ] T024 [US4] Wire `ScanForPII` into `telemetry.Service.buildPayload` — call after `json.Marshal`, before HTTP POST; on failure, log `telemetry anonymity violation (not transmitted)` at error level and increment a new `anonymity_violations_total` counter registered with the existing `CounterRegistry` in `internal/telemetry/registry.go`.
-- [ ] T025 [US4] Add a runtime-detected blocked-value list: on startup, populate `anonymity.BlockedValues` with `os.Hostname()` result, the last path component of `os.UserHomeDir()`, and the values of any env var from `{GITHUB_TOKEN, GITLAB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY}` when non-empty. Implement in `internal/telemetry/anonymity.go`.
+- [x] T024 [US4] Wire `ScanForPII` into `telemetry.Service.buildPayload` — call after `json.Marshal`, before HTTP POST; on failure, log `telemetry anonymity violation (not transmitted)` at error level and increment a new `anonymity_violations_total` counter registered with the existing `CounterRegistry` in `internal/telemetry/registry.go`.
+- [x] T025 [US4] Add a runtime-detected blocked-value list: on startup, populate `anonymity.BlockedValues` with `os.Hostname()` result, the last path component of `os.UserHomeDir()`, and the values of any env var from `{GITHUB_TOKEN, GITLAB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY}` when non-empty. Implement in `internal/telemetry/anonymity.go`.
 - [ ] T026 [US4] Run `go test -race ./internal/telemetry/...` and confirm T021–T023 pass and T009 still passes.
 
 **Checkpoint**: US4 shippable independently (and co-ships with US1).
@@ -112,25 +112,25 @@ CRITICAL: No user story work begins until this phase is complete.
 
 ### Tests (write first)
 
-- [ ] T027 [P] [US2] Create `internal/telemetry/activation_test.go` with test cases: (a) empty BBolt → Load returns zero-value struct, (b) Save then Load round-trips, (c) monotonic flag cannot flip true→false through Save, (d) MCP clients list deduplicates and caps at 16 (17th insertion is dropped), (e) path-like client name recorded as "unknown", (f) 24h window decay resets the counter after simulated 25h elapsed.
-- [ ] T028 [P] [US2] Add test `TestRetrieveToolsBucket` to `activation_test.go` verifying 100 concurrent `IncrementRetrieveToolsCall` calls result in count=100 with no races (use `-race`).
-- [ ] T029 [P] [US2] Add test `TestTokensSavedBucketing` to `activation_test.go` with table: 0→"0", 50→"1_100", 500→"100_1k", 5000→"1k_10k", 50000→"10k_100k", 500000→"100k_plus".
-- [ ] T030 [P] [US2] Add integration test `internal/server/mcp_initialize_test.go` (or extend existing) that invokes an MCP `initialize` with `params.clientInfo.name = "claude-code"` and asserts a telemetry hook records the client (use an in-memory fake `ActivationStore`).
-- [ ] T031 [P] [US2] Add integration test `internal/server/mcp_retrieve_tools_test.go` (or extend existing) that calls the builtin `retrieve_tools` and asserts `IncrementRetrieveToolsCall` fires.
+- [x] T027 [P] [US2] Create `internal/telemetry/activation_test.go` with test cases: (a) empty BBolt → Load returns zero-value struct, (b) Save then Load round-trips, (c) monotonic flag cannot flip true→false through Save, (d) MCP clients list deduplicates and caps at 16 (17th insertion is dropped), (e) path-like client name recorded as "unknown", (f) 24h window decay resets the counter after simulated 25h elapsed.
+- [x] T028 [P] [US2] Add test `TestRetrieveToolsBucket` to `activation_test.go` verifying 100 concurrent `IncrementRetrieveToolsCall` calls result in count=100 with no races (use `-race`).
+- [x] T029 [P] [US2] Add test `TestTokensSavedBucketing` to `activation_test.go` with table: 0→"0", 50→"1_100", 500→"100_1k", 5000→"1k_10k", 50000→"10k_100k", 500000→"100k_plus".
+- [x] T030 [P] [US2] Add integration test `internal/server/mcp_initialize_test.go` (or extend existing) that invokes an MCP `initialize` with `params.clientInfo.name = "claude-code"` and asserts a telemetry hook records the client (use an in-memory fake `ActivationStore`).
+- [x] T031 [P] [US2] Add integration test `internal/server/mcp_retrieve_tools_test.go` (or extend existing) that calls the builtin `retrieve_tools` and asserts `IncrementRetrieveToolsCall` fires.
 
 ### Implementation
 
-- [ ] T032 [US2] Implement `ActivationStore` methods in `internal/telemetry/activation.go`: `Load`, `Save`, `MarkFirstConnectedServer`, `MarkFirstMCPClient`, `MarkFirstRetrieveToolsCall`, `RecordMCPClient` (with sanitization per research R7), `IncrementRetrieveToolsCall`, `AddTokensSaved`, `SetInstallerPending`, `IsInstallerPending`.
-- [ ] T033 [US2] Implement token-saved bucketing helper `BucketTokens(n int) string` in `internal/telemetry/activation.go` per FR-009.
-- [ ] T034 [US2] Implement 24h window decay logic inside `IncrementRetrieveToolsCall` / emit-time reset in `internal/telemetry/activation.go`.
-- [ ] T035 [US2] Implement client-name sanitizer `sanitizeClientName(raw string) string` in `internal/telemetry/activation.go` — regex `^[a-z0-9][a-z0-9-_.]{0,63}$`; reject `/`, `\\`, `..`, `@`; fall back to `"unknown"`.
-- [ ] T036 [US2] Extend `telemetry.HeartbeatPayload` in `internal/telemetry/telemetry.go` with `Activation *ActivationState` field.
-- [ ] T037 [US2] Update `telemetry.Service.buildPayload` to load activation state from BBolt, compute `RetrieveToolsCalls24h` and `EstimatedTokensSaved24hBucket` at emit time, and embed in the payload.
-- [ ] T038 [US2] Hook MCP `initialize` handler in `internal/server/mcp.go`: on successful handshake, call `activationStore.MarkFirstMCPClient()` + `activationStore.RecordMCPClient(params.clientInfo.name)`. Plumb the store through via the existing runtime dependency-injection path (likely via `runtime.Runtime` or `server.Server` field).
-- [ ] T039 [US2] Hook builtin `retrieve_tools` in the relevant handler under `internal/server/` (e.g., `mcp_builtin.go` or wherever `retrieve_tools` is dispatched): on each call, invoke `activationStore.IncrementRetrieveToolsCall()` + `activationStore.MarkFirstRetrieveToolsCall()`; estimate tokens saved from the returned result and call `AddTokensSaved`.
-- [ ] T040 [US2] Hook upstream-server connection-success event in `internal/runtime/` (wherever connect success is emitted): call `activationStore.MarkFirstConnectedServer()`.
-- [ ] T041 [US2] Extend `/api/v1/status` handler in `internal/httpapi/server.go` to include the `activation` snapshot (read-only, loaded via `ActivationStore.Load`).
-- [ ] T042 [US2] Extend `cmd/mcpproxy/telemetry_cmd.go` `telemetry status` subcommand to display activation flags + counters in the output.
+- [x] T032 [US2] Implement `ActivationStore` methods in `internal/telemetry/activation.go`: `Load`, `Save`, `MarkFirstConnectedServer`, `MarkFirstMCPClient`, `MarkFirstRetrieveToolsCall`, `RecordMCPClient` (with sanitization per research R7), `IncrementRetrieveToolsCall`, `AddTokensSaved`, `SetInstallerPending`, `IsInstallerPending`.
+- [x] T033 [US2] Implement token-saved bucketing helper `BucketTokens(n int) string` in `internal/telemetry/activation.go` per FR-009.
+- [x] T034 [US2] Implement 24h window decay logic inside `IncrementRetrieveToolsCall` / emit-time reset in `internal/telemetry/activation.go`.
+- [x] T035 [US2] Implement client-name sanitizer `sanitizeClientName(raw string) string` in `internal/telemetry/activation.go` — regex `^[a-z0-9][a-z0-9-_.]{0,63}$`; reject `/`, `\\`, `..`, `@`; fall back to `"unknown"`.
+- [x] T036 [US2] Extend `telemetry.HeartbeatPayload` in `internal/telemetry/telemetry.go` with `Activation *ActivationState` field.
+- [x] T037 [US2] Update `telemetry.Service.buildPayload` to load activation state from BBolt, compute `RetrieveToolsCalls24h` and `EstimatedTokensSaved24hBucket` at emit time, and embed in the payload.
+- [x] T038 [US2] Hook MCP `initialize` handler in `internal/server/mcp.go`: on successful handshake, call `activationStore.MarkFirstMCPClient()` + `activationStore.RecordMCPClient(params.clientInfo.name)`. Plumb the store through via the existing runtime dependency-injection path (likely via `runtime.Runtime` or `server.Server` field).
+- [x] T039 [US2] Hook builtin `retrieve_tools` in the relevant handler under `internal/server/` (e.g., `mcp_builtin.go` or wherever `retrieve_tools` is dispatched): on each call, invoke `activationStore.IncrementRetrieveToolsCall()` + `activationStore.MarkFirstRetrieveToolsCall()`; estimate tokens saved from the returned result and call `AddTokensSaved`.
+- [x] T040 [US2] Hook upstream-server connection-success event in `internal/runtime/` (wherever connect success is emitted): call `activationStore.MarkFirstConnectedServer()`.
+- [x] T041 [US2] Extend `/api/v1/status` handler in `internal/httpapi/server.go` to include the `activation` snapshot (read-only, loaded via `ActivationStore.Load`).
+- [x] T042 [US2] Extend `cmd/mcpproxy/telemetry_cmd.go` `telemetry status` subcommand to display activation flags + counters in the output.
 - [ ] T043 [US2] Run `go test -race ./internal/telemetry/... ./internal/server/...` and confirm T027–T031 pass.
 
 **Checkpoint**: US2 shippable. Activation funnel data flowing.
@@ -145,24 +145,24 @@ CRITICAL: No user story work begins until this phase is complete.
 
 ### Tests (write first)
 
-- [ ] T044 [P] [US3] Create `internal/telemetry/launch_source_test.go` table-driven: env=installer → installer; handshake=tray → tray; ppid-is-launchd → login_item (mocked); tty=true → cli; fallthrough → unknown.
-- [ ] T045 [P] [US3] Create `internal/telemetry/autostart_test.go` covering the socket-mediated reader: when tray responds true → state `true`; when tray returns 500 → state `nil`; when tray not running → state `nil`.
-- [ ] T046 [P] [US3] Add test to `internal/telemetry/activation_test.go` verifying `installer_heartbeat_pending` is set on startup when env var present and cleared after one heartbeat (fake `BuildPayload`).
-- [ ] T047 [P] [US3] Create `native/macos/MCPProxy/Sources/MCPProxy/Tests/AutoStartTests.swift` stub (XCTest) that asserts the first-run dialog's "Launch at login" checkbox state is ON by default; run via `mcpproxy-ui-test` screenshot verification if XCTest harness is unavailable.
+- [x] T044 [P] [US3] Create `internal/telemetry/launch_source_test.go` table-driven: env=installer → installer; handshake=tray → tray; ppid-is-launchd → login_item (mocked); tty=true → cli; fallthrough → unknown.
+- [x] T045 [P] [US3] Create `internal/telemetry/autostart_test.go` covering the socket-mediated reader: when tray responds true → state `true`; when tray returns 500 → state `nil`; when tray not running → state `nil`.
+- [x] T046 [P] [US3] Add test to `internal/telemetry/activation_test.go` verifying `installer_heartbeat_pending` is set on startup when env var present and cleared after one heartbeat (fake `BuildPayload`).
+- [x] T047 [P] [US3] Create `native/macos/MCPProxy/Sources/MCPProxy/Tests/AutoStartTests.swift` stub (XCTest) that asserts the first-run dialog's "Launch at login" checkbox state is ON by default; run via `mcpproxy-ui-test` screenshot verification if XCTest harness is unavailable.
 
 ### Implementation
 
-- [ ] T048 [US3] Implement `DetectLaunchSource(env, handshake, ppidChecker, ttyChecker) LaunchSource` + `DetectLaunchSourceOnce()` in `internal/telemetry/launch_source.go` per research R3.
-- [ ] T049 [US3] Implement `autostart.go` reader in `internal/telemetry/autostart.go`: on macOS/Windows, send a request to the tray socket's `/autostart` endpoint (1h TTL cache in the telemetry service); on Linux, return `nil`. Gracefully handle socket absent → `nil`.
-- [ ] T050 [US3] Extend `telemetry.HeartbeatPayload` with `LaunchSource string` and `AutostartEnabled *bool` fields (pointer for tri-state per data-model.md).
-- [ ] T051 [US3] Update `telemetry.Service.buildPayload` to: (a) on first heartbeat with `installer_heartbeat_pending=true`, emit `launch_source=installer` and clear the flag, (b) otherwise emit `DetectLaunchSourceOnce()` result, (c) populate `AutostartEnabled` from `autostart.Read()`.
-- [ ] T052 [US3] Set `activationStore.SetInstallerPending(true)` at process startup in the runtime wire-up (likely `cmd/mcpproxy/serve.go` or equivalent) when `os.Getenv("MCPPROXY_LAUNCHED_BY") == "installer"`.
-- [ ] T053 [US3] Create `native/macos/MCPProxy/Sources/MCPProxy/AutoStart.swift`: wrapper around `SMAppService.mainApp` with `register()`, `unregister()`, and `isEnabled()` methods; log failures without crashing.
-- [ ] T054 [US3] Create `native/macos/MCPProxy/Sources/MCPProxy/FirstRunDialog.swift`: SwiftUI sheet presented on first launch with a "Launch at login" checkbox defaulting to ON; on dismiss, call `AutoStart.register()` if checked; persist "first-run-completed" marker via UserDefaults.
-- [ ] T055 [US3] Extend the tray's socket route handler in `native/macos/MCPProxy/Sources/MCPProxy/` to expose `GET /autostart` returning `{"enabled": true|false}` based on `AutoStart.isEnabled()`.
-- [ ] T056 [US3] On macOS tray launch in `MCPProxyApp.swift` (or equivalent entry point): if first-run marker is absent, present `FirstRunDialog`; otherwise proceed silently.
-- [ ] T057 [US3] Create `packaging/macos/postinstall.sh` per research R10; mark executable; ensure it is invoked by the DMG's post-install step or embedded pkg.
-- [ ] T058 [US3] Update macOS DMG build script (`scripts/build.sh` or the relevant target under `packaging/macos/`) to include `postinstall.sh` and ensure it has the correct permissions in the final artifact.
+- [x] T048 [US3] Implement `DetectLaunchSource(env, handshake, ppidChecker, ttyChecker) LaunchSource` + `DetectLaunchSourceOnce()` in `internal/telemetry/launch_source.go` per research R3.
+- [x] T049 [US3] Implement `autostart.go` reader in `internal/telemetry/autostart.go`: on macOS/Windows, send a request to the tray socket's `/autostart` endpoint (1h TTL cache in the telemetry service); on Linux, return `nil`. Gracefully handle socket absent → `nil`.
+- [x] T050 [US3] Extend `telemetry.HeartbeatPayload` with `LaunchSource string` and `AutostartEnabled *bool` fields (pointer for tri-state per data-model.md).
+- [x] T051 [US3] Update `telemetry.Service.buildPayload` to: (a) on first heartbeat with `installer_heartbeat_pending=true`, emit `launch_source=installer` and clear the flag, (b) otherwise emit `DetectLaunchSourceOnce()` result, (c) populate `AutostartEnabled` from `autostart.Read()`.
+- [x] T052 [US3] Set `activationStore.SetInstallerPending(true)` at process startup in the runtime wire-up (likely `cmd/mcpproxy/serve.go` or equivalent) when `os.Getenv("MCPPROXY_LAUNCHED_BY") == "installer"`.
+- [x] T053 [US3] Create `native/macos/MCPProxy/Sources/MCPProxy/AutoStart.swift`: wrapper around `SMAppService.mainApp` with `register()`, `unregister()`, and `isEnabled()` methods; log failures without crashing.
+- [x] T054 [US3] Create `native/macos/MCPProxy/Sources/MCPProxy/FirstRunDialog.swift`: SwiftUI sheet presented on first launch with a "Launch at login" checkbox defaulting to ON; on dismiss, call `AutoStart.register()` if checked; persist "first-run-completed" marker via UserDefaults.
+- [x] T055 [US3] Extend the tray's socket route handler in `native/macos/MCPProxy/Sources/MCPProxy/` to expose `GET /autostart` returning `{"enabled": true|false}` based on `AutoStart.isEnabled()`.
+- [x] T056 [US3] On macOS tray launch in `MCPProxyApp.swift` (or equivalent entry point): if first-run marker is absent, present `FirstRunDialog`; otherwise proceed silently.
+- [x] T057 [US3] Create `packaging/macos/postinstall.sh` per research R10; mark executable; ensure it is invoked by the DMG's post-install step or embedded pkg.
+- [x] T058 [US3] Update macOS DMG build script (`scripts/build.sh` or the relevant target under `packaging/macos/`) to include `postinstall.sh` and ensure it has the correct permissions in the final artifact.
 - [ ] T059 [US3] Build and replace the tray per `CLAUDE.md` instructions (`swiftc -target arm64-apple-macosx13.0 ...`); restart tray; use `mcp__mcpproxy-ui-test__screenshot_window` to capture the first-run dialog and verify checkbox state.
 - [ ] T060 [US3] Run `go test -race ./internal/telemetry/...` and confirm T044–T046 pass.
 
@@ -183,7 +183,7 @@ CRITICAL: No user story work begins until this phase is complete.
 - [ ] T067 Run `./scripts/test-api-e2e.sh` end-to-end and confirm exit 0.
 - [ ] T068 Run `go test -race ./internal/...` full suite and confirm no regressions.
 - [ ] T069 Quickstart verification: follow `specs/044-retention-telemetry-v3/quickstart.md` end-to-end on a local install; record any deviations.
-- [ ] T070 Open a PR against the base branch with title `feat(telemetry): payload v3 with env_kind, activation, auto-start default` and link this spec.
+- [x] T070 Open a PR against the base branch with title `feat(telemetry): payload v3 with env_kind, activation, auto-start default` and link this spec.
 
 ---
 

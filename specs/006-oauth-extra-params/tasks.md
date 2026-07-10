@@ -122,8 +122,8 @@ Go monorepo structure:
 
 #### Auth Status Enhancements
 
-- [ ] T037 [US3] Extend /api/v1/servers response to include OAuth config details in internal/httpapi/server.go
-- [ ] T038 [US3] Update runAuthStatusClientMode to display OAuth configuration section in cmd/mcpproxy/auth_cmd.go
+- [x] T037 [US3] Extend /api/v1/servers response to include OAuth config details in internal/httpapi/server.go
+- [x] T038 [US3] Update runAuthStatusClientMode to display OAuth configuration section in cmd/mcpproxy/auth_cmd.go
 - [ ] T039 [US3] Add extra parameters display (with masking) to auth status output in cmd/mcpproxy/auth_cmd.go
 - [ ] T040 [US3] Add scopes, PKCE status, redirect URI display to auth status output in cmd/mcpproxy/auth_cmd.go
 - [ ] T041 [US3] Add authorization/token endpoints display to auth status output in cmd/mcpproxy/auth_cmd.go
@@ -138,16 +138,16 @@ Go monorepo structure:
 
 #### Debug Logging
 
-- [ ] T047 [P] [US3] Add DEBUG logging for authorization URL construction in internal/oauth/transport_wrapper.go
-- [ ] T048 [P] [US3] Add DEBUG logging for token exchange requests in internal/oauth/transport_wrapper.go
-- [ ] T049 [P] [US3] Add DEBUG logging for token refresh requests in internal/oauth/transport_wrapper.go
+- [x] T047 [P] [US3] Add DEBUG logging for authorization URL construction in internal/oauth/transport_wrapper.go
+- [x] T048 [P] [US3] Add DEBUG logging for token exchange requests in internal/oauth/transport_wrapper.go
+- [x] T049 [P] [US3] Add DEBUG logging for token refresh requests in internal/oauth/transport_wrapper.go
 - [ ] T050 [P] [US3] Add DEBUG logging for extra params injection in internal/transport/http.go
 
 #### Doctor Command Enhancements
 
-- [ ] T051 [US3] Add OAuth health check section to doctor command in cmd/mcpproxy/doctor_cmd.go
-- [ ] T052 [US3] Implement RFC 8707 compliance detection in doctor diagnostics in cmd/mcpproxy/doctor_cmd.go
-- [ ] T053 [US3] Add missing extra_params suggestions to doctor output in cmd/mcpproxy/doctor_cmd.go
+- [x] T051 [US3] Add OAuth health check section to doctor command in cmd/mcpproxy/doctor_cmd.go
+- [x] T052 [US3] Implement RFC 8707 compliance detection in doctor diagnostics in cmd/mcpproxy/doctor_cmd.go
+- [x] T053 [US3] Add missing extra_params suggestions to doctor output in cmd/mcpproxy/doctor_cmd.go
 - [ ] T054 [US3] Add example config snippets for common OAuth issues in cmd/mcpproxy/doctor_cmd.go
 
 **Checkpoint**: All diagnostics should now provide clear, actionable guidance for OAuth troubleshooting
@@ -182,8 +182,8 @@ Go monorepo structure:
 - [ ] T063 [P] Add troubleshooting section to CLAUDE.md for common OAuth issues
 - [ ] T064 Run full test suite (unit + integration + E2E) with `./scripts/run-all-tests.sh`
 - [ ] T065 Run linter with `./scripts/run-linter.sh` and fix any issues
-- [ ] T066 [P] Add code comments explaining wrapper pattern in internal/oauth/transport_wrapper.go
-- [ ] T067 [P] Add security documentation for masking strategy in internal/oauth/masking.go
+- [x] T066 [P] Add code comments explaining wrapper pattern in internal/oauth/transport_wrapper.go
+- [x] T067 [P] Add security documentation for masking strategy in internal/oauth/masking.go
 - [ ] T068 Verify quickstart.md 30-second test scenario works end-to-end
 - [ ] T069 Performance benchmark: Verify wrapper overhead is <1ms for URL manipulation
 - [ ] T070 Performance benchmark: Verify no impact on non-OAuth servers

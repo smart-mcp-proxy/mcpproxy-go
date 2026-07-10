@@ -141,18 +141,18 @@ This is a Go backend refactoring project with CLI interface:
 
 ### Implementation for User Story 3
 
-- [ ] T053 [US3] Add API metadata annotations to cmd/mcpproxy/main.go (@title, @version, @description, @host, @BasePath, @securityDefinitions)
-- [ ] T054 [P] [US3] Add swag annotations to handleGetServers in internal/httpapi/server.go (@Summary, @Description, @Tags, @Produce, @Param, @Success, @Failure, @Router, @Security)
-- [ ] T055 [P] [US3] Add swag annotations to handleRestartServer in internal/httpapi/server.go
-- [ ] T056 [P] [US3] Add swag annotations to handleEnableServer and handleDisableServer in internal/httpapi/server.go
-- [ ] T057 [P] [US3] Add swag annotations to handleGetServerLogs in internal/httpapi/server.go
-- [ ] T058 [P] [US3] Add swag annotations to handleGetDiagnostics in internal/httpapi/server.go
-- [ ] T059 [P] [US3] Add swag annotations to all remaining /api/v1 endpoints in internal/httpapi/server.go (servers, tools, docker, secrets, stats, sessions, config)
-- [ ] T060 [US3] Create Swagger UI handler in internal/httpapi/swagger.go (mount httpSwagger.WrapHandler, import generated docs)
-- [ ] T061 [US3] Register Swagger UI route in internal/httpapi/server.go setupRoutes() (mount at /swagger/)
-- [ ] T062 [US3] Add swagger target to Makefile (run swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml)
-- [ ] T063 [US3] Update build target in Makefile to depend on swagger target (build: swagger frontend-build...)
-- [ ] T064 [US3] Add docs/ to .gitignore exceptions (ensure generated docs are tracked)
+- [x] T053 [US3] Add API metadata annotations to cmd/mcpproxy/main.go (@title, @version, @description, @host, @BasePath, @securityDefinitions)
+- [x] T054 [P] [US3] Add swag annotations to handleGetServers in internal/httpapi/server.go (@Summary, @Description, @Tags, @Produce, @Param, @Success, @Failure, @Router, @Security)
+- [x] T055 [P] [US3] Add swag annotations to handleRestartServer in internal/httpapi/server.go
+- [x] T056 [P] [US3] Add swag annotations to handleEnableServer and handleDisableServer in internal/httpapi/server.go
+- [x] T057 [P] [US3] Add swag annotations to handleGetServerLogs in internal/httpapi/server.go
+- [x] T058 [P] [US3] Add swag annotations to handleGetDiagnostics in internal/httpapi/server.go
+- [x] T059 [P] [US3] Add swag annotations to all remaining /api/v1 endpoints in internal/httpapi/server.go (servers, tools, docker, secrets, stats, sessions, config)
+- [x] T060 [US3] Create Swagger UI handler in internal/httpapi/swagger.go (mount httpSwagger.WrapHandler, import generated docs)
+- [x] T061 [US3] Register Swagger UI route in internal/httpapi/server.go setupRoutes() (mount at /swagger/)
+- [x] T062 [US3] Add swagger target to Makefile (run swag init -g cmd/mcpproxy/main.go --output docs --outputTypes yaml)
+- [x] T063 [US3] Update build target in Makefile to depend on swagger target (build: swagger frontend-build...)
+- [x] T064 [US3] Add docs/ to .gitignore exceptions (ensure generated docs are tracked)
 
 **Checkpoint**: At this point, User Stories 1, 2, AND 3 should all work independently. OpenAPI spec auto-generates during build, validates successfully, and Swagger UI serves documentation at /swagger/.
 
@@ -166,27 +166,27 @@ This is a Go backend refactoring project with CLI interface:
 
 ### Tests for User Story 4
 
-- [ ] T065 [P] [US4] Unit test for RestartAll() in internal/management/service_test.go (verify sequential execution, partial failure handling)
-- [ ] T066 [P] [US4] Unit test for EnableAll() in internal/management/service_test.go
-- [ ] T067 [P] [US4] Unit test for DisableAll() in internal/management/service_test.go
+- [x] T065 [P] [US4] Unit test for RestartAll() in internal/management/service_test.go (verify sequential execution, partial failure handling)
+- [x] T066 [P] [US4] Unit test for EnableAll() in internal/management/service_test.go
+- [x] T067 [P] [US4] Unit test for DisableAll() in internal/management/service_test.go
 - [ ] T068 [P] [US4] Integration test for POST /api/v1/servers/restart_all in internal/httpapi/server_test.go
 - [ ] T069 [P] [US4] E2E test for `mcpproxy upstream restart --all` in cmd/mcpproxy/upstream_cmd_test.go
 
 ### Implementation for User Story 4
 
-- [ ] T070 [P] [US4] Implement RestartAll() method in internal/management/service.go (gate check→iterate servers→call RestartServer()→return count and errors)
-- [ ] T071 [P] [US4] Implement EnableAll() method in internal/management/service.go (gate check→iterate→call EnableServer(true)→return count)
-- [ ] T072 [P] [US4] Implement DisableAll() method in internal/management/service.go (gate check→iterate→call EnableServer(false)→return count)
-- [ ] T073 [P] [US4] Add handleRestartAll endpoint in internal/httpapi/server.go (call managementService.RestartAll(), return success/failure counts)
-- [ ] T074 [P] [US4] Add handleEnableAll endpoint in internal/httpapi/server.go
-- [ ] T075 [P] [US4] Add handleDisableAll endpoint in internal/httpapi/server.go
-- [ ] T076 [US4] Register POST /api/v1/servers/restart_all route in internal/httpapi/server.go setupRoutes()
-- [ ] T077 [US4] Register POST /api/v1/servers/enable_all and disable_all routes in internal/httpapi/server.go setupRoutes()
-- [ ] T078 [US4] Add swag annotations to bulk operation endpoints in internal/httpapi/server.go (handleRestartAll, handleEnableAll, handleDisableAll)
-- [ ] T079 [US4] Add RestartAll() method to internal/cliclient/client.go (call POST /api/v1/servers/restart_all)
-- [ ] T080 [US4] Add EnableAll() and DisableAll() methods to internal/cliclient/client.go
-- [ ] T081 [US4] Update runUpstreamRestart in cmd/mcpproxy/upstream_cmd.go to support --all flag (call client.RestartAll())
-- [ ] T082 [US4] Update runUpstreamEnable and runUpstreamDisable in cmd/mcpproxy/upstream_cmd.go to support --all flag
+- [x] T070 [P] [US4] Implement RestartAll() method in internal/management/service.go (gate check→iterate servers→call RestartServer()→return count and errors)
+- [x] T071 [P] [US4] Implement EnableAll() method in internal/management/service.go (gate check→iterate→call EnableServer(true)→return count)
+- [x] T072 [P] [US4] Implement DisableAll() method in internal/management/service.go (gate check→iterate→call EnableServer(false)→return count)
+- [x] T073 [P] [US4] Add handleRestartAll endpoint in internal/httpapi/server.go (call managementService.RestartAll(), return success/failure counts)
+- [x] T074 [P] [US4] Add handleEnableAll endpoint in internal/httpapi/server.go
+- [x] T075 [P] [US4] Add handleDisableAll endpoint in internal/httpapi/server.go
+- [x] T076 [US4] Register POST /api/v1/servers/restart_all route in internal/httpapi/server.go setupRoutes()
+- [x] T077 [US4] Register POST /api/v1/servers/enable_all and disable_all routes in internal/httpapi/server.go setupRoutes()
+- [x] T078 [US4] Add swag annotations to bulk operation endpoints in internal/httpapi/server.go (handleRestartAll, handleEnableAll, handleDisableAll)
+- [x] T079 [US4] Add RestartAll() method to internal/cliclient/client.go (call POST /api/v1/servers/restart_all)
+- [x] T080 [US4] Add EnableAll() and DisableAll() methods to internal/cliclient/client.go
+- [x] T081 [US4] Update runUpstreamRestart in cmd/mcpproxy/upstream_cmd.go to support --all flag (call client.RestartAll())
+- [x] T082 [US4] Update runUpstreamEnable and runUpstreamDisable in cmd/mcpproxy/upstream_cmd.go to support --all flag
 
 **Checkpoint**: All user stories (1, 2, 3, 4) should now be independently functional. Bulk operations work across CLI/REST/MCP with partial failure reporting.
 

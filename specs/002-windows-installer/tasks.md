@@ -25,7 +25,7 @@ This project follows Go repository structure:
 
 **Purpose**: Create directory structure and installer resources
 
-- [X] T001 [P1] Create `scripts/installer-resources/windows/` directory for Windows-specific resources
+- [ ] T001 [P1] Create `scripts/installer-resources/windows/` directory for Windows-specific resources
 - [X] T002 [P1] Create `wix/` directory at repository root for WiX Toolset definitions
 - [X] T003 [P1] [P] Add WiX Toolset as documentation dependency in CLAUDE.md
 
@@ -130,13 +130,13 @@ This project follows Go repository structure:
 
 ### Implementation for User Story 5
 
-- [ ] T033 [P1] [US5] Modify `.github/workflows/release.yml` to add Windows installer build job using `windows-latest` runner
+- [x] T033 [P1] [US5] Modify `.github/workflows/release.yml` to add Windows installer build job using `windows-latest` runner
 - [ ] T034 [P1] [US5] Add WiX Toolset installation step in release.yml using `dotnet tool install --global wix` command
-- [ ] T035 [P1] [US5] Add Inno Setup installation step in release.yml using `choco install innosetup -y` (if using Inno Setup)
-- [ ] T036 [P1] [US5] Add Windows amd64 binary build step in release.yml with CGO configuration for both mcpproxy and mcpproxy-tray
-- [ ] T037 [P1] [US5] Add Windows arm64 binary build step in release.yml with cross-compilation settings
-- [ ] T038 [P1] [US5] Add installer generation step in release.yml calling build script with version from Git tag
-- [ ] T039 [P1] [US5] Add artifact upload step in release.yml to attach installers to GitHub release with naming convention `mcpproxy-{version}-windows-{arch}-installer.{ext}`
+- [x] T035 [P1] [US5] Add Inno Setup installation step in release.yml using `choco install innosetup -y` (if using Inno Setup)
+- [x] T036 [P1] [US5] Add Windows amd64 binary build step in release.yml with CGO configuration for both mcpproxy and mcpproxy-tray
+- [x] T037 [P1] [US5] Add Windows arm64 binary build step in release.yml with cross-compilation settings
+- [x] T038 [P1] [US5] Add installer generation step in release.yml calling build script with version from Git tag
+- [x] T039 [P1] [US5] Add artifact upload step in release.yml to attach installers to GitHub release with naming convention `mcpproxy-{version}-windows-{arch}-installer.{ext}`
 - [ ] T040 [P1] [US5] Test release workflow by pushing test tag to feature branch and verifying artifact uploads
 - [ ] T041 [P1] [US5] Verify installer artifacts appear on GitHub releases page with correct naming and are downloadable
 
@@ -153,13 +153,13 @@ This project follows Go repository structure:
 ### Implementation for User Story 6
 
 - [X] T042 [P2] [US6] Enhance PowerShell build script `scripts/build-windows-installer.ps1` to accept `-Version` parameter for local versioning
-- [ ] T043 [P2] [US6] Add local testing instructions to quickstart.md showing how to build installer with custom version string
-- [ ] T044 [P2] [US6] Modify `.github/workflows/prerelease.yml` to add Windows installer build job (same steps as release.yml)
-- [ ] T045 [P2] [US6] Configure prerelease workflow to use version format `{last_tag}-next.{commit_hash}` for prerelease installers
-- [ ] T046 [P2] [US6] Add prerelease artifact upload step to attach installers to workflow runs (not releases page)
+- [x] T043 [P2] [US6] Add local testing instructions to quickstart.md showing how to build installer with custom version string
+- [x] T044 [P2] [US6] Modify `.github/workflows/prerelease.yml` to add Windows installer build job (same steps as release.yml)
+- [x] T045 [P2] [US6] Configure prerelease workflow to use version format `{last_tag}-next.{commit_hash}` for prerelease installers
+- [x] T046 [P2] [US6] Add prerelease artifact upload step to attach installers to workflow runs (not releases page)
 - [ ] T047 [P2] [US6] Test prerelease workflow by pushing to `next` branch and downloading installer from workflow artifacts
 - [ ] T048 [P2] [US6] Test local build workflow on Windows VM - build installer, uninstall previous version, install new version, verify version string
-- [ ] T049 [P2] [US6] Document uninstall/reinstall workflow in quickstart.md for iterative testing
+- [x] T049 [P2] [US6] Document uninstall/reinstall workflow in quickstart.md for iterative testing
 
 **Checkpoint**: All user stories should now be independently functional - developers can iterate quickly without production releases
 

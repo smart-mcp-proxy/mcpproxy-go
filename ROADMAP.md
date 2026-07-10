@@ -209,12 +209,12 @@ graph TD
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | unassigned | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | unassigned | P0 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | unassigned | P1 | — |  |  |
-| Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 25/60 (42%) | [002-windows-installer](./specs/002-windows-installer/) |  |
+| Windows native tray app `MCP-43` | In review | BackendEngineer | P2 | 35/60 (58%) | [002-windows-installer](./specs/002-windows-installer/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | Blocked |  | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Web UI + macOS app UX audit | Todo | unassigned | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | unassigned | P1 | — |  |  |
-| Analytics dashboard as default page | Todo | unassigned | P1 | 16/26 (62%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
-| Registries — easier search + add-server | Todo | unassigned | P1 | 3/24 (12%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
+| Analytics dashboard as default page | Todo | unassigned | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
+| Registries — easier search + add-server | Todo | unassigned | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Todo | unassigned | P2 | — |  |  |
 | Planning/docs truth automation | Todo | unassigned | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo |  | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
@@ -236,41 +236,41 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 
 | # | Status | Progress |
 | --- | --- | --- |
-| [001-code-execution](./specs/001-code-execution/) | `drafted` | 0/127 (0%) |
+| [001-code-execution](./specs/001-code-execution/) | `in-flight` | 74/127 (58%) |
 | [001-fix-skipped-auth-tests](./specs/001-fix-skipped-auth-tests/) | — | — |
-| [001-oas-endpoint-documentation](./specs/001-oas-endpoint-documentation/) | `in-flight` | 49/69 (71%) |
+| [001-oas-endpoint-documentation](./specs/001-oas-endpoint-documentation/) | `in-flight` | 36/69 (52%) |
 | [001-oauth-scope-discovery](./specs/001-oauth-scope-discovery/) | — | — |
-| [001-update-version-display](./specs/001-update-version-display/) | `in-flight` | 11/58 (19%) |
-| [002-windows-installer](./specs/002-windows-installer/) | `in-flight` | 25/60 (42%) |
-| [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 10/64 (16%) |
-| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 45/101 (45%) |
+| [001-update-version-display](./specs/001-update-version-display/) | `in-flight` | 39/58 (67%) |
+| [002-windows-installer](./specs/002-windows-installer/) | `in-flight` | 35/60 (58%) |
+| [003-tool-annotations-webui](./specs/003-tool-annotations-webui/) | `in-flight` | 37/64 (58%) |
+| [004-management-health-refactor](./specs/004-management-health-refactor/) | `in-flight` | 73/101 (72%) |
 | [005-rest-management-integration](./specs/005-rest-management-integration/) | `shipped` | 45/45 (100%) |
-| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 31/65 (48%) |
-| [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 88/103 (85%) |
+| [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 41/65 (63%) |
+| [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 92/103 (89%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
-| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `drafted` | 0/87 (0%) |
+| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 43/87 (49%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 24/36 (67%) |
-| [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 39/39 (100%) |
+| [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
 | [012-unified-health-status](./specs/012-unified-health-status/) | `shipped` | 44/44 (100%) |
 | [013-structured-server-state](./specs/013-structured-server-state/) | `shipped` | 46/46 (100%) |
 | [013-tool-change-notifications](./specs/013-tool-change-notifications/) | `in-flight` | 26/45 (58%) |
-| [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `shipped` | 65/66 (98%) |
+| [014-cli-output-formatting](./specs/014-cli-output-formatting/) | `in-flight` | 62/66 (94%) |
 | [015-server-management-cli](./specs/015-server-management-cli/) | `shipped` | 50/50 (100%) |
-| [016-activity-log-backend](./specs/016-activity-log-backend/) | `drafted` | 0/50 (0%) |
-| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `drafted` | 0/60 (0%) |
+| [016-activity-log-backend](./specs/016-activity-log-backend/) | `in-flight` | 44/50 (88%) |
+| [017-activity-cli-commands](./specs/017-activity-cli-commands/) | `in-flight` | 50/60 (83%) |
 | [018-intent-declaration](./specs/018-intent-declaration/) | `shipped` | 69/69 (100%) |
-| [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 73/73 (100%) |
+| [019-activity-webui](./specs/019-activity-webui/) | `shipped` | 72/73 (99%) |
 | [020-oauth-login-feedback](./specs/020-oauth-login-feedback/) | — | — |
-| [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 20/42 (48%) |
-| [022-oauth-redirect-uri-persistence](./specs/022-oauth-redirect-uri-persistence/) | `shipped` | 24/25 (96%) |
+| [021-request-id-logging](./specs/021-request-id-logging/) | `in-flight` | 33/42 (79%) |
+| [022-oauth-redirect-uri-persistence](./specs/022-oauth-redirect-uri-persistence/) | `in-flight` | 23/25 (92%) |
 | [023-oauth-state-persistence](./specs/023-oauth-state-persistence/) | `shipped` | 38/39 (97%) |
 | [023-smart-config-patch](./specs/023-smart-config-patch/) | `shipped` | 52/53 (98%) |
 | [024-expand-activity-log](./specs/024-expand-activity-log/) | `shipped` | 63/66 (95%) |
-| [026-pii-detection](./specs/026-pii-detection/) | `shipped` | 130/130 (100%) |
+| [026-pii-detection](./specs/026-pii-detection/) | `shipped` | 127/130 (98%) |
 | [027-status-command](./specs/027-status-command/) | `shipped` | 25/25 (100%) |
-| [028-agent-tokens](./specs/028-agent-tokens/) | `drafted` | 0/43 (0%) |
-| [029-mcpproxy-teams](./specs/029-mcpproxy-teams/) | `shipped` | 29/29 (100%) |
+| [028-agent-tokens](./specs/028-agent-tokens/) | `in-flight` | 36/43 (84%) |
+| [029-mcpproxy-teams](./specs/029-mcpproxy-teams/) | `shipped` | 28/29 (97%) |
 | [033-typescript-code-execution](./specs/033-typescript-code-execution/) | `shipped` | 19/19 (100%) |
 | [034-expand-secret-refs](./specs/034-expand-secret-refs/) | `shipped` | 17/17 (100%) |
 | [035-enhanced-annotations](./specs/035-enhanced-annotations/) | — | — |
@@ -279,37 +279,37 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [039-connect-and-dashboard](./specs/039-connect-and-dashboard/) | — | — |
 | [039-scanner-qa-audit](./specs/039-scanner-qa-audit/) | — | — |
 | [039-security-scanner-plugins](./specs/039-security-scanner-plugins/) | — | — |
-| [040-server-ux](./specs/040-server-ux/) | `drafted` | 0/35 (0%) |
+| [040-server-ux](./specs/040-server-ux/) | `in-flight` | 28/35 (80%) |
 | [041-quarantine-invariants](./specs/041-quarantine-invariants/) | — | — |
-| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `drafted` | 0/91 (0%) |
-| [043-linux-package-repos](./specs/043-linux-package-repos/) | `shipped` | 39/41 (95%) |
-| [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `drafted` | 0/106 (0%) |
-| [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `drafted` | 0/70 (0%) |
+| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 60/91 (66%) |
+| [043-linux-package-repos](./specs/043-linux-package-repos/) | `shipped` | 41/41 (100%) |
+| [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `in-flight` | 59/106 (56%) |
+| [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 54/70 (77%) |
 | [045-paperclip-cockpit](./specs/045-paperclip-cockpit/) | `in-flight` | 40/47 (85%) |
 | [046-local-first-onboarding](./specs/046-local-first-onboarding/) | — | — |
 | [046-local-launcher-for-http-sse](./specs/046-local-launcher-for-http-sse/) | — | — |
-| [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 5/46 (11%) |
-| [048-tray-refetch-elimination](./specs/048-tray-refetch-elimination/) | `in-flight` | 5/31 (16%) |
+| [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 25/46 (54%) |
+| [048-tray-refetch-elimination](./specs/048-tray-refetch-elimination/) | `in-flight` | 18/31 (58%) |
 | [049-agent-discoverable-disabled-tools](./specs/049-agent-discoverable-disabled-tools/) | `shipped` | 18/18 (100%) |
-| [050-global-tools-page](./specs/050-global-tools-page/) | `drafted` | 0/26 (0%) |
+| [050-global-tools-page](./specs/050-global-tools-page/) | `in-flight` | 24/26 (92%) |
 | [051-readme-hero-demo](./specs/051-readme-hero-demo/) | — | — |
 | [053-oss-repo-improvements](./specs/053-oss-repo-improvements/) | — | — |
 | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) | — | — |
 | [055-docs-diataxis](./specs/055-docs-diataxis/) | — | — |
-| [055-frontend-major-upgrades](./specs/055-frontend-major-upgrades/) | `drafted` | 0/24 (0%) |
-| [056-output-schema-validation](./specs/056-output-schema-validation/) | `shipped` | 23/24 (96%) |
-| [057-in-proxy-profiles](./specs/057-in-proxy-profiles/) | `drafted` | 0/25 (0%) |
+| [055-frontend-major-upgrades](./specs/055-frontend-major-upgrades/) | `shipped` | 23/24 (96%) |
+| [056-output-schema-validation](./specs/056-output-schema-validation/) | `in-flight` | 22/24 (92%) |
+| [057-in-proxy-profiles](./specs/057-in-proxy-profiles/) | `in-flight` | 20/25 (80%) |
 | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) | — | — |
-| [059-output-sanitisation](./specs/059-output-sanitisation/) | `shipped` | 25/25 (100%) |
+| [059-output-sanitisation](./specs/059-output-sanitisation/) | `shipped` | 24/25 (96%) |
 | [060-settings-page](./specs/060-settings-page/) | `shipped` | 16/16 (100%) |
 | [064-glass-cockpit](./specs/064-glass-cockpit/) | — | — |
 | [065-evaluation-foundation](./specs/065-evaluation-foundation/) | — | — |
-| [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) | `in-flight` | 16/26 (62%) |
-| [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) | `in-flight` | 3/24 (12%) |
+| [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) | `shipped` | 25/26 (96%) |
+| [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) | `in-flight` | 21/24 (88%) |
 | [071-official-registry-protocol](./specs/071-official-registry-protocol/) | `shipped` | 12/12 (100%) |
-| [073-activity-size-retention](./specs/073-activity-size-retention/) | `drafted` | 0/14 (0%) |
-| [074-discovery-intervals](./specs/074-discovery-intervals/) | `drafted` | 0/19 (0%) |
-| [075-macos-tcc-connect](./specs/075-macos-tcc-connect/) | `in-flight` | 11/30 (37%) |
+| [073-activity-size-retention](./specs/073-activity-size-retention/) | `in-flight` | 13/14 (93%) |
+| [074-discovery-intervals](./specs/074-discovery-intervals/) | `in-flight` | 17/19 (89%) |
+| [075-macos-tcc-connect](./specs/075-macos-tcc-connect/) | `shipped` | 30/30 (100%) |
 | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) | `in-flight` | 22/24 (92%) |
 | [077-scanner-simplification](./specs/077-scanner-simplification/) | `in-flight` | 38/42 (90%) |
 | [078-connect-trust-preview](./specs/078-connect-trust-preview/) | — | — |

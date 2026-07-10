@@ -29,9 +29,9 @@ description: "Tasks for Diagnostics & Error Taxonomy (spec 044)"
 
 **Purpose**: Scaffold the new package, wire `go generate`, and verify build baseline.
 
-- [ ] T001 Create package skeleton `internal/diagnostics/` with files: `types.go`, `codes.go`, `catalog.go`, `registry.go`, `classifier.go`, `fixers.go` (empty stubs, package declarations only)
-- [ ] T002 [P] Add `docs/errors/` directory with an initial `README.md` placeholder noting it is auto-generated
-- [ ] T003 [P] Add empty `scripts/check-errors-docs-links.sh` (stub that exits 0) and `scripts/test-diagnostics-e2e.sh` (stub), both executable
+- [x] T001 Create package skeleton `internal/diagnostics/` with files: `types.go`, `codes.go`, `catalog.go`, `registry.go`, `classifier.go`, `fixers.go` (empty stubs, package declarations only)
+- [x] T002 [P] Add `docs/errors/` directory with an initial `README.md` placeholder noting it is auto-generated
+- [x] T003 [P] Add empty `scripts/check-errors-docs-links.sh` (stub that exits 0) and `scripts/test-diagnostics-e2e.sh` (stub), both executable
 - [ ] T004 [P] Add `go generate` directive comment in `internal/diagnostics/registry.go` linking to future codegen for `docs/errors/README.md`
 - [ ] T005 Verify baseline build passes: `cd /Users/user/repos/mcpproxy-go-diagnostics-taxonomy && go build ./...`
 
@@ -45,21 +45,21 @@ description: "Tasks for Diagnostics & Error Taxonomy (spec 044)"
 
 ### Types & catalog framework
 
-- [ ] T010 Implement core types in `internal/diagnostics/types.go`: `Code`, `Severity` (info/warn/error), `FixStepType`, `FixStep`, `CatalogEntry`, `DiagnosticError`, `FixRequest`, `FixResult`
-- [ ] T011 [P] Implement `internal/diagnostics/catalog.go`: `Get(Code) (CatalogEntry, bool)`, `All() []CatalogEntry` (stable-sorted)
-- [ ] T012 [P] Implement `internal/diagnostics/registry.go` with `var registry = map[Code]CatalogEntry{}` and `init()` scaffold
-- [ ] T013 [P] Implement `internal/diagnostics/fixers.go`: `FixerFunc`, `fixers` map, `Register(key string, f FixerFunc)`, `Invoke(key, req)`
-- [ ] T014 Implement `internal/diagnostics/classifier.go`: `Classify(err error, hints ClassifierHints) Code` with signature + fallback to `MCPX_UNKNOWN_UNCLASSIFIED`
+- [x] T010 Implement core types in `internal/diagnostics/types.go`: `Code`, `Severity` (info/warn/error), `FixStepType`, `FixStep`, `CatalogEntry`, `DiagnosticError`, `FixRequest`, `FixResult`
+- [x] T011 [P] Implement `internal/diagnostics/catalog.go`: `Get(Code) (CatalogEntry, bool)`, `All() []CatalogEntry` (stable-sorted)
+- [x] T012 [P] Implement `internal/diagnostics/registry.go` with `var registry = map[Code]CatalogEntry{}` and `init()` scaffold
+- [x] T013 [P] Implement `internal/diagnostics/fixers.go`: `FixerFunc`, `fixers` map, `Register(key string, f FixerFunc)`, `Invoke(key, req)`
+- [x] T014 Implement `internal/diagnostics/classifier.go`: `Classify(err error, hints ClassifierHints) Code` with signature + fallback to `MCPX_UNKNOWN_UNCLASSIFIED`
 
 ### Error inventory (seed codes)
 
-- [ ] T015 Grep codebase and produce initial catalog entries in `codes.go` + `registry.go` for all 7 domains (OAUTH, STDIO, HTTP, DOCKER, CONFIG, QUARANTINE, NETWORK) plus the `UNKNOWN` fallback. Target ≥ 25 codes total. Each entry MUST include code, severity, user_message, ≥1 fix_step, docs_url.
+- [x] T015 Grep codebase and produce initial catalog entries in `codes.go` + `registry.go` for all 7 domains (OAUTH, STDIO, HTTP, DOCKER, CONFIG, QUARANTINE, NETWORK) plus the `UNKNOWN` fallback. Target ≥ 25 codes total. Each entry MUST include code, severity, user_message, ≥1 fix_step, docs_url.
 
 ### Completeness tests (FR-003)
 
-- [ ] T016 Write `internal/diagnostics/catalog_test.go` asserting: every registered code matches the naming regex; non-empty user_message; `len(fix_steps) >= 1`; docs_url present; no duplicate codes; `Deprecated` entries reference a live replacement
+- [x] T016 Write `internal/diagnostics/catalog_test.go` asserting: every registered code matches the naming regex; non-empty user_message; `len(fix_steps) >= 1`; docs_url present; no duplicate codes; `Deprecated` entries reference a live replacement
 - [ ] T017 Run `go test ./internal/diagnostics/...` and iterate until green
-- [ ] T018 [P] Write initial `internal/diagnostics/classifier_test.go` stubs (one table per domain) — all PENDING until per-domain tasks land
+- [x] T018 [P] Write initial `internal/diagnostics/classifier_test.go` stubs (one table per domain) — all PENDING until per-domain tasks land
 
 ### Activity-log integration
 
@@ -67,13 +67,13 @@ description: "Tasks for Diagnostics & Error Taxonomy (spec 044)"
 
 ### Stateview snapshot extension
 
-- [ ] T020 Extend `internal/runtime/stateview/stateview.go` with per-server `DiagnosticError` field (optional); update copy-on-write snapshot logic; extend `stateview_test.go` with round-trip test
+- [x] T020 Extend `internal/runtime/stateview/stateview.go` with per-server `DiagnosticError` field (optional); update copy-on-write snapshot logic; extend `stateview_test.go` with round-trip test
 
 ### REST infrastructure
 
-- [ ] T021 Add `internal/httpapi/diagnostics_per_server.go` with handler stub `handleGetServerDiagnostics` and route registration under existing `/api/v1/servers/{name}/diagnostics` (per `contracts/diagnostics-openapi.yaml`)
-- [ ] T022 Add `internal/httpapi/diagnostics_fix.go` with handler stub `handleInvokeFix` + rate-limiter middleware (token-bucket keyed by `(server, code)`, 1/s per tuple), return 429 with Retry-After on breach
-- [ ] T023 Register both new routes in `internal/httpapi/server.go` inside the existing `/api/v1` group
+- [x] T021 Add `internal/httpapi/diagnostics_per_server.go` with handler stub `handleGetServerDiagnostics` and route registration under existing `/api/v1/servers/{name}/diagnostics` (per `contracts/diagnostics-openapi.yaml`)
+- [x] T022 Add `internal/httpapi/diagnostics_fix.go` with handler stub `handleInvokeFix` + rate-limiter middleware (token-bucket keyed by `(server, code)`, 1/s per tuple), return 429 with Retry-After on breach
+- [x] T023 Register both new routes in `internal/httpapi/server.go` inside the existing `/api/v1` group
 
 **Checkpoint**: Foundation ready — catalog exists with ≥ 25 codes, tests green, stateview carries DiagnosticError, REST routes wired but behaviour is story-dependent.
 
@@ -87,21 +87,21 @@ description: "Tasks for Diagnostics & Error Taxonomy (spec 044)"
 
 ### Tests for US1 (write first, expect failure, then implement)
 
-- [ ] T030 [P] [US1] Classifier golden test in `internal/diagnostics/classifier_test.go` for STDIO: `exec.Error{Name:"/nonexistent", Err: syscall.ENOENT}` → `MCPX_STDIO_SPAWN_ENOENT`
+- [x] T030 [P] [US1] Classifier golden test in `internal/diagnostics/classifier_test.go` for STDIO: `exec.Error{Name:"/nonexistent", Err: syscall.ENOENT}` → `MCPX_STDIO_SPAWN_ENOENT`
 - [ ] T031 [P] [US1] Classifier golden test for STDIO: non-zero exit → `MCPX_STDIO_EXIT_NONZERO`
-- [ ] T032 [P] [US1] Classifier golden test for STDIO: initial handshake timeout → `MCPX_STDIO_HANDSHAKE_TIMEOUT`
+- [x] T032 [P] [US1] Classifier golden test for STDIO: initial handshake timeout → `MCPX_STDIO_HANDSHAKE_TIMEOUT`
 - [ ] T033 [P] [US1] HTTP handler test in `internal/httpapi/diagnostics_per_server_test.go`: healthy server returns empty `error_code`; failing server returns populated fields
 - [ ] T034 [US1] E2E test `scripts/test-diagnostics-e2e.sh`: start mcpproxy with broken stdio server; curl `/api/v1/servers/broken/diagnostics`; assert `MCPX_STDIO_SPAWN_ENOENT`
 
 ### Implementation for US1
 
-- [ ] T040 [US1] Implement STDIO classifier branches in `internal/diagnostics/classifier.go` using `errors.As(*exec.Error)` + `errors.Is(syscall.ENOENT)` + timeout/exit detection
-- [ ] T041 [US1] Wrap terminal connection errors in `internal/upstream/manager.go` (or `internal/upstream/managed/*.go`): catch the raw error at the terminal return path, call `diagnostics.Classify(err, hints)`, attach as `DiagnosticError` on stateview snapshot
-- [ ] T042 [US1] Implement `handleGetServerDiagnostics` in `internal/httpapi/diagnostics_per_server.go`: read stateview, include existing fields + additive `error_code`, `severity`, `user_message`, `fix_steps`, `docs_url`, `detected_at`, `cause`
-- [ ] T043 [US1] Populate catalog entries for 3 STDIO codes: `MCPX_STDIO_SPAWN_ENOENT`, `MCPX_STDIO_EXIT_NONZERO`, `MCPX_STDIO_HANDSHAKE_TIMEOUT`
-- [ ] T044 [US1] Author docs pages `docs/errors/MCPX_STDIO_SPAWN_ENOENT.md`, `docs/errors/MCPX_STDIO_EXIT_NONZERO.md`, `docs/errors/MCPX_STDIO_HANDSHAKE_TIMEOUT.md`
+- [x] T040 [US1] Implement STDIO classifier branches in `internal/diagnostics/classifier.go` using `errors.As(*exec.Error)` + `errors.Is(syscall.ENOENT)` + timeout/exit detection
+- [x] T041 [US1] Wrap terminal connection errors in `internal/upstream/manager.go` (or `internal/upstream/managed/*.go`): catch the raw error at the terminal return path, call `diagnostics.Classify(err, hints)`, attach as `DiagnosticError` on stateview snapshot
+- [x] T042 [US1] Implement `handleGetServerDiagnostics` in `internal/httpapi/diagnostics_per_server.go`: read stateview, include existing fields + additive `error_code`, `severity`, `user_message`, `fix_steps`, `docs_url`, `detected_at`, `cause`
+- [x] T043 [US1] Populate catalog entries for 3 STDIO codes: `MCPX_STDIO_SPAWN_ENOENT`, `MCPX_STDIO_EXIT_NONZERO`, `MCPX_STDIO_HANDSHAKE_TIMEOUT`
+- [x] T044 [US1] Author docs pages `docs/errors/MCPX_STDIO_SPAWN_ENOENT.md`, `docs/errors/MCPX_STDIO_EXIT_NONZERO.md`, `docs/errors/MCPX_STDIO_HANDSHAKE_TIMEOUT.md`
 - [ ] T045 [US1] Implement `scripts/check-errors-docs-links.sh`: assert bidirectional code ↔ file linkage; add invocation to `scripts/run-all-tests.sh`
-- [ ] T046 [US1] Update `oas/swagger.yaml` (or `internal/httpapi/swagger.go`) with the extended per-server diagnostics schema from `contracts/diagnostics-openapi.yaml`
+- [x] T046 [US1] Update `oas/swagger.yaml` (or `internal/httpapi/swagger.go`) with the extended per-server diagnostics schema from `contracts/diagnostics-openapi.yaml`
 - [ ] T047 [US1] Run `go test -race ./internal/...` and `./scripts/test-diagnostics-e2e.sh`; iterate until green
 
 **Checkpoint**: MVP delivered. A deliberately-broken stdio server produces a stable code + user guidance via REST. No UI/tray/fix behaviour yet.
@@ -126,17 +126,17 @@ Commit: `feat(diagnostics): STDIO domain with classifier + REST surfacing (US1)`
 ### Implementation for US2 — Frontend
 
 - [ ] T060 [P] [US2] Create `frontend/src/components/diagnostics/FixStep.vue` (renders one step: link/command/button)
-- [ ] T061 [P] [US2] Create `frontend/src/components/diagnostics/ErrorPanel.vue` consuming `{code, severity, user_message, fix_steps, docs_url}`
-- [ ] T062 [US2] Extend `frontend/src/stores/servers.ts` (or equivalent) to expose the additive diagnostics fields from the snapshot
-- [ ] T063 [US2] Wire `ErrorPanel` from `frontend/src/views/ServerDetail.vue` (visible when `error_code` non-empty)
+- [x] T061 [P] [US2] Create `frontend/src/components/diagnostics/ErrorPanel.vue` consuming `{code, severity, user_message, fix_steps, docs_url}`
+- [x] T062 [US2] Extend `frontend/src/stores/servers.ts` (or equivalent) to expose the additive diagnostics fields from the snapshot
+- [x] T063 [US2] Wire `ErrorPanel` from `frontend/src/views/ServerDetail.vue` (visible when `error_code` non-empty)
 - [ ] T064 [US2] Add toast handling for fix-button responses (reuse existing toast system)
 - [ ] T065 [US2] `cd frontend && npm run build` and verify the built asset is picked up by `make build`
 
 ### Implementation for US2 — macOS tray
 
-- [ ] T070 [P] [US2] Create `native/macos/MCPProxy/API/DiagnosticsDecoder.swift`: decode `error_code`/`severity` from server snapshot
-- [ ] T071 [P] [US2] Create `native/macos/MCPProxy/Menu/FixIssuesMenu.swift`: "Fix Issues (N)" submenu populated from failing servers; each entry opens web UI at server's detail page
-- [ ] T072 [US2] Modify `native/macos/MCPProxy/StatusBar/StatusBarController.swift`: compute worst severity across servers and set badge (red=error, orange=warn, none=healthy)
+- [x] T070 [P] [US2] Create `native/macos/MCPProxy/API/DiagnosticsDecoder.swift`: decode `error_code`/`severity` from server snapshot
+- [x] T071 [P] [US2] Create `native/macos/MCPProxy/Menu/FixIssuesMenu.swift`: "Fix Issues (N)" submenu populated from failing servers; each entry opens web UI at server's detail page
+- [x] T072 [US2] Modify `native/macos/MCPProxy/StatusBar/StatusBarController.swift`: compute worst severity across servers and set badge (red=error, orange=warn, none=healthy)
 - [ ] T073 [US2] Rebuild tray per `CLAUDE.md` tray-build instructions; replace `/tmp/MCPProxy.app/Contents/MacOS/MCPProxy`
 - [ ] T074 [US2] Execute T052 + T053 visual verifications; attach screenshots paths to the PR description
 
@@ -154,7 +154,7 @@ Commit: `feat(diagnostics): web UI ErrorPanel + macOS tray badge (US2)`
 
 ### Tests for US3
 
-- [ ] T080 [P] [US3] Cobra CLI test for `doctor --server` in `cmd/mcpproxy/doctor_test.go`: invokes REST, formats output correctly in table/JSON/YAML
+- [x] T080 [P] [US3] Cobra CLI test for `doctor --server` in `cmd/mcpproxy/doctor_test.go`: invokes REST, formats output correctly in table/JSON/YAML
 - [ ] T081 [P] [US3] Cobra CLI test for `doctor fix` in `cmd/mcpproxy/doctor_fix_test.go`: dry-run default for destructive; `--execute` flag required
 - [ ] T082 [P] [US3] Cobra CLI test for `doctor list-codes` in `cmd/mcpproxy/doctor_list_codes_test.go`: prints all catalog entries in both table and JSON formats
 - [ ] T083 [US3] Extend `scripts/test-diagnostics-e2e.sh`: run `doctor fix` dry-run against broken server, assert preview includes "dry-run"; assert 429 on immediate second attempt (rate-limit)
@@ -163,11 +163,11 @@ Commit: `feat(diagnostics): web UI ErrorPanel + macOS tray badge (US2)`
 
 - [ ] T090 [US3] Implement fixer `Register("stdio_show_last_logs", ...)` in `internal/diagnostics/fixers.go` (non-destructive): tails the per-server log and returns it in FixResult.Preview
 - [ ] T091 [US3] Implement fixer `Register("oauth_reauth", ...)`: calls existing `internal/oauth/coordinator.InitiateLogin(ctx, server)`; destructive: mutates token store
-- [ ] T092 [US3] Implement `handleInvokeFix` body in `internal/httpapi/diagnostics_fix.go`: parse FixRequest, check destructive + mode, enforce rate-limit, call `fixers.Invoke`, record FixAttempt via `activity_service.RecordFixAttempt`
-- [ ] T093 [P] [US3] Add `cmd/mcpproxy/doctor.go` modifications: support `--server <name>` flag; print code + user_message + fix_steps
-- [ ] T094 [P] [US3] Add `cmd/mcpproxy/doctor_fix.go` subcommand with flags: `<CODE>`, `--server`, `--execute` (default false), `--fixer-key` (default auto-select destructive-safe)
-- [ ] T095 [P] [US3] Add `cmd/mcpproxy/doctor_list_codes.go` subcommand using `internal/cli/output` formatter (table/JSON/YAML)
-- [ ] T096 [US3] Update `docs/cli-management-commands.md` with `doctor fix` and `doctor list-codes` examples
+- [x] T092 [US3] Implement `handleInvokeFix` body in `internal/httpapi/diagnostics_fix.go`: parse FixRequest, check destructive + mode, enforce rate-limit, call `fixers.Invoke`, record FixAttempt via `activity_service.RecordFixAttempt`
+- [x] T093 [P] [US3] Add `cmd/mcpproxy/doctor.go` modifications: support `--server <name>` flag; print code + user_message + fix_steps
+- [x] T094 [P] [US3] Add `cmd/mcpproxy/doctor_fix.go` subcommand with flags: `<CODE>`, `--server`, `--execute` (default false), `--fixer-key` (default auto-select destructive-safe)
+- [x] T095 [P] [US3] Add `cmd/mcpproxy/doctor_list_codes.go` subcommand using `internal/cli/output` formatter (table/JSON/YAML)
+- [x] T096 [US3] Update `docs/cli-management-commands.md` with `doctor fix` and `doctor list-codes` examples
 
 **Checkpoint**: CLI matches the spec. Destructive fixes require `--execute`.
 
@@ -181,47 +181,47 @@ Commit: `feat(diagnostics): CLI doctor fix + list-codes (US3)`
 
 ### OAUTH
 
-- [ ] T100 [P] Classifier tests for OAUTH codes in `internal/diagnostics/classifier_test.go`: `MCPX_OAUTH_REFRESH_EXPIRED`, `MCPX_OAUTH_REFRESH_403`, `MCPX_OAUTH_DISCOVERY_FAILED`, `MCPX_OAUTH_CALLBACK_TIMEOUT`
-- [ ] T101 Implement OAUTH classifier branches using typed errors from `internal/oauth/*.go`
-- [ ] T102 Wrap OAuth terminal errors in `internal/oauth/*.go` so they surface via stateview
-- [ ] T103 [P] Author docs pages under `docs/errors/MCPX_OAUTH_*.md`
+- [x] T100 [P] Classifier tests for OAUTH codes in `internal/diagnostics/classifier_test.go`: `MCPX_OAUTH_REFRESH_EXPIRED`, `MCPX_OAUTH_REFRESH_403`, `MCPX_OAUTH_DISCOVERY_FAILED`, `MCPX_OAUTH_CALLBACK_TIMEOUT`
+- [x] T101 Implement OAUTH classifier branches using typed errors from `internal/oauth/*.go`
+- [x] T102 Wrap OAuth terminal errors in `internal/oauth/*.go` so they surface via stateview
+- [x] T103 [P] Author docs pages under `docs/errors/MCPX_OAUTH_*.md`
 - [ ] T104 Commit: `feat(diagnostics): OAUTH domain classifier`
 
 ### HTTP
 
-- [ ] T110 [P] Classifier tests for `MCPX_HTTP_DNS_FAILED`, `MCPX_HTTP_TLS_FAILED`, `MCPX_HTTP_401`, `MCPX_HTTP_404`, `MCPX_HTTP_5XX`
-- [ ] T111 Implement HTTP classifier using `*net.DNSError`, `*tls.CertificateVerificationError`, HTTP status code inspection
-- [ ] T112 [P] Author docs pages `docs/errors/MCPX_HTTP_*.md`
+- [x] T110 [P] Classifier tests for `MCPX_HTTP_DNS_FAILED`, `MCPX_HTTP_TLS_FAILED`, `MCPX_HTTP_401`, `MCPX_HTTP_404`, `MCPX_HTTP_5XX`
+- [x] T111 Implement HTTP classifier using `*net.DNSError`, `*tls.CertificateVerificationError`, HTTP status code inspection
+- [x] T112 [P] Author docs pages `docs/errors/MCPX_HTTP_*.md`
 - [ ] T113 Commit: `feat(diagnostics): HTTP domain classifier`
 
 ### DOCKER
 
-- [ ] T120 [P] Classifier tests for `MCPX_DOCKER_DAEMON_DOWN`, `MCPX_DOCKER_IMAGE_PULL_FAILED`, `MCPX_DOCKER_NO_PERMISSION`, `MCPX_DOCKER_SNAP_APPARMOR`
-- [ ] T121 Implement DOCKER classifier in `internal/diagnostics/classifier.go`; for `MCPX_DOCKER_SNAP_APPARMOR` consult memory note `~/.claude/projects/-Users-user-repos-mcpproxy-go/memory/project_scanner_snap_docker.md`
+- [x] T120 [P] Classifier tests for `MCPX_DOCKER_DAEMON_DOWN`, `MCPX_DOCKER_IMAGE_PULL_FAILED`, `MCPX_DOCKER_NO_PERMISSION`, `MCPX_DOCKER_SNAP_APPARMOR`
+- [x] T121 Implement DOCKER classifier in `internal/diagnostics/classifier.go`; for `MCPX_DOCKER_SNAP_APPARMOR` consult memory note `~/.claude/projects/-Users-user-repos-mcpproxy-go/memory/project_scanner_snap_docker.md`
 - [ ] T122 Wrap Docker errors at their terminal return paths (search under `internal/upstream/` isolation code and `internal/security/` scanner code)
-- [ ] T123 Implement dual fix steps for `MCPX_DOCKER_SNAP_APPARMOR` per research.md R2: link to docs + destructive button to set `skip_scanner: true` on the server's config (dry-run default)
-- [ ] T124 [P] Author docs pages `docs/errors/MCPX_DOCKER_*.md`
+- [x] T123 Implement dual fix steps for `MCPX_DOCKER_SNAP_APPARMOR` per research.md R2: link to docs + destructive button to set `skip_scanner: true` on the server's config (dry-run default)
+- [x] T124 [P] Author docs pages `docs/errors/MCPX_DOCKER_*.md`
 - [ ] T125 Commit: `feat(diagnostics): DOCKER domain classifier + snap-apparmor handling`
 
 ### CONFIG
 
-- [ ] T130 [P] Classifier tests for `MCPX_CONFIG_DEPRECATED_FIELD`, `MCPX_CONFIG_PARSE_ERROR`, `MCPX_CONFIG_MISSING_SECRET`
+- [x] T130 [P] Classifier tests for `MCPX_CONFIG_DEPRECATED_FIELD`, `MCPX_CONFIG_PARSE_ERROR`, `MCPX_CONFIG_MISSING_SECRET`
 - [ ] T131 Implement CONFIG classifier; wrap errors in `internal/config/*.go`
-- [ ] T132 [P] Author docs pages `docs/errors/MCPX_CONFIG_*.md`
+- [x] T132 [P] Author docs pages `docs/errors/MCPX_CONFIG_*.md`
 - [ ] T133 Commit: `feat(diagnostics): CONFIG domain classifier`
 
 ### QUARANTINE
 
-- [ ] T140 [P] Classifier tests for `MCPX_QUARANTINE_PENDING_APPROVAL`, `MCPX_QUARANTINE_TOOL_CHANGED`
-- [ ] T141 Implement QUARANTINE classifier; wire into the existing quarantine flow in `internal/runtime/tool_quarantine.go`
-- [ ] T142 [P] Author docs pages `docs/errors/MCPX_QUARANTINE_*.md`
+- [x] T140 [P] Classifier tests for `MCPX_QUARANTINE_PENDING_APPROVAL`, `MCPX_QUARANTINE_TOOL_CHANGED`
+- [x] T141 Implement QUARANTINE classifier; wire into the existing quarantine flow in `internal/runtime/tool_quarantine.go`
+- [x] T142 [P] Author docs pages `docs/errors/MCPX_QUARANTINE_*.md`
 - [ ] T143 Commit: `feat(diagnostics): QUARANTINE domain classifier`
 
 ### NETWORK
 
 - [ ] T150 [P] Classifier tests for `MCPX_NETWORK_PROXY_MISCONFIG`, `MCPX_NETWORK_OFFLINE`
 - [ ] T151 Implement NETWORK classifier (detect missing default route / unreachable hosts / HTTP_PROXY env issues)
-- [ ] T152 [P] Author docs pages `docs/errors/MCPX_NETWORK_*.md`
+- [x] T152 [P] Author docs pages `docs/errors/MCPX_NETWORK_*.md`
 - [ ] T153 Commit: `feat(diagnostics): NETWORK domain classifier`
 
 **Checkpoint**: All 7 domains covered. Every registered code has message + fix_step + docs page. `scripts/check-errors-docs-links.sh` passes.
@@ -238,17 +238,17 @@ Commit: `feat(diagnostics): CLI doctor fix + list-codes (US3)`
 
 ### Tests for US4
 
-- [ ] T160 [P] [US4] Payload test in `internal/telemetry/*_test.go`: registering error codes populates `error_code_counts_24h`
-- [ ] T161 [P] [US4] Payload test: fix-attempt counters increment; top-20 cap enforced
+- [x] T160 [P] [US4] Payload test in `internal/telemetry/*_test.go`: registering error codes populates `error_code_counts_24h`
+- [x] T161 [P] [US4] Payload test: fix-attempt counters increment; top-20 cap enforced
 - [ ] T162 [US4] HTTP handler test in `internal/httpapi/telemetry_payload_test.go`: v3 payload includes `diagnostics` sub-object
 
 ### Implementation for US4
 
-- [ ] T170 [US4] Extend `internal/telemetry/` counter registry with `RecordErrorCode(Code)`, `RecordFixAttempt(code, outcome)` (in-memory only)
-- [ ] T171 [US4] Wire `RecordErrorCode` from the stateview snapshot extension (T020)
-- [ ] T172 [US4] Wire `RecordFixAttempt` from `handleInvokeFix` (T092)
-- [ ] T173 [US4] Extend v3 payload serialization with `diagnostics` sub-object: top-20 `error_code_counts_24h`, `fix_attempted_24h`, `fix_succeeded_24h`, `unique_codes_ever`
-- [ ] T174 [US4] Respect telemetry-disabled config (reuse existing `TelemetryEnabled()` check — no new gate)
+- [x] T170 [US4] Extend `internal/telemetry/` counter registry with `RecordErrorCode(Code)`, `RecordFixAttempt(code, outcome)` (in-memory only)
+- [x] T171 [US4] Wire `RecordErrorCode` from the stateview snapshot extension (T020)
+- [x] T172 [US4] Wire `RecordFixAttempt` from `handleInvokeFix` (T092)
+- [x] T173 [US4] Extend v3 payload serialization with `diagnostics` sub-object: top-20 `error_code_counts_24h`, `fix_attempted_24h`, `fix_succeeded_24h`, `unique_codes_ever`
+- [x] T174 [US4] Respect telemetry-disabled config (reuse existing `TelemetryEnabled()` check — no new gate)
 - [ ] T175 [US4] Commit: `feat(diagnostics): telemetry v3 diagnostics sub-object (US4)`
 
 **Checkpoint**: Telemetry carries diagnostics counters when enabled; zero data when disabled.

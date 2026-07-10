@@ -28,11 +28,11 @@ Following Go project structure from plan.md:
 
 **Purpose**: Project scaffolding and type definitions
 
-- [ ] T001 [P] Define ActivityType enum and ActivityRecord struct in internal/storage/activity_models.go
-- [ ] T002 [P] Define ActivityFilter struct in internal/storage/activity_models.go
-- [ ] T003 [P] Add activity event types to internal/runtime/events.go (activity.tool_call.started, activity.tool_call.completed, activity.policy_decision)
-- [ ] T004 [P] Define API request/response types in internal/contracts/activity.go (ActivityListResponse, ActivityDetailResponse)
-- [ ] T005 Add activity configuration fields to internal/config/config.go (retention_days, max_records, max_response_size)
+- [x] T001 [P] Define ActivityType enum and ActivityRecord struct in internal/storage/activity_models.go
+- [x] T002 [P] Define ActivityFilter struct in internal/storage/activity_models.go
+- [x] T003 [P] Add activity event types to internal/runtime/events.go (activity.tool_call.started, activity.tool_call.completed, activity.policy_decision)
+- [x] T004 [P] Define API request/response types in internal/contracts/activity.go (ActivityListResponse, ActivityDetailResponse)
+- [x] T005 Add activity configuration fields to internal/config/config.go (retention_days, max_records, max_response_size)
 
 ---
 
@@ -42,16 +42,16 @@ Following Go project structure from plan.md:
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 Add ActivityRecordsBucket constant to internal/storage/models.go
-- [ ] T007 Implement activityKey() function in internal/storage/activity.go (timestamp_ns + ULID format)
-- [ ] T008 Implement SaveActivity() in internal/storage/activity.go (BBolt write transaction)
-- [ ] T009 Implement GetActivity() in internal/storage/activity.go (BBolt read by ID)
-- [ ] T010 Implement ListActivities() with pagination in internal/storage/activity.go (cursor iteration)
-- [ ] T011 Implement DeleteActivity() in internal/storage/activity.go
-- [ ] T012 Add activity bucket initialization in internal/storage/bbolt.go initBuckets()
-- [ ] T013 Add activity storage methods to Manager interface in internal/storage/manager.go
-- [ ] T014 Implement truncateResponse() helper in internal/storage/activity.go
-- [ ] T015 Write unit tests for activity storage in internal/storage/activity_test.go
+- [x] T006 Add ActivityRecordsBucket constant to internal/storage/models.go
+- [x] T007 Implement activityKey() function in internal/storage/activity.go (timestamp_ns + ULID format)
+- [x] T008 Implement SaveActivity() in internal/storage/activity.go (BBolt write transaction)
+- [x] T009 Implement GetActivity() in internal/storage/activity.go (BBolt read by ID)
+- [x] T010 Implement ListActivities() with pagination in internal/storage/activity.go (cursor iteration)
+- [x] T011 Implement DeleteActivity() in internal/storage/activity.go
+- [x] T012 Add activity bucket initialization in internal/storage/bbolt.go initBuckets()
+- [x] T013 Add activity storage methods to Manager interface in internal/storage/manager.go
+- [x] T014 Implement truncateResponse() helper in internal/storage/activity.go
+- [x] T015 Write unit tests for activity storage in internal/storage/activity_test.go
 
 **Checkpoint**: Activity storage layer complete - user story implementation can begin
 
@@ -65,19 +65,19 @@ Following Go project structure from plan.md:
 
 ### Tests for User Story 1
 
-- [ ] T016 [P] [US1] Write test for handleListActivity in internal/httpapi/activity_test.go (pagination, filters)
-- [ ] T017 [P] [US1] Write E2E test for GET /api/v1/activity in internal/server/activity_e2e_test.go
+- [x] T016 [P] [US1] Write test for handleListActivity in internal/httpapi/activity_test.go (pagination, filters)
+- [x] T017 [P] [US1] Write E2E test for GET /api/v1/activity in internal/server/activity_e2e_test.go
 
 ### Implementation for User Story 1
 
-- [ ] T018 [US1] Implement parseActivityFilters() in internal/httpapi/activity.go
-- [ ] T019 [US1] Implement handleListActivity() handler in internal/httpapi/activity.go
-- [ ] T020 [US1] Register GET /api/v1/activity route in internal/httpapi/server.go setupRoutes()
-- [ ] T021 [US1] Add ListActivities() method to ServerController interface in internal/httpapi/server.go
-- [ ] T022 [US1] Implement ListActivities() in Runtime for controller interface in internal/runtime/runtime.go
-- [ ] T023 [US1] Emit activity events from handleCallTool in internal/server/mcp.go (started + completed)
-- [ ] T024 [US1] Subscribe to activity events and persist in internal/runtime/activity_service.go
-- [ ] T025 [US1] Initialize activity service in Runtime.New() in internal/runtime/runtime.go
+- [x] T018 [US1] Implement parseActivityFilters() in internal/httpapi/activity.go
+- [x] T019 [US1] Implement handleListActivity() handler in internal/httpapi/activity.go
+- [x] T020 [US1] Register GET /api/v1/activity route in internal/httpapi/server.go setupRoutes()
+- [x] T021 [US1] Add ListActivities() method to ServerController interface in internal/httpapi/server.go
+- [x] T022 [US1] Implement ListActivities() in Runtime for controller interface in internal/runtime/runtime.go
+- [x] T023 [US1] Emit activity events from handleCallTool in internal/server/mcp.go (started + completed)
+- [x] T024 [US1] Subscribe to activity events and persist in internal/runtime/activity_service.go
+- [x] T025 [US1] Initialize activity service in Runtime.New() in internal/runtime/runtime.go
 
 **Checkpoint**: User Story 1 complete - activity list API functional and tool calls recorded
 
@@ -91,13 +91,13 @@ Following Go project structure from plan.md:
 
 ### Tests for User Story 2
 
-- [ ] T026 [P] [US2] Write test for activity SSE events in internal/httpapi/sse_test.go
+- [x] T026 [P] [US2] Write test for activity SSE events in internal/httpapi/sse_test.go
 
 ### Implementation for User Story 2
 
-- [ ] T027 [US2] Add activity event types to SSE handler switch in internal/httpapi/server.go handleSSEEvents()
-- [ ] T028 [US2] Emit activity.policy_decision event from policy check in internal/runtime/lifecycle.go
-- [ ] T029 [US2] Emit activity.quarantine_change event from QuarantineServer in internal/runtime/lifecycle.go
+- [x] T027 [US2] Add activity event types to SSE handler switch in internal/httpapi/server.go handleSSEEvents()
+- [x] T028 [US2] Emit activity.policy_decision event from policy check in internal/runtime/lifecycle.go
+- [x] T029 [US2] Emit activity.quarantine_change event from QuarantineServer in internal/runtime/lifecycle.go
 
 **Checkpoint**: User Story 2 complete - real-time SSE events delivered for all activity types
 
@@ -111,14 +111,14 @@ Following Go project structure from plan.md:
 
 ### Tests for User Story 3
 
-- [ ] T030 [P] [US3] Write test for handleGetActivityDetail in internal/httpapi/activity_test.go (success + 404)
+- [x] T030 [P] [US3] Write test for handleGetActivityDetail in internal/httpapi/activity_test.go (success + 404)
 
 ### Implementation for User Story 3
 
-- [ ] T031 [US3] Implement handleGetActivityDetail() handler in internal/httpapi/activity.go
-- [ ] T032 [US3] Register GET /api/v1/activity/{id} route in internal/httpapi/server.go setupRoutes()
-- [ ] T033 [US3] Add GetActivity() method to ServerController interface in internal/httpapi/server.go
-- [ ] T034 [US3] Implement GetActivity() in Runtime for controller interface in internal/runtime/runtime.go
+- [x] T031 [US3] Implement handleGetActivityDetail() handler in internal/httpapi/activity.go
+- [x] T032 [US3] Register GET /api/v1/activity/{id} route in internal/httpapi/server.go setupRoutes()
+- [x] T033 [US3] Add GetActivity() method to ServerController interface in internal/httpapi/server.go
+- [x] T034 [US3] Implement GetActivity() in Runtime for controller interface in internal/runtime/runtime.go
 
 **Checkpoint**: User Story 3 complete - activity detail view functional
 
@@ -136,10 +136,10 @@ Following Go project structure from plan.md:
 
 ### Implementation for User Story 4
 
-- [ ] T036 [US4] Implement StreamActivities() channel-based iterator in internal/storage/activity.go
-- [ ] T037 [US4] Implement handleExportActivity() handler with streaming in internal/httpapi/activity.go
-- [ ] T038 [US4] Implement activityToCSVRow() helper in internal/httpapi/activity.go
-- [ ] T039 [US4] Register GET /api/v1/activity/export route in internal/httpapi/server.go setupRoutes()
+- [x] T036 [US4] Implement StreamActivities() channel-based iterator in internal/storage/activity.go
+- [x] T037 [US4] Implement handleExportActivity() handler with streaming in internal/httpapi/activity.go
+- [x] T038 [US4] Implement activityToCSVRow() helper in internal/httpapi/activity.go
+- [x] T039 [US4] Register GET /api/v1/activity/export route in internal/httpapi/server.go setupRoutes()
 
 **Checkpoint**: User Story 4 complete - compliance export functional
 
@@ -149,11 +149,11 @@ Following Go project structure from plan.md:
 
 **Purpose**: Automatic cleanup to prevent unbounded storage growth
 
-- [ ] T040 Implement pruneOldActivities() in internal/storage/activity.go (time-based deletion)
-- [ ] T041 Implement pruneExcessActivities() in internal/storage/activity.go (count-based deletion)
-- [ ] T042 Implement runActivityRetentionLoop() background goroutine in internal/runtime/activity_service.go
-- [ ] T043 Start retention loop in Runtime startup in internal/runtime/lifecycle.go
-- [ ] T044 Write test for retention cleanup in internal/storage/activity_test.go
+- [x] T040 Implement pruneOldActivities() in internal/storage/activity.go (time-based deletion)
+- [x] T041 Implement pruneExcessActivities() in internal/storage/activity.go (count-based deletion)
+- [x] T042 Implement runActivityRetentionLoop() background goroutine in internal/runtime/activity_service.go
+- [x] T043 Start retention loop in Runtime startup in internal/runtime/lifecycle.go
+- [x] T044 Write test for retention cleanup in internal/storage/activity_test.go
 
 ---
 
@@ -162,7 +162,7 @@ Following Go project structure from plan.md:
 **Purpose**: Documentation, validation, and hardening
 
 - [ ] T045 [P] Update CLAUDE.md with activity API endpoints documentation
-- [ ] T046 [P] Add activity endpoints to oas/swagger.yaml
+- [x] T046 [P] Add activity endpoints to oas/swagger.yaml
 - [ ] T047 [P] Run ./scripts/verify-oas-coverage.sh to validate OpenAPI coverage
 - [ ] T048 Run ./scripts/test-api-e2e.sh to verify full integration
 - [ ] T049 Run ./scripts/run-linter.sh to verify code quality

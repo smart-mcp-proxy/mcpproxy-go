@@ -253,12 +253,12 @@
 - [x] T101 [P] Add E2E test: REST API activity filter by sensitive_data in `internal/server/e2e_test.go`
 - [x] T102 [P] Add E2E test: REST API activity filter by severity in `internal/server/e2e_test.go`
 - [x] T103 [P] Add E2E test: detection metadata in activity response in `internal/server/e2e_test.go`
-- [x] T104 [P] Add E2E test: custom pattern detection in `internal/server/e2e_test.go`
+- [ ] T104 [P] Add E2E test: custom pattern detection in `internal/server/e2e_test.go`
 - [x] T105 [P] Add E2E test: credit card detection with Luhn validation in `internal/server/e2e_test.go`
 - [x] T106 [P] Add E2E test: high-entropy string detection in `internal/server/e2e_test.go`
 - [x] T107 [P] Add E2E test: is_likely_example flag for test values in `internal/server/e2e_test.go`
-- [x] T108 Add E2E test scenarios to `scripts/test-api-e2e.sh` for sensitive data detection
-- [x] T109 Add E2E test for SSE event emission on detection in `internal/server/e2e_test.go`
+- [ ] T108 Add E2E test scenarios to `scripts/test-api-e2e.sh` for sensitive data detection
+- [ ] T109 Add E2E test for SSE event emission on detection in `internal/server/e2e_test.go`
 
 **Checkpoint**: All E2E tests pass with `./scripts/test-api-e2e.sh`
 
