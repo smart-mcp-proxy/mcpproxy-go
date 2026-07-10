@@ -8,14 +8,25 @@
 # `tasks.md` answers "how much of spec NNN is checked off?". This file answers
 # "what are we building next, what blocks what, and who owns it?".
 #
+# THIS FILE IS THE WORKING SET: todo / in_progress / in_review / blocked / parked,
+# plus recently-shipped `done` epics. Cold `done` epics are swept into
+# roadmap.archive.yaml so this file does not grow without bound:
+#     python3 scripts/gen-roadmap.py --archive --dry-run   # preview the sweep
+#     python3 scripts/gen-roadmap.py --archive             # move + regenerate
+# An epic is swept when it is `done`, every child task is `done`, every PR it
+# references is MERGED, and the newest of those merges is >= 14 days old
+# (tune with --min-age-days). Set `keep: true` to pin an epic here forever.
+# A depends_on: edge pointing into the archive is satisfied by definition.
+#
 # Regenerate the human-readable view after editing:
 #     python3 scripts/gen-roadmap.py        # writes ROADMAP.md
 #     # or: scripts/gen-roadmap              # same thing (wrapper)
 #
 # Validate this file against ground truth (does not write ROADMAP.md):
 #     python3 scripts/gen-roadmap.py --check-github   # PR state vs status,
-#         # dangling spec: links, status sanity. Add --strict to fail on
-#         # warnings. Needs an authenticated `gh`; exits 2 if gh is missing.
+#         # dangling spec: links, dangling depends_on ids (resolved against the
+#         # archive too), status sanity. Add --strict to fail on warnings.
+#         # Needs an authenticated `gh`; exits 2 if gh is missing.
 #
 # ── Schema ──────────────────────────────────────────────────────────────────
 # version:  schema version (int).
@@ -31,6 +42,7 @@
 #   mcp:         optional. External tracker id mirroring MCP-xxxx vocabulary.
 #   depends_on:  optional. List of epic/task ids that must land first (DAG edge).
 #   parked:      optional bool. true = intentionally on hold (still status: todo).
+#   keep:        optional bool. true = never sweep into roadmap.archive.yaml.
 #   note:        optional. One-line context.
 #   tasks:       optional. List of child task objects. Each task has the same
 #                fields as an epic except `tasks`. A task's depends_on may point
@@ -39,56 +51,14 @@
 # Conventions:
 #  - depends_on edges flow PREREQUISITE -> DEPENDENT (drawn A --> B = "A unblocks B").
 #  - Keep ids slug-cased and stable; renaming an id breaks inbound depends_on.
-#  - `done` epics keep their PR refs as provenance.
+#  - `done` epics keep their PR refs as provenance (in this file until swept,
+#    then in roadmap.archive.yaml).
 # ─────────────────────────────────────────────────────────────────────────────
 
 version: 1
 
 epics:
   # ── DONE ────────────────────────────────────────────────────────────────
-  - id: profiles-v2
-    title: Profiles v2 (per-profile tool views)
-    status: done
-    assignee: BackendEngineer
-    priority: P1
-    mcp: MCP-33
-    # No epic-level spec link: Profiles v2 shipped via the PRs below, not via a
-    # speckit tasks.md. (specs/057-in-proxy-profiles is a SEPARATE, still-draft
-    # "permanent URLs" spec at 0/25 — linking it here showed a false "drafted"
-    # badge on a done epic. Provenance lives in the per-task PR refs.)
-    depends_on: []
-    note: "Stateful profiles: per-profile Bleve indexes, set_profile, token profile_pin, tray + Web UI switchers. Shipped via #756/#761/#766/#767."
-    tasks:
-      - id: profiles-v2-indexes
-        title: Per-profile Bleve indexes (T1)
-        status: done
-        assignee: BackendEngineer
-        mcp: MCP-3240
-        pr: "#756"
-        depends_on: []
-      - id: profiles-v2-set-profile
-        title: set_profile tool + session resolver + REST (T2)
-        status: done
-        assignee: BackendEngineer
-        mcp: MCP-3241
-        pr: "#761"
-        depends_on: [profiles-v2-indexes]
-      - id: profiles-v2-profile-pin
-        title: Per-agent-token profile_pin (T3)
-        status: done
-        assignee: BackendEngineer
-        mcp: MCP-3242
-        pr: "#766"
-        spec: specs/028-agent-tokens
-        depends_on: [profiles-v2-set-profile]
-      - id: profiles-v2-tray-switcher
-        title: Tray profile switcher Go + Swift (T5)
-        status: done
-        assignee: BackendEngineer
-        mcp: MCP-3244
-        pr: "#767"
-        depends_on: [profiles-v2-set-profile]
-
   - id: sandbox-isolation
     title: Non-Docker sandbox isolation (Landlock)
     status: done
@@ -128,23 +98,6 @@ epics:
         mcp: MCP-3236
         pr: "#782"
         depends_on: [sandbox-scanner-parity]
-
-  - id: ts-code-exec-ga
-    title: TypeScript code-execution GA + cookbook
-    status: done
-    assignee: BackendEngineer
-    priority: P2
-    mcp: MCP-38
-    spec: specs/033-typescript-code-execution
-    depends_on: []
-    note: "TS runtime graduated from preview (shipped v0.45.0); MCP-38 = docs/spec + cookbook only."
-    tasks:
-      - id: ts-code-exec-cookbook
-        title: Cookbook (10 TS recipes) + GA docs
-        status: done
-        mcp: MCP-38
-        pr: "#753"
-        depends_on: []
 
   - id: scanner-v2
     title: Spec 076 deterministic offline tool-scanner
