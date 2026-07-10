@@ -21,7 +21,6 @@ epics:
     archived_on: 2026-07-10
     title: Profiles v2 (per-profile tool views)
     status: done
-    assignee: BackendEngineer
     priority: P1
     mcp: MCP-33
     # No epic-level spec link: Profiles v2 shipped via the PRs below, not via a
@@ -35,21 +34,18 @@ epics:
       - id: profiles-v2-indexes
         title: Per-profile Bleve indexes (T1)
         status: done
-        assignee: BackendEngineer
         mcp: MCP-3240
         pr: "#756"
         depends_on: []
       - id: profiles-v2-set-profile
         title: set_profile tool + session resolver + REST (T2)
         status: done
-        assignee: BackendEngineer
         mcp: MCP-3241
         pr: "#761"
         depends_on: [profiles-v2-indexes]
       - id: profiles-v2-profile-pin
         title: Per-agent-token profile_pin (T3)
         status: done
-        assignee: BackendEngineer
         mcp: MCP-3242
         pr: "#766"
         spec: specs/028-agent-tokens
@@ -57,7 +53,6 @@ epics:
       - id: profiles-v2-tray-switcher
         title: Tray profile switcher Go + Swift (T5)
         status: done
-        assignee: BackendEngineer
         mcp: MCP-3244
         pr: "#767"
         depends_on: [profiles-v2-set-profile]
@@ -67,7 +62,6 @@ epics:
     archived_on: 2026-07-10
     title: TypeScript code-execution GA + cookbook
     status: done
-    assignee: BackendEngineer
     priority: P2
     mcp: MCP-38
     spec: specs/033-typescript-code-execution

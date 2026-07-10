@@ -2,8 +2,8 @@
 #
 # This file is the SOURCE OF TRUTH for the cross-spec roadmap: epics, their
 # child tasks, the dependency DAG between them, and execution state that a
-# tasks.md checkbox cannot express (status beyond done/not-done, assignee,
-# priority, blocked-by edges, external tracker ids, PR links).
+# tasks.md checkbox cannot express (status beyond done/not-done, priority,
+# blocked-by edges, external tracker ids, PR links).
 #
 # `tasks.md` answers "how much of spec NNN is checked off?". This file answers
 # "what are we building next, what blocks what, and who owns it?".
@@ -35,7 +35,6 @@
 #                the DAG node id and as a depends_on target.
 #   title:       REQUIRED. Human label.
 #   status:      REQUIRED. one of: todo | in_progress | in_review | blocked | done
-#   assignee:    optional. Owner (agent/role/person).
 #   priority:    optional. P0 (highest) .. P3.
 #   spec:        optional. Path to a specs/<NNN> folder (drives progress badge).
 #   pr:          optional. PR ref, e.g. "#761" or a list of refs.
@@ -62,7 +61,6 @@ epics:
   - id: sandbox-isolation
     title: Non-Docker sandbox isolation (Landlock)
     status: done
-    assignee: BackendEngineer
     priority: P1
     mcp: MCP-34
     depends_on: []
@@ -102,7 +100,6 @@ epics:
   - id: scanner-v2
     title: Spec 076 deterministic offline tool-scanner
     status: done
-    assignee: BackendEngineer
     priority: P1
     mcp: MCP-3574
     spec: specs/076-deterministic-tool-scanner
@@ -150,7 +147,6 @@ epics:
   - id: windows-tray
     title: Windows native tray app
     status: in_review
-    assignee: BackendEngineer
     priority: P2
     mcp: MCP-43
     depends_on: []
@@ -171,7 +167,6 @@ epics:
   - id: ux-audit
     title: Web UI + macOS app UX audit
     status: todo
-    assignee: unassigned
     priority: P0
     depends_on: []
     note: "End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push. (No spec yet — 064 is the unrelated agent-fleet glass-cockpit spec.)"
@@ -189,7 +184,6 @@ epics:
   - id: action-log-transparency
     title: Action log / transparency — info at a glance
     status: todo
-    assignee: unassigned
     priority: P1
     depends_on: [ux-audit]
     note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Vision pillar 'feel control → transparency' — the activity log is a headline feature, polish it and bring it to the tray menu. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
@@ -220,7 +214,6 @@ epics:
   - id: analytics-dashboard
     title: Analytics dashboard as default page
     status: in_progress
-    assignee: unassigned
     priority: P1
     spec: specs/069-observability-usage-graphs
     depends_on: [ux-audit]
@@ -241,7 +234,6 @@ epics:
   - id: registries-search-add
     title: Registries — easier search + add-server
     status: done
-    assignee: unassigned
     priority: P1
     spec: specs/070-registry-easy-upstream-add
     depends_on: []
@@ -263,7 +255,6 @@ epics:
   - id: scanner-simplification
     title: Scanner simplification (deterministic default, opt-in deep scan)
     status: done
-    assignee: unassigned
     priority: P1
     spec: specs/077-scanner-simplification
     depends_on: [scanner-v2]
@@ -299,7 +290,6 @@ epics:
   - id: tpa-db
     title: "tpa-db: versioned TPA signature database for the offline scanner"
     status: todo
-    assignee: unassigned
     priority: P1
     depends_on: [scanner-simplification]
     note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate."
@@ -321,7 +311,6 @@ epics:
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
     status: in_progress
-    assignee: unassigned
     priority: P0
     spec: specs/079-upgrade-nudge
     depends_on: []
@@ -351,7 +340,6 @@ epics:
   - id: connect-trust
     title: "Connect step trust: preview, visible backup, one-click undo"
     status: in_progress
-    assignee: unassigned
     priority: P0
     spec: specs/078-connect-trust-preview
     depends_on: []
@@ -380,7 +368,6 @@ epics:
   - id: telemetry-identity
     title: "Telemetry identity & data quality (machine_id + CI-filter hardening)"
     status: in_progress
-    assignee: unassigned
     priority: P1
     depends_on: []
     note: "Heartbeat lacks a stable identity, so active-install counts are inflated by CI/dev churn and launch_source is 79% unknown. Add a hashed machine_id (schema v6) and harden the worker/dashboard cohort filters. Spans repos mcpproxy-go (client), mcpproxy-telemetry (worker), mcpproxy-dash (dashboard)."
@@ -408,7 +395,6 @@ epics:
   - id: release-qa-gate
     title: "Release qualification gate (auto-QA matrix blocks the tag)"
     status: in_progress
-    assignee: unassigned
     priority: P0
     spec: specs/081-release-qa-gate
     depends_on: []
@@ -440,7 +426,6 @@ epics:
   - id: telemetry-v7-churn
     title: "Telemetry v7: honest funnel + churn instrumentation"
     status: in_progress
-    assignee: unassigned
     priority: P0
     spec: specs/080-telemetry-v7-churn
     depends_on: []
@@ -475,7 +460,6 @@ epics:
   - id: tray-api-purity
     title: "Tray↔core decoupling: socket/REST API only, no config-file reads"
     status: todo
-    assignee: unassigned
     priority: P2
     depends_on: []
     note: "Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-03 audit: Swift tray clean (opens config in editor only, never parses); Go tray's update-check gate was caught reading mcp_config.json in PR #805 review and reworked to core-API gating — but one pre-existing violation remains."
@@ -489,7 +473,6 @@ epics:
   - id: planning-hygiene
     title: Planning/docs truth automation
     status: todo
-    assignee: unassigned
     priority: P2
     depends_on: []
     note: "Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests."
