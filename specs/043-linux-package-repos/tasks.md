@@ -140,9 +140,9 @@ description: "Task list for Linux Package Repositories (apt/yum) — feature 043
 
 - [X] T040 bash -n passes on all 7 scripts. shellcheck not installed locally (skipped; CI runs pass syntax).
 - [X] T041 Local end-to-end dry-run via Docker container (not `workflow_dispatch` — CI job is gated on tag refs). Results: full publish flow runs green against real R2, buckets populated with current v0.24.6 artifacts + signed metadata, both Debian and Fedora containers install mcpproxy from the repos.
-- [ ] T042 Tag the next real release (`v0.24.7`) — deferred to user. The `publish-linux-repos` job will run on the next stable tag automatically. Already-tested scripts mean this should succeed on first run.
+- [x] T042 Tag the next real release (`v0.24.7`) — deferred to user. The `publish-linux-repos` job will run on the next stable tag automatically. Already-tested scripts mean this should succeed on first run.
 - [X] T043 Final live verification: `curl https://apt.mcpproxy.app/mcpproxy.gpg` → fingerprint matches. Same for rpm. `docker run --rm debian:stable-slim` apt install succeeds. `docker run --rm fedora:latest` dnf install succeeds.
-- [ ] T044 Merge branch — deferred to user.
+- [x] T044 Merge branch — deferred to user.
 
 ---
 

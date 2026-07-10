@@ -128,8 +128,8 @@ Based on plan.md structure:
 - [x] T043 [US3] Implement custom help function with --help-json check in internal/cli/output/help.go
 - [x] T044 [US3] Add --help-json flag to root command in cmd/mcpproxy/main.go
 - [x] T045 [US3] Propagate --help-json to all subcommands in cmd/mcpproxy/main.go
-- [x] T046 [US3] E2E test: mcpproxy --help-json returns valid JSON with commands array
-- [x] T047 [US3] E2E test: mcpproxy upstream --help-json returns subcommands array
+- [ ] T046 [US3] E2E test: mcpproxy --help-json returns valid JSON with commands array
+- [ ] T047 [US3] E2E test: mcpproxy upstream --help-json returns subcommands array
 
 **Checkpoint**: --help-json works on all commands, agents can discover CLI structure ✅
 
@@ -152,7 +152,7 @@ Based on plan.md structure:
 - [x] T051 [US4] Implement YAMLFormatter.Format() using yaml.v3 in internal/cli/output/yaml.go
 - [x] T052 [US4] Implement YAMLFormatter.FormatError() in internal/cli/output/yaml.go
 - [x] T053 [US4] Implement YAMLFormatter.FormatTable() in internal/cli/output/yaml.go
-- [x] T054 [US4] E2E test: mcpproxy upstream list -o yaml produces valid YAML
+- [ ] T054 [US4] E2E test: mcpproxy upstream list -o yaml produces valid YAML
 
 **Checkpoint**: All output formats (table, json, yaml) working ✅
 

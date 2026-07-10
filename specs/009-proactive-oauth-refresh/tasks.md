@@ -25,11 +25,11 @@
 
 **Purpose**: Project initialization and shared entities
 
-- [ ] T001 Create OAuthStatus enum type in internal/oauth/status.go
-- [ ] T002 [P] Add SSE event types oauth.token_refreshed and oauth.refresh_failed in internal/runtime/events.go
-- [ ] T003 [P] Add event emission methods EmitOAuthTokenRefreshed and EmitOAuthRefreshFailed in internal/runtime/event_bus.go
-- [ ] T004 [P] Define error types ErrServerNotOAuth and ErrRefreshFailed in internal/oauth/errors.go
-- [ ] T005 [P] Add oauth_status and token_expires_at fields to Server struct in internal/contracts/server.go
+- [x] T001 Create OAuthStatus enum type in internal/oauth/status.go
+- [x] T002 [P] Add SSE event types oauth.token_refreshed and oauth.refresh_failed in internal/runtime/events.go
+- [x] T003 [P] Add event emission methods EmitOAuthTokenRefreshed and EmitOAuthRefreshFailed in internal/runtime/event_bus.go
+- [x] T004 [P] Define error types ErrServerNotOAuth and ErrRefreshFailed in internal/oauth/errors.go
+- [x] T005 [P] Add oauth_status and token_expires_at fields to Server struct in internal/contracts/server.go
 
 ---
 
@@ -39,11 +39,11 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T006 Extend Service interface with TriggerOAuthLogout method signature in internal/management/service.go
-- [ ] T007 Extend RuntimeOperations interface with TriggerOAuthLogout and RefreshOAuthToken method signatures in internal/management/service.go
-- [ ] T008 [P] Add triggerOAuthLogout function to frontend API client in frontend/src/services/api.ts
-- [ ] T009 [P] Add triggerOAuthLogout action to servers store in frontend/src/stores/servers.ts
-- [ ] T010 [P] Extend ServerResponse TypeScript interface with oauth_status and token_expires_at in frontend/src/types/contracts.ts
+- [x] T006 Extend Service interface with TriggerOAuthLogout method signature in internal/management/service.go
+- [x] T007 Extend RuntimeOperations interface with TriggerOAuthLogout and RefreshOAuthToken method signatures in internal/management/service.go
+- [x] T008 [P] Add triggerOAuthLogout function to frontend API client in frontend/src/services/api.ts
+- [x] T009 [P] Add triggerOAuthLogout action to servers store in frontend/src/stores/servers.ts
+- [x] T010 [P] Extend ServerResponse TypeScript interface with oauth_status and token_expires_at in frontend/src/types/contracts.ts
 - [ ] T011 [P] Add SSE event types to TypeScript types in frontend/src/types/contracts.ts
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
@@ -58,28 +58,28 @@
 
 ### Tests for User Story 1
 
-- [ ] T012 [P] [US1] Unit test for RefreshManager scheduleRefresh at 80% lifetime in internal/oauth/refresh_manager_test.go
-- [ ] T013 [P] [US1] Unit test for RefreshManager retry with exponential backoff in internal/oauth/refresh_manager_test.go
-- [ ] T014 [P] [US1] Unit test for RefreshManager stop on max retries in internal/oauth/refresh_manager_test.go
-- [ ] T015 [P] [US1] Unit test for RefreshManager coordination with OAuthFlowCoordinator in internal/oauth/refresh_manager_test.go
-- [ ] T016 [P] [US1] Unit test for RefreshManager OnTokenSaved and OnTokenCleared hooks in internal/oauth/refresh_manager_test.go
+- [x] T012 [P] [US1] Unit test for RefreshManager scheduleRefresh at 80% lifetime in internal/oauth/refresh_manager_test.go
+- [x] T013 [P] [US1] Unit test for RefreshManager retry with exponential backoff in internal/oauth/refresh_manager_test.go
+- [x] T014 [P] [US1] Unit test for RefreshManager stop on max retries in internal/oauth/refresh_manager_test.go
+- [x] T015 [P] [US1] Unit test for RefreshManager coordination with OAuthFlowCoordinator in internal/oauth/refresh_manager_test.go
+- [x] T016 [P] [US1] Unit test for RefreshManager OnTokenSaved and OnTokenCleared hooks in internal/oauth/refresh_manager_test.go
 
 ### Implementation for User Story 1
 
-- [ ] T017 [US1] Create RefreshSchedule struct in internal/oauth/refresh_manager.go
-- [ ] T018 [US1] Create RefreshManager struct with storage, coordinator, and timer management in internal/oauth/refresh_manager.go
-- [ ] T019 [US1] Implement NewRefreshManager constructor in internal/oauth/refresh_manager.go
-- [ ] T020 [US1] Implement RefreshManager.Start() to load existing tokens and schedule refreshes in internal/oauth/refresh_manager.go
-- [ ] T021 [US1] Implement RefreshManager.Stop() to cancel all timers in internal/oauth/refresh_manager.go
-- [ ] T022 [US1] Implement RefreshManager.scheduleRefresh() with 80% lifetime calculation in internal/oauth/refresh_manager.go
-- [ ] T023 [US1] Implement RefreshManager.executeRefresh() with coordinator check in internal/oauth/refresh_manager.go
-- [ ] T024 [US1] Implement RefreshManager.handleRefreshFailure() with exponential backoff retry in internal/oauth/refresh_manager.go
-- [ ] T025 [US1] Implement RefreshManager.OnTokenSaved() hook to reschedule on token update in internal/oauth/refresh_manager.go
-- [ ] T026 [US1] Implement RefreshManager.OnTokenCleared() hook to cancel schedule on logout in internal/oauth/refresh_manager.go
-- [ ] T027 [US1] Implement Runtime.RefreshOAuthToken() method in internal/runtime/runtime.go
-- [ ] T028 [US1] Integrate RefreshManager initialization into Runtime startup in internal/runtime/runtime.go
-- [ ] T029 [US1] Integrate RefreshManager shutdown into Runtime cleanup in internal/runtime/runtime.go
-- [ ] T030 [US1] Call RefreshManager.OnTokenSaved() from PersistentTokenStore.SaveToken() in internal/oauth/persistent_token_store.go
+- [x] T017 [US1] Create RefreshSchedule struct in internal/oauth/refresh_manager.go
+- [x] T018 [US1] Create RefreshManager struct with storage, coordinator, and timer management in internal/oauth/refresh_manager.go
+- [x] T019 [US1] Implement NewRefreshManager constructor in internal/oauth/refresh_manager.go
+- [x] T020 [US1] Implement RefreshManager.Start() to load existing tokens and schedule refreshes in internal/oauth/refresh_manager.go
+- [x] T021 [US1] Implement RefreshManager.Stop() to cancel all timers in internal/oauth/refresh_manager.go
+- [x] T022 [US1] Implement RefreshManager.scheduleRefresh() with 80% lifetime calculation in internal/oauth/refresh_manager.go
+- [x] T023 [US1] Implement RefreshManager.executeRefresh() with coordinator check in internal/oauth/refresh_manager.go
+- [x] T024 [US1] Implement RefreshManager.handleRefreshFailure() with exponential backoff retry in internal/oauth/refresh_manager.go
+- [x] T025 [US1] Implement RefreshManager.OnTokenSaved() hook to reschedule on token update in internal/oauth/refresh_manager.go
+- [x] T026 [US1] Implement RefreshManager.OnTokenCleared() hook to cancel schedule on logout in internal/oauth/refresh_manager.go
+- [x] T027 [US1] Implement Runtime.RefreshOAuthToken() method in internal/runtime/runtime.go
+- [x] T028 [US1] Integrate RefreshManager initialization into Runtime startup in internal/runtime/runtime.go
+- [x] T029 [US1] Integrate RefreshManager shutdown into Runtime cleanup in internal/runtime/runtime.go
+- [x] T030 [US1] Call RefreshManager.OnTokenSaved() from PersistentTokenStore.SaveToken() in internal/oauth/persistent_token_store.go
 
 **Checkpoint**: Proactive token refresh should now work independently - tokens refresh at 80% lifetime
 
@@ -100,14 +100,14 @@
 
 ### Implementation for User Story 2
 
-- [ ] T035 [US2] Implement Runtime.TriggerOAuthLogout() method in internal/runtime/runtime.go
-- [ ] T036 [US2] Implement service.TriggerOAuthLogout() in internal/management/service.go
-- [ ] T037 [US2] Add TriggerOAuthLogout method to CLI client in internal/cliclient/client.go
-- [ ] T038 [US2] Create authLogoutCmd cobra command in cmd/mcpproxy/auth_cmd.go
-- [ ] T039 [US2] Implement runAuthLogout function with daemon socket support in cmd/mcpproxy/auth_cmd.go
-- [ ] T040 [US2] Implement runLogoutStandalone function for standalone mode in cmd/mcpproxy/auth_cmd.go
+- [x] T035 [US2] Implement Runtime.TriggerOAuthLogout() method in internal/runtime/runtime.go
+- [x] T036 [US2] Implement service.TriggerOAuthLogout() in internal/management/service.go
+- [x] T037 [US2] Add TriggerOAuthLogout method to CLI client in internal/cliclient/client.go
+- [x] T038 [US2] Create authLogoutCmd cobra command in cmd/mcpproxy/auth_cmd.go
+- [x] T039 [US2] Implement runAuthLogout function with daemon socket support in cmd/mcpproxy/auth_cmd.go
+- [x] T040 [US2] Implement runLogoutStandalone function for standalone mode in cmd/mcpproxy/auth_cmd.go
 - [ ] T041 [US2] Add --all flag support to logout from all OAuth servers in cmd/mcpproxy/auth_cmd.go
-- [ ] T042 [US2] Register authLogoutCmd with authCmd in cmd/mcpproxy/auth_cmd.go
+- [x] T042 [US2] Register authLogoutCmd with authCmd in cmd/mcpproxy/auth_cmd.go
 
 **Checkpoint**: CLI logout command should work independently via daemon or standalone mode
 
@@ -121,17 +121,17 @@
 
 ### Tests for User Story 3
 
-- [ ] T043 [P] [US3] Contract test for logout endpoint 200 response in internal/httpapi/contracts_test.go
+- [x] T043 [P] [US3] Contract test for logout endpoint 200 response in internal/httpapi/contracts_test.go
 - [ ] T044 [P] [US3] Contract test for logout endpoint 400 non-OAuth server in internal/httpapi/contracts_test.go
 - [ ] T045 [P] [US3] Contract test for logout endpoint 404 not found in internal/httpapi/contracts_test.go
 
 ### Implementation for User Story 3
 
-- [ ] T046 [US3] Add Swagger annotation for logout endpoint in internal/httpapi/server.go
-- [ ] T047 [US3] Implement handleServerLogout handler in internal/httpapi/server.go
-- [ ] T048 [US3] Register POST /api/v1/servers/{id}/logout route in internal/httpapi/server.go
-- [ ] T049 [US3] Update mock controller TriggerOAuthLogout in internal/httpapi/contracts_test.go
-- [ ] T050 [US3] Run make swagger to regenerate OpenAPI spec in oas/swagger.yaml
+- [x] T046 [US3] Add Swagger annotation for logout endpoint in internal/httpapi/server.go
+- [x] T047 [US3] Implement handleServerLogout handler in internal/httpapi/server.go
+- [x] T048 [US3] Register POST /api/v1/servers/{id}/logout route in internal/httpapi/server.go
+- [x] T049 [US3] Update mock controller TriggerOAuthLogout in internal/httpapi/contracts_test.go
+- [x] T050 [US3] Run make swagger to regenerate OpenAPI spec in oas/swagger.yaml
 
 **Checkpoint**: REST logout endpoint should work independently - test with curl
 
@@ -220,7 +220,7 @@
 ### Implementation for User Story 7
 
 - [ ] T074 [US7] Implement FormatRelativeTime helper function in internal/oauth/status.go
-- [ ] T075 [US7] Update CLI auth status output to include expiration time in cmd/mcpproxy/auth_cmd.go
+- [x] T075 [US7] Update CLI auth status output to include expiration time in cmd/mcpproxy/auth_cmd.go
 - [ ] T076 [US7] Add expiration time display to ServerCard details in frontend/src/components/ServerCard.vue
 - [ ] T077 [US7] Add warning indicator for tokens expiring within 5 minutes in frontend/src/components/ServerCard.vue
 - [ ] T078 [US7] Add EXPIRED text formatting for expired tokens in frontend/src/components/ServerCard.vue

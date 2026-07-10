@@ -54,7 +54,7 @@ TDD is mandatory (Constitution V / FR-X3): the failing `_test.go` task precedes 
 - [x] T022 [P] Run `gofmt`/`goimports`; `./scripts/run-linter.sh`; ensure `go build -tags server ./cmd/mcpproxy` and personal build both pass (FR-X2 edition parity).
 - [x] T023 Full suite: `go test -race ./internal/security/ ./internal/config/ ./internal/server/ -count=1`; then `./scripts/test-api-e2e.sh` green (SC-006 no regression).
 - [x] T024 [P] Docs: add `docs/features/output-sanitisation.md`; update `docs/features/sensitive-data-detection.md` cross-link. (Do NOT grow CLAUDE.md past 40k — one-liner only if room.)
-- [x] T025 **Mandatory verification** (see quickstart.md): curl/MCP roundtrip vs stub untrusted upstream (spotlight + redact + block); chrome-ext inspection of the Web UI activity view showing policy_decision rows; capture screenshots → build HTML report at `specs/059-output-sanitisation/verification/report.html`.
+- [ ] T025 **Mandatory verification** (see quickstart.md): curl/MCP roundtrip vs stub untrusted upstream (spotlight + redact + block); chrome-ext inspection of the Web UI activity view showing policy_decision rows; capture screenshots → build HTML report at `specs/059-output-sanitisation/verification/report.html`.
 
 ## Dependencies
 

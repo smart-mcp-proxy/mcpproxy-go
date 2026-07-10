@@ -7,26 +7,54 @@ checkboxes in each specs/<NNN>/tasks.md, and writes a single ROADMAP.md
 containing:
 
   1. A generated-file banner + schema/regenerate instructions.
-  2. A Mermaid `graph TD` of the epic/task DAG, styled by status.
-  3. A status table (epic, status, assignee, progress, spec/PR links).
-  4. An aggregate per-spec progress table (recomputed from tasks.md).
+  2. "Roadmap at a glance": a small Mermaid `graph LR` of the CROSS-EPIC DAG
+     (only epics that have an edge; the dependency-free ones are listed as text
+     beneath it) plus a per-epic `<details>` block holding that epic's own task
+     graph and task table. One 70-node graph was illegible on GitHub; splitting
+     it by zoom level is what makes the roadmap browsable.
+  3. A status table (epic, status, priority, progress, spec/PR links).
+  4. A compact "Shipped" table of epics swept into roadmap.archive.yaml.
+  5. An aggregate per-spec progress table (recomputed from tasks.md).
 
 Design choice: we write the aggregate spec table into ROADMAP.md rather than
 overwriting the hand-maintained specs/README.md, so the existing curated index
 (with its prose, runbooks and design-doc links) is never clobbered. ROADMAP.md
 is fully generated and safe to overwrite on every run.
 
+Archive: roadmap.yaml is the WORKING SET (todo/in_progress/in_review/blocked/
+parked). Cold `done` epics are swept into roadmap.archive.yaml by `--archive`
+so the active file does not grow without bound. Provenance (PR refs, notes) is
+preserved verbatim: the sweep moves the raw YAML text block, it does not
+re-serialise it. A `depends_on:` edge pointing at an archived id is satisfied
+by definition (archived == done), so the generator resolves ids against BOTH
+files and only ERRORs on ids that exist in neither.
+
 Usage:
     python3 scripts/gen-roadmap.py [--check | --check-github [--strict]]
+    python3 scripts/gen-roadmap.py --archive [--min-age-days N] [--dry-run]
 
     --check         Exit non-zero if ROADMAP.md is out of date (does not write).
                     Useful as a CI canary.
     --check-github  Cross-check roadmap.yaml against ground truth (does not write):
                     live GitHub PR state (via `gh`), spec: links resolving to
-                    real specs/ dirs, and status sanity. Reports ERROR/WARN and
-                    exits 1 on any ERROR, 0 otherwise; 2 if `gh` is unavailable.
+                    real specs/ dirs, depends_on ids resolving to a known epic or
+                    task, and status sanity. Reports ERROR/WARN and exits 1 on any
+                    ERROR, 0 otherwise; 2 if `gh` is unavailable.
     --strict        With --check-github, promote warnings to errors for the exit
                     code (report is unchanged).
+    --archive       Sweep cold `done` epics out of roadmap.yaml into
+                    roadmap.archive.yaml, then regenerate ROADMAP.md. An epic is
+                    cold when it is `done`, every child task is `done`, every PR
+                    it references is MERGED, and the NEWEST of those merges is at
+                    least --min-age-days old (default 14 — "shipped and two weeks
+                    cold"). Epics carrying `keep: true` are never swept; epics
+                    with no PR refs cannot be dated and are skipped. Needs an
+                    authenticated `gh` unless --force-undated.
+    --min-age-days  Cool-off window for --archive (default 14).
+    --dry-run       With --archive, print what would move and change nothing.
+    --force-undated With --archive, sweep without `gh`. PR merge state is NOT
+                    verified; shipped_on is stamped "unknown". --min-age-days 0
+                    waives the cool-off, never the merge check.
 
 Pure stdlib + PyYAML (already used by scripts/check-settings-parity.py).
 Idempotent: running twice with no source change produces identical output.
@@ -34,12 +62,15 @@ Idempotent: running twice with no source change produces identical output.
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import html
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 try:
     import yaml
@@ -49,8 +80,29 @@ except ImportError:  # pragma: no cover
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROADMAP_YAML = os.path.join(REPO_ROOT, "roadmap.yaml")
+ROADMAP_ARCHIVE_YAML = os.path.join(REPO_ROOT, "roadmap.archive.yaml")
 ROADMAP_MD = os.path.join(REPO_ROOT, "ROADMAP.md")
 SPECS_DIR = os.path.join(REPO_ROOT, "specs")
+
+# Default cool-off before a done epic is swept into the archive.
+DEFAULT_MIN_AGE_DAYS = 14
+
+ARCHIVE_HEADER = """\
+# roadmap.archive.yaml — cold storage for SHIPPED epics.
+#
+# Swept out of roadmap.yaml by `python3 scripts/gen-roadmap.py --archive` once an
+# epic is `done`, all its PRs are merged, and the newest merge has cooled off
+# (default 14 days). roadmap.yaml stays the working set; this file keeps the
+# provenance: PR refs, gotcha notes, and the DAG ids other epics depend on.
+#
+# Schema is identical to roadmap.yaml, plus two generator-stamped fields:
+#   shipped_on:  date of the NEWEST merged PR in the epic subtree
+#   archived_on: date the sweep moved it here
+#
+# A `depends_on:` edge pointing at an id in this file is satisfied by definition.
+# Nothing here is re-serialised: blocks are moved as raw text, so comments and
+# formatting survive. Append-only in practice; edit by hand only to fix a typo.
+"""
 
 # GitHub repo `gh` queries target for --check-github.
 REPO_SLUG = "smart-mcp-proxy/mcpproxy-go"
@@ -141,61 +193,331 @@ def fmt_pr(pr) -> str:
     return str(pr)
 
 
-def mermaid_label(item: dict) -> str:
-    """Node shape+label: `["title<br/>MCP-xxx"]`. Quotes let parens/slashes/em
-    dashes survive; brackets give the node its (default rectangle) shape."""
-    title = item["title"].replace('"', "'")
-    mcp = item.get("mcp")
-    inner = f"{title}<br/>{mcp}" if mcp else title
-    return f'["{inner}"]'
-
-
-def render_mermaid(epics: list[dict]) -> str:
-    lines = ["```mermaid", "graph TD"]
-    classed: dict[str, list[str]] = {k: [] for k in STATUS_CLASSDEF}
-
-    # Declare nodes (epics as subgraphs containing their tasks).
+def all_ids(epics: list[dict]) -> set[str]:
+    """Every epic id and task id declared in a roadmap document."""
+    ids: set[str] = set()
     for epic in epics:
-        eid = node_id(epic["id"])
-        classed[status_of(epic)].append(eid)
-        tasks = epic.get("tasks") or []
-        if tasks:
-            lines.append(f'  subgraph sg_{eid}["{epic["title"].replace(chr(34), chr(39))}"]')
-            lines.append(f"    {eid}{mermaid_label(epic)}")
-            for t in tasks:
-                tid = node_id(t["id"])
-                lines.append(f"    {tid}{mermaid_label(t)}")
-                classed[status_of(t)].append(tid)
-            lines.append("  end")
-        else:
-            lines.append(f"  {eid}{mermaid_label(epic)}")
-
-    # Edges (prerequisite --> dependent).
-    lines.append("")
-    for epic in epics:
-        eid = node_id(epic["id"])
-        for dep in epic.get("depends_on") or []:
-            lines.append(f"  {node_id(dep)} --> {eid}")
+        ids.add(epic["id"])
         for t in epic.get("tasks") or []:
-            tid = node_id(t["id"])
-            for dep in t.get("depends_on") or []:
-                lines.append(f"  {node_id(dep)} --> {tid}")
+            ids.add(t["id"])
+    return ids
 
-    # Class definitions + assignments.
-    lines.append("")
-    for status, style in STATUS_CLASSDEF.items():
-        lines.append(f"  classDef {status} {style};")
+
+def id_list(epics: list[dict]) -> list[str]:
+    """Every epic and task id, in file order, WITH duplicates preserved."""
+    out: list[str] = []
+    for epic in epics:
+        out.append(epic["id"])
+        for t in epic.get("tasks") or []:
+            out.append(t["id"])
+    return out
+
+
+def duplicate_ids(epics: list[dict]) -> list[str]:
+    """Ids declared more than once. The schema says ids are unique across epics
+    AND tasks; YAML happily accepts duplicates because these are list items,
+    not mapping keys, so nothing else enforces it.
+
+    A duplicate epic id is a data-loss hazard for --archive: the sweep keys raw
+    text blocks by id, so one block silently overwrites the other while both
+    line ranges are cut from the source.
+    """
+    seen: set[str] = set()
+    dupes: list[str] = []
+    for i in id_list(epics):
+        if i in seen and i not in dupes:
+            dupes.append(i)
+        seen.add(i)
+    return dupes
+
+
+def node_id_collisions(epics: list[dict]) -> list[tuple[str, str]]:
+    """Distinct ids that sanitise to the same Mermaid node id (`a-b` and `a_b`
+    both become `a_b`), which would merge two nodes and their edges."""
+    by_node: dict[str, list[str]] = {}
+    for i in sorted(all_ids(epics)):
+        by_node.setdefault(node_id(i), []).append(i)
+    return [(v[0], v[1]) for v in by_node.values() if len(v) > 1]
+
+
+def find_cycles(epics: list[dict]) -> list[list[str]]:
+    """Every dependency cycle, self-loops included. depends_on is supposed to
+    describe a DAG; existence checks alone let `a -> b -> a` through and the
+    rendered graph then claims a prerequisite chain that can never start."""
+    adj: dict[str, list[str]] = {}
+    for item in id_list(epics):
+        adj.setdefault(item, [])
+    for epic in epics:
+        for dep in epic.get("depends_on") or []:
+            adj.setdefault(dep, []).append(epic["id"])
+        for t in epic.get("tasks") or []:
+            for dep in t.get("depends_on") or []:
+                adj.setdefault(dep, []).append(t["id"])
+
+    cycles: list[list[str]] = []
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {n: WHITE for n in adj}
+
+    def walk(node: str, stack: list[str]) -> None:
+        colour[node] = GREY
+        stack.append(node)
+        for nxt in adj.get(node, []):
+            if colour.get(nxt, WHITE) == GREY:          # back edge → cycle
+                cyc = stack[stack.index(nxt):] + [nxt]
+                if cyc not in cycles:
+                    cycles.append(cyc)
+            elif colour.get(nxt, WHITE) == WHITE:
+                walk(nxt, stack)
+        stack.pop()
+        colour[node] = BLACK
+
+    for n in list(adj):
+        if colour.get(n, WHITE) == WHITE:
+            walk(n, [])
+    return cycles
+
+
+# ── DAG rendering ────────────────────────────────────────────────────────────
+# The roadmap has two zoom levels — ~24 epics and ~70 tasks — and cramming both
+# into one Mermaid `graph TD` renders as an illegible postage stamp on GitHub.
+# We split them: a small EPIC-LEVEL overview graph (legible at default zoom),
+# then per-epic <details> blocks (GitHub renders Mermaid + tables inside them)
+# each carrying that one epic's task DAG and links. A reader expands only what
+# they care about, so the page stays short.
+
+# Status glyphs for the collapsed <summary> lines and per-task table cells,
+# mirroring the STATUS_CLASSDEF fills (green/blue/amber/red/grey/dark).
+STATUS_EMOJI = {
+    "done": "🟢",
+    "in_progress": "🔵",
+    "in_review": "🟡",
+    "blocked": "🔴",
+    "todo": "⚪",
+    "parked": "⚫",
+}
+
+
+def truncate(text: str, limit: int) -> str:
+    """Collapse whitespace and clip to `limit` chars with an ellipsis."""
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def node_box(label: str) -> str:
+    """A default-rectangle Mermaid node body: `["label"]`. Quotes and brackets
+    are neutralised — either terminates the node body early and corrupts the
+    graph — so parens/slashes/em dashes survive."""
+    safe = label.replace('"', "'").replace("[", "(").replace("]", ")")
+    return f'["{safe}"]'
+
+
+def md_cell(text: str) -> str:
+    """Escape a value bound for a Markdown table cell: a raw `|` opens a new
+    column and a newline ends the row."""
+    return " ".join(str(text).split()).replace("|", "\\|")
+
+
+def html_text(text: str) -> str:
+    """Escape a value interpolated into raw HTML (a <summary>): a title holding
+    `</summary>` would otherwise break the collapsible block open."""
+    return html.escape(str(text), quote=False)
+
+
+def epic_owner_map(epics: list[dict]) -> dict[str, str]:
+    """Map every node id (epic id or task id) to the id of its owning epic."""
+    owner: dict[str, str] = {}
+    for epic in epics:
+        owner[epic["id"]] = epic["id"]
+        for t in epic.get("tasks") or []:
+            owner[t["id"]] = epic["id"]
+    return owner
+
+
+def iter_edges(epics: list[dict]):
+    """Yield every (prerequisite_id, dependent_id) edge in the whole DAG."""
+    for epic in epics:
+        for dep in epic.get("depends_on") or []:
+            yield (dep, epic["id"])
+        for t in epic.get("tasks") or []:
+            for dep in t.get("depends_on") or []:
+                yield (dep, t["id"])
+
+
+def _emit_classes(lines: list[str], classed: dict[str, list[str]]) -> None:
+    """Append Mermaid classDef + class-assignment lines for used statuses only."""
+    for status, ids in classed.items():
+        if ids:
+            lines.append(f"  classDef {status} {STATUS_CLASSDEF[status]};")
     for status, ids in classed.items():
         if ids:
             lines.append(f"  class {','.join(ids)} {status};")
 
+
+def overview_edges(epics: list[dict]) -> list[tuple[str, str]]:
+    """Distinct epic→epic edges, collapsing every cross-epic task edge onto the
+    epics that own its endpoints. Edges whose endpoint resolves to an archived
+    or absent id are dropped — an edge into the archive is satisfied by
+    definition, and drawing it would conjure a phantom node."""
+    owner = epic_owner_map(epics)
+    seen: list[tuple[str, str]] = []
+    for dep, dependent in iter_edges(epics):
+        src, dst = owner.get(dep), owner.get(dependent)
+        if not src or not dst or src == dst or (src, dst) in seen:
+            continue
+        seen.append((src, dst))
+    return seen
+
+
+def render_overview_mermaid(epics: list[dict]) -> tuple[str, list[dict]]:
+    """Epic-level overview: one node per *connected* epic, epic→epic edges only.
+
+    Returns (mermaid_block, standalone_epics). Epics with no cross-epic edge are
+    NOT drawn: with 24 epics and only ~6 edges, including them turned the graph
+    into a 2000px column of disconnected boxes — a list pretending to be a graph.
+    They are listed as text beside it instead, which is what a reader wants and
+    what keeps the actual DAG legible at default zoom.
+    """
+    edges = overview_edges(epics)
+    connected = {e for pair in edges for e in pair}
+    drawn = [e for e in epics if e["id"] in connected]
+
+    lines = ["```mermaid", "graph LR"]
+    classed: dict[str, list[str]] = {k: [] for k in STATUS_CLASSDEF}
+    for epic in drawn:
+        eid = node_id(epic["id"])
+        classed[status_of(epic)].append(eid)
+        lines.append(f"  {eid}{node_box(truncate(epic['title'], 40))}")
+
+    lines.append("")
+    for src, dst in edges:
+        lines.append(f"  {node_id(src)} --> {node_id(dst)}")
+
+    lines.append("")
+    _emit_classes(lines, classed)
+    lines.append("```")
+    return "\n".join(lines), [e for e in epics if e["id"] not in connected]
+
+
+def render_standalone_epics(epics: list[dict]) -> str:
+    """One line per dependency-free epic, grouped by status — the epics the
+    overview graph omits because they have no edges to show."""
+    if not epics:
+        return ""
+    order = {s: i for i, s in enumerate(STATUS_ORDER)}
+    rows = []
+    for epic in sorted(epics, key=lambda e: (order.get(e.get("status", "todo"), 99),
+                                             e.get("priority", "P9"))):
+        st = status_of(epic)
+        prio = epic.get("priority")
+        meta = " · ".join(x for x in (STATUS_LABEL.get(epic.get("status", "todo")), prio,
+                                      "parked" if epic.get("parked") else None) if x)
+        rows.append(f"- {STATUS_EMOJI[st]} **{md_cell(epic['title'])}** — {meta}")
+    return "\n".join(rows)
+
+
+def render_epic_mini_mermaid(epic: dict) -> str:
+    """Per-epic task DAG: the epic's tasks + their INTERNAL edges only. Empty
+    string when the epic has no tasks (nothing to draw)."""
+    tasks = epic.get("tasks") or []
+    if not tasks:
+        return ""
+    task_ids = {t["id"] for t in tasks}
+    lines = ["```mermaid", "graph LR"]
+    classed: dict[str, list[str]] = {k: [] for k in STATUS_CLASSDEF}
+    for t in tasks:
+        tid = node_id(t["id"])
+        classed[status_of(t)].append(tid)
+        label = truncate(t["title"], 46)
+        if t.get("mcp"):
+            label = f"{label}<br/>{t['mcp']}"
+        lines.append(f"  {tid}{node_box(label)}")
+    lines.append("")
+    for t in tasks:
+        for dep in t.get("depends_on") or []:
+            if dep in task_ids:  # internal edges only; cross-epic edges live in the overview
+                lines.append(f"  {node_id(dep)} --> {node_id(t['id'])}")
+    lines.append("")
+    _emit_classes(lines, classed)
     lines.append("```")
     return "\n".join(lines)
 
 
+def render_epic_task_table(epic: dict) -> str:
+    """Compact per-epic task table (status + tracker/PR links). Empty string
+    when the epic has no tasks."""
+    tasks = epic.get("tasks") or []
+    if not tasks:
+        return ""
+    rows = ["| Task | Status | Refs |", "| --- | --- | --- |"]
+    for t in tasks:
+        st = t.get("status", "todo")
+        cell = f"{STATUS_EMOJI.get(status_of(t), '')} {STATUS_LABEL.get(st, st)}"
+        refs = []
+        if t.get("mcp"):
+            refs.append(f"`{t['mcp']}`")
+        pr = fmt_pr(t.get("pr"))
+        if pr:
+            refs.append(pr)
+        rows.append(f"| {md_cell(t['title'])} | {cell} | {' '.join(refs) or '—'} |")
+    return "\n".join(rows)
+
+
+def render_epic_details(epics: list[dict]) -> str:
+    """One collapsible <details> per epic (active status first), each holding
+    the epic note, spec/PR links, its task DAG and a task table."""
+    order = {s: i for i, s in enumerate(STATUS_ORDER)}
+
+    def sort_key(e):
+        return (order.get(e.get("status", "todo"), 99),
+                1 if e.get("parked") else 0,
+                e.get("priority", "P9"))
+
+    out: list[str] = []
+    for epic in sorted(epics, key=sort_key):
+        st = epic.get("status", "todo")
+        label = STATUS_LABEL.get(st, st)
+        if epic.get("parked"):
+            label += " · parked"
+        head = [label]
+        if epic.get("priority"):
+            head.append(epic["priority"])
+        if epic.get("mcp"):
+            head.append(epic["mcp"])
+        summary = (f"{STATUS_EMOJI.get(status_of(epic), '')} {html_text(epic['title'])}"
+                   f" — {html_text(' · '.join(head))}")
+
+        out.append("<details>")
+        out.append(f"<summary>{summary}</summary>")
+        out.append("")  # blank line: GitHub needs it to render markdown inside <details>
+        if epic.get("note"):
+            out.append(f"> {md_cell(epic['note'])}")
+            out.append("")
+        links = []
+        if epic.get("spec"):
+            spec = epic["spec"]
+            links.append(f"Spec: [{os.path.basename(spec)}](./{spec}/)")
+        pr = fmt_pr(epic.get("pr"))
+        if pr:
+            links.append(f"PR: {pr}")
+        if links:
+            out.append(" · ".join(links))
+            out.append("")
+        mini = render_epic_mini_mermaid(epic)
+        if mini:
+            out.append(mini)
+            out.append("")
+        table = render_epic_task_table(epic)
+        if table:
+            out.append(table)
+            out.append("")
+        out.append("</details>")
+        out.append("")
+    return "\n".join(out).rstrip("\n")
+
+
 def render_status_table(epics: list[dict]) -> str:
-    rows = ["| Epic | Status | Assignee | Priority | Progress | Spec | PR |",
-            "| --- | --- | --- | --- | --- | --- | --- |"]
+    rows = ["| Epic | Status | Priority | Progress | Spec | PR |",
+            "| --- | --- | --- | --- | --- | --- |"]
     order = {s: i for i, s in enumerate(STATUS_ORDER)}
 
     def sort_key(e):
@@ -212,10 +534,44 @@ def render_status_table(epics: list[dict]) -> str:
         spec_cell = f"[{os.path.basename(spec)}](./{spec}/)" if spec else ""
         pr = fmt_pr(epic.get("pr"))
         mcp = epic.get("mcp")
-        epic_cell = epic["title"] + (f" `{mcp}`" if mcp else "")
+        epic_cell = md_cell(epic["title"]) + (f" `{mcp}`" if mcp else "")
         rows.append(
-            f"| {epic_cell} | {st} | {epic.get('assignee', '')} | "
-            f"{epic.get('priority', '')} | {progress or '—'} | {spec_cell} | {pr} |"
+            f"| {epic_cell} | {st} | {epic.get('priority', '')} | "
+            f"{progress or '—'} | {spec_cell} | {pr} |"
+        )
+    return "\n".join(rows)
+
+
+def load_archive() -> dict:
+    """Read roadmap.archive.yaml; an absent file is an empty archive."""
+    if not os.path.isfile(ROADMAP_ARCHIVE_YAML):
+        return {"version": 1, "epics": []}
+    with open(ROADMAP_ARCHIVE_YAML, encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    data.setdefault("epics", [])
+    if data["epics"] is None:
+        data["epics"] = []
+    return data
+
+
+def render_archive_table(archive: dict) -> str:
+    """Compact provenance table for swept epics: what shipped, when, in which PRs."""
+    epics = archive.get("epics") or []
+    if not epics:
+        return "_Nothing archived yet._"
+    rows = ["| Epic | Shipped | Archived | PRs |", "| --- | --- | --- | --- |"]
+    for epic in sorted(epics, key=lambda e: str(e.get("shipped_on", "")), reverse=True):
+        prs = " ".join(
+            sorted({f"#{n}" for n in parse_pr_refs(epic.get("pr"))}
+                   | {f"#{n}" for t in epic.get("tasks") or []
+                      for n in parse_pr_refs(t.get("pr"))},
+                   key=lambda s: int(s[1:]))
+        )
+        mcp = epic.get("mcp")
+        title = md_cell(epic["title"]) + (f" `{mcp}`" if mcp else "")
+        rows.append(
+            f"| {title} | {epic.get('shipped_on', '—')} | "
+            f"{epic.get('archived_on', '—')} | {prs or '—'} |"
         )
     return "\n".join(rows)
 
@@ -235,8 +591,9 @@ def render_spec_table() -> str:
     return "\n".join(rows)
 
 
-def render(data: dict) -> str:
+def render(data: dict, archive: dict | None = None) -> str:
     epics = data.get("epics", [])
+    archive = archive if archive is not None else {"epics": []}
     out = []
     out.append("<!-- GENERATED FILE — do not edit by hand. -->")
     out.append("<!-- Source: roadmap.yaml  ·  Generator: scripts/gen-roadmap.py -->")
@@ -249,9 +606,16 @@ def render(data: dict) -> str:
                "Edit `roadmap.yaml` and re-run the generator.")
     out.append("")
     out.append("The roadmap models cross-spec **epics → tasks** with a dependency DAG, "
-               "execution `status`, `assignee`, `priority`, and links — the things a "
+               "execution `status`, `priority`, and links — the things a "
                "per-spec `tasks.md` checkbox list cannot express. Per-spec checkbox "
                "progress is recomputed live from each `specs/<NNN>/tasks.md`.")
+    out.append("")
+    out.append("[`roadmap.yaml`](./roadmap.yaml) holds the **working set** (todo · in-progress · "
+               "in-review · blocked · parked). Cold shipped epics are swept into "
+               "[`roadmap.archive.yaml`](./roadmap.archive.yaml) and surface in the "
+               "[Shipped](#shipped-archived) table below, so the working file stays small "
+               "while provenance survives. A `depends_on:` edge into the archive is "
+               "satisfied by definition.")
     out.append("")
     out.append("## How to regenerate")
     out.append("")
@@ -260,31 +624,60 @@ def render(data: dict) -> str:
     out.append("scripts/gen-roadmap                # convenience wrapper (same thing)")
     out.append("python3 scripts/gen-roadmap.py --check          # CI canary: fail if ROADMAP.md is stale")
     out.append("python3 scripts/gen-roadmap.py --check-github   # cross-check statuses vs live GitHub PR state,")
-    out.append("                                                # spec links, and status sanity (add --strict")
-    out.append("                                                # to fail on warnings; needs an authenticated gh)")
+    out.append("                                                # spec links, depends_on ids, and status sanity")
+    out.append("                                                # (add --strict to fail on warnings; needs gh)")
+    out.append("python3 scripts/gen-roadmap.py --archive --dry-run   # preview the cold-done sweep")
+    out.append("python3 scripts/gen-roadmap.py --archive             # sweep into roadmap.archive.yaml + regenerate")
     out.append("```")
     out.append("")
     out.append("## roadmap.yaml schema (short form)")
     out.append("")
     out.append("- **epics[]** — each has `id` (stable slug, DAG node), `title`, "
-               "`status` (todo·in_progress·in_review·blocked·done), `assignee`, "
+               "`status` (todo·in_progress·in_review·blocked·done), "
                "`priority` (P0–P3), `depends_on: [ids]` (DAG edges, prerequisite→dependent), "
                "optional `parked: true`, and links `spec:` / `pr:` / `mcp:` (external MCP-xxxx).")
     out.append("- **epics[].tasks[]** — child tasks with the same fields; their "
                "`depends_on` may reference sibling tasks or other epics.")
     out.append("- See the header comment in `roadmap.yaml` for the full field reference.")
     out.append("")
-    out.append("## Epic / task DAG")
+    out.append("## Roadmap at a glance")
     out.append("")
-    out.append("Node colour = status (green done · blue in-progress · amber in-review · "
-               "red blocked · grey todo · dashed grey parked). Edges point "
-               "prerequisite → dependent.")
+    out.append("The cross-epic dependency graph — **one node per epic**, edges point "
+               "prerequisite → dependent. Task-level detail lives in the collapsible "
+               "sections below, and dependency-free epics are listed under the graph "
+               "rather than drawn as disconnected boxes, so this stays legible at "
+               "default zoom. Node colour = status: "
+               "🟢 done · 🔵 in-progress · 🟡 in-review · 🔴 blocked · ⚪ todo · ⚫ parked.")
     out.append("")
-    out.append(render_mermaid(epics))
+    overview, standalone = render_overview_mermaid(epics)
+    out.append(overview)
+    if standalone:
+        out.append("")
+        out.append(f"**Independent epics** ({len(standalone)}) — no cross-epic "
+                   f"prerequisites; each stands alone:")
+        out.append("")
+        out.append(render_standalone_epics(standalone))
+    out.append("")
+    out.append("## Epic details")
+    out.append("")
+    out.append("Each epic's child tasks, their internal dependency graph, and "
+               "tracker/PR links — **collapsed by default**, expand the ones you "
+               "care about. Full metadata (priority, spec progress) is in "
+               "the [Epics](#epics) table below.")
+    out.append("")
+    out.append(render_epic_details(epics))
     out.append("")
     out.append("## Epics")
     out.append("")
     out.append(render_status_table(epics))
+    out.append("")
+    out.append("## Shipped (archived)")
+    out.append("")
+    out.append("Swept out of the working set by `--archive` once done, merged and cooled off. "
+               "Full entries — notes, child tasks, PR refs — live in "
+               "[`roadmap.archive.yaml`](./roadmap.archive.yaml).")
+    out.append("")
+    out.append(render_archive_table(archive))
     out.append("")
     out.append("## Per-spec progress (recomputed from `specs/<NNN>/tasks.md`)")
     out.append("")
@@ -439,6 +832,51 @@ def check_spec_links(items: list[dict]) -> list[Finding]:
     return out
 
 
+def check_id_integrity(data: dict, archive: dict) -> list[Finding]:
+    """Ids must be unique (across both files), and must not collide once
+    sanitised for Mermaid. Both are silent corruptors otherwise."""
+    out: list[Finding] = []
+    both = (data.get("epics") or []) + (archive.get("epics") or [])
+    for dup in duplicate_ids(both):
+        out.append(Finding("ERROR", f"id {dup}",
+            "declared more than once across roadmap.yaml/roadmap.archive.yaml. "
+            "Ids must be unique across epics AND tasks; a duplicate epic id "
+            "makes --archive silently drop one of the two blocks."))
+    for a, b in node_id_collisions(both):
+        out.append(Finding("ERROR", f"id {a}",
+            f"sanitises to the same Mermaid node id as '{b}' — the two would "
+            f"render as one node and inherit each other's edges."))
+    return out
+
+
+def check_cycles(data: dict) -> list[Finding]:
+    """depends_on must describe a DAG."""
+    out: list[Finding] = []
+    for cyc in find_cycles(data.get("epics") or []):
+        kind = "self-loop" if len(cyc) == 2 else "cycle"
+        out.append(Finding("ERROR", f"depends_on {kind}",
+            " → ".join(cyc) + " — depends_on must be acyclic."))
+    return out
+
+
+def check_dangling_deps(items: list[dict], archive: dict) -> list[Finding]:
+    """Every depends_on target must name a known id.
+
+    Known == an epic/task in roadmap.yaml, or an epic/task in the archive (an
+    edge into the archive is a satisfied prerequisite, not a dangling one).
+    Anything else is a typo or a renamed id that silently broke the DAG.
+    """
+    out: list[Finding] = []
+    known = {m["id"] for m in items} | all_ids(archive.get("epics") or [])
+    for meta in items:
+        for dep in meta["item"].get("depends_on") or []:
+            if dep not in known:
+                out.append(Finding("ERROR", ref_label(meta),
+                    f"depends_on: '{dep}' matches no epic or task id in "
+                    f"roadmap.yaml or roadmap.archive.yaml."))
+    return out
+
+
 def check_status_sanity(items: list[dict]) -> list[Finding]:
     """Reviews/in-flight work should have PR evidence; done epics should have
     all children done.
@@ -506,8 +944,12 @@ def check_github(data: dict, strict: bool) -> int:
         cache: dict = {}
         findings += check_pr_status(items, REPO_SLUG, cache)
 
-    # spec + status checks are offline and always run.
+    # spec + status + DAG checks are offline and always run.
+    archive = load_archive()
     findings += check_spec_links(items)
+    findings += check_id_integrity(data, archive)
+    findings += check_cycles(data)
+    findings += check_dangling_deps(items, archive)
     findings += check_status_sanity(items)
 
     if not ok:
@@ -521,6 +963,345 @@ def check_github(data: dict, strict: bool) -> int:
     return print_report(findings, strict)
 
 
+# ── archive sweep (--archive) ───────────────────────────────────────────────
+# An epic block starts at indent 2 ("  - id: slug"); child tasks sit at indent 6
+# and so never match. A trailing comment or quotes on the id are tolerated.
+# Section banners ("  # ── DONE ──") separate groups.
+#
+# This is a REGEX over YAML, which cannot know about block scalars: a `note: |`
+# whose body happens to contain a line like "  - id: x" would look like an epic
+# start. `assert_blocks_match_yaml` is the guard — the ids this regex finds must
+# equal the ids PyYAML parses, or we refuse to touch the file.
+EPIC_START_RE = re.compile(r"""^  - id:\s*["']?([^"'\s#]+)["']?\s*(?:\#.*)?$""")
+# Only the generated banner shape ("  # ── TITLE ──…"), never any indent-2
+# comment that merely starts with a box-drawing glyph.
+SECTION_HDR_RE = re.compile(r"^  # ──\s")
+
+
+def atomic_write(path: str, text: str) -> None:
+    """Write via a temp file in the same directory + rename, so a crash never
+    leaves a half-written roadmap or archive behind."""
+    d = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".gen-roadmap.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def epic_pr_numbers(epic: dict) -> list[int]:
+    """Every PR referenced by an epic or any of its child tasks."""
+    nums = list(parse_pr_refs(epic.get("pr")))
+    for t in epic.get("tasks") or []:
+        for n in parse_pr_refs(t.get("pr")):
+            if n not in nums:
+                nums.append(n)
+    return nums
+
+
+def _parse_merged_at(value: str) -> _dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc)
+    except ValueError:  # pragma: no cover
+        return None
+
+
+def epic_shipped_on(epic: dict, cache: dict, use_gh: bool) -> tuple[_dt.datetime | None, str]:
+    """(newest merge datetime, blocker). blocker is '' when the epic is datable
+    and every referenced PR is merged; otherwise it explains why not.
+
+    use_gh=False means --force-undated: we cannot see PR state at all, so the
+    epic is archived on its `done` status alone and stamped `shipped_on:
+    unknown`. That is the ONLY path that skips merge validation.
+    """
+    nums = epic_pr_numbers(epic)
+    if not use_gh:
+        return (None, "")
+    if not nums:
+        return (None, "no PR refs to date it")
+    newest: _dt.datetime | None = None
+    for n in nums:
+        st = gh_pr_state(n, REPO_SLUG, cache)
+        if "error" in st:
+            return (None, f"PR #{n} unresolvable ({st['error']})")
+        if st.get("state") != "MERGED":
+            return (None, f"PR #{n} is {st.get('state')}, not MERGED")
+        merged = _parse_merged_at(st.get("mergedAt") or "")
+        if merged is None:
+            return (None, f"PR #{n} has no mergedAt")
+        if newest is None or merged > newest:
+            newest = merged
+    return (newest, "")
+
+
+def find_epic_blocks(text: str) -> list[tuple[str, int, int]]:
+    """[(epic_id, start_line, end_line_exclusive)] over the raw roadmap text.
+
+    A block's end is trimmed back past trailing blank lines and section banners,
+    which belong to the NEXT group rather than to the epic being cut.
+    """
+    lines = text.splitlines(keepends=True)
+    starts = [(m.group(1), i) for i, l in enumerate(lines)
+              if (m := EPIC_START_RE.match(l))]
+    blocks: list[tuple[str, int, int]] = []
+    for idx, (eid, start) in enumerate(starts):
+        end = starts[idx + 1][1] if idx + 1 < len(starts) else len(lines)
+        while end - 1 > start and (not lines[end - 1].strip()
+                                   or SECTION_HDR_RE.match(lines[end - 1])):
+            end -= 1
+        blocks.append((eid, start, end))
+    return blocks
+
+
+def assert_blocks_match_yaml(raw: str, epics: list[dict]) -> str:
+    """Return an error string if the regex's view of the file disagrees with
+    PyYAML's, else "".
+
+    The sweep cuts raw text by line number, so a phantom `- id:` (e.g. inside a
+    `note: |` block scalar) or an epic the regex fails to see would slice a
+    block at the wrong boundary. Comparing the two id lists — in order — is a
+    cheap, total invariant: if they match, every block boundary is anchored to
+    a real epic.
+    """
+    seen = [b[0] for b in find_epic_blocks(raw)]
+    want = [e["id"] for e in epics]
+    if seen == want:
+        return ""
+    return (f"text-scan found epics {seen}\n       but PyYAML parsed {want}.\n"
+            "       A `- id:` inside a block scalar, or an unrecognised epic "
+            "line, would make the sweep cut at the wrong boundary.")
+
+
+def prune_empty_sections(lines: list[str]) -> list[str]:
+    """Drop a section banner that no longer has any epic under it, and collapse
+    the blank-line runs the excision leaves behind."""
+    hdrs = [i for i, l in enumerate(lines) if SECTION_HDR_RE.match(l)]
+    drop: set[int] = set()
+    for pos, i in enumerate(hdrs):
+        nxt = hdrs[pos + 1] if pos + 1 < len(hdrs) else len(lines)
+        if not any(EPIC_START_RE.match(l) for l in lines[i + 1:nxt]):
+            drop.add(i)
+            j = i + 1
+            while j < nxt and not lines[j].strip():
+                drop.add(j)
+                j += 1
+    kept = [l for i, l in enumerate(lines) if i not in drop]
+
+    out: list[str] = []
+    for line in kept:
+        blank = not line.strip()
+        # Collapse blank runs, and never leave a blank between a surviving
+        # section banner and the first epic left under it.
+        if blank and out and (not out[-1].strip() or SECTION_HDR_RE.match(out[-1])):
+            continue
+        out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    if out and not out[-1].endswith("\n"):
+        out[-1] += "\n"
+    return out
+
+
+def stamp_block(block: str, shipped_on: str, archived_on: str) -> str:
+    """Inject shipped_on/archived_on right after the epic's `- id:` line, using
+    the block's own line ending so a CRLF source does not gain mixed endings."""
+    lines = block.splitlines(keepends=True)
+    if any(l.startswith("    archived_on:") for l in lines):
+        return block  # already stamped; never double-stamp
+    eol = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    head, rest = lines[0], lines[1:]
+    stamp = [f"    shipped_on: {shipped_on}{eol}",
+             f"    archived_on: {archived_on}{eol}"]
+    return "".join([head] + stamp + rest)
+
+
+def archive_append_target(archive_text: str) -> str:
+    """Return an error string if `archive_text` is not safe to append an epic
+    block to, else "".
+
+    The append is raw-text, so the file must end with a bare `epics:` key
+    (empty archive) or with epic blocks under it. `epics: []` or `epics: null`
+    would turn the appended block into a syntax error, and a trailing comment
+    would swallow it.
+    """
+    try:
+        parsed = yaml.safe_load(archive_text)
+    except yaml.YAMLError as e:
+        return f"existing roadmap.archive.yaml does not parse: {e}"
+    if not isinstance(parsed, dict) or "epics" not in parsed:
+        return "existing roadmap.archive.yaml has no top-level `epics:` key"
+    epics = parsed.get("epics")
+    if epics not in (None, []) and not isinstance(epics, list):
+        return "existing roadmap.archive.yaml `epics:` is not a list"
+    if isinstance(epics, list) and epics:
+        # Must end inside the block sequence, not after a comment or a new key.
+        last = [l for l in archive_text.splitlines() if l.strip()][-1]
+        if not last.startswith("    ") and not last.startswith("  - "):
+            return (f"existing roadmap.archive.yaml ends with {last!r}, not "
+                    f"inside the epics list — appending would corrupt it")
+        seen, want = [b[0] for b in find_epic_blocks(archive_text)], [e["id"] for e in epics]
+        if seen != want:
+            return f"archive text-scan {seen} disagrees with parsed ids {want}"
+    else:
+        if not re.search(r"^epics:[ \t]*$", archive_text, flags=re.M):
+            return ("existing roadmap.archive.yaml has an empty `epics:` written "
+                    "as a flow/null value; rewrite it as a bare `epics:` line")
+    return ""
+
+
+def sweep_archive(min_age_days: int, dry_run: bool, force_undated: bool = False) -> int:
+    with open(ROADMAP_YAML, encoding="utf-8") as fh:
+        raw = fh.read()
+    data = yaml.safe_load(raw)
+    epics = data.get("epics", [])
+
+    # Refuse to cut text we cannot see the same way the YAML parser does.
+    mismatch = assert_blocks_match_yaml(raw, epics)
+    if mismatch:
+        sys.stderr.write(f"error: refusing to sweep — {mismatch}\n")
+        return 1
+
+    # Blocks are keyed by id below; a duplicate would clobber one of them while
+    # both line ranges get cut. Refuse rather than lose an epic.
+    dupes = duplicate_ids(epics)
+    if dupes:
+        sys.stderr.write(
+            f"error: refusing to sweep — duplicate id(s) {dupes} in "
+            f"roadmap.yaml. Ids must be unique across epics and tasks.\n")
+        return 1
+
+    # `gh` is what proves a PR is MERGED. Without it we cannot tell a shipped
+    # epic from one whose PR is still open, so the sweep is refused unless the
+    # operator explicitly accepts that with --force-undated. (--min-age-days 0
+    # waives the COOL-OFF, never the merge check.)
+    use_gh, gh_reason = gh_available()
+    if not use_gh and not force_undated:
+        sys.stderr.write(
+            f"error: --archive needs an authenticated `gh` to verify that each "
+            f"epic's PRs are merged ({gh_reason}). --min-age-days 0 waives the "
+            f"cool-off, not the merge check. Pass --force-undated to sweep "
+            f"anyway on `done` status alone (stamps shipped_on: unknown).\n")
+        return 2
+    if force_undated and use_gh:
+        use_gh = False  # honour the operator's explicit choice
+    if not use_gh:
+        print("warning: --force-undated — PR merge state is NOT verified; "
+              "epics are archived on `done` status alone.\n")
+
+    today = _dt.datetime.now(_dt.timezone.utc)
+    cache: dict = {}
+    chosen: list[tuple[dict, str]] = []   # (epic, shipped_on)
+    skipped: list[tuple[str, str]] = []   # (id, reason)
+
+    for epic in epics:
+        eid = epic["id"]
+        if epic.get("status") != "done":
+            continue
+        if epic.get("keep"):
+            skipped.append((eid, "keep: true"))
+            continue
+        undone = [t["id"] for t in epic.get("tasks") or [] if t.get("status") != "done"]
+        if undone:
+            skipped.append((eid, f"child task(s) not done: {', '.join(undone)}"))
+            continue
+        newest, blocker = epic_shipped_on(epic, cache, use_gh)
+        if blocker:
+            skipped.append((eid, blocker))
+            continue
+        if newest is None:                       # min-age 0, gh unavailable
+            chosen.append((epic, "unknown"))
+            continue
+        age = (today - newest).days
+        if age < min_age_days:
+            skipped.append((eid, f"merged {age}d ago, cool-off is {min_age_days}d"))
+            continue
+        chosen.append((epic, newest.date().isoformat()))
+
+    print(f"archive sweep (cool-off {min_age_days}d, "
+          f"{'dry run' if dry_run else 'writing'})\n")
+    if skipped:
+        print("kept in roadmap.yaml:")
+        for eid, why in skipped:
+            print(f"  · {eid}: {why}")
+        print()
+    if not chosen:
+        print("nothing to archive.")
+        return 0
+    print("moving to roadmap.archive.yaml:")
+    for epic, shipped in chosen:
+        prs = " ".join(f"#{n}" for n in epic_pr_numbers(epic))
+        print(f"  → {epic['id']} (shipped {shipped}) {prs}")
+    print()
+    if dry_run:
+        print("dry run: no files changed.")
+        return 0
+
+    # Excise raw text blocks (comments and formatting survive verbatim).
+    chosen_ids = {e["id"] for e, _ in chosen}
+    lines = raw.splitlines(keepends=True)
+    blocks = {eid: "".join(lines[s:e]) for eid, s, e in find_epic_blocks(raw)
+              if eid in chosen_ids}
+    missing = chosen_ids - set(blocks)
+    if missing:
+        sys.stderr.write(f"error: could not locate raw block(s) for {sorted(missing)}; "
+                         "aborting without writing.\n")
+        return 1
+
+    cut = {i for eid, s, e in find_epic_blocks(raw) if eid in chosen_ids
+           for i in range(s, e)}
+    new_raw = "".join(prune_empty_sections([l for i, l in enumerate(lines) if i not in cut]))
+
+    # Safety: the surviving text must still parse, and must have lost exactly
+    # the epics we meant to move.
+    reparsed = yaml.safe_load(new_raw)
+    got = {e["id"] for e in reparsed.get("epics", [])}
+    want = {e["id"] for e in epics} - chosen_ids
+    if got != want:
+        sys.stderr.write(f"error: post-sweep roadmap.yaml would contain {sorted(got)}, "
+                         f"expected {sorted(want)}; aborting without writing.\n")
+        return 1
+
+    archived_on = today.date().isoformat()
+    archive_text = ""
+    if os.path.isfile(ROADMAP_ARCHIVE_YAML):
+        with open(ROADMAP_ARCHIVE_YAML, encoding="utf-8") as fh:
+            archive_text = fh.read().rstrip("\n") + "\n"
+        problem = archive_append_target(archive_text)
+        if problem:
+            sys.stderr.write(f"error: refusing to sweep — {problem}.\n")
+            return 1
+    else:
+        archive_text = ARCHIVE_HEADER + "\nversion: 1\n\nepics:\n"
+    for epic, shipped in chosen:
+        sep = "" if archive_text.endswith("epics:\n") else "\n"
+        archive_text += sep + stamp_block(blocks[epic["id"]], shipped, archived_on)
+
+    parsed_archive = yaml.safe_load(archive_text)
+    if len({e["id"] for e in parsed_archive.get("epics") or []}) != \
+            len(parsed_archive.get("epics") or []):
+        sys.stderr.write("error: archive would contain duplicate epic ids; aborting.\n")
+        return 1
+
+    # Write the ARCHIVE first, then the working set. The sweep is a move across
+    # two files with no transaction: if we die in between, the epics must be
+    # duplicated (recoverable, and the next --archive is a no-op for them)
+    # rather than lost. Each write is itself atomic via rename.
+    atomic_write(ROADMAP_ARCHIVE_YAML, archive_text)
+    atomic_write(ROADMAP_YAML, new_raw)
+    atomic_write(ROADMAP_MD, render(reparsed, load_archive()))
+
+    print(f"archived {len(chosen)} epic(s); roadmap.yaml now has "
+          f"{len(reparsed.get('epics', []))}. Regenerated ROADMAP.md.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Generate ROADMAP.md from roadmap.yaml")
     ap.add_argument("--check", action="store_true",
@@ -531,7 +1312,23 @@ def main() -> int:
     ap.add_argument("--strict", action="store_true",
                     help="with --check-github, promote warnings to errors "
                          "for the exit code")
+    ap.add_argument("--archive", action="store_true",
+                    help="sweep cold done epics into roadmap.archive.yaml and "
+                         "regenerate ROADMAP.md")
+    ap.add_argument("--min-age-days", type=int, default=DEFAULT_MIN_AGE_DAYS,
+                    metavar="N",
+                    help=f"cool-off before a done epic is archived, dated from its "
+                         f"newest merged PR (default {DEFAULT_MIN_AGE_DAYS}; 0 sweeps "
+                         f"every done epic and needs no gh)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --archive, report the sweep and change nothing")
+    ap.add_argument("--force-undated", action="store_true",
+                    help="with --archive, sweep without `gh`: PR merge state is "
+                         "NOT verified and shipped_on is stamped 'unknown'")
     args = ap.parse_args()
+
+    if args.archive:
+        return sweep_archive(args.min_age_days, args.dry_run, args.force_undated)
 
     with open(ROADMAP_YAML, encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
@@ -539,7 +1336,7 @@ def main() -> int:
     if args.check_github:
         return check_github(data, args.strict)
 
-    rendered = render(data)
+    rendered = render(data, load_archive())
 
     if args.check:
         current = ""
@@ -554,8 +1351,10 @@ def main() -> int:
 
     with open(ROADMAP_MD, "w", encoding="utf-8") as fh:
         fh.write(rendered)
+    archived = len(load_archive().get("epics") or [])
     print(f"wrote {os.path.relpath(ROADMAP_MD, REPO_ROOT)} "
-          f"({len(data.get('epics', []))} epics)")
+          f"({len(data.get('epics', []))} epics"
+          + (f", {archived} archived)" if archived else ")"))
     return 0
 
 

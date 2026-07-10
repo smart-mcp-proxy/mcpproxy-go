@@ -111,13 +111,13 @@
 
 ### Implementation for User Story 3
 
-- [ ] T023 [US3] Create CLI error display helper that extracts and prints request_id in `cmd/mcpproxy/cmd_helpers.go`
-- [ ] T024 [US3] Update `upstream` command error handling to display request ID in `cmd/mcpproxy/upstream_cmd.go`
-- [ ] T025 [US3] Update `auth` command error handling to display request ID in `cmd/mcpproxy/auth_cmd.go`
-- [ ] T026 [US3] Update `activity` command error handling to display request ID in `cmd/mcpproxy/activity_cmd.go`
-- [ ] T027 [US3] Update `tools` command error handling to display request ID in `cmd/mcpproxy/tools_cmd.go`
-- [ ] T028 [US3] Update `call` command error handling to display request ID in `cmd/mcpproxy/call_cmd.go`
-- [ ] T029 [US3] Update `code` command error handling to display request ID in `cmd/mcpproxy/code_cmd.go`
+- [x] T023 [US3] Create CLI error display helper that extracts and prints request_id in `cmd/mcpproxy/cmd_helpers.go`
+- [x] T024 [US3] Update `upstream` command error handling to display request ID in `cmd/mcpproxy/upstream_cmd.go`
+- [x] T025 [US3] Update `auth` command error handling to display request ID in `cmd/mcpproxy/auth_cmd.go`
+- [x] T026 [US3] Update `activity` command error handling to display request ID in `cmd/mcpproxy/activity_cmd.go`
+- [x] T027 [US3] Update `tools` command error handling to display request ID in `cmd/mcpproxy/tools_cmd.go`
+- [x] T028 [US3] Update `call` command error handling to display request ID in `cmd/mcpproxy/call_cmd.go`
+- [x] T029 [US3] Update `code` command error handling to display request ID in `cmd/mcpproxy/code_cmd.go`
 
 **Checkpoint**: At this point, CLI users see request_id on errors with log retrieval suggestion
 
@@ -132,15 +132,15 @@
 ### Tests for User Story 4
 
 - [ ] T030 [P] [US4] Add E2E test: `--request-id` flag filters activity logs in `internal/server/e2e_test.go`
-- [ ] T031 [P] [US4] Add E2E test: API query param `request_id` filters logs in `internal/server/e2e_test.go`
+- [x] T031 [P] [US4] Add E2E test: API query param `request_id` filters logs in `internal/server/e2e_test.go`
 
 ### Implementation for User Story 4
 
-- [ ] T032 [US4] Extend ActivityRecord to include request_id field in `internal/contracts/activity.go`
-- [ ] T033 [US4] Update activity recording to capture request_id from context in `internal/storage/activity.go`
-- [ ] T034 [US4] Add `--request-id` flag to `activity list` command in `cmd/mcpproxy/activity_cmd.go`
-- [ ] T035 [US4] Add `request_id` query parameter to activity API handler in `internal/httpapi/activity.go`
-- [ ] T036 [US4] Update activity storage query to filter by request_id in `internal/storage/activity.go`
+- [x] T032 [US4] Extend ActivityRecord to include request_id field in `internal/contracts/activity.go`
+- [x] T033 [US4] Update activity recording to capture request_id from context in `internal/storage/activity.go`
+- [x] T034 [US4] Add `--request-id` flag to `activity list` command in `cmd/mcpproxy/activity_cmd.go`
+- [x] T035 [US4] Add `request_id` query parameter to activity API handler in `internal/httpapi/activity.go`
+- [x] T036 [US4] Update activity storage query to filter by request_id in `internal/storage/activity.go`
 
 **Checkpoint**: At this point, users can retrieve logs filtered by request_id via CLI and API
 

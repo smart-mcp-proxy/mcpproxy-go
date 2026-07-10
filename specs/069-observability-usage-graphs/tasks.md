@@ -20,10 +20,10 @@ Web app: Go backend under `internal/`; embedded Vue frontend under `frontend/src
 
 **Purpose**: Give the token-sink graphs a real byte source (research.md R1). Blocks all aggregate work.
 
-- [ ] T001 [BE] Failing test in `internal/storage/activity_test.go`: `ActivityRecord` round-trips new `RequestBytes`/`ResponseBytes`; legacy records (no fields) decode to `0`.
-- [ ] T002 [BE] Add `RequestBytes int` (`request_bytes`) + `ResponseBytes int` (`response_bytes`) to `ActivityRecord` in `internal/storage/activity_models.go`.
-- [ ] T003 [BE] Failing test in `internal/runtime/activity_service_test.go`: byte sizes captured **pre-truncation** (truncated `Response` still reports full `ResponseBytes`; request args measured).
-- [ ] T004 [BE] Populate `RequestBytes`/`ResponseBytes` in `ActivityService.handleEvent` before truncation; make T001/T003 green.
+- [x] T001 [BE] Failing test in `internal/storage/activity_test.go`: `ActivityRecord` round-trips new `RequestBytes`/`ResponseBytes`; legacy records (no fields) decode to `0`.
+- [x] T002 [BE] Add `RequestBytes int` (`request_bytes`) + `ResponseBytes int` (`response_bytes`) to `ActivityRecord` in `internal/storage/activity_models.go`.
+- [x] T003 [BE] Failing test in `internal/runtime/activity_service_test.go`: byte sizes captured **pre-truncation** (truncated `Response` still reports full `ResponseBytes`; request args measured).
+- [x] T004 [BE] Populate `RequestBytes`/`ResponseBytes` in `ActivityService.handleEvent` before truncation; make T001/T003 green.
 
 ---
 
@@ -58,11 +58,11 @@ Web app: Go backend under `internal/`; embedded Vue frontend under `frontend/src
 
 - [X] T016 [FE] [US4] Add Overview↔Usage switcher to `frontend/src/views/Dashboard.vue`, preserving Overview state on switch-back (SC-006); window selector (24h/7d/all); `data-test` attrs.
 - [X] T017 [FE] Add `getActivityUsage()` to `frontend/src/services/api.ts`.
-- [ ] T018 [FE] [US1] `frontend/src/components/usage/CallHistogram.vue` + `ResponseSizeRanking.vue` (token-sink, labeled size-based per FR-006) using vue-chartjs.
-- [ ] T019 [FE] [US2] `frontend/src/components/usage/ErrorRateChart.vue` + per-tool latency (p50/p95).
-- [ ] T020 [FE] [US3] `frontend/src/components/usage/Timeline.vue` honoring active filters (FR-008).
-- [ ] T021 [FE] [US5] Tokens-saved headline in `Usage.vue` from existing `ServerTokenMetrics` (FR-007); empty/low-data states (FR-009).
-- [ ] T022 [FE] Compose `frontend/src/views/Usage.vue`; async-load graphs so Dashboard first paint is not blocked (SC-004); `make build`.
+- [x] T018 [FE] [US1] `frontend/src/components/usage/CallHistogram.vue` + `ResponseSizeRanking.vue` (token-sink, labeled size-based per FR-006) using vue-chartjs.
+- [x] T019 [FE] [US2] `frontend/src/components/usage/ErrorRateChart.vue` + per-tool latency (p50/p95).
+- [x] T020 [FE] [US3] `frontend/src/components/usage/Timeline.vue` honoring active filters (FR-008).
+- [x] T021 [FE] [US5] Tokens-saved headline in `Usage.vue` from existing `ServerTokenMetrics` (FR-007); empty/low-data states (FR-009).
+- [x] T022 [FE] Compose `frontend/src/views/Usage.vue`; async-load graphs so Dashboard first paint is not blocked (SC-004); `make build`.
 - [ ] T023 [FE] Playwright sweep (CLAUDE.md Web-UI workflow) → switcher, window, four charts, empty-state; HTML report in `specs/069-observability-usage-graphs/verification/` (kept local, not committed).
 
 ---

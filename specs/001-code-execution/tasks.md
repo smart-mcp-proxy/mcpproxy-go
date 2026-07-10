@@ -15,10 +15,10 @@
 
 **Purpose**: Project initialization and basic structure
 
-- [ ] T001 Add github.com/dop251/goja dependency: `go get github.com/dop251/goja@latest && go mod tidy`
-- [ ] T002 Create internal/jsruntime directory: `mkdir -p internal/jsruntime`
+- [x] T001 Add github.com/dop251/goja dependency: `go get github.com/dop251/goja@latest && go mod tidy`
+- [x] T002 Create internal/jsruntime directory: `mkdir -p internal/jsruntime`
 - [ ] T003 [P] Create tests/e2e directory for E2E tests: `mkdir -p tests/e2e`
-- [ ] T004 [P] Create docs/code_execution directory: `mkdir -p docs/code_execution`
+- [x] T004 [P] Create docs/code_execution directory: `mkdir -p docs/code_execution`
 
 ---
 
@@ -41,12 +41,12 @@
 
 ### Core Error Handling
 
-- [ ] T013 Create internal/jsruntime/errors.go with JsError type and error code constants (SYNTAX_ERROR, RUNTIME_ERROR, TIMEOUT, MAX_TOOL_CALLS_EXCEEDED, SERVER_NOT_ALLOWED, SERIALIZATION_ERROR)
+- [x] T013 Create internal/jsruntime/errors.go with JsError type and error code constants (SYNTAX_ERROR, RUNTIME_ERROR, TIMEOUT, MAX_TOOL_CALLS_EXCEEDED, SERVER_NOT_ALLOWED, SERIALIZATION_ERROR)
 
 ### Configuration
 
-- [ ] T014 Modify internal/config/config.go to add EnableCodeExecution, CodeExecutionTimeoutMs, CodeExecutionMaxToolCalls, CodeExecutionPoolSize fields with defaults
-- [ ] T015 Add config validation for new fields (timeout: 1-600000ms, pool_size: 1-100, max_tool_calls >= 0)
+- [x] T014 Modify internal/config/config.go to add EnableCodeExecution, CodeExecutionTimeoutMs, CodeExecutionMaxToolCalls, CodeExecutionPoolSize fields with defaults
+- [x] T015 Add config validation for new fields (timeout: 1-600000ms, pool_size: 1-100, max_tool_calls >= 0)
 - [ ] T016 Update config tests to verify new fields parse correctly and defaults apply
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
@@ -63,23 +63,23 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T017 [P] [US1] Unit test: Execute simple JS returning value in internal/jsruntime/runtime_test.go
-- [ ] T018 [P] [US1] Unit test: Execute JS calling mock call_tool() once in internal/jsruntime/runtime_test.go
-- [ ] T019 [P] [US1] Unit test: Execute JS with loop calling call_tool() multiple times in internal/jsruntime/runtime_test.go
+- [x] T017 [P] [US1] Unit test: Execute simple JS returning value in internal/jsruntime/runtime_test.go
+- [x] T018 [P] [US1] Unit test: Execute JS calling mock call_tool() once in internal/jsruntime/runtime_test.go
+- [x] T019 [P] [US1] Unit test: Execute JS with loop calling call_tool() multiple times in internal/jsruntime/runtime_test.go
 - [ ] T020 [P] [US1] Integration test: code_execution tool with two mock upstream servers in internal/server/mcp_code_execution_test.go
 
 ### Implementation for User Story 1
 
-- [ ] T021 [P] [US1] Create internal/jsruntime/runtime.go with Execute(ctx, caller, code, input, opts) function signature
-- [ ] T022 [US1] Implement Goja VM initialization in Execute() - create runtime, set up sandbox restrictions (no require, no fs, no net)
-- [ ] T023 [US1] Implement `input` global variable binding - expose opts.Input as global `input` in VM
-- [ ] T024 [US1] Implement `call_tool(serverName, toolName, args)` function binding - bridge to caller.CallTool()
-- [ ] T025 [US1] Implement result extraction - serialize final JS expression as JSON and return in Result type
-- [ ] T026 [US1] Add basic error handling - catch goja.Exception, extract message/stack, return JsError
-- [ ] T027 [US1] Create internal/server/mcp_code_execution.go tool handler - parse json_args (code, input, options)
-- [ ] T028 [US1] Integrate with jsruntime.Execute() in tool handler - call Execute(), format response as { ok, value, error }
-- [ ] T029 [US1] Modify internal/server/mcp.go to register code_execution tool in listTools() with guard for config.EnableCodeExecution
-- [ ] T030 [US1] Add code_execution tool schema to MCP tools list with full description explaining when to use vs direct tools
+- [x] T021 [P] [US1] Create internal/jsruntime/runtime.go with Execute(ctx, caller, code, input, opts) function signature
+- [x] T022 [US1] Implement Goja VM initialization in Execute() - create runtime, set up sandbox restrictions (no require, no fs, no net)
+- [x] T023 [US1] Implement `input` global variable binding - expose opts.Input as global `input` in VM
+- [x] T024 [US1] Implement `call_tool(serverName, toolName, args)` function binding - bridge to caller.CallTool()
+- [x] T025 [US1] Implement result extraction - serialize final JS expression as JSON and return in Result type
+- [x] T026 [US1] Add basic error handling - catch goja.Exception, extract message/stack, return JsError
+- [x] T027 [US1] Create internal/server/mcp_code_execution.go tool handler - parse json_args (code, input, options)
+- [x] T028 [US1] Integrate with jsruntime.Execute() in tool handler - call Execute(), format response as { ok, value, error }
+- [x] T029 [US1] Modify internal/server/mcp.go to register code_execution tool in listTools() with guard for config.EnableCodeExecution
+- [x] T030 [US1] Add code_execution tool schema to MCP tools list with full description explaining when to use vs direct tools
 
 **Checkpoint**: At this point, basic code execution with call_tool should work for simple sequential scripts
 
@@ -93,18 +93,18 @@
 
 ### Tests for User Story 2 (TDD - Write First)
 
-- [ ] T031 [P] [US2] Unit test: JS throws uncaught exception - verify error message and stack trace in internal/jsruntime/runtime_test.go
+- [x] T031 [P] [US2] Unit test: JS throws uncaught exception - verify error message and stack trace in internal/jsruntime/runtime_test.go
 - [ ] T032 [P] [US2] Unit test: call_tool() returns { ok: false } - verify JS can check res.ok in internal/jsruntime/runtime_test.go
 - [ ] T033 [P] [US2] Unit test: JS handles error from first tool, continues execution - verify partial results in internal/jsruntime/runtime_test.go
 - [ ] T034 [US2] Integration test: code_execution with failing upstream tool in internal/server/mcp_code_execution_test.go
 
 ### Implementation for User Story 2
 
-- [ ] T035 [US2] Enhance call_tool() to return { ok: true, result } on success and { ok: false, error: { message, code } } on failure
+- [x] T035 [US2] Enhance call_tool() to return { ok: true, result } on success and { ok: false, error: { message, code } } on failure
 - [ ] T036 [US2] Map upstream errors to error codes (NOT_FOUND, UPSTREAM_ERROR, TIMEOUT, INVALID_ARGS, SERVER_NOT_ALLOWED)
-- [ ] T037 [US2] Enhance error extraction to include line numbers for syntax errors before execution
-- [ ] T038 [US2] Add goja.Exception stack trace parsing - extract full call stack with line numbers
-- [ ] T039 [US2] Update tool handler error response format to include detailed error.message, error.stack, error.code
+- [x] T037 [US2] Enhance error extraction to include line numbers for syntax errors before execution
+- [x] T038 [US2] Add goja.Exception stack trace parsing - extract full call stack with line numbers
+- [x] T039 [US2] Update tool handler error response format to include detailed error.message, error.stack, error.code
 
 **Checkpoint**: Error handling complete - JS code can gracefully handle tool failures and provide clear debugging info
 
@@ -118,20 +118,20 @@
 
 ### Tests for User Story 3 (TDD - Write First)
 
-- [ ] T040 [P] [US3] Unit test: Timeout enforcement - code running longer than timeout_ms terminates in internal/jsruntime/runtime_test.go
-- [ ] T041 [P] [US3] Unit test: max_tool_calls limit - 6th call fails when max_tool_calls=5 in internal/jsruntime/runtime_test.go
-- [ ] T042 [P] [US3] Unit test: Sandbox restrictions - attempt require(), fs access fails in internal/jsruntime/runtime_test.go
-- [ ] T043 [P] [US3] Unit test: Per-request timeout override - verify custom timeout_ms honored in internal/jsruntime/runtime_test.go
+- [x] T040 [P] [US3] Unit test: Timeout enforcement - code running longer than timeout_ms terminates in internal/jsruntime/runtime_test.go
+- [x] T041 [P] [US3] Unit test: max_tool_calls limit - 6th call fails when max_tool_calls=5 in internal/jsruntime/runtime_test.go
+- [x] T042 [P] [US3] Unit test: Sandbox restrictions - attempt require(), fs access fails in internal/jsruntime/runtime_test.go
+- [x] T043 [P] [US3] Unit test: Per-request timeout override - verify custom timeout_ms honored in internal/jsruntime/runtime_test.go
 
 ### Implementation for User Story 3
 
-- [ ] T044 [US3] Implement watchdog timeout enforcement - goroutine with time.After() and context cancellation
-- [ ] T045 [US3] Add timeout error handling - detect context cancellation, return TIMEOUT error with appropriate message
-- [ ] T046 [US3] Implement max_tool_calls tracking - counter in execution context, increment on each call_tool(), enforce limit
-- [ ] T047 [US3] Add MAX_TOOL_CALLS_EXCEEDED error when limit exceeded in call_tool() implementation
-- [ ] T048 [US3] Verify sandbox restrictions - test that require(), filesystem, network APIs are undefined/blocked
-- [ ] T049 [US3] Add per-request option parsing - extract timeout_ms, max_tool_calls, allowed_servers from options
-- [ ] T050 [US3] Merge global config defaults with per-request overrides - apply precedence (request > config > hardcoded defaults)
+- [x] T044 [US3] Implement watchdog timeout enforcement - goroutine with time.After() and context cancellation
+- [x] T045 [US3] Add timeout error handling - detect context cancellation, return TIMEOUT error with appropriate message
+- [x] T046 [US3] Implement max_tool_calls tracking - counter in execution context, increment on each call_tool(), enforce limit
+- [x] T047 [US3] Add MAX_TOOL_CALLS_EXCEEDED error when limit exceeded in call_tool() implementation
+- [x] T048 [US3] Verify sandbox restrictions - test that require(), filesystem, network APIs are undefined/blocked
+- [x] T049 [US3] Add per-request option parsing - extract timeout_ms, max_tool_calls, allowed_servers from options
+- [x] T050 [US3] Merge global config defaults with per-request overrides - apply precedence (request > config > hardcoded defaults)
 
 **Checkpoint**: Execution limits enforced - system protected from runaway code and resource exhaustion
 
@@ -147,13 +147,13 @@
 
 - [ ] T051 [P] [US8] Unit test: Complex input data (nested objects, arrays) accessible via `input` global in internal/jsruntime/runtime_test.go
 - [ ] T052 [P] [US8] Unit test: Complex result serialization (nested objects, arrays) in internal/jsruntime/runtime_test.go
-- [ ] T053 [P] [US8] Unit test: Non-serializable result (function, circular ref) returns SERIALIZATION_ERROR in internal/jsruntime/runtime_test.go
+- [x] T053 [P] [US8] Unit test: Non-serializable result (function, circular ref) returns SERIALIZATION_ERROR in internal/jsruntime/runtime_test.go
 
 ### Implementation for User Story 8
 
-- [ ] T054 [US8] Enhance input binding to support deeply nested objects and arrays - use goja's ToValue() conversion
-- [ ] T055 [US8] Add result serialization validation - detect functions, circular references before JSON marshaling
-- [ ] T056 [US8] Return SERIALIZATION_ERROR with clear message when result contains non-JSON types
+- [x] T054 [US8] Enhance input binding to support deeply nested objects and arrays - use goja's ToValue() conversion
+- [x] T055 [US8] Add result serialization validation - detect functions, circular references before JSON marshaling
+- [x] T056 [US8] Return SERIALIZATION_ERROR with clear message when result contains non-JSON types
 - [ ] T057 [US8] Add integration test verifying end-to-end input → JS → result flow with complex data structures
 
 **Checkpoint**: MVP COMPLETE - All P1 user stories implemented (US1, US2, US3, US8). Core code_execution functionality ready for testing
@@ -168,22 +168,22 @@
 
 ### Tests for User Story 4 (TDD - Write First)
 
-- [ ] T058 [P] [US4] Unit test: Pool Acquire() returns instance in internal/jsruntime/pool_test.go
-- [ ] T059 [P] [US4] Unit test: Pool Release() returns instance to pool in internal/jsruntime/pool_test.go
-- [ ] T060 [P] [US4] Unit test: Pool Acquire() blocks when all instances in use in internal/jsruntime/pool_test.go
-- [ ] T061 [P] [US4] Unit test: Pool Resize() adds/removes instances in internal/jsruntime/pool_test.go
+- [x] T058 [P] [US4] Unit test: Pool Acquire() returns instance in internal/jsruntime/pool_test.go
+- [x] T059 [P] [US4] Unit test: Pool Release() returns instance to pool in internal/jsruntime/pool_test.go
+- [x] T060 [P] [US4] Unit test: Pool Acquire() blocks when all instances in use in internal/jsruntime/pool_test.go
+- [x] T061 [P] [US4] Unit test: Pool Resize() adds/removes instances in internal/jsruntime/pool_test.go
 - [ ] T062 [US4] E2E test: 10 concurrent executions complete successfully in tests/e2e/code_execution_test.go
 
 ### Implementation for User Story 4
 
-- [ ] T063 [US4] Create internal/jsruntime/pool.go with Pool struct and channels for available instances
-- [ ] T064 [US4] Implement NewPool(size) constructor - pre-allocate goja.Runtime instances
-- [ ] T065 [US4] Implement Acquire(ctx) method - channel receive with context timeout support
-- [ ] T066 [US4] Implement Release(instance) method - channel send to return instance to pool
-- [ ] T067 [US4] Implement Resize(new_size) for hot config reload - add/remove instances safely
-- [ ] T068 [US4] Integrate pool with tool handler - Acquire() before Execute(), defer Release()
-- [ ] T069 [US4] Initialize pool in server startup with config.CodeExecutionPoolSize
-- [ ] T070 [US4] Add pool shutdown logic - gracefully close all instances on server shutdown
+- [x] T063 [US4] Create internal/jsruntime/pool.go with Pool struct and channels for available instances
+- [x] T064 [US4] Implement NewPool(size) constructor - pre-allocate goja.Runtime instances
+- [x] T065 [US4] Implement Acquire(ctx) method - channel receive with context timeout support
+- [x] T066 [US4] Implement Release(instance) method - channel send to return instance to pool
+- [x] T067 [US4] Implement Resize(new_size) for hot config reload - add/remove instances safely
+- [x] T068 [US4] Integrate pool with tool handler - Acquire() before Execute(), defer Release()
+- [x] T069 [US4] Initialize pool in server startup with config.CodeExecutionPoolSize
+- [x] T070 [US4] Add pool shutdown logic - gracefully close all instances on server shutdown
 
 **Checkpoint**: Concurrent execution supported - multiple clients can execute code simultaneously
 
@@ -204,8 +204,8 @@
 
 ### Implementation for User Story 5
 
-- [ ] T075 [US5] Verify config defaults: EnableCodeExecution=false, CodeExecutionTimeoutMs=120000, CodeExecutionMaxToolCalls=0, CodeExecutionPoolSize=10
-- [ ] T076 [US5] Add feature toggle check in listTools() - only include code_execution if EnableCodeExecution=true
+- [x] T075 [US5] Verify config defaults: EnableCodeExecution=false, CodeExecutionTimeoutMs=120000, CodeExecutionMaxToolCalls=0, CodeExecutionPoolSize=10
+- [x] T076 [US5] Add feature toggle check in listTools() - only include code_execution if EnableCodeExecution=true
 - [ ] T077 [US5] Add feature toggle check in tool handler - return error if disabled
 - [ ] T078 [US5] Test hot config reload - verify pool resize and timeout updates apply without restart
 
@@ -226,11 +226,11 @@
 
 ### Implementation for User Story 6
 
-- [ ] T081 [US6] Add execution_id generation (UUID) at start of Execute()
-- [ ] T082 [US6] Create Execution Context struct with execution_id, start_time, end_time, status, tool_calls
-- [ ] T083 [US6] Create Tool Call Record struct with server_name, tool_name, arguments, start_time, duration_ms, success, result/error
-- [ ] T084 [US6] Track all call_tool() invocations - append Tool Call Records to Execution Context
-- [ ] T085 [US6] Add execution logging - write to main.log with format `[code_execution] execution_id=<uuid> status=<status> duration=<ms> tools_called=<list>`
+- [x] T081 [US6] Add execution_id generation (UUID) at start of Execute()
+- [x] T082 [US6] Create Execution Context struct with execution_id, start_time, end_time, status, tool_calls
+- [x] T083 [US6] Create Tool Call Record struct with server_name, tool_name, arguments, start_time, duration_ms, success, result/error
+- [x] T084 [US6] Track all call_tool() invocations - append Tool Call Records to Execution Context
+- [x] T085 [US6] Add execution logging - write to main.log with format `[code_execution] execution_id=<uuid> status=<status> duration=<ms> tools_called=<list>`
 - [ ] T086 [US6] Truncate logged code to 500 chars to prevent log flooding
 - [ ] T087 [US6] Include execution_id in response payload for client-side correlation
 
@@ -246,10 +246,10 @@
 
 ### Implementation for User Story 7
 
-- [ ] T088 [US7] Update code_execution tool description in internal/server/mcp.go with "When to use" and "When NOT to use" sections
-- [ ] T089 [US7] Add inline examples in tool schema showing basic tool composition pattern
+- [x] T088 [US7] Update code_execution tool description in internal/server/mcp.go with "When to use" and "When NOT to use" sections
+- [x] T089 [US7] Add inline examples in tool schema showing basic tool composition pattern
 - [ ] T090 [US7] Add error handling examples in tool description - demonstrate checking res.ok
-- [ ] T091 [US7] Include guidance on input/output structure in tool description
+- [x] T091 [US7] Include guidance on input/output structure in tool description
 
 **Checkpoint**: Tool description guides LLM behavior - appropriate usage patterns encouraged
 
@@ -271,15 +271,15 @@
 
 ### Implementation for User Story 9
 
-- [ ] T097 [US9] Create cmd/mcpproxy/code_cmd.go with Cobra command definition for `mcpproxy code exec`
-- [ ] T098 [US9] Add flags: --code, --file, --input, --input-file, --timeout, --max-tool-calls, --allowed-servers
-- [ ] T099 [US9] Implement code loading from file if --file provided, validate mutually exclusive with --code
+- [x] T097 [US9] Create cmd/mcpproxy/code_cmd.go with Cobra command definition for `mcpproxy code exec`
+- [x] T098 [US9] Add flags: --code, --file, --input, --input-file, --timeout, --max-tool-calls, --allowed-servers
+- [x] T099 [US9] Implement code loading from file if --file provided, validate mutually exclusive with --code
 - [ ] T100 [US9] Implement input loading from file if --input-file provided, validate mutually exclusive with --input
-- [ ] T101 [US9] Parse input JSON from flag value or file
+- [x] T101 [US9] Parse input JSON from flag value or file
 - [ ] T102 [US9] Call code_execution internally (not via HTTP) - use jsruntime.Execute() directly
-- [ ] T103 [US9] Format output as JSON matching MCP response structure { ok, value, error }
-- [ ] T104 [US9] Handle exit codes - 0 for success, 1 for errors
-- [ ] T105 [US9] Add CLI help text with usage examples and flag descriptions
+- [x] T103 [US9] Format output as JSON matching MCP response structure { ok, value, error }
+- [x] T104 [US9] Handle exit codes - 0 for success, 1 for errors
+- [x] T105 [US9] Add CLI help text with usage examples and flag descriptions
 
 **Checkpoint**: CLI interface complete - developers can test code_execution without MCP client
 
@@ -293,24 +293,24 @@
 
 ### Implementation for User Story 10
 
-- [ ] T106 [P] [US10] Create docs/code_execution/overview.md - feature description, when to use, security model
-- [ ] T107 [P] [US10] Create docs/code_execution/examples.md with 5+ working examples:
+- [x] T106 [P] [US10] Create docs/code_execution/overview.md - feature description, when to use, security model
+- [x] T107 [P] [US10] Create docs/code_execution/examples.md with 5+ working examples:
   - Example 1: Basic tool composition (fetch → transform → send)
   - Example 2: Error handling with partial results
   - Example 3: Loop with filtering (batch operations)
   - Example 4: Conditional logic (if/else based on tool results)
   - Example 5: Data aggregation from multiple sources
-- [ ] T108 [P] [US10] Create docs/code_execution/api-reference.md - complete schema for input, output, options, error codes
-- [ ] T109 [P] [US10] Create docs/code_execution/troubleshooting.md - common errors and solutions:
+- [x] T108 [P] [US10] Create docs/code_execution/api-reference.md - complete schema for input, output, options, error codes
+- [x] T109 [P] [US10] Create docs/code_execution/troubleshooting.md - common errors and solutions:
   - Timeout errors
   - max_tool_calls exceeded
   - Sandbox restrictions (require, fs, net)
   - JSON serialization errors
   - Tool discovery issues
-- [ ] T110 [US10] Update CLAUDE.md with code_execution architecture overview
+- [x] T110 [US10] Update CLAUDE.md with code_execution architecture overview
 - [ ] T111 [US10] Update CLAUDE.md with CLI command examples (`mcpproxy code exec`)
 - [ ] T112 [US10] Validate all documentation examples execute successfully
-- [ ] T113 [US10] Add docstrings to all public functions in internal/jsruntime package
+- [x] T113 [US10] Add docstrings to all public functions in internal/jsruntime package
 
 **Checkpoint**: Documentation complete - 90%+ of developers should be able to use code_execution after reading docs (SC-014)
 

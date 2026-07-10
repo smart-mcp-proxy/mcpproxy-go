@@ -60,15 +60,15 @@
 ### Tests for User Story 1
 
 - [ ] T012 [P] [US1] Write unit test for version display in tray in `internal/tray/tray_test.go`
-- [ ] T013 [P] [US1] Write unit test for /api/v1/info version field in `internal/httpapi/server_test.go`
-- [ ] T014 [P] [US1] Add E2E test for version in /api/v1/info response in `scripts/test-api-e2e.sh`
+- [x] T013 [P] [US1] Write unit test for /api/v1/info version field in `internal/httpapi/server_test.go`
+- [x] T014 [P] [US1] Add E2E test for version in /api/v1/info response in `scripts/test-api-e2e.sh`
 
 ### Implementation for User Story 1
 
-- [ ] T015 [US1] Add version menu item at top of tray menu in `internal/tray/tray.go` (setupMenu function)
-- [ ] T016 [US1] Add UpdateInfo and InfoResponse types to `frontend/src/types/contracts.ts`
-- [ ] T017 [US1] Display version in Web Control Panel sidebar/footer in `frontend/src/App.vue` or `frontend/src/components/SidebarNav.vue`
-- [ ] T018 [US1] Add version output to doctor command in `cmd/mcpproxy/doctor.go`
+- [x] T015 [US1] Add version menu item at top of tray menu in `internal/tray/tray.go` (setupMenu function)
+- [x] T016 [US1] Add UpdateInfo and InfoResponse types to `frontend/src/types/contracts.ts`
+- [x] T017 [US1] Display version in Web Control Panel sidebar/footer in `frontend/src/App.vue` or `frontend/src/components/SidebarNav.vue`
+- [x] T018 [US1] Add version output to doctor command in `cmd/mcpproxy/doctor.go`
 
 **Checkpoint**: Version visible in tray, WebUI, and CLI - MVP complete
 
@@ -86,14 +86,14 @@
 - [ ] T020 [P] [US2] Write unit test for periodic check (4hr ticker) in `internal/updatecheck/checker_test.go`
 - [ ] T021 [P] [US2] Write unit test for GitHub API success scenario in `internal/updatecheck/github_test.go`
 - [ ] T022 [P] [US2] Write unit test for GitHub API failure scenario (graceful degradation) in `internal/updatecheck/github_test.go`
-- [ ] T023 [P] [US2] Write unit test for semver comparison in `internal/updatecheck/checker_test.go`
+- [x] T023 [P] [US2] Write unit test for semver comparison in `internal/updatecheck/checker_test.go`
 - [ ] T024 [P] [US2] Add E2E test verifying update field in /api/v1/info in `scripts/test-api-e2e.sh`
 
 ### Implementation for User Story 2
 
-- [ ] T025 [US2] Implement initial check on startup (non-blocking goroutine) in `internal/updatecheck/checker.go`
-- [ ] T026 [US2] Ensure 4-hour periodic check preserves last known state on failure in `internal/updatecheck/checker.go`
-- [ ] T027 [US2] Add debug-level logging for GitHub API errors in `internal/updatecheck/github.go`
+- [x] T025 [US2] Implement initial check on startup (non-blocking goroutine) in `internal/updatecheck/checker.go`
+- [x] T026 [US2] Ensure 4-hour periodic check preserves last known state on failure in `internal/updatecheck/checker.go`
+- [x] T027 [US2] Add debug-level logging for GitHub API errors in `internal/updatecheck/github.go`
 
 **Checkpoint**: Background update detection working, API returns update status
 
@@ -112,11 +112,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T030 [US3] Remove existing "Check for Updates..." menu item from `internal/tray/tray.go`
-- [ ] T031 [US3] Add hidden update menu item that shows when update available in `internal/tray/tray.go`
-- [ ] T032 [US3] Poll /api/v1/info periodically in tray to check for updates in `internal/tray/tray.go`
-- [ ] T033 [US3] Implement click handler to open GitHub releases URL in `internal/tray/tray.go`
-- [ ] T034 [US3] Detect Homebrew installation and show "brew upgrade" message in `internal/tray/tray.go`
+- [x] T030 [US3] Remove existing "Check for Updates..." menu item from `internal/tray/tray.go`
+- [x] T031 [US3] Add hidden update menu item that shows when update available in `internal/tray/tray.go`
+- [x] T032 [US3] Poll /api/v1/info periodically in tray to check for updates in `internal/tray/tray.go`
+- [x] T033 [US3] Implement click handler to open GitHub releases URL in `internal/tray/tray.go`
+- [x] T034 [US3] Detect Homebrew installation and show "brew upgrade" message in `internal/tray/tray.go`
 
 **Checkpoint**: Tray shows update notification when available
 
@@ -134,11 +134,11 @@
 
 ### Implementation for User Story 4
 
-- [ ] T036 [US4] Create `frontend/src/components/UpdateBanner.vue` with dismissible alert
-- [ ] T037 [US4] Integrate UpdateBanner in `frontend/src/App.vue` or layout component
-- [ ] T038 [US4] Fetch update info from /api/v1/info on WebUI load
-- [ ] T039 [US4] Implement session-based dismiss (sessionStorage)
-- [ ] T040 [US4] Add link to GitHub releases page in banner
+- [x] T036 [US4] Create `frontend/src/components/UpdateBanner.vue` with dismissible alert
+- [x] T037 [US4] Integrate UpdateBanner in `frontend/src/App.vue` or layout component
+- [x] T038 [US4] Fetch update info from /api/v1/info on WebUI load
+- [x] T039 [US4] Implement session-based dismiss (sessionStorage)
+- [x] T040 [US4] Add link to GitHub releases page in banner
 
 **Checkpoint**: WebUI shows dismissible update banner
 
@@ -152,9 +152,9 @@
 
 ### Implementation for User Story 5
 
-- [ ] T041 [US5] Query /api/v1/info from doctor command (if server running) in `cmd/mcpproxy/doctor.go`
-- [ ] T042 [US5] Display "Version: vX.Y.Z (latest)" when up-to-date in `cmd/mcpproxy/doctor.go`
-- [ ] T043 [US5] Display "Version: vX.Y.Z (update available: vX.Y.Z)" with URL when update available in `cmd/mcpproxy/doctor.go`
+- [x] T041 [US5] Query /api/v1/info from doctor command (if server running) in `cmd/mcpproxy/doctor.go`
+- [x] T042 [US5] Display "Version: vX.Y.Z (latest)" when up-to-date in `cmd/mcpproxy/doctor.go`
+- [x] T043 [US5] Display "Version: vX.Y.Z (update available: vX.Y.Z)" with URL when update available in `cmd/mcpproxy/doctor.go`
 - [ ] T044 [US5] Handle case when server not running (show version only) in `cmd/mcpproxy/doctor.go`
 
 **Checkpoint**: CLI doctor shows version and update status
@@ -169,9 +169,9 @@
 
 ### Implementation for User Story 6
 
-- [ ] T045 [US6] Ensure tray update menu opens correct release URL (already in T033)
-- [ ] T046 [US6] Ensure WebUI banner link opens correct release URL (already in T040)
-- [ ] T047 [US6] Ensure doctor output includes correct release URL (already in T043)
+- [x] T045 [US6] Ensure tray update menu opens correct release URL (already in T033)
+- [x] T046 [US6] Ensure WebUI banner link opens correct release URL (already in T040)
+- [x] T047 [US6] Ensure doctor output includes correct release URL (already in T043)
 
 **Checkpoint**: All interfaces link to correct GitHub releases page
 
@@ -181,8 +181,8 @@
 
 **Purpose**: Documentation, OpenAPI spec, and final validation
 
-- [ ] T048 [P] Create `docs/features/version-updates.md` with user-facing documentation
-- [ ] T049 [P] Update `oas/swagger.yaml` with /api/v1/info response extension (update field)
+- [x] T048 [P] Create `docs/features/version-updates.md` with user-facing documentation
+- [x] T049 [P] Update `oas/swagger.yaml` with /api/v1/info response extension (update field)
 - [ ] T050 [P] Update `AUTOUPDATE.md` to reference new centralized approach
 - [ ] T051 Run `./scripts/run-linter.sh` and fix any issues
 - [ ] T052 Run `go test ./internal/updatecheck/... -v` to verify all unit tests pass

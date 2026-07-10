@@ -137,7 +137,7 @@
 ### Implementation for User Story 4
 
 - [x] T032 [US4] Add `resource` field to auth status output in cmd/mcpproxy/auth_cmd.go
-- [x] T033 [US4] Add resource parameter to doctor diagnostics in cmd/mcpproxy/doctor_cmd.go
+- [ ] T033 [US4] Add resource parameter to doctor diagnostics in cmd/mcpproxy/doctor_cmd.go
 - [x] T034 [US4] Test manually: `go build && ./mcpproxy auth status --server=test`
 
 **Checkpoint**: User Story 4 complete - Diagnostic commands show detected resource parameter ✅

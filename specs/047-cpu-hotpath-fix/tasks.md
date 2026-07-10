@@ -36,11 +36,11 @@ US1 alone delivers the core CPU win even before US2-5 ship. US2+US4+US5 together
 
 **Independent test**: Unit test mocks the storage layer with a call counter; asserts that 10 consecutive `GetScanSummary("never-scanned")` invocations result in exactly 1 storage call.
 
-- [ ] T002 [P] [US1] Add failing unit test `TestGetScanSummary_CachesNegativeResult` in `internal/security/scanner/service_test.go` that asserts a mock storage's call counter equals 1 after 10 consecutive `GetScanSummary("never-scanned")` calls.
-- [ ] T003 [P] [US1] Add failing unit test `TestGetScanSummary_DoesNotCacheOnTransientError` in `internal/security/scanner/service_test.go` that asserts non-`errNoScans` errors do **not** populate the cache.
-- [ ] T004 [P] [US1] Add failing unit test `TestGetScanSummary_OverwritesNilSentinelOnRealScan` in `internal/security/scanner/service_test.go` that asserts a real scan summary replaces the nil sentinel.
-- [ ] T005 [US1] Introduce `var errNoScans = errors.New("no scan jobs found for server")` in `internal/security/scanner/service.go`; have `findLatestPassJobs` return `errNoScans` for the empty-bucket case (replacing the current `fmt.Errorf` constructions on lines that say "no scan jobs found for server").
-- [ ] T006 [US1] In `internal/security/scanner/service.go` `GetScanSummary`, when `findLatestPassJobs` returns an error matching `errNoScans` via `errors.Is`, call `s.cacheScanSummary(serverName, nil)` before returning `nil`. Do not cache on any other error.
+- [x] T002 [P] [US1] Add failing unit test `TestGetScanSummary_CachesNegativeResult` in `internal/security/scanner/service_test.go` that asserts a mock storage's call counter equals 1 after 10 consecutive `GetScanSummary("never-scanned")` calls.
+- [x] T003 [P] [US1] Add failing unit test `TestGetScanSummary_DoesNotCacheOnTransientError` in `internal/security/scanner/service_test.go` that asserts non-`errNoScans` errors do **not** populate the cache.
+- [x] T004 [P] [US1] Add failing unit test `TestGetScanSummary_OverwritesNilSentinelOnRealScan` in `internal/security/scanner/service_test.go` that asserts a real scan summary replaces the nil sentinel.
+- [x] T005 [US1] Introduce `var errNoScans = errors.New("no scan jobs found for server")` in `internal/security/scanner/service.go`; have `findLatestPassJobs` return `errNoScans` for the empty-bucket case (replacing the current `fmt.Errorf` constructions on lines that say "no scan jobs found for server").
+- [x] T006 [US1] In `internal/security/scanner/service.go` `GetScanSummary`, when `findLatestPassJobs` returns an error matching `errNoScans` via `errors.Is`, call `s.cacheScanSummary(serverName, nil)` before returning `nil`. Do not cache on any other error.
 - [ ] T007 [US1] Run `go test -race ./internal/security/scanner/... -v` and confirm T002–T004 now pass.
 
 ## Phase 4 — US2: SSE `servers.changed` payload includes server list and stats
@@ -49,11 +49,11 @@ US1 alone delivers the core CPU win even before US2-5 ship. US2+US4+US5 together
 
 **Independent test**: Subscribe to a fake bus, trigger `emitServersChanged("test", nil)`, assert the published event's payload has non-nil `servers` and `stats` matching what `mgmt.ListServers` returned.
 
-- [ ] T008 [P] [US2] Add failing unit test `TestEmitServersChanged_PayloadIncludesServers` in `internal/runtime/event_bus_test.go` that asserts a published event has a non-nil `payload["servers"]` slice and `payload["stats"]` value, both reflecting a fake `mgmt.ListServers` return.
-- [ ] T009 [P] [US2] Add failing unit test `TestEmitServersChanged_FallsBackToNotifyOnlyWhenListServersFails` in the same file that asserts when `mgmt.ListServers` errors, the event still publishes with just `payload["reason"]` (no `servers` key) and a Warn log line is emitted.
-- [ ] T010 [P] [US2] Add failing unit test `TestEmitServersChanged_RedactsSensitiveHeaders` in the same file that asserts header values matching the existing redaction predicate appear masked in `payload["servers"]`.
-- [ ] T011 [US2] In `internal/runtime/event_bus.go` `emitServersChanged`, after merging `extra` and setting `reason`, call the management service's `ListServers` (use the existing `r.mgmt` or equivalent injection point on `*Runtime`). On success, set `payload["servers"] = redactServerHeaders(servers)` and `payload["stats"] = stats`. On error, log Warn and skip the keys.
-- [ ] T012 [US2] If `redactServerHeaders` is currently package-private to `httpapi`, hoist a copy into `internal/runtime/redaction.go` (or expose via a small adapter) so the runtime can call it without circular import. Keep behavior identical to the HTTP handler.
+- [x] T008 [P] [US2] Add failing unit test `TestEmitServersChanged_PayloadIncludesServers` in `internal/runtime/event_bus_test.go` that asserts a published event has a non-nil `payload["servers"]` slice and `payload["stats"]` value, both reflecting a fake `mgmt.ListServers` return.
+- [x] T009 [P] [US2] Add failing unit test `TestEmitServersChanged_FallsBackToNotifyOnlyWhenListServersFails` in the same file that asserts when `mgmt.ListServers` errors, the event still publishes with just `payload["reason"]` (no `servers` key) and a Warn log line is emitted.
+- [x] T010 [P] [US2] Add failing unit test `TestEmitServersChanged_RedactsSensitiveHeaders` in the same file that asserts header values matching the existing redaction predicate appear masked in `payload["servers"]`.
+- [x] T011 [US2] In `internal/runtime/event_bus.go` `emitServersChanged`, after merging `extra` and setting `reason`, call the management service's `ListServers` (use the existing `r.mgmt` or equivalent injection point on `*Runtime`). On success, set `payload["servers"] = redactServerHeaders(servers)` and `payload["stats"] = stats`. On error, log Warn and skip the keys.
+- [x] T012 [US2] If `redactServerHeaders` is currently package-private to `httpapi`, hoist a copy into `internal/runtime/redaction.go` (or expose via a small adapter) so the runtime can call it without circular import. Keep behavior identical to the HTTP handler.
 - [ ] T013 [US2] Run `go test -race ./internal/runtime/... -v` and confirm T008–T010 pass.
 
 ## Phase 5 — US3: Coalesce `servers.changed` bursts
@@ -62,13 +62,13 @@ US1 alone delivers the core CPU win even before US2-5 ship. US2+US4+US5 together
 
 **Independent test**: Fire 100 calls within 10 ms; assert the bus receives exactly 1 event in the next 50 ms whose `reason` matches the *last* call's reason.
 
-- [ ] T014 [P] [US3] Add failing unit test `TestCoalescer_CollapsesBurstToSingleEvent` in `internal/runtime/coalescer_test.go` (new file) using a fake clock + `flushNow()` hook to drive the drainer deterministically.
-- [ ] T015 [P] [US3] Add failing unit test `TestCoalescer_LastWriteWins` asserting the published event's `reason` equals the last submitted call's reason.
-- [ ] T016 [P] [US3] Add failing unit test `TestCoalescer_FlushesOnShutdown` asserting a final event publishes when the runtime's stop is invoked while one is pending.
-- [ ] T017 [P] [US3] Add failing unit test `TestCoalescer_NoStarvationOnSingleEvent` asserting a single submitted event publishes within ~1 interval period.
-- [ ] T018 [US3] In `internal/runtime/event_bus.go`, add `serversChangedCoalescer` struct with `pending atomic.Pointer[Event]`, `wake chan struct{}`, `interval time.Duration`, plus methods `submit(*Event)`, `flushNow()` (test hook), and a private drainer goroutine that loops on `select { case <-time.After(interval): ...; case <-r.shutdown: ... }`.
-- [ ] T019 [US3] In `internal/runtime/runtime.go`, instantiate the coalescer in `Runtime.New` (interval 50 ms), start the drainer in `Runtime.Start`, and stop it in `Runtime.Stop` (final flush, then exit).
-- [ ] T020 [US3] In `emitServersChanged`, replace the direct `r.publishEvent` call with `r.coalescer.submit(newEvent(EventTypeServersChanged, payload))`.
+- [x] T014 [P] [US3] Add failing unit test `TestCoalescer_CollapsesBurstToSingleEvent` in `internal/runtime/coalescer_test.go` (new file) using a fake clock + `flushNow()` hook to drive the drainer deterministically.
+- [x] T015 [P] [US3] Add failing unit test `TestCoalescer_LastWriteWins` asserting the published event's `reason` equals the last submitted call's reason.
+- [x] T016 [P] [US3] Add failing unit test `TestCoalescer_FlushesOnShutdown` asserting a final event publishes when the runtime's stop is invoked while one is pending.
+- [x] T017 [P] [US3] Add failing unit test `TestCoalescer_NoStarvationOnSingleEvent` asserting a single submitted event publishes within ~1 interval period.
+- [x] T018 [US3] In `internal/runtime/event_bus.go`, add `serversChangedCoalescer` struct with `pending atomic.Pointer[Event]`, `wake chan struct{}`, `interval time.Duration`, plus methods `submit(*Event)`, `flushNow()` (test hook), and a private drainer goroutine that loops on `select { case <-time.After(interval): ...; case <-r.shutdown: ... }`.
+- [x] T019 [US3] In `internal/runtime/runtime.go`, instantiate the coalescer in `Runtime.New` (interval 50 ms), start the drainer in `Runtime.Start`, and stop it in `Runtime.Stop` (final flush, then exit).
+- [x] T020 [US3] In `emitServersChanged`, replace the direct `r.publishEvent` call with `r.coalescer.submit(newEvent(EventTypeServersChanged, payload))`.
 - [ ] T021 [US3] Run `go test -race ./internal/runtime/... -v` and confirm T014–T017 pass.
 
 ## Phase 6 — US4: Swift tray consumes embedded payload (with refetch fallback)
@@ -79,8 +79,8 @@ US1 alone delivers the core CPU win even before US2-5 ship. US2+US4+US5 together
 
 - [ ] T022 [P] [US4] Add failing XCTest in `native/macos/MCPProxy/MCPProxyTests/SSEHandlerTests.swift` (new file) named `testServersChangedWithPayloadUpdatesStateWithoutRefetch`.
 - [ ] T023 [P] [US4] Add failing XCTest `testServersChangedWithoutPayloadFallsBackToRefetch` in the same file.
-- [ ] T024 [US4] In `native/macos/MCPProxy/MCPProxy/Core/CoreProcessManager.swift`, modify the `case "servers.changed":` branch of `handleSSEEvent`. Decode the event's `payload` field; if `payload.servers` is present and non-null, decode into `[Server]` (existing struct from `API/Models.swift`), update `appState.servers` on the main actor, and skip the `refreshServers()` call. Otherwise, keep current behavior.
-- [ ] T025 [US4] Update `native/macos/MCPProxy/MCPProxy/API/Models.swift` if needed to add a `ServersChangedPayload` decode struct with `servers: [Server]?` and `stats: ServerStats?` (both optional for forward compat).
+- [x] T024 [US4] In `native/macos/MCPProxy/MCPProxy/Core/CoreProcessManager.swift`, modify the `case "servers.changed":` branch of `handleSSEEvent`. Decode the event's `payload` field; if `payload.servers` is present and non-null, decode into `[Server]` (existing struct from `API/Models.swift`), update `appState.servers` on the main actor, and skip the `refreshServers()` call. Otherwise, keep current behavior.
+- [x] T025 [US4] Update `native/macos/MCPProxy/MCPProxy/API/Models.swift` if needed to add a `ServersChangedPayload` decode struct with `servers: [Server]?` and `stats: ServerStats?` (both optional for forward compat).
 - [ ] T026 [US4] Build the tray binary (see `quickstart.md`) and confirm it runs against the v0 core (notify-only path) and the v1 core (payload path).
 
 ## Phase 7 — US5: Web UI consumes embedded payload (with refetch fallback)
@@ -91,7 +91,7 @@ US1 alone delivers the core CPU win even before US2-5 ship. US2+US4+US5 together
 
 - [ ] T027 [P] [US5] Add failing Vitest in `frontend/src/__tests__/sse-handler.test.ts` (or the existing equivalent path) named `'servers.changed with payload updates store without refetch'`.
 - [ ] T028 [P] [US5] Add failing Vitest `'servers.changed without payload falls back to fetch'` in the same file.
-- [ ] T029 [US5] Locate the SSE handler (likely `frontend/src/composables/useEventStream.ts` or `frontend/src/stores/server.ts`); modify the `servers.changed` branch to decode `payload.servers` / `payload.stats`, write to the store directly, and skip the refetch when both are present.
+- [x] T029 [US5] Locate the SSE handler (likely `frontend/src/composables/useEventStream.ts` or `frontend/src/stores/server.ts`); modify the `servers.changed` branch to decode `payload.servers` / `payload.stats`, write to the store directly, and skip the refetch when both are present.
 - [ ] T030 [US5] Run `npm run test --prefix frontend` and confirm T027–T028 pass.
 
 ## Phase 8 — Polish & Verification

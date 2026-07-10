@@ -43,19 +43,19 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T011 Create sessions BBolt bucket initialization in internal/storage/manager.go
-- [ ] T012 Implement CreateSession storage method in internal/storage/manager.go
-- [ ] T013 Implement CloseSession storage method in internal/storage/manager.go
-- [ ] T014 Implement GetRecentSessions storage method in internal/storage/manager.go
-- [ ] T015 Implement GetSessionByID storage method in internal/storage/manager.go
-- [ ] T016 Implement UpdateSessionStats storage method in internal/storage/manager.go
-- [ ] T017 Implement session retention cleanup (keep 100 most recent) in internal/storage/manager.go
+- [x] T011 Create sessions BBolt bucket initialization in internal/storage/manager.go
+- [x] T012 Implement CreateSession storage method in internal/storage/manager.go
+- [x] T013 Implement CloseSession storage method in internal/storage/manager.go
+- [x] T014 Implement GetRecentSessions storage method in internal/storage/manager.go
+- [x] T015 Implement GetSessionByID storage method in internal/storage/manager.go
+- [x] T016 Implement UpdateSessionStats storage method in internal/storage/manager.go
+- [x] T017 Implement session retention cleanup (keep 100 most recent) in internal/storage/manager.go
 - [ ] T018 [P] Write unit tests for session storage operations in internal/storage/session_test.go
-- [ ] T019 Extend SessionStore to persist sessions to storage in internal/server/session_store.go
-- [ ] T020 Add session lifecycle hooks (create on initialize, close on disconnect) in internal/server/mcp.go
-- [ ] T021 [P] Add sessions API route registration in internal/httpapi/server.go
-- [ ] T022 Implement handleGetSessions endpoint in internal/httpapi/server.go
-- [ ] T023 Implement handleGetSessionDetail endpoint in internal/httpapi/server.go
+- [x] T019 Extend SessionStore to persist sessions to storage in internal/server/session_store.go
+- [x] T020 Add session lifecycle hooks (create on initialize, close on disconnect) in internal/server/mcp.go
+- [x] T021 [P] Add sessions API route registration in internal/httpapi/server.go
+- [x] T022 Implement handleGetSessions endpoint in internal/httpapi/server.go
+- [x] T023 Implement handleGetSessionDetail endpoint in internal/httpapi/server.go
 - [ ] T024 [P] Write integration tests for session API endpoints in internal/httpapi/session_test.go
 
 **Checkpoint**: Foundation ready - user story implementation can now begin
@@ -70,12 +70,12 @@
 
 ### Implementation for User Story 1
 
-- [ ] T025 [P] [US1] Propagate tool annotations from mcp-go SDK through tool listing in internal/runtime/runtime.go
-- [ ] T026 [P] [US1] Include annotations in tool API responses in internal/httpapi/server.go
-- [ ] T027 [P] [US1] Create AnnotationBadges.vue component in frontend/src/components/AnnotationBadges.vue
-- [ ] T028 [US1] Add annotation badges to tool cards in frontend/src/views/ServerDetail.vue
-- [ ] T029 [US1] Style annotation badges with DaisyUI classes (info/error/neutral/secondary) in AnnotationBadges.vue
-- [ ] T030 [US1] Handle tools without annotations gracefully (no badges displayed) in ServerDetail.vue
+- [x] T025 [P] [US1] Propagate tool annotations from mcp-go SDK through tool listing in internal/runtime/runtime.go
+- [x] T026 [P] [US1] Include annotations in tool API responses in internal/httpapi/server.go
+- [x] T027 [P] [US1] Create AnnotationBadges.vue component in frontend/src/components/AnnotationBadges.vue
+- [x] T028 [US1] Add annotation badges to tool cards in frontend/src/views/ServerDetail.vue
+- [x] T029 [US1] Style annotation badges with DaisyUI classes (info/error/neutral/secondary) in AnnotationBadges.vue
+- [x] T030 [US1] Handle tools without annotations gracefully (no badges displayed) in ServerDetail.vue
 
 **Checkpoint**: User Story 1 complete - tool annotations visible on server details page
 
@@ -89,10 +89,10 @@
 
 ### Implementation for User Story 2
 
-- [ ] T031 [US2] Capture tool annotations when recording tool calls in internal/server/mcp.go
-- [ ] T032 [US2] Lookup tool annotations from server's tool list in RecordToolCall function
-- [ ] T033 [US2] Add compact mode prop to AnnotationBadges.vue for icon-only display
-- [ ] T034 [US2] Add tooltip support to compact annotation icons in AnnotationBadges.vue
+- [x] T031 [US2] Capture tool annotations when recording tool calls in internal/server/mcp.go
+- [x] T032 [US2] Lookup tool annotations from server's tool list in RecordToolCall function
+- [x] T033 [US2] Add compact mode prop to AnnotationBadges.vue for icon-only display
+- [x] T034 [US2] Add tooltip support to compact annotation icons in AnnotationBadges.vue
 - [ ] T035 [US2] Integrate compact AnnotationBadges in tool call history rows in frontend/src/views/ToolCalls.vue
 - [ ] T036 [US2] Ensure compact indicators don't exceed 30% of row width in ToolCalls.vue
 
@@ -108,8 +108,8 @@
 
 ### Implementation for User Story 3
 
-- [ ] T037 [US3] Add getSessions API method to frontend/src/services/api.ts
-- [ ] T038 [US3] Add getSession API method to frontend/src/services/api.ts
+- [x] T037 [US3] Add getSessions API method to frontend/src/services/api.ts
+- [x] T038 [US3] Add getSession API method to frontend/src/services/api.ts
 - [ ] T039 [P] [US3] Create SessionsTable.vue component in frontend/src/components/SessionsTable.vue
 - [ ] T040 [US3] Implement session row display with all columns (status, client, start time, duration, calls, tokens)
 - [ ] T041 [US3] Add duration calculation for active sessions (elapsed time) in SessionsTable.vue
@@ -118,7 +118,7 @@
 - [ ] T044 [US3] Handle missing client name with graceful placeholder in SessionsTable.vue
 - [ ] T045 [US3] Make session rows clickable with navigation to filtered history in SessionsTable.vue
 - [ ] T046 [US3] Integrate SessionsTable component into frontend/src/views/Dashboard.vue
-- [ ] T047 [US3] Implement 30-second polling for active session updates in Dashboard.vue
+- [x] T047 [US3] Implement 30-second polling for active session updates in Dashboard.vue
 
 **Checkpoint**: User Story 3 complete - sessions dashboard table functional
 
@@ -132,8 +132,8 @@
 
 ### Implementation for User Story 4
 
-- [ ] T048 [US4] Implement GetToolCallsBySession storage method in internal/storage/manager.go
-- [ ] T049 [US4] Add session_id query parameter support to handleGetToolCalls in internal/httpapi/server.go
+- [x] T048 [US4] Implement GetToolCallsBySession storage method in internal/storage/manager.go
+- [x] T049 [US4] Add session_id query parameter support to handleGetToolCalls in internal/httpapi/server.go
 - [ ] T050 [US4] Add getToolCalls sessionId parameter to frontend/src/services/api.ts
 - [ ] T051 [P] [US4] Create SessionFilter.vue dropdown component in frontend/src/components/SessionFilter.vue
 - [ ] T052 [US4] Integrate SessionFilter component into frontend/src/views/ToolCalls.vue
