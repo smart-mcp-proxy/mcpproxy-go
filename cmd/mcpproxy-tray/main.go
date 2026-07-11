@@ -1732,6 +1732,18 @@ func (cpl *CoreProcessLauncher) buildCoreEnvironment() []string {
 		"MCPPROXY_ENABLE_TRAY=false",
 		fmt.Sprintf("MCPPROXY_API_KEY=%s", trayAPIKey))
 
+	// Tell the core it was launched by the tray, so telemetry's launch_source
+	// can say so. Without this a tray-spawned core is unclassifiable: its parent
+	// is the tray (not launchd, so not login_item) and it has no TTY (so not
+	// cli), leaving launch_source "unknown".
+	//
+	// The installer launches the tray with MCPPROXY_LAUNCHED_BY=installer and
+	// the core inherits it through os.Environ() above; that first-run
+	// attribution outranks "tray", so we must not overwrite it.
+	if strings.TrimSpace(os.Getenv("MCPPROXY_LAUNCHED_BY")) != "installer" {
+		filtered = append(filtered, "MCPPROXY_LAUNCHED_BY=tray")
+	}
+
 	// Pass through TLS configuration if set
 	if tlsEnabled := strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")); tlsEnabled != "" {
 		filtered = append(filtered, fmt.Sprintf("MCPPROXY_TLS_ENABLED=%s", tlsEnabled))

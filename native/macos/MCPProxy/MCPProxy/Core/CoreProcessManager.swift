@@ -333,6 +333,17 @@ actor CoreProcessManager {
         // explicitly opened the GUI app, so OS prompts are expected.
         // See issue #409 / internal/secret/keyring_provider.go.
         env["MCPPROXY_KEYRING_WRITE"] = "1"
+        // Tell the core it was launched by the tray, so telemetry's launch_source
+        // can say so. Without this a tray-spawned core is unclassifiable: its
+        // parent is this app (not launchd, so not login_item) and it has no TTY
+        // (so not cli), leaving launch_source "unknown".
+        //
+        // The DMG installer launches this app with MCPPROXY_LAUNCHED_BY=installer
+        // (packaging/macos/postinstall.sh); that first-run attribution outranks
+        // "tray", so do not overwrite it.
+        if env["MCPPROXY_LAUNCHED_BY"] != "installer" {
+            env["MCPPROXY_LAUNCHED_BY"] = "tray"
+        }
         proc.environment = env
 
         // Capture stderr for error diagnostics

@@ -128,6 +128,41 @@ func TestRetrieveTools_HooksActivation(t *testing.T) {
 	require.NoError(t, err)
 	after2 := loadActivationFromRuntime(t, rt)
 	require.Equal(t, 2, after2.RetrieveToolsCalls24h)
+
+	// retrieve_tools is a BUILT-IN tool, not a proxied upstream call, so it must
+	// NOT set the real-call flag. If it did, the retrieve→call funnel would
+	// report 100% conversion for every user who ever searched.
+	require.False(t, after2.FirstRealToolCallEver,
+		"retrieve_tools must not mark first_real_tool_call_ever — it is a builtin, not an upstream call")
+}
+
+// recordUpstreamTool (the shared entry point of every call_tool_* variant)
+// marks the lifetime first_real_tool_call_ever flag — the counterpart of
+// first_retrieve_tools_call_ever, so the retrieve→call funnel step is
+// measurable lifetime-against-lifetime.
+func TestRealToolCall_MarksFirstRealToolCallEver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration — needs full runtime + index + cache")
+	}
+	proxy, rt, _ := buildMCPProxyWithActivation(t)
+
+	before := loadActivationFromRuntime(t, rt)
+	require.False(t, before.FirstRealToolCallEver)
+
+	// Exercise the exact hook every call_tool_read/write/destructive variant
+	// runs, without needing a live upstream server: handleCallToolVariant calls
+	// recordUpstreamTool() before it ever touches the upstream.
+	proxy.recordUpstreamTool()
+
+	after := loadActivationFromRuntime(t, rt)
+	require.True(t, after.FirstRealToolCallEver,
+		"an upstream tool call must mark first_real_tool_call_ever=true")
+
+	// Monotonic: the flag is lifetime, so a second call keeps it true and
+	// never reverts.
+	proxy.recordUpstreamTool()
+	after2 := loadActivationFromRuntime(t, rt)
+	require.True(t, after2.FirstRealToolCallEver)
 }
 
 // T030: AfterInitialize hook records clientInfo.name via the runtime helper.

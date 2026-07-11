@@ -476,8 +476,17 @@ func (p *MCPProxyServer) recordBuiltinTool(name string) {
 
 // recordUpstreamTool increments the upstream tool call counter without ever
 // recording the tool name. Spec 042 User Story 2.
+//
+// It also marks the lifetime first_real_tool_call_ever activation flag, the
+// counterpart of first_retrieve_tools_call_ever, so the retrieve→call funnel
+// step can be measured lifetime-against-lifetime instead of against a 24h
+// counter. nil-safe.
 func (p *MCPProxyServer) recordUpstreamTool() {
 	telemetry.RecordUpstreamToolOn(p.telemetryRegistry())
+
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.RecordRealToolCallForActivation()
+	}
 }
 
 // emitActivityEvent safely emits an activity event if runtime is available

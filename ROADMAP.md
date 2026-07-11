@@ -179,41 +179,6 @@ graph LR
 </details>
 
 <details>
-<summary>🔵 Telemetry v7: honest funnel + churn instrumentation — In progress · P0</summary>
-
-> 2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity).
-
-Spec: [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/)
-
-```mermaid
-graph LR
-  telemetry_v7_wizard_fix["T1: wizard metric fix - on dismiss record con…"]
-  telemetry_v7_funnel_fields["T2: funnel observability fields (wizard_shown…"]
-  telemetry_v7_prechurn_snapshot["T3: pre-churn snapshot (previous_shutdown cle…"]
-  telemetry_v7_realcall_flag["first_real_tool_call_ever activation flag (sy…"]
-  telemetry_v7_churn_events["T4: cross-repo churn_events materialization +…"]
-
-  telemetry_v7_wizard_fix --> telemetry_v7_churn_events
-  telemetry_v7_funnel_fields --> telemetry_v7_churn_events
-  telemetry_v7_prechurn_snapshot --> telemetry_v7_churn_events
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class telemetry_v7_wizard_fix,telemetry_v7_funnel_fields,telemetry_v7_prechurn_snapshot done;
-  class telemetry_v7_realcall_flag,telemetry_v7_churn_events todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path | 🟢 Done | #813 |
-| T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d) | 🟢 Done | #813 |
-| T3: pre-churn snapshot (previous_shutdown clean\|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death | 🟢 Done | #813 |
-| first_real_tool_call_ever activation flag (symmetric to first_retrieve_tools_call_ever) so the retrieve->call funnel step is measurable lifetime-vs-lifetime | ⚪ Todo | — |
-| T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080) | ⚪ Todo | — |
-
-</details>
-
-<details>
 <summary>🔵 Analytics dashboard as default page — In progress · P1</summary>
 
 > Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done; only the default-landing half remains.
@@ -243,21 +208,23 @@ graph LR
 <details>
 <summary>🔵 Telemetry identity &amp; data quality (machine_id + CI-filter hardening) — In progress · P1</summary>
 
-> Heartbeat lacks a stable identity, so active-install counts are inflated by CI/dev churn and launch_source is 79% unknown. Add a hashed machine_id (schema v6) and harden the worker/dashboard cohort filters. Spans repos mcpproxy-go (client), mcpproxy-telemetry (worker), mcpproxy-dash (dashboard).
+> 2026-07-11 source audit: the CLIENT half is DONE and RELEASED — the old framing ('add a hashed machine_id (schema v6)') is stale. machine_id (HMAC-SHA256 of the OS machine id, internal/telemetry/machine_id.go) is emitted unconditionally in every heartbeat (telemetry.go:789; telemetry is opt-out) and shipped in v0.47.0; the client schema is already v7, a version past the v6 this note described; CI is filtered client-side by disabling telemetry outright (env_overrides.go). Worker verified live in prod 2026-07-07 (machine_id 100% populated). The audit also found that the 79%-unknown launch_source was a CLIENT bug misfiled to mcpproxy-dash — a dashboard cannot display a value the client is incapable of sending. That is now fixed (see telemetry-launchsource-tray). Remaining: dashboard consumption (mcpproxy-dash) + snapshot-cron alerting.
 
 ```mermaid
 graph LR
   telemetry_machineid_client["Hashed machine_id in heartbeat (schema v6)"]
   telemetry_machineid_worker["Worker migration: machine_id column + extract…"]
+  telemetry_launchsource_tray["Emit launch_source=tray — the 'tray' value wa…"]
   telemetry_machineid_dash["Dashboard identityExpr prefers machine_id; ex…"]
   telemetry_snapshot_alerting["Alerting on external-downloads snapshot cron…"]
 
   telemetry_machineid_client --> telemetry_machineid_worker
   telemetry_machineid_worker --> telemetry_machineid_dash
+  telemetry_launchsource_tray --> telemetry_machineid_dash
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class telemetry_machineid_client,telemetry_machineid_worker done;
+  class telemetry_machineid_client,telemetry_machineid_worker,telemetry_launchsource_tray done;
   class telemetry_machineid_dash,telemetry_snapshot_alerting todo;
 ```
 
@@ -265,8 +232,44 @@ graph LR
 | --- | --- | --- |
 | Hashed machine_id in heartbeat (schema v6) | 🟢 Done | https://github.com/smart-mcp-proxy/mcpproxy-go/pull/796 |
 | Worker migration: machine_id column + extraction (repo mcpproxy-telemetry) | 🟢 Done | mcpproxy-telemetry#3 |
-| Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash) | ⚪ Todo | — |
+| Emit launch_source=tray — the 'tray' value was UNREACHABLE in the client, and that (not the dashboard) was the 79%-unknown root cause | 🟢 Done | — |
+| Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort (repo mcpproxy-dash) | ⚪ Todo | — |
 | Alerting on external-downloads snapshot cron (34-day outage went unnoticed) | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Telemetry v7: honest funnel + churn instrumentation — In progress · P1</summary>
+
+> 2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. 2026-07-11 source audit + fix: ALL of spec 080 is shipped and released in v0.47.0 (#813) — T1 wizard completed_external, T2 funnel fields, T3 pre-churn snapshot, US4 schema v7. The previous note claimed 'only cross-repo churn analytics (T4) remains'; that was WRONG — first_real_tool_call_ever had ZERO occurrences in Go code and was in-repo CLIENT work. It is now implemented, so the retrieve->call funnel is finally measurable lifetime-vs-lifetime. P0->P1: only cross-repo T4 now remains.
+
+Spec: [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/)
+
+```mermaid
+graph LR
+  telemetry_v7_wizard_fix["T1: wizard metric fix - on dismiss record con…"]
+  telemetry_v7_funnel_fields["T2: funnel observability fields (wizard_shown…"]
+  telemetry_v7_prechurn_snapshot["T3: pre-churn snapshot (previous_shutdown cle…"]
+  telemetry_v7_realcall_flag["first_real_tool_call_ever activation flag (sy…"]
+  telemetry_v7_churn_events["T4: cross-repo churn_events materialization +…"]
+
+  telemetry_v7_wizard_fix --> telemetry_v7_churn_events
+  telemetry_v7_funnel_fields --> telemetry_v7_churn_events
+  telemetry_v7_prechurn_snapshot --> telemetry_v7_churn_events
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class telemetry_v7_wizard_fix,telemetry_v7_funnel_fields,telemetry_v7_prechurn_snapshot,telemetry_v7_realcall_flag done;
+  class telemetry_v7_churn_events todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path | 🟢 Done | #813 |
+| T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d) | 🟢 Done | #813 |
+| T3: pre-churn snapshot (previous_shutdown clean\|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death | 🟢 Done | #813 |
+| first_real_tool_call_ever activation flag (symmetric to first_retrieve_tools_call_ever) so the retrieve->call funnel step is measurable lifetime-vs-lifetime | 🟢 Done | — |
+| T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080) | ⚪ Todo | — |
 
 </details>
 
@@ -624,9 +627,9 @@ graph LR
 | Upgrade awareness & guided update | In progress | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Connect step trust: preview, visible backup, one-click undo | In progress | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
-| Telemetry v7: honest funnel + churn instrumentation | In progress | P0 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
+| Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | Windows native tray app `MCP-43` | In review | P2 | — |  |  |
 | MCP protocol upgrade to 2026-07-28 revision | Blocked | P3 | — | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |

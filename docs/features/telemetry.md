@@ -102,6 +102,26 @@ The onboarding connect-step status (a v4 field) gains a fourth value in v7:
 
 Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` + `last_error_code` let the final heartbeat before an install goes silent distinguish "crashed and never came back" from "exited cleanly and never returned".
 
+### Activation: `first_real_tool_call_ever`
+
+The `activation` block gains one additive boolean:
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `first_real_tool_call_ever` | boolean | `true` once this install has proxied at least one **real** tool call to an upstream server (any `call_tool_read` / `call_tool_write` / `call_tool_destructive`). Built-in tools such as `retrieve_tools` do **not** set it. Monotonic and lifetime-scoped, exactly like `first_retrieve_tools_call_ever` | A single boolean about our own funnel; no tool name, server, or arguments |
+
+**Why it exists.** The retrieve→call funnel used to compare a *lifetime* flag (`first_retrieve_tools_call_ever`) against a *24h windowed* counter (`retrieve_tools_calls_24h` / upstream-call counters). That asymmetry made conversion look like a cliff ("42% search → 16% call") when the true lifetime-vs-lifetime conversion is far higher. This flag is the missing symmetric term.
+
+**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`. Do **not** compare either lifetime flag against a windowed counter.
+
+### `launch_source` = `tray`
+
+`launch_source` is a v3 field, but its `tray` value was **unreachable in practice until now**: a tray-spawned core has the tray app as its parent (not `launchd`, so not `login_item`) and no TTY (so not `cli`), and nothing told it otherwise — so it fell through to `unknown`. That is why `launch_source` was ~79% `unknown` on the flagship macOS path.
+
+Both trays now stamp `MCPPROXY_LAUNCHED_BY=tray` on the core process they spawn, and the core honours it. The DMG installer's `MCPPROXY_LAUNCHED_BY=installer` still outranks it, so first-run attribution is unchanged.
+
+**Guidance for consumers**: `unknown` counts from before this fix are not comparable with counts after it — segment by version.
+
 All v7 fields ride the **same opt-out** as the rest of the heartbeat: when telemetry is disabled, nothing is transmitted. Local counters may still persist on disk (so re-enabling doesn't fabricate a fresh-install picture), but they never leave the machine.
 
 You can inspect exactly what would be sent — including every v7 field — with:
