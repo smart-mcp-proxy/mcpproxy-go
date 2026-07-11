@@ -694,6 +694,7 @@ import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import { buildSessionLabels } from '@/utils/sessionLabel'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -766,27 +767,58 @@ interface SessionOption {
   id: string
   label: string
   clientName?: string
+  startTime?: string
 }
+
+// Client identity lives on the session record, not the activity record — an
+// activity row only carries session_id. We join the two here so the filter can
+// show "Claude Code · 14:32" instead of an opaque "...139c9".
+const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string }>())
+
+const loadSessions = async () => {
+  try {
+    const response = await api.getSessions(100)
+    const next = new Map<string, { clientName?: string; startTime?: string }>()
+    for (const s of response.data?.sessions ?? []) {
+      next.set(s.id, { clientName: s.client_name, startTime: s.start_time })
+    }
+    sessionInfo.value = next
+  } catch {
+    // Non-fatal: without session metadata the filter degrades to id suffixes,
+    // which is exactly the previous behaviour. Never block the activity log.
+  }
+}
+
 const availableSessions = computed((): SessionOption[] => {
-  const sessionsMap = new Map<string, { clientName?: string }>()
+  const seen = new Map<string, { clientName?: string; startTime?: string }>()
   activities.value.forEach(a => {
-    if (a.session_id && !sessionsMap.has(a.session_id)) {
-      // Try to get client name from metadata or any available source
-      const clientName = a.metadata?.client_name as string | undefined
-      sessionsMap.set(a.session_id, { clientName })
+    if (a.session_id && !seen.has(a.session_id)) {
+      const info = sessionInfo.value.get(a.session_id)
+      seen.set(a.session_id, {
+        // Prefer the session record; fall back to metadata for records that
+        // carry it, then to nothing (→ id suffix).
+        clientName: info?.clientName ?? (a.metadata?.client_name as string | undefined),
+        startTime: info?.startTime ?? a.timestamp,
+      })
     }
   })
 
-  return Array.from(sessionsMap.entries())
-    .map(([sessionId, info]) => {
-      // Format: "ClientName ...12345" or "...12345" if no client name
-      const suffix = sessionId.slice(-5)
-      const label = info.clientName
-        ? `${info.clientName} ...${suffix}`
-        : `...${suffix}`
-      return { id: sessionId, label, clientName: info.clientName }
-    })
-    .sort((a, b) => a.label.localeCompare(b.label))
+  const entries = Array.from(seen.entries()).map(([sessionId, info]) => ({
+    sessionId,
+    clientName: info.clientName,
+    startTime: info.startTime,
+  }))
+  const labels = buildSessionLabels(entries)
+
+  return entries
+    .map(e => ({
+      id: e.sessionId,
+      label: labels.get(e.sessionId) ?? `...${e.sessionId.slice(-5)}`,
+      clientName: e.clientName,
+      startTime: e.startTime,
+    }))
+    // Most recent session first — in a session picker, recency beats alphabet.
+    .sort((a, b) => (b.startTime ?? '').localeCompare(a.startTime ?? ''))
 })
 
 // Get session label by ID for display in Active Filters
@@ -1191,6 +1223,7 @@ onMounted(() => {
   }
 
   loadActivities()
+  loadSessions()
 
   // Listen for SSE activity events
   window.addEventListener('mcpproxy:activity', handleActivityEvent as EventListener)

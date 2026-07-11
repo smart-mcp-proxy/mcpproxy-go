@@ -265,6 +265,18 @@
             </li>
             <li>
               <router-link
+                to="/sessions"
+                :class="{ 'active': isActiveRoute('/sessions') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Sessions' : ''"
+                data-test="sidebar-sessions"
+              >
+                <IconSessions class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Sessions</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
                 to="/activity"
                 :class="{ 'active': isActiveRoute('/activity') }"
                 class="rounded-lg font-medium"
@@ -541,6 +553,10 @@ const IconTokens = makeIcon(
 )
 const IconActivity = makeIcon(
   'M4 12h3l3-8 4 16 3-8h3'
+)
+// Two chat bubbles — a session is one AI client's conversation with the proxy.
+const IconSessions = makeIcon(
+  'M8 10h8M8 14h5M4 5a1 1 0 011-1h14a1 1 0 011 1v10a1 1 0 01-1 1H9l-5 4V5z'
 )
 const IconShield = makeIcon(
   'M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3zm-3 9l2 2 4-4'
