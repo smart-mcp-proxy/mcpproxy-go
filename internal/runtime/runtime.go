@@ -2653,6 +2653,30 @@ func (r *Runtime) RecordRetrieveToolsCallForActivation() {
 	}
 }
 
+// RecordRealToolCallForActivation marks the first-ever real (upstream) tool
+// call. "Real" means a call proxied to an upstream server, as opposed to a
+// built-in tool such as retrieve_tools.
+//
+// This is the lifetime counterpart of RecordRetrieveToolsCallForActivation.
+// Until it existed, the retrieve step had a lifetime flag while the call step
+// had only a windowed counter, so the retrieve→call funnel compared a
+// lifetime value against a 24h one and understated conversion badly.
+//
+// No-op if the activation store is not wired.
+func (r *Runtime) RecordRealToolCallForActivation() {
+	if r.telemetryService == nil {
+		return
+	}
+	store := r.telemetryService.ActivationStore()
+	db := r.telemetryService.ActivationDB()
+	if store == nil || db == nil {
+		return
+	}
+	if err := store.MarkFirstRealToolCall(db); err != nil {
+		r.logger.Debug("activation: MarkFirstRealToolCall failed", zap.Error(err))
+	}
+}
+
 // RecordTokensSavedForActivation adds n to the 24h tokens-saved estimator.
 // n <= 0 is a no-op. Spec 044 US2.
 func (r *Runtime) RecordTokensSavedForActivation(n int) {

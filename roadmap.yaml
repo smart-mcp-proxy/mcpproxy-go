@@ -370,7 +370,7 @@ epics:
     status: in_progress
     priority: P1
     depends_on: []
-    note: "Heartbeat lacks a stable identity, so active-install counts are inflated by CI/dev churn and launch_source is 79% unknown. Add a hashed machine_id (schema v6) and harden the worker/dashboard cohort filters. Spans repos mcpproxy-go (client), mcpproxy-telemetry (worker), mcpproxy-dash (dashboard)."
+    note: "2026-07-11 source audit: the CLIENT half is DONE and RELEASED — the old framing ('add a hashed machine_id (schema v6)') is stale. machine_id (HMAC-SHA256 of the OS machine id, internal/telemetry/machine_id.go) is emitted unconditionally in every heartbeat (telemetry.go:789; telemetry is opt-out) and shipped in v0.47.0; the client schema is already v7, a version past the v6 this note described; CI is filtered client-side by disabling telemetry outright (env_overrides.go). Worker verified live in prod 2026-07-07 (machine_id 100% populated). The audit also found that the 79%-unknown launch_source was a CLIENT bug misfiled to mcpproxy-dash — a dashboard cannot display a value the client is incapable of sending. That is now fixed (see telemetry-launchsource-tray). Remaining: dashboard consumption (mcpproxy-dash) + snapshot-cron alerting."
     tasks:
       - id: telemetry-machineid-client
         title: "Hashed machine_id in heartbeat (schema v6)"
@@ -383,10 +383,17 @@ epics:
         pr: "mcpproxy-telemetry#3"
         note: "Verified LIVE in prod 2026-07-07: remote D1 migration 0006 applied, worker deployed 2026-07-03 (right after 53811ed), v7 heartbeats populating machine_id 100% (64-char HMAC hex, distinct installs), vitest 129/129. No further worker work needed; dashboard consumption is the remaining child."
         depends_on: [telemetry-machineid-client]
+      - id: telemetry-launchsource-tray
+        title: "Emit launch_source=tray — the 'tray' value was UNREACHABLE in the client, and that (not the dashboard) was the 79%-unknown root cause"
+        status: done
+        priority: P1
+        note: "FIXED 2026-07-11. Was: defaultHandshakeChecker.LaunchedViaTray() hardcoded `return false` and neither tray told the core it had spawned it, so a tray-spawned core (parent = the tray app, not launchd -> not login_item; no TTY -> not cli) fell through to 'unknown'. Now both trays (Swift CoreProcessManager.swift + Go buildCoreEnvironment) stamp MCPPROXY_LAUNCHED_BY=tray on the core they spawn, and DetectLaunchSource honours it. MCPPROXY_LAUNCHED_BY=installer still outranks it, so first-run attribution is unchanged; unrecognised values are ignored. NOTE for the dash: 'unknown' counts before/after this fix are NOT comparable — segment by version."
+        depends_on: []
       - id: telemetry-machineid-dash
-        title: "Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort; fix launch_source 79% unknown (repo mcpproxy-dash)"
+        title: "Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort (repo mcpproxy-dash)"
         status: todo
-        depends_on: [telemetry-machineid-worker]
+        note: "'fix launch_source 79% unknown' was REMOVED from this task on 2026-07-11 and moved to telemetry-launchsource-tray — it was a mcpproxy-go client bug, not a dashboard one."
+        depends_on: [telemetry-machineid-worker, telemetry-launchsource-tray]
       - id: telemetry-snapshot-alerting
         title: "Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"
         status: todo
@@ -426,10 +433,10 @@ epics:
   - id: telemetry-v7-churn
     title: "Telemetry v7: honest funnel + churn instrumentation"
     status: in_progress
-    priority: P0
+    priority: P1
     spec: specs/080-telemetry-v7-churn
     depends_on: []
-    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. v7 = wizard metric fix, funnel observability, pre-churn snapshot. Client-side T1-T3 SHIPPED in #813 (v0.47.0, 2026-07-07); only cross-repo churn analytics (T4) remains and needs stable identity (see telemetry-identity)."
+    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. 2026-07-11 source audit + fix: ALL of spec 080 is shipped and released in v0.47.0 (#813) — T1 wizard completed_external, T2 funnel fields, T3 pre-churn snapshot, US4 schema v7. The previous note claimed 'only cross-repo churn analytics (T4) remains'; that was WRONG — first_real_tool_call_ever had ZERO occurrences in Go code and was in-repo CLIENT work. It is now implemented, so the retrieve->call funnel is finally measurable lifetime-vs-lifetime. P0->P1: only cross-repo T4 now remains."
     tasks:
       - id: telemetry-v7-wizard-fix
         title: "T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path"
@@ -448,9 +455,9 @@ epics:
         depends_on: []
       - id: telemetry-v7-realcall-flag
         title: "first_real_tool_call_ever activation flag (symmetric to first_retrieve_tools_call_ever) so the retrieve->call funnel step is measurable lifetime-vs-lifetime"
-        status: todo
+        status: done
         priority: P1
-        note: "Root cause of the debunked 42%->16% cliff: retrieve step had a lifetime BBolt flag, real-call step only windowed per-day counters. Stamp from handleCallToolVariant (internal/server/mcp.go:1558, same path as RecordUpstreamTool); pure boolean in the activation bucket, additive to schema."
+        note: "Root cause of the debunked 42%->16% cliff: retrieve step had a lifetime BBolt flag, real-call step only windowed per-day counters. DONE 2026-07-11: activationKeyFirstRealToolCallEver + ActivationState.FirstRealToolCallEver + MarkFirstRealToolCall (internal/telemetry/activation.go), stamped from recordUpstreamTool (internal/server/mcp.go) — the shared entry point every call_tool_* variant already runs. Additive boolean in the activation bucket, no schema bump. Tested that retrieve_tools does NOT set it (builtin, not an upstream call)."
         depends_on: []
       - id: telemetry-v7-churn-events
         title: "T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080)"

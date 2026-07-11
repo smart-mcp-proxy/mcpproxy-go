@@ -128,6 +128,64 @@ func TestRetrieveTools_HooksActivation(t *testing.T) {
 	require.NoError(t, err)
 	after2 := loadActivationFromRuntime(t, rt)
 	require.Equal(t, 2, after2.RetrieveToolsCalls24h)
+
+	// retrieve_tools is a BUILT-IN tool, not a proxied upstream call, so it must
+	// NOT set the real-call flag. If it did, the retrieve→call funnel would
+	// report 100% conversion for every user who ever searched.
+	require.False(t, after2.FirstRealToolCallEver,
+		"retrieve_tools must not mark first_real_tool_call_ever — it is a builtin, not an upstream call")
+}
+
+// A SUCCESSFUL upstream call marks the lifetime first_real_tool_call_ever flag
+// — the counterpart of first_retrieve_tools_call_ever, so the retrieve→call
+// funnel step is measurable lifetime-against-lifetime.
+func TestRealToolCall_MarksFirstRealToolCallEver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration — needs full runtime + index + cache")
+	}
+	proxy, rt, _ := buildMCPProxyWithActivation(t)
+
+	before := loadActivationFromRuntime(t, rt)
+	require.False(t, before.FirstRealToolCallEver)
+
+	// The success-path hook: handleCallToolVariant runs this only after the
+	// upstream has actually returned a result.
+	proxy.recordRealToolCallSuccess()
+
+	after := loadActivationFromRuntime(t, rt)
+	require.True(t, after.FirstRealToolCallEver,
+		"a successful upstream tool call must mark first_real_tool_call_ever=true")
+
+	// Monotonic: the flag is lifetime, so a second call keeps it true and
+	// never reverts.
+	proxy.recordRealToolCallSuccess()
+	after2 := loadActivationFromRuntime(t, rt)
+	require.True(t, after2.FirstRealToolCallEver)
+}
+
+// An ATTEMPTED call must not mark activation. recordUpstreamTool runs at the top
+// of handleCallToolVariant — before validation, quarantine checks, connectivity,
+// and the upstream call itself — so a call that is malformed, blocked by
+// quarantine, aimed at a disabled tool, or sent to a disconnected server reaches
+// it and then fails.
+//
+// If that stamped the flag, an install whose very first tool call was BLOCKED
+// would be counted as activated, hiding exactly the breakage the metric exists
+// to surface. Regression test for a real bug caught in cross-model review.
+func TestAttemptedToolCall_DoesNotMarkFirstRealToolCallEver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration — needs full runtime + index + cache")
+	}
+	proxy, rt, _ := buildMCPProxyWithActivation(t)
+
+	// The attempt counter fires (Spec 042 semantics: it counts attempts)...
+	proxy.recordUpstreamTool()
+
+	// ...but activation must NOT, because no upstream ever returned a result.
+	after := loadActivationFromRuntime(t, rt)
+	require.False(t, after.FirstRealToolCallEver,
+		"an attempted (failed/blocked) call must not mark first_real_tool_call_ever — "+
+			"only a successful upstream result counts as activation")
 }
 
 // T030: AfterInitialize hook records clientInfo.name via the runtime helper.
