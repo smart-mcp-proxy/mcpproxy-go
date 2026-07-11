@@ -32,11 +32,29 @@ type SensitiveDataEventEmitter interface {
 	EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string)
 }
 
+// SessionClientResolver maps an MCP session id to the client that opened it
+// (clientInfo.name / clientInfo.version from the initialize handshake).
+// Returns empty strings when the session is unknown.
+type SessionClientResolver func(sessionID string) (name, version string)
+
 // ActivityService subscribes to activity events and persists them to storage.
 // It runs as a background goroutine and handles activity recording non-blocking.
 type ActivityService struct {
 	storage *storage.Manager
 	logger  *zap.Logger
+
+	// clientResolver stamps the MCP client onto each activity record at WRITE
+	// time. Read-time joining against the sessions API is not viable: the core
+	// retains only the 100 most recent sessions, while activity is retained for
+	// 90 days — and an IDE that reconnects every few minutes burns through 100
+	// sessions in about a day. Any name resolved by lookup therefore decays back
+	// to a bare session id. Denormalizing it here makes it permanent, and it
+	// costs nothing: the resolver reads the in-memory session store (O(1)) and
+	// the session is by definition still open when its activity is emitted.
+	//
+	// nil until wired via SetSessionClientResolver; the records simply carry no
+	// client name in that case.
+	clientResolver SessionClientResolver
 
 	// Channel for receiving events
 	eventCh chan Event
@@ -98,6 +116,37 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 	}
 	s.usagePersistIntervalNs.Store(int64(DefaultUsagePersistInterval))
 	return s
+}
+
+// SetSessionClientResolver wires the session -> MCP client lookup. Safe to leave
+// unset (records then carry no client name).
+func (s *ActivityService) SetSessionClientResolver(r SessionClientResolver) {
+	s.clientResolver = r
+}
+
+// withClientInfo stamps client_name / client_version onto an activity record's
+// metadata, so the Activity Log can name the client that made the call long
+// after the session record itself has been evicted.
+//
+// Returns the metadata map to assign; it allocates one only when there is
+// something to add, so records for sessionless events stay exactly as they were.
+func (s *ActivityService) withClientInfo(metadata map[string]interface{}, sessionID string) map[string]interface{} {
+	if sessionID == "" || s.clientResolver == nil {
+		return metadata
+	}
+	name, version := s.clientResolver(sessionID)
+	if name == "" {
+		return metadata // unknown session (e.g. already closed) — nothing to add
+	}
+
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+	}
+	metadata["client_name"] = name
+	if version != "" {
+		metadata["client_version"] = version
+	}
+	return metadata
 }
 
 // SetDetector sets the sensitive data detector for async scanning (Spec 026).
@@ -383,6 +432,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 			metadata["profile"] = profileSlug
 		}
 	}
+	// Name the MCP client on the record itself, so it survives session eviction.
+	metadata = s.withClientInfo(metadata, sessionID)
 
 	// Spec 069 A1: byte sizes measured pre-truncation by the emitter.
 	requestBytes := int(getInt64Payload(evt.Payload, "request_bytes"))
@@ -461,10 +512,10 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 		ServerName: serverName,
 		ToolName:   toolName,
 		Status:     decision,
-		Metadata: map[string]interface{}{
+		Metadata: s.withClientInfo(map[string]interface{}{
 			"decision": decision,
 			"reason":   reason,
-		},
+		}, sessionID),
 		Timestamp: evt.Timestamp,
 		SessionID: sessionID,
 	}
@@ -635,6 +686,10 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	if contentTrust != "" {
 		metadata["content_trust"] = contentTrust
 	}
+	// Name the MCP client on the record itself, so it survives session eviction.
+	// retrieve_tools calls arrive here, and they are the bulk of session-bearing
+	// activity — without this they would be the rows left showing a bare id.
+	metadata = s.withClientInfo(metadata, sessionID)
 
 	record := &storage.ActivityRecord{
 		Type:         storage.ActivityTypeInternalToolCall,

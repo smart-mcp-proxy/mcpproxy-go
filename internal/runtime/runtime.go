@@ -2653,6 +2653,16 @@ func (r *Runtime) RecordRetrieveToolsCallForActivation() {
 	}
 }
 
+// SetSessionClientResolver wires the session -> MCP client lookup that stamps
+// client_name / client_version onto every activity record at write time.
+// No-op if the activity service is not wired.
+func (r *Runtime) SetSessionClientResolver(resolver SessionClientResolver) {
+	if r.activityService == nil {
+		return
+	}
+	r.activityService.SetSessionClientResolver(resolver)
+}
+
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool
 // call. "Real" means a call proxied to an upstream server, as opposed to a
 // built-in tool such as retrieve_tools.

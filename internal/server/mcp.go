@@ -213,6 +213,21 @@ func NewMCPProxyServer(
 	// Wire up storage manager for session persistence
 	sessionStore.SetStorageManager(storage)
 
+	// Let the activity log name the MCP client on every record it writes.
+	// Activity is retained for 90 days but only the 100 most recent SESSIONS are
+	// kept — and an IDE that reconnects every few minutes burns through 100
+	// sessions in about a day. So the client name must be stamped on the record
+	// at write time; resolving it later against the session store works for a
+	// day and then decays back to a bare session id.
+	if mainServer != nil && mainServer.runtime != nil {
+		mainServer.runtime.SetSessionClientResolver(func(sessionID string) (name, version string) {
+			if info := sessionStore.GetSession(sessionID); info != nil {
+				return info.ClientName, info.ClientVersion
+			}
+			return "", ""
+		})
+	}
+
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
 	// Update session activity on every MCP message to prevent premature cleanup.
