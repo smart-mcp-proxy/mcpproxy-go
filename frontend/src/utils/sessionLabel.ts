@@ -24,22 +24,41 @@ const KNOWN_CLIENTS: Array<[needle: string, display: string]> = [
 ]
 
 /**
+ * Max rendered length of an unrecognised client name.
+ *
+ * `clientInfo.name` is attacker-controllable: any MCP client can send an
+ * arbitrary string at initialize and the core stores it verbatim. Vue escapes it
+ * on render, so there is no XSS — but an unbounded name would still be dumped
+ * into a `<select>` option and blow out the filter layout. Bound it.
+ */
+const MAX_CLIENT_NAME = 32
+
+/** Shortest id suffix we ever show. Grows on demand to stay unique. */
+const MIN_SUFFIX = 5
+
+/**
  * Map a raw MCP clientInfo.name to a display name. Unknown clients are shown
- * verbatim — a name we don't recognise is still far better than a hash.
+ * verbatim but length-bounded — a name we don't recognise is still far better
+ * than a hash.
  */
 export function prettyClientName(raw?: string): string {
   const name = (raw ?? '').trim()
   if (!name) return ''
+
   const lower = name.toLowerCase()
   for (const [needle, display] of KNOWN_CLIENTS) {
     if (lower.includes(needle)) return display
   }
-  return name
+
+  // Unrecognised, and therefore untrusted: collapse whitespace (a newline would
+  // break the option label) and truncate.
+  const flat = name.replace(/\s+/g, ' ')
+  return flat.length > MAX_CLIENT_NAME ? `${flat.slice(0, MAX_CLIENT_NAME - 1)}…` : flat
 }
 
-/** Last 5 chars of a session id — the legacy label, now only ever a fallback. */
-export function sessionIdSuffix(sessionId: string): string {
-  return sessionId.slice(-5)
+/** Last `len` chars of a session id. */
+export function sessionIdSuffix(sessionId: string, len: number = MIN_SUFFIX): string {
+  return sessionId.slice(-len)
 }
 
 function clockTime(iso?: string): string {
@@ -55,11 +74,14 @@ export interface SessionLabelInput {
   clientName?: string
   /** ISO start time, used to tell two sessions of the same client apart. */
   startTime?: string
-  /**
-   * True when another session in the same list would render an identical label.
-   * Callers compute this across the whole list; we then disambiguate with the id.
-   */
-  ambiguous?: boolean
+}
+
+/** The label with no disambiguating suffix. "" when there is no client name. */
+function baseLabel(input: SessionLabelInput): string {
+  const pretty = prettyClientName(input.clientName)
+  if (!pretty) return '' // no client name → the id is all we have
+  const time = clockTime(input.startTime)
+  return time ? `${pretty} · ${time}` : pretty
 }
 
 /**
@@ -67,38 +89,71 @@ export interface SessionLabelInput {
  *
  *   "Claude Code · 14:32"          — the common case
  *   "Claude Code · 14:32 (139c9)"  — two Claude Code sessions started the same minute
- *   "...139c9"                     — no clientInfo (pre-initialize or a stale session)
+ *   "...139c9"                     — no clientInfo (pre-initialize, or an evicted session)
+ *
+ * `suffixLen` is chosen by buildSessionLabels so the suffix is long enough to
+ * actually disambiguate — a fixed-width suffix can itself collide.
  */
-export function formatSessionLabel(input: SessionLabelInput): string {
-  const pretty = prettyClientName(input.clientName)
-  if (!pretty) {
-    // Unchanged legacy behaviour: without a client name there is nothing better to show.
-    return `...${sessionIdSuffix(input.sessionId)}`
-  }
+export function formatSessionLabel(
+  input: SessionLabelInput,
+  opts: { ambiguous?: boolean; suffixLen?: number } = {}
+): string {
+  const len = opts.suffixLen ?? MIN_SUFFIX
+  const base = baseLabel(input)
 
-  const time = clockTime(input.startTime)
-  const base = time ? `${pretty} · ${time}` : pretty
-  return input.ambiguous ? `${base} (${sessionIdSuffix(input.sessionId)})` : base
+  // No client name: the id suffix IS the label (unchanged legacy behaviour).
+  if (!base) return `...${sessionIdSuffix(input.sessionId, len)}`
+
+  return opts.ambiguous ? `${base} (${sessionIdSuffix(input.sessionId, len)})` : base
 }
 
 /**
- * Label a whole list at once, resolving collisions so no two sessions share a
- * label. Returns a Map keyed by session id.
+ * Shortest suffix length that tells every id in `ids` apart.
+ *
+ * A fixed 5-char suffix is NOT guaranteed unique — two ids can share their last
+ * five characters — so grow it until the ids are distinguished, falling back to
+ * the longest id. Session ids are unique, so this always terminates.
  */
-export function buildSessionLabels(
-  sessions: Array<Omit<SessionLabelInput, 'ambiguous'>>
-): Map<string, string> {
-  const counts = new Map<string, number>()
+function uniqueSuffixLen(ids: string[]): number {
+  const maxLen = Math.max(...ids.map(id => id.length))
+  for (let len = MIN_SUFFIX; len < maxLen; len++) {
+    if (new Set(ids.map(id => id.slice(-len))).size === ids.length) return len
+  }
+  return maxLen
+}
+
+/**
+ * Label a whole list at once, resolving collisions so no two sessions ever share
+ * a label. Returns a Map keyed by session id.
+ */
+export function buildSessionLabels(sessions: SessionLabelInput[]): Map<string, string> {
+  // Group by the label they would get with no disambiguation. Sessions with no
+  // client name all share the "" group: their label is the id suffix, which must
+  // be unique among themselves too.
+  const groups = new Map<string, SessionLabelInput[]>()
   for (const s of sessions) {
-    const provisional = formatSessionLabel(s)
-    counts.set(provisional, (counts.get(provisional) ?? 0) + 1)
+    const key = baseLabel(s)
+    const group = groups.get(key)
+    if (group) group.push(s)
+    else groups.set(key, [s])
   }
 
   const labels = new Map<string, string>()
-  for (const s of sessions) {
-    const provisional = formatSessionLabel(s)
-    const ambiguous = (counts.get(provisional) ?? 0) > 1
-    labels.set(s.sessionId, formatSessionLabel({ ...s, ambiguous }))
+  for (const [key, group] of groups) {
+    const named = key !== ''
+
+    // A named session alone in its group needs no suffix at all.
+    if (named && group.length === 1) {
+      labels.set(group[0].sessionId, formatSessionLabel(group[0]))
+      continue
+    }
+
+    // Otherwise every member gets a suffix, long enough to be unique within the
+    // group. (Unnamed sessions always carry one — it is their whole label.)
+    const suffixLen = group.length > 1 ? uniqueSuffixLen(group.map(s => s.sessionId)) : MIN_SUFFIX
+    for (const s of group) {
+      labels.set(s.sessionId, formatSessionLabel(s, { ambiguous: named, suffixLen }))
+    }
   }
   return labels
 }

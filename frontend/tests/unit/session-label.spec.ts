@@ -42,12 +42,10 @@ describe('formatSessionLabel', () => {
   })
 
   it('disambiguates with the id suffix when the label would collide', () => {
-    const label = formatSessionLabel({
-      sessionId: 'abc-def-139c9',
-      clientName: 'claude-code',
-      startTime,
-      ambiguous: true,
-    })
+    const label = formatSessionLabel(
+      { sessionId: 'abc-def-139c9', clientName: 'claude-code', startTime },
+      { ambiguous: true }
+    )
     expect(label).toContain('Claude Code')
     expect(label).toContain('139c9')
   })
@@ -80,5 +78,62 @@ describe('buildSessionLabels', () => {
   it('keeps the hash fallback for sessions with no client name', () => {
     const labels = buildSessionLabels([{ sessionId: 'abc-def-139c9' }])
     expect(labels.get('abc-def-139c9')).toBe('...139c9')
+  })
+
+  // Regression: a fixed 5-char suffix is not guaranteed unique. Two same-client
+  // sessions started in the same minute whose ids END IN THE SAME 5 CHARACTERS
+  // used to produce byte-identical labels. Caught in cross-model review.
+  it('grows the suffix when the last 5 chars also collide', () => {
+    const labels = buildSessionLabels([
+      { sessionId: 'sess-a-12345', clientName: 'claude-code', startTime: '2026-07-11T14:32:00Z' },
+      { sessionId: 'sess-b-12345', clientName: 'claude-code', startTime: '2026-07-11T14:32:00Z' },
+    ])
+    const a = labels.get('sess-a-12345')!
+    const b = labels.get('sess-b-12345')!
+    expect(a).not.toBe(b)
+    expect(a).toContain('Claude Code')
+    expect(b).toContain('Claude Code')
+  })
+
+  // Same trap, on the no-client-name path: those labels are ONLY the id suffix.
+  it('grows the suffix for unnamed sessions sharing the last 5 chars', () => {
+    const labels = buildSessionLabels([
+      { sessionId: 'sess-a-12345' },
+      { sessionId: 'sess-b-12345' },
+    ])
+    expect(labels.get('sess-a-12345')).not.toBe(labels.get('sess-b-12345'))
+  })
+
+  it('never emits duplicate labels across a realistic mixed list', () => {
+    const labels = buildSessionLabels([
+      { sessionId: 's1-aaaaa', clientName: 'claude-code', startTime: '2026-07-11T14:32:00Z' },
+      { sessionId: 's2-aaaaa', clientName: 'claude-code', startTime: '2026-07-11T14:32:00Z' },
+      { sessionId: 's3-bbbbb', clientName: 'cursor', startTime: '2026-07-11T14:05:00Z' },
+      { sessionId: 's4-ccccc' },
+      { sessionId: 's5-ccccc' },
+    ])
+    const all = [...labels.values()]
+    expect(new Set(all).size).toBe(all.length)
+  })
+})
+
+describe('prettyClientName — untrusted input', () => {
+  // clientInfo.name is attacker-controllable: any MCP client can send anything
+  // at initialize and the core stores it verbatim. Vue escapes it (no XSS), but
+  // an unbounded name would still be dumped into a <select> option and wreck the
+  // filter layout. Caught in cross-model review.
+  it('bounds the length of an unrecognised client name', () => {
+    const hostile = 'A'.repeat(10_000)
+    const out = prettyClientName(hostile)
+    expect(out.length).toBeLessThanOrEqual(32)
+    expect(out.endsWith('…')).toBe(true)
+  })
+
+  it('collapses newlines and tabs that would break the option label', () => {
+    expect(prettyClientName('evil\n\nname\twith\nbreaks')).toBe('evil name with breaks')
+  })
+
+  it('does not truncate recognised clients (they map to a short display name)', () => {
+    expect(prettyClientName('claude-code-' + 'x'.repeat(500))).toBe('Claude Code')
   })
 })
