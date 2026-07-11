@@ -108,11 +108,13 @@ The `activation` block gains one additive boolean:
 
 | Field | Type | When it is set | Privacy rationale |
 |-------|------|----------------|-------------------|
-| `first_real_tool_call_ever` | boolean | `true` once this install has proxied at least one **real** tool call to an upstream server (any `call_tool_read` / `call_tool_write` / `call_tool_destructive`). Built-in tools such as `retrieve_tools` do **not** set it. Monotonic and lifetime-scoped, exactly like `first_retrieve_tools_call_ever` | A single boolean about our own funnel; no tool name, server, or arguments |
+| `first_real_tool_call_ever` | boolean | `true` once an upstream server has **successfully returned a result** for at least one real tool call (any `call_tool_read` / `call_tool_write` / `call_tool_destructive`). Built-in tools such as `retrieve_tools` do **not** set it, and neither do **attempted** calls that fail — malformed args, a quarantined or disabled tool, a disconnected server, or an upstream error. Monotonic and lifetime-scoped, exactly like `first_retrieve_tools_call_ever` | A single boolean about our own funnel; no tool name, server, or arguments |
 
 **Why it exists.** The retrieve→call funnel used to compare a *lifetime* flag (`first_retrieve_tools_call_ever`) against a *24h windowed* counter (`retrieve_tools_calls_24h` / upstream-call counters). That asymmetry made conversion look like a cliff ("42% search → 16% call") when the true lifetime-vs-lifetime conversion is far higher. This flag is the missing symmetric term.
 
-**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`. Do **not** compare either lifetime flag against a windowed counter.
+**Success, not attempt.** The flag is stamped only after the upstream returns a result — deliberately *not* alongside the `upstream_tool_calls` counter, which fires on every invocation including blocked and failed ones. An install whose first tool call was blocked by quarantine has **not** activated, and counting it as activated would hide exactly the breakage this metric exists to surface.
+
+**Guidance for consumers**: measure the funnel step as `first_real_tool_call_ever` over `first_retrieve_tools_call_ever`. Do **not** compare either lifetime flag against a windowed counter, and note that `upstream_tool_calls` counts *attempts* while this flag counts *success* — they are not the same denominator.
 
 ### `launch_source` = `tray`
 

@@ -477,13 +477,27 @@ func (p *MCPProxyServer) recordBuiltinTool(name string) {
 // recordUpstreamTool increments the upstream tool call counter without ever
 // recording the tool name. Spec 042 User Story 2.
 //
-// It also marks the lifetime first_real_tool_call_ever activation flag, the
-// counterpart of first_retrieve_tools_call_ever, so the retrieve→call funnel
-// step can be measured lifetime-against-lifetime instead of against a 24h
-// counter. nil-safe.
+// This counts ATTEMPTS: it runs at the top of handleCallToolVariant, before
+// validation, quarantine checks, connectivity, and the upstream call itself.
+// Do not hang success-semantics metrics off it — see recordRealToolCallSuccess.
 func (p *MCPProxyServer) recordUpstreamTool() {
 	telemetry.RecordUpstreamToolOn(p.telemetryRegistry())
+}
 
+// recordRealToolCallSuccess marks the lifetime first_real_tool_call_ever
+// activation flag — the counterpart of first_retrieve_tools_call_ever, so the
+// retrieve→call funnel step can be measured lifetime-against-lifetime instead
+// of against a 24h counter.
+//
+// It is deliberately NOT called from recordUpstreamTool. That counter fires on
+// every call_tool_* invocation, including ones that are malformed, blocked by
+// quarantine, aimed at a disabled tool, or sent to a disconnected server. An
+// install whose first tool call was blocked has not activated — counting it as
+// activated would hide exactly the breakage this metric exists to surface.
+//
+// Call this only once the upstream has actually returned a successful result.
+// nil-safe.
+func (p *MCPProxyServer) recordRealToolCallSuccess() {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.RecordRealToolCallForActivation()
 	}
@@ -1962,6 +1976,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
+
+	// The upstream returned a real result: this install has now genuinely made a
+	// real tool call. Stamped here — past every validation / quarantine /
+	// connectivity gate and past the upstream error branch above — so the
+	// activation flag means "succeeded", not merely "attempted".
+	p.recordRealToolCallSuccess()
 
 	// Record successful response
 	toolCallRecord.Response = result
