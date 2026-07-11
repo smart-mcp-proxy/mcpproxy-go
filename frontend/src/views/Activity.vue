@@ -694,6 +694,7 @@ import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import { buildSessionLabels } from '@/utils/sessionLabel'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -766,28 +767,110 @@ interface SessionOption {
   id: string
   label: string
   clientName?: string
+  startTime?: string
 }
+
+// Client identity lives on the session record, not the activity record — an
+// activity row only carries session_id. We join the two here so the filter can
+// show "Claude Code · 14:32" instead of an opaque "...139c9".
+const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string }>())
+
+// Session ids we have already tried and failed to resolve. The core keeps only
+// the 100 most recent sessions, so an old session's activity rows can outlive
+// its record and never become resolvable. Without this set, every refresh would
+// see them as "unknown" and refetch forever.
+const unresolvableSessions = ref(new Set<string>())
+
+let sessionsInFlight: Promise<void> | null = null
+
+const loadSessions = async () => {
+  // Coalesce: a burst of SSE events must not fan out into N parallel fetches.
+  if (sessionsInFlight) return sessionsInFlight
+
+  sessionsInFlight = (async () => {
+    try {
+      const response = await api.getSessions(100)
+      const next = new Map<string, { clientName?: string; startTime?: string }>()
+      for (const s of response.data?.sessions ?? []) {
+        next.set(s.id, { clientName: s.client_name, startTime: s.start_time })
+      }
+      sessionInfo.value = next
+
+      // Anything still unknown after a fresh fetch is gone for good (evicted by
+      // the 100-session cap). Remember it so we stop asking.
+      for (const a of activities.value) {
+        if (a.session_id && !next.has(a.session_id)) {
+          unresolvableSessions.value.add(a.session_id)
+        }
+      }
+    } catch {
+      // Non-fatal: without session metadata the filter degrades to id suffixes,
+      // which is exactly the previous behaviour. Never block the activity log.
+      // Deliberately NOT marked unresolvable — a transient failure should be
+      // retried the next time an unknown session shows up.
+    } finally {
+      sessionsInFlight = null
+    }
+  })()
+
+  return sessionsInFlight
+}
+
+// The Activity Log is a live page: a client can connect while it is open, and
+// SSE will deliver its rows. Those sessions were not in the map we fetched on
+// mount, so refresh the join whenever a genuinely new session id appears.
+const refreshSessionsIfUnknown = () => {
+  const hasUnknown = activities.value.some(
+    a =>
+      a.session_id &&
+      !sessionInfo.value.has(a.session_id) &&
+      !unresolvableSessions.value.has(a.session_id)
+  )
+  if (hasUnknown) void loadSessions()
+}
+
 const availableSessions = computed((): SessionOption[] => {
-  const sessionsMap = new Map<string, { clientName?: string }>()
+  const seen = new Map<string, { clientName?: string; startTime?: string }>()
   activities.value.forEach(a => {
-    if (a.session_id && !sessionsMap.has(a.session_id)) {
-      // Try to get client name from metadata or any available source
-      const clientName = a.metadata?.client_name as string | undefined
-      sessionsMap.set(a.session_id, { clientName })
+    if (a.session_id && !seen.has(a.session_id)) {
+      const info = sessionInfo.value.get(a.session_id)
+      seen.set(a.session_id, {
+        // Prefer the session record; fall back to metadata for records that
+        // carry it, then to nothing (→ id suffix).
+        clientName: info?.clientName ?? (a.metadata?.client_name as string | undefined),
+        startTime: info?.startTime ?? a.timestamp,
+      })
     }
   })
 
-  return Array.from(sessionsMap.entries())
-    .map(([sessionId, info]) => {
-      // Format: "ClientName ...12345" or "...12345" if no client name
-      const suffix = sessionId.slice(-5)
-      const label = info.clientName
-        ? `${info.clientName} ...${suffix}`
-        : `...${suffix}`
-      return { id: sessionId, label, clientName: info.clientName }
-    })
-    .sort((a, b) => a.label.localeCompare(b.label))
+  const entries = Array.from(seen.entries()).map(([sessionId, info]) => ({
+    sessionId,
+    clientName: info.clientName,
+    startTime: info.startTime,
+  }))
+  const labels = buildSessionLabels(entries)
+
+  return entries
+    .map(e => ({
+      id: e.sessionId,
+      label: labels.get(e.sessionId) ?? `...${e.sessionId.slice(-5)}`,
+      clientName: e.clientName,
+      startTime: e.startTime,
+    }))
+    // Most recent session first — in a session picker, recency beats alphabet.
+    // Compare epoch ms, not the ISO strings: those carry a timezone offset
+    // ("...+03:00"), so lexical order is not chronological order across offsets.
+    // A missing or unparseable start time sorts last; id breaks ties so the
+    // order is stable rather than dependent on Map insertion.
+    .sort((a, b) => epochOf(b.startTime) - epochOf(a.startTime) || a.id.localeCompare(b.id))
 })
+
+/** Epoch ms for sorting; -Infinity for missing/unparseable, so it sorts last. */
+const epochOf = (iso?: string): number => {
+  if (!iso) return -Infinity
+  const t = new Date(iso).getTime()
+  return Number.isNaN(t) ? -Infinity : t
+}
 
 // Get session label by ID for display in Active Filters
 const getSessionLabel = (sessionId: string): string => {
@@ -1182,6 +1265,12 @@ const handleKeydown = (event: KeyboardEvent) => {
   }
 }
 
+// Keep the session join fresh no matter how activities arrived — polling,
+// manual refresh, or an SSE event for a client that connected just now. Watching
+// the list covers every mutation path; refreshSessionsIfUnknown is a no-op
+// unless a genuinely new session id showed up, and coalesces concurrent fetches.
+watch(activities, refreshSessionsIfUnknown)
+
 // Lifecycle
 onMounted(() => {
   // Check for session filter from URL query params (linked from Dashboard/Sessions pages)
@@ -1191,6 +1280,7 @@ onMounted(() => {
   }
 
   loadActivities()
+  loadSessions()
 
   // Listen for SSE activity events
   window.addEventListener('mcpproxy:activity', handleActivityEvent as EventListener)

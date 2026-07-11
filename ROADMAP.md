@@ -336,6 +336,7 @@ graph LR
 
 ```mermaid
 graph LR
+  sessions_web_ui["Sessions in the Web UI: meaningful session na…"]
   action_log_glance_view["At-a-glance action log view (top signals, hea…"]
   action_log_tray_menu["Activity in the tray menu (recent tool calls…"]
   tray_menu_open_telemetry["tray_menu_opened counter: Swift menuWillOpen…"]
@@ -344,12 +345,15 @@ graph LR
   action_log_glance_view --> action_log_tray_menu
   action_log_glance_view --> action_log_retention_tie_in
 
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class sessions_web_ui done;
   class action_log_glance_view,action_log_tray_menu,tray_menu_open_telemetry,action_log_retention_tie_in todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
+| Sessions in the Web UI: meaningful session names in the Activity Log filter + the existing /sessions page linked in the sidebar | 🟢 Done | — |
 | At-a-glance action log view (top signals, health) | ⚪ Todo | — |
 | Activity in the tray menu (recent tool calls + security events, jump to full log) | ⚪ Todo | — |
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
