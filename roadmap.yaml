@@ -459,16 +459,21 @@ epics:
 
   - id: tray-api-purity
     title: "Tray↔core decoupling: socket/REST API only, no config-file reads"
-    status: todo
+    status: done
     priority: P2
     depends_on: []
-    note: "Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-03 audit: Swift tray clean (opens config in editor only, never parses); Go tray's update-check gate was caught reading mcp_config.json in PR #805 review and reworked to core-API gating — but one pre-existing violation remains."
+    note: "Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot."
     tasks:
       - id: tray-oauth-config-read
-        title: "Go tray OAuth login path loads mcp_config.json directly (internal/tray/tray.go:~1734 config.LoadFromFile via GetConfigPath) — replace with REST (server config / OAuth endpoints), then remove GetConfigPath from the tray server interface if no consumers remain"
-        status: todo
+        title: "Delete the dead config read in the Go tray OAuth path (config.LoadFromFile) + drop the now-unused internal/config import. GetConfigPath stays on the interface — openConfigDir still needs the path to reveal the dir in the file manager."
+        status: done
         priority: P2
         depends_on: []
+      - id: tray-config-import-guard
+        title: "Test guard (internal/tray/config_import_guard_test.go) failing any tray-side call to config.LoadFromFile/Load/SaveConfig/... Parses source on disk, so a violation cannot hide behind an inactive build tag. Bans config FILE I/O, not the config package — cmd/mcpproxy-tray legitimately references the config.LogConfig type for its own logger."
+        status: done
+        priority: P2
+        depends_on: [tray-oauth-config-read]
 
   - id: planning-hygiene
     title: Planning/docs truth automation

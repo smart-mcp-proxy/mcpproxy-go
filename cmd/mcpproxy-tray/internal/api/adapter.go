@@ -310,9 +310,14 @@ func (a *ServerAdapter) ReloadConfiguration() error {
 
 // GetConfigPath returns the configuration file path core is running with.
 // The tray passes MCPPROXY_TRAY_CONFIG_PATH to core as --config (see
-// buildCoreArgs in main.go), so tray-side config consumers — e.g. the Spec 079
-// update_check gate — must resolve to that same override, not a hardcoded
-// default. Falls back to the default ~/.mcpproxy path when unset.
+// buildCoreArgs in main.go), so a tray-side consumer of this path must resolve
+// to that same override, not a hardcoded default. Falls back to the default
+// ~/.mcpproxy path when unset.
+//
+// This returns a PATH ONLY — the tray never parses the config file. Its sole
+// consumer is openConfigDir (internal/tray/tray.go), which reveals the
+// directory in the file manager. See TestTrayDoesNotReadConfigFile for the
+// enforced rule.
 func (a *ServerAdapter) GetConfigPath() string {
 	if cfg := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_CONFIG_PATH")); cfg != "" {
 		return cfg

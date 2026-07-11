@@ -67,7 +67,6 @@ graph LR
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🟡 **Windows native tray app** — In review · P2
 - 🔴 **MCP protocol upgrade to 2026-07-28 revision** — Blocked · P3
-- ⚪ **Tray↔core decoupling: socket/REST API only, no config-file reads** — Todo · P2
 - ⚪ **Planning/docs truth automation** — Todo · P2
 - ⚫ **Server marketplace** — Todo · P3 · parked
 - ⚫ **Audit SIEM integration** — Todo · P3 · parked
@@ -77,6 +76,7 @@ graph LR
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
 - ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
 - 🟢 **Registries — easier search + add-server** — Done · P1
+- 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
 
 ## Epic details
 
@@ -381,26 +381,6 @@ graph LR
 </details>
 
 <details>
-<summary>⚪ Tray↔core decoupling: socket/REST API only, no config-file reads — Todo · P2</summary>
-
-> Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-03 audit: Swift tray clean (opens config in editor only, never parses); Go tray's update-check gate was caught reading mcp_config.json in PR #805 review and reworked to core-API gating — but one pre-existing violation remains.
-
-```mermaid
-graph LR
-  tray_oauth_config_read["Go tray OAuth login path loads mcp_config.jso…"]
-
-
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tray_oauth_config_read todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| Go tray OAuth login path loads mcp_config.json directly (internal/tray/tray.go:~1734 config.LoadFromFile via GetConfigPath) — replace with REST (server config / OAuth endpoints), then remove GetConfigPath from the tray server interface if no consumers remain | ⚪ Todo | — |
-
-</details>
-
-<details>
 <summary>⚪ Planning/docs truth automation — Todo · P2</summary>
 
 > Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests.
@@ -617,6 +597,29 @@ graph LR
 
 </details>
 
+<details>
+<summary>🟢 Tray↔core decoupling: socket/REST API only, no config-file reads — Done · P2</summary>
+
+> Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot.
+
+```mermaid
+graph LR
+  tray_oauth_config_read["Delete the dead config read in the Go tray OA…"]
+  tray_config_import_guard["Test guard (internal/tray/config_import_guard…"]
+
+  tray_oauth_config_read --> tray_config_import_guard
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class tray_oauth_config_read,tray_config_import_guard done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Delete the dead config read in the Go tray OAuth path (config.LoadFromFile) + drop the now-unused internal/config import. GetConfigPath stays on the interface — openConfigDir still needs the path to reveal the dir in the file manager. | 🟢 Done | — |
+| Test guard (internal/tray/config_import_guard_test.go) failing any tray-side call to config.LoadFromFile/Load/SaveConfig/... Parses source on disk, so a violation cannot hide behind an inactive build tag. Bans config FILE I/O, not the config package — cmd/mcpproxy-tray legitimately references the config.LogConfig type for its own logger. | 🟢 Done | — |
+
+</details>
+
 ## Epics
 
 | Epic | Status | Priority | Progress | Spec | PR |
@@ -632,7 +635,6 @@ graph LR
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — |  |  |
-| Tray↔core decoupling: socket/REST API only, no config-file reads | Todo | P2 | — |  |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
@@ -645,6 +647,7 @@ graph LR
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
+| Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 
 ## Shipped (archived)
 
