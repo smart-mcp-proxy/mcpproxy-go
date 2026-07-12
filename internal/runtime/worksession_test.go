@@ -195,3 +195,36 @@ func TestWorkSessionTracker_ConcurrentResolveIsStable(t *testing.T) {
 		assert.Equal(t, first, <-out, "concurrent resolves of one identity must agree")
 	}
 }
+
+// FR-006 / cross-model review finding: the principal MUST be part of the key.
+// Two different agent tokens driving the same client in the same project are
+// different work, and must not be merged into one session.
+func TestWorkSession_SeparatesPrincipals(t *testing.T) {
+	tr, _ := fixedClock(time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC))
+
+	base := WorkSessionIdentity{ClientName: "claude-code", WorkspaceRoot: "/repos/alpha"}
+	a := base
+	a.Principal = "agent:ci-bot"
+	b := base
+	b.Principal = "agent:release-bot"
+
+	assert.NotEqual(t, tr.Resolve(a), tr.Resolve(b),
+		"two agent tokens in the same project must not share a work session")
+}
+
+// The tracker must not grow forever on a long-lived daemon. Reap is wired into
+// the activity retention loop; this pins the behaviour it relies on.
+func TestWorkSession_ReapDropsOnlyIdleEntries(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 7, 12, 10, 0, 0, 0, time.UTC))
+
+	stale := WorkSessionIdentity{ClientName: "claude-code", WorkspaceRoot: "/repos/old"}
+	tr.Resolve(stale)
+
+	advance(5 * time.Hour)
+
+	active := WorkSessionIdentity{ClientName: "cursor", WorkspaceRoot: "/repos/live"}
+	liveID := tr.Resolve(active)
+
+	assert.Equal(t, 1, tr.Reap(4*time.Hour), "only the idle entry is dropped")
+	assert.Equal(t, liveID, tr.Resolve(active), "the live work session is untouched")
+}

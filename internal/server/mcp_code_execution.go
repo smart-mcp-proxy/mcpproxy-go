@@ -348,6 +348,9 @@ func (p *MCPProxyServer) handleCodeExecution(ctx context.Context, request mcp.Ca
 
 	// Update session stats for code_execution call
 	if sessionID != "" && codeExecMetrics != nil {
+		// Spec 082: code execution is real work — it earns the session a record,
+		// and the record must exist before its stats are written.
+		p.markSessionWorked(ctx, sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, codeExecMetrics.TotalTokens)
 	}
 

@@ -37,10 +37,12 @@ type SensitiveDataEventEmitter interface {
 // Returns empty strings when the session is unknown.
 type SessionClientResolver func(sessionID string) (name, version string)
 
-// SessionWorkspaceResolver maps an MCP session id to the project the client is
-// working in, as disclosed via MCP roots. Returns "" when the client did not
-// disclose one (measured: Codex does not) or the session is unknown.
-type SessionWorkspaceResolver func(sessionID string) string
+// SessionWorkSessionResolver maps an MCP session id to the WORK session it
+// belongs to (Spec 082): one client, one project, across reconnects.
+//
+// It returns the id cached on the connection — deliberately not a fresh
+// derivation, so every record from one connection agrees on its work session.
+type SessionWorkSessionResolver func(sessionID string) string
 
 // ActivityService subscribes to activity events and persists them to storage.
 // It runs as a background goroutine and handles activity recording non-blocking.
@@ -61,12 +63,15 @@ type ActivityService struct {
 	// client name in that case.
 	clientResolver SessionClientResolver
 
-	// workspaceResolver and workSessions turn a transport session into a WORK
-	// session (Spec 082): one client, one project, across reconnects. The id is
-	// stamped onto the record at write time for the same reason the client name
-	// is — a value resolved later decays once the session record is evicted.
-	workspaceResolver SessionWorkspaceResolver
-	workSessions      *WorkSessionTracker
+	// workSessionResolver returns the WORK session a record belongs to (Spec 082):
+	// one client, one project, across reconnects. Stamped at write time for the
+	// same reason the client name is — a value resolved later decays once the
+	// record it points at is evicted.
+	workSessionResolver SessionWorkSessionResolver
+
+	// workSessionReaper drops idle work sessions so the tracker cannot grow
+	// without bound. Wired alongside the resolver.
+	workSessionReaper func(time.Duration) int
 
 	// Channel for receiving events
 	eventCh chan Event
@@ -136,34 +141,24 @@ func (s *ActivityService) SetSessionClientResolver(r SessionClientResolver) {
 	s.clientResolver = r
 }
 
-// SetSessionWorkspaceResolver wires the session -> project lookup (Spec 082).
-func (s *ActivityService) SetSessionWorkspaceResolver(r SessionWorkspaceResolver) {
-	s.workspaceResolver = r
+// SetWorkSessionResolver wires the session -> work-session lookup (Spec 082).
+func (s *ActivityService) SetWorkSessionResolver(r SessionWorkSessionResolver) {
+	s.workSessionResolver = r
 }
 
-// SetWorkSessionTracker wires the work-session derivation (Spec 082).
-func (s *ActivityService) SetWorkSessionTracker(t *WorkSessionTracker) {
-	s.workSessions = t
+// SetWorkSessionReaper wires the idle-work-session sweep into the retention loop.
+func (s *ActivityService) SetWorkSessionReaper(f func(time.Duration) int) {
+	s.workSessionReaper = f
 }
 
-// resolveWorkSession derives the work session for a piece of activity: one
-// client, in one project, for a continuous stretch of work.
-//
-// Returns "" when we know nothing about the caller, or the tracker is not wired.
-// An unattributed record is better than one filed under a meaningless bucket.
+// resolveWorkSession returns the work session a record belongs to, or "" when it
+// cannot be attributed (an unattributed record beats one filed under a bucket
+// that means nothing).
 func (s *ActivityService) resolveWorkSession(sessionID string) string {
-	if sessionID == "" || s.workSessions == nil {
+	if sessionID == "" || s.workSessionResolver == nil {
 		return ""
 	}
-
-	id := WorkSessionIdentity{}
-	if s.clientResolver != nil {
-		id.ClientName, id.ClientVersion = s.clientResolver(sessionID)
-	}
-	if s.workspaceResolver != nil {
-		id.WorkspaceRoot = s.workspaceResolver(sessionID)
-	}
-	return s.workSessions.Resolve(id)
+	return s.workSessionResolver(sessionID)
 }
 
 // withClientInfo stamps client_name / client_version onto an activity record's
@@ -308,7 +303,24 @@ func (s *ActivityService) runRetentionLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.runRetentionCleanup()
+			s.reapWorkSessions()
 		}
+	}
+}
+
+// workSessionReapAfter is how long a work session may sit idle before the
+// tracker forgets it. Comfortably past the 30-minute idle window, so an entry is
+// only dropped once it can no longer be continued.
+const workSessionReapAfter = 4 * time.Hour
+
+// reapWorkSessions stops the tracker growing without bound on a long-lived
+// daemon: one map entry per distinct identity, forever, is a slow leak.
+func (s *ActivityService) reapWorkSessions() {
+	if s.workSessionReaper == nil {
+		return
+	}
+	if n := s.workSessionReaper(workSessionReapAfter); n > 0 {
+		s.logger.Debug("reaped idle work sessions", zap.Int("count", n))
 	}
 }
 

@@ -2671,28 +2671,36 @@ func (r *Runtime) SetSessionClientResolver(resolver SessionClientResolver) {
 	r.activityService.SetSessionClientResolver(resolver)
 }
 
-// SetSessionWorkspaceResolver wires the session -> project lookup used to group
-// activity into work sessions (Spec 082). No-op if the activity service is not
-// wired.
-func (r *Runtime) SetSessionWorkspaceResolver(resolver SessionWorkspaceResolver) {
+// SetWorkSessionResolver wires the session -> work-session lookup used to stamp
+// every activity record (Spec 082).
+//
+// The resolver reads the id CACHED on the connection rather than re-deriving it.
+// Re-deriving per record would let one connection's records disagree: the first
+// resolves before the client's project has arrived, the second after.
+func (r *Runtime) SetWorkSessionResolver(resolver SessionWorkSessionResolver) {
 	if r.activityService == nil {
 		return
 	}
-	r.activityService.SetSessionWorkspaceResolver(resolver)
+	r.activityService.SetWorkSessionResolver(resolver)
+	r.activityService.SetWorkSessionReaper(r.ReapWorkSessions)
+}
+
+// ResolveWorkSession derives the work session for an identity, opening a new one
+// when it has been idle past the window. Called once per connection.
+func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
 	if r.workSessions == nil {
 		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
 	}
-	r.activityService.SetWorkSessionTracker(r.workSessions)
+	return r.workSessions.Resolve(id)
 }
 
-// WorkSessionFor returns the current work session for a transport session, or ""
-// when it cannot be derived. Used by the MCP layer to tag the session record it
-// persists on first activity.
-func (r *Runtime) WorkSessionFor(sessionID string) string {
-	if r.activityService == nil {
-		return ""
+// ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
+// does not accumulate one map entry per identity forever.
+func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {
+	if r.workSessions == nil {
+		return 0
 	}
-	return r.activityService.resolveWorkSession(sessionID)
+	return r.workSessions.Reap(maxIdle)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool

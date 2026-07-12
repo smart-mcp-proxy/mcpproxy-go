@@ -164,6 +164,7 @@ An operator or agent can list sessions and filter activity by session from the C
 4. **A record is created on first activity, not on connect.** Chosen over "create then reap" because reaping leaves a window in which the noise is visible and still consumes the retention budget.
 5. **"Activity" means a tool call or tool retrieval** — the things a user would recognise as work. A handshake, capability exchange, or keepalive is not activity.
 6. **Historical activity is not backfilled.** The information needed to attribute it no longer exists. Those records remain viewable and unattributed.
+7. **A proxy restart starts a new work session.** The tracker is in-memory, so after a restart the same user resumes under a NEW work-session id, while the rows written before the restart keep the old one. Selecting either shows only its half. Accepted: a restart is a genuine discontinuity, and persisting the tracker would buy little for the complexity. Recorded here so it is a decision rather than a surprise.
 
 ## Dependencies
 

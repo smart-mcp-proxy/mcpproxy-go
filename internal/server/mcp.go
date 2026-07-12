@@ -227,14 +227,11 @@ func NewMCPProxyServer(
 			return "", ""
 		})
 
-		// Spec 082: the project the client is working in, so activity can be
-		// grouped into work sessions ("Claude Code · mcpproxy-go") rather than
-		// per-reconnect transport sessions.
-		mainServer.runtime.SetSessionWorkspaceResolver(func(sessionID string) string {
-			if info := sessionStore.GetSession(sessionID); info != nil {
-				return info.Workspace
-			}
-			return ""
+		// Spec 082: which WORK session a record belongs to — one client, one
+		// project, across reconnects. Reads the id cached on the connection, so
+		// every record from that connection agrees.
+		mainServer.runtime.SetWorkSessionResolver(func(sessionID string) string {
+			return sessionStore.WorkSessionID(sessionID)
 		})
 	}
 
@@ -1197,7 +1194,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	}
 	// Spec 082: a tool retrieval is real work — it earns the session a record.
 	if sid := sessionIDFromContext(ctx); sid != "" {
-		p.markSessionWorked(sid)
+		p.markSessionWorked(ctx, sid)
 	}
 
 	startTime := time.Now()
@@ -2017,7 +2014,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 		// Update session stats even for errors (to track call count)
 		if sessionID != "" && tokenMetrics != nil {
-			p.markSessionWorked(sessionID)
+			p.markSessionWorked(ctx, sessionID)
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
@@ -2119,7 +2116,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Update session stats for successful call
 	if sessionID != "" && tokenMetrics != nil {
-		p.markSessionWorked(sessionID)
+		p.markSessionWorked(ctx, sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
@@ -2435,7 +2432,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 		// Update session stats even for errors (to track call count)
 		if sessionID != "" && tokenMetrics != nil {
-			p.markSessionWorked(sessionID)
+			p.markSessionWorked(ctx, sessionID)
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
@@ -2523,7 +2520,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Update session stats for successful call
 	if sessionID != "" && tokenMetrics != nil {
-		p.markSessionWorked(sessionID)
+		p.markSessionWorked(ctx, sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 

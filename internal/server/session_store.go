@@ -43,6 +43,22 @@ type SessionInfo struct {
 	// workspaceFetchStarted guards the roots request so it is attempted at most
 	// once per connection.
 	workspaceFetchStarted bool
+
+	// workspaceReady is closed once the roots answer has arrived OR we have given
+	// up on it. Activity waits (briefly) on this before deriving a work session,
+	// so the first tool call of a connection is not filed under a workspace-less
+	// key while the second lands under a workspace-keyed one — which would split
+	// one connection across two work sessions.
+	workspaceReady chan struct{}
+
+	// workSessionID is resolved once per connection and then reused, so every
+	// record from this connection agrees on which work session it belongs to.
+	workSessionID string
+
+	// persistDone is closed once the durable record exists. Concurrent first
+	// calls wait on it rather than racing ahead to UpdateSessionStats, which
+	// errors if the row is not there yet.
+	persistDone chan struct{}
 }
 
 // SessionStore manages MCP session information
@@ -89,15 +105,22 @@ func (s *SessionStore) SetSession(sessionID, clientName, clientVersion string, h
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.sessions[sessionID] = &SessionInfo{
-		SessionID:     sessionID,
-		ClientName:    clientName,
-		ClientVersion: clientVersion,
-		hasRoots:      hasRoots,
-		hasSampling:   hasSampling,
-		experimental:  experimental,
-		startTime:     time.Now(),
+	info := &SessionInfo{
+		SessionID:      sessionID,
+		ClientName:     clientName,
+		ClientVersion:  clientVersion,
+		hasRoots:       hasRoots,
+		hasSampling:    hasSampling,
+		experimental:   experimental,
+		startTime:      time.Now(),
+		workspaceReady: make(chan struct{}),
+		persistDone:    make(chan struct{}),
 	}
+	// A client that cannot report roots will never make us wait for them.
+	if !hasRoots {
+		close(info.workspaceReady)
+	}
+	s.sessions[sessionID] = info
 
 	s.logger.Debug("session registered (not yet persisted — awaiting first activity)",
 		zap.String("session_id", sessionID),
@@ -124,6 +147,7 @@ func (s *SessionStore) SetWorkspace(sessionID, workspaceRoot string) {
 	info.Workspace = workspaceRoot
 	persisted := info.persisted
 	mgr := s.storageManager
+	s.signalWorkspaceReadyLocked(info)
 	s.mu.Unlock()
 
 	s.logger.Debug("session workspace resolved",
@@ -140,25 +164,43 @@ func (s *SessionStore) SetWorkspace(sessionID, workspaceRoot string) {
 }
 
 // EnsurePersisted writes the session to storage the first time it does something
-// real, and is a no-op afterwards.
+// real, and blocks concurrent callers until that row exists.
 //
-// This is the counterpart of SetSession's deferral. It MUST run before anything
-// updates the session's stats: UpdateSessionStats requires the row to exist and
-// errors if it does not, so a first tool call would otherwise lose its counts.
-func (s *SessionStore) EnsurePersisted(sessionID, workSessionID string) {
+// The blocking matters. UpdateSessionStats requires the row and errors if it is
+// missing, so if a second concurrent first-call merely saw "someone else is
+// persisting" and raced on, its stats would be dropped with a warning. It waits
+// instead.
+//
+// Returns the work-session id this connection belongs to. It is resolved ONCE
+// per connection and reused, so every record from this connection agrees.
+func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func(*SessionInfo) string) string {
 	if sessionID == "" {
-		return
+		return ""
 	}
 
 	s.mu.Lock()
 	info, ok := s.sessions[sessionID]
-	if !ok || info.persisted || s.storageManager == nil {
+	if !ok || s.storageManager == nil {
 		s.mu.Unlock()
-		return
+		return ""
 	}
-	// Mark before releasing the lock: two concurrent first-calls must produce
-	// one CreateSession, not two.
+
+	if info.persisted {
+		workSessionID := info.workSessionID
+		done := info.persistDone
+		s.mu.Unlock()
+		<-done // the row may still be in flight; stats callers need it to exist
+		return workSessionID
+	}
+
+	// We are the one who persists. Resolve the work session now, once, under the
+	// lock, and cache it for every later record from this connection.
 	info.persisted = true
+	if info.workSessionID == "" && resolveWorkSession != nil {
+		cp := *info
+		info.workSessionID = resolveWorkSession(&cp)
+	}
+
 	record := &storage.SessionRecord{
 		ID:            info.SessionID,
 		ClientName:    info.ClientName,
@@ -171,23 +213,47 @@ func (s *SessionStore) EnsurePersisted(sessionID, workSessionID string) {
 		Experimental:  info.experimental,
 		WorkspaceRoot: info.Workspace,
 		WorkspaceName: workspaceDisplayName(info.Workspace),
-		WorkSessionID: workSessionID,
+		WorkSessionID: info.workSessionID,
 	}
+	workSessionID := info.workSessionID
+	done := info.persistDone
 	mgr := s.storageManager
 	s.mu.Unlock()
 
-	if err := mgr.CreateSession(record); err != nil {
+	err := mgr.CreateSession(record)
+
+	s.mu.Lock()
+	if err != nil {
 		s.logger.Warn("failed to persist session to storage",
 			zap.String("session_id", sessionID),
 			zap.Error(err),
 		)
-		// Let a later activity retry rather than silently never persisting.
-		s.mu.Lock()
-		if info, ok := s.sessions[sessionID]; ok {
-			info.persisted = false
+		// Let a later activity retry rather than silently never persisting. The
+		// waiters are released either way — a blocked caller is worse than a
+		// caller that finds no row.
+		if cur, ok := s.sessions[sessionID]; ok {
+			cur.persisted = false
 		}
-		s.mu.Unlock()
 	}
+	select {
+	case <-done:
+	default:
+		close(done)
+	}
+	s.mu.Unlock()
+
+	return workSessionID
+}
+
+// WorkSessionID returns the work session this connection belongs to, if it has
+// been resolved yet.
+func (s *SessionStore) WorkSessionID(sessionID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		return info.workSessionID
+	}
+	return ""
 }
 
 // TryClaimWorkspaceFetch returns true exactly once per session, for the caller
@@ -205,12 +271,72 @@ func (s *SessionStore) TryClaimWorkspaceFetch(sessionID string) bool {
 	return true
 }
 
-// GetSession retrieves session information
+// GetSession returns a COPY of the session info.
+//
+// It must be a copy: the roots goroutine writes Workspace under the lock while
+// callers (the workspace resolver, the activity path) read it, and handing out
+// the live pointer is a data race.
 func (s *SessionStore) GetSession(sessionID string) *SessionInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.sessions[sessionID]
+	info, ok := s.sessions[sessionID]
+	if !ok {
+		return nil
+	}
+	cp := *info
+	return &cp
+}
+
+// signalWorkspaceReadyLocked closes the readiness channel exactly once.
+// Caller must hold the write lock.
+func (s *SessionStore) signalWorkspaceReadyLocked(info *SessionInfo) {
+	select {
+	case <-info.workspaceReady:
+		// already closed
+	default:
+		close(info.workspaceReady)
+	}
+}
+
+// WorkspaceSettled blocks until the client's roots have arrived, or we have
+// given up waiting, or the deadline passes — whichever comes first.
+//
+// This exists so the FIRST piece of activity on a connection is not attributed
+// before we know the project. Without it, the first tool call resolves a
+// workspace-less work session and the second (roots having landed in between)
+// resolves a workspace-keyed one: a single connection would split across two
+// work sessions, which is exactly the thing this feature exists to prevent.
+func (s *SessionStore) WorkspaceSettled(sessionID string, wait time.Duration) {
+	s.mu.RLock()
+	info, ok := s.sessions[sessionID]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	select {
+	case <-info.workspaceReady:
+	case <-time.After(wait):
+		// The client is not going to answer in time. Give up for good, so we do
+		// not pay this wait on every subsequent call and do not later change our
+		// mind about which work session this connection belongs to.
+		s.mu.Lock()
+		if cur, ok := s.sessions[sessionID]; ok {
+			s.signalWorkspaceReadyLocked(cur)
+		}
+		s.mu.Unlock()
+	}
+}
+
+// AbandonWorkspaceFetch marks the roots answer as never coming, unblocking
+// anything waiting on it.
+func (s *SessionStore) AbandonWorkspaceFetch(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if info, ok := s.sessions[sessionID]; ok {
+		s.signalWorkspaceReadyLocked(info)
+	}
 }
 
 // RemoveSession removes session information.
