@@ -117,6 +117,39 @@ describe('buildSessionLabels', () => {
   })
 })
 
+describe('workspace labels (Spec 082)', () => {
+  // The whole point of the feature: the label answers "what was I working on".
+  it('names the project the client was working in', () => {
+    const label = formatSessionLabel({
+      sessionId: 'ws-abc',
+      clientName: 'claude-code',
+      workspace: 'mcpproxy-go',
+      startTime: '2026-07-12T14:32:00Z',
+    })
+    expect(label).toBe('Claude Code · mcpproxy-go')
+  })
+
+  // Measured: Codex does not disclose roots. It must still be usable.
+  it('falls back to the time when the client discloses no project', () => {
+    const label = formatSessionLabel({
+      sessionId: 'ws-def',
+      clientName: 'codex',
+      startTime: '2026-07-12T14:32:00Z',
+    })
+    expect(label).toContain('Codex')
+    expect(label).not.toBe('...ws-def')
+  })
+
+  it('separates two projects worked in by the same client', () => {
+    const labels = buildSessionLabels([
+      { sessionId: 'ws-1', clientName: 'claude-code', workspace: 'mcpproxy-go' },
+      { sessionId: 'ws-2', clientName: 'claude-code', workspace: 'english-notes' },
+    ])
+    expect(labels.get('ws-1')).toBe('Claude Code · mcpproxy-go')
+    expect(labels.get('ws-2')).toBe('Claude Code · english-notes')
+  })
+})
+
 describe('prettyClientName — untrusted input', () => {
   // clientInfo.name is attacker-controllable: any MCP client can send anything
   // at initialize and the core stores it verbatim. Vue escapes it (no XSS), but

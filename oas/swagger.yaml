@@ -1077,7 +1077,7 @@ components:
           description: Name of upstream MCP server
           type: string
         session_id:
-          description: MCP session ID for correlation
+          description: MCP transport session ID (regenerated on every reconnect)
           type: string
         source:
           $ref: '#/components/schemas/contracts.ActivitySource'
@@ -1092,6 +1092,9 @@ components:
           type: string
         type:
           $ref: '#/components/schemas/contracts.ActivityType'
+        work_session_id:
+          description: 'Spec 082: one client, one project, across reconnects'
+          type: string
       type: object
     contracts.ActivitySource:
       description: 'How activity was triggered: "mcp", "cli", "api"'
@@ -1660,6 +1663,14 @@ components:
           type: integer
         total_tokens:
           type: integer
+        work_session_id:
+          type: string
+        workspace_name:
+          description: |-
+            Workspace / work session (Spec 082). WorkspaceName is the project's
+            basename — the full local path is never exposed. WorkSessionID groups the
+            reconnects that make up one stretch of user work.
+          type: string
       type: object
     contracts.MetadataStatus:
       properties:
@@ -2902,9 +2913,14 @@ paths:
         name: tool
         schema:
           type: string
-      - description: Filter by MCP session ID
+      - description: Filter by MCP transport session ID
         in: query
         name: session_id
+        schema:
+          type: string
+      - description: Filter by work session (one client, one project, across reconnects)
+        in: query
+        name: work_session_id
         schema:
           type: string
       - description: Filter by status
@@ -3118,9 +3134,14 @@ paths:
         name: tool
         schema:
           type: string
-      - description: Filter by MCP session ID
+      - description: Filter by MCP transport session ID
         in: query
         name: session_id
+        schema:
+          type: string
+      - description: Filter by work session (one client, one project, across reconnects)
+        in: query
+        name: work_session_id
         schema:
           type: string
       - description: Filter by status

@@ -177,6 +177,34 @@ An operator or agent can list sessions and filter activity by session from the C
 - Distinguishing two concurrent conversations from the same client in the same project (see Assumption 3).
 - Any change to what MCPProxy sends on the wire to clients or upstream servers.
 - Implementing the forthcoming stateless protocol revision. This feature must merely survive it.
+- Server-edition OAuth user identity as the principal (see Integrity Review, item 6).
+- The pre-existing server-edition bucket collision (see Integrity Review, item 7) — a separate defect, not this feature's to fix, but this feature must not make it worse.
+
+## Integrity Review *(cross-model review against the existing codebase, 2026-07-12)*
+
+A cross-model review of this spec against the real code found nine collisions. They are recorded here because several **correct the spec**, and the plan must honour them.
+
+**Corrections to the spec (the spec was wrong):**
+
+1. **Roots MUST NOT be fetched during the initialize handshake.** `afterInitialize` fires *before* the initialize response is sent (`mcp-go` `request_handler.go:133` → `createResponse` at `:134`). Requesting roots there would deadlock: the client waits for the initialize result while we wait for its roots answer. **FR-009 is amended**: the project MUST be obtained *after* the handshake completes, asynchronously, with a timeout, and MUST never block or delay a client request. (Empirically, clients answer a roots request immediately after `notifications/initialized` — that is the safe trigger.)
+
+2. **Work-session attribution MUST be a first-class field, not metadata.** Activity filtering compares `record.SessionID` (`internal/storage/activity_models.go:201`); REST, CSV export, CLI and frontend all key on `session_id`. Attribution buried in a metadata map would be stamped but **unfilterable**, silently failing FR-017. **FR-012 is amended** to require a first-class, filterable field.
+
+3. **Only *durable persistence* may be deferred — never the in-memory session.** The in-memory session map (`session_store.go:53`) is what resolves the client name for every activity record (`SetSessionClientResolver`, added in #839). Deferring it would make the first activity of every session lose its client identity. **FR-001/FR-002 are clarified**: suppress the *storage write*, not the in-memory registration.
+
+4. **Deferred creation races the existing stats write.** `UpdateSessionStats` requires the row to already exist and errors if it does not (`storage/manager.go:1443,1465`). Creating the record on first activity means the first call's stats would be dropped with a warning. The write path must ensure the record exists before stats are applied.
+
+5. **Disconnect must stay quiet.** `RemoveSession` unconditionally closes the session in storage (`session_store.go:106`), which returns "session not found" for anything never persisted (`storage/manager.go:1298`). Without care, every idle disconnect would log a warning — trading record noise for log noise.
+
+**Constraints the plan must respect (the spec was right, but incomplete):**
+
+6. **The principal is only partly available.** MCP auth resolves agent tokens and the API key (`server/server.go:210-286`), but server-edition OAuth identity is a *separate* middleware and `/mcp` does not pass through it. FR-006's principal is therefore implementable for agent-token/API-key today, and **not** for server-edition OAuth users. Out of scope; the derivation must degrade without it.
+
+7. **Pre-existing bucket collision (not caused by this feature).** Core MCP sessions use BBolt bucket `"sessions"` (`storage/models.go:30`); server-edition *user login* sessions use a bucket of the same name (`serveredition/users/store.go:18`) on the same DB (`serveredition_wire.go`). The admin handler unmarshals every value in that bucket as an auth session. Work-session records MUST NOT be added to that bucket. **This is an existing defect worth its own fix.**
+
+8. **"Activity" and `tool_call_count` are not the same thing.** `retrieve_tools` emits an activity record but does *not* increment `tool_call_count` (only `UpdateSessionStats` does). A retrieval-only session would correctly exist under FR-001 while displaying zero tool calls. The surfaces must not present that as an empty session.
+
+9. **Session retention is hardcoded.** The 100-record cap lives at `storage/manager.go:1261` with no configuration path, and the activity retention default is 7 days (not the 90 assumed elsewhere in comments). FR-004 is therefore a real change, not a config tweak.
 
 ## Commit Message Conventions *(mandatory)*
 

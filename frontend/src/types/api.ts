@@ -313,6 +313,11 @@ export interface MCPSession {
   has_roots?: boolean
   has_sampling?: boolean
   experimental?: string[]
+  // Spec 082: the project the client is working in (basename only — the full
+  // local path never leaves the machine), and the work session this connection
+  // belongs to.
+  workspace_name?: string
+  work_session_id?: string
 }
 
 // Tool types
@@ -713,6 +718,8 @@ export interface ActivityRecord {
   duration_ms?: number
   timestamp: string
   session_id?: string
+  /** Spec 082: one client, one project, across reconnects. Absent on pre-082 records. */
+  work_session_id?: string
   request_id?: string
   metadata?: Record<string, any>
   // Spec 026: Sensitive data detection fields

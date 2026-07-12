@@ -92,6 +92,10 @@ type Runtime struct {
 	managementService interface{}      // Initialized later to avoid import cycle
 	activityService   *ActivityService // Activity logging service
 
+	// workSessions derives a unit of USER WORK from the churn of transport
+	// sessions underneath it (Spec 082).
+	workSessions *WorkSessionTracker
+
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
 	// GET /api/v1/servers.
@@ -1254,6 +1258,8 @@ func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, er
 			HasRoots:      rec.HasRoots,
 			HasSampling:   rec.HasSampling,
 			Experimental:  rec.Experimental,
+			WorkspaceName: rec.WorkspaceName,
+			WorkSessionID: rec.WorkSessionID,
 		})
 	}
 
@@ -1292,6 +1298,8 @@ func (r *Runtime) GetSessionByID(sessionID string) (*contracts.MCPSession, error
 		HasRoots:      rec.HasRoots,
 		HasSampling:   rec.HasSampling,
 		Experimental:  rec.Experimental,
+		WorkspaceName: rec.WorkspaceName,
+		WorkSessionID: rec.WorkSessionID,
 	}, nil
 }
 
@@ -2661,6 +2669,30 @@ func (r *Runtime) SetSessionClientResolver(resolver SessionClientResolver) {
 		return
 	}
 	r.activityService.SetSessionClientResolver(resolver)
+}
+
+// SetSessionWorkspaceResolver wires the session -> project lookup used to group
+// activity into work sessions (Spec 082). No-op if the activity service is not
+// wired.
+func (r *Runtime) SetSessionWorkspaceResolver(resolver SessionWorkspaceResolver) {
+	if r.activityService == nil {
+		return
+	}
+	r.activityService.SetSessionWorkspaceResolver(resolver)
+	if r.workSessions == nil {
+		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+	}
+	r.activityService.SetWorkSessionTracker(r.workSessions)
+}
+
+// WorkSessionFor returns the current work session for a transport session, or ""
+// when it cannot be derived. Used by the MCP layer to tag the session record it
+// persists on first activity.
+func (r *Runtime) WorkSessionFor(sessionID string) string {
+	if r.activityService == nil {
+		return ""
+	}
+	return r.activityService.resolveWorkSession(sessionID)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool

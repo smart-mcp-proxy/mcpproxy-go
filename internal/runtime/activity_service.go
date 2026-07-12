@@ -37,6 +37,11 @@ type SensitiveDataEventEmitter interface {
 // Returns empty strings when the session is unknown.
 type SessionClientResolver func(sessionID string) (name, version string)
 
+// SessionWorkspaceResolver maps an MCP session id to the project the client is
+// working in, as disclosed via MCP roots. Returns "" when the client did not
+// disclose one (measured: Codex does not) or the session is unknown.
+type SessionWorkspaceResolver func(sessionID string) string
+
 // ActivityService subscribes to activity events and persists them to storage.
 // It runs as a background goroutine and handles activity recording non-blocking.
 type ActivityService struct {
@@ -55,6 +60,13 @@ type ActivityService struct {
 	// nil until wired via SetSessionClientResolver; the records simply carry no
 	// client name in that case.
 	clientResolver SessionClientResolver
+
+	// workspaceResolver and workSessions turn a transport session into a WORK
+	// session (Spec 082): one client, one project, across reconnects. The id is
+	// stamped onto the record at write time for the same reason the client name
+	// is — a value resolved later decays once the session record is evicted.
+	workspaceResolver SessionWorkspaceResolver
+	workSessions      *WorkSessionTracker
 
 	// Channel for receiving events
 	eventCh chan Event
@@ -122,6 +134,36 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 // unset (records then carry no client name).
 func (s *ActivityService) SetSessionClientResolver(r SessionClientResolver) {
 	s.clientResolver = r
+}
+
+// SetSessionWorkspaceResolver wires the session -> project lookup (Spec 082).
+func (s *ActivityService) SetSessionWorkspaceResolver(r SessionWorkspaceResolver) {
+	s.workspaceResolver = r
+}
+
+// SetWorkSessionTracker wires the work-session derivation (Spec 082).
+func (s *ActivityService) SetWorkSessionTracker(t *WorkSessionTracker) {
+	s.workSessions = t
+}
+
+// resolveWorkSession derives the work session for a piece of activity: one
+// client, in one project, for a continuous stretch of work.
+//
+// Returns "" when we know nothing about the caller, or the tracker is not wired.
+// An unattributed record is better than one filed under a meaningless bucket.
+func (s *ActivityService) resolveWorkSession(sessionID string) string {
+	if sessionID == "" || s.workSessions == nil {
+		return ""
+	}
+
+	id := WorkSessionIdentity{}
+	if s.clientResolver != nil {
+		id.ClientName, id.ClientVersion = s.clientResolver(sessionID)
+	}
+	if s.workspaceResolver != nil {
+		id.WorkspaceRoot = s.workspaceResolver(sessionID)
+	}
+	return s.workSessions.Resolve(id)
 }
 
 // withClientInfo stamps client_name / client_version onto an activity record's
@@ -452,6 +494,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		DurationMs:        durationMs,
 		Timestamp:         evt.Timestamp,
 		SessionID:         sessionID,
+		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		Metadata:          metadata,
 		RequestBytes:      requestBytes,
@@ -516,8 +559,9 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 			"decision": decision,
 			"reason":   reason,
 		}, sessionID),
-		Timestamp: evt.Timestamp,
-		SessionID: sessionID,
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -692,19 +736,20 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	metadata = s.withClientInfo(metadata, sessionID)
 
 	record := &storage.ActivityRecord{
-		Type:         storage.ActivityTypeInternalToolCall,
-		Source:       storage.ActivitySourceMCP,
-		ToolName:     internalToolName,
-		ServerName:   targetServer,
-		Arguments:    arguments,
-		Response:     responseStr,
-		Status:       status,
-		ErrorMessage: errorMsg,
-		DurationMs:   durationMs,
-		Metadata:     metadata,
-		Timestamp:    evt.Timestamp,
-		SessionID:    sessionID,
-		RequestID:    requestID,
+		Type:          storage.ActivityTypeInternalToolCall,
+		Source:        storage.ActivitySourceMCP,
+		ToolName:      internalToolName,
+		ServerName:    targetServer,
+		Arguments:     arguments,
+		Response:      responseStr,
+		Status:        status,
+		ErrorMessage:  errorMsg,
+		DurationMs:    durationMs,
+		Metadata:      metadata,
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
+		RequestID:     requestID,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)

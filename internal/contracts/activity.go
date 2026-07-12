@@ -32,26 +32,27 @@ const (
 
 // ActivityRecord represents an activity record in API responses
 type ActivityRecord struct {
-	ID                string                 `json:"id"`                                              // Unique identifier (ULID format)
-	Type              ActivityType           `json:"type"`                                            // Type of activity
-	Source            ActivitySource         `json:"source,omitempty"`                                // How activity was triggered: "mcp", "cli", "api"
-	ServerName        string                 `json:"server_name,omitempty"`                           // Name of upstream MCP server
-	ToolName          string                 `json:"tool_name,omitempty"`                             // Name of tool called
-	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"`        // Tool call arguments
-	Response          string                 `json:"response,omitempty"`                              // Tool response (potentially truncated)
-	ResponseTruncated bool                   `json:"response_truncated,omitempty"`                    // True if response was truncated
-	Status            string                 `json:"status"`                                          // Result status: "success", "error", "blocked"
-	ErrorMessage      string                 `json:"error_message,omitempty"`                         // Error details if status is "error"
-	DurationMs        int64                  `json:"duration_ms,omitempty"`                           // Execution duration in milliseconds
-	Timestamp         time.Time              `json:"timestamp"`                                       // When activity occurred
-	SessionID         string                 `json:"session_id,omitempty"`                            // MCP session ID for correlation
-	RequestID         string                 `json:"request_id,omitempty"`                            // HTTP request ID for correlation
-	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`         // Additional context-specific data
+	ID                string                 `json:"id"`                                       // Unique identifier (ULID format)
+	Type              ActivityType           `json:"type"`                                     // Type of activity
+	Source            ActivitySource         `json:"source,omitempty"`                         // How activity was triggered: "mcp", "cli", "api"
+	ServerName        string                 `json:"server_name,omitempty"`                    // Name of upstream MCP server
+	ToolName          string                 `json:"tool_name,omitempty"`                      // Name of tool called
+	Arguments         map[string]interface{} `json:"arguments,omitempty" swaggertype:"object"` // Tool call arguments
+	Response          string                 `json:"response,omitempty"`                       // Tool response (potentially truncated)
+	ResponseTruncated bool                   `json:"response_truncated,omitempty"`             // True if response was truncated
+	Status            string                 `json:"status"`                                   // Result status: "success", "error", "blocked"
+	ErrorMessage      string                 `json:"error_message,omitempty"`                  // Error details if status is "error"
+	DurationMs        int64                  `json:"duration_ms,omitempty"`                    // Execution duration in milliseconds
+	Timestamp         time.Time              `json:"timestamp"`                                // When activity occurred
+	SessionID         string                 `json:"session_id,omitempty"`                     // MCP transport session ID (regenerated on every reconnect)
+	WorkSessionID     string                 `json:"work_session_id,omitempty"`                // Spec 082: one client, one project, across reconnects
+	RequestID         string                 `json:"request_id,omitempty"`                     // HTTP request ID for correlation
+	Metadata          map[string]interface{} `json:"metadata,omitempty" swaggertype:"object"`  // Additional context-specific data
 
 	// Sensitive data detection fields (Spec 026)
-	HasSensitiveData bool     `json:"has_sensitive_data"`             // Whether sensitive data was detected
-	DetectionTypes   []string `json:"detection_types,omitempty"`      // List of detection types found
-	MaxSeverity      string   `json:"max_severity,omitempty"`         // Highest severity level detected (critical, high, medium, low)
+	HasSensitiveData bool     `json:"has_sensitive_data"`        // Whether sensitive data was detected
+	DetectionTypes   []string `json:"detection_types,omitempty"` // List of detection types found
+	MaxSeverity      string   `json:"max_severity,omitempty"`    // Highest severity level detected (critical, high, medium, low)
 }
 
 // ActivityListResponse is the response for GET /api/v1/activity
@@ -79,23 +80,23 @@ const (
 
 // ActivitySSEEvent represents an activity event for SSE streaming
 type ActivitySSEEvent struct {
-	EventType  string                 `json:"event_type"`                    // SSE event name
-	ActivityID string                 `json:"activity_id"`                   // Reference to ActivityRecord
-	Timestamp  int64                  `json:"timestamp"`                     // Unix timestamp
-	Payload    map[string]interface{} `json:"payload" swaggertype:"object"`  // Event-specific data
+	EventType  string                 `json:"event_type"`                   // SSE event name
+	ActivityID string                 `json:"activity_id"`                  // Reference to ActivityRecord
+	Timestamp  int64                  `json:"timestamp"`                    // Unix timestamp
+	Payload    map[string]interface{} `json:"payload" swaggertype:"object"` // Event-specific data
 }
 
 // ActivitySummaryResponse is the response for GET /api/v1/activity/summary
 type ActivitySummaryResponse struct {
-	Period       string              `json:"period"`                  // Time period (1h, 24h, 7d, 30d)
-	TotalCount   int                 `json:"total_count"`             // Total activity count
-	SuccessCount int                 `json:"success_count"`           // Count of successful activities
-	ErrorCount   int                 `json:"error_count"`             // Count of error activities
-	BlockedCount int                 `json:"blocked_count"`           // Count of blocked activities
-	TopServers   []ActivityTopServer `json:"top_servers,omitempty"`   // Top servers by activity count
-	TopTools     []ActivityTopTool   `json:"top_tools,omitempty"`     // Top tools by activity count
-	StartTime    string              `json:"start_time"`              // Start of the period (RFC3339)
-	EndTime      string              `json:"end_time"`                // End of the period (RFC3339)
+	Period       string              `json:"period"`                // Time period (1h, 24h, 7d, 30d)
+	TotalCount   int                 `json:"total_count"`           // Total activity count
+	SuccessCount int                 `json:"success_count"`         // Count of successful activities
+	ErrorCount   int                 `json:"error_count"`           // Count of error activities
+	BlockedCount int                 `json:"blocked_count"`         // Count of blocked activities
+	TopServers   []ActivityTopServer `json:"top_servers,omitempty"` // Top servers by activity count
+	TopTools     []ActivityTopTool   `json:"top_tools,omitempty"`   // Top tools by activity count
+	StartTime    string              `json:"start_time"`            // Start of the period (RFC3339)
+	EndTime      string              `json:"end_time"`              // End of the period (RFC3339)
 }
 
 // ActivityTopServer represents a server's activity count in the summary

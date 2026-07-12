@@ -38,6 +38,11 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 	}
 
 	// Session filter
+	// Spec 082: filter by a unit of user work (one client, one project, across
+	// reconnects). This is what the UI's Session filter now sends.
+	if ws := q.Get("work_session_id"); ws != "" {
+		filter.WorkSessionID = ws
+	}
 	if sessionID := q.Get("session_id"); sessionID != "" {
 		filter.SessionID = sessionID
 	}
@@ -124,7 +129,8 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param type query string false "Filter by activity type(s), comma-separated for multiple (Spec 024)" Enums(tool_call, policy_decision, quarantine_change, server_change, system_start, system_stop, internal_tool_call, config_change)
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
-// @Param session_id query string false "Filter by MCP session ID"
+// @Param session_id query string false "Filter by MCP transport session ID"
+// @Param work_session_id query string false "Filter by work session (one client, one project, across reconnects)"
 // @Param status query string false "Filter by status" Enums(success, error, blocked)
 // @Param intent_type query string false "Filter by intent operation type (Spec 018)" Enums(read, write, destructive)
 // @Param request_id query string false "Filter by HTTP request ID for log correlation (Spec 021)"
@@ -229,6 +235,7 @@ func storageToContractActivity(a *storage.ActivityRecord) contracts.ActivityReco
 		DurationMs:        a.DurationMs,
 		Timestamp:         a.Timestamp,
 		SessionID:         a.SessionID,
+		WorkSessionID:     a.WorkSessionID,
 		RequestID:         a.RequestID,
 		Metadata:          a.Metadata,
 		// Sensitive data detection fields (Spec 026)
@@ -324,6 +331,7 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 		DurationMs:        a.DurationMs,
 		Timestamp:         a.Timestamp,
 		SessionID:         a.SessionID,
+		WorkSessionID:     a.WorkSessionID,
 		RequestID:         a.RequestID,
 		Metadata:          a.Metadata,
 		// Sensitive data detection fields (Spec 026)
@@ -351,7 +359,8 @@ func storageToContractActivityForExport(a *storage.ActivityRecord, includeBodies
 // @Param type query string false "Filter by activity type"
 // @Param server query string false "Filter by server name"
 // @Param tool query string false "Filter by tool name"
-// @Param session_id query string false "Filter by MCP session ID"
+// @Param session_id query string false "Filter by MCP transport session ID"
+// @Param work_session_id query string false "Filter by work session (one client, one project, across reconnects)"
 // @Param status query string false "Filter by status"
 // @Param start_time query string false "Filter activities after this time (RFC3339)"
 // @Param end_time query string false "Filter activities before this time (RFC3339)"

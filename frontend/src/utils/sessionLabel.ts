@@ -74,12 +74,26 @@ export interface SessionLabelInput {
   clientName?: string
   /** ISO start time, used to tell two sessions of the same client apart. */
   startTime?: string
+  /**
+   * The project the client is working in (Spec 082) — the basename of its
+   * workspace root, e.g. "mcpproxy-go". Absent for clients that do not disclose
+   * roots (measured: Codex does not), in which case we fall back to the time.
+   */
+  workspace?: string
 }
 
 /** The label with no disambiguating suffix. "" when there is no client name. */
 function baseLabel(input: SessionLabelInput): string {
   const pretty = prettyClientName(input.clientName)
   if (!pretty) return '' // no client name → the id is all we have
+
+  // The project is the most useful thing we can say: it is what the user was
+  // actually working on ("Claude Code · mcpproxy-go"), which is the question the
+  // session filter exists to answer. Time is the fallback for clients that do
+  // not disclose a workspace (measured: Codex does not).
+  const workspace = (input.workspace ?? '').trim()
+  if (workspace) return `${pretty} · ${workspace}`
+
   const time = clockTime(input.startTime)
   return time ? `${pretty} · ${time}` : pretty
 }

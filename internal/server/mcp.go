@@ -226,7 +226,22 @@ func NewMCPProxyServer(
 			}
 			return "", ""
 		})
+
+		// Spec 082: the project the client is working in, so activity can be
+		// grouped into work sessions ("Claude Code · mcpproxy-go") rather than
+		// per-reconnect transport sessions.
+		mainServer.runtime.SetSessionWorkspaceResolver(func(sessionID string) string {
+			if info := sessionStore.GetSession(sessionID); info != nil {
+				return info.Workspace
+			}
+			return ""
+		})
 	}
+
+	// Forward handle to the MCP server, which is constructed below but is needed
+	// by the hooks above it (to send a roots request back to the client).
+	// Atomic because the hooks run on client goroutines.
+	var mcpSrvRef atomic.Pointer[mcpserver.MCPServer]
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
@@ -239,6 +254,25 @@ func NewMCPProxyServer(
 			return
 		}
 		sessionStore.UpdateActivity(session.SessionID())
+
+		// Spec 082: ask the client which project it is working in — once, lazily,
+		// on the first real request after the handshake.
+		//
+		// The timing is the whole trick, and two obvious options are both wrong:
+		//   - AddAfterInitialize runs BEFORE the initialize response is written,
+		//     so asking there DEADLOCKS: the client cannot answer until it has
+		//     the initialize result it is still waiting for.
+		//   - notifications/initialized never reaches this hook at all — mcp-go
+		//     dispatches notifications before beforeAny is invoked
+		//     (request_handler.go: `if baseMessage.ID == nil { ... return }`).
+		//
+		// The first request with an id (tools/list, tools/call, ...) is the
+		// earliest point that both fires this hook and finds the client able to
+		// answer. Fetching is async and best-effort: a client that will not
+		// answer simply has no workspace.
+		if method != mcp.MethodInitialize && sessionStore.TryClaimWorkspaceFetch(session.SessionID()) {
+			go fetchWorkspaceRoot(ctx, mcpSrvRef.Load(), sessionStore, logger)
+		}
 	})
 
 	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
@@ -348,6 +382,10 @@ func NewMCPProxyServer(
 		mcpServerVersion(),
 		capabilities...,
 	)
+
+	// Publish the server to the hooks, which need it to ask the client for its
+	// workspace roots (Spec 082). Set before the server ever serves a request.
+	mcpSrvRef.Store(mcpServer)
 
 	// Initialize JavaScript runtime pool if code execution is enabled
 	var jsPool *jsruntime.Pool
@@ -1156,6 +1194,10 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// handler stays unaware of BBolt. nil-safe.
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.RecordRetrieveToolsCallForActivation()
+	}
+	// Spec 082: a tool retrieval is real work — it earns the session a record.
+	if sid := sessionIDFromContext(ctx); sid != "" {
+		p.markSessionWorked(sid)
 	}
 
 	startTime := time.Now()
@@ -1975,6 +2017,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 		// Update session stats even for errors (to track call count)
 		if sessionID != "" && tokenMetrics != nil {
+			p.markSessionWorked(sessionID)
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
@@ -2076,6 +2119,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Update session stats for successful call
 	if sessionID != "" && tokenMetrics != nil {
+		p.markSessionWorked(sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
@@ -2391,6 +2435,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 		// Update session stats even for errors (to track call count)
 		if sessionID != "" && tokenMetrics != nil {
+			p.markSessionWorked(sessionID)
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
@@ -2478,6 +2523,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Update session stats for successful call
 	if sessionID != "" && tokenMetrics != nil {
+		p.markSessionWorked(sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
