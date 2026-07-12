@@ -95,3 +95,14 @@ func (s *Session) Validate() error {
 	}
 	return nil
 }
+
+// isLoginSession reports whether this really is a user login session, rather
+// than a foreign record that merely unmarshalled without error.
+//
+// JSON unmarshalling accepts any shape and leaves unknown fields zero, so a
+// record belonging to someone else looks like a session with no user and a zero
+// expiry. Treating that as an expired session is how the sweep used to delete
+// data that was never its own.
+func (s *Session) isLoginSession() bool {
+	return s.UserID != "" && !s.ExpiresAt.IsZero()
+}
