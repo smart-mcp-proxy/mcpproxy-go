@@ -835,9 +835,11 @@ const availableSessions = computed((): SessionOption[] => {
     if (a.session_id && !seen.has(a.session_id)) {
       const info = sessionInfo.value.get(a.session_id)
       seen.set(a.session_id, {
-        // Prefer the session record; fall back to metadata for records that
-        // carry it, then to nothing (→ id suffix).
-        clientName: info?.clientName ?? (a.metadata?.client_name as string | undefined),
+        // Prefer the name persisted ON the record: it is that row's own truth and
+        // never expires. The /api/v1/sessions lookup is only a fallback for rows
+        // written before the name was persisted — and it decays, because just the
+        // 100 most recent sessions are kept while activity lives for 90 days.
+        clientName: (a.metadata?.client_name as string | undefined) ?? info?.clientName,
         startTime: info?.startTime ?? a.timestamp,
       })
     }

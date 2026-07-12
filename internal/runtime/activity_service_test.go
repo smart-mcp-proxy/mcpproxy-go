@@ -486,6 +486,77 @@ func setupTestStorage(t *testing.T) (*storage.Manager, func()) {
 	}
 }
 
+// TestActivityRecordsCarryClientName verifies that the MCP client is stamped onto
+// the activity record at WRITE time.
+//
+// This must not be a read-time lookup: activity is retained for 90 days but only
+// the 100 most recent sessions are, and an IDE reconnecting every few minutes
+// burns through 100 sessions in about a day. A name resolved by joining against
+// the session store therefore decays back to a bare session id — which is exactly
+// the bug this fixes. Persisting it on the record makes it permanent.
+func TestActivityRecordsCarryClientName(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.SetSessionClientResolver(func(sessionID string) (string, string) {
+		if sessionID == "mcp-session-abc" {
+			return "claude-code", "1.0.60"
+		}
+		return "", ""
+	})
+
+	// A retrieve_tools call — an internal tool call, which is the bulk of
+	// session-bearing activity.
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "retrieve_tools",
+			"session_id":         "mcp-session-abc",
+			"request_id":         "req-1",
+			"status":             "success",
+			"duration_ms":        int64(20),
+		},
+	})
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	assert.Equal(t, "claude-code", records[0].Metadata["client_name"],
+		"the client name must be persisted on the record, not looked up later")
+	assert.Equal(t, "1.0.60", records[0].Metadata["client_version"])
+}
+
+// TestActivityRecordsUnknownSessionHasNoClientName verifies we add nothing when
+// the session cannot be resolved (already closed, or no resolver wired), rather
+// than writing an empty key the UI would have to special-case.
+func TestActivityRecordsUnknownSessionHasNoClientName(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.SetSessionClientResolver(func(string) (string, string) { return "", "" })
+
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "retrieve_tools",
+			"session_id":         "mcp-session-gone",
+			"status":             "success",
+		},
+	})
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	_, hasName := records[0].Metadata["client_name"]
+	assert.False(t, hasName, "an unresolvable session must not add an empty client_name")
+}
+
 // TestHandleToolCallCompleted_UserIdentityExtraction verifies that handleToolCallCompleted
 // extracts UserID and UserEmail from _auth_ prefixed arguments and sets them on the record.
 func TestHandleToolCallCompleted_UserIdentityExtraction(t *testing.T) {
