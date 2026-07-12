@@ -15,7 +15,20 @@ import (
 const (
 	BucketUsers        = "users"
 	BucketUsersByEmail = "users_by_email"
-	BucketSessions     = "sessions"
+	// BucketSessions holds USER LOGIN sessions.
+	//
+	// The name stays "sessions" DELIBERATELY. The core used to share this bucket
+	// for MCP session records, and the two swept it believing each owned every
+	// key — core's retention evicted user logins, and the expiry sweep below
+	// deleted MCP records (they carry no expires_at, so a zero time reads as long
+	// expired). The core has moved out to "mcp_sessions"
+	// (internal/storage/sessions_migration.go); this bucket is now exclusively
+	// ours.
+	//
+	// Renaming it here as well would orphan every existing login and log the whole
+	// estate out on upgrade — the exact harm this fix exists to prevent. So it
+	// keeps its name, and the guards below make the sweep safe regardless.
+	BucketSessions = "sessions"
 )
 
 // UserStore provides CRUD operations for User and Session entities in BBolt.
@@ -391,7 +404,14 @@ func (s *UserStore) ListSessions() ([]*Session, error) {
 		return bucket.ForEach(func(_, v []byte) error {
 			var session Session
 			if err := json.Unmarshal(v, &session); err != nil {
-				return fmt.Errorf("failed to unmarshal session: %w", err)
+				return nil // not a login session — skip rather than fail the listing
+			}
+			// Defence in depth: only list records that actually look like login
+			// sessions. JSON unmarshalling happily accepts a foreign shape and
+			// leaves the fields zero, which is how MCP records used to appear here
+			// as phantom sessions with no user and a zero expiry.
+			if !session.isLoginSession() {
+				return nil
 			}
 			sessions = append(sessions, &session)
 			return nil
@@ -418,6 +438,13 @@ func (s *UserStore) CleanupExpiredSessions() (int, error) {
 			var session Session
 			if err := json.Unmarshal(v, &session); err != nil {
 				return nil // Skip malformed entries
+			}
+			// NEVER delete a record that is not a login session. A foreign record
+			// unmarshals without error and leaves ExpiresAt at the zero time, which
+			// reads as "long expired" — that is precisely how this sweep used to
+			// destroy every MCP session record sharing the bucket.
+			if !session.isLoginSession() {
+				return nil
 			}
 			if now.After(session.ExpiresAt) {
 				keyCopy := make([]byte, len(k))

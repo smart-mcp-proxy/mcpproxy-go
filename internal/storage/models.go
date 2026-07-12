@@ -27,7 +27,27 @@ const (
 	MetaBucket            = "meta"
 	CacheBucket           = "cache"
 	CacheStatsBucket      = "cache_stats"
-	SessionsBucket        = "sessions"
+	// SessionsBucket holds MCP transport/work session records.
+	//
+	// It is NOT "sessions". The server edition stores USER LOGIN sessions in a
+	// bucket of that name, on the same BBolt database, and the two were silently
+	// destroying each other:
+	//
+	//   - enforceSessionRetention (here) keeps the 100 newest keys and deletes the
+	//     rest by raw key order, with no type check — evicting user auth sessions
+	//     and logging people out at random.
+	//   - the server edition's CleanupExpiredSessions unmarshals every value as an
+	//     auth session; an MCP record has no expires_at, so its zero time reads as
+	//     long expired and the record is deleted.
+	//
+	// Namespacing the bucket is what makes each side's sweep safe.
+	SessionsBucket = "mcp_sessions"
+
+	// LegacySessionsBucket is the pre-namespacing bucket. In the personal edition
+	// it holds only MCP records; in the server edition it holds a mix of those and
+	// user login sessions. migrateLegacySessions moves the MCP records out and
+	// leaves the auth sessions where they are, so nobody is logged out.
+	LegacySessionsBucket = "sessions"
 
 	// Security scanner buckets (Spec 039)
 	ScannersBucket           = "security_scanners"
