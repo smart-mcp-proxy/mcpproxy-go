@@ -1195,6 +1195,21 @@ type SessionRecord struct {
 	HasRoots     bool     `json:"has_roots,omitempty"`    // Whether client supports roots
 	HasSampling  bool     `json:"has_sampling,omitempty"` // Whether client supports sampling
 	Experimental []string `json:"experimental,omitempty"` // Experimental capability names
+
+	// Workspace / work session (Spec 082).
+	//
+	// WorkspaceRoot is the project the client is working in, fetched once from
+	// the client's MCP roots. It is a LOCAL FILESYSTEM PATH: it stays on this
+	// machine and is never sent to telemetry. WorkspaceName is its basename, and
+	// is what the UI shows.
+	//
+	// WorkSessionID groups this connection with the other connections that make
+	// up the same stretch of user work (see internal/runtime/worksession.go).
+	// A client reconnecting every few minutes produces many session records that
+	// all share one WorkSessionID.
+	WorkspaceRoot string `json:"workspace_root,omitempty"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
+	WorkSessionID string `json:"work_session_id,omitempty"`
 }
 
 // CreateSession creates a new session record
@@ -1432,6 +1447,63 @@ func (m *Manager) CloseAllActiveSessions() error {
 
 		return nil
 	})
+}
+
+// SetSessionWorkspace backfills the workspace on an already-persisted session.
+//
+// Needed because the workspace is discovered asynchronously (the client is asked
+// for its roots only after the handshake completes — asking during it deadlocks),
+// so a busy session can be persisted before the answer arrives.
+func (m *Manager) SetSessionWorkspace(sessionID, workspaceRoot string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(SessionsBucket))
+		if bucket == nil {
+			return fmt.Errorf("sessions bucket not found")
+		}
+
+		var sessionKey []byte
+		var session SessionRecord
+		c := bucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if strings.HasSuffix(string(k), "_"+sessionID) {
+				sessionKey = k
+				if err := json.Unmarshal(v, &session); err != nil {
+					return fmt.Errorf("failed to unmarshal session: %w", err)
+				}
+				break
+			}
+		}
+		if sessionKey == nil {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+
+		session.WorkspaceRoot = workspaceRoot
+		session.WorkspaceName = workspaceDisplayName(workspaceRoot)
+
+		data, err := json.Marshal(session)
+		if err != nil {
+			return fmt.Errorf("failed to marshal session: %w", err)
+		}
+		return bucket.Put(sessionKey, data)
+	})
+}
+
+// workspaceDisplayName is the basename of a workspace root. Only the basename is
+// ever displayed or exported — the full path is local and private.
+func workspaceDisplayName(root string) string {
+	root = strings.TrimSpace(root)
+	root = strings.TrimPrefix(root, "file://")
+	root = strings.TrimRight(root, "/")
+	if root == "" {
+		return ""
+	}
+	if i := strings.LastIndex(root, "/"); i >= 0 {
+		return root[i+1:]
+	}
+	return root
 }
 
 // UpdateSessionStats increments tool call count and adds tokens

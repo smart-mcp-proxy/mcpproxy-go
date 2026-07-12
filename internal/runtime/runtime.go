@@ -92,6 +92,10 @@ type Runtime struct {
 	managementService interface{}      // Initialized later to avoid import cycle
 	activityService   *ActivityService // Activity logging service
 
+	// workSessions derives a unit of USER WORK from the churn of transport
+	// sessions underneath it (Spec 082).
+	workSessions *WorkSessionTracker
+
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
 	// GET /api/v1/servers.
@@ -1254,6 +1258,8 @@ func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, er
 			HasRoots:      rec.HasRoots,
 			HasSampling:   rec.HasSampling,
 			Experimental:  rec.Experimental,
+			WorkspaceName: rec.WorkspaceName,
+			WorkSessionID: rec.WorkSessionID,
 		})
 	}
 
@@ -1292,6 +1298,8 @@ func (r *Runtime) GetSessionByID(sessionID string) (*contracts.MCPSession, error
 		HasRoots:      rec.HasRoots,
 		HasSampling:   rec.HasSampling,
 		Experimental:  rec.Experimental,
+		WorkspaceName: rec.WorkspaceName,
+		WorkSessionID: rec.WorkSessionID,
 	}, nil
 }
 
@@ -2661,6 +2669,38 @@ func (r *Runtime) SetSessionClientResolver(resolver SessionClientResolver) {
 		return
 	}
 	r.activityService.SetSessionClientResolver(resolver)
+}
+
+// SetWorkSessionResolver wires the session -> work-session lookup used to stamp
+// every activity record (Spec 082).
+//
+// The resolver reads the id CACHED on the connection rather than re-deriving it.
+// Re-deriving per record would let one connection's records disagree: the first
+// resolves before the client's project has arrived, the second after.
+func (r *Runtime) SetWorkSessionResolver(resolver SessionWorkSessionResolver) {
+	if r.activityService == nil {
+		return
+	}
+	r.activityService.SetWorkSessionResolver(resolver)
+	r.activityService.SetWorkSessionReaper(r.ReapWorkSessions)
+}
+
+// ResolveWorkSession derives the work session for an identity, opening a new one
+// when it has been idle past the window. Called once per connection.
+func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
+	if r.workSessions == nil {
+		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+	}
+	return r.workSessions.Resolve(id)
+}
+
+// ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
+// does not accumulate one map entry per identity forever.
+func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {
+	if r.workSessions == nil {
+		return 0
+	}
+	return r.workSessions.Reap(maxIdle)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool

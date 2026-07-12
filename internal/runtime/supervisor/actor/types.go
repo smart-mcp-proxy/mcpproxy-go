@@ -83,9 +83,9 @@ const (
 
 // ActorConfig holds the configuration for an actor
 type ActorConfig struct {
-	Name          string
-	ServerConfig  *config.ServerConfig
-	MaxRetries    int
-	RetryInterval time.Duration
+	Name           string
+	ServerConfig   *config.ServerConfig
+	MaxRetries     int
+	RetryInterval  time.Duration
 	ConnectTimeout time.Duration
 }

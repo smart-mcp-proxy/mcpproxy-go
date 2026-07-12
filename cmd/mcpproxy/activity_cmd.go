@@ -201,7 +201,7 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 		q.Set("status", f.Status)
 	}
 	if f.SessionID != "" {
-		q.Set("session_id", f.SessionID)
+		q.Set(sessionQueryParam(f.SessionID), f.SessionID)
 	}
 	if f.StartTime != "" {
 		q.Set("start_time", f.StartTime)
@@ -736,7 +736,7 @@ func init() {
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
-	activityListCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by MCP session ID")
+	activityListCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityListCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter records after this time (RFC3339)")
 	activityListCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter records before this time (RFC3339)")
 	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
@@ -773,7 +773,7 @@ func init() {
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
 	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status")
-	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session ID")
+	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
 }
@@ -1594,7 +1594,7 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 		q.Set("status", activityStatus)
 	}
 	if activitySessionID != "" {
-		q.Set("session_id", activitySessionID)
+		q.Set(sessionQueryParam(activitySessionID), activitySessionID)
 	}
 	if activityStartTime != "" {
 		q.Set("start_time", activityStartTime)
@@ -1657,4 +1657,16 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// sessionQueryParam picks the right filter for a --session value.
+//
+// Spec 082: the user-facing "session" is a WORK session (one client, one
+// project, across reconnects) and its ids are prefixed "ws-". Raw MCP transport
+// session ids are still accepted, so existing scripts keep working.
+func sessionQueryParam(v string) string {
+	if strings.HasPrefix(v, "ws-") {
+		return "work_session_id"
+	}
+	return "session_id"
 }

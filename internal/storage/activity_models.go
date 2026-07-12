@@ -82,9 +82,22 @@ type ActivityRecord struct {
 	ErrorMessage      string                 `json:"error_message,omitempty"`      // Error details if status is "error"
 	DurationMs        int64                  `json:"duration_ms,omitempty"`        // Execution duration in milliseconds
 	Timestamp         time.Time              `json:"timestamp"`                    // When activity occurred
-	SessionID         string                 `json:"session_id,omitempty"`         // MCP session ID for correlation
+	SessionID         string                 `json:"session_id,omitempty"`         // MCP transport session ID (regenerated on every reconnect)
 	RequestID         string                 `json:"request_id,omitempty"`         // HTTP request ID for correlation
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`           // Additional context-specific data
+
+	// WorkSessionID groups records into one unit of USER WORK (Spec 082): one
+	// client, in one project, under one principal, across reconnects. Unlike
+	// SessionID it survives the client re-initializing, which real clients do
+	// every few minutes.
+	//
+	// First-class rather than metadata on purpose: activity filtering compares
+	// struct fields (see ActivityFilter.Matches), so a value tucked into
+	// Metadata would be stored but not filterable.
+	//
+	// Empty on records written before Spec 082 — those stay viewable, just
+	// unattributed.
+	WorkSessionID string `json:"work_session_id,omitempty"`
 
 	// Byte sizes measured pre-truncation (Spec 069 A1). Zero means unknown (legacy records).
 	RequestBytes  int `json:"request_bytes,omitempty"`  // JSON-serialized request arguments size in bytes
@@ -110,7 +123,7 @@ type ActivityFilter struct {
 	Types      []string  // Filter by activity types (Spec 024: supports multiple types with OR logic)
 	Server     string    // Filter by server name
 	Tool       string    // Filter by tool name
-	SessionID  string    // Filter by MCP session
+	SessionID  string    // Filter by MCP transport session
 	Status     string    // Filter by status (success/error/blocked)
 	StartTime  time.Time // Activities after this time
 	EndTime    time.Time // Activities before this time
@@ -118,6 +131,11 @@ type ActivityFilter struct {
 	Offset     int       // Pagination offset
 	IntentType string    // Filter by intent operation type: read, write, destructive (Spec 018)
 	RequestID  string    // Filter by HTTP request ID for correlation (Spec 021)
+
+	// WorkSessionID filters by a unit of user work (Spec 082) — one client, one
+	// project, across reconnects. This is what the UI's "Session" filter means;
+	// SessionID above is the raw transport connection.
+	WorkSessionID string
 
 	// Sensitive data detection filters (Spec 026)
 	SensitiveData *bool  // Filter by sensitive data detection (nil=no filter, true=has detections, false=no detections)
@@ -200,6 +218,11 @@ func (f *ActivityFilter) Matches(record *ActivityRecord) bool {
 
 	// Check session filter
 	if f.SessionID != "" && record.SessionID != f.SessionID {
+		return false
+	}
+
+	// Check work-session filter (Spec 082)
+	if f.WorkSessionID != "" && record.WorkSessionID != f.WorkSessionID {
 		return false
 	}
 

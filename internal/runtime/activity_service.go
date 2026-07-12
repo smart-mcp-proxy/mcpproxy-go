@@ -37,6 +37,13 @@ type SensitiveDataEventEmitter interface {
 // Returns empty strings when the session is unknown.
 type SessionClientResolver func(sessionID string) (name, version string)
 
+// SessionWorkSessionResolver maps an MCP session id to the WORK session it
+// belongs to (Spec 082): one client, one project, across reconnects.
+//
+// It returns the id cached on the connection — deliberately not a fresh
+// derivation, so every record from one connection agrees on its work session.
+type SessionWorkSessionResolver func(sessionID string) string
+
 // ActivityService subscribes to activity events and persists them to storage.
 // It runs as a background goroutine and handles activity recording non-blocking.
 type ActivityService struct {
@@ -55,6 +62,16 @@ type ActivityService struct {
 	// nil until wired via SetSessionClientResolver; the records simply carry no
 	// client name in that case.
 	clientResolver SessionClientResolver
+
+	// workSessionResolver returns the WORK session a record belongs to (Spec 082):
+	// one client, one project, across reconnects. Stamped at write time for the
+	// same reason the client name is — a value resolved later decays once the
+	// record it points at is evicted.
+	workSessionResolver SessionWorkSessionResolver
+
+	// workSessionReaper drops idle work sessions so the tracker cannot grow
+	// without bound. Wired alongside the resolver.
+	workSessionReaper func(time.Duration) int
 
 	// Channel for receiving events
 	eventCh chan Event
@@ -122,6 +139,26 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 // unset (records then carry no client name).
 func (s *ActivityService) SetSessionClientResolver(r SessionClientResolver) {
 	s.clientResolver = r
+}
+
+// SetWorkSessionResolver wires the session -> work-session lookup (Spec 082).
+func (s *ActivityService) SetWorkSessionResolver(r SessionWorkSessionResolver) {
+	s.workSessionResolver = r
+}
+
+// SetWorkSessionReaper wires the idle-work-session sweep into the retention loop.
+func (s *ActivityService) SetWorkSessionReaper(f func(time.Duration) int) {
+	s.workSessionReaper = f
+}
+
+// resolveWorkSession returns the work session a record belongs to, or "" when it
+// cannot be attributed (an unattributed record beats one filed under a bucket
+// that means nothing).
+func (s *ActivityService) resolveWorkSession(sessionID string) string {
+	if sessionID == "" || s.workSessionResolver == nil {
+		return ""
+	}
+	return s.workSessionResolver(sessionID)
 }
 
 // withClientInfo stamps client_name / client_version onto an activity record's
@@ -266,7 +303,24 @@ func (s *ActivityService) runRetentionLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.runRetentionCleanup()
+			s.reapWorkSessions()
 		}
+	}
+}
+
+// workSessionReapAfter is how long a work session may sit idle before the
+// tracker forgets it. Comfortably past the 30-minute idle window, so an entry is
+// only dropped once it can no longer be continued.
+const workSessionReapAfter = 4 * time.Hour
+
+// reapWorkSessions stops the tracker growing without bound on a long-lived
+// daemon: one map entry per distinct identity, forever, is a slow leak.
+func (s *ActivityService) reapWorkSessions() {
+	if s.workSessionReaper == nil {
+		return
+	}
+	if n := s.workSessionReaper(workSessionReapAfter); n > 0 {
+		s.logger.Debug("reaped idle work sessions", zap.Int("count", n))
 	}
 }
 
@@ -452,6 +506,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		DurationMs:        durationMs,
 		Timestamp:         evt.Timestamp,
 		SessionID:         sessionID,
+		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		Metadata:          metadata,
 		RequestBytes:      requestBytes,
@@ -516,8 +571,9 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 			"decision": decision,
 			"reason":   reason,
 		}, sessionID),
-		Timestamp: evt.Timestamp,
-		SessionID: sessionID,
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -692,19 +748,20 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	metadata = s.withClientInfo(metadata, sessionID)
 
 	record := &storage.ActivityRecord{
-		Type:         storage.ActivityTypeInternalToolCall,
-		Source:       storage.ActivitySourceMCP,
-		ToolName:     internalToolName,
-		ServerName:   targetServer,
-		Arguments:    arguments,
-		Response:     responseStr,
-		Status:       status,
-		ErrorMessage: errorMsg,
-		DurationMs:   durationMs,
-		Metadata:     metadata,
-		Timestamp:    evt.Timestamp,
-		SessionID:    sessionID,
-		RequestID:    requestID,
+		Type:          storage.ActivityTypeInternalToolCall,
+		Source:        storage.ActivitySourceMCP,
+		ToolName:      internalToolName,
+		ServerName:    targetServer,
+		Arguments:     arguments,
+		Response:      responseStr,
+		Status:        status,
+		ErrorMessage:  errorMsg,
+		DurationMs:    durationMs,
+		Metadata:      metadata,
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
+		RequestID:     requestID,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)

@@ -158,27 +158,15 @@ func (m *Manager) ListActivities(filter ActivityFilter) ([]*ActivityRecord, int,
 			}
 
 			if len(records) < filter.Limit {
-				records = append(records, &ActivityRecord{
-					ID:                record.ID,
-					Type:              record.Type,
-					Source:            record.Source,
-					ServerName:        record.ServerName,
-					ToolName:          record.ToolName,
-					Arguments:         record.Arguments,
-					Response:          record.Response,
-					ResponseTruncated: record.ResponseTruncated,
-					Status:            record.Status,
-					ErrorMessage:      record.ErrorMessage,
-					DurationMs:        record.DurationMs,
-					Timestamp:         record.Timestamp,
-					SessionID:         record.SessionID,
-					RequestID:         record.RequestID,
-					Metadata:          record.Metadata,
-					UserID:            record.UserID,
-					UserEmail:         record.UserEmail,
-					RequestBytes:      record.RequestBytes,
-					ResponseBytes:     record.ResponseBytes,
-				})
+				// Copy the whole struct rather than listing fields.
+				//
+				// This used to be a field-by-field copy, which silently dropped
+				// any field nobody remembered to add here — WorkSessionID was
+				// written to BBolt correctly and then thrown away on the way out,
+				// which is a genuinely nasty way to lose data. `record` is
+				// declared fresh each iteration, so taking its address is safe.
+				rec := record
+				records = append(records, &rec)
 			}
 		}
 

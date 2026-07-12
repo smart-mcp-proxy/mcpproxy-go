@@ -768,12 +768,13 @@ interface SessionOption {
   label: string
   clientName?: string
   startTime?: string
+  workspace?: string
 }
 
 // Client identity lives on the session record, not the activity record — an
 // activity row only carries session_id. We join the two here so the filter can
 // show "Claude Code · 14:32" instead of an opaque "...139c9".
-const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string }>())
+const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string; workspace?: string }>())
 
 // Session ids we have already tried and failed to resolve. The core keeps only
 // the 100 most recent sessions, so an old session's activity rows can outlive
@@ -790,17 +791,33 @@ const loadSessions = async () => {
   sessionsInFlight = (async () => {
     try {
       const response = await api.getSessions(100)
-      const next = new Map<string, { clientName?: string; startTime?: string }>()
+      const next = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
       for (const s of response.data?.sessions ?? []) {
-        next.set(s.id, { clientName: s.client_name, startTime: s.start_time })
+        const info = {
+          clientName: s.client_name,
+          startTime: s.start_time,
+          workspace: s.workspace_name,
+        }
+        // Key by BOTH ids: the work session (Spec 082 — what we group by) and the
+        // transport session (so pre-082 activity rows still resolve).
+        if (s.work_session_id) {
+          const existing = next.get(s.work_session_id)
+          // A work session spans many connections; keep the EARLIEST start, since
+          // that is when the work began.
+          if (!existing || (s.start_time && existing.startTime && s.start_time < existing.startTime)) {
+            next.set(s.work_session_id, info)
+          }
+        }
+        next.set(s.id, info)
       }
       sessionInfo.value = next
 
       // Anything still unknown after a fresh fetch is gone for good (evicted by
       // the 100-session cap). Remember it so we stop asking.
       for (const a of activities.value) {
-        if (a.session_id && !next.has(a.session_id)) {
-          unresolvableSessions.value.add(a.session_id)
+        const key = groupKeyOf(a)
+        if (key && !next.has(key)) {
+          unresolvableSessions.value.add(key)
         }
       }
     } catch {
@@ -820,27 +837,32 @@ const loadSessions = async () => {
 // SSE will deliver its rows. Those sessions were not in the map we fetched on
 // mount, so refresh the join whenever a genuinely new session id appears.
 const refreshSessionsIfUnknown = () => {
-  const hasUnknown = activities.value.some(
-    a =>
-      a.session_id &&
-      !sessionInfo.value.has(a.session_id) &&
-      !unresolvableSessions.value.has(a.session_id)
-  )
+  const hasUnknown = activities.value.some(a => {
+    const key = groupKeyOf(a)
+    return key && !sessionInfo.value.has(key) && !unresolvableSessions.value.has(key)
+  })
   if (hasUnknown) void loadSessions()
 }
 
+// The key an activity row is grouped and filtered by: its WORK session (Spec
+// 082) — one client, one project, across reconnects. Rows written before 082
+// have none, so they fall back to the transport session and behave as before.
+const groupKeyOf = (a: ActivityRecord): string => a.work_session_id || a.session_id || ''
+
 const availableSessions = computed((): SessionOption[] => {
-  const seen = new Map<string, { clientName?: string; startTime?: string }>()
+  const seen = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
   activities.value.forEach(a => {
-    if (a.session_id && !seen.has(a.session_id)) {
-      const info = sessionInfo.value.get(a.session_id)
-      seen.set(a.session_id, {
+    const key = groupKeyOf(a)
+    if (key && !seen.has(key)) {
+      const info = sessionInfo.value.get(key) ?? sessionInfo.value.get(a.session_id ?? '')
+      seen.set(key, {
         // Prefer the name persisted ON the record: it is that row's own truth and
         // never expires. The /api/v1/sessions lookup is only a fallback for rows
         // written before the name was persisted — and it decays, because just the
         // 100 most recent sessions are kept while activity lives for 90 days.
         clientName: (a.metadata?.client_name as string | undefined) ?? info?.clientName,
         startTime: info?.startTime ?? a.timestamp,
+        workspace: info?.workspace,
       })
     }
   })
@@ -849,6 +871,7 @@ const availableSessions = computed((): SessionOption[] => {
     sessionId,
     clientName: info.clientName,
     startTime: info.startTime,
+    workspace: info.workspace,
   }))
   const labels = buildSessionLabels(entries)
 
@@ -858,6 +881,7 @@ const availableSessions = computed((): SessionOption[] => {
       label: labels.get(e.sessionId) ?? `...${e.sessionId.slice(-5)}`,
       clientName: e.clientName,
       startTime: e.startTime,
+      workspace: e.workspace,
     }))
     // Most recent session first — in a session picker, recency beats alphabet.
     // Compare epoch ms, not the ISO strings: those carry a timezone offset
@@ -894,9 +918,10 @@ const filteredActivities = computed(() => {
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
   }
-  // Session filter (Spec 024)
+  // Session filter — a WORK session (Spec 082), falling back to the transport
+  // session for rows written before it.
   if (filterSession.value) {
-    result = result.filter(a => a.session_id === filterSession.value)
+    result = result.filter(a => groupKeyOf(a) === filterSession.value)
   }
   if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
