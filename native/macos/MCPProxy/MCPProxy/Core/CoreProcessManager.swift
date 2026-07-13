@@ -172,6 +172,12 @@ actor CoreProcessManager {
     }
 
     /// Stop watching for an external core (we are starting or shutting down).
+    ///
+    /// MUST only be called from OUTSIDE the watch task (shutdown, supersede,
+    /// spawn). Calling it from within the attach path cancels the task that is
+    /// performing the attach, so the connect it awaits fails with
+    /// CancellationError — see attachToExternalCore, which drops the reference
+    /// instead of cancelling.
     private func cancelAttachWatch() {
         attachWatchTask?.cancel()
         attachWatchTask = nil
@@ -274,7 +280,14 @@ actor CoreProcessManager {
 
     /// Attach to an already-running core process on the socket.
     private func attachToExternalCore() async {
-        cancelAttachWatch()
+        // Drop the watch WITHOUT cancelling it. This attach is usually running
+        // INSIDE the watch task (that is how the core was noticed), so cancelling
+        // here would cancel the very work we are about to await: connectToCore()
+        // would throw CancellationError and the tray would sit in
+        // "Failed to connect to external core: cancelled" while a perfectly
+        // healthy core was running. The watch loop exits on its own the moment
+        // attachIfCoreIsRunning() reports success.
+        attachWatchTask = nil
         await MainActor.run {
             appState.ownership = .externalAttached
             // A core IS running, so we are not in the stopped state — even if we
