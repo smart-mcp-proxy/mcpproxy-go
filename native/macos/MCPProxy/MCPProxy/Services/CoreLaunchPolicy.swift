@@ -64,4 +64,17 @@ struct CoreLaunchPolicy {
         if isPinnedOffByEnvironment { return false }
         return startCoreOnLaunch
     }
+
+    /// May a RETRY (after a core error) spawn a core?
+    ///
+    /// Yes when the core we lost was ours — the user started it, explicitly or by
+    /// leaving autostart on, so relaunching is what they want. But a retry after
+    /// an EXTERNAL core vanished must not spawn one behind the user's back when
+    /// autostart is off: that would route around the very preference they set.
+    /// Such a retry re-attaches if a core is there, and otherwise goes back to
+    /// idle, waiting for one.
+    static func retryMaySpawn(ownership: CoreOwnership, policyAllowsSpawn: Bool) -> Bool {
+        if ownership == .trayManaged { return true }
+        return policyAllowsSpawn
+    }
 }

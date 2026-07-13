@@ -87,6 +87,26 @@ final class CoreLaunchPolicyTests: XCTestCase {
         XCTAssertFalse(pinned.maySpawnCore, "but the environment wins for the effective policy")
     }
 
+    // MARK: - Retry must not route around the policy
+
+    /// A retry after OUR core died relaunches it: the user asked for that core,
+    /// either explicitly or by leaving autostart on.
+    func testRetryRelaunchesACoreWeOwn() {
+        XCTAssertTrue(CoreLaunchPolicy.retryMaySpawn(ownership: .trayManaged, policyAllowsSpawn: false),
+                      "a core the tray owns is relaunched on retry even with autostart off")
+        XCTAssertTrue(CoreLaunchPolicy.retryMaySpawn(ownership: .trayManaged, policyAllowsSpawn: true))
+    }
+
+    /// But a retry after an EXTERNAL core vanished must not spawn one behind the
+    /// user's back when autostart is off — that would route around the very
+    /// preference they set. It re-attaches, or goes back to idle.
+    func testRetryDoesNotSpawnForAnExternalCoreWhenAutostartIsOff() {
+        XCTAssertFalse(CoreLaunchPolicy.retryMaySpawn(ownership: .externalAttached, policyAllowsSpawn: false),
+                       "retry must not spawn a core the user told us not to start")
+        XCTAssertTrue(CoreLaunchPolicy.retryMaySpawn(ownership: .externalAttached, policyAllowsSpawn: true),
+                      "with autostart on, a retry may spawn a replacement")
+    }
+
     /// Values that are not truthy leave the policy alone.
     func testUnsetOrFalsyEnvironmentIsIgnored() {
         for raw in ["0", "false", "", "no"] {

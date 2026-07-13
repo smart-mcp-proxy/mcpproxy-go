@@ -49,6 +49,15 @@ actor CoreProcessManager {
     private var refreshTask: Task<Void, Never>?
     /// Poll for an external core while core autostart is off (GH #410).
     private var attachWatchTask: Task<Void, Never>?
+
+    /// Set when this manager has been replaced by a newer one. A superseded
+    /// manager must never publish to the shared AppState again: the app creates a
+    /// FRESH CoreProcessManager on an explicit "Start MCPProxy Core", and the old
+    /// one may still be inside its idle attach-watch. Without this, the old
+    /// manager could observe the socket the NEW manager's core just created and
+    /// mislabel that tray-spawned core as `.externalAttached` — after which the
+    /// tray would refuse to stop it and leak it on quit.
+    private var superseded: Bool = false
     private var retryCount: Int = 0
     private let maxRetries: Int = 3
     private let notificationService: NotificationService
@@ -122,10 +131,19 @@ actor CoreProcessManager {
         await launchAndConnect()
     }
 
+    /// Retire this manager: stop watching and never touch AppState again. Called
+    /// before the app swaps in a replacement manager.
+    func supersede() {
+        superseded = true
+        cancelAttachWatch()
+    }
+
     /// Attach to a core that is already up. Returns false when none is.
     private func attachIfCoreIsRunning() async -> Bool {
+        guard !superseded else { return false }
         guard SocketTransport.isSocketAvailable(path: socketPath) else { return false }
         guard await probeExternalCore() else { return false }
+        guard !superseded else { return false } // a replacement took over while we probed
         await attachToExternalCore()
         return true
     }
@@ -226,7 +244,13 @@ actor CoreProcessManager {
         await transitionState(to: .idle)
     }
 
-    /// Retry launching the core after an error.
+    /// Retry after an error.
+    ///
+    /// This must not become a back door around the launch policy (#410). If the
+    /// core we lost was an EXTERNAL one and the user has core autostart off,
+    /// retrying re-attaches or returns to idle — it does not silently spawn a
+    /// tray-managed core the user asked us not to start. A core we own is
+    /// relaunched as before.
     func retry() async {
         retryCount = 0
         stderrBuffer = ""
@@ -238,7 +262,12 @@ actor CoreProcessManager {
         }
         self.process = nil
 
-        await launchAndConnect()
+        let ownership = await MainActor.run { appState.ownership }
+        let maySpawn = CoreLaunchPolicy.retryMaySpawn(
+            ownership: ownership,
+            policyAllowsSpawn: CoreLaunchPolicy().maySpawnCore
+        )
+        await start(maySpawn: maySpawn)
     }
 
     // MARK: - Private: Attach to External Core

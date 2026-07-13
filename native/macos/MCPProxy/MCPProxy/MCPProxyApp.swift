@@ -439,7 +439,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let policy = CoreLaunchPolicy()
         await MainActor.run {
             appState.autoStartEnabled = AutoStartService.isEnabled
-            appState.startCoreOnLaunch = policy.startCoreOnLaunch
+            // NOTE: do NOT assign appState.startCoreOnLaunch here. AppState already
+            // initializes it from CoreLaunchPolicy, and its didSet WRITES to
+            // UserDefaults — so a redundant sync would materialize the key on
+            // every launch, including for users who only set MCPPROXY_TRAY_SKIP_CORE
+            // and never touched the preference.
         }
 
         if SymlinkService.needsSetup() {
@@ -872,6 +876,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @objc private func startCoreAction() {
         Task {
             appState.isStopped = false
+            // Retire the outgoing manager first. In idle mode it is still polling
+            // for a core to attach to, and it would otherwise find the core the
+            // NEW manager is about to spawn and label it "external" (#410).
+            await coreManager?.supersede()
+
             let manager = CoreProcessManager(
                 appState: appState,
                 notificationService: notificationService
