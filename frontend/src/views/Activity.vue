@@ -695,7 +695,12 @@ import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
-import { buildWorkSessionIndex, groupKeyOf as workSessionKeyOf } from '@/utils/sessionGrouping'
+import {
+  buildWorkSessionIndex,
+  groupKeyOf as workSessionKeyOf,
+  matchesSessionFilter,
+  resolveSessionFilter,
+} from '@/utils/sessionGrouping'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -857,6 +862,17 @@ const refreshSessionsIfUnknown = () => {
 // splitting one client into two entries in the picker.
 const workSessionIndex = computed(() => buildWorkSessionIndex(activities.value, sessionsRaw.value))
 
+// A deep link from the Sessions page arrives with a TRANSPORT session id (see
+// Sessions.vue), while the picker's options are keyed by work session. Rewrite
+// the filter to the work session as soon as the index can tell us what it is —
+// otherwise the filter works but the dropdown shows blank, because no option
+// equals the value it is bound to.
+watch(workSessionIndex, index => {
+  if (!filterSession.value) return
+  const resolved = resolveSessionFilter(filterSession.value, index)
+  if (resolved !== filterSession.value) filterSession.value = resolved
+})
+
 // The key an activity row is grouped and filtered by: its WORK session (Spec
 // 082) — one client, one project, across reconnects. Rows for which no work
 // session is known anywhere still fall back to the transport session.
@@ -932,9 +948,10 @@ const filteredActivities = computed(() => {
     result = result.filter(a => a.server_name === filterServer.value)
   }
   // Session filter — a WORK session (Spec 082), falling back to the transport
-  // session for rows written before it.
+  // session for rows written before it. Accepts either id, so a deep link from
+  // the Sessions page (which knows only transport ids) still finds the rows.
   if (filterSession.value) {
-    result = result.filter(a => groupKeyOf(a) === filterSession.value)
+    result = result.filter(a => matchesSessionFilter(a, filterSession.value, workSessionIndex.value))
   }
   if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
