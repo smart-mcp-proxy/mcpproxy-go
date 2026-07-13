@@ -27,6 +27,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -117,6 +118,11 @@ type MCPProxyServer struct {
 	logger               *zap.Logger
 	mainServer           *Server        // Reference to main server for config persistence
 	config               *config.Config // Add config reference for security checks
+
+	// workSessionResolver maps an identity to a work session (Spec 082). Normally
+	// nil, and the runtime's tracker is used; tests inject a stub so they do not
+	// have to stand up a whole Runtime to exercise session attribution.
+	workSessionResolver func(runtime.WorkSessionIdentity) string
 
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
@@ -235,10 +241,12 @@ func NewMCPProxyServer(
 		})
 	}
 
-	// Forward handle to the MCP server, which is constructed below but is needed
-	// by the hooks above it (to send a roots request back to the client).
-	// Atomic because the hooks run on client goroutines.
+	// Forward handles to the MCP server and the proxy, both constructed below but
+	// needed by the hooks above them (to send a roots request back to the client,
+	// and to attribute work to a session). Atomic because the hooks run on client
+	// goroutines.
 	var mcpSrvRef atomic.Pointer[mcpserver.MCPServer]
+	var proxyRef atomic.Pointer[MCPProxyServer]
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
@@ -269,6 +277,14 @@ func NewMCPProxyServer(
 		// answer simply has no workspace.
 		if method != mcp.MethodInitialize && sessionStore.TryClaimWorkspaceFetch(session.SessionID()) {
 			go fetchWorkspaceRoot(ctx, mcpSrvRef.Load(), sessionStore, logger)
+		}
+
+		// Spec 082: attribute this request to a work session before the handler
+		// runs, so every activity record the handler writes carries it. Kicked off
+		// AFTER the roots fetch above, which it may wait on briefly — the fetch is
+		// already in flight by then.
+		if proxy := proxyRef.Load(); proxy != nil {
+			proxy.markWorkIfToolCall(ctx, method)
 		}
 	})
 
@@ -431,6 +447,9 @@ func NewMCPProxyServer(
 		sessionStore:         sessionStore,
 		hooks:                hooks,
 	}
+
+	// Let the hooks (registered before the proxy existed) reach it.
+	proxyRef.Store(proxy)
 
 	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)
