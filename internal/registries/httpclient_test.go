@@ -217,7 +217,7 @@ func TestFetchOfficialServers_RetryRecovers(t *testing.T) {
 	defer srv.Close()
 
 	reg := &RegistryEntry{ID: "official", Name: "Official", ServersURL: srv.URL, Protocol: protocolOfficial}
-	servers, err := fetchOfficialServers(context.Background(), reg, nil, "")
+	servers, err := fetchOfficialServers(context.Background(), reg, nil, "", 0)
 	if err != nil {
 		t.Fatalf("fetchOfficialServers after transient failure: %v", err)
 	}

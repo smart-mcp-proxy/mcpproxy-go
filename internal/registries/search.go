@@ -67,23 +67,27 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 		return nil, fmt.Errorf("registry '%s' has no servers endpoint", reg.Name)
 	}
 
-	// Fetch servers from registry WITHOUT repository guessing (for performance).
-	// Forward the query so search-capable protocols can filter server-side.
-	servers, err := fetchServers(ctx, reg, nil, query) // Pass nil guesser to skip expensive operations
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
-	}
-
-	// Filter results BEFORE expensive repository guessing
-	filtered := filterServers(servers, tag, query)
-
-	// Apply limit BEFORE expensive repository guessing (default 10, max 50)
+	// Clamp the limit up front (default 10, max 50) so it can also bound how many
+	// pages a paginating registry is asked for. Applying it only after the whole
+	// listing had been fetched meant a limit=3 search still crawled every page —
+	// six-plus minutes against a registry answering in ~20s per page.
 	if limit <= 0 {
 		limit = 10 // Default limit
 	}
 	if limit > 50 {
 		limit = 50 // Max limit
 	}
+
+	// Fetch servers from registry WITHOUT repository guessing (for performance).
+	// Forward the query so search-capable protocols can filter server-side, and
+	// the limit so they can stop paginating once they have enough.
+	servers, err := fetchServers(ctx, reg, nil, query, limit) // Pass nil guesser to skip expensive operations
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
+	}
+
+	// Filter results BEFORE expensive repository guessing
+	filtered := filterServers(servers, tag, query)
 
 	if len(filtered) > limit {
 		filtered = filtered[:limit]
@@ -143,12 +147,12 @@ func FindServerByID(ctx context.Context, registryID, serverID string, guesser *e
 // the hinted search does not surface the exact entry — so the match is found
 // regardless of its position in the listing.
 func findServerByIDFetch(ctx context.Context, reg *RegistryEntry, serverID string) (*ServerEntry, error) {
-	if servers, err := fetchServers(ctx, reg, nil, serverID); err == nil {
+	if servers, err := fetchServers(ctx, reg, nil, serverID, 0); err == nil {
 		if match, err := findServerByIDIn(servers, serverID); err == nil {
 			return match, nil
 		}
 	}
-	servers, err := fetchServers(ctx, reg, nil, "")
+	servers, err := fetchServers(ctx, reg, nil, "", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -170,13 +174,15 @@ func findServerByIDIn(servers []ServerEntry, serverID string) (*ServerEntry, err
 // fetchServers fetches and parses servers from a registry based on its protocol.
 // The optional query is forwarded to protocols that support server-side search
 // (currently the official v0.1 protocol); other protocols filter client-side.
-func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string) ([]ServerEntry, error) {
+// maxResults (0 = no cap) lets a paginating protocol stop early once it has
+// enough to satisfy the caller — see fetchOfficialServers.
+func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string, maxResults int) ([]ServerEntry, error) {
 	// The official protocol paginates (cursor follow-loop) and is handled by a
 	// dedicated fetcher; the built-in reference source is served in-binary with
 	// no network request at all.
 	switch reg.Protocol {
 	case protocolOfficial:
-		return fetchOfficialServers(ctx, reg, guesser, query)
+		return fetchOfficialServers(ctx, reg, guesser, query, maxResults)
 	case protocolReference:
 		return referenceServers(), nil
 	}

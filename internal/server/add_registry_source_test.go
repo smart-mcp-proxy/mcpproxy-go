@@ -123,7 +123,9 @@ func TestResolveRegistrySourceShape_AdoptsProbedURL(t *testing.T) {
 func TestBuildRegistrySourceEntry_RejectsUnsupportedProtocol(t *testing.T) {
 	_, err := buildRegistrySourceEntry("https://acme.example/", "custom/json", "", "")
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, ErrInvalidRegistryURL), "got %v", err)
+	assert.True(t, errors.Is(err, ErrUnsupportedRegistryProtocol), "got %v", err)
+	assert.Equal(t, "unsupported_registry_protocol", AddRegistrySourceErrorCode(err),
+		"a protocol problem must not be reported as a URL problem — the URL was fine")
 
 	// The one supported protocol, named explicitly, is fine.
 	_, err = buildRegistrySourceEntry("https://acme.example/", "modelcontextprotocol/registry", "", "")

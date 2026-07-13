@@ -34,6 +34,11 @@ var (
 	ErrRegistryShadowsBuiltin = errors.New("registry_shadows_builtin")
 	// ErrDuplicateRegistry means a custom registry with that id already exists.
 	ErrDuplicateRegistry = errors.New("duplicate_registry")
+	// ErrUnsupportedRegistryProtocol means a protocol other than the single one
+	// MCPProxy implements was requested. Reported separately from
+	// invalid_registry_url so the guidance can talk about the protocol rather than
+	// telling the user to "provide an https URL" for a URL that was fine.
+	ErrUnsupportedRegistryProtocol = errors.New("unsupported_registry_protocol")
 	// ErrRegistrySourceUnusable means the URL answered but serves no MCP server
 	// list (GH #783): a 404, an HTML page, or JSON with nothing server-shaped in
 	// it. Refusing the add here is the whole point — the alternative is a
@@ -70,6 +75,8 @@ func AddRegistrySourceErrorCode(err error) string {
 		return "registry_shadows_builtin"
 	case errors.Is(err, ErrDuplicateRegistry):
 		return "duplicate_registry"
+	case errors.Is(err, ErrUnsupportedRegistryProtocol):
+		return "unsupported_registry_protocol"
 	case errors.Is(err, ErrRegistrySourceUnusable):
 		return "registry_source_unusable"
 	}
@@ -197,8 +204,8 @@ func buildRegistrySourceEntry(rawURL, protocol, id, name string) (config.Registr
 		protocol = defaultRegistryProtocol
 	}
 	if protocol != defaultRegistryProtocol {
-		return config.RegistryEntry{}, fmt.Errorf("%w: unsupported registry protocol %q (only %q is supported)",
-			ErrInvalidRegistryURL, protocol, defaultRegistryProtocol)
+		return config.RegistryEntry{}, fmt.Errorf("%w: %q (only %q is supported)",
+			ErrUnsupportedRegistryProtocol, protocol, defaultRegistryProtocol)
 	}
 	if id == "" {
 		id = deriveRegistryID(u.Host)

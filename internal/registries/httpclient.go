@@ -15,12 +15,19 @@ import (
 
 const (
 	// registryRequestTimeout bounds a SINGLE registry HTTP request (connect + TLS
-	// handshake + awaiting response headers + body read). The official registry's
-	// deep-cursor pages can be slow under load, so this is deliberately more
-	// forgiving than a snappy localhost call. Retries layer on top via
-	// registryMaxAttempts so one slow page no longer aborts the whole listing
-	// (root fix for the "Official MCP Registry returned no results" timeout).
-	registryRequestTimeout = 15 * time.Second
+	// handshake + awaiting response headers + body read). Retries layer on top via
+	// registryMaxAttempts so one slow page no longer aborts the whole listing.
+	//
+	// This MUST stay comfortably above what a real registry takes to answer. It
+	// was 15s, and the official registry
+	// (https://registry.modelcontextprotocol.io/v0.1/servers) currently takes
+	// ~18-20s to return its first page — so EVERY attempt timed out, all three
+	// retries burned, and browsing the official registry failed outright with
+	// "context deadline exceeded (Client.Timeout exceeded while awaiting
+	// headers)". That is the "the official registry doesn't work either" half of
+	// GH #783, reproduced live. 45s leaves real headroom over a ~20s registry
+	// without letting a truly hung host stall a fetch indefinitely.
+	registryRequestTimeout = 45 * time.Second
 
 	// registryMaxAttempts is the total number of attempts (1 initial + retries)
 	// for an idempotent registry GET before giving up.

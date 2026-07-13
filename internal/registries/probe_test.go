@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestProbeRegistrySource_StaticJSONFileIsRefused is GH discussion #783: the
@@ -57,7 +58,7 @@ func TestProbeRegistrySource_OfficialBaseURL(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"servers":[{"server":{"name":"io.acme/x","description":"d"},"_meta":{}}],"metadata":{}}`)
+		fmt.Fprint(w, `{"servers":[{"server":{"name":"io.acme/x","description":"d","remotes":[{"type":"streamable-http","url":"https://acme.example/mcp"}]},"_meta":{}}],"metadata":{}}`)
 	}))
 	defer srv.Close()
 
@@ -317,5 +318,56 @@ func TestProbeRegistrySource_RefusesPayloadTheParserCannotUse(t *testing.T) {
 
 	if _, err := ProbeRegistrySource(context.Background(), srv.URL+"/v0.1/servers"); !errors.Is(err, ErrRegistrySourceUnusable) {
 		t.Fatalf("err = %v, want ErrRegistrySourceUnusable — the parser cannot get an installable server out of this", err)
+	}
+}
+
+// --- Codex review round 3 -----------------------------------------------------
+
+// TestProbeRegistrySource_MetadataDoesNotLaunderACatalog: a bespoke catalog does
+// not become an official registry by carrying a "metadata" key. Acceptance must
+// be earned through the parser — a sibling key is not evidence.
+func TestProbeRegistrySource_MetadataDoesNotLaunderACatalog(t *testing.T) {
+	withFastRetries(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"servers":[{"id":"fetch","name":"Fetch","config":{"runtime":"uvx","args":["mcp-server-fetch"]}}],"metadata":{"total":1}}`)
+	}))
+	defer srv.Close()
+
+	if _, err := ProbeRegistrySource(context.Background(), srv.URL+"/apps.json"); !errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnusable — a catalog with a metadata key is still a catalog", err)
+	}
+}
+
+// TestProbeRegistrySource_SlowCandidateIsNotAVerdict is the bug found by running
+// the real thing: the official registry serves an HTML docs page at its BASE url
+// (a definitive "not a registry") while its actual /v0.1/servers collection can
+// take ~20s to answer. Judging on the first candidate alone would refuse the
+// official registry itself. A candidate we could not judge must leave the whole
+// probe inconclusive — reported as unreachable, which the add path TOLERATES.
+func TestProbeRegistrySource_SlowCandidateIsNotAVerdict(t *testing.T) {
+	withFastRetries(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0.1/servers" {
+			// Too slow to judge within the probe's per-candidate budget.
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html>docs</html>`) // the base URL answers, definitively not a registry
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err := ProbeRegistrySource(ctx, srv.URL)
+	if !errors.Is(err, ErrRegistrySourceUnreachable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnreachable — an unjudged candidate must not become a refusal", err)
+	}
+	if errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Error("refusing a source whose real endpoint we never managed to read would block adding the official registry")
 	}
 }

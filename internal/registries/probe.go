@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // GH discussion #783: every user-added source was persisted as
@@ -40,6 +41,13 @@ type SourceProbe struct {
 	Protocol   string
 }
 
+// probeCandidateTimeout bounds ONE candidate URL. It is deliberately much
+// tighter than registryRequestTimeout: an add is an interactive operation, and a
+// registry too slow to answer within this window is simply added unverified
+// (ErrRegistrySourceUnreachable is tolerated) rather than made to hang the CLI,
+// the REST call, and the user.
+const probeCandidateTimeout = 12 * time.Second
+
 // ProbeRegistrySource fetches a candidate registry URL and classifies it. The
 // URL the user pasted is always tried FIRST and, if it works, stored verbatim.
 // Only a base URL that turns out not to serve a list itself falls back to the
@@ -53,24 +61,36 @@ func ProbeRegistrySource(ctx context.Context, rawURL string) (*SourceProbe, erro
 	var (
 		reasons   []string
 		reachable bool
+		// inconclusive records that at least one candidate could not be JUDGED —
+		// it timed out or the connection failed. We must not refuse a source on a
+		// check we never actually completed: the official registry's base URL
+		// serves an HTML docs page (a definitive "not a registry") while its real
+		// /v0.1/servers collection can take ~20s to answer, so judging on the
+		// first candidate alone would refuse the official registry itself.
+		inconclusive bool
 	)
 	for _, candidate := range candidates {
+		// Bound each candidate separately, so one slow endpoint cannot eat the whole
+		// probe budget and starve the next candidate.
+		candidateCtx, cancel := context.WithTimeout(ctx, probeCandidateTimeout)
 		// Pin the fetch to the candidate itself so validateRegistryURL's host check
 		// and the SSRF dial guard both apply to the probe exactly as they do to a
 		// real registry fetch.
-		body, err := registryGet(ctx, &RegistryEntry{URL: candidate, ServersURL: candidate}, candidate)
+		body, err := registryGet(candidateCtx, &RegistryEntry{URL: candidate, ServersURL: candidate}, candidate)
+		cancel()
+
 		if err != nil {
 			var statusErr *registryStatusError
 			switch {
-			case errors.As(err, &statusErr):
-				// The host answered — a definitive verdict about this candidate.
+			case errors.As(err, &statusErr),
+				errors.Is(err, ErrBlockedRegistryHost),
+				errors.Is(err, ErrRegistryRedirectRefused):
+				// The host ANSWERED — with a non-200, from a blocked range, or with a
+				// redirect we refuse to follow. A verdict, not a transient failure.
 				reachable = true
-			case errors.Is(err, ErrBlockedRegistryHost), errors.Is(err, ErrRegistryRedirectRefused):
-				// The host resolves into a blocked range, or it answered with a
-				// redirect we refuse to follow. Either way it ANSWERED: a verdict,
-				// not a transient failure. This source can never work, so it must be
-				// refused rather than waved through by the offline-tolerance path.
-				reachable = true
+			default:
+				// Timeout / connection failure: we learned nothing about this source.
+				inconclusive = true
 			}
 			reasons = append(reasons, fmt.Sprintf("%s: %v", candidate, err))
 			continue
@@ -83,6 +103,14 @@ func ProbeRegistrySource(ctx context.Context, rawURL string) (*SourceProbe, erro
 			continue
 		}
 		return &SourceProbe{ServersURL: candidate, Protocol: protocol}, nil
+	}
+
+	// Refuse ONLY when every candidate gave a definitive answer and none was a
+	// registry. If any candidate was inconclusive, report the source as
+	// unreachable so the add path tolerates it rather than rejecting a registry we
+	// never managed to check.
+	if inconclusive {
+		return nil, fmt.Errorf("%w (%s)", ErrRegistrySourceUnreachable, strings.Join(reasons, "; "))
 	}
 
 	sentinel := ErrRegistrySourceUnusable
@@ -173,14 +201,18 @@ func isOfficialPayload(data interface{}) bool {
 
 // isEmptyOfficialEnvelope recognises a registry that is genuinely empty (or whose
 // first page is), which carries no items to sniff: a "servers"/"data" list that
-// is present but empty, or the pagination metadata block.
+// is present and EMPTY.
+//
+// The emptiness is the whole point. An earlier cut also accepted any payload
+// carrying a "metadata" object, which was a loophole: a bespoke catalog that
+// happens to include metadata (say {"servers":[…app entries…],"metadata":{"total":1}})
+// sailed through even though its items parse to servers with no runnable
+// transport. If a list is present and non-empty, it must earn acceptance through
+// the parser (isOfficialPayload) — never through a sibling key.
 func isEmptyOfficialEnvelope(data interface{}) bool {
 	root, ok := data.(map[string]interface{})
 	if !ok {
 		return false
-	}
-	if _, hasMeta := root["metadata"].(map[string]interface{}); hasMeta {
-		return true
 	}
 	for _, key := range []string{"servers", "data"} {
 		if items, ok := root[key].([]interface{}); ok && len(items) == 0 {

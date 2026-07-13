@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -138,7 +139,7 @@ func TestFetchOfficialServers_Pagination(t *testing.T) {
 	defer srv.Close()
 
 	reg := &RegistryEntry{ID: "official", Name: "Official", ServersURL: srv.URL, Protocol: protocolOfficial}
-	servers, err := fetchOfficialServers(context.Background(), reg, nil, "")
+	servers, err := fetchOfficialServers(context.Background(), reg, nil, "", 0)
 	if err != nil {
 		t.Fatalf("fetchOfficialServers: %v", err)
 	}
@@ -180,5 +181,47 @@ func TestReferenceServers_BuiltinOffline(t *testing.T) {
 		if s.URL != "" {
 			t.Errorf("reference server %q must leave URL empty, got %q", want, s.URL)
 		}
+	}
+}
+
+// TestFetchOfficialServers_StopsPagingOnceSatisfied pins the fix for the second
+// half of GH #783 ("the official registry doesn't work either").
+//
+// The caller's limit used to be applied only AFTER the entire listing had been
+// fetched, so a limit=3 search still followed the cursor through every page. The
+// official registry currently answers in ~20s per page, which turned a 3-result
+// search into a >6-minute crawl that simply timed out. A search the registry has
+// already filtered server-side must cost one page.
+func TestFetchOfficialServers_StopsPagingOnceSatisfied(t *testing.T) {
+	var pages int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&pages, 1)
+		w.Header().Set("Content-Type", "application/json")
+		// Every page is full and always offers another cursor — an endless registry.
+		fmt.Fprintf(w, `{"servers":[
+		  {"server":{"name":"io.acme/a%d","description":"d","remotes":[{"url":"https://acme.example/a"}]},"_meta":{}},
+		  {"server":{"name":"io.acme/b%d","description":"d","remotes":[{"url":"https://acme.example/b"}]},"_meta":{}}
+		],"metadata":{"nextCursor":"page-%d"}}`, n, n, n+1)
+	}))
+	defer srv.Close()
+
+	reg := &RegistryEntry{ID: "official", Name: "Official", ServersURL: srv.URL, Protocol: protocolOfficial}
+
+	// Enough on page 1 (2 servers >= limit 2) => exactly one request.
+	if _, err := fetchOfficialServers(context.Background(), reg, nil, "", 2); err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&pages); got != 1 {
+		t.Errorf("fetched %d pages for a limit of 2, want 1 — the caller's limit must bound pagination", got)
+	}
+
+	// No cap (the add-by-id path needs the full listing) => bounded only by
+	// officialMaxPages, never unbounded.
+	atomic.StoreInt32(&pages, 0)
+	if _, err := fetchOfficialServers(context.Background(), reg, nil, "", 0); err != nil {
+		t.Fatalf("fetch failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&pages); got != officialMaxPages {
+		t.Errorf("uncapped fetch made %d requests, want the officialMaxPages bound (%d)", got, officialMaxPages)
 	}
 }

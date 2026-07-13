@@ -516,6 +516,12 @@ func registryAddErrorOutput(err error) error {
 	case "invalid_registry_url":
 		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
 			WithGuidance("Provide an https URL, e.g. https://registry.example.com"), clioutput.ErrCodeInvalidInput)
+	case "unsupported_registry_protocol":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("MCPProxy speaks only modelcontextprotocol/registry v0.1 — omit --protocol"), clioutput.ErrCodeInvalidInput)
+	case "registry_source_unusable":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("That URL does not serve a modelcontextprotocol/registry v0.1 server list"), clioutput.ErrCodeInvalidInput)
 	case "registries_locked":
 		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
 			WithGuidance("Registry additions are disabled by policy (registries_locked)"), clioutput.ErrCodeOperationFailed)
@@ -632,5 +638,9 @@ func loadRegistryConfig() (*config.Config, error) {
 
 func registryContext() (context.Context, context.CancelFunc) {
 	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
-	return context.WithTimeout(ctx, 30*time.Second)
+	// Registry ops talk to live registries: add-source probes the URL, and a
+	// search may page through a registry that takes ~20s per page (the official
+	// one currently does). This must stay comfortably above the server-side
+	// budgets, or the CLI reports a timeout for work the daemon actually finished.
+	return context.WithTimeout(ctx, 120*time.Second)
 }
