@@ -263,6 +263,32 @@
                 <span v-show="!collapsed">Agent Tokens</span>
               </router-link>
             </li>
+          </ul>
+
+          <!-- Section: Observability
+               Workspace is what you CONFIGURE (servers, tools, secrets);
+               these are what you OBSERVE. Keeping them apart stops the two
+               kinds of page reading as one undifferentiated list. -->
+          <div
+            v-if="!collapsed"
+            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+          >
+            Observability
+          </div>
+          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
+            <li>
+              <router-link
+                to="/activity"
+                :class="{ 'active': isActiveRoute('/activity') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Activity Log' : ''"
+              >
+                <IconActivity class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Activity Log</span>
+              </router-link>
+            </li>
             <li>
               <router-link
                 to="/sessions"
@@ -273,17 +299,6 @@
               >
                 <IconSessions class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Sessions</span>
-              </router-link>
-            </li>
-            <li>
-              <router-link
-                to="/activity"
-                :class="{ 'active': isActiveRoute('/activity') }"
-                class="rounded-lg font-medium"
-                :title="collapsed ? 'Activity Log' : ''"
-              >
-                <IconActivity class="w-5 h-5 shrink-0" />
-                <span v-show="!collapsed">Activity Log</span>
               </router-link>
             </li>
             <li>
