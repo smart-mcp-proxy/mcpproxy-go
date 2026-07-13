@@ -260,6 +260,29 @@ enum CoreOwnership: Equatable {
     /// The core was already running when the tray attached.
     /// On quit, the tray will detach without stopping the core.
     case externalAttached
+
+    /// Whether tray shutdown may terminate the core process.
+    ///
+    /// This held before only by accident — `CoreProcessManager.process` is nil
+    /// for an attached core, so the kill was skipped — which put a user's
+    /// externally-managed core one refactor away from being killed by a tray
+    /// quit. State the rule instead of relying on a nil.
+    var shouldTerminateOnShutdown: Bool {
+        self == .trayManaged
+    }
+
+    /// Title for the tray's stop action.
+    ///
+    /// A core we merely attached to CANNOT be stopped by us: we hold no PID for
+    /// it and the core exposes no shutdown endpoint. The menu used to offer
+    /// "Stop MCPProxy Core" anyway, tear down our own clients, display
+    /// "Stopped", and leave the core running. Say what actually happens.
+    var stopActionTitle: String {
+        switch self {
+        case .trayManaged: return "Stop MCPProxy Core"
+        case .externalAttached: return "Disconnect from Core"
+        }
+    }
 }
 
 // MARK: - Reconnection Policy

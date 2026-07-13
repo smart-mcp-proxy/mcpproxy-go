@@ -428,10 +428,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Core Startup
 
+    /// Bring up the core on app launch.
+    ///
+    /// GH #410: `maySpawn` is the user's "Start Core when app opens" preference.
+    /// When it is off the manager still ATTACHES to a core that is already
+    /// running — it just will not start one, and idles watching for one instead.
     private func startCore() async {
         await notificationService.setup()
+
+        let policy = CoreLaunchPolicy()
         await MainActor.run {
             appState.autoStartEnabled = AutoStartService.isEnabled
+            appState.startCoreOnLaunch = policy.startCoreOnLaunch
         }
 
         if SymlinkService.needsSetup() {
@@ -445,7 +453,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             notificationService: notificationService
         )
         coreManager = manager
-        await manager.start()
+        await manager.start(maySpawn: policy.maySpawnCore)
     }
 
     private func resolveBundledCoreBinary() -> String? {
@@ -790,10 +798,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             start.image?.size = NSSize(width: 18, height: 18)
             menu.addItem(start)
         } else if appState.coreState == .connected || appState.coreState.isOperational {
-            let stop = NSMenuItem(title: "Stop MCPProxy Core", action: #selector(stopCore), keyEquivalent: "")
+            // A core we only attached to cannot be stopped by us — we hold no PID
+            // for it and the core has no shutdown endpoint. Say "Disconnect", and
+            // mean it (#410).
+            let ownership = appState.ownership
+            let stop = NSMenuItem(title: ownership.stopActionTitle, action: #selector(stopCore), keyEquivalent: "")
             stop.target = self
-            stop.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "stop")
+            let symbol = ownership.shouldTerminateOnShutdown ? "stop.circle.fill" : "eject.circle.fill"
+            stop.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "stop")
             stop.image?.size = NSSize(width: 18, height: 18)
+            if !ownership.shouldTerminateOnShutdown {
+                stop.toolTip = "This core was started outside MCPProxy. Disconnecting leaves it running."
+            }
             menu.addItem(stop)
         }
 
@@ -811,11 +827,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func stopCore() {
-        NSLog("[MCPProxy] stopCore: stopping core")
+        // Only a core WE spawned gets signalled. For an attached core this is a
+        // disconnect: tear down our clients and leave the core alone (#410).
+        let ownsCore = appState.ownership.shouldTerminateOnShutdown
+        NSLog("[MCPProxy] stopCore: ownership=%@", ownsCore ? "tray-managed" : "external-attached")
         appState.isStopped = true
 
         // Kill the core process directly — most reliable method
-        let proc = coreManager?.managedProcess
+        let proc = ownsCore ? coreManager?.managedProcess : nil
         NSLog("[MCPProxy] stopCore: managedProcess=%@, isRunning=%@",
               proc != nil ? "exists" : "nil",
               proc?.isRunning == true ? "yes" : "no")
@@ -858,7 +877,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 notificationService: notificationService
             )
             coreManager = manager
-            await manager.start()
+            // An explicit "Start MCPProxy Core" always spawns, whatever the
+            // autostart preference says — the preference governs app LAUNCH, and
+            // the user is asking for a core right now (#410).
+            await manager.start(maySpawn: true)
             updateStatusIcon()
         }
     }

@@ -99,7 +99,22 @@ final class AppState: ObservableObject {
     @Published var webUIBaseURL: String = "http://127.0.0.1:8080"
 
     /// Whether the user has explicitly stopped MCPProxy (distinct from idle/error states).
+    /// Session-only by design (GH #410): the persistent choice is `startCoreOnLaunch`,
+    /// so stopping the core to debug something does not silently leave the tray
+    /// dead after the next reboot.
     @Published var isStopped: Bool = false
+
+    /// GH #410 — whether the tray may start a core when it opens. The one piece of
+    /// launcher state the tray persists; it says nothing about whether a core is
+    /// running (that is always discovered live from the socket). Mirrors
+    /// CoreLaunchPolicy so SwiftUI can bind to it.
+    @Published var startCoreOnLaunch: Bool = CoreLaunchPolicy().startCoreOnLaunch {
+        didSet { CoreLaunchPolicy().startCoreOnLaunch = startCoreOnLaunch }
+    }
+
+    /// True when MCPPROXY_TRAY_SKIP_CORE pins core autostart off, so the Settings
+    /// toggle can render disabled instead of disagreeing with actual behaviour.
+    let coreLaunchPinnedOffByEnvironment: Bool = CoreLaunchPolicy().isPinnedOffByEnvironment
 
     /// User-adjustable font scale (1.0 = default, persisted in UserDefaults).
     /// Standard macOS Cmd+/Cmd- changes this by 0.1 increments.
