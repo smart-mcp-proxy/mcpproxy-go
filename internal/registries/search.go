@@ -210,6 +210,10 @@ func parseServers(ctx context.Context, rawData interface{}, reg *RegistryEntry, 
 		// Single-page parse; the paginating fetcher (fetchOfficialServers) is the
 		// normal entry point and already follows the cursor.
 		servers, _ = parseOfficialPage(rawData)
+	case protocolGenericJSON:
+		// A static JSON document (GH #783): fetched verbatim by fetchServers — no
+		// routes, no pagination, no query parameters.
+		servers = parseGenericJSON(rawData)
 	case "custom/pulse":
 		servers = parsePulseWithoutGuesser(rawData) // Parse without guesser first
 	case protocolDocker:

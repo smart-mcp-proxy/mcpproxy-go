@@ -43,6 +43,8 @@ func EditRegistrySourceErrorCode(err error) string {
 		return "registry_shadows_builtin"
 	case errors.Is(err, ErrInvalidRegistryURL):
 		return "invalid_registry_url"
+	case errors.Is(err, ErrRegistrySourceUnusable):
+		return "registry_source_unusable"
 	}
 	return ""
 }
@@ -63,6 +65,22 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 	updated, remaining, err := editRegistrySourceInConfig(currentConfig, req)
 	if err != nil {
 		return nil, err
+	}
+
+	// A new base URL re-opens the "what protocol does this source speak?" question
+	// (GH #783), so re-probe it — unless the caller pinned the servers URL
+	// explicitly, in which case that is the answer. This is what lets a user REPAIR
+	// a registry that was added while the URL was being mangled.
+	if strings.TrimSpace(req.URL) != "" && strings.TrimSpace(req.ServersURL) == "" {
+		if err := s.resolveRegistrySourceShape(&updated); err != nil {
+			return nil, err
+		}
+		for i := range remaining {
+			if strings.EqualFold(remaining[i].ID, updated.ID) {
+				remaining[i] = updated
+				break
+			}
+		}
 	}
 
 	// Copy-on-write: clone the config and publish a fresh registries slice so

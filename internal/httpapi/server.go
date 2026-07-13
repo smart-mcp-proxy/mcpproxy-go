@@ -4527,7 +4527,7 @@ func registryAddErrorStatus(code string) int {
 	switch code {
 	case "registry_not_found", "server_not_found":
 		return http.StatusNotFound
-	case "no_install_info", "missing_required_input", "duplicate_name", "invalid_registry_url":
+	case "no_install_info", "missing_required_input", "duplicate_name", "invalid_registry_url", "registry_source_unusable":
 		return http.StatusBadRequest
 	case "registries_locked":
 		return http.StatusForbidden

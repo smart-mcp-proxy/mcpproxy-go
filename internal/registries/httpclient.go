@@ -164,13 +164,25 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("registry query returned %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+			return nil, &registryStatusError{StatusCode: resp.StatusCode}
 		}
 
 		return body, nil
 	}
 
 	return nil, lastErr
+}
+
+// registryStatusError is the error registryGet returns when a registry ANSWERED
+// with a non-200 status. It is distinct from a transport failure so the add-time
+// probe can tell "this URL is definitively not a registry" (refuse the add) from
+// "the host is unreachable right now" (tolerate it — the user may be offline).
+type registryStatusError struct {
+	StatusCode int
+}
+
+func (e *registryStatusError) Error() string {
+	return fmt.Sprintf("registry query returned %d %s", e.StatusCode, http.StatusText(e.StatusCode))
 }
 
 // isRetryableStatus reports whether an HTTP status warrants a retry: server-side
