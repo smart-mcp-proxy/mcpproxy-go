@@ -98,24 +98,36 @@ func stubProbe(t *testing.T, fn func(ctx context.Context, rawURL string) (*regis
 	t.Cleanup(func() { probeRegistrySource = prev })
 }
 
-// TestResolveRegistrySourceShape_AdoptsProbedProtocol: the probe — not an
-// assumption — decides the stored URL and protocol (GH #783). A static JSON
-// source is stored verbatim on the custom/json protocol, so nothing is appended
-// to it at fetch time.
-func TestResolveRegistrySourceShape_AdoptsProbedProtocol(t *testing.T) {
-	const appsJSON = "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json"
+// TestResolveRegistrySourceShape_AdoptsProbedURL: the probe — not an assumption
+// — decides the stored ServersURL/Protocol (GH #783). The URL the user pasted is
+// what gets probed, and what gets stored.
+func TestResolveRegistrySourceShape_AdoptsProbedURL(t *testing.T) {
+	const base = "https://registry.acme.example"
 	stubProbe(t, func(_ context.Context, rawURL string) (*registries.SourceProbe, error) {
-		assert.Equal(t, appsJSON, rawURL, "the probe must see the URL the user pasted")
-		return &registries.SourceProbe{ServersURL: appsJSON, Protocol: "custom/json"}, nil
+		assert.Equal(t, base, rawURL, "the probe must see the URL the user pasted")
+		return &registries.SourceProbe{ServersURL: base + "/v0.1/servers", Protocol: "modelcontextprotocol/registry"}, nil
 	})
 
-	entry, err := buildRegistrySourceEntry(appsJSON, "", "", "")
+	entry, err := buildRegistrySourceEntry(base, "", "", "")
 	require.NoError(t, err)
 	srv := &Server{logger: zap.NewNop()}
 	require.NoError(t, srv.resolveRegistrySourceShape(&entry))
 
-	assert.Equal(t, appsJSON, entry.ServersURL)
-	assert.Equal(t, "custom/json", entry.Protocol)
+	assert.Equal(t, base+"/v0.1/servers", entry.ServersURL)
+	assert.Equal(t, "modelcontextprotocol/registry", entry.Protocol)
+}
+
+// An unsupported protocol is rejected outright. MCPProxy speaks exactly one
+// registry protocol; naming another is a mistake worth reporting, not something
+// to accept and then fail to parse.
+func TestBuildRegistrySourceEntry_RejectsUnsupportedProtocol(t *testing.T) {
+	_, err := buildRegistrySourceEntry("https://acme.example/", "custom/json", "", "")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrInvalidRegistryURL), "got %v", err)
+
+	// The one supported protocol, named explicitly, is fine.
+	_, err = buildRegistrySourceEntry("https://acme.example/", "modelcontextprotocol/registry", "", "")
+	assert.NoError(t, err)
 }
 
 // A source that answers but is not a server list is REFUSED at add time, with

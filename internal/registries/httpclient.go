@@ -2,6 +2,7 @@ package registries
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -84,15 +85,15 @@ func buildRegistryClient() *http.Client {
 // bouncing us to another one.
 func checkRegistryRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
-		return fmt.Errorf("registry redirect chain too long (%d hops)", len(via))
+		return fmt.Errorf("%w: chain too long (%d hops)", ErrRegistryRedirectRefused, len(via))
 	}
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-		return fmt.Errorf("registry redirect scheme %q not allowed (want http/https)", req.URL.Scheme)
+		return fmt.Errorf("%w: scheme %q not allowed (want http/https)", ErrRegistryRedirectRefused, req.URL.Scheme)
 	}
 	// Pin every hop to the host we originally dialed.
 	origin := via[0].URL
 	if !strings.EqualFold(req.URL.Host, origin.Host) {
-		return fmt.Errorf("registry redirect to %q left the configured host %q", req.URL.Host, origin.Host)
+		return fmt.Errorf("%w: redirect to %q left the configured host %q", ErrRegistryRedirectRefused, req.URL.Host, origin.Host)
 	}
 	if err := hostLiteralBlocked(req.URL.Host, registryAllowPrivateFetch.Load()); err != nil {
 		return err
@@ -200,6 +201,13 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 
 	return nil, lastErr
 }
+
+// ErrRegistryRedirectRefused means a registry answered with a redirect our policy
+// will not follow (off the configured host, a non-http scheme, or too many hops).
+// Like a non-200 status, this is the host ANSWERING — so the add-time probe must
+// treat it as a definitive verdict about the source, not as "the network is down"
+// (which would tolerate it and persist a registry that can never work).
+var ErrRegistryRedirectRefused = errors.New("registry redirect refused")
 
 // registryStatusError is the error registryGet returns when a registry ANSWERED
 // with a non-200 status. It is distinct from a transport failure so the add-time

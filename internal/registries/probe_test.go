@@ -230,3 +230,92 @@ func TestProbeRegistrySource_BlockedHostIsDefinitive(t *testing.T) {
 		t.Error("a blocked host must not be reported as merely unreachable — that would add the registry")
 	}
 }
+
+// --- Codex review round 2 -----------------------------------------------------
+
+// TestProbeRegistrySource_AcceptsEveryShapeTheParserReads: the probe must accept
+// exactly what the official fetcher can actually read. parseOfficialPage
+// tolerates a bare array of wrapped items and the alternative "data" envelope,
+// so refusing those at add time would block a user from adding a registry that
+// works perfectly well once added.
+func TestProbeRegistrySource_AcceptsEveryShapeTheParserReads(t *testing.T) {
+	withFastRetries(t)
+
+	bodies := map[string]string{
+		"bare array of wrapped items": `[{"server":{"name":"io.acme/x","description":"d","remotes":[{"url":"https://acme.example/mcp"}]},"_meta":{}}]`,
+		"data envelope":               `{"data":[{"server":{"name":"io.acme/x","description":"d","packages":[{"registryType":"npm","identifier":"acme"}]},"_meta":{}}],"metadata":{}}`,
+		"wrapped items under servers": `{"servers":[{"server":{"name":"io.acme/x","description":"d","packages":[{"registryType":"npm","identifier":"acme"}]},"_meta":{}}]}`,
+		// The legacy flat shape parseOpenAPIRegistry reads: ServerEntry-shaped
+		// objects with a url. (A flat item carrying `packages` is NOT accepted —
+		// see TestProbeRegistrySource_RefusesPayloadTheParserCannotUse.)
+		"legacy flat list": `{"servers":[{"id":"acme","name":"acme","url":"https://acme.example/mcp"}]}`,
+	}
+
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, body)
+			}))
+			defer srv.Close()
+
+			probe, err := ProbeRegistrySource(context.Background(), srv.URL+"/v0.1/servers")
+			if err != nil {
+				t.Fatalf("probe refused a payload the official parser reads fine: %v", err)
+			}
+			if probe.Protocol != protocolOfficial {
+				t.Errorf("Protocol = %q, want official", probe.Protocol)
+			}
+		})
+	}
+}
+
+// TestProbeRegistrySource_RefusedRedirectIsDefinitive: a source that answers with
+// a redirect our policy refuses (cross-host, or into a blocked range) ANSWERED —
+// it is not "offline". Filing it as unreachable would wave it through the
+// offline-tolerance path and persist a registry that can never work.
+func TestProbeRegistrySource_RefusedRedirectIsDefinitive(t *testing.T) {
+	withFastRetries(t)
+
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"servers":[],"metadata":{}}`)
+	}))
+	defer elsewhere.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/v0.1/servers", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	_, err := ProbeRegistrySource(context.Background(), srv.URL+"/v0.1/servers")
+	if !errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnusable", err)
+	}
+	if errors.Is(err, ErrRegistrySourceUnreachable) {
+		t.Error("a refused redirect must not be reported as merely unreachable — that would ADD the registry")
+	}
+}
+
+// TestProbeRegistrySource_RefusesPayloadTheParserCannotUse pins the other half of
+// the probe's contract: it accepts a payload only if the OFFICIAL PARSER can get
+// a usable (installable or connectable) server out of it.
+//
+// A flat, unwrapped item carrying `packages` is the sharp case. parseOfficialPage
+// routes an unwrapped list to the legacy parseOpenAPIRegistry, which unmarshals
+// straight into ServerEntry — a struct with no `packages` field — so the install
+// info is dropped and the entries come out with neither a command nor a URL.
+// Adding such a source would put servers in the UI that can never be installed.
+// Better to refuse it at add time than to ship that dead end.
+func TestProbeRegistrySource_RefusesPayloadTheParserCannotUse(t *testing.T) {
+	withFastRetries(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"servers":[{"name":"io.acme/x","description":"d","packages":[{"registryType":"npm","identifier":"acme"}]}]}`)
+	}))
+	defer srv.Close()
+
+	if _, err := ProbeRegistrySource(context.Background(), srv.URL+"/v0.1/servers"); !errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnusable — the parser cannot get an installable server out of this", err)
+	}
+}

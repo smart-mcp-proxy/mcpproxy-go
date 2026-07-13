@@ -65,9 +65,10 @@ func ProbeRegistrySource(ctx context.Context, rawURL string) (*SourceProbe, erro
 			case errors.As(err, &statusErr):
 				// The host answered — a definitive verdict about this candidate.
 				reachable = true
-			case errors.Is(err, ErrBlockedRegistryHost):
-				// The host resolves into a blocked range. That is a verdict, not a
-				// transient failure: this source can never work, so it must be
+			case errors.Is(err, ErrBlockedRegistryHost), errors.Is(err, ErrRegistryRedirectRefused):
+				// The host resolves into a blocked range, or it answered with a
+				// redirect we refuse to follow. Either way it ANSWERED: a verdict,
+				// not a transient failure. This source can never work, so it must be
 				// refused rather than waved through by the offline-tolerance path.
 				reachable = true
 			}
@@ -144,27 +145,47 @@ func classifyRegistryPayload(body []byte) (string, error) {
 
 // isOfficialPayload reports whether a body is an official v0.1 registry page.
 //
-// A "servers" key alone is NOT enough — a hand-written static catalog may wrap
-// its list under the same name. Require a signal only a real official page
-// carries:
+// The gate is defined BY THE PARSER, not by a second opinion about what official
+// JSON looks like: a payload qualifies when parseOfficialPage — the very function
+// that will read this registry on every later search — gets at least one server
+// out of it with a usable transport. Any other rule risks drifting from the
+// parser in one of two bad directions:
 //
-//	metadata{}                     — the pagination block (present even when empty)
-//	items wrapped as {server,_meta} — the official envelope
-//	an empty servers list           — nothing to sniff; it paginates, treat as official
+//   - stricter than the parser ⇒ we refuse to add a registry that would have
+//     worked. parseOfficialPage tolerates a bare array of wrapped items and the
+//     alternative "data" envelope, and an earlier version of this check rejected
+//     both.
+//   - looser than the parser ⇒ we accept a bespoke catalog (a list of
+//     {name, config:{runtime,args}} app entries) whose items the official parser
+//     turns into servers with no package and no remote — visible in search,
+//     impossible to add.
+//
+// An EMPTY official page has no items to judge, so it is recognised structurally.
 func isOfficialPayload(data interface{}) bool {
+	servers, _ := parseOfficialPage(data)
+	for i := range servers {
+		if servers[i].InstallCmd != "" || servers[i].URL != "" || servers[i].ConnectURL != "" {
+			return true
+		}
+	}
+	return isEmptyOfficialEnvelope(data)
+}
+
+// isEmptyOfficialEnvelope recognises a registry that is genuinely empty (or whose
+// first page is), which carries no items to sniff: a "servers"/"data" list that
+// is present but empty, or the pagination metadata block.
+func isEmptyOfficialEnvelope(data interface{}) bool {
 	root, ok := data.(map[string]interface{})
 	if !ok {
-		return false
-	}
-	servers, hasServers := root["servers"].([]interface{})
-	if !hasServers {
 		return false
 	}
 	if _, hasMeta := root["metadata"].(map[string]interface{}); hasMeta {
 		return true
 	}
-	if len(servers) == 0 {
-		return true
+	for _, key := range []string{"servers", "data"} {
+		if items, ok := root[key].([]interface{}); ok && len(items) == 0 {
+			return true
+		}
 	}
-	return itemsAreWrapped(servers)
+	return false
 }

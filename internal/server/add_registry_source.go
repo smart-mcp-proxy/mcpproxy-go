@@ -97,12 +97,17 @@ func (s *Server) AddRegistrySource(req *AddRegistrySourceRequest) (*config.Regis
 		return nil, err
 	}
 
-	// Resolve what this source ACTUALLY is before persisting it (GH #783). An
-	// explicit --protocol is the user's override and skips the probe.
-	if strings.TrimSpace(req.Protocol) == "" {
-		if err := s.resolveRegistrySourceShape(&entry); err != nil {
-			return nil, err
-		}
+	// Verify the source really is a v0.1 registry before persisting it (GH #783).
+	//
+	// This is deliberately NOT skippable by passing a protocol. An earlier cut
+	// treated an explicit protocol as a user override that bypassed the probe —
+	// which would have made the whole fix inert on the surface the bug was
+	// reported from: the Web UI and the macOS tray both always send
+	// "modelcontextprotocol/registry" (it is their only option), so the check
+	// would never have run there. There is exactly one supported protocol; naming
+	// it does not make an arbitrary URL speak it.
+	if err := s.resolveRegistrySourceShape(&entry); err != nil {
+		return nil, err
 	}
 
 	// Copy-on-write: clone the config and its registries slice, append to the
@@ -185,8 +190,15 @@ func buildRegistrySourceEntry(rawURL, protocol, id, name string) (config.Registr
 		return config.RegistryEntry{}, fmt.Errorf("%w: %v", ErrInvalidRegistryURL, err)
 	}
 
+	// MCPProxy implements exactly one registry protocol. Naming a different one is
+	// a mistake we should report, not silently accept and then fail to parse.
+	protocol = strings.TrimSpace(protocol)
 	if protocol == "" {
 		protocol = defaultRegistryProtocol
+	}
+	if protocol != defaultRegistryProtocol {
+		return config.RegistryEntry{}, fmt.Errorf("%w: unsupported registry protocol %q (only %q is supported)",
+			ErrInvalidRegistryURL, protocol, defaultRegistryProtocol)
 	}
 	if id == "" {
 		id = deriveRegistryID(u.Host)
