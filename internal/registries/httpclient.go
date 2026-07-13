@@ -67,9 +67,37 @@ func buildRegistryClient() *http.Client {
 		Control:   registryDialControl,
 	}).DialContext
 	return &http.Client{
-		Timeout:   registryRequestTimeout,
-		Transport: transport,
+		Timeout:       registryRequestTimeout,
+		Transport:     transport,
+		CheckRedirect: checkRegistryRedirect,
 	}
+}
+
+// checkRegistryRedirect re-applies the fetch guards to EVERY redirect hop.
+//
+// Without this, validateRegistryURL/guardRegistryTargetHost bound only the
+// initial URL while the client happily followed a `302 Location:` anywhere: to
+// the cloud-metadata endpoint (where, with an HTTP(S)_PROXY set, the dial-time
+// Control hook never even sees the real target), or to a different public host,
+// escaping the host pin that exists so a registry-supplied value cannot redirect
+// our fetch elsewhere. A registry is an API on one host; it has no business
+// bouncing us to another one.
+func checkRegistryRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("registry redirect chain too long (%d hops)", len(via))
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("registry redirect scheme %q not allowed (want http/https)", req.URL.Scheme)
+	}
+	// Pin every hop to the host we originally dialed.
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Host, origin.Host) {
+		return fmt.Errorf("registry redirect to %q left the configured host %q", req.URL.Host, origin.Host)
+	}
+	if err := hostLiteralBlocked(req.URL.Host, registryAllowPrivateFetch.Load()); err != nil {
+		return err
+	}
+	return guardRegistryTargetHost(req.Context(), req.URL.String())
 }
 
 // registryGet performs an idempotent GET against a registry endpoint with the

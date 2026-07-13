@@ -60,8 +60,14 @@ func ProbeRegistrySource(ctx context.Context, rawURL string) (*SourceProbe, erro
 		body, err := registryGet(ctx, &RegistryEntry{URL: candidate, ServersURL: candidate}, candidate)
 		if err != nil {
 			var statusErr *registryStatusError
-			if errors.As(err, &statusErr) {
+			switch {
+			case errors.As(err, &statusErr):
 				// The host answered — a definitive verdict about this candidate.
+				reachable = true
+			case errors.Is(err, ErrBlockedRegistryHost):
+				// The host resolves into a blocked range. That is a verdict, not a
+				// transient failure: this source can never work, so it must be
+				// refused rather than waved through by the offline-tolerance path.
 				reachable = true
 			}
 			reasons = append(reasons, fmt.Sprintf("%s: %v", candidate, err))
@@ -124,14 +130,8 @@ func classifyRegistryPayload(body []byte) (string, error) {
 		return "", fmt.Errorf("response is not JSON: %w", err)
 	}
 
-	if root, ok := data.(map[string]interface{}); ok {
-		// The official envelope is the only shape that paginates, and it is the
-		// only one whose query parameters (version/limit/search/cursor) are safe to
-		// send. Recognize it structurally: a "servers" list, optionally alongside
-		// the cursor metadata block.
-		if _, hasServers := root["servers"].([]interface{}); hasServers {
-			return protocolOfficial, nil
-		}
+	if isOfficialPayload(data) {
+		return protocolOfficial, nil
 	}
 
 	// Anything else must yield at least one usable server to count as a registry;
@@ -141,4 +141,33 @@ func classifyRegistryPayload(body []byte) (string, error) {
 		return "", errors.New("no MCP servers found in the response")
 	}
 	return protocolGenericJSON, nil
+}
+
+// isOfficialPayload reports whether a body is an official v0.1 registry page.
+//
+// A "servers" key alone is NOT enough: a hand-written static document may wrap
+// its list under the same name, and misreading it as official means we append
+// the official query params to a static file and parse it with the official
+// parser — dropping the very install info (config.runtime/args) that makes its
+// entries addable. Require a signal only a real official page carries:
+//
+//	metadata{}                     — the pagination block (present even when empty)
+//	items wrapped as {server,_meta} — the official envelope
+//	an empty servers list           — nothing to sniff; it paginates, treat as official
+func isOfficialPayload(data interface{}) bool {
+	root, ok := data.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	servers, hasServers := root["servers"].([]interface{})
+	if !hasServers {
+		return false
+	}
+	if _, hasMeta := root["metadata"].(map[string]interface{}); hasMeta {
+		return true
+	}
+	if len(servers) == 0 {
+		return true
+	}
+	return itemsAreWrapped(servers)
 }

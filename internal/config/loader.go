@@ -513,6 +513,12 @@ func initializeRegistries(cfg *Config) {
 	// the current two-value vocabulary so existing installs don't break on read.
 	normalizeRegistryProvenanceValues(cfg)
 
+	// One-time repair (GH #783): un-mangle custom registries whose servers_url was
+	// built by the old derivation, which glued "/v0.1/servers" onto a static JSON
+	// document and made every search 404. Fixing the add path alone would leave
+	// already-affected users — the reporter included — broken forever.
+	RepairMangledRegistryURLs(cfg)
+
 	// One-time migration (MCP-2930): map the deprecated per-server skip_quarantine
 	// flag onto auto_approve_tool_changes so existing configs converge on the new
 	// field. Runs on initial load and every hot-reload (LoadFromFile path).

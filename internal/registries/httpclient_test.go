@@ -225,3 +225,70 @@ func TestFetchOfficialServers_RetryRecovers(t *testing.T) {
 		t.Fatalf("expected 1 server after retry recovery, got %d", len(servers))
 	}
 }
+
+// TestRegistryGet_RefusesRedirectToBlockedHost: the host pin and the SSRF
+// guards were applied to the INITIAL url only, while the shared client followed
+// redirects by default. A registry (or a URL a user pastes into add-source)
+// could therefore 302 the fetch to the cloud-metadata endpoint or another host.
+// With an HTTP(S)_PROXY set, the dial-time guard never even sees the real
+// target. Every hop must be re-validated.
+func TestRegistryGet_RefusesRedirectToBlockedHost(t *testing.T) {
+	withFastRetries(t)
+	withGuardActive(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://169.254.169.254/latest/meta-data/", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	reg := &RegistryEntry{ID: "evil", ServersURL: srv.URL, Protocol: protocolOfficial}
+	if _, err := registryGet(context.Background(), reg, srv.URL); err == nil {
+		t.Fatal("expected a redirect to the metadata endpoint to be refused, got nil error")
+	}
+}
+
+// A redirect to a DIFFERENT host escapes the configured-host pin, which exists
+// precisely so a registry-supplied value cannot point our fetch elsewhere.
+func TestRegistryGet_RefusesCrossHostRedirect(t *testing.T) {
+	withFastRetries(t)
+
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"servers":[]}`)
+	}))
+	defer elsewhere.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/v0.1/servers", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	reg := &RegistryEntry{ID: "acme", ServersURL: srv.URL, Protocol: protocolOfficial}
+	if _, err := registryGet(context.Background(), reg, srv.URL); err == nil {
+		t.Fatal("expected a cross-host redirect to be refused, got nil error")
+	}
+}
+
+// A same-host redirect (the common trailing-slash / scheme normalisation) must
+// still be followed, or we would break real registries.
+func TestRegistryGet_FollowsSameHostRedirect(t *testing.T) {
+	withFastRetries(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v0.1/servers" {
+			http.Redirect(w, r, "/v0.1/servers/", http.StatusMovedPermanently)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"servers":[],"metadata":{}}`)
+	}))
+	defer srv.Close()
+
+	reg := &RegistryEntry{ID: "acme", ServersURL: srv.URL, Protocol: protocolOfficial}
+	body, err := registryGet(context.Background(), reg, srv.URL+"/v0.1/servers")
+	if err != nil {
+		t.Fatalf("a same-host redirect must still be followed: %v", err)
+	}
+	if len(body) == 0 {
+		t.Error("expected the redirected body")
+	}
+}

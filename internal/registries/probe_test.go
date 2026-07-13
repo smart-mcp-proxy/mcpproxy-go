@@ -177,3 +177,66 @@ func TestProbeCandidates(t *testing.T) {
 		}
 	}
 }
+
+// --- Codex review round 1 -----------------------------------------------------
+
+// TestProbeRegistrySource_StaticServersEnvelopeIsGeneric: a STATIC document may
+// also wrap its list in "servers". Classifying on that key alone marked such a
+// file as the official protocol — after which we would append the official
+// query params to a static file and parse it with the official parser, losing
+// the {config:{runtime,args}} install info entirely (server shows up, cannot be
+// added). Only a genuinely official payload may claim the official protocol.
+func TestProbeRegistrySource_StaticServersEnvelopeIsGeneric(t *testing.T) {
+	withFastRetries(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"servers":[{"name":"Fetch","description":"d","config":{"runtime":"uvx","args":["mcp-server-fetch"]}}]}`)
+	}))
+	defer srv.Close()
+
+	probe, err := ProbeRegistrySource(context.Background(), srv.URL+"/apps.json")
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if probe.Protocol != protocolGenericJSON {
+		t.Errorf("Protocol = %q, want %q — a static file is not the official protocol just because it says \"servers\"", probe.Protocol, protocolGenericJSON)
+	}
+}
+
+// An official registry whose first page is EMPTY must still be recognised as
+// official (there are no items to sniff, and it paginates).
+func TestProbeRegistrySource_EmptyOfficialPageStaysOfficial(t *testing.T) {
+	withFastRetries(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"servers":[],"metadata":{"count":0}}`)
+	}))
+	defer srv.Close()
+
+	probe, err := ProbeRegistrySource(context.Background(), srv.URL+"/v0.1/servers")
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if probe.Protocol != protocolOfficial {
+		t.Errorf("Protocol = %q, want official for an empty official page", probe.Protocol)
+	}
+}
+
+// TestProbeRegistrySource_BlockedHostIsDefinitive: a source whose host resolves
+// into a blocked (SSRF) range can never work, so it must be REFUSED — not
+// waved through by the offline-tolerance path as if the network were merely
+// down.
+func TestProbeRegistrySource_BlockedHostIsDefinitive(t *testing.T) {
+	withFastRetries(t)
+	withGuardActive(t)
+
+	_, err := ProbeRegistrySource(context.Background(), "https://127.0.0.1:9/apps.json")
+	if !errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnusable (a blocked host is a verdict, not a transient failure)", err)
+	}
+	if errors.Is(err, ErrRegistrySourceUnreachable) {
+		t.Error("a blocked host must not be reported as merely unreachable — that would add the registry")
+	}
+}

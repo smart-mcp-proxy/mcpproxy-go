@@ -2,18 +2,22 @@ package registries
 
 import (
 	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // protocolGenericJSON is the protocol for a plain-JSON registry source: any
 // https URL that serves a list of MCP servers as a static document rather than
-// implementing the official v0.1 registry API (GH discussion #783 — the Fleur
-// app-registry apps.json is the canonical example).
+// implementing the official v0.1 registry API (GH discussion #783).
 //
 // The distinction that matters at fetch time: a generic/json source is fetched
 // EXACTLY as configured. Nothing is appended to its path (buildOfficialURL's
 // version/limit/search/cursor query and the /v0.1/servers route are official-
 // protocol details), because a static document has no routes and no pagination.
-const protocolGenericJSON = "custom/json"
+//
+// Defined in config so the load-time repair (config.RepairMangledRegistryURLs)
+// can name it without importing this package — that would be an import cycle.
+const protocolGenericJSON = config.RegistryProtocolGenericJSON
 
 // genericListKeys are the envelope keys a static registry may wrap its list in.
 // A bare top-level array is also supported.
@@ -87,6 +91,13 @@ func genericItems(rawData interface{}) []genericItem {
 // the mcpServers form and empty otherwise. Returns ok=false when the item has no
 // usable name.
 func genericItemToEntry(keyName string, item map[string]interface{}) (ServerEntry, bool) {
+	// A static file may hold items in the official {server, _meta} envelope (e.g.
+	// a dumped registry page). Unwrap it so those entries parse here too, instead
+	// of yielding a nameless item that gets dropped.
+	if wrapped, ok := item["server"].(map[string]interface{}); ok {
+		return genericItemToEntry(keyName, wrapped)
+	}
+
 	// An official server.json object (packages/remotes) is classified by the
 	// official mapper so a static file holding real server.json entries behaves
 	// identically to the same entries served by the official registry.
