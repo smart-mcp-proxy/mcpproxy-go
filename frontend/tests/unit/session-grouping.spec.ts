@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { buildWorkSessionIndex, groupKeyOf } from '@/utils/sessionGrouping'
+import {
+  buildWorkSessionIndex,
+  groupKeyOf,
+  resolveSessionFilter,
+  matchesSessionFilter,
+} from '@/utils/sessionGrouping'
 import type { ActivityRecord, MCPSession } from '@/types/api'
 
 const rec = (p: Partial<ActivityRecord>): ActivityRecord =>
@@ -76,5 +81,54 @@ describe('work-session grouping', () => {
   it('tolerates records with no session id at all', () => {
     const index = buildWorkSessionIndex([rec({ tool_name: 'echo' })], [])
     expect(groupKeyOf(rec({ tool_name: 'echo' }), index)).toBe('')
+  })
+})
+
+// Sessions page → "View Activity" links with the row's TRANSPORT id, because
+// that is what the Sessions table is a list of. The Activity page groups and
+// filters by WORK session. So the link arrived carrying an id that matched no
+// group and no dropdown option: an empty log and a blank Session picker, even
+// though the session plainly had activity.
+describe('session filter from a deep link', () => {
+  const SID = 'mcp-session-edb5dc8a-84a6-48d0-a0a6-b03b3aa08ebd'
+  const WSID = 'ws-3c571af4004fba33'
+
+  const rows: ActivityRecord[] = [
+    rec({ session_id: SID, work_session_id: WSID, tool_name: 'retrieve_tools' }),
+    rec({ session_id: SID, work_session_id: WSID, tool_name: 'call_tool_read' }),
+  ]
+  const index = buildWorkSessionIndex(rows, [])
+
+  it('translates a transport id into the work session the picker is keyed by', () => {
+    expect(resolveSessionFilter(SID, index)).toBe(WSID)
+  })
+
+  it('leaves a work-session id alone (the dropdown’s own values must survive)', () => {
+    expect(resolveSessionFilter(WSID, index)).toBe(WSID)
+  })
+
+  it('leaves an unknown id alone rather than dropping the filter', () => {
+    expect(resolveSessionFilter('sess-never-seen', index)).toBe('sess-never-seen')
+    expect(resolveSessionFilter('', index)).toBe('')
+  })
+
+  it('matches the session’s rows whether the filter is the transport or work id', () => {
+    for (const filter of [SID, WSID]) {
+      expect(rows.filter(a => matchesSessionFilter(a, filter, index))).toHaveLength(2)
+    }
+  })
+
+  // The index is built from data that arrives asynchronously. Before it lands,
+  // a transport-id filter must still show the connection's rows rather than an
+  // empty log that then blinks into existence.
+  it('matches on the raw transport id even before the index is populated', () => {
+    const empty = new Map<string, string>()
+    expect(rows.filter(a => matchesSessionFilter(a, SID, empty))).toHaveLength(2)
+  })
+
+  it('does not match rows from a different session', () => {
+    const other = rec({ session_id: 'sess-other', work_session_id: 'ws-other' })
+    expect(matchesSessionFilter(other, SID, index)).toBe(false)
+    expect(matchesSessionFilter(other, WSID, index)).toBe(false)
   })
 })

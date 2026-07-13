@@ -47,3 +47,35 @@ export function groupKeyOf(a: ActivityRecord, index: WorkSessionIndex): string {
   if (a.session_id) return index.get(a.session_id) ?? a.session_id
   return ''
 }
+
+/**
+ * Translate a session filter into the key the activity log is actually grouped
+ * by.
+ *
+ * The Sessions page links to `/activity?session=<transport id>` — that is what
+ * its table lists. But the log groups by work session, so the raw transport id
+ * matched no group and no entry in the Session dropdown: an empty log next to a
+ * blank picker. Anything already a work-session id, or unknown, passes through
+ * untouched.
+ */
+export function resolveSessionFilter(sessionKey: string, index: WorkSessionIndex): string {
+  if (!sessionKey) return ''
+  return index.get(sessionKey) ?? sessionKey
+}
+
+/**
+ * Whether a record belongs to the filtered session, accepting either id.
+ *
+ * The index is assembled from data that arrives asynchronously, so a deep link
+ * carrying a transport id must still match on that id alone until the index
+ * catches up — otherwise the log shows "no matching activities" for a moment
+ * before the rows appear.
+ */
+export function matchesSessionFilter(
+  a: ActivityRecord,
+  sessionKey: string,
+  index: WorkSessionIndex,
+): boolean {
+  if (!sessionKey) return true
+  return groupKeyOf(a, index) === resolveSessionFilter(sessionKey, index) || a.session_id === sessionKey
+}
