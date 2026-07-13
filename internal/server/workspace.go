@@ -167,14 +167,55 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 	principal := principalFromContext(ctx)
 
 	return p.sessionStore.EnsurePersisted(sessionID, func(info *SessionInfo) string {
-		if p.mainServer == nil || p.mainServer.runtime == nil {
+		resolve := p.resolveWorkSession()
+		if resolve == nil {
 			return ""
 		}
-		return p.mainServer.runtime.ResolveWorkSession(runtime.WorkSessionIdentity{
+		return resolve(runtime.WorkSessionIdentity{
 			Principal:     principal,
 			ClientName:    info.ClientName,
 			ClientVersion: info.ClientVersion,
 			WorkspaceRoot: info.Workspace,
 		})
 	})
+}
+
+// resolveWorkSession is the runtime's work-session tracker, or the stub a test
+// injected in its place. Nil when neither is available.
+func (p *MCPProxyServer) resolveWorkSession() func(runtime.WorkSessionIdentity) string {
+	if p.workSessionResolver != nil {
+		return p.workSessionResolver
+	}
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return nil
+	}
+	return p.mainServer.runtime.ResolveWorkSession
+}
+
+// markWorkIfToolCall attributes a request to a work session when — and only when
+// — it is real work (Spec 082).
+//
+// This runs from the beforeAny hook, which every MCP method passes through on
+// every server instance (direct / code-exec / call-tool all share these hooks).
+// That placement is the point: work used to be marked inside individual tool
+// handlers, and the built-ins that did not bother — list_registries,
+// upstream_servers, quarantine_security — wrote activity with no work session on
+// it. The Web UI grouped those orphaned rows under the raw transport session id
+// while the rest of the same connection grouped under its work-session id, so a
+// single client appeared as two sessions in the picker. Marking here means a new
+// built-in cannot reintroduce that by forgetting a call.
+//
+// A tools/call is the boundary of "work", deliberately: a connection that only
+// initializes and lists tools has done nothing, and persisting it would bury the
+// user's real sessions under background agents that connect every few minutes,
+// do nothing, and leave.
+func (p *MCPProxyServer) markWorkIfToolCall(ctx context.Context, method mcp.MCPMethod) string {
+	if method != mcp.MethodToolsCall {
+		return ""
+	}
+	session := mcpserver.ClientSessionFromContext(ctx)
+	if session == nil {
+		return ""
+	}
+	return p.markSessionWorked(ctx, session.SessionID())
 }

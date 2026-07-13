@@ -693,8 +693,9 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
-import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
 import { buildSessionLabels } from '@/utils/sessionLabel'
+import { buildWorkSessionIndex, groupKeyOf as workSessionKeyOf } from '@/utils/sessionGrouping'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -776,6 +777,10 @@ interface SessionOption {
 // show "Claude Code · 14:32" instead of an opaque "...139c9".
 const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string; workspace?: string }>())
 
+// The raw session records behind that map. Kept because they carry the
+// transport -> work session link that groupKeyOf needs (see workSessionIndex).
+const sessionsRaw = ref<MCPSession[]>([])
+
 // Session ids we have already tried and failed to resolve. The core keeps only
 // the 100 most recent sessions, so an old session's activity rows can outlive
 // its record and never become resolvable. Without this set, every refresh would
@@ -791,8 +796,10 @@ const loadSessions = async () => {
   sessionsInFlight = (async () => {
     try {
       const response = await api.getSessions(100)
+      const sessions = response.data?.sessions ?? []
+      sessionsRaw.value = sessions
       const next = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
-      for (const s of response.data?.sessions ?? []) {
+      for (const s of sessions) {
         const info = {
           clientName: s.client_name,
           startTime: s.start_time,
@@ -844,10 +851,16 @@ const refreshSessionsIfUnknown = () => {
   if (hasUnknown) void loadSessions()
 }
 
+// Transport session -> work session, learned from the sessions API and from any
+// sibling row that does carry one. A row with no work session of its own is
+// folded into its connection's, rather than keying on the raw transport id and
+// splitting one client into two entries in the picker.
+const workSessionIndex = computed(() => buildWorkSessionIndex(activities.value, sessionsRaw.value))
+
 // The key an activity row is grouped and filtered by: its WORK session (Spec
-// 082) — one client, one project, across reconnects. Rows written before 082
-// have none, so they fall back to the transport session and behave as before.
-const groupKeyOf = (a: ActivityRecord): string => a.work_session_id || a.session_id || ''
+// 082) — one client, one project, across reconnects. Rows for which no work
+// session is known anywhere still fall back to the transport session.
+const groupKeyOf = (a: ActivityRecord): string => workSessionKeyOf(a, workSessionIndex.value)
 
 const availableSessions = computed((): SessionOption[] => {
   const seen = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
