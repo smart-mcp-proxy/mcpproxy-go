@@ -12,19 +12,20 @@ import (
 // GH discussion #783: every user-added source was persisted as
 // "modelcontextprotocol/registry" with /v0.1/servers glued onto whatever URL was
 // pasted, so MCPProxy fetched routes that only the official registry has. A
-// static JSON registry (Fleur's apps.json) 404'd, and the failure only surfaced
-// later, at search time, as an opaque "registry query returned 404".
+// pasted static JSON document 404'd, and the failure only surfaced later, at
+// search time, as an opaque "registry query returned 404".
 //
 // ProbeRegistrySource replaces that assumption with a measurement: fetch the
-// source once at ADD time, and let the payload decide both the URL to store and
-// the protocol to speak.
+// source once at ADD time and confirm it really does speak the official v0.1
+// protocol — the only registry protocol MCPProxy implements. If it does not, say
+// so now, with the reason.
 
 var (
-	// ErrRegistrySourceUnusable means the source answered but is not an MCP
-	// server list (404 on every candidate, HTML, non-JSON, or JSON with no
-	// recognizable server list). This is a definitive verdict: the add is
-	// refused so the user learns immediately, rather than at the next search.
-	ErrRegistrySourceUnusable = errors.New("registry source did not return a list of MCP servers")
+	// ErrRegistrySourceUnusable means the source answered but is not an official
+	// v0.1 registry (404 on every candidate, HTML, non-JSON, or JSON that is not
+	// a server list). This is a definitive verdict: the add is refused so the
+	// user learns immediately, rather than at the next search.
+	ErrRegistrySourceUnusable = errors.New("registry source is not a modelcontextprotocol/registry v0.1 endpoint")
 
 	// ErrRegistrySourceUnreachable means the source could not be contacted at all
 	// (DNS failure, connection refused, timeout). This says nothing about whether
@@ -120,36 +121,32 @@ func looksLikeDocument(path string) bool {
 	return strings.Contains(last, ".")
 }
 
-// classifyRegistryPayload decides which protocol a body speaks. An official v0.1
-// response (the { "servers": [...], "metadata": {...} } envelope) is fetched with
-// the paginating official fetcher; anything else that still holds a recognizable
-// list of servers is treated as a static JSON document and fetched verbatim.
+// classifyRegistryPayload verifies that a body is an official v0.1 registry
+// page, and returns the protocol to store.
+//
+// MCPProxy speaks exactly one registry protocol: modelcontextprotocol/registry
+// v0.1. A URL that answers with something else — an HTML page, an arbitrary JSON
+// document, a bespoke app-store catalog — is not a registry we can browse, and
+// the user learns that HERE, at add time, with the reason. Previously we assumed
+// every added source spoke the official protocol and only failed later, at
+// search time, with an opaque 404 (GH #783).
 func classifyRegistryPayload(body []byte) (string, error) {
 	var data interface{}
 	if err := json.Unmarshal(body, &data); err != nil {
 		return "", fmt.Errorf("response is not JSON: %w", err)
 	}
 
-	if isOfficialPayload(data) {
-		return protocolOfficial, nil
+	if !isOfficialPayload(data) {
+		return "", errors.New("response is not a modelcontextprotocol/registry v0.1 server list")
 	}
-
-	// Anything else must yield at least one usable server to count as a registry;
-	// otherwise the URL is some other JSON document (or an HTML page) and the user
-	// should hear about it now.
-	if len(parseGenericJSON(data)) == 0 {
-		return "", errors.New("no MCP servers found in the response")
-	}
-	return protocolGenericJSON, nil
+	return protocolOfficial, nil
 }
 
 // isOfficialPayload reports whether a body is an official v0.1 registry page.
 //
-// A "servers" key alone is NOT enough: a hand-written static document may wrap
-// its list under the same name, and misreading it as official means we append
-// the official query params to a static file and parse it with the official
-// parser — dropping the very install info (config.runtime/args) that makes its
-// entries addable. Require a signal only a real official page carries:
+// A "servers" key alone is NOT enough — a hand-written static catalog may wrap
+// its list under the same name. Require a signal only a real official page
+// carries:
 //
 //	metadata{}                     — the pagination block (present even when empty)
 //	items wrapped as {server,_meta} — the official envelope

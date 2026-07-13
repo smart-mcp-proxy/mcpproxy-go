@@ -47,12 +47,15 @@ func TestUserAddedV01Source_IsSearchableAndCustom(t *testing.T) {
 	assert.Equal(t, "acme/widget", servers[0].Name)
 }
 
-// TestUserAddedStaticJSONSource_IsSearchable is the GH #783 acceptance test: a
-// static JSON document (the Fleur app-registry apps.json) added as a custom
-// source is browsable end-to-end, and MCPProxy fetches it EXACTLY as configured
-// — no /v0.1/servers route and no version/limit/search query appended, both of
-// which are official-protocol details that a static file 404s or ignores.
-func TestUserAddedStaticJSONSource_IsSearchable(t *testing.T) {
+// TestUserAddedStaticJSONSource_IsRefusedAtAddTime is the GH #783 acceptance
+// test. MCPProxy implements exactly one registry protocol (official v0.1), so a
+// static JSON catalog cannot be browsed. What #783 was really about is HOW that
+// failed: the URL was silently rewritten to ".../apps.json/v0.1/servers" and
+// 404'd on every later search, with nothing telling the user why.
+//
+// Now the pasted URL is fetched verbatim at add time and the source is refused
+// with a reason — and, critically, NOTHING is appended to the URL we request.
+func TestUserAddedStaticJSONSource_IsRefusedAtAddTime(t *testing.T) {
 	var gotPath, gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
@@ -61,44 +64,17 @@ func TestUserAddedStaticJSONSource_IsSearchable(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `[
-		  {"name":"Fetch","description":"web pages","sourceUrl":"https://github.com/modelcontextprotocol/servers","config":{"mcpKey":"fetch","runtime":"uvx","args":["mcp-server-fetch"]}},
-		  {"name":"Memory","description":"knowledge graph","config":{"mcpKey":"memory","runtime":"npx","args":["-y","@modelcontextprotocol/server-memory"]}}
-		]`)
+		fmt.Fprint(w, `[{"name":"Fetch","description":"web pages","config":{"runtime":"uvx","args":["mcp-server-fetch"]}}]`)
 	}))
 	defer srv.Close()
 
 	appsURL := srv.URL + "/fleuristes/app-registry/refs/heads/main/apps.json"
 
-	// A probe of the pasted URL is what produces this config entry.
-	probe, err := ProbeRegistrySource(context.Background(), appsURL)
-	require.NoError(t, err, "the pasted static JSON URL must probe cleanly")
-	require.Equal(t, appsURL, probe.ServersURL)
-	require.Equal(t, protocolGenericJSON, probe.Protocol)
+	_, err := ProbeRegistrySource(context.Background(), appsURL)
+	require.Error(t, err, "a static catalog is not an official v0.1 registry")
+	assert.ErrorIs(t, err, ErrRegistrySourceUnusable)
 
-	cfg := config.DefaultConfig()
-	cfg.Registries = []config.RegistryEntry{{
-		ID:         "fleur-static",
-		Name:       "Fleur",
-		URL:        appsURL,
-		ServersURL: probe.ServersURL,
-		Protocol:   probe.Protocol,
-	}}
-	SetRegistriesFromConfig(cfg)
-
-	servers, err := SearchServers(context.Background(), "fleur-static", "", "", 10, nil)
-	require.NoError(t, err, "a static JSON registry must be searchable")
-	require.Len(t, servers, 2)
-	assert.Equal(t, "Fetch", servers[0].Name)
-	assert.Equal(t, "uvx mcp-server-fetch", servers[0].InstallCmd, "the entry must carry enough info to be added")
-	assert.Equal(t, "Fleur", servers[0].Registry)
-
-	assert.Equal(t, "/fleuristes/app-registry/refs/heads/main/apps.json", gotPath, "no route may be appended to a static source")
-	assert.Empty(t, gotQuery, "no official-protocol query may be appended to a static source")
-
-	// A query still filters, client-side.
-	filtered, err := SearchServers(context.Background(), "fleur-static", "", "memory", 10, nil)
-	require.NoError(t, err)
-	require.Len(t, filtered, 1)
-	assert.Equal(t, "Memory", filtered[0].Name)
+	assert.Equal(t, "/fleuristes/app-registry/refs/heads/main/apps.json", gotPath,
+		"the pasted URL must be fetched verbatim — no route may be appended to it")
+	assert.Empty(t, gotQuery, "no official-protocol query may be appended to it either")
 }

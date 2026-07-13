@@ -10,11 +10,12 @@ import (
 	"testing"
 )
 
-// TestProbeRegistrySource_StaticJSONFile is GH discussion #783: the user pastes
-// a static JSON file URL (Fleur's apps.json). The probe must keep that URL
-// VERBATIM (no /v0.1/servers suffix, which 404s) and classify it as custom/json
-// so the fetcher does not append official-protocol query params to it either.
-func TestProbeRegistrySource_StaticJSONFile(t *testing.T) {
+// TestProbeRegistrySource_StaticJSONFileIsRefused is GH discussion #783: the
+// user pastes a static JSON document (a bespoke app catalog). MCPProxy speaks
+// only the official v0.1 protocol, so this cannot be browsed — but the user must
+// be told THAT, at add time, instead of having the URL silently rewritten to
+// ".../apps.json/v0.1/servers" and 404-ing on every later search.
+func TestProbeRegistrySource_StaticJSONFileIsRefused(t *testing.T) {
 	withFastRetries(t)
 
 	var gotPath, gotQuery string
@@ -29,21 +30,18 @@ func TestProbeRegistrySource_StaticJSONFile(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	probe, err := ProbeRegistrySource(context.Background(), srv.URL+"/repo/apps.json")
-	if err != nil {
-		t.Fatalf("probe failed: %v", err)
+	_, err := ProbeRegistrySource(context.Background(), srv.URL+"/repo/apps.json")
+	if !errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnusable", err)
 	}
-	if probe.ServersURL != srv.URL+"/repo/apps.json" {
-		t.Errorf("ServersURL = %q, want the pasted URL verbatim", probe.ServersURL)
-	}
-	if probe.Protocol != protocolGenericJSON {
-		t.Errorf("Protocol = %q, want %q", probe.Protocol, protocolGenericJSON)
-	}
+
+	// Even while probing, the pasted URL is fetched EXACTLY as given: no invented
+	// route, no official-protocol query params.
 	if gotPath != "/repo/apps.json" {
 		t.Errorf("requested path = %q, want the pasted path with nothing appended", gotPath)
 	}
 	if gotQuery != "" {
-		t.Errorf("requested query = %q, want none for a static JSON source", gotQuery)
+		t.Errorf("requested query = %q, want none", gotQuery)
 	}
 }
 
@@ -180,13 +178,9 @@ func TestProbeCandidates(t *testing.T) {
 
 // --- Codex review round 1 -----------------------------------------------------
 
-// TestProbeRegistrySource_StaticServersEnvelopeIsGeneric: a STATIC document may
-// also wrap its list in "servers". Classifying on that key alone marked such a
-// file as the official protocol — after which we would append the official
-// query params to a static file and parse it with the official parser, losing
-// the {config:{runtime,args}} install info entirely (server shows up, cannot be
-// added). Only a genuinely official payload may claim the official protocol.
-func TestProbeRegistrySource_StaticServersEnvelopeIsGeneric(t *testing.T) {
+// A static catalog that merely wraps its list under "servers" must not be
+// mistaken for an official registry (it carries none of the official signals).
+func TestProbeRegistrySource_StaticServersEnvelopeIsRefused(t *testing.T) {
 	withFastRetries(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -195,12 +189,8 @@ func TestProbeRegistrySource_StaticServersEnvelopeIsGeneric(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	probe, err := ProbeRegistrySource(context.Background(), srv.URL+"/apps.json")
-	if err != nil {
-		t.Fatalf("probe failed: %v", err)
-	}
-	if probe.Protocol != protocolGenericJSON {
-		t.Errorf("Protocol = %q, want %q — a static file is not the official protocol just because it says \"servers\"", probe.Protocol, protocolGenericJSON)
+	if _, err := ProbeRegistrySource(context.Background(), srv.URL+"/apps.json"); !errors.Is(err, ErrRegistrySourceUnusable) {
+		t.Fatalf("err = %v, want ErrRegistrySourceUnusable — a static catalog is not the official protocol just because it says \"servers\"", err)
 	}
 }
 

@@ -159,6 +159,12 @@ func newRegistryAddSourceCmd() *cobra.Command {
 official modelcontextprotocol/registry v0.1 protocol (the same protocol shipped
 by Copilot/VS Code/Azure).
 
+That protocol is the ONLY one MCPProxy speaks. The URL is fetched when you add
+it and rejected right away if it turns out not to be a v0.1 registry — a static
+JSON catalog or an HTML page cannot be browsed, and you hear about it now rather
+than on your first search. Paste either the base URL or the full servers
+endpoint; whatever you paste is used as-is.
+
 The added source is tagged "custom" (informational). Servers you discover and
 add through it follow the global quarantine default like any other server, so
 with quarantine enabled (the default) they land quarantined for review:

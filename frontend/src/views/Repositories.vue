@@ -395,7 +395,9 @@
             Update this custom <code>modelcontextprotocol/registry</code> source. Its id is fixed.
           </template>
           <template v-else>
-            Add a custom <code>modelcontextprotocol/registry</code> v0.1 source by its HTTPS URL.
+            Add a custom <code>modelcontextprotocol/registry</code> v0.1 source by its HTTPS URL —
+            that is the only registry protocol MCPProxy speaks, so the URL is checked when you add it
+            and rejected here if it turns out not to be one (a plain JSON catalog or a web page cannot be browsed).
             It is shown as a <span class="badge badge-ghost badge-xs align-middle">Custom</span> source.
           </template>
         </p>
