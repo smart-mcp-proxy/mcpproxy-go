@@ -30,11 +30,19 @@ const (
 	officialMaxPages = 20
 )
 
-// fetchOfficialServers fetches every (active, latest) server from an official
-// v0.1 registry, following metadata.nextCursor up to officialMaxPages. The
-// optional query is passed through as the registry-side `search` parameter to
-// reduce pagination; surfaces still filter client-side for exactness.
-func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string) ([]ServerEntry, error) {
+// fetchOfficialServers fetches (active, latest) servers from an official v0.1
+// registry, following metadata.nextCursor up to officialMaxPages. The optional
+// query is passed through as the registry-side `search` parameter to reduce
+// pagination; surfaces still filter client-side for exactness.
+//
+// maxResults (0 = no cap) stops the cursor-follow loop as soon as enough
+// matching servers have been collected to satisfy the caller. This matters far
+// more than it sounds: the official registry currently answers in ~20s per page,
+// so crawling all 20 pages to serve a `limit=3` search took over six minutes and
+// simply timed out — the caller's limit was only applied AFTER the whole listing
+// had been fetched. A search that the registry has already filtered server-side
+// now costs one page.
+func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string, maxResults int) ([]ServerEntry, error) {
 	var all []ServerEntry
 	cursor := ""
 	for page := 0; page < officialMaxPages; page++ {
@@ -58,6 +66,13 @@ func fetchOfficialServers(ctx context.Context, reg *RegistryEntry, guesser *expe
 
 		servers, next := parseOfficialPage(rawData)
 		all = append(all, servers...)
+
+		// Enough to answer the caller? Stop paying for pages nobody will see.
+		// Counted against the SAME client-side filter the caller will apply, so we
+		// never stop early on a page whose entries all get filtered out.
+		if maxResults > 0 && len(filterServers(all, "", query)) >= maxResults {
+			break
+		}
 
 		if next == "" || next == cursor {
 			break

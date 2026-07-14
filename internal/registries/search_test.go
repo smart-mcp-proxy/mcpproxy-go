@@ -628,7 +628,7 @@ func TestFetchServers_SendsVersionedUserAgent(t *testing.T) {
 		ServersURL: srv.URL,
 	}
 
-	_, err := fetchServers(context.Background(), reg, nil, "")
+	_, err := fetchServers(context.Background(), reg, nil, "", 0)
 	require.NoError(t, err, "fetchServers should not get a 410 — it must send a versioned User-Agent")
 	require.NotEmpty(t, gotUserAgent, "fetchServers must send a User-Agent header")
 	require.Contains(t, gotUserAgent, "mcpproxy/", "User-Agent must be versioned (mcpproxy/<version>)")
