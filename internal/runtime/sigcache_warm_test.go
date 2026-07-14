@@ -77,7 +77,9 @@ func TestApplyDifferentialToolUpdate_EvictsStaleSignatureCacheEntries(t *testing
 	rt.SignatureCache().Warm("evict-hash-a2", schemaA2, "Read a file.")
 	assert.Equal(t, before, rt.SignatureCache().CompileCount(), "live hash must remain cached")
 	rt.SignatureCache().Get("evict-hash-a", schemaA, "Read a file.")
-	assert.Equal(t, before+1, rt.SignatureCache().CompileCount(), "stale hash must have been evicted")
+	assert.Equal(t, before, rt.SignatureCache().CompileCount(),
+		"stale hash must compute-through without re-memoizing (post-reconcile Get gate)")
+	assert.Equal(t, 1, rt.SignatureCache().Len(), "stale Get must not repopulate the cache")
 }
 
 func TestApplyDifferentialToolUpdate_WarmsSignatureCache(t *testing.T) {

@@ -104,10 +104,17 @@ func TestCache_RetainHashes_EvictsStale(t *testing.T) {
 		t.Errorf("retained entries recompiled: CompileCount %d -> %d", before, n)
 	}
 
-	// Evicted hashes are genuine misses again.
-	c.Get("stale-1", cacheTestSchema, "Tool.")
-	if n := c.CompileCount(); n != before+1 {
-		t.Errorf("evicted hash must recompile on Get: CompileCount = %d, want %d", n, before+1)
+	// Evicted hashes compute-through WITHOUT re-memoizing (post-reconcile,
+	// only live-set hashes may enter the cache — Codex R2 stale-repopulation
+	// fix). The render still succeeds; the counter and Len stay put.
+	if sig := c.Get("stale-1", cacheTestSchema, "Tool."); sig.Sig == "" {
+		t.Error("evicted hash must still render via compute-through")
+	}
+	if n := c.CompileCount(); n != before {
+		t.Errorf("evicted hash must not re-enter the cache: CompileCount = %d, want %d", n, before)
+	}
+	if n := c.Len(); n != len(live) {
+		t.Errorf("Len after stale Get = %d, want %d", n, len(live))
 	}
 
 	// Empty live set clears everything; nil behaves the same.
@@ -189,5 +196,34 @@ func TestCache_ConcurrentGetWarm_RaceClean(t *testing.T) {
 	}
 	if n := c.Len(); n != hashes {
 		t.Errorf("Len = %d, want %d", n, hashes)
+	}
+}
+
+// TestCache_StaleGetAfterRetainDoesNotRepopulate covers the Codex R2 finding:
+// a Get for a hash evicted by RetainHashes must serve the rendered signature
+// (compute-through) without re-memoizing it.
+func TestCache_StaleGetAfterRetainDoesNotRepopulate(t *testing.T) {
+	c := NewCache()
+	c.Warm("stale", `{"type":"object","properties":{"q":{"type":"string"}}}`, "Old tool.")
+	c.Warm("livehash", `{"type":"object"}`, "Live tool.")
+
+	if evicted := c.RetainHashes(map[string]struct{}{"livehash": {}}); evicted != 1 {
+		t.Fatalf("RetainHashes evicted %d, want 1", evicted)
+	}
+
+	// A racing request that still holds the stale hash renders fine...
+	sig := c.Get("stale", `{"type":"object","properties":{"q":{"type":"string"}}}`, "Old tool.")
+	if sig.Sig == "" {
+		t.Fatal("stale Get must compute-through, got empty signature")
+	}
+	// ...but must NOT re-enter the cache.
+	if got := c.Len(); got != 1 {
+		t.Fatalf("cache re-populated stale hash: Len=%d, want 1", got)
+	}
+	// And a live hash still memoizes normally.
+	c.Get("livehash2", `{"type":"object"}`, "Another.") // pre-reconcile behavior for unknown hashes:
+	// livehash2 is not in the live set either — must also compute-through.
+	if got := c.Len(); got != 1 {
+		t.Fatalf("non-live hash memoized after reconcile: Len=%d, want 1", got)
 	}
 }
