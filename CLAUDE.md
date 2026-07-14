@@ -158,5 +158,6 @@ tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/
 - **Windows installer**: [docs/github-actions-windows-wix-research.md](docs/github-actions-windows-wix-research.md). **Prerelease** (`next` branch + `v*-rc.*` tags, opt-in, off stable channels): [docs/prerelease-builds.md](docs/prerelease-builds.md).
 
 ## Recent Changes
+- 083-discovery-profiler: Added Go 1.24 (bench package, same module as mcpproxy-go); Node.js ≥20 for the TSCG arm subprocess (CI-provided, matches existing E2E prereqs); Python via `uv` for dataset fetch + LAP (CI only)
 - 077-scanner-simplification: Added Go 1.24 (backend/core), TypeScript 5.9 / Vue 3.5 (frontend Web UI) + Existing only — `internal/security/detect` (stdlib + `golang.org/x/text/unicode/norm`, already an indirect dep), `internal/security/scanner`, BBolt (scanner records + tool approvals), Bleve (index, untouched), zap (logging). **No new third-party dependency.**
 - 076-deterministic-tool-scanner: Added Go 1.24 + stdlib only for detection (`unicode`, `unicode/utf8`, `encoding/base64`, `encoding/hex`, `regexp`); `golang.org/x/text/unicode/norm` (already an indirect dep via x/text) for NFKC; existing `internal/security/patterns/`, `internal/security/scanner/`, `internal/runtime/tool_quarantine.go`. No new third-party dependency.

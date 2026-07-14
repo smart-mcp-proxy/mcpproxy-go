@@ -752,3 +752,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
 | [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
+| [083-discovery-profiler](./specs/083-discovery-profiler/) | `drafted` | 0/41 (0%) |
