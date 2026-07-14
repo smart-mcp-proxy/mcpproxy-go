@@ -53,7 +53,7 @@ An operator enables the feature globally with one config line (`toon_output: "ad
 
 ### User Story 3 - Safety-chain ordering: detection and truncation unaffected (Priority: P2)
 
-A security-conscious operator confirms that enabling TOON changes neither what the sensitive-data scanner sees nor how truncation behaves: both sanitisation and detection receive the same inputs they receive with the feature off (a secret is caught identically either way), and truncation applies after encoding so a truncated TOON payload is explicitly marked as truncated.
+A security-conscious operator confirms that enabling TOON changes neither what the sensitive-data scanner finds nor how truncation behaves: sanitisation runs on the raw pre-encoding result, detection receives an equivalent pre-encoding rendering, and the observable guarantee is identical detection FINDINGS either way (a secret is caught identically; incidental byte differences such as timestamped truncation banners carry no upstream data). Truncation applies after encoding so a truncated TOON payload is explicitly marked as truncated.
 
 **Why this priority**: Encoding must never weaken the security pipeline; this is a hard invariant, but it's P2 because it's a property of the implementation rather than new user-facing behavior.
 
@@ -61,7 +61,7 @@ A security-conscious operator confirms that enabling TOON changes neither what t
 
 **Acceptance Scenarios**:
 
-1. **Given** a tool result containing sensitive data, **When** TOON encoding is active, **Then** sensitive-data detection produces the same findings as with the feature off (each pipeline stage receives the same pre-encoding input it receives today, per FR-007).
+1. **Given** a tool result containing sensitive data, **When** TOON encoding is active, **Then** sensitive-data detection produces the same FINDINGS as with the feature off (each pipeline stage receives an equivalent pre-encoding rendering per FR-007; finding-set parity is the tested guarantee).
 2. **Given** a result exceeding the configured response limit, **When** it is TOON-encoded, **Then** the size limit is applied to the final rendered payload and the standard truncation notice is present (encode first, then truncate).
 3. **Given** any encoding failure (encoder error, unparseable JSON), **Then** the response falls back to passthrough — a TOON bug can never lose result data.
 
