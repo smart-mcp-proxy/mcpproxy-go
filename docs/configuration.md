@@ -99,6 +99,22 @@ MCPProxy looks for configuration in these locations (in order):
 | `call_tool_timeout` | string | `"2m"` | Timeout for tool calls (e.g., `"30s"`, `"2m"`, `"5m"`). **Note**: When using agents like Codex or Claude as MCP servers, you may need to increase this timeout significantly, even up to 10 minutes (`"10m"`), as these agents may require longer processing times for complex operations |
 | `init_timeout` | duration | `"30s"` | Deadline for an upstream's MCP `initialize` handshake (e.g. `"30s"`, `"120s"`, `"3m"`). Raise this for servers that do legitimate first-run warmup — building a cache/index or prefetching — before they answer `initialize`, so they are not killed mid-startup. Global default; can be overridden per server (see [Server Fields](#server-fields)). Range: `1s`–`30m`; `"0s"`/unset uses the 30s default. |
 
+### TOON Output (Adaptive Result Encoding)
+
+```json
+{
+  "toon_output": "adaptive",
+  "toon_min_savings_pct": 15
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `toon_output` | string | `"off"` | TOON encoding of `call_tool_*` result text blocks: `off` (byte-identical to pre-feature behavior), `adaptive` (encode only tabular-uniform JSON when the complete TOON emission — marker + decode hint + body — beats the passthrough by at least `toon_min_savings_pct`; never larger by construction), or `always` (encode every JSON-parseable block regardless of size — **benchmarking/debugging only, can increase token cost**). Hot-reloads; applies to the next tool call without restart. |
+| `toon_min_savings_pct` | integer | `15` | Minimum byte savings (percent, 1–90) the TOON emission must achieve over the passthrough for `adaptive` mode to encode. Byte savings approximate token savings for this payload class. |
+
+Per-server override: set `toon_output` on a server entry to override the global for that server's tools (precedence: per-server > global > default `off`). See [Server Fields](#server-fields) and [TOON Output](features/toon-output.md) for the full feature description (marker contract, safety chain, decision metadata).
+
 ### Discovery & Health Checks
 
 mcpproxy keeps each upstream connection alive and its tool index fresh with two
@@ -217,6 +233,7 @@ the proxy.
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
 | `quarantined` | boolean | No | Security quarantine status (default: `false` for manually added servers, `true` for LLM-added servers) |
 | `reconnect_on_use` | boolean | No | When `true`, tool calls to a disconnected server trigger an immediate reconnect attempt (15s timeout) before failing (default: `false`) |
+| `toon_output` | string | No | Per-server override for the global [`toon_output`](#toon-output-adaptive-result-encoding): `off`, `adaptive`, or `always`. Non-empty value wins over the global for this server's tools; omit to inherit. See [TOON Output](features/toon-output.md). |
 | `created` | string | No | ISO 8601 timestamp (auto-generated) |
 | `updated` | string | No | ISO 8601 timestamp (auto-updated) |
 
@@ -1220,3 +1237,4 @@ Run `mcpproxy doctor` to check configuration health.
 - [Logging](logging.md) - Logging configuration and management
 - [Code Execution](code_execution/overview.md) - JavaScript code execution
 - [Search Servers](search_servers.md) - MCP server discovery
+- [TOON Output](features/toon-output.md) - Adaptive TOON encoding of tool results

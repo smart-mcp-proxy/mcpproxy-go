@@ -353,6 +353,10 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// MCP-3322: per-server init_timeout override; round-tripped through
 		// UpstreamRecord so REST/UI/CLI-set deadlines survive a restart.
 		"InitTimeout": true,
+		// Spec 084: per-server toon_output override; round-tripped through
+		// UpstreamRecord so a REST/UI-set override survives a restart and a
+		// SaveConfiguration rebuild of the JSON server list.
+		"ToonOutput": true,
 	}
 
 	// Get all fields from ServerConfig

@@ -753,4 +753,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
 | [083-discovery-profiler](./specs/083-discovery-profiler/) | `drafted` | 0/41 (0%) |
-| [084-toon-output](./specs/084-toon-output/) | `drafted` | 0/43 (0%) |
+| [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |

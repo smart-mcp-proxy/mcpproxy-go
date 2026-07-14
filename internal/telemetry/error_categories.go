@@ -18,6 +18,10 @@ const (
 	ErrCatIndexRebuildFailed      ErrorCategory = "index_rebuild_failed"
 	ErrCatConfigReloadFailed      ErrorCategory = "config_reload_failed"
 	ErrCatSocketBindFailed        ErrorCategory = "socket_bind_failed"
+	// ErrCatToonEncodeFallback counts genuine TOON encoder failures that fell
+	// back to passthrough (spec 084, FR-006 "logged and counted"). Rare by
+	// construction — non-JSON blocks are ordinary traffic and never counted.
+	ErrCatToonEncodeFallback ErrorCategory = "toon_encode_fallback"
 )
 
 var validErrorCategories = map[ErrorCategory]struct{}{
@@ -32,6 +36,7 @@ var validErrorCategories = map[ErrorCategory]struct{}{
 	ErrCatIndexRebuildFailed:      {},
 	ErrCatConfigReloadFailed:      {},
 	ErrCatSocketBindFailed:        {},
+	ErrCatToonEncodeFallback:      {},
 }
 
 // IsValidErrorCategory reports whether the given category is in the fixed enum.

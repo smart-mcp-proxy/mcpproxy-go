@@ -2,7 +2,6 @@
   "listen": ":8081",
   "enable_socket": true,
   "data_dir": "./test-data",
-  "enable_tray": false,
   "debug_search": false,
   "mcpServers": [
     {
@@ -17,13 +16,33 @@
       "enabled": true,
       "quarantined": false,
       "created": "2025-01-01T00:00:00Z",
-      "updated": "2025-09-23T10:13:46.357736+03:00"
+      "updated": "2026-07-14T21:23:24.883151+03:00"
+    },
+    {
+      "name": "launcher-test",
+      "url": "http://127.0.0.1:39933/mcp",
+      "protocol": "http",
+      "command": "./test/launcher-server/launcher-server",
+      "args": [
+        "--port",
+        "39933",
+        "--quiet"
+      ],
+      "oauth": null,
+      "enabled": true,
+      "quarantined": false,
+      "created": "2026-05-11T00:00:00Z",
+      "updated": "2026-07-14T21:23:24.892192+03:00",
+      "launcher_wait_timeout": "10s"
     }
   ],
   "top_k": 10,
   "tools_limit": 50,
   "tool_response_limit": 20000,
   "call_tool_timeout": "30s",
+  "max_result_size_chars": 500000,
+  "toon_output": "off",
+  "toon_min_savings_pct": 15,
   "environment": {
     "inherit_system_safe": true,
     "allowed_system_vars": [
@@ -43,13 +62,15 @@
     "enable_file": true,
     "enable_console": true,
     "filename": "main.log",
+    "log_dir": "test-data/logs",
     "max_size": 10,
     "max_backups": 5,
     "max_age": 30,
     "compress": true,
     "json_format": false
   },
-  "api_key": "15152abefac37127746d2bb27a4157da95d13ff4a6036abb1f40be3a343dddaa",
+  "api_key": "a2f179cd162108e56b5f2493c309993d17e313626ee3ed1f8360d6fb60d3830b",
+  "require_mcp_auth": false,
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -58,6 +79,7 @@
   "check_server_repo": true,
   "docker_isolation": {
     "enabled": false,
+    "enable_cache_volume": true,
     "default_images": {
       "bash": "alpine:3.18",
       "binary": "alpine:3.18",
@@ -89,17 +111,6 @@
   },
   "registries": [
     {
-      "id": "pulse",
-      "name": "Pulse MCP",
-      "description": "Browse and discover MCP use-cases, servers, clients, and news",
-      "url": "https://www.pulsemcp.com/",
-      "servers_url": "https://api.pulsemcp.com/v0beta/servers",
-      "tags": [
-        "verified"
-      ],
-      "protocol": "custom/pulse"
-    },
-    {
       "id": "docker-mcp-catalog",
       "name": "Docker MCP Catalog",
       "description": "A collection of secure, high-quality MCP servers as docker images",
@@ -108,45 +119,8 @@
       "tags": [
         "verified"
       ],
-      "protocol": "custom/docker"
-    },
-    {
-      "id": "fleur",
-      "name": "Fleur",
-      "description": "Fleur is the app store for Claude",
-      "url": "https://www.fleurmcp.com/",
-      "servers_url": "https://raw.githubusercontent.com/fleuristes/app-registry/refs/heads/main/apps.json",
-      "tags": [
-        "verified"
-      ],
-      "protocol": "custom/fleur"
-    },
-    {
-      "id": "azure-mcp-demo",
-      "name": "Azure MCP Registry Demo",
-      "description": "A reference implementation of MCP registry using Azure API Center",
-      "url": "https://demo.registry.azure-mcp.net/",
-      "servers_url": "https://demo.registry.azure-mcp.net/v0/servers",
-      "tags": [
-        "verified",
-        "demo",
-        "azure",
-        "reference"
-      ],
-      "protocol": "mcp/v0"
-    },
-    {
-      "id": "remote-mcp-servers",
-      "name": "Remote MCP Servers",
-      "description": "Community-maintained list of remote Model Context Protocol servers",
-      "url": "https://remote-mcp-servers.com/",
-      "servers_url": "https://remote-mcp-servers.com/api/servers",
-      "tags": [
-        "verified",
-        "community",
-        "remote"
-      ],
-      "protocol": "custom/remote"
+      "protocol": "custom/docker",
+      "provenance": "official"
     }
   ],
   "features": {
@@ -183,6 +157,7 @@
   "code_execution_pool_size": 10,
   "activity_retention_days": 90,
   "activity_max_records": 100000,
+  "activity_max_size_mb": 256,
   "activity_max_response_size": 65536,
   "activity_cleanup_interval_min": 60,
   "intent_declaration": {
@@ -195,13 +170,48 @@
     "max_payload_size_kb": 1024,
     "entropy_threshold": 4.5,
     "categories": {
-      "cloud_credentials": true,
-      "private_key": true,
       "api_token": true,
-      "database_credential": true,
+      "auth_token": true,
+      "cloud_credentials": true,
       "credit_card": true,
+      "database_credential": true,
       "high_entropy": true,
+      "private_key": true,
       "sensitive_file": true
     }
-  }
+  },
+  "output_validation": {
+    "mode": "warn",
+    "max_bytes": 5242880,
+    "max_depth": 64,
+    "missing_structured_content": "allow"
+  },
+  "output_sanitisation": {
+    "response_action": "spotlight",
+    "strip_classes": [
+      "ansi",
+      "c0c1",
+      "bidi",
+      "zero_width"
+    ],
+    "max_redactions": 100
+  },
+  "telemetry": {
+    "last_startup_outcome": "success",
+    "notice_shown": true
+  },
+  "observability": {
+    "usage_cache_ttl": "5s",
+    "usage_persist_interval": "30s",
+    "metrics": {
+      "enabled": false
+    },
+    "tracing": {
+      "enabled": false,
+      "protocol": "http",
+      "endpoint": "localhost:4318",
+      "sample_rate": 0.1
+    }
+  },
+  "routing_mode": "retrieve_tools"
 }

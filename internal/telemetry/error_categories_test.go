@@ -15,6 +15,7 @@ func TestValidErrorCategoriesEnum(t *testing.T) {
 		ErrCatIndexRebuildFailed,
 		ErrCatConfigReloadFailed,
 		ErrCatSocketBindFailed,
+		ErrCatToonEncodeFallback,
 	}
 
 	if got := len(validErrorCategories); got != len(want) {

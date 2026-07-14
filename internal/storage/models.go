@@ -160,6 +160,10 @@ type UpstreamRecord struct {
 	// MCP-3322: per-server MCP `initialize` handshake deadline override,
 	// persisted so a REST/UI/CLI-set init_timeout survives a restart.
 	InitTimeout *config.Duration `json:"init_timeout,omitempty"`
+	// Spec 084: per-server toon_output override ("" = inherit global),
+	// persisted so the override survives a restart and a SaveConfiguration
+	// rebuild of the JSON server list.
+	ToonOutput string `json:"toon_output,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics

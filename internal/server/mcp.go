@@ -33,6 +33,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toonenc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -123,6 +124,11 @@ type MCPProxyServer struct {
 	// nil, and the runtime's tracker is used; tests inject a stub so they do not
 	// have to stand up a whole Runtime to exercise session attribution.
 	workSessionResolver func(runtime.WorkSessionIdentity) string
+
+	// telemetryRegOverride lets tests observe telemetry counters without
+	// standing up a whole Runtime (mirrors workSessionResolver). Nil in
+	// production — telemetryRegistry() then resolves via mainServer.runtime.
+	telemetryRegOverride *telemetry.CounterRegistry
 
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
@@ -524,6 +530,9 @@ func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[st
 // is not initialized. Spec 042. The Record* helpers in the telemetry package
 // are nil-safe so callers do not need to nil-check the return value.
 func (p *MCPProxyServer) telemetryRegistry() *telemetry.CounterRegistry {
+	if p.telemetryRegOverride != nil {
+		return p.telemetryRegOverride
+	}
 	if p.mainServer == nil || p.mainServer.runtime == nil {
 		return nil
 	}
@@ -586,9 +595,12 @@ func (p *MCPProxyServer) emitActivityToolCallStarted(serverName, toolName, sessi
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
 // profile is the Spec 057 profile slug for /mcp/p/<slug> calls - optional (FR-011)
-func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int) {
+// detectionText is the spec-084 pre-encoding detection scan input (FR-007b) —
+// empty when TOON is off or on non-call_tool_* paths (detector falls back to response)
+// toonDecisions are the spec-084 per-block encoding decisions (FR-010) — nil when the feature did not run
+func (p *MCPProxyServer) emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonDecisions []toonenc.Decision) {
 	if p.mainServer != nil && p.mainServer.runtime != nil {
-		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes)
+		p.mainServer.runtime.EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg, durationMs, arguments, response, responseTruncated, toolVariant, intent, contentTrust, profile, requestBytes, responseBytes, detectionText, toonOutputMetadata(toonDecisions))
 	}
 }
 
@@ -657,6 +669,12 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 		sensitivityDesc = "Classify data sensitivity."
 		reasonDesc = "Why is this tool being called?"
 	}
+
+	// Spec 084 (FR-005): echo the TOON marker contract so agents learn it
+	// in-session. toonenc.Marker is the single source of truth
+	// (contracts/marker-format.md); this line is documentation of it.
+	description += " RESULT ENCODING: a result text block may begin with the line \"" +
+		toonenc.Marker + "\" — then the rest of that block is TOON, not JSON."
 
 	allOpts := []mcp.ToolOption{
 		mcp.WithDescription(description),
@@ -1915,7 +1933,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 				intentMap = intent.ToMap()
 			}
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -1940,7 +1958,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			intentMap = intent.ToMap()
 		}
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2042,7 +2060,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if intent != nil {
 			intentMap = intent.ToMap()
 		}
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil)
 
 		// Spec 024: Emit internal tool call event for error
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -2099,6 +2117,20 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	activityResponseBytes := rawByteSize(result)
 	activityRequestBytes := rawByteSize(activityArgs)
 
+	// Spec 084: adaptive TOON encoding of result text blocks. Positioned AFTER
+	// applyOutputSanitisation (the encoder input is the sanitised result,
+	// FR-007a) and AFTER the Spec 069 raw-byte measurement above (which must
+	// stay pre-encoding, research D-SEAM), and BEFORE forwardContentResult so
+	// truncation applies to the final rendered payload and the marker/hint at
+	// the head of the block survive it (FR-008). When the resolved mode is off
+	// this returns ("", nil) and the path is byte-identical to pre-feature
+	// behavior (FR-002): the detector then falls back to scanning response.
+	var toonDetectionText string
+	var toonDecisions []toonenc.Decision
+	if ctr, ok := result.(*mcp.CallToolResult); ok {
+		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
+	}
+
 	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
@@ -2145,7 +2177,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	if intent != nil {
 		intentMap = intent.ToMap()
 	}
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, toolVariant, intentMap, contentTrust, profileSlug, activityRequestBytes, activityResponseBytes, toonDetectionText, toonDecisions)
 
 	// Spec 024: Emit internal tool call event for success
 	internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
@@ -2324,7 +2356,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			}
 			// Log the early failure to activity (Spec 024)
 			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil)
 			return mcp.NewToolResultError(errMsg), nil
 		}
 	} else {
@@ -2333,7 +2365,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		errMsg := fmt.Sprintf("No client found for server: %s", serverName)
 		// Log the early failure to activity (Spec 024)
 		p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, "", nil, "", "", 0, 0, "", nil)
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
@@ -2456,7 +2488,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		}
 
 		// Emit activity completed event for error with determined source (legacy - no intent)
-		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0)
+		p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil)
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
@@ -2545,7 +2577,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Emit activity completed event for success with determined source (legacy - no intent)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
-	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes)
+	p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "success", "", duration.Milliseconds(), activityArgs, response, responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil)
 
 	return forwarded, nil
 }
@@ -5639,7 +5671,10 @@ func (p *MCPProxyServer) lookupOutputSchema(serverName, toolName string) string 
 //
 // forwarded is the result produced by forwardContentResult; its StructuredContent
 // is identical to the upstream's (forwardContentResult only truncates text
-// blocks), so validating it here is equivalent to validating the original.
+// blocks, and the spec-084 TOON seam upstream of it rewrites TextContent
+// only), so validating it here is equivalent to validating the ORIGINAL
+// structured result (FR-010b) — TOON encoding can neither mask nor cause a
+// schema violation.
 func (p *MCPProxyServer) applyOutputValidation(ctx context.Context, serverName, toolName string, forwarded *mcp.CallToolResult) *mcp.CallToolResult {
 	// Disabled (mode=off) or validator not constructed -> no-op (FR-A4/FR-A7).
 	if p.outputValidator == nil || !p.config.OutputValidation.IsEnabled() {

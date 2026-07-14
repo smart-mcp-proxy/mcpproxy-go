@@ -99,6 +99,19 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "call_tool_timeout")
 	}
 
+	// TOON output (spec 084, FR-001 — hot-reloadable). The call_tool_* encoder
+	// seam reads ToonOutput/ToonMinSavingsPct fresh on every call (same pattern
+	// as output sanitisation), so applying the change is free; these entries
+	// exist so a lone toon edit is acknowledged instead of being reported as
+	// "no changes detected". Per-server toon_output overrides are already
+	// covered by the Servers DeepEqual above.
+	if oldCfg.ToonOutput != newCfg.ToonOutput {
+		result.ChangedFields = append(result.ChangedFields, "toon_output")
+	}
+	if oldCfg.ToonMinSavingsPct != newCfg.ToonMinSavingsPct {
+		result.ChangedFields = append(result.ChangedFields, "toon_min_savings_pct")
+	}
+
 	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
 	// loop (managed client) and indexing loop (runtime) re-resolve their interval
 	// each cycle, and ApplyConfig propagates the new global config to the upstream
