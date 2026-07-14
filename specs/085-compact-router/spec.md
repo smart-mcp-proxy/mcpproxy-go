@@ -41,7 +41,7 @@ An agent that selected a lossy-flagged tool (or wants certainty) calls `describe
 
 **Acceptance Scenarios**:
 
-1. **Given** ids returned by `retrieve_tools`, **When** `describe_tool` is called, **Then** each returned definition contains the full input schema and untruncated description, byte-equal to the full-mode rendering of the same tool.
+1. **Given** ids returned by `retrieve_tools`, **When** `describe_tool` is called, **Then** each returned definition contains the full input schema and untruncated description, **field-equal to the full-mode rendering of the same tool over `{name, description, inputSchema, server, annotations, call_with}`** — ranked-only fields (e.g. `score`) are absent, since `describe_tool` is a lookup, not a ranked search.
 2. **Given** a mix of valid and unknown ids, **When** `describe_tool` is called, **Then** valid ids return definitions and unknown ids return per-id error entries; the call as a whole succeeds.
 3. **Given** more than the maximum ids (5), **When** `describe_tool` is called, **Then** the call returns a clear error naming the limit.
 4. **Given** the `retrieve_tools` routing mode, **Then** `describe_tool` is present beside `retrieve_tools`; its own definition costs ≤ ~150 tokens; quarantined/disabled/out-of-profile ids return per-id not-found errors, not definitions.
@@ -126,7 +126,7 @@ A maintainer runs the spec-083 profiler against a compact-mode proxy and reads t
 
 **describe_tool (US2)**
 
-- **FR-010**: A new built-in tool `describe_tool` MUST accept 1–5 tool ids and return, per id, the full input schema and complete description — byte-equal to the full-mode rendering of the same tool — or a per-id error for unknown/invisible ids without failing the batch.
+- **FR-010**: A new built-in tool `describe_tool` MUST accept 1–5 tool ids and return, per id, the full input schema and complete description — **field-equal to the full-mode rendering of the same tool over `{name, description, inputSchema, server, annotations, call_with}`; ranked-only fields (`score`) are absent** — or a per-id error for unknown/invisible ids without failing the batch.
 - **FR-011**: `describe_tool` MUST be exposed in the `retrieve_tools` routing mode (the surface this feature changes); other routing modes keep their current surfaces in v1 (extending to code_execution mode is follow-up work). Resolution MUST apply the same visibility pipeline as search — profile scoping, authorization, callability, quarantine and disabled rules — before returning any definition: `describe_tool` must never return a definition that the same session's `retrieve_tools` could not return. Its own definition SHOULD cost ≤150 tokens.
 - **FR-012**: `describe_tool` MUST work identically in both response modes.
 

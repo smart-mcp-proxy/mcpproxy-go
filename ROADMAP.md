@@ -754,4 +754,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
 | [083-discovery-profiler](./specs/083-discovery-profiler/) | `drafted` | 0/41 (0%) |
 | [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |
-| [085-compact-router](./specs/085-compact-router/) | — | — |
+| [085-compact-router](./specs/085-compact-router/) | `drafted` | 0/46 (0%) |
