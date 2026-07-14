@@ -57,24 +57,36 @@ final class MergePatchEncodingTests: XCTestCase {
         XCTAssertTrue(headers["X-Old"] is NSNull, "X-Old value must round-trip as NSNull, not be coerced to anything else")
     }
 
-    /// Demonstrate the WRONG path so a future refactor can't tell itself
-    /// "JSONEncoder should be fine, let's switch". `[String: String?]`
-    /// run through the default encoder strips nil values silently.
-    func testDefaultJSONEncoderDropsOptionalNilFromMap() throws {
+    /// Tripwire on `[String: String?]` + `JSONEncoder` — the tempting shortcut
+    /// for building the patch, and the reason we don't take it.
+    ///
+    /// How Foundation encodes a nil map value is NOT stable across toolchains:
+    /// it used to DROP the key entirely (so a delete silently became "no change"),
+    /// and current Foundation emits `null` instead (so the same code would now
+    /// mean "delete"). Either way the meaning of a user's edit would be decided by
+    /// the Swift runtime rather than by us, and it flipped once already — which is
+    /// exactly why `saveEdits()` builds `[String: Any]` with `NSNull()` and encodes
+    /// through JSONSerialization, whose rendering is specified.
+    ///
+    /// This test therefore pins the observed behaviour rather than a preference.
+    /// If it fails, Foundation has changed AGAIN: re-audit saveEdits() (it should
+    /// still be immune, because it does not use this path) and update the comment.
+    func testDefaultJSONEncoderNilMapEncodingIsToolchainDefined() throws {
         struct Body: Encodable {
             let headers: [String: String?]
         }
         let body = Body(headers: ["X-Keep": "v", "X-Stale": nil])
-        let data = try JSONEncoder().encode(body)
-        let str = String(data: data, encoding: .utf8)!
+        let str = String(data: try JSONEncoder().encode(body), encoding: .utf8)!
 
-        // X-Stale must NOT appear in the encoded JSON — which is exactly
-        // why we don't use this approach. If a future change makes the
-        // encoder start emitting nil as `null`, this test fails and the
-        // author has to update both the test and the saveEdits() path.
-        XCTAssertFalse(str.contains("X-Stale"),
-                       "documented pitfall: default JSONEncoder drops nil map values; if this changes, audit saveEdits()")
-        XCTAssertTrue(str.contains("X-Keep"))
+        XCTAssertTrue(str.contains("X-Keep"), "a present value must always survive")
+
+        // Current Foundation: nil is emitted as an explicit null.
+        XCTAssertTrue(str.contains("\"X-Stale\":null") || str.contains("\"X-Stale\" : null"),
+                      """
+                      Foundation's encoding of nil map values changed again (got: \(str)).
+                      saveEdits() does not use this path — verify that is still true — and \
+                      update this tripwire to the new behaviour.
+                      """)
     }
 
     /// Sanity: an empty-string value (set-to-empty) must NOT be treated
