@@ -75,18 +75,12 @@ jobs:
         run: swift --version
       - name: Run native unit tests
         working-directory: native/macos/MCPProxy
-        # NOTE: the skip-set below are pre-existing/environmental failures
-        # tracked for repair (AutoStart UserDefaults first-run, SSE-parser
-        # edge cases, a JSONEncoder behavior canary). They are unrelated to the
-        # tray form logic. Remove skips as each is fixed so coverage grows.
-        # Tracked in the native-test-suite-green follow-up.
-        run: |
-          swift test \
-            --skip AutoStartTests \
-            --skip testDefaultJSONEncoderDropsOptionalNilFromMap \
-            --skip testSSEEventDecodeInvalidDataThrows \
-            --skip testFieldWithColonButNoValue \
-            --skip testFieldWithNoColon
+        # The whole suite runs. The former skip-set (AutoStart first-run, two
+        # SSE-parser edge cases, a JSONEncoder canary, SSE decode) is fixed — two
+        # of them were real bugs the skips were hiding — so there is nothing left
+        # to exclude. Do not reintroduce --skip: a skipped test is an untested
+        # code path that looks green.
+        run: swift test
 
   settings-parity:
     name: settings-parity

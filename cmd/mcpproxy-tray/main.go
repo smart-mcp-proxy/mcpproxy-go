@@ -997,6 +997,18 @@ const (
 	coreOwnershipExternalUnmanaged
 )
 
+// shouldTerminateCore reports whether tray shutdown may kill the core: only a
+// core the tray itself launched.
+//
+// GH #410: coreOwnershipExternalManaged ("a core was already running, so I
+// attached to it") used to be terminated as well — via the PID from /status and
+// a `pgrep -f "mcpproxy serve"` sweep — so quitting the tray killed a core the
+// user was running under launchd/brew. Attaching to a process is not a claim of
+// ownership over it.
+func shouldTerminateCore(ownership coreOwnershipMode) bool {
+	return ownership == coreOwnershipTrayManaged
+}
+
 // CoreProcessLauncher manages the mcpproxy core process with state machine integration
 type CoreProcessLauncher struct {
 	coreURL      string
@@ -1598,19 +1610,16 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 			cpl.forceKillCore()
 			time.Sleep(1 * time.Second) // Give it a moment to die
 		}
-	} else {
-		switch cpl.coreOwnership {
-		case coreOwnershipExternalUnmanaged:
-			cpl.logger.Info("Core management skipped by configuration - leaving external core running")
-		default:
-			cpl.logger.Warn("Process monitor unavailable during shutdown - attempting emergency core termination")
-			if err := cpl.shutdownExternalCoreFallback(); err != nil {
-				cpl.logger.Error("Emergency core shutdown failed", zap.Error(err))
-			}
+	} else if shouldTerminateCore(cpl.coreOwnership) {
+		cpl.logger.Warn("Process monitor unavailable during shutdown - attempting emergency core termination")
+		if err := cpl.shutdownExternalCoreFallback(); err != nil {
+			cpl.logger.Error("Emergency core shutdown failed", zap.Error(err))
 		}
+	} else {
+		cpl.logger.Info("Core was not started by the tray - leaving it running")
 	}
 
-	if cpl.coreOwnership != coreOwnershipExternalUnmanaged {
+	if shouldTerminateCore(cpl.coreOwnership) {
 		if err := cpl.ensureCoreTermination(); err != nil {
 			cpl.logger.Error("Final core termination verification failed", zap.Error(err))
 		}
@@ -1731,6 +1740,18 @@ func (cpl *CoreProcessLauncher) buildCoreEnvironment() []string {
 	filtered = append(filtered,
 		"MCPPROXY_ENABLE_TRAY=false",
 		fmt.Sprintf("MCPPROXY_API_KEY=%s", trayAPIKey))
+
+	// Tell the core it was launched by the tray, so telemetry's launch_source
+	// can say so. Without this a tray-spawned core is unclassifiable: its parent
+	// is the tray (not launchd, so not login_item) and it has no TTY (so not
+	// cli), leaving launch_source "unknown".
+	//
+	// The installer launches the tray with MCPPROXY_LAUNCHED_BY=installer and
+	// the core inherits it through os.Environ() above; that first-run
+	// attribution outranks "tray", so we must not overwrite it.
+	if strings.TrimSpace(os.Getenv("MCPPROXY_LAUNCHED_BY")) != "installer" {
+		filtered = append(filtered, "MCPPROXY_LAUNCHED_BY=tray")
+	}
 
 	// Pass through TLS configuration if set
 	if tlsEnabled := strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")); tlsEnabled != "" {

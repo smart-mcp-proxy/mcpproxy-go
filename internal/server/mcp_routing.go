@@ -195,6 +195,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			return blocked, nil
 		}
 
+		// Spec 082: a direct tool call is real work — it earns the session a
+		// durable record, and does so BEFORE any activity is emitted so the
+		// records carry the right work session.
+		p.markSessionWorked(ctx, sessionID)
+
 		// Emit activity event
 		p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
 

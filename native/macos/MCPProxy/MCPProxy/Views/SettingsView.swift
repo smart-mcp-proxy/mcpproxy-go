@@ -64,6 +64,20 @@ private struct AppPrefsTab: View {
                 if let launchError {
                     Text(launchError).font(.callout).foregroundColor(.red)
                 }
+
+                // GH #410. Deliberately independent of "Launch at login": that one
+                // controls whether the APP starts with macOS, this one whether the
+                // CORE starts with the app. Turning it off keeps the menu-bar app
+                // available without the core and its upstream server processes.
+                Toggle("Start MCPProxy Core when the app opens", isOn: $appState.startCoreOnLaunch)
+                    .disabled(appState.coreLaunchPinnedOffByEnvironment)
+                if appState.coreLaunchPinnedOffByEnvironment {
+                    Text("Pinned off by MCPPROXY_TRAY_SKIP_CORE in the environment.")
+                        .font(.callout).foregroundColor(.secondary)
+                } else if !appState.startCoreOnLaunch {
+                    Text("MCPProxy will not start the core. It still connects to a core you start yourself, and you can start one from the menu at any time.")
+                        .font(.callout).foregroundColor(.secondary)
+                }
             } header: { Text("Startup") }
 
             Section {

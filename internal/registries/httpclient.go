@@ -2,6 +2,7 @@ package registries
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,12 +15,19 @@ import (
 
 const (
 	// registryRequestTimeout bounds a SINGLE registry HTTP request (connect + TLS
-	// handshake + awaiting response headers + body read). The official registry's
-	// deep-cursor pages can be slow under load, so this is deliberately more
-	// forgiving than a snappy localhost call. Retries layer on top via
-	// registryMaxAttempts so one slow page no longer aborts the whole listing
-	// (root fix for the "Official MCP Registry returned no results" timeout).
-	registryRequestTimeout = 15 * time.Second
+	// handshake + awaiting response headers + body read). Retries layer on top via
+	// registryMaxAttempts so one slow page no longer aborts the whole listing.
+	//
+	// This MUST stay comfortably above what a real registry takes to answer. It
+	// was 15s, and the official registry
+	// (https://registry.modelcontextprotocol.io/v0.1/servers) currently takes
+	// ~18-20s to return its first page — so EVERY attempt timed out, all three
+	// retries burned, and browsing the official registry failed outright with
+	// "context deadline exceeded (Client.Timeout exceeded while awaiting
+	// headers)". That is the "the official registry doesn't work either" half of
+	// GH #783, reproduced live. 45s leaves real headroom over a ~20s registry
+	// without letting a truly hung host stall a fetch indefinitely.
+	registryRequestTimeout = 45 * time.Second
 
 	// registryMaxAttempts is the total number of attempts (1 initial + retries)
 	// for an idempotent registry GET before giving up.
@@ -67,9 +75,37 @@ func buildRegistryClient() *http.Client {
 		Control:   registryDialControl,
 	}).DialContext
 	return &http.Client{
-		Timeout:   registryRequestTimeout,
-		Transport: transport,
+		Timeout:       registryRequestTimeout,
+		Transport:     transport,
+		CheckRedirect: checkRegistryRedirect,
 	}
+}
+
+// checkRegistryRedirect re-applies the fetch guards to EVERY redirect hop.
+//
+// Without this, validateRegistryURL/guardRegistryTargetHost bound only the
+// initial URL while the client happily followed a `302 Location:` anywhere: to
+// the cloud-metadata endpoint (where, with an HTTP(S)_PROXY set, the dial-time
+// Control hook never even sees the real target), or to a different public host,
+// escaping the host pin that exists so a registry-supplied value cannot redirect
+// our fetch elsewhere. A registry is an API on one host; it has no business
+// bouncing us to another one.
+func checkRegistryRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("%w: chain too long (%d hops)", ErrRegistryRedirectRefused, len(via))
+	}
+	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+		return fmt.Errorf("%w: scheme %q not allowed (want http/https)", ErrRegistryRedirectRefused, req.URL.Scheme)
+	}
+	// Pin every hop to the host we originally dialed.
+	origin := via[0].URL
+	if !strings.EqualFold(req.URL.Host, origin.Host) {
+		return fmt.Errorf("%w: redirect to %q left the configured host %q", ErrRegistryRedirectRefused, req.URL.Host, origin.Host)
+	}
+	if err := hostLiteralBlocked(req.URL.Host, registryAllowPrivateFetch.Load()); err != nil {
+		return err
+	}
+	return guardRegistryTargetHost(req.Context(), req.URL.String())
 }
 
 // registryGet performs an idempotent GET against a registry endpoint with the
@@ -164,13 +200,32 @@ func registryGet(ctx context.Context, reg *RegistryEntry, reqURL string) ([]byte
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("registry query returned %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+			return nil, &registryStatusError{StatusCode: resp.StatusCode}
 		}
 
 		return body, nil
 	}
 
 	return nil, lastErr
+}
+
+// ErrRegistryRedirectRefused means a registry answered with a redirect our policy
+// will not follow (off the configured host, a non-http scheme, or too many hops).
+// Like a non-200 status, this is the host ANSWERING — so the add-time probe must
+// treat it as a definitive verdict about the source, not as "the network is down"
+// (which would tolerate it and persist a registry that can never work).
+var ErrRegistryRedirectRefused = errors.New("registry redirect refused")
+
+// registryStatusError is the error registryGet returns when a registry ANSWERED
+// with a non-200 status. It is distinct from a transport failure so the add-time
+// probe can tell "this URL is definitively not a registry" (refuse the add) from
+// "the host is unreachable right now" (tolerate it — the user may be offline).
+type registryStatusError struct {
+	StatusCode int
+}
+
+func (e *registryStatusError) Error() string {
+	return fmt.Sprintf("registry query returned %d %s", e.StatusCode, http.StatusText(e.StatusCode))
 }
 
 // isRetryableStatus reports whether an HTTP status warrants a retry: server-side

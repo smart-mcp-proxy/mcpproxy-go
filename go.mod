@@ -13,11 +13,11 @@ require (
 	github.com/dop251/goja v0.0.0-20260305124333-6a7976c22267
 	github.com/evanw/esbuild v0.28.1
 	github.com/gen2brain/beeep v0.11.2
-	github.com/go-chi/chi/v5 v5.3.0
+	github.com/go-chi/chi/v5 v5.3.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/inconshreveable/go-update v0.0.0-20160112193335-8152e7eb6ccf
-	github.com/mark3labs/mcp-go v0.55.1
+	github.com/mark3labs/mcp-go v0.56.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/prometheus/client_golang v1.23.2
@@ -36,11 +36,11 @@ require (
 	go.opentelemetry.io/otel/sdk v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
 	go.uber.org/zap v1.28.0
-	golang.org/x/mod v0.37.0
-	golang.org/x/sync v0.21.0
-	golang.org/x/sys v0.46.0
-	golang.org/x/term v0.44.0
-	golang.org/x/text v0.38.0
+	golang.org/x/mod v0.38.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
+	golang.org/x/text v0.40.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
 	pgregory.net/rapid v1.3.0
@@ -143,8 +143,8 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/tools v0.45.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.81.1 // indirect

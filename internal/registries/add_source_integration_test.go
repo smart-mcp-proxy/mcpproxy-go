@@ -46,3 +46,35 @@ func TestUserAddedV01Source_IsSearchableAndCustom(t *testing.T) {
 	require.NotEmpty(t, servers, "user-added v0.1 endpoint must be searchable")
 	assert.Equal(t, "acme/widget", servers[0].Name)
 }
+
+// TestUserAddedStaticJSONSource_IsRefusedAtAddTime is the GH #783 acceptance
+// test. MCPProxy implements exactly one registry protocol (official v0.1), so a
+// static JSON catalog cannot be browsed. What #783 was really about is HOW that
+// failed: the URL was silently rewritten to ".../apps.json/v0.1/servers" and
+// 404'd on every later search, with nothing telling the user why.
+//
+// Now the pasted URL is fetched verbatim at add time and the source is refused
+// with a reason — and, critically, NOTHING is appended to the URL we request.
+func TestUserAddedStaticJSONSource_IsRefusedAtAddTime(t *testing.T) {
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		if r.URL.Path != "/fleuristes/app-registry/refs/heads/main/apps.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"name":"Fetch","description":"web pages","config":{"runtime":"uvx","args":["mcp-server-fetch"]}}]`)
+	}))
+	defer srv.Close()
+
+	appsURL := srv.URL + "/fleuristes/app-registry/refs/heads/main/apps.json"
+
+	_, err := ProbeRegistrySource(context.Background(), appsURL)
+	require.Error(t, err, "a static catalog is not an official v0.1 registry")
+	assert.ErrorIs(t, err, ErrRegistrySourceUnusable)
+
+	assert.Equal(t, "/fleuristes/app-registry/refs/heads/main/apps.json", gotPath,
+		"the pasted URL must be fetched verbatim — no route may be appended to it")
+	assert.Empty(t, gotQuery, "no official-protocol query may be appended to it either")
+}

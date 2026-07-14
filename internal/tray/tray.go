@@ -26,7 +26,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
 	// "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
@@ -1755,47 +1754,6 @@ func (a *App) handleOAuthLogin(serverName string) error {
 	a.logger.Info("Found server for OAuth",
 		zap.String("server", serverName),
 		zap.Any("server_data", targetServer))
-
-	// Load the config file that mcpproxy is using
-	configPath := a.server.GetConfigPath()
-	if configPath == "" {
-		err := fmt.Errorf("config path not available")
-		a.logger.Error("Failed to get config path for OAuth login",
-			zap.String("server", serverName),
-			zap.Error(err))
-		return err
-	}
-
-	a.logger.Info("Loading config file for OAuth",
-		zap.String("server", serverName),
-		zap.String("config_path", configPath))
-
-	globalConfig, err := config.LoadFromFile(configPath)
-	if err != nil {
-		a.logger.Error("Failed to load server configuration for OAuth login",
-			zap.String("server", serverName),
-			zap.String("config_path", configPath),
-			zap.Error(err))
-		return fmt.Errorf("failed to load server configuration: %w", err)
-	}
-
-	// Debug: Check if server exists in config
-	var serverFound bool
-	for _, server := range globalConfig.Servers {
-		if server.Name == serverName {
-			serverFound = true
-			break
-		}
-	}
-
-	a.logger.Info("Server lookup in config",
-		zap.String("server", serverName),
-		zap.Bool("found_in_config", serverFound),
-		zap.String("config_path", configPath))
-
-	a.logger.Info("Config loaded for OAuth",
-		zap.String("server", serverName),
-		zap.Int("total_servers", len(globalConfig.Servers)))
 
 	// Trigger OAuth inside the running daemon to avoid DB lock conflicts
 	a.logger.Info("Triggering in-process OAuth from tray", zap.String("server", serverName))

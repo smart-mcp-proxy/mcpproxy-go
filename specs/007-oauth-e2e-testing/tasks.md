@@ -236,7 +236,7 @@ Based on plan.md:
 - [ ] T080 [US9] Enhance `auth login` to print authorization URL preview in `cmd/mcpproxy/auth_cmd.go`
 - [x] T081 [US9] Enhance `auth status` to display endpoints, scopes, expiry, PKCE in `cmd/mcpproxy/auth_cmd.go`
 - [ ] T082 [US9] Add secret masking to auth status output in `cmd/mcpproxy/auth_cmd.go`
-- [ ] T083 [US9] Add structured logging fields for OAuth operations in `internal/oauth/config.go`
+- [x] T083 [US9] Add structured logging fields for OAuth operations in `internal/oauth/config.go`
 - [ ] T084 [US9] Add structured logging for provider URL, scopes, grant_type in `internal/upstream/core/connection.go`
 - [x] T085 [US9] Implement OAuth health check in doctor command in `internal/management/diagnostics.go`
 - [ ] T086 [US9] Add discovery endpoint reachability check to doctor in `internal/management/diagnostics.go`

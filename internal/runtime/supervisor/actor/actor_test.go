@@ -12,10 +12,10 @@ import (
 
 // MockClient simulates a managed.Client for testing
 type MockClient struct {
-	connected      bool
-	connectErr     error
-	disconnectErr  error
-	connectCalled  int
+	connected        bool
+	connectErr       error
+	disconnectErr    error
+	connectCalled    int
 	disconnectCalled int
 }
 

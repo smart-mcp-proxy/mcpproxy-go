@@ -109,8 +109,11 @@
                   <div class="text-xs text-base-content/60">{{ formatRelativeTime(session.last_activity) }}</div>
                 </td>
                 <td>
+                  <!-- Link by WORK session (Spec 082) — that is what the Activity
+                       Log groups by. Falling back to the transport id keeps rows
+                       written before 082 reachable; the log accepts either. -->
                   <router-link
-                    :to="{ name: 'activity', query: { session: session.id } }"
+                    :to="{ name: 'activity', query: { session: session.work_session_id || session.id } }"
                     class="btn btn-xs btn-primary"
                     title="View activity for this session"
                   >

@@ -32,11 +32,46 @@ type SensitiveDataEventEmitter interface {
 	EmitSensitiveDataDetected(activityID string, detectionCount int, maxSeverity string, detectionTypes []string)
 }
 
+// SessionClientResolver maps an MCP session id to the client that opened it
+// (clientInfo.name / clientInfo.version from the initialize handshake).
+// Returns empty strings when the session is unknown.
+type SessionClientResolver func(sessionID string) (name, version string)
+
+// SessionWorkSessionResolver maps an MCP session id to the WORK session it
+// belongs to (Spec 082): one client, one project, across reconnects.
+//
+// It returns the id cached on the connection — deliberately not a fresh
+// derivation, so every record from one connection agrees on its work session.
+type SessionWorkSessionResolver func(sessionID string) string
+
 // ActivityService subscribes to activity events and persists them to storage.
 // It runs as a background goroutine and handles activity recording non-blocking.
 type ActivityService struct {
 	storage *storage.Manager
 	logger  *zap.Logger
+
+	// clientResolver stamps the MCP client onto each activity record at WRITE
+	// time. Read-time joining against the sessions API is not viable: the core
+	// retains only the 100 most recent sessions, while activity is retained for
+	// 90 days — and an IDE that reconnects every few minutes burns through 100
+	// sessions in about a day. Any name resolved by lookup therefore decays back
+	// to a bare session id. Denormalizing it here makes it permanent, and it
+	// costs nothing: the resolver reads the in-memory session store (O(1)) and
+	// the session is by definition still open when its activity is emitted.
+	//
+	// nil until wired via SetSessionClientResolver; the records simply carry no
+	// client name in that case.
+	clientResolver SessionClientResolver
+
+	// workSessionResolver returns the WORK session a record belongs to (Spec 082):
+	// one client, one project, across reconnects. Stamped at write time for the
+	// same reason the client name is — a value resolved later decays once the
+	// record it points at is evicted.
+	workSessionResolver SessionWorkSessionResolver
+
+	// workSessionReaper drops idle work sessions so the tracker cannot grow
+	// without bound. Wired alongside the resolver.
+	workSessionReaper func(time.Duration) int
 
 	// Channel for receiving events
 	eventCh chan Event
@@ -98,6 +133,57 @@ func NewActivityService(storage *storage.Manager, logger *zap.Logger) *ActivityS
 	}
 	s.usagePersistIntervalNs.Store(int64(DefaultUsagePersistInterval))
 	return s
+}
+
+// SetSessionClientResolver wires the session -> MCP client lookup. Safe to leave
+// unset (records then carry no client name).
+func (s *ActivityService) SetSessionClientResolver(r SessionClientResolver) {
+	s.clientResolver = r
+}
+
+// SetWorkSessionResolver wires the session -> work-session lookup (Spec 082).
+func (s *ActivityService) SetWorkSessionResolver(r SessionWorkSessionResolver) {
+	s.workSessionResolver = r
+}
+
+// SetWorkSessionReaper wires the idle-work-session sweep into the retention loop.
+func (s *ActivityService) SetWorkSessionReaper(f func(time.Duration) int) {
+	s.workSessionReaper = f
+}
+
+// resolveWorkSession returns the work session a record belongs to, or "" when it
+// cannot be attributed (an unattributed record beats one filed under a bucket
+// that means nothing).
+func (s *ActivityService) resolveWorkSession(sessionID string) string {
+	if sessionID == "" || s.workSessionResolver == nil {
+		return ""
+	}
+	return s.workSessionResolver(sessionID)
+}
+
+// withClientInfo stamps client_name / client_version onto an activity record's
+// metadata, so the Activity Log can name the client that made the call long
+// after the session record itself has been evicted.
+//
+// Returns the metadata map to assign; it allocates one only when there is
+// something to add, so records for sessionless events stay exactly as they were.
+func (s *ActivityService) withClientInfo(metadata map[string]interface{}, sessionID string) map[string]interface{} {
+	if sessionID == "" || s.clientResolver == nil {
+		return metadata
+	}
+	name, version := s.clientResolver(sessionID)
+	if name == "" {
+		return metadata // unknown session (e.g. already closed) — nothing to add
+	}
+
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+	}
+	metadata["client_name"] = name
+	if version != "" {
+		metadata["client_version"] = version
+	}
+	return metadata
 }
 
 // SetDetector sets the sensitive data detector for async scanning (Spec 026).
@@ -217,7 +303,24 @@ func (s *ActivityService) runRetentionLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.runRetentionCleanup()
+			s.reapWorkSessions()
 		}
+	}
+}
+
+// workSessionReapAfter is how long a work session may sit idle before the
+// tracker forgets it. Comfortably past the 30-minute idle window, so an entry is
+// only dropped once it can no longer be continued.
+const workSessionReapAfter = 4 * time.Hour
+
+// reapWorkSessions stops the tracker growing without bound on a long-lived
+// daemon: one map entry per distinct identity, forever, is a slow leak.
+func (s *ActivityService) reapWorkSessions() {
+	if s.workSessionReaper == nil {
+		return
+	}
+	if n := s.workSessionReaper(workSessionReapAfter); n > 0 {
+		s.logger.Debug("reaped idle work sessions", zap.Int("count", n))
 	}
 }
 
@@ -383,6 +486,8 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 			metadata["profile"] = profileSlug
 		}
 	}
+	// Name the MCP client on the record itself, so it survives session eviction.
+	metadata = s.withClientInfo(metadata, sessionID)
 
 	// Spec 069 A1: byte sizes measured pre-truncation by the emitter.
 	requestBytes := int(getInt64Payload(evt.Payload, "request_bytes"))
@@ -401,6 +506,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		DurationMs:        durationMs,
 		Timestamp:         evt.Timestamp,
 		SessionID:         sessionID,
+		WorkSessionID:     s.resolveWorkSession(sessionID),
 		RequestID:         requestID,
 		Metadata:          metadata,
 		RequestBytes:      requestBytes,
@@ -461,12 +567,13 @@ func (s *ActivityService) handlePolicyDecision(evt Event) {
 		ServerName: serverName,
 		ToolName:   toolName,
 		Status:     decision,
-		Metadata: map[string]interface{}{
+		Metadata: s.withClientInfo(map[string]interface{}{
 			"decision": decision,
 			"reason":   reason,
-		},
-		Timestamp: evt.Timestamp,
-		SessionID: sessionID,
+		}, sessionID),
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -635,21 +742,26 @@ func (s *ActivityService) handleInternalToolCall(evt Event) {
 	if contentTrust != "" {
 		metadata["content_trust"] = contentTrust
 	}
+	// Name the MCP client on the record itself, so it survives session eviction.
+	// retrieve_tools calls arrive here, and they are the bulk of session-bearing
+	// activity — without this they would be the rows left showing a bare id.
+	metadata = s.withClientInfo(metadata, sessionID)
 
 	record := &storage.ActivityRecord{
-		Type:         storage.ActivityTypeInternalToolCall,
-		Source:       storage.ActivitySourceMCP,
-		ToolName:     internalToolName,
-		ServerName:   targetServer,
-		Arguments:    arguments,
-		Response:     responseStr,
-		Status:       status,
-		ErrorMessage: errorMsg,
-		DurationMs:   durationMs,
-		Metadata:     metadata,
-		Timestamp:    evt.Timestamp,
-		SessionID:    sessionID,
-		RequestID:    requestID,
+		Type:          storage.ActivityTypeInternalToolCall,
+		Source:        storage.ActivitySourceMCP,
+		ToolName:      internalToolName,
+		ServerName:    targetServer,
+		Arguments:     arguments,
+		Response:      responseStr,
+		Status:        status,
+		ErrorMessage:  errorMsg,
+		DurationMs:    durationMs,
+		Metadata:      metadata,
+		Timestamp:     evt.Timestamp,
+		SessionID:     sessionID,
+		WorkSessionID: s.resolveWorkSession(sessionID),
+		RequestID:     requestID,
 	}
 
 	// Extract user identity from auth metadata injected into arguments (server edition)

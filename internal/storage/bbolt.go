@@ -97,12 +97,21 @@ func (b *BoltDB) initBuckets() error {
 			ScanReportsBucket,
 			IntegrityBaselinesBucket,
 			OnboardingBucket,
+			SessionsBucket,
 		}
 
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
 			}
+		}
+
+		// Move MCP session records out of the shared "sessions" bucket, which the
+		// server edition also used for USER LOGIN sessions. Each side swept the
+		// bucket believing it owned every key, deleting the other's data.
+		// Idempotent; leaves auth sessions untouched, so nobody is logged out.
+		if err := migrateLegacySessions(tx); err != nil {
+			return fmt.Errorf("failed to migrate legacy sessions bucket: %w", err)
 		}
 
 		// Backfill the scan-job index for databases created before MCP-2205.
