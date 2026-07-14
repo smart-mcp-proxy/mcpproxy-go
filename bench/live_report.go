@@ -54,13 +54,38 @@ type LatencyReport struct {
 }
 
 // LiveReport is the full live benchmark result: exact-token comparison,
-// retrieval accuracy, and search latency, all gathered from one running proxy.
+// retrieval accuracy, and search latency, all gathered from one running
+// proxy — plus, since Spec 083 (T016), the retrieve_tools RESPONSE cost
+// measured over the real MCP protocol (per-golden-query rows with span-based
+// component attribution, FR-001/002), the break-even analysis (FR-003/004),
+// the FR-021 proxy identity fields, and the session-cost estimate rows for
+// the measured live encoding.
 type LiveReport struct {
 	Proxy     string            `json:"proxy"`
 	Encoding  string            `json:"encoding"`
 	Tokens    *LiveTokenReport  `json:"tokens"`
 	Retrieval *RetrievalMetrics `json:"retrieval"`
 	Latency   *LatencyReport    `json:"latency"`
+
+	// ProxyInfo records the measured proxy's identity and discovery
+	// configuration (FR-021): version, tool count, tools_limit, routing_mode.
+	// Collected best-effort from /api/v1/info, /api/v1/config, /api/v1/status;
+	// fields the proxy does not expose stay zero-valued.
+	ProxyInfo *ProxyInfo `json:"proxy_info,omitempty"`
+	// ResponseCost is the per-golden-query retrieve_tools response-cost
+	// summary over the real MCP protocol (FR-001). nil when the measurement
+	// was skipped — see ResponseCostNote.
+	ResponseCost *ResponseCostSummary `json:"response_cost,omitempty"`
+	// BreakEven is the FR-003 analysis over the SAME token report as the
+	// headline (naive full menu vs proxy menu, both schema-counted). nil when
+	// responses were not measured or the menu counts are non-authoritative.
+	BreakEven *BreakEvenAnalysis `json:"break_even,omitempty"`
+	// SessionEstimates are the FR-019 estimator rows for the measured live
+	// encoding (baseline_json — the proxy's own full-JSON responses).
+	SessionEstimates []SessionCostEstimate `json:"session_estimates,omitempty"`
+	// ResponseCostNote explains a skipped or degraded response-cost /
+	// break-even measurement (never silent, SC-006 spirit). Empty on success.
+	ResponseCostNote string `json:"response_cost_note,omitempty"`
 }
 
 // recallCutoffs are the standard Recall@k cutoffs reported (matches Spec 065
@@ -116,13 +141,173 @@ func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet) (*LiveR
 		return nil, fmt.Errorf("score retrieval: %w", err)
 	}
 
-	return &LiveReport{
+	rep := &LiveReport{
 		Proxy:     client.BaseURL,
 		Encoding:  tk.encoding,
 		Tokens:    tokenRep,
 		Retrieval: metrics,
 		Latency:   computeLatency(latencies, loadAll),
-	}, nil
+	}
+
+	// 4. Response cost over the real MCP protocol (Spec 083 US1, FR-001/002/
+	// 023): one retrieve_tools call per golden query through a single MCP
+	// session. A proxy without a reachable /mcp endpoint degrades to an
+	// explicit skip note — the REST-based measurements above stay intact
+	// (additive wiring) — but per-call failures after a successful session
+	// are real faults and fail the run.
+	respCost, note, err := measureResponseCost(ctx, tk, client, golden)
+	if err != nil {
+		return nil, err
+	}
+	rep.ResponseCost = respCost
+	rep.ResponseCostNote = note
+
+	// 5. Break-even (FR-003) + session estimates (FR-019), both derived from
+	// the SAME token report as the headline (research D7b: one denominator).
+	// Non-authoritative menu counts (schemas missing on either side) would
+	// make the numerator compare different token shapes, so the analysis is
+	// withheld with a reason instead of computed dishonestly.
+	if respCost != nil {
+		proxyMenuTokens := 0
+		for _, m := range tokenRep.Modes {
+			if m.Mode == ModeRetrieveTools {
+				proxyMenuTokens = m.Tokens
+			}
+		}
+		if !tokenRep.AuthoritativeHeadline {
+			rep.ResponseCostNote = "break-even withheld: menu token counts are non-authoritative (schemas missing on one side — see tokens.notes)"
+		} else {
+			be, berr := ComputeBreakEven(tokenRep.BaselineTokens, proxyMenuTokens, respCost.Mean)
+			if berr != nil {
+				return nil, fmt.Errorf("break-even: %w", berr)
+			}
+			rep.BreakEven = be
+			// The measured live encoding is the proxy's own full-JSON
+			// response rendering — the baseline_json arm by definition.
+			rep.SessionEstimates = EstimateSessionCosts(proxyMenuTokens,
+				map[string]float64{"baseline_json": respCost.Mean})
+		}
+	}
+
+	// 6. Proxy identity (FR-021), best-effort: fields the proxy does not
+	// expose stay zero-valued rather than failing the run.
+	rep.ProxyInfo = fetchProxyInfo(ctx, client, len(upstream))
+
+	return rep, nil
+}
+
+// measureResponseCost opens one MCP session against the proxy and replays the
+// golden set through retrieve_tools with the proxy's configured default limit
+// (what a real agent pays per call), measuring the raw text content of each
+// response (FR-001) with client-side latency (FR-023). A failed session
+// initialization returns (nil, reason, nil) — the skip path; a failed call
+// inside an established session is an error.
+func measureResponseCost(ctx context.Context, tk *Tokenizer, client *LiveClient, golden *GoldenSet) (*ResponseCostSummary, string, error) {
+	caller, err := NewMCPCaller(ctx, client.BaseURL, client.APIKey)
+	if err != nil {
+		return nil, fmt.Sprintf("response-cost measurement skipped: %v", err), nil
+	}
+	defer caller.Close()
+
+	perQuery := make([]DiscoveryResponseMeasurement, 0, len(golden.Queries))
+	for _, q := range golden.Queries {
+		raw, latency, err := caller.RetrieveTools(ctx, q.Query, 0)
+		if err != nil {
+			return nil, "", fmt.Errorf("measure response cost: %w", err)
+		}
+		m, err := MeasureRetrieveToolsResponse(tk, q.ID, raw, ms(latency))
+		if err != nil {
+			return nil, "", fmt.Errorf("measure response cost: %w", err)
+		}
+		perQuery = append(perQuery, *m)
+	}
+	return SummarizeResponseCost(perQuery), "", nil
+}
+
+// fetchProxyInfo collects the FR-021 proxy identity fields best-effort:
+// version from GET /api/v1/info, routing_mode from GET /api/v1/status, and
+// tools_limit from GET /api/v1/config (no dedicated endpoint exposes it).
+// Endpoint failures leave the corresponding field zero-valued — recording
+// what IS known must not fail the run.
+func fetchProxyInfo(ctx context.Context, client *LiveClient, toolCount int) *ProxyInfo {
+	info := &ProxyInfo{ToolCount: toolCount}
+
+	var infoResp struct {
+		Version string `json:"version"`
+	}
+	if err := client.getJSON(ctx, "/api/v1/info", &infoResp); err == nil {
+		info.Version = infoResp.Version
+	}
+
+	var statusResp struct {
+		RoutingMode string `json:"routing_mode"`
+	}
+	if err := client.getJSON(ctx, "/api/v1/status", &statusResp); err == nil {
+		info.RoutingMode = statusResp.RoutingMode
+	}
+
+	var cfgResp struct {
+		Config struct {
+			ToolsLimit int `json:"tools_limit"`
+		} `json:"config"`
+	}
+	if err := client.getJSON(ctx, "/api/v1/config", &cfgResp); err == nil {
+		info.ToolsLimit = cfgResp.Config.ToolsLimit
+	}
+	return info
+}
+
+// ToReportV2 projects a live run into the versioned v2 report envelope
+// (research D12): the live proxy toolset becomes the single corpus row, arm
+// rows stay empty (arms are offline-computable, not live-measured), and every
+// headline number carries its provenance label (SC-005).
+func (r *LiveReport) ToReportV2(generatedAt string) *ReportV2 {
+	version := "live"
+	toolCount := 0
+	var proxy *ProxyInfo
+	if r.ProxyInfo != nil {
+		p := *r.ProxyInfo
+		proxy = &p
+		toolCount = p.ToolCount
+		if p.Version != "" {
+			version = p.Version
+		}
+	}
+
+	r2 := &ReportV2{
+		ReportVersion: ReportVersion2,
+		GeneratedAt:   generatedAt,
+		Tokenizer:     TokenizerInfo{Name: r.Encoding, Caveat: TokenizerCaveatText},
+		Proxy:         proxy,
+		Corpora: []CorpusDescriptor{{
+			ID:        "live-proxy",
+			Name:      "live proxy toolset (" + r.Proxy + ")",
+			Version:   version,
+			ToolCount: toolCount,
+			License:   "n/a (live measurement of a running proxy; not redistributed)",
+			Committed: false,
+		}},
+		Arms:             []ArmResult{},
+		ResponseCost:     r.ResponseCost,
+		BreakEven:        r.BreakEven,
+		SessionEstimates: r.SessionEstimates,
+		Provenance: map[string]string{
+			"menu_tokens":       ProvenanceMeasured,
+			"response_cost":     ProvenanceMeasured,
+			"break_even":        ProvenanceComputed,
+			"session_estimates": SessionEstimateProvenance,
+			"latency":           ProvenanceMeasured,
+		},
+	}
+	if r.Latency != nil {
+		r2.Latency = &LatencyV2{
+			P50Ms: r.Latency.P50ms,
+			P95Ms: r.Latency.P95ms,
+			P99Ms: r.Latency.P99ms,
+			MaxMs: r.Latency.MaxMs,
+		}
+	}
+	return r2
 }
 
 // buildTokenReport counts the baseline upstream tools WITH schemas against each

@@ -1,0 +1,11 @@
+class Cbae0cfe3 = {"properties":{"max_length":{"default":5000,"description":"Maximum number of characters to return.","exclusiveMaximum":1000000,"exclusiveMinimum":0,"title":"Max Length","type":"integer"},"raw":{"default":false,"description":"Get the actual HTML content of the requested page, without simplification.","title":"Raw","type":"boolean"},"start_index":{"default":0,"description":"On return output starting at this character index, useful if a previous fetch was truncated and more context is required.","minimum":0,"title":"Start Index","type":"integer"},"url":{"description":"URL to fetch","format":"uri","minLength":1,"title":"Url","type":"string"}},"required":["url"],"type":"object"}
+class C923b083c = {"properties":{"path":{"type":"string"}},"required":["path"],"type":"object"}
+class C9ca47776 = {"properties":{"excludePatterns":{"default":[],"items":{"type":"string"},"type":"array"},"path":{"type":"string"}},"required":["path"],"type":"object"}
+
+fetch|Fetches a URL from the internet and optionally extracts its contents as markdown.
+
+Although originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.|Cbae0cfe3
+
+create_directory|Create a new directory or ensure a directory exists. Can create multiple nested directories in one operation. If the directory already exists, this operation will succeed silently. Perfect for setting up directory structures for projects or ensuring required paths exist. Only works within allowed directories.|C923b083c
+
+directory_tree|Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name', 'type' (file/directory), and 'children' for directories. Files have no children array, while directories always have a children array (which may be empty). The output is formatted with 2-space indentation for readability. Only works within allowed directories.|C9ca47776

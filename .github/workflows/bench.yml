@@ -46,10 +46,14 @@ jobs:
           go-version: "1.25"
           cache: true
 
-      - name: Set up Node.js (npx-launched MCP reference servers)
+      # Node ≥20 is required both for the npx-launched MCP reference servers
+      # and for the Spec 083 TSCG encoding arm (bench/tscg/shim.mjs).
+      - name: Set up Node.js (reference servers + TSCG arm)
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: bench/tscg/package-lock.json
 
       - name: Set up uv (uvx-launched MCP reference servers)
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
@@ -57,14 +61,36 @@ jobs:
       - name: Build mcpproxy (personal edition)
         run: go build -o mcpproxy ./cmd/mcpproxy
 
-      # Offline benchmark: deterministic token-reduction scores, no live servers.
-      # Writes bench/results/report.json and bench/results/dashboard.html.
-      - name: Run offline benchmark
-        run: go run ./bench/cmd/bench -out bench/results
+      # Pinned TSCG shim deps for the Spec 083 tscg encoding arm. `make
+      # bench-discovery` runs npm ci itself; doing it as a dedicated step keeps
+      # dependency-install failures separate from benchmark failures in CI logs.
+      - name: Install pinned TSCG shim dependencies
+        run: npm ci --prefix bench/tscg
+
+      # Offline discovery profiler (Spec 083, SC-008): deterministic encoding
+      # arms on the schema-bearing frozen corpus — no live servers, no network.
+      # Writes bench/results/report.json (v2) and bench/results/dashboard.html.
+      - name: Run offline discovery benchmark (encoding arms)
+        run: make bench-discovery
+
+      # The live run below writes report.json/dashboard.html into the same
+      # directory; preserve the offline arm report so both land in the artifact
+      # and on the published dashboard site.
+      - name: Preserve offline arm report
+        run: |
+          mkdir -p bench/results/offline
+          cp bench/results/report.json bench/results/offline/report.json
+          cp bench/results/dashboard.html bench/results/offline/dashboard.html
 
       # Live benchmark: boot mcpproxy with the 7 no-auth reference servers, wait
-      # for the full tool catalog, then score accuracy + latency + full-schema tokens.
-      # Writes bench/results/live_report.json.
+      # for the full tool catalog, then score accuracy + latency + full-schema
+      # tokens plus (Spec 083 US1) the retrieve_tools RESPONSE cost over the
+      # real MCP protocol with break-even analysis — RunLive measures response
+      # cost automatically. Before the bench run, a version-pinned LAP lint
+      # (Spec 083 US4, FR-015) produces an independent verdict against the same
+      # booted proxy; LAP failure is non-fatal (skip with reason) and the
+      # artifact merges into the v2 report via -lap-json.
+      # Writes bench/results/live_report.json + report.json (v2) + dashboard.html.
       - name: Boot mcpproxy with reference servers and run live benchmark
         env:
           DS: ${{ github.workspace }}/specs/065-evaluation-foundation/datasets
@@ -109,11 +135,24 @@ jobs:
             exit 1
           fi
 
-          go run ./bench/cmd/bench \
+          # Independent LAP verdict (pinned lap-score==0.8.0). Non-fatal by
+          # design (FR-015): a broken/missing lap.json becomes a skip-with-
+          # reason row in the v2 report, never a job failure.
+          uvx --from lap-score==0.8.0 lap lint \
+            --mcp-url "$BASE/mcp?apikey=$KEY" \
+            --json > bench/results/lap.json \
+            || echo "LAP skipped (lap lint exited non-zero; verdict row will carry the skip reason)"
+
+          if ! go run ./bench/cmd/bench \
             -live \
             -proxy "$BASE" \
             -api-key "$KEY" \
-            -out bench/results
+            -lap-json bench/results/lap.json \
+            -out bench/results; then
+            echo "::error::live bench run failed"
+            tail -40 "$RUNNER_TEMP/mcpproxy-bench.log" || true
+            exit 1
+          fi
 
           kill "$server_pid" 2>/dev/null || true
 
@@ -121,13 +160,19 @@ jobs:
       - name: Prepare dashboard index
         run: cp bench/results/dashboard.html bench/results/index.html
 
-      # Always upload results as a CI artifact — available even if Pages deploy fails.
+      # Always upload results as a CI artifact — available even if Pages deploy
+      # fails. Covers report.json (v2), dashboard.html, live_report.json,
+      # lap.json, and the preserved offline arm report. The ToolRet runtime
+      # cache is excluded defensively: its bytes must never leave the runner
+      # as a publishable artifact (FR-013, license unstated upstream).
       - name: Upload dashboard artifact
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: bench-dashboard-${{ github.ref_name }}
-          path: bench/results/
+          path: |
+            bench/results/
+            !bench/results/cache/**
           retention-days: 90
           if-no-files-found: warn
 
@@ -156,3 +201,59 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy bench/results --project-name=mcpproxy-bench --commit-dirty=true
+
+  # Spec 083 US3 (SC-004/SC-007): retrieval-quality scoring on a seeded subset
+  # of the public ToolRet benchmark (~44k tools). Manual-only — the fetch pulls
+  # ~hundreds of MB from Hugging Face and the 43k-tool index build is the
+  # heaviest bench path, so it never runs on release tags. The ToolRet cache is
+  # runtime-only (license unstated upstream, FR-013): it is never committed and
+  # never uploaded — only the derived report leaves the runner.
+  toolret-subset:
+    name: ToolRet subset scoring (manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    # Non-blocking, same as the dashboard job (FR-022).
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Set up uv (ToolRet parquet fetch)
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+
+      # Pinned HF revisions live inside the script; bumping a pin is a
+      # reviewed event. Cache lands in bench/results/cache/toolret/<revision>/.
+      - name: Fetch ToolRet at pinned revisions
+        run: ./scripts/fetch-toolret.sh
+
+      # Seeded deterministic subset (FR-014): same revision + seed + size ⇒
+      # same subset. Arms limited to the node-free pair — retrieval quality is
+      # arm-aware only for index-altering arms, and the subset budget is 30 min.
+      - name: Score ToolRet subset
+        run: |
+          go run ./bench/cmd/bench \
+            -toolret bench/results/cache/toolret \
+            -subset 250 \
+            -seed 42 \
+            -arms baseline_json,compact_sig \
+            -out bench/results
+
+      # Report only — never the cache (FR-013).
+      - name: Upload ToolRet subset report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: bench-toolret-subset-${{ github.run_id }}
+          path: |
+            bench/results/report.json
+            bench/results/dashboard.html
+          retention-days: 90
+          if-no-files-found: warn

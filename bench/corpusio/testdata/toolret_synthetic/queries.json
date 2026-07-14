@@ -1,0 +1,60 @@
+{
+  "dataset": "synthetic/toolret-queries-shape",
+  "revision": "synthetic-queries-rev-1",
+  "dropped_empty_queries": 1,
+  "note": "SYNTHETIC fixture for bench/corpusio tests. Matches the JSON shape scripts/fetch-toolret.sh writes (mangopy/ToolRet-Queries: id/query/instruction/labels/category, labels flattened to {id, relevance}). Contains NO real ToolRet data. Deliberately UNSORTED. synth_query_04 has only relevance-0 labels (unscoreable, loader drops it); dropped_empty_queries echoes the fetch script's own drop count.",
+  "queries": [
+    {
+      "id": "synth_query_02",
+      "config": "code",
+      "category": "code",
+      "query": "What is today's fake date?",
+      "instruction": "Given a date inquiry task, retrieve synthetic tools that return the current fake date.",
+      "labels": [
+        {"id": "synth_tool_02", "relevance": 1}
+      ]
+    },
+    {
+      "id": "synth_query_01",
+      "config": "code",
+      "category": "web",
+      "query": "Tell me about made-up historical events on April 21st.",
+      "instruction": "Given a historical events query, retrieve synthetic tools that list events for a date.",
+      "labels": [
+        {"id": "synth_tool_02", "relevance": 2},
+        {"id": "synth_tool_04", "relevance": 0},
+        {"id": "synth_tool_01", "relevance": 1}
+      ]
+    },
+    {
+      "id": "synth_query_05",
+      "config": "web",
+      "category": "web",
+      "query": "Convert 5 imaginary furlongs to fake meters.",
+      "instruction": "Given a unit conversion task, retrieve synthetic tools that convert units.",
+      "labels": [
+        {"id": "synth_tool_05", "relevance": 1}
+      ]
+    },
+    {
+      "id": "synth_query_04",
+      "config": "web",
+      "category": "web",
+      "query": "A query whose labels are all irrelevant.",
+      "instruction": "This query must be dropped by the loader: no label has relevance >= 1.",
+      "labels": [
+        {"id": "synth_tool_06", "relevance": 0}
+      ]
+    },
+    {
+      "id": "synth_query_03",
+      "config": "web",
+      "category": "web",
+      "query": "What's the fake weather in Faketown?",
+      "instruction": "Given a weather query, retrieve synthetic tools that report weather.",
+      "labels": [
+        {"id": "synth_tool_03", "relevance": 1}
+      ]
+    }
+  ]
+}

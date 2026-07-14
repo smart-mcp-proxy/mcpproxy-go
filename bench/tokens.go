@@ -24,6 +24,7 @@
 package bench
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -78,6 +79,32 @@ func LoadCorpus(path string) (*Corpus, error) {
 		return nil, fmt.Errorf("corpus %q contains no tools", path)
 	}
 	return &c, nil
+}
+
+// LoadCorpusV2 reads the Spec 083 schema-bearing frozen corpus
+// (specs/083-discovery-profiler/datasets/corpus_v2.tools.json). On top of
+// LoadCorpus it enforces the corpus_v2 contract: every tool MUST carry a
+// non-empty JSON input schema (arm comparison over a schema-less corpus is
+// meaningless — research D4), and each schema is compacted at load so the
+// in-memory bytes are canonical-compact (the on-disk file is pretty-printed
+// for git diffability; its keys are already sorted by the generator's jq -S).
+func LoadCorpusV2(path string) (*Corpus, error) {
+	c, err := LoadCorpus(path)
+	if err != nil {
+		return nil, err
+	}
+	for i := range c.Tools {
+		tl := &c.Tools[i]
+		if len(tl.Schema) == 0 {
+			return nil, fmt.Errorf("corpus %q: tool %s has no input schema — corpus_v2 must be schema-bearing", path, tl.ToolID)
+		}
+		var buf bytes.Buffer
+		if err := json.Compact(&buf, tl.Schema); err != nil {
+			return nil, fmt.Errorf("corpus %q: tool %s schema is invalid JSON: %w", path, tl.ToolID, err)
+		}
+		tl.Schema = json.RawMessage(buf.Bytes())
+	}
+	return c, nil
 }
 
 // Tokenizer wraps a tiktoken encoding for reproducible token estimation.
