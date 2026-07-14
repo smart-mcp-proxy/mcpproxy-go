@@ -2146,14 +2146,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
 	response = forwardedText(forwarded, response)
 
-	// Track truncation in token metrics
-	if wasTruncated && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
+	// Track truncation and TOON re-encoding in token metrics: both change the
+	// agent-facing payload, so OutputTokens must reflect the final response
+	// (the count above measured the pre-encoding result — Spec 084 FR-010).
+	if (wasTruncated || toonEncodedAny(toonDecisions)) && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
 		tokenizer := p.mainServer.runtime.Tokenizer()
 		if tokenizer != nil {
-			truncatedTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
+			finalTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
 			if err == nil {
-				tokenMetrics.WasTruncated = true
-				tokenMetrics.OutputTokens = truncatedTokens
+				tokenMetrics.WasTruncated = wasTruncated
+				tokenMetrics.OutputTokens = finalTokens
 				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
 				toolCallRecord.Metrics = tokenMetrics
 			}

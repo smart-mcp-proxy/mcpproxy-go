@@ -203,3 +203,17 @@ func toonOutputMetadata(decisions []toonenc.Decision) map[string]interface{} {
 		"blocks": blocks,
 	}
 }
+
+// toonEncodedAny reports whether any block in decisions was actually
+// re-encoded. Token metrics recount from the final response when this is
+// true: the pre-encoding output count no longer matches what the agent
+// receives (Codex review R2 finding — otherwise session/token stats would
+// overreport exactly where TOON saves).
+func toonEncodedAny(decisions []toonenc.Decision) bool {
+	for _, d := range decisions {
+		if d.Outcome == toonenc.OutcomeEncoded {
+			return true
+		}
+	}
+	return false
+}

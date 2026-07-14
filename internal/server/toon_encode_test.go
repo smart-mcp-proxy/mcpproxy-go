@@ -478,3 +478,24 @@ func TestCallToolVariantDescriptionsEchoToonMarker(t *testing.T) {
 		})
 	}
 }
+
+// TestToonEncodedAny guards the token-metrics recount trigger (Codex R2):
+// OutputTokens must be recounted from the final response iff at least one
+// block was actually re-encoded.
+func TestToonEncodedAny(t *testing.T) {
+	if toonEncodedAny(nil) {
+		t.Fatal("nil decisions must not report encoded")
+	}
+	if toonEncodedAny([]toonenc.Decision{
+		{Outcome: toonenc.OutcomePassthroughNotTabular},
+		{Outcome: toonenc.OutcomePassthroughBelowThreshold},
+	}) {
+		t.Fatal("pure passthrough decisions must not report encoded")
+	}
+	if !toonEncodedAny([]toonenc.Decision{
+		{Outcome: toonenc.OutcomePassthroughNotTabular},
+		{Outcome: toonenc.OutcomeEncoded},
+	}) {
+		t.Fatal("any encoded block must report encoded")
+	}
+}
