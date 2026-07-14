@@ -1677,3 +1677,84 @@ func TestMigrateDeepScanConfigIgnoresAutoScanQuarantined(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "auto_scan_quarantined", "removed key must not serialize")
 }
+
+// Tests for tool_response_mode (Spec 085 T013 — FR-001/FR-015)
+
+func TestToolResponseModeValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		wantErr bool
+	}{
+		{name: "empty means full (default)", mode: "", wantErr: false},
+		{name: "full is valid", mode: ToolResponseModeFull, wantErr: false},
+		{name: "compact is valid", mode: ToolResponseModeCompact, wantErr: false},
+		{name: "bogus value is rejected", mode: "bogus", wantErr: true},
+		{name: "case-sensitive: Compact is rejected", mode: "Compact", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{ToolResponseMode: tt.mode}
+			errs := cfg.ValidateDetailed()
+
+			var found *ValidationError
+			for i := range errs {
+				if errs[i].Field == "tool_response_mode" {
+					found = &errs[i]
+					break
+				}
+			}
+			if tt.wantErr {
+				require.NotNil(t, found, "ValidateDetailed must reject %q with Field:\"tool_response_mode\"", tt.mode)
+				assert.Contains(t, found.Message, "full")
+				assert.Contains(t, found.Message, "compact")
+			} else {
+				assert.Nil(t, found, "ValidateDetailed must accept %q", tt.mode)
+			}
+		})
+	}
+}
+
+// The default (unset) survives Validate() untouched — Phase 1 ships full
+// behavior with no field written (FR-016).
+func TestToolResponseModeDefaultUnset(t *testing.T) {
+	cfg := &Config{}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "", cfg.ToolResponseMode, "unset stays unset; resolution to full happens at read time")
+}
+
+// Spec 085 T017: MCPPROXY_TOOL_RESPONSE_MODE explicit env alias overrides the
+// file value on the standard load path, and an invalid env value fails
+// validation with a clear message.
+func TestToolResponseModeEnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "mcp_config.json")
+	raw, err := json.Marshal(map[string]any{
+		"listen":             "127.0.0.1:0",
+		"data_dir":           tmp,
+		"tool_response_mode": ToolResponseModeFull,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, raw, 0o600))
+
+	t.Run("env wins over file", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TOOL_RESPONSE_MODE", ToolResponseModeCompact)
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, ToolResponseModeCompact, cfg.ToolResponseMode)
+	})
+
+	t.Run("no env keeps file value", func(t *testing.T) {
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, ToolResponseModeFull, cfg.ToolResponseMode)
+	})
+
+	t.Run("invalid env value fails validation", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TOOL_RESPONSE_MODE", "bogus")
+		_, err := LoadFromFile(cfgPath)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tool_response_mode")
+	})
+}

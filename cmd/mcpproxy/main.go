@@ -62,6 +62,7 @@ var (
 	logLevel          string
 	debugSearch       bool
 	toolResponseLimit int
+	toolResponseMode  string
 	logToFile         bool
 	logDir            string
 
@@ -129,6 +130,7 @@ func main() {
 	serverCmd.Flags().BoolVar(&enableSocket, "enable-socket", true, "Enable Unix socket/named pipe for local IPC (default: true)")
 	serverCmd.Flags().BoolVar(&debugSearch, "debug-search", false, "Enable debug search tool for search relevancy debugging")
 	serverCmd.Flags().IntVar(&toolResponseLimit, "tool-response-limit", 0, "Tool response limit in characters (0 = disabled, default: 20000 from config)")
+	serverCmd.Flags().StringVar(&toolResponseMode, "tool-response-mode", "", "retrieve_tools serialization mode: full (default) or compact (Spec 085)")
 	serverCmd.Flags().BoolVar(&requireMCPAuth, "require-mcp-auth", false, "Require authentication on /mcp endpoint (agent tokens or API key)")
 	serverCmd.Flags().BoolVar(&readOnlyMode, "read-only", false, "Enable read-only mode")
 	serverCmd.Flags().BoolVar(&disableManagement, "disable-management", false, "Disable management features")
@@ -726,6 +728,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	if toolResponseLimit != 0 {
 		cfg.ToolResponseLimit = toolResponseLimit
 	}
+	applyToolResponseModeFlag(cfg, cmd.Flags().Changed("tool-response-mode"), toolResponseMode)
 
 	// Validate the configuration
 	if err := cfg.Validate(); err != nil {
@@ -733,6 +736,17 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// applyToolResponseModeFlag applies the --tool-response-mode serve flag onto
+// the loaded config (Spec 085 T017). Only an explicitly set flag overrides the
+// file/env value (so an unset flag never clobbers MCPPROXY_TOOL_RESPONSE_MODE
+// or the config file); cfg.Validate(), which runs right after, rejects
+// invalid values with a tool_response_mode error.
+func applyToolResponseModeFlag(cfg *config.Config, changed bool, mode string) {
+	if changed {
+		cfg.ToolResponseMode = mode
+	}
 }
 
 // classifyError categorizes errors to return appropriate exit codes

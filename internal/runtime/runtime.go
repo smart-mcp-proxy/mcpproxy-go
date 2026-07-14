@@ -34,6 +34,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolsig"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -76,6 +77,7 @@ type Runtime struct {
 	upstreamManager  *upstream.Manager
 	cacheManager     *cache.Manager
 	truncator        *truncate.Truncator
+	sigCache         *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
 	secretResolver   *secret.Resolver
 	tokenizer        tokens.Tokenizer
 	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
@@ -291,6 +293,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		upstreamManager:  upstreamManager,
 		cacheManager:     cacheManager,
 		truncator:        truncator,
+		sigCache:         toolsig.NewCache(),
 		secretResolver:   secretResolver,
 		tokenizer:        tokenizer,
 		refreshManager:   refreshManager,
@@ -581,6 +584,14 @@ func (r *Runtime) CacheManager() *cache.Manager {
 // Truncator exposes the truncator utility.
 func (r *Runtime) Truncator() *truncate.Truncator {
 	return r.truncator
+}
+
+// SignatureCache exposes the process-wide compact-signature cache (Spec 085
+// FR-008). Exactly one instance exists: the indexing path warms it and the
+// MCP request path (via NewMCPProxyServer) reads it. Never construct a second
+// cache — warming a cache the request path does not hold is a silent no-op.
+func (r *Runtime) SignatureCache() *toolsig.Cache {
+	return r.sigCache
 }
 
 // ActivityService exposes the activity service for testing.

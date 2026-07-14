@@ -538,6 +538,14 @@ Get the current routing mode and available MCP endpoints.
 
 See [Routing Modes](../features/routing-modes.md) for details on each mode.
 
+#### MCP tool surface: compact responses and describe_tool (Spec 085)
+
+The MCP endpoints (not REST) additionally expose progressive-disclosure discovery in the `retrieve_tools` routing mode:
+
+- **`tool_response_mode`** config (`full` default | `compact`, hot-reloadable via `POST /api/v1/config/apply`) controls `retrieve_tools` serialization only. In `compact` mode each entry is `{id, score, sig, desc, lossy}` — a one-line parameter signature (`*` = required, `~` = lossy) plus a first-sentence description — instead of full `inputSchema`, and the response carries one top-level `hint` line. Ranking is identical between modes.
+- **`detail`** — optional per-call `retrieve_tools` parameter (`compact` | `full`) overriding the configured mode for that call.
+- **`describe_tool`** — built-in second-stage tool (retrieve_tools mode only): accepts 1–5 `server:tool` ids and returns full definitions (`name`, `description`, `inputSchema`, `server`, `annotations`, `call_with`) with per-id errors for unknown/invisible ids. It applies the same visibility pipeline as search (profile scope, agent-token scope, quarantine, tool approval, disabled) and never returns a definition `retrieve_tools` could not.
+
 ### Tools
 
 #### GET /api/v1/tools

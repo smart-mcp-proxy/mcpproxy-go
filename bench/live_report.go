@@ -67,7 +67,9 @@ type LatencyReport struct {
 // measured over the real MCP protocol (per-golden-query rows with span-based
 // component attribution, FR-001/002), the break-even analysis (FR-003/004),
 // the FR-021 proxy identity fields, and the session-cost estimate rows for
-// the measured live encoding.
+// the measured live encoding. FlipGates (Spec 085 FR-017/FR-018) is populated
+// only when the live run was invoked with the compact arm enabled
+// (-flip-gates).
 type LiveReport struct {
 	Proxy     string            `json:"proxy"`
 	Encoding  string            `json:"encoding"`
@@ -99,6 +101,9 @@ type LiveReport struct {
 	// ResponseCostNote explains a skipped or degraded response-cost /
 	// break-even measurement (never silent, SC-006 spirit). Empty on success.
 	ResponseCostNote string `json:"response_cost_note,omitempty"`
+	// FlipGates (Spec 085 FR-017/FR-018) is populated only when the live run
+	// was invoked with the compact arm enabled (-flip-gates).
+	FlipGates *FlipGateReport `json:"flip_gates,omitempty"`
 }
 
 // recallCutoffs are the standard Recall@k cutoffs reported (matches Spec 065

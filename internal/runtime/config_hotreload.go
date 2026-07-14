@@ -112,6 +112,15 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "toon_min_savings_pct")
 	}
 
+	// Tool response mode (Spec 085 FR-015 — hot-reloadable, serialization
+	// only). Without this clause an API apply that changes only this field
+	// computes empty ChangedFields and is swallowed as "no changes detected".
+	// The retrieve path reads the live snapshot (p.currentConfig()), so
+	// reporting the change is all the propagation needed.
+	if oldCfg.ToolResponseMode != newCfg.ToolResponseMode {
+		result.ChangedFields = append(result.ChangedFields, "tool_response_mode")
+	}
+
 	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
 	// loop (managed client) and indexing loop (runtime) re-resolve their interval
 	// each cycle, and ApplyConfig propagates the new global config to the upstream

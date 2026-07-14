@@ -70,6 +70,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 		nil, // mainServer not needed for this test
 		false,
 		cfg,
+		nil, // signature cache: standalone test construction
 	)
 
 	// Test adding a problematic upstream server (the one that was hanging)
@@ -165,6 +166,7 @@ func TestUpstreamServersListOperation(t *testing.T) {
 		nil, // mainServer not needed for this test
 		false,
 		cfg,
+		nil, // signature cache: standalone test construction
 	)
 
 	// Test listing upstream servers

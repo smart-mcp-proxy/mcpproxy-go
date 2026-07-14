@@ -305,6 +305,26 @@ What it adds over the offline token run:
   above. The live run emits both the v1 `live_report.json` and the v2
   `report.json`/`dashboard.html`.
 
+### Compact arm / flip gates (Spec 085, `-flip-gates`)
+
+`-live -flip-gates` additionally replays the golden set through the proxy's
+**MCP** `retrieve_tools` tool twice per query — once with `detail=full`, once
+with `detail=compact` (same pipeline, FR-017) — and emits the Spec 085
+flip-gate metrics under `flip_gates` in `live_report.json` (FR-018):
+
+- per-query **ranked-ID identity** across modes (gate: 100%, SC-002 — any
+  mismatch is listed and fails the gate),
+- full vs compact **response-token distributions** (p50/p95/max) and the
+  median reduction (SC-001 gates on ≥50% on a real corpus),
+- the **lossy-signature rate** via the shared `internal/toolsig` grammar
+  (gate: <20%, SC-005), with the heaviest signatures for triage,
+- `describe_tool` usage per completed task (informational; populated by the
+  E2E suite, not a live run).
+
+```bash
+go run ./bench/cmd/bench -live -flip-gates -proxy http://127.0.0.1:8092 -api-key eval-corpus-snapshot
+```
+
 ## What is scoped but not yet built (follow-ups)
 
 These require decisions and/or other roles, so they are tracked as child issues

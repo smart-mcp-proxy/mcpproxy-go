@@ -18,12 +18,17 @@ Unset `tool_response_mode` ⇒ `full`. Responses are byte-identical to pre-featu
 
 ```bash
 # Kill any instance holding the DB, then run on an isolated dev instance/port.
-./mcpproxy serve --listen 127.0.0.1:18085 --data-dir /tmp/mcpproxy-085 --log-level=debug
+# NOTE: pass --config explicitly — --data-dir alone still loads the config from
+# ~/.mcpproxy and would connect to your real upstream servers.
+./mcpproxy serve --config /tmp/mcpproxy-085/mcp_config.json --data-dir /tmp/mcpproxy-085 --log-level=debug
 ```
 
-Search and observe today's shape (full `inputSchema` per entry):
-```bash
-mcpproxy tools retrieve --query "create a cdn resource" -o json   # or via /mcp retrieve_tools
+Search and observe today's shape (full `inputSchema` per entry) by calling
+`retrieve_tools` over `/mcp` with any MCP client (the management CLI has no
+retrieve command; the bench MCP caller below drives it programmatically):
+```jsonc
+// retrieve_tools arguments
+{ "query": "create a cdn resource" }
 ```
 The tools/list surface differs from pre-feature by **exactly**: `describe_tool` added, the
 `detail` param added to `retrieve_tools`, and updated `call_tool_*`/`retrieve_tools`
@@ -31,19 +36,21 @@ descriptions (FR-014). Everything else is unchanged.
 
 ## 3. Flip to compact — hot-reload, no restart (FR-015 / SC-007)
 
-Edit `~/.mcpproxy/mcp_config.json` (or the dev `--data-dir` config):
+Edit `~/.mcpproxy/mcp_config.json` (or the dev `--config` file):
 ```json
 { "tool_response_mode": "compact", "mcpServers": [ … ] }
 ```
-Save. The existing config watcher reloads; the **next** `retrieve_tools` call returns compact
-entries:
+There is **no fsnotify auto-watcher** — trigger the reload through either hot-reload path
+(both are E2E-tested, `TestE2E_ToolResponseModeToggle`): `POST /api/v1/config/apply` with the
+updated config, or a programmatic `ReloadConfiguration()` (tray/CLI-driven disk reload). The
+**next** `retrieve_tools` call returns compact entries:
 ```json
 { "query": "create a cdn resource",
   "tools": [
     {"id":"digitalocean:cdn_create","score":0.94,"lossy":false,
      "sig":"(origin*:str, certificate_id:str, custom_domain:str, ttl:int=3600)",
      "desc":"Create a CDN for a Spaces bucket"} ],
-  "hint":"Call via call_tool_write. If a sig contains '~', call describe_tool({tool_ids:[id]}) first." }
+  "hint":"sig legend: name*:type = required param, ~ = collapsed/lossy (details omitted), (~) = schema unavailable. Before calling a tool whose entry is lossy:true, call describe_tool with its id to get the full input schema." }
 ```
 Env/flag equivalents (server edition):
 ```bash
@@ -93,17 +100,22 @@ go test -race ./internal/server/... -run 'RetrieveTools|DescribeTool|SelfHeal|En
 Key assertions: full-mode byte-identity (SC-003); ranked-ID identity full vs compact (SC-002);
 required params present in 100% of signatures (SC-004); mode toggle within one reload (SC-007).
 
-## 8. Measure the gates (US5, spec-083 profiler)
+## 8. Measure the gates (US5)
 
-After `internal/toolsig` lands and the offline bench arm imports it:
+The live compact arm is in-tree (bench/flipgate.go, `-flip-gates`); it replays the 47-query
+golden set through MCP `retrieve_tools` in BOTH detail modes against a running proxy:
 ```bash
-make bench-discovery                      # offline corpus arm (compact_sig via internal/toolsig)
-# live arm against a running compact-mode proxy — see bench/README.md live mode
+go run ./bench/cmd/bench -live -flip-gates -proxy http://127.0.0.1:18085 -api-key <key>
+# report lands in bench/results/live_report.json under "flip_gates"
 ```
+The offline `bench/arms` migration (`make bench-discovery` with compact_sig via
+`internal/toolsig`) is gated on the 083 branch (PR #851) merging + the 085 rebase — T040/T043.
+
 Read from the report: per-query ranked-ID identity (gate 100% / SC-002), discovery-token
-p50/p95/max (gate median ≤1,000, max ≤1,500), lossy-signature rate on the 45-tool corpus (gate
-<20% / SC-005), describe_tool calls per completed task (<0.3, informational). These authorize
-the separate Phase-2 default flip (FR-016) — **not** part of this release.
+p50/p95/max (gate median ≤1,000, max ≤1,500), lossy-signature rate (gate <20% / SC-005; the
+frozen corpus_v2 run follows the 083 rebase — until then the gate runs over the live corpus),
+describe_tool calls per completed task (<0.3, informational, collected by the E2E suite). These
+authorize the separate Phase-2 default flip (FR-016) — **not** part of this release.
 
 ## Reference fixtures (spec Assumptions)
 - Golden set: `specs/065-evaluation-foundation/datasets/retrieval_golden_v1.json` (47 queries)

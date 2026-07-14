@@ -590,4 +590,11 @@ func applyTLSEnvOverrides(cfg *Config) {
 	if value := os.Getenv("MCPPROXY_DATA"); value != "" {
 		cfg.DataDir = value
 	}
+
+	// Override retrieve_tools serialization mode from environment (Spec 085).
+	// Explicit MCPPROXY_* alias per the established loader convention; the
+	// value is validated by cfg.Validate() right after these overrides apply.
+	if value := os.Getenv("MCPPROXY_TOOL_RESPONSE_MODE"); value != "" {
+		cfg.ToolResponseMode = value
+	}
 }

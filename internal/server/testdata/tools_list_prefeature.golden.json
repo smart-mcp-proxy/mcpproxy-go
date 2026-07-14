@@ -1,0 +1,1131 @@
+{
+  "call_tool_mode": {
+    "call_tool_destructive": {
+      "annotations": {
+        "title": "Call Tool (Destructive)",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
+            "properties": {},
+            "type": "object"
+          },
+          "args_json": {
+            "description": "Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility.",
+            "type": "string"
+          },
+          "intent_data_sensitivity": {
+            "description": "Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data.",
+            "type": "string"
+          },
+          "intent_reason": {
+            "description": "Why is this deletion needed? Provide justification like 'User confirmed cleanup' or 'Removing obsolete data'.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tool name in format 'server:tool' (e.g., 'github:delete_repo'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "call_tool_destructive"
+    },
+    "call_tool_read": {
+      "annotations": {
+        "title": "Call Tool (Read)",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
+            "properties": {},
+            "type": "object"
+          },
+          "args_json": {
+            "description": "Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility.",
+            "type": "string"
+          },
+          "intent_data_sensitivity": {
+            "description": "Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns.",
+            "type": "string"
+          },
+          "intent_reason": {
+            "description": "Why is this tool being called? Provide context like 'User asked to check status' or 'Gathering data for report'.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tool name in format 'server:tool' (e.g., 'github:get_user'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "call_tool_read"
+    },
+    "call_tool_write": {
+      "annotations": {
+        "title": "Call Tool (Write)",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
+            "properties": {},
+            "type": "object"
+          },
+          "args_json": {
+            "description": "Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility.",
+            "type": "string"
+          },
+          "intent_data_sensitivity": {
+            "description": "Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes.",
+            "type": "string"
+          },
+          "intent_reason": {
+            "description": "Why is this modification needed? Provide context like 'User requested update' or 'Fixing reported issue'.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tool name in format 'server:tool' (e.g., 'github:create_issue'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "call_tool_write"
+    },
+    "code_execution": {
+      "annotations": {
+        "title": "Code Execution (Disabled)",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config.",
+      "inputSchema": {
+        "properties": {
+          "code": {
+            "description": "JavaScript source code to execute.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "name": "code_execution"
+    },
+    "list_registries": {
+      "annotations": {
+        "title": "List Registries",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "list_registries"
+    },
+    "quarantine_security": {
+      "annotations": {
+        "title": "Quarantine Security",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools)",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled.",
+            "enum": [
+              "list_quarantined",
+              "inspect_quarantined",
+              "quarantine_server",
+              "inspect_tools",
+              "approve_tool",
+              "approve_all_tools",
+              "block_tool",
+              "block_all_tools",
+              "enable_tool",
+              "disable_tool"
+            ],
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "Tool name (required for approve_tool and block_tool operations)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "quarantine_security"
+    },
+    "read_cache": {
+      "annotations": {
+        "title": "Read Cache",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages.",
+      "inputSchema": {
+        "properties": {
+          "key": {
+            "description": "Cache key provided by mcpproxy when a response was truncated.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of records to return per page (default: 50, max: 1000)",
+            "type": "number"
+          },
+          "offset": {
+            "description": "Starting record offset for pagination (default: 0)",
+            "type": "number"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "read_cache"
+    },
+    "retrieve_tools": {
+      "annotations": {
+        "title": "Retrieve Tools",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Search and discover available upstream tools using BM25 full-text search. WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). Use annotation filters to self-restrict discovery scope. Use natural language to describe what you want to accomplish.",
+      "inputSchema": {
+        "properties": {
+          "debug": {
+            "description": "Enable debug mode with detailed scoring and ranking explanations (default: false)",
+            "type": "boolean"
+          },
+          "exclude_destructive": {
+            "description": "Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations.",
+            "type": "boolean"
+          },
+          "exclude_open_world": {
+            "description": "Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools.",
+            "type": "boolean"
+          },
+          "explain_tool": {
+            "description": "When debug=true, explain why a specific tool was ranked low (format: 'server:tool')",
+            "type": "string"
+          },
+          "include_session_risk_warning": {
+            "description": "Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag.",
+            "type": "boolean"
+          },
+          "include_stats": {
+            "description": "Include usage statistics for returned tools (default: false)",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Maximum number of tools to return (default: configured tools_limit, max: 100)",
+            "type": "number"
+          },
+          "query": {
+            "description": "Natural language description of what you want to accomplish. Be specific (e.g., 'create a new GitHub repository', 'get weather for London').",
+            "type": "string"
+          },
+          "read_only_only": {
+            "description": "Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "retrieve_tools"
+    },
+    "search_servers": {
+      "annotations": {
+        "title": "Search Servers",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return (default: 10, max: 50)",
+            "type": "number"
+          },
+          "registry": {
+            "description": "Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Search term to filter servers by name or description (case-insensitive)",
+            "type": "string"
+          },
+          "tag": {
+            "description": "Filter servers by tag/category (if supported by registry)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry"
+        ],
+        "type": "object"
+      },
+      "name": "search_servers"
+    },
+    "set_profile": {
+      "annotations": {
+        "title": "Set Profile",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/\u003cslug\u003e URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
+      "inputSchema": {
+        "properties": {
+          "profile": {
+            "description": "Profile slug to activate for this session (e.g. 'research'). Pass \"\" (empty) to clear the active profile and return to all servers.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "set_profile"
+    },
+    "upstream_servers": {
+      "annotations": {
+        "title": "Upstream Servers",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)",
+      "inputSchema": {
+        "properties": {
+          "args_json": {
+            "description": "Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args (arrays are not merged).",
+            "type": "string"
+          },
+          "command": {
+            "description": "Command to run for stdio servers (e.g., 'uvx', 'python')",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Whether server should be enabled (default: true)",
+            "type": "boolean"
+          },
+          "env_json": {
+            "description": "Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: MERGES with existing vars (new keys added, existing keys updated).",
+            "type": "string"
+          },
+          "headers_json": {
+            "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Server id within the registry - required for add_from_registry.",
+            "type": "string"
+          },
+          "init_timeout": {
+            "description": "Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch.",
+            "type": "string"
+          },
+          "isolation_json": {
+            "description": "Docker isolation config as JSON object. MERGES with existing settings - only provided fields change. Use 'null' to remove isolation entirely. Example: '{\"image\": \"python:3.12\"}' updates only the image.",
+            "type": "string"
+          },
+          "lines": {
+            "description": "Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation",
+            "type": "number"
+          },
+          "name": {
+            "description": "Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)",
+            "type": "string"
+          },
+          "oauth_json": {
+            "description": "OAuth config as JSON object. MERGES with existing settings. Use 'null' to remove OAuth entirely. Fields: client_id, client_secret, scopes (array - replaces).",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool.",
+            "enum": [
+              "list",
+              "add",
+              "remove",
+              "update",
+              "patch",
+              "tail_log",
+              "add_from_registry"
+            ],
+            "type": "string"
+          },
+          "protocol": {
+            "description": "Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)",
+            "enum": [
+              "stdio",
+              "http",
+              "sse",
+              "streamable-http",
+              "auto"
+            ],
+            "type": "string"
+          },
+          "registry": {
+            "description": "Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "upstream_servers"
+    }
+  },
+  "code_execution_mode": {
+    "code_execution": {
+      "annotations": {
+        "title": "Code Execution (Disabled)",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config.",
+      "inputSchema": {
+        "properties": {
+          "code": {
+            "description": "JavaScript source code to execute.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "name": "code_execution"
+    },
+    "list_registries": {
+      "annotations": {
+        "title": "List Registries",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "list_registries"
+    },
+    "quarantine_security": {
+      "annotations": {
+        "title": "Quarantine Security",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools)",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled.",
+            "enum": [
+              "list_quarantined",
+              "inspect_quarantined",
+              "quarantine_server",
+              "inspect_tools",
+              "approve_tool",
+              "approve_all_tools",
+              "block_tool",
+              "block_all_tools",
+              "enable_tool",
+              "disable_tool"
+            ],
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "Tool name (required for approve_tool and block_tool operations)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "quarantine_security"
+    },
+    "retrieve_tools": {
+      "annotations": {
+        "title": "Retrieve Tools",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Search and discover available upstream tools using BM25 full-text search. Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. Do NOT use call_tool_read/write/destructive — they are not available in this mode. Use natural language to describe what you want to accomplish. Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools).",
+      "inputSchema": {
+        "properties": {
+          "exclude_destructive": {
+            "description": "Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations.",
+            "type": "boolean"
+          },
+          "exclude_open_world": {
+            "description": "Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools.",
+            "type": "boolean"
+          },
+          "include_session_risk_warning": {
+            "description": "Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag.",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Maximum number of tools to return (default: configured tools_limit, max: 100)",
+            "type": "number"
+          },
+          "query": {
+            "description": "Natural language description of what you want to accomplish.",
+            "type": "string"
+          },
+          "read_only_only": {
+            "description": "Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "retrieve_tools"
+    },
+    "search_servers": {
+      "annotations": {
+        "title": "Search Servers",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return (default: 10, max: 50)",
+            "type": "number"
+          },
+          "registry": {
+            "description": "Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Search term to filter servers by name or description (case-insensitive)",
+            "type": "string"
+          },
+          "tag": {
+            "description": "Filter servers by tag/category (if supported by registry)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry"
+        ],
+        "type": "object"
+      },
+      "name": "search_servers"
+    },
+    "set_profile": {
+      "annotations": {
+        "title": "Set Profile",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/\u003cslug\u003e URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
+      "inputSchema": {
+        "properties": {
+          "profile": {
+            "description": "Profile slug to activate for this session (e.g. 'research'). Pass \"\" (empty) to clear the active profile and return to all servers.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "set_profile"
+    },
+    "upstream_servers": {
+      "annotations": {
+        "title": "Upstream Servers",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)",
+      "inputSchema": {
+        "properties": {
+          "args_json": {
+            "description": "Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args (arrays are not merged).",
+            "type": "string"
+          },
+          "command": {
+            "description": "Command to run for stdio servers (e.g., 'uvx', 'python')",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Whether server should be enabled (default: true)",
+            "type": "boolean"
+          },
+          "env_json": {
+            "description": "Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: MERGES with existing vars (new keys added, existing keys updated).",
+            "type": "string"
+          },
+          "headers_json": {
+            "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Server id within the registry - required for add_from_registry.",
+            "type": "string"
+          },
+          "init_timeout": {
+            "description": "Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch.",
+            "type": "string"
+          },
+          "isolation_json": {
+            "description": "Docker isolation config as JSON object. MERGES with existing settings - only provided fields change. Use 'null' to remove isolation entirely. Example: '{\"image\": \"python:3.12\"}' updates only the image.",
+            "type": "string"
+          },
+          "lines": {
+            "description": "Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation",
+            "type": "number"
+          },
+          "name": {
+            "description": "Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)",
+            "type": "string"
+          },
+          "oauth_json": {
+            "description": "OAuth config as JSON object. MERGES with existing settings. Use 'null' to remove OAuth entirely. Fields: client_id, client_secret, scopes (array - replaces).",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool.",
+            "enum": [
+              "list",
+              "add",
+              "remove",
+              "update",
+              "patch",
+              "tail_log",
+              "add_from_registry"
+            ],
+            "type": "string"
+          },
+          "protocol": {
+            "description": "Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)",
+            "enum": [
+              "stdio",
+              "http",
+              "sse",
+              "streamable-http",
+              "auto"
+            ],
+            "type": "string"
+          },
+          "registry": {
+            "description": "Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "upstream_servers"
+    }
+  },
+  "default_server": {
+    "call_tool_destructive": {
+      "annotations": {
+        "title": "Call Tool (Destructive)",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
+            "properties": {},
+            "type": "object"
+          },
+          "args_json": {
+            "description": "Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility.",
+            "type": "string"
+          },
+          "intent_data_sensitivity": {
+            "description": "Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data.",
+            "type": "string"
+          },
+          "intent_reason": {
+            "description": "Why is this deletion needed? Provide justification like 'User confirmed cleanup' or 'Removing obsolete data'.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tool name in format 'server:tool' (e.g., 'github:delete_repo'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "call_tool_destructive"
+    },
+    "call_tool_read": {
+      "annotations": {
+        "title": "Call Tool (Read)",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
+            "properties": {},
+            "type": "object"
+          },
+          "args_json": {
+            "description": "Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility.",
+            "type": "string"
+          },
+          "intent_data_sensitivity": {
+            "description": "Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns.",
+            "type": "string"
+          },
+          "intent_reason": {
+            "description": "Why is this tool being called? Provide context like 'User asked to check status' or 'Gathering data for report'.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tool name in format 'server:tool' (e.g., 'github:get_user'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "call_tool_read"
+    },
+    "call_tool_write": {
+      "annotations": {
+        "title": "Call Tool (Write)",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state.",
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "description": "Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects.",
+            "properties": {},
+            "type": "object"
+          },
+          "args_json": {
+            "description": "Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility.",
+            "type": "string"
+          },
+          "intent_data_sensitivity": {
+            "description": "Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes.",
+            "type": "string"
+          },
+          "intent_reason": {
+            "description": "Why is this modification needed? Provide context like 'User requested update' or 'Fixing reported issue'.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Tool name in format 'server:tool' (e.g., 'github:create_issue'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "call_tool_write"
+    },
+    "list_registries": {
+      "annotations": {
+        "title": "List Registries",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "📋 List all available MCP registries. Use this FIRST to discover which registries you can search with the 'search_servers' tool. Each registry contains different collections of MCP servers that can be added as upstreams.",
+      "inputSchema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "list_registries"
+    },
+    "quarantine_security": {
+      "annotations": {
+        "title": "Quarantine Security",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Security quarantine management for MCP servers and tools. Review and manage quarantined servers and tools to prevent Tool Poisoning Attacks (TPAs). Supports server-level quarantine and tool-level approval for individual tool description/schema changes. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Server name (required for inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools)",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Security operation: list_quarantined, inspect_quarantined, quarantine_server, inspect_tools, approve_tool, approve_all_tools, block_tool, block_all_tools, enable_tool, disable_tool. 'block_tool'/'block_all_tools' atomically approve AND disable a tool (acknowledge it but keep it hidden) — all-or-nothing so a tool is never left approved+enabled.",
+            "enum": [
+              "list_quarantined",
+              "inspect_quarantined",
+              "quarantine_server",
+              "inspect_tools",
+              "approve_tool",
+              "approve_all_tools",
+              "block_tool",
+              "block_all_tools",
+              "enable_tool",
+              "disable_tool"
+            ],
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "Tool name (required for approve_tool and block_tool operations)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "quarantine_security"
+    },
+    "read_cache": {
+      "annotations": {
+        "title": "Read Cache",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Retrieve paginated data when mcpproxy indicates a tool response was truncated. Use the cache key provided in truncation messages to access the complete dataset with pagination.",
+      "inputSchema": {
+        "properties": {
+          "key": {
+            "description": "Cache key provided by mcpproxy when a response was truncated (e.g. 'Use read_cache tool: key=\"abc123def...\"')",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of records to return per page (default: 50, max: 1000)",
+            "type": "number"
+          },
+          "offset": {
+            "description": "Starting record offset for pagination (default: 0)",
+            "type": "number"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "read_cache"
+    },
+    "retrieve_tools": {
+      "annotations": {
+        "title": "Retrieve Tools",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers.",
+      "inputSchema": {
+        "properties": {
+          "debug": {
+            "description": "Enable debug mode with detailed scoring and ranking explanations (default: false)",
+            "type": "boolean"
+          },
+          "explain_tool": {
+            "description": "When debug=true, explain why a specific tool was ranked low (format: 'server:tool')",
+            "type": "string"
+          },
+          "include_disabled": {
+            "description": "Set true to also surface tools that exist but are currently locked by config, user, or quarantine (default: false). Returns a 'disabled' list (name/server/description/status) plus a 'remediation' map; callable results are unaffected and listed first.",
+            "type": "boolean"
+          },
+          "include_session_risk_warning": {
+            "description": "Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag.",
+            "type": "boolean"
+          },
+          "include_stats": {
+            "description": "Include usage statistics for returned tools (default: false)",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "Maximum number of tools to return (default: configured tools_limit, max: 100)",
+            "type": "number"
+          },
+          "query": {
+            "description": "Natural language description of what you want to accomplish. Be specific about your task (e.g., 'create a new GitHub repository', 'get weather for London', 'query SQLite database for users'). The search will find the most relevant tools across all connected servers.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "retrieve_tools"
+    },
+    "search_servers": {
+      "annotations": {
+        "title": "Search Servers",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "description": "🔍 Discover MCP servers from known registries with repository type detection. Search and filter servers from embedded registry list to find new MCP servers that can be added as upstreams. Features npm/PyPI package detection for enhanced install commands. WORKFLOW: 1) Call 'list_registries' first to see available registries, 2) Use this tool with a registry ID to search servers. Results include server URLs and repository information ready for direct use with upstream_servers add command.",
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "description": "Maximum number of results to return (default: 10, max: 50)",
+            "type": "number"
+          },
+          "registry": {
+            "description": "Registry ID or name to search (e.g., 'smithery', 'mcprun', 'pulse'). Use 'list_registries' tool first to see available registries.",
+            "type": "string"
+          },
+          "search": {
+            "description": "Search term to filter servers by name or description (case-insensitive)",
+            "type": "string"
+          },
+          "tag": {
+            "description": "Filter servers by tag/category (if supported by registry)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "registry"
+        ],
+        "type": "object"
+      },
+      "name": "search_servers"
+    },
+    "set_profile": {
+      "annotations": {
+        "title": "Set Profile",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/\u003cslug\u003e URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
+      "inputSchema": {
+        "properties": {
+          "profile": {
+            "description": "Profile slug to activate for this session (e.g. 'research'). Pass \"\" (empty) to clear the active profile and return to all servers.",
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "set_profile"
+    },
+    "upstream_servers": {
+      "annotations": {
+        "title": "Upstream Servers",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      },
+      "description": "Manage upstream MCP servers - add, remove, update, and list servers. Includes Docker isolation configuration and connection status monitoring. SECURITY: Newly added servers are automatically quarantined to prevent Tool Poisoning Attacks (TPAs). Use 'quarantine_security' tool to review and manage quarantined servers. NOTE: Unquarantining servers is only available through manual config editing or system tray UI for security.\n\nDocker Isolation: Use 'isolation_json' parameter to configure per-server Docker images, CPU/memory limits, and network isolation. Example: {\"enabled\": true, \"image\": \"node:20\", \"network_mode\": \"bridge\"}.\n\nSMART PATCHING (update/patch): Uses deep merge - only specify fields you want to change. Omitted fields are PRESERVED, not removed. Examples:\n- Enable server: {\"operation\": \"patch\", \"name\": \"my-server\", \"enabled\": true} - only enabled changes\n- Enable isolation: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"enabled\\\": true}\"} - enables isolation with defaults\n- Update image: {\"operation\": \"patch\", \"name\": \"my-server\", \"isolation_json\": \"{\\\"image\\\": \\\"python:3.12\\\"}\"} - other isolation fields preserved\n- Add env var: env_json merges with existing vars\n- Replace args: args_json replaces entirely (arrays not merged)\n- Remove field: use 'null' (e.g., isolation_json: \"null\" removes isolation)",
+      "inputSchema": {
+        "properties": {
+          "args_json": {
+            "description": "Command arguments for stdio servers as a JSON array of strings (e.g., '[\"mcp-server-sqlite\", \"--db-path\", \"/path/to/db\"]'). For update/patch: REPLACES all existing args (arrays are not merged).",
+            "type": "string"
+          },
+          "command": {
+            "description": "Command to run for stdio servers (e.g., 'uvx', 'python')",
+            "type": "string"
+          },
+          "enabled": {
+            "description": "Whether server should be enabled (default: true)",
+            "type": "boolean"
+          },
+          "env_json": {
+            "description": "Environment variables for stdio servers as JSON object (e.g., '{\"API_KEY\": \"value\"}'). For update/patch: MERGES with existing vars (new keys added, existing keys updated).",
+            "type": "string"
+          },
+          "headers_json": {
+            "description": "HTTP headers for authentication as JSON object (e.g., '{\"Authorization\": \"Bearer token\"}'). For update/patch: MERGES with existing headers (new keys added, existing keys updated).",
+            "type": "string"
+          },
+          "id": {
+            "description": "Server id within the registry - required for add_from_registry.",
+            "type": "string"
+          },
+          "init_timeout": {
+            "description": "Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch.",
+            "type": "string"
+          },
+          "isolation_json": {
+            "description": "Docker isolation config as JSON object. MERGES with existing settings - only provided fields change. Use 'null' to remove isolation entirely. Example: '{\"image\": \"python:3.12\"}' updates only the image.",
+            "type": "string"
+          },
+          "lines": {
+            "description": "Number of lines to tail from server log (default: 50, max: 500) - used with tail_log operation",
+            "type": "number"
+          },
+          "name": {
+            "description": "Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)",
+            "type": "string"
+          },
+          "oauth_json": {
+            "description": "OAuth config as JSON object. MERGES with existing settings. Use 'null' to remove OAuth entirely. Fields: client_id, client_secret, scopes (array - replaces).",
+            "type": "string"
+          },
+          "operation": {
+            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool.",
+            "enum": [
+              "list",
+              "add",
+              "remove",
+              "update",
+              "patch",
+              "tail_log",
+              "add_from_registry"
+            ],
+            "type": "string"
+          },
+          "protocol": {
+            "description": "Transport protocol: stdio, http, sse, streamable-http, auto (default: auto-detect)",
+            "enum": [
+              "stdio",
+              "http",
+              "sse",
+              "streamable-http",
+              "auto"
+            ],
+            "type": "string"
+          },
+          "registry": {
+            "description": "Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation"
+        ],
+        "type": "object"
+      },
+      "name": "upstream_servers"
+    }
+  }
+}

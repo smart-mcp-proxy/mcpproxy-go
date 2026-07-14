@@ -51,7 +51,7 @@ func createTestMCPProxyServer(t *testing.T) *MCPProxyServer {
 
 	tr := truncate.NewTruncator(0)
 
-	proxy := NewMCPProxyServer(sm, idx, um, cm, tr, logger, nil, false, cfg)
+	proxy := NewMCPProxyServer(sm, idx, um, cm, tr, logger, nil, false, cfg, nil)
 	return proxy
 }
 

@@ -560,6 +560,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedTools); err != nil {
 			return err
 		}
+		r.warmSignatureCache(allowedTools)
 		// The shared index changed for this server; refresh dependent profiles.
 		r.reindexAffectedProfiles(serverName)
 		return nil
@@ -686,6 +687,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedAddedTools); err != nil {
 			return fmt.Errorf("failed to index added tools: %w", err)
 		}
+		r.warmSignatureCache(allowedAddedTools)
 	}
 
 	// 4. Re-index modified tools (excluding blocked)
@@ -707,6 +709,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
 			return fmt.Errorf("failed to re-index modified tools: %w", err)
 		}
+		r.warmSignatureCache(allowedModifiedTools)
 	}
 
 	// If the shared index changed for this server, refresh the per-profile indexes
@@ -719,6 +722,24 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 	}
 
 	return nil
+}
+
+// warmSignatureCache pre-compiles compact signatures for freshly indexed
+// tools (Spec 085 US1 T024, FR-008: signatures are compiled at index time
+// into the ONE Runtime-owned cache, keyed by the Spec-032 tool hash), so a
+// later compact retrieve_tools is a pure cache read — never a per-request
+// compile. Hashless tools are skipped: warming them would memoize distinct
+// schemas under one "" key (indexed tools always carry a hash).
+func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
+	if r.sigCache == nil {
+		return
+	}
+	for _, tool := range tools {
+		if tool == nil || tool.Hash == "" {
+			continue
+		}
+		r.sigCache.Warm(tool.Hash, tool.ParamsJSON, tool.Description)
+	}
 }
 
 // filterBlockedTools removes tools that are blocked by quarantine from the list.

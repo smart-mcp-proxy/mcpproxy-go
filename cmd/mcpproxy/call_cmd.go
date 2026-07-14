@@ -499,6 +499,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 		nil, // mainServer not needed for CLI calls
 		false,
 		globalConfig,
+		nil, // standalone one-shot: no runtime-owned signature cache
 	)
 
 	fmt.Printf("🛠️  Calling %s...\n", toolVariant)

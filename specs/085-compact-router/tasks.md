@@ -22,9 +22,9 @@ the pre-dispatch schema lookup, not on the compact serialization, so it can land
 
 ## Phase 1: Setup (shared scaffolding)
 
-- [ ] T001 [P] Create leaf package `internal/toolsig/` with `doc.go` stating the no-`internal/server`-import
+- [x] T001 [P] Create leaf package `internal/toolsig/` with `doc.go` stating the no-`internal/server`-import
   rule (bench must import it) and the grammar reference to `contracts/signature-grammar.md`.
-- [ ] T002 [P] Add `ToolResponseMode string` field to `internal/config/config.go` beside
+- [x] T002 [P] Add `ToolResponseMode string` field to `internal/config/config.go` beside
   `RoutingMode` (~290) with `json:"tool_response_mode,omitempty" mapstructure:"tool-response-mode"`
   and a doc comment (orthogonal to routing_mode; default full). No behavior yet.
 
@@ -37,30 +37,30 @@ visibility resolver, and the entry-builder seam exist.**
 
 ### Signature compiler (blocks US1, US5)
 
-- [ ] T003 [P] Write failing table test `internal/toolsig/signature_test.go` for `Render` covering
+- [x] T003 [P] Write failing table test `internal/toolsig/signature_test.go` for `Render` covering
   worked examples **E1–E11** in `contracts/signature-grammar.md` (exact `sig`/`desc`/`lossy`
   bytes), including ⟲**#8** E8 (required name absent from `properties` ⇒ `name*~:any`, never
   dropped), E9 (metachar quoting), E10 (non-null type union ⇒ `str|int`), and E11 (unparseable
   schema ⇒ `(~)`, `Lossy=true`, never `()`), plus a determinism test (shuffled property insertion
   order ⇒ identical output) and the `Lossy == contains(sig,"~")` biconditional. — FR-019/SC-004.
-- [ ] T004 [P] Write failing test `internal/toolsig/firstsentence_test.go` for `FirstSentence`
+- [x] T004 [P] Write failing test `internal/toolsig/firstsentence_test.go` for `FirstSentence`
   (⟲**#3**): CJK terminator `。` matches **unconditionally** (E6); ASCII `.` splits **only** at a
   boundary (`e.g. text` splits after the space-followed period; `3.14`/`v1.2` do **not** split);
   no-terminator length-cap fallback (rune-safe); empty ⇒ empty.
-- [ ] T005 Implement `internal/toolsig/signature.go` (`Render`, `FirstSentence`) per the grammar
+- [x] T005 Implement `internal/toolsig/signature.go` (`Render`, `FirstSentence`) per the grammar
   contract until T003/T004 pass — type map incl. `any` fallback, marker order `*~`, atom
   quoting (§3.5), required-first/optional-sorted, enum≤5 inline, short-scalar defaults, `~` lossy
   collapse, unparseable-schema ⇒ `(~)` (bare lossy marker, never `()`+lossy — E11), never-elide-required
   over missing type. (FR-002/003/004/019)
-- [ ] T006 [P] Write failing test `internal/toolsig/cache_test.go`: `Get` compiles-on-miss and
+- [x] T006 [P] Write failing test `internal/toolsig/cache_test.go`: `Get` compiles-on-miss and
   memoizes; distinct hashes ⇒ distinct entries; concurrent `Get`/`Warm` race-clean under `-race`;
   a test-only compile counter increments once per unique hash.
-- [ ] T007 Implement `internal/toolsig/cache.go` (RWMutex-guarded `map[hash]Signature`, `Get`,
+- [x] T007 Implement `internal/toolsig/cache.go` (RWMutex-guarded `map[hash]Signature`, `Get`,
   `Warm`, test compile counter) until T006 passes — FR-008 keying.
 
 ### ⟲#4 — Single cache owner + wiring (blocks US1's FR-008 guarantee)
 
-- [ ] T008 Wire **one** `*toolsig.Cache`: create it in `Runtime` init and pass it into
+- [x] T008 Wire **one** `*toolsig.Cache`: create it in `Runtime` init and pass it into
   `NewMCPProxyServer` (store `p.sigCache`); confirm the indexing path and the request path hold
   the *same* instance. Add a failing-then-passing **compile-count test** (server-level): index N
   tools, warm the cache, issue a compact `retrieve_tools`, assert the cache's compile counter did
@@ -68,11 +68,11 @@ visibility resolver, and the entry-builder seam exist.**
 
 ### ⟲#5 — Shared visibility resolver (blocks US2; strengthens US1/self-heal)
 
-- [ ] T009 [P] Write failing parity test `internal/server/mcp_visibility_test.go`: for a fixed
+- [x] T009 [P] Write failing parity test `internal/server/mcp_visibility_test.go`: for a fixed
   session/agent-token, a tool is returned by `retrieve_tools` **iff** `p.toolVisibleToSession`
   says visible — across profile-scoped, agent-scoped, quarantined, pending/changed, and disabled
   cases.
-- [ ] T010 Extract `p.toolVisibleToSession(ctx, server, tool) (bool, reason string)` into new
+- [x] T010 Extract `p.toolVisibleToSession(ctx, server, tool) (bool, reason string)` into new
   `internal/server/mcp_visibility.go` from the `serverDiscoverable` closure (`mcp.go:1324`) + the
   inline callable/quarantine passes, preserving order: index presence → profile+agent scope →
   server quarantine → tool approval (pending/changed) → `isToolCallable`. Rewire
@@ -81,10 +81,10 @@ visibility resolver, and the entry-builder seam exist.**
 
 ### Entry-builder extraction refactor (BLOCKS compact mode — spec Assumption; behavior-preserving)
 
-- [ ] T011 Write failing golden byte-identity test `internal/server/mcp_entry_builder_test.go`:
+- [x] T011 Write failing golden byte-identity test `internal/server/mcp_entry_builder_test.go`:
   capture the current full-mode `retrieve_tools` response for a fixed corpus+query and assert the
   post-refactor `json.Marshal` bytes are unchanged (FR-006/SC-003). Include `include_stats` on/off.
-- [ ] T012 Extract `buildToolEntry(result, mode, opts) map[string]any` into new
+- [x] T012 Extract `buildToolEntry(result, mode, opts) map[string]any` into new
   `internal/server/mcp_entry_builder.go` from `mcp.go` (~1428–1492), preserving the exact full
   entry map (name/description/inputSchema/score/server/annotations/call_with/usage_count/last_used).
   Rewire `handleRetrieveToolsWithMode` to call it for the full path; leave cross-cutting sections
@@ -92,19 +92,19 @@ visibility resolver, and the entry-builder seam exist.**
 
 ### ⟲#1 — Config validation + hot-reload wiring (blocks US1 toggle, US4)
 
-- [ ] T013 [P] Write failing test `internal/config/config_test.go`: `ValidateDetailed` rejects
+- [x] T013 [P] Write failing test `internal/config/config_test.go`: `ValidateDetailed` rejects
   `tool_response_mode:"bogus"` with `Field:"tool_response_mode"`; accepts `""`/`full`/`compact`.
   (FR-001/FR-015)
-- [ ] T014 Add the validation clause beside the `routing_mode` block (`config.go` ~1650) until
+- [x] T014 Add the validation clause beside the `routing_mode` block (`config.go` ~1650) until
   T013 passes.
-- [ ] T015 ⟲#1a Write failing test then add a `tool_response_mode` clause to `DetectConfigChanges`
+- [x] T015 ⟲#1a Write failing test then add a `tool_response_mode` clause to `DetectConfigChanges`
   (`internal/runtime/config_hotreload.go`): when only that field differs, `ChangedFields` contains
   `"tool_response_mode"` (else an API apply of only this field is swallowed as "no changes").
-- [ ] T016 ⟲#1b Implement `p.effectiveToolResponseMode(detail string) string` reading
+- [x] T016 ⟲#1b Implement `p.effectiveToolResponseMode(detail string) string` reading
   **`p.currentConfig()`** (`profile_resolver.go:38`, live snapshot) — empty⇒`full` — NOT the
   construction-time `p.config` the retrieve path uses at `mcp.go:1236`. Unit-test that a reloaded
   config changes the resolved mode without reconstructing the server.
-- [ ] T017 [P] Add `MCPPROXY_TOOL_RESPONSE_MODE` explicit env alias in `internal/config/loader.go`
+- [x] T017 [P] Add `MCPPROXY_TOOL_RESPONSE_MODE` explicit env alias in `internal/config/loader.go`
   (~570 pattern) and `--tool-response-mode` cobra flag in `cmd/mcpproxy`; test env/flag→config.
 
 **Checkpoint**: compiler + owned cache + visibility resolver + entry-builder seam + config +
@@ -119,27 +119,27 @@ schema; ranking identical to full.
 **Independent test**: golden query in compact mode ⇒ compact entries (no `inputSchema`), required
 params marked, desc=first sentence; same query in full mode byte-identical to today.
 
-- [ ] T018 [P] [US1] Write failing test `internal/server/mcp_entry_builder_test.go` (compact case):
+- [x] T018 [P] [US1] Write failing test `internal/server/mcp_entry_builder_test.go` (compact case):
   `buildToolEntry(result, compact)` ⇒ `{id, score, sig, desc, lossy}` only, no `inputSchema`/full
   `description`/`annotations`. (FR-002)
-- [ ] T019 [P] [US1] ⟲#6 Write failing **full 47-query golden-set** ranked-ID identity test
+- [x] T019 [P] [US1] ⟲#6 Write failing **full 47-query golden-set** ranked-ID identity test
   `internal/server/mcp_ranked_identity_test.go`: for **every** query in
   `specs/065-evaluation-foundation/datasets/retrieval_golden_v1.json`, the ordered `id` list is
   identical in `full` vs `compact`. This is a **release-blocking US1 test** (SC-002), NOT deferred
   to the US5 profiler. (FR-007/SC-002)
-- [ ] T020 [P] [US1] Write failing never-elide test over the 45-tool frozen corpus
+- [x] T020 [P] [US1] Write failing never-elide test over the 45-tool frozen corpus
   (`specs/083-discovery-profiler/datasets/corpus_v2.tools.json`): every required param appears in
   every rendered `sig` with `*`. (FR-003/SC-004)
-- [ ] T021 [US1] Implement the compact branch in `buildToolEntry` using `p.sigCache.Get(hash,
+- [x] T021 [US1] Implement the compact branch in `buildToolEntry` using `p.sigCache.Get(hash,
   paramsJSON, description)`; derive `id` from `ServerName`/`Name` exactly as full-mode `name`
   (never re-sort). Make T018–T020 pass. (FR-002/003/004/007)
-- [ ] T022 [US1] Add effective-mode resolution: call `p.effectiveToolResponseMode(detail)` (T016)
+- [x] T022 [US1] Add effective-mode resolution: call `p.effectiveToolResponseMode(detail)` (T016)
   in `handleRetrieveToolsWithMode`; register the `detail` param (enum `compact|full`, no default)
   on the `retrieve_tools` definition in `mcp.go:691` and both `mcp_routing.go` builders. Test
   override both directions and unset⇒configured. (FR-005)
-- [ ] T023 [US1] Add the deterministic compact `hint` top-level field (FR-009) when mode=compact;
+- [x] T023 [US1] Add the deterministic compact `hint` top-level field (FR-009) when mode=compact;
   test its presence/absence and that it counts in the serialized size.
-- [ ] T024 [US1] Warm `p.sigCache` from `runtime.applyDifferentialToolUpdate`
+- [x] T024 [US1] Warm `p.sigCache` from `runtime.applyDifferentialToolUpdate`
   (`internal/runtime/lifecycle.go` ~686/707 after `BatchIndexTools`, and the full-reindex branch
   ~560); extend the T008 compile-count test to assert a post-index compact `retrieve_tools` is a
   cache hit. (FR-008)
@@ -156,25 +156,25 @@ same visibility as search.
 **Independent test**: valid id ⇒ definition fields identical to full-mode entry; unknown ids ⇒
 per-id errors without failing the batch; >5 ⇒ limit error.
 
-- [ ] T025 [P] [US2] ⟲#2 Write failing test `internal/server/mcp_describe_tool_test.go`:
+- [x] T025 [P] [US2] ⟲#2 Write failing test `internal/server/mcp_describe_tool_test.go`:
   valid id ⇒ definition **field-equal** to the full-mode `retrieve_tools` entry over
   `{name, description, inputSchema, server, annotations, call_with}` (compare after `delete(entry,
   "score")`); assert the definition carries **no** `score` key. Mixed valid/unknown ⇒ definitions +
   per-id errors, overall success; 6 ids ⇒ limit error, no processing. (FR-010)
-- [ ] T026 [P] [US2] Write failing visibility-parity test reusing `p.toolVisibleToSession` (T010):
+- [x] T026 [P] [US2] Write failing visibility-parity test reusing `p.toolVisibleToSession` (T010):
   agent-token session scoped to server A ⇒ `describe_tool(["B:x"])` returns an error, never a
   definition; quarantined/pending/disabled id ⇒ per-id error — asserted against the **same**
   predicate `retrieve_tools` uses. (FR-011, Constitution IV)
-- [ ] T027 [US2] Implement `internal/server/mcp_describe_tool.go` handler: validate 1–5 ids; per id
+- [x] T027 [US2] Implement `internal/server/mcp_describe_tool.go` handler: validate 1–5 ids; per id
   run `p.toolVisibleToSession` → on visible, `indexManager.GetToolsByServer` filtered to the tool →
   `buildToolEntry(..., full)` with `score` stripped; per-id errors with remediation codes. Make
   T025/T026 pass. (FR-010/011/012)
-- [ ] T028 [US2] Register `describe_tool` in the retrieve_tools routing mode only: default server
+- [x] T028 [US2] Register `describe_tool` in the retrieve_tools routing mode only: default server
   `registerTools` (`mcp.go:689`) and `buildCallToolModeTools` (`mcp_routing.go:354`). Assert (test)
   present there and **absent** from code_execution (`buildCodeExecModeTools`) and direct mode.
   ⟲#8 Assert its definition ≤150 tokens counted with **tiktoken `cl100k_base`** (the bench's pinned
   encoder, so budget and profiler agree). (FR-011)
-- [ ] T029 [US2] Test FR-012: identical `describe_tool` output under `full` and `compact` mode.
+- [x] T029 [US2] Test FR-012: identical `describe_tool` output under `full` and `compact` mode.
 
 **Checkpoint**: US1 + US2 — compact discovery with working second stage.
 
@@ -187,24 +187,24 @@ non-argument failures do not.
 **Independent test**: omit a required param ⇒ error includes full schema + hint, upstream not
 called; retry with corrected args succeeds.
 
-- [ ] T030 [P] [US3] Write failing test `internal/server/mcp_input_validation_test.go`: missing
+- [x] T030 [P] [US3] Write failing test `internal/server/mcp_input_validation_test.go`: missing
   required arg ⇒ `invalid_params` error with full `input_schema` + `hint`, upstream stub records
   **zero** invocations; uncompilable schema ⇒ fail-open (dispatch proceeds, `validation_skipped`
   counted). (FR-013/FR-013b)
-- [ ] T031 [P] [US3] Write failing test that non-argument failures (simulated 401/timeout/5xx via
+- [x] T031 [P] [US3] Write failing test that non-argument failures (simulated 401/timeout/5xx via
   stub) keep the existing `createDetailedErrorResponse` shape with **no** `input_schema`.
   (FR-013 scenario 2)
-- [ ] T032 [US3] Implement `internal/server/mcp_input_validation.go`: `validateArgs(paramsJSON,
+- [x] T032 [US3] Implement `internal/server/mcp_input_validation.go`: `validateArgs(paramsJSON,
   args)` using `github.com/santhosh-tekuri/jsonschema/v6` (already a direct dep), memoized compiled
   schema by tool hash; fail-open on compile error. Make T030 pass.
-- [ ] T033 [US3] Wire pre-dispatch validation into `handleCallToolVariant` after args-parse +
+- [x] T033 [US3] Wire pre-dispatch validation into `handleCallToolVariant` after args-parse +
   `p.toolVisibleToSession`/callability (`mcp.go` ~1747, before `CallTool` ~1955): on failure return
   the self-healing error and skip dispatch. Schema source = the tool's `ParamsJSON` from the index
   (same source signatures use). (FR-013)
-- [ ] T034 [US3] Extend `createDetailedErrorResponse` (`mcp.go:4767`) to classify upstream
+- [x] T034 [US3] Extend `createDetailedErrorResponse` (`mcp.go:4767`) to classify upstream
   InvalidParams (JSON-RPC `-32602` / best-effort) and attach `input_schema`+`hint` (Path B); leave
   transport/auth/timeout shapes untouched. Make T031 pass. (FR-013)
-- [ ] T035 [US3] E2E in `internal/server/e2e_test.go`: invalid call → schema-informed retry →
+- [x] T035 [US3] E2E in `internal/server/e2e_test.go`: invalid call → schema-informed retry →
   success, in both full and compact mode (identical error). (SC-006, US3 scenario 3)
 
 **Checkpoint**: US3 — bounded, self-correcting failure path; zero happy-path cost.
@@ -217,21 +217,21 @@ called; retry with corrected args succeeds.
 **Independent test**: toggle `tool_response_mode` on a running proxy ⇒ next-call shape changes, no
 restart; default (unset) behaves as full.
 
-- [ ] T036 [P] [US4] Write failing menu-surface test: tools/list in retrieve_tools mode differs
+- [x] T036 [P] [US4] Write failing menu-surface test: tools/list in retrieve_tools mode differs
   from a pre-feature snapshot by **exactly** `describe_tool` added + `detail` param added +
   updated `call_tool_*`/`retrieve_tools` descriptions; all existing `retrieve_tools` params
   (limit, include_stats, debug, read_only_only, exclude_destructive, include_disabled, …)
   preserved. (FR-014/SC-003/SC-007)
-- [ ] T037 [US4] Update `call_tool_*` descriptions (`buildCallToolVariantTool`, `mcp.go` ~672 and
+- [x] T037 [US4] Update `call_tool_*` descriptions (`buildCallToolVariantTool`, `mcp.go` ~672 and
   the per-variant text ~614–658) and `retrieve_tools` descriptions (`mcp.go:692`,
   `mcp_routing.go:358`) to reference signatures + `describe_tool` instead of "read inputSchema from
   retrieve_tools". Make T036 pass. (FR-014)
-- [ ] T038 [US4] E2E mode-toggle test (`e2e_test.go`): on a running proxy, flip full→compact
+- [x] T038 [US4] E2E mode-toggle test (`e2e_test.go`): on a running proxy, flip full→compact
   **(a)** via the config-file reload path **and (b)** via an API apply that changes only
   `tool_response_mode`; assert the next `retrieve_tools` returns compact with no restart in both;
   unset ⇒ full. (Exercises the T015 DetectConfigChanges clause + T016 currentConfig read.)
   (FR-015/SC-007)
-- [ ] T039 [P] [US4] Docs: `docs/configuration.md` (`tool_response_mode` + env + flag),
+- [x] T039 [P] [US4] Docs: `docs/configuration.md` (`tool_response_mode` + env + flag),
   `docs/api/rest-api.md`/MCP section (`describe_tool`, `detail`), and the CLAUDE.md built-in-tools
   line. (Constitution VI)
 
@@ -244,21 +244,21 @@ restart; default (unset) behaves as full.
 **Goal**: spec-083 profiler measures compact mode and emits the flip-gate metrics.
 **Independent test**: profiler live run against a compact-mode proxy emits the gate metrics.
 
-- [ ] T040 [US5] ⟲#7 **Sequenced across branches** (research.md R1): `internal/toolsig` ships on
+- [ ] T040 [US5] ⛔ CROSS-BRANCH-BLOCKED (083/PR #851 must merge + 085 rebase) ⟲#7 **Sequenced across branches** (research.md R1): `internal/toolsig` ships on
   the `085` branch, but `bench/arms/compact.go` lives only on `083-discovery-profiler` (PR #851)
   and is absent from the `085` tree today. Do this **only after 083 merges to main and `085` is
   rebased on main** (which brings `bench/arms/` in): migrate `bench/arms/compact.go` to import
   `internal/toolsig`, regenerate `bench/arms/testdata/compact_golden.txt` from the shared grammar,
   and update the arm's parity/contract tests. Until then this task is BLOCKED — do not fabricate
   `bench/arms/` on 085. (FR-019 sharing)
-- [ ] T041 [US5] Add/confirm the profiler **live** compact arm/flag (FR-017) measuring real
+- [x] T041 [US5] Add/confirm the profiler **live** compact arm/flag (FR-017) measuring real
   compact `retrieve_tools` responses with the same pipeline as full (token distributions, component
   breakdown, break-even) in `bench/live*.go` (present in the 085 tree — no 083 dependency).
-- [ ] T042 [US5] Emit the flip-gate metrics (FR-018) in the report: per-query ranked-ID identity
+- [x] T042 [US5] Emit the flip-gate metrics (FR-018) in the report: per-query ranked-ID identity
   across modes (gate 100% — reuses the T019 corpus), lossy-signature rate on the 45-tool frozen
   corpus (gate <20%), response-token reduction, describe_tool usage counts from the E2E suite
   (informational).
-- [ ] T043 [US5] Re-baseline (after T040/T041): run `make bench-discovery` + the live arm; record
+- [ ] T043 [US5] ⛔ CROSS-BRANCH-BLOCKED (follows T040 after the 083 rebase) Re-baseline (after T040/T041): run `make bench-discovery` + the live arm; record
   the *measured* compact reduction (SC-001 ≥50% median) and note it **supersedes** the prior
   −52.6%/−92% bench-grammar figures (those used full descriptions; the production grammar truncates
   to first sentence). (SC-001/SC-005, research.md R1)
@@ -269,9 +269,9 @@ restart; default (unset) behaves as full.
 
 ## Phase 8: Polish & Cross-Cutting
 
-- [ ] T044 [P] Add `oas/swagger.yaml` entries if any REST surface exposes the new fields/tool.
-- [ ] T045 [P] Run `quickstart.md` end-to-end as a manual/scripted smoke; fix drift.
-- [ ] T046 Full gate: `go test -race ./internal/...`, `./scripts/test-api-e2e.sh`,
+- [x] T044 [P] Add `oas/swagger.yaml` entries if any REST surface exposes the new fields/tool.
+- [x] T045 [P] Run `quickstart.md` end-to-end as a manual/scripted smoke; fix drift.
+- [x] T046 Full gate: `go test -race ./internal/...`, `./scripts/test-api-e2e.sh`,
   `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...`, and
   `go test -tags server ./internal/serveredition/...` (edition-agnostic sanity).
 
@@ -313,35 +313,38 @@ restart; default (unset) behaves as full.
 
 ## Requirements & Success-Criteria coverage (verification)
 
-| Item | Task(s) |
-|---|---|
-| FR-001 tool_response_mode config, hot-reload, serialization-only | T002, T014, T015, T016, T022 |
-| FR-002 compact entry fields, no schema | T018, T021 |
-| FR-003 required marked + never elided (incl. missing-type E8) | T003, T005, T020, T021 |
-| FR-004 lossy collapse + flag | T003, T005, T021 |
-| FR-005 per-call `detail` override | T022 |
-| FR-006 full-mode byte-identical payloads | T011, T012 |
-| FR-007 ranked-ID identity across modes | T019, T021 |
-| FR-008 index-time hash-keyed cache, single owner, no per-request compile | T006, T007, T008, T024 |
-| FR-009 compact hint line | T023 |
-| FR-010 describe_tool ≤5, per-id errors, definition-field equal (no score) | T025, T027 |
-| FR-011 describe_tool shared-resolver visibility + retrieve mode only + ≤150 tok | T009, T010, T026, T027, T028 |
-| FR-012 describe_tool mode-independent | T029 |
-| FR-013 pre-dispatch validation + schema-on-arg-error, not on transport | T030, T031, T032, T033, T034 |
-| FR-013b fail-open validation | T030, T032 |
-| FR-014 no renames; call_tool_*/retrieve_tools descriptions updated | T036, T037 |
-| FR-015 hot-reload apply (both paths), invalid value fails validation | T013, T014, T015, T016, T038 |
-| FR-016 Phase-1 default full; flip is separate | T002, T014 (default), out-of-release note |
-| FR-017 profiler compact arm (live) | T041 |
-| FR-018 flip-gate metrics emitted | T042 |
-| FR-019 deterministic + shared signature compiler | T003, T005, T040 |
-| SC-001 ≥50% median token reduction (measured) | T043 |
-| SC-002 100% ranked-ID identity (release-blocking in US1) | T019, T042 |
-| SC-003 byte-level full-mode regression + exact surface delta | T011, T036 |
-| SC-004 required in 100% of signatures | T020 |
-| SC-005 lossy rate <20% | T042, T043 |
-| SC-006 one retry succeeds; zero happy-path token cost | T035 |
-| SC-007 toggle within one hot-reload cycle; exactly one new tool | T036, T038 |
+| Item | Task(s) | Status |
+|---|---|---|
+| FR-001 tool_response_mode config, hot-reload, serialization-only | T002, T014, T015, T016, T022 | ✅ done |
+| FR-002 compact entry fields, no schema | T018, T021 | ✅ done |
+| FR-003 required marked + never elided (incl. missing-type E8) | T003, T005, T020, T021 | ✅ done |
+| FR-004 lossy collapse + flag | T003, T005, T021 | ✅ done |
+| FR-005 per-call `detail` override | T022 | ✅ done |
+| FR-006 full-mode byte-identical payloads | T011, T012 | ✅ done |
+| FR-007 ranked-ID identity across modes | T019, T021 | ✅ done |
+| FR-008 index-time hash-keyed cache, single owner, no per-request compile | T006, T007, T008, T024 | ✅ done |
+| FR-009 compact hint line | T023 | ✅ done |
+| FR-010 describe_tool ≤5, per-id errors, definition-field equal (no score) | T025, T027 | ✅ done |
+| FR-011 describe_tool shared-resolver visibility + retrieve mode only + ≤150 tok | T009, T010, T026, T027, T028 | ✅ done |
+| FR-012 describe_tool mode-independent | T029 | ✅ done |
+| FR-013 pre-dispatch validation + schema-on-arg-error, not on transport | T030, T031, T032, T033, T034 | ✅ done |
+| FR-013b fail-open validation | T030, T032 | ✅ done |
+| FR-014 no renames; call_tool_*/retrieve_tools descriptions updated | T036, T037 | ✅ done |
+| FR-015 hot-reload apply (both paths), invalid value fails validation | T013, T014, T015, T016, T038 | ✅ done |
+| FR-016 Phase-1 default full; flip is separate | T002, T014 (default), out-of-release note | ✅ done |
+| FR-017 profiler compact arm (live) | T041 | ✅ done (in-tree live arm `-flip-gates`; offline bench/arms migration ⛔ T040) |
+| FR-018 flip-gate metrics emitted | T042 | ✅ done (identity + tokens + lossy emitted; describe_tool usage field informational, populated by E2E later; frozen-corpus_v2 lossy run ⛔ awaits 083 rebase) |
+| FR-019 deterministic + shared signature compiler | T003, T005, T040 | ✅ compiler done; ⛔ T040 bench-arm migration blocked on 083 (PR #851) merge + rebase |
+| SC-001 ≥50% median token reduction (measured) | T043 | ⛔ blocked — re-baseline after 083 merge + rebase (T040/T043) |
+| SC-002 100% ranked-ID identity (release-blocking in US1) | T019, T042 | ✅ done (47/47 in-repo test + live gate emitted) |
+| SC-003 byte-level full-mode regression + exact surface delta | T011, T036 | ✅ done |
+| SC-004 required in 100% of signatures | T020 | ✅ done (45-schema frozen in-test corpus; corpus_v2 extension follows 083 rebase) |
+| SC-005 lossy rate <20% | T042, T043 | ✅ gate emitted (live corpus); ⛔ frozen-corpus_v2 measurement blocked on 083 rebase (T043) |
+| SC-006 one retry succeeds; zero happy-path token cost | T035 | ✅ done |
+| SC-007 toggle within one hot-reload cycle; exactly one new tool | T036, T038 | ✅ done (both reload paths E2E-tested) |
+
+**Status legend**: ✅ done on this branch · ⛔ cross-branch-blocked on 083 (PR #851) merging + the
+085 rebase (T040/T043 only — documented below).
 
 **Unsatisfiable / flagged items**: none unsatisfiable. Two sequencing/measurement notes:
 (1) SC-001's prior −52.6%/−92% figures were measured against the *bench* grammar (full

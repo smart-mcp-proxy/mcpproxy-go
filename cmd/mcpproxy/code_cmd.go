@@ -272,6 +272,7 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 		nil,
 		false,
 		globalConfig,
+		nil, // standalone one-shot: no runtime-owned signature cache
 	)
 	defer mcpProxy.Close()
 

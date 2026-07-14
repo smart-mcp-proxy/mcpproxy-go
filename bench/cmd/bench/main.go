@@ -58,6 +58,7 @@ func main() {
 	outDir := flag.String("out", "bench/results", "output directory for reports")
 	encoding := flag.String("encoding", bench.DefaultEncoding, "tiktoken encoding name")
 	live := flag.Bool("live", false, "run the live benchmark against a running proxy (full schemas + accuracy + latency + response cost)")
+	flipGates := flag.Bool("flip-gates", false, "with -live: run the Spec 085 compact arm — replay the golden set through MCP retrieve_tools in full AND compact mode and emit the flip-gate metrics (ranked-ID identity, token reduction, lossy rate)")
 	proxy := flag.String("proxy", "http://127.0.0.1:8092", "live proxy base URL")
 	apiKey := flag.String("api-key", "eval-corpus-snapshot", "live proxy API key (X-API-Key)")
 	goldenPath := flag.String("golden", "specs/065-evaluation-foundation/datasets/retrieval_golden_v1.json", "path to the retrieval golden set")
@@ -85,6 +86,7 @@ func main() {
 			lapPath:       *lapJSON,
 			corpusV2Path:  *corpusV2Path,
 			expectedTools: *expectedTools,
+			flipGates:     *flipGates,
 		})
 		return
 	}
@@ -428,6 +430,7 @@ type liveOptions struct {
 	lapPath       string
 	corpusV2Path  string
 	expectedTools int
+	flipGates     bool
 }
 
 func runLive(opts liveOptions) {
@@ -442,6 +445,19 @@ func runLive(opts liveOptions) {
 	})
 	if err != nil {
 		log.Fatalf("bench: %v", err)
+	}
+	if opts.flipGates {
+		// Spec 085 compact arm (FR-017/FR-018): same golden set, same live
+		// proxy, replayed through MCP retrieve_tools in both detail modes.
+		upstream, uerr := client.FetchUpstreamTools(context.Background())
+		if uerr != nil {
+			log.Fatalf("bench: flip-gates: %v", uerr)
+		}
+		gates, gerr := bench.RunLiveFlipGates(context.Background(), opts.proxy+"/mcp", golden, upstream, "live:"+opts.proxy, tkEncoding(report), 10)
+		if gerr != nil {
+			log.Fatalf("bench: flip-gates: %v", gerr)
+		}
+		report.FlipGates = gates
 	}
 	jsonPath, err := report.WriteJSON(opts.outDir)
 	if err != nil {
@@ -497,6 +513,12 @@ func runLive(opts liveOptions) {
 				be.BreakEvenCalls, be.NaiveFullMenuTokens, be.ProxyMenuTokens, be.MeanResponseTokens)
 		}
 	}
+	if g := report.FlipGates; g != nil {
+		fmt.Fprintf(os.Stdout, "  flip gates (Spec 085): ranked-ID identity %d/%d (pass=%v); median reduction %.1f%% (full p50=%d, compact p50=%d); lossy rate %.1f%% (pass=%v)\n",
+			g.RankedIdentity.Identical, g.RankedIdentity.Queries, g.RankedIdentity.Pass,
+			g.Tokens.MedianReduction*100, g.Tokens.Full.P50, g.Tokens.Compact.P50,
+			g.Lossy.Rate*100, g.Lossy.Pass)
+	}
 	fmt.Fprintf(os.Stdout, "wrote %s\n", jsonPath)
 
 	// Versioned v2 report + dashboard for the live run (research D12), with
@@ -515,4 +537,14 @@ func runLive(opts liveOptions) {
 		log.Fatalf("bench: %v", err)
 	}
 	fmt.Fprintf(os.Stdout, "wrote %s and %s\n", jsonV2Path, htmlPath)
+}
+
+// tkEncoding builds the tokenizer matching the live report's encoding so the
+// flip gates count with the same pinned encoder.
+func tkEncoding(rep *bench.LiveReport) *bench.Tokenizer {
+	tk, err := bench.NewTokenizer(rep.Encoding)
+	if err != nil {
+		log.Fatalf("bench: %v", err)
+	}
+	return tk
 }
