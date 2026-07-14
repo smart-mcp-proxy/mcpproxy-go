@@ -233,6 +233,25 @@ components:
           type: boolean
         tools_limit:
           type: integer
+        toon_min_savings_pct:
+          description: |-
+            ToonMinSavingsPct is the minimum byte-savings percentage (validated
+            1-90; 0/unset → 15) the complete TOON emission (marker + hint + body)
+            must achieve over the exact passthrough emission for adaptive mode to
+            encode a block. Byte savings approximate token savings for the tabular
+            payload class; the spec-083 profiler reports true token deltas.
+            Global-only (no per-server override, FR-001).
+          type: integer
+        toon_output:
+          description: |-
+            ToonOutput selects the TOON encoding mode for call_tool_* result text
+            blocks (spec 084): "off" (default — responses byte-identical to
+            pre-feature behavior), "adaptive" (encode only tabular-uniform payloads
+            that beat compact JSON by ToonMinSavingsPct), or "always"
+            (benchmark/debug only — encodes every JSON-parseable block and can
+            INCREASE token cost). Per-server override: ServerConfig.ToonOutput.
+            Resolved by ResolveToonOutput; hot-reloadable.
+          type: string
         top_k:
           description: 'Deprecated: TopK is superseded by ToolsLimit and has no runtime
             effect. Kept for backward compatibility.'
@@ -866,6 +885,13 @@ components:
             — and no longer gates quarantine or skip_quarantine.
           type: string
         tool_discovery_interval:
+          type: string
+        toon_output:
+          description: |-
+            ToonOutput overrides the global toon_output mode for this server's
+            tools (spec 084, FR-001). Plain string, not a pointer: ""/absent =
+            inherit the global value; "off"|"adaptive"|"always" = override ("off"
+            is the explicit force-off). Resolved by Config.ResolveToonOutput.
           type: string
         updated:
           type: string
