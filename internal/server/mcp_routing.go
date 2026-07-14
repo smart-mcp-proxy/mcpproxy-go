@@ -333,7 +333,11 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
-		retrieveToolsDetailOption(),
+		// Spec 085 FR-011 / spec §Out-of-scope: NO retrieveToolsDetailOption()
+		// here. describe_tool is absent from the code-execution surface in v1,
+		// so a compact response would reference an unavailable second stage;
+		// this mode's retrieve_tools always serializes FULL (enforced in
+		// handleRetrieveToolsWithMode) and does not expose the detail param.
 	)
 	tools = append(tools, p.setProfileServerTool())
 	tools = append(tools, mcpserver.ServerTool{

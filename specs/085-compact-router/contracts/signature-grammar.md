@@ -85,8 +85,16 @@ metacharacters. The **signature metacharacter set** is: space, `,` `:` `|` `=` `
 - **Bare** (`bareatom`) when the string is non-empty and contains **no** metacharacter — rendered
   verbatim (`origin`, `3600`, `auto`, `full`).
 - **Quoted** (`quotedatom`) otherwise (contains a metachar, or is the empty string): wrap in
-  double quotes and backslash-escape embedded `"` and `\`. Example: an enum value `a|b` →
-  `"a|b"`; a property named `x:y` → `"x:y"*:str`; a default `1,000` → `="1,000"`.
+  double quotes, backslash-escape embedded `"` and `\`, and escape embedded `~` to the
+  tilde-free sequence `\u007E` (4 hex digits, code point U+007E). Example: an enum value `a|b` →
+  `"a|b"`; a property named `x:y` → `"x:y"*:str`; a default `1,000` → `="1,000"`; a property
+  named `k~v` → `"k\u007Ev"*:str`.
+
+**Tilde is special (Lossy⟺`~` biconditional, §1)**: every RAW `~` in a signature string is a
+lossy marker — `Signature.Lossy == strings.Contains(sig, "~")` is a strict biconditional. A
+literal tilde inside an atom payload must therefore never survive rendering as-is: quoting alone
+is not enough (a quoted `"k~v"` still contains the byte `~`), which is why `~` has its own
+escape. `\u007E` contains no tilde, so a non-lossy signature never contains `~` anywhere.
 
 This makes the signature **unambiguous and reversible** (a parser can recover each atom) and keeps
 the common case (identifier-like names, numeric/keyword defaults) unquoted. Quoting is applied by

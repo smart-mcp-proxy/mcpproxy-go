@@ -444,7 +444,11 @@ const metachars = ` ,:|=()*~[]"`
 
 // quoteAtom renders an atom (name / enum value / default literal): bare when
 // non-empty and metachar-free; otherwise double-quoted with embedded `"` and
-// `\` backslash-escaped (unambiguous and reversible, §3.5).
+// `\` backslash-escaped and `~` escaped to the tilde-free sequence `\u007E`
+// (unambiguous and reversible, §3.5). The `~` escape is what upholds the
+// strict Lossy ⟺ contains(sig,"~") biconditional (§1): a literal tilde in an
+// atom payload must never appear in the signature string, where every raw
+// `~` is a lossy marker.
 func quoteAtom(atom string) string {
 	if atom != "" && !strings.ContainsAny(atom, metachars) {
 		return atom
@@ -452,45 +456,65 @@ func quoteAtom(atom string) string {
 	var b strings.Builder
 	b.WriteByte('"')
 	for _, r := range atom {
-		if r == '"' || r == '\\' {
+		switch r {
+		case '"', '\\':
 			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '~':
+			b.WriteString(`\u007E`)
+		default:
+			b.WriteRune(r)
 		}
-		b.WriteRune(r)
 	}
 	b.WriteByte('"')
 	return b.String()
 }
 
 // parseQuotedAtom is the reference parser for a quoted atom — it recovers the
-// original string from quoteAtom output. Used by tests to prove the escaping
-// round-trips; exported grammar consumers should treat signatures as opaque.
+// original string from quoteAtom output (including the tilde-free `\u007E`
+// escape for `~`, §3.5). Used by tests to prove the escaping round-trips;
+// exported grammar consumers should treat signatures as opaque.
 func parseQuotedAtom(quoted string) (string, error) {
 	if len(quoted) < 2 || quoted[0] != '"' || quoted[len(quoted)-1] != '"' {
 		return "", errors.New("toolsig: not a quoted atom")
 	}
 	var b strings.Builder
-	escaped := false
 	body := quoted[1 : len(quoted)-1]
-	for _, r := range body {
-		if escaped {
-			if r != '"' && r != '\\' {
-				return "", fmt.Errorf("toolsig: invalid escape \\%c", r)
-			}
-			b.WriteRune(r)
-			escaped = false
-			continue
-		}
+	for i := 0; i < len(body); {
+		r, size := utf8.DecodeRuneInString(body[i:])
 		switch r {
 		case '\\':
-			escaped = true
+			i += size
+			if i >= len(body) {
+				return "", errors.New("toolsig: dangling escape")
+			}
+			esc, escSize := utf8.DecodeRuneInString(body[i:])
+			switch esc {
+			case '"', '\\':
+				b.WriteRune(esc)
+				i += escSize
+			case 'u':
+				// \uXXXX — 4 hex digits (only ever emitted for '~', but the
+				// parser accepts any code point for forward compatibility).
+				i += escSize
+				if i+4 > len(body) {
+					return "", errors.New("toolsig: truncated \\u escape")
+				}
+				code, err := strconv.ParseUint(body[i:i+4], 16, 32)
+				if err != nil {
+					return "", fmt.Errorf("toolsig: invalid \\u escape %q", body[i:i+4])
+				}
+				b.WriteRune(rune(code))
+				i += 4
+			default:
+				return "", fmt.Errorf("toolsig: invalid escape \\%c", esc)
+			}
 		case '"':
 			return "", errors.New("toolsig: unescaped quote inside atom")
 		default:
 			b.WriteRune(r)
+			i += size
 		}
-	}
-	if escaped {
-		return "", errors.New("toolsig: dangling escape")
 	}
 	return b.String(), nil
 }

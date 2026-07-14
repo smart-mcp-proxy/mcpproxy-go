@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 085 T011 — full-mode byte-identity golden (FR-006/SC-003).
@@ -128,6 +130,99 @@ func TestRetrieveToolsFullMode_GoldenByteIdentity(t *testing.T) {
 		})
 		compareGolden(t, filepath.Join("testdata", "retrieve_full_stats.golden.json"), got)
 	})
+}
+
+// --- FR-006/FR-007 result-set parity with the merge-base (main) ---
+//
+// The extracted visibility path must reproduce the merge-base FULL-mode
+// filter semantics EXACTLY. Expected behavior below is derived by reading the
+// merge-base code (commit 95cfcfed):
+//
+//   - git show main:internal/server/mcp.go, handleRetrieveToolsWithMode
+//     filter loop (~:1345-1363): each index hit passes ONLY
+//     serverDiscoverable (agent scope + profile scope) then isToolCallable —
+//     no server-quarantine check, no pending/changed approval gate at this
+//     point. Non-callable hits go to droppedCount/disabled[].
+//   - git show main:internal/server/mcp.go, isToolCallable (~:5306-5357):
+//     server exists + Enabled + not config-denied + approval.Disabled==false.
+//     It never consults ServerConfig.Quarantined and never consults
+//     approval.Status — so PENDING and CHANGED tools that are in the index
+//     are callable results, and a quarantined server's tool that still
+//     lingers in the index (transient toggle window) is returned too; the
+//     quarantine second pass (collectQuarantinedToolMatches) dedupes it via
+//     `seen` instead of re-adding it as a locked entry.
+//
+// Any drift here (e.g. gating pending/changed or quarantined-lingering tools
+// out of SEARCH) violates FR-006 byte-identity. describe_tool is allowed to
+// be stricter (contracts/describe_tool.md), search is not.
+func TestRetrieveToolsFullMode_MergeBaseFilterSemantics(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "github", Enabled: true,
+	}))
+	// Enabled but quarantined: models the transient window where its tool is
+	// still indexed after a runtime quarantine toggle.
+	require.NoError(t, proxy.storage.SaveUpstreamServer(&config.ServerConfig{
+		Name: "quarry", Enabled: true, Quarantined: true,
+	}))
+
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "pending_tool",
+		Status: storage.ToolApprovalStatusPending,
+	}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "changed_tool",
+		Status: storage.ToolApprovalStatusChanged,
+	}))
+	require.NoError(t, proxy.storage.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "github", ToolName: "disabled_tool",
+		Status: storage.ToolApprovalStatusApproved, Disabled: true,
+	}))
+
+	for _, tool := range []struct{ name, server, desc string }{
+		{"github:plain_tool", "github", "mergebasequery alpha"},
+		{"github:pending_tool", "github", "mergebasequery beta two"},
+		{"github:changed_tool", "github", "mergebasequery gamma three words"},
+		{"github:disabled_tool", "github", "mergebasequery delta four words here"},
+		{"quarry:lingering_tool", "quarry", "mergebasequery epsilon five words here now"},
+	} {
+		require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{
+			Name: tool.name, ServerName: tool.server,
+			Description: tool.desc, ParamsJSON: `{"type":"object"}`,
+		}))
+	}
+
+	cases := []struct {
+		tool string
+		want bool // returned by full-mode retrieve_tools per merge-base semantics
+	}{
+		{"github:plain_tool", true},
+		// main:internal/server/mcp.go isToolCallable (~:5405-5410) checks only
+		// approval.Disabled — a pending/changed Status passes.
+		{"github:pending_tool", true},
+		{"github:changed_tool", true},
+		// approval.Disabled=true → !isToolCallable → dropped (~:1349).
+		{"github:disabled_tool", false},
+		// isToolCallable (~:5388-5395) checks Enabled only, never Quarantined.
+		{"quarry:lingering_tool", true},
+	}
+
+	got := callRetrieveRaw(t, proxy, map[string]interface{}{
+		"query": "mergebasequery", "limit": float64(20),
+	})
+	var resp retrieveToolsResponse
+	require.NoError(t, json.Unmarshal([]byte(got), &resp))
+	names := map[string]bool{}
+	for _, entry := range resp.Tools {
+		names[entry["name"].(string)] = true
+	}
+
+	for _, c := range cases {
+		assert.Equal(t, c.want, names[c.tool],
+			"FULL-mode result-set drift from merge-base for %s (FR-006): merge-base filter = scope -> isToolCallable only", c.tool)
+	}
+	assert.Equal(t, 4, resp.Total, "merge-base returns 4 of the 5 fixture tools")
 }
 
 // --- Spec 085 US1 T018 (FR-002): compact entry shape ---

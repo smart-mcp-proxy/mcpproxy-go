@@ -87,11 +87,13 @@ func (p *MCPProxyServer) describeVisibilityError(reason, serverName, toolName st
 // {name, description, inputSchema, server, annotations, call_with}, with the
 // ranked-only score absent — plus per-id errors for ids that don't resolve.
 //
-// Every id runs through p.toolVisibleToSession, the exact predicate
-// retrieve_tools filters with, so describe_tool can never return a definition
-// the same session's search would not (FR-011, Constitution IV). The handler
-// never consults the response mode: output is identical under full and
-// compact (FR-012).
+// Every id runs through p.toolVisibleToSession — retrieve_tools' search gates
+// (scope → callability) plus the STRICTER describe-only contract gates
+// (index presence, server quarantine, pending/changed approval). Because it
+// only adds gates on top of search's, describe_tool can never return a
+// definition the same session's search would not (FR-011, Constitution IV).
+// The handler never consults the response mode: output is identical under
+// full and compact (FR-012).
 func (p *MCPProxyServer) handleDescribeTool(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	p.recordMCPSurface()
 	p.recordBuiltinTool("describe_tool")

@@ -69,11 +69,16 @@ Contract guarantees:
 - **Mode independence (FR-012)**: identical output whether `tool_response_mode` is `full` or
   `compact` — describe_tool ignores the mode.
 
-## Visibility pipeline (FR-011 — MUST mirror retrieve_tools)
+## Visibility pipeline (FR-011 — strictly narrower than retrieve_tools)
 
-For each id, resolve `(server, tool)` and call the **shared resolver** `p.toolVisibleToSession`
-(research.md R10 / tasks.md T010) — the exact same predicate `retrieve_tools` uses. Its check
-order (single source of truth, identical in the contract, research.md, and tasks.md) is:
+For each id, resolve `(server, tool)` and call the resolver `p.toolVisibleToSession`
+(research.md R10 / tasks.md T010). It is built from the SAME step helpers `retrieve_tools`
+filters with (scope + `isToolCallable`), **plus** the describe-only gates 1/3/4 below.
+`retrieve_tools`' own result filter applies only steps 2 and 5 — the merge-base FULL-mode
+semantics, which FR-006 byte-identity freezes (search never gated server quarantine or
+pending/changed approvals on indexed hits). Because describe_tool only ADDS gates, the
+security invariant (never return what search would not) holds by construction; the extra
+gates make describe stricter, never looser. Check order for describe_tool:
 1. **Index presence** — the tool exists in the (profile-scoped) index. Absent ⇒ per-id error
    `not_found`.
 2. **Profile scope (Spec 057) + agent-token server scope (Spec 028)** — out of scope ⇒ per-id

@@ -45,6 +45,41 @@ func sigWarmTool(name, hash, schema, desc string) *config.ToolMetadata {
 	}
 }
 
+// The cache must also RECONCILE (finding: stale hashes were never evicted —
+// lifecycle only warmed new ones): after a differential update replaces or
+// removes tools, entries keyed by the dead hashes are evicted and Len matches
+// the live indexed tool count.
+func TestApplyDifferentialToolUpdate_EvictsStaleSignatureCacheEntries(t *testing.T) {
+	rt := newSigWarmRuntime(t)
+	ctx := context.Background()
+
+	schemaA := `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`
+	schemaB := `{"type":"object","properties":{"q":{"type":"string"}},"required":["q"]}`
+	schemaA2 := `{"type":"object","properties":{"path":{"type":"string"},"head":{"type":"integer"}},"required":["path"]}`
+
+	require.NoError(t, rt.applyDifferentialToolUpdate(ctx, "sig-server", []*config.ToolMetadata{
+		sigWarmTool("tool_a", "evict-hash-a", schemaA, "Read a file."),
+		sigWarmTool("tool_b", "evict-hash-b", schemaB, "Search things."),
+	}))
+	assert.Equal(t, 2, rt.SignatureCache().Len())
+
+	// tool_a's definition changes (new hash) and tool_b is REMOVED: after the
+	// update the only live hash is evict-hash-a2.
+	require.NoError(t, rt.applyDifferentialToolUpdate(ctx, "sig-server", []*config.ToolMetadata{
+		sigWarmTool("tool_a", "evict-hash-a2", schemaA2, "Read a file."),
+	}))
+
+	assert.Equal(t, 1, rt.SignatureCache().Len(),
+		"cache must reconcile to the live tool set after churn (stale hashes evicted)")
+
+	// The live entry is a pure hit; the dead ones are genuine misses again.
+	before := rt.SignatureCache().CompileCount()
+	rt.SignatureCache().Warm("evict-hash-a2", schemaA2, "Read a file.")
+	assert.Equal(t, before, rt.SignatureCache().CompileCount(), "live hash must remain cached")
+	rt.SignatureCache().Get("evict-hash-a", schemaA, "Read a file.")
+	assert.Equal(t, before+1, rt.SignatureCache().CompileCount(), "stale hash must have been evicted")
+}
+
 func TestApplyDifferentialToolUpdate_WarmsSignatureCache(t *testing.T) {
 	rt := newSigWarmRuntime(t)
 	ctx := context.Background()

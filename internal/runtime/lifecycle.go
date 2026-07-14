@@ -563,6 +563,7 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		r.warmSignatureCache(allowedTools)
 		// The shared index changed for this server; refresh dependent profiles.
 		r.reindexAffectedProfiles(serverName)
+		r.reconcileSignatureCache()
 		return nil
 	}
 
@@ -719,6 +720,9 @@ func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName st
 		len(approvalResult.BlockedTools) > 0
 	if changed {
 		r.reindexAffectedProfiles(serverName)
+		// Evict signature-cache entries orphaned by removed/redefined tools —
+		// warming above only ever ADDS entries.
+		r.reconcileSignatureCache()
 	}
 
 	return nil
@@ -739,6 +743,45 @@ func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 			continue
 		}
 		r.sigCache.Warm(tool.Hash, tool.ParamsJSON, tool.Description)
+	}
+}
+
+// reconcileSignatureCache evicts signature-cache entries whose hash no longer
+// backs any indexed tool (Spec 085 FR-008 hygiene). warmSignatureCache only
+// ever ADDS entries, so after tool removals/redefinitions the dead hashes
+// would otherwise accumulate for the life of the process. Called after index
+// rebuilds and differential updates; enumerates the SHARED index only —
+// per-profile indexes hold subsets of the same tools, hence the same hashes.
+func (r *Runtime) reconcileSignatureCache() {
+	if r.sigCache == nil || r.indexManager == nil {
+		return
+	}
+	serverNames, err := r.indexManager.GetAllIndexedServerNames()
+	if err != nil {
+		r.logger.Debug("signature cache reconcile skipped: cannot enumerate indexed servers", zap.Error(err))
+		return
+	}
+	live := make(map[string]struct{})
+	for _, serverName := range serverNames {
+		tools, err := r.indexManager.GetToolsByServer(serverName)
+		if err != nil {
+			// Fail open (skip the sweep) rather than evict entries we could not
+			// enumerate: a lingering stale entry is harmless memory, an evicted
+			// live one costs a recompile on the next compact retrieve.
+			r.logger.Debug("signature cache reconcile skipped: cannot enumerate server tools",
+				zap.String("server", serverName), zap.Error(err))
+			return
+		}
+		for _, tool := range tools {
+			if tool != nil && tool.Hash != "" {
+				live[tool.Hash] = struct{}{}
+			}
+		}
+	}
+	if evicted := r.sigCache.RetainHashes(live); evicted > 0 {
+		r.logger.Debug("evicted stale signature cache entries",
+			zap.Int("evicted", evicted),
+			zap.Int("live", len(live)))
 	}
 }
 
@@ -1558,6 +1601,11 @@ func (r *Runtime) cleanupOrphanedIndexEntries() {
 		zap.Int("active_servers", len(activeServers)),
 		zap.Int("indexed_servers", len(indexedServers)),
 		zap.Int("orphans_removed", removedCount))
+
+	if removedCount > 0 {
+		// Removed servers' tools leave the index; their signatures leave too.
+		r.reconcileSignatureCache()
+	}
 }
 
 // supervisorEventForwarder subscribes to supervisor events and emits runtime events

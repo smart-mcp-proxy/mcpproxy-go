@@ -341,6 +341,68 @@ func TestRender_AtomEscaping_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRender_TildeAtoms_LossyBiconditional: a literal "~" inside an atom
+// (name / enum value / default) must never leak into the signature string —
+// otherwise a non-lossy signature would contain "~" and break the strict
+// biconditional Lossy ⟺ contains(sig,"~") (grammar contract §1/§3.5). Quoted
+// atoms therefore escape "~" to a tilde-free sequence (~).
+func TestRender_TildeAtoms_LossyBiconditional(t *testing.T) {
+	tests := []struct {
+		name       string
+		paramsJSON string
+		wantLossy  bool
+	}{
+		{
+			name:       "tilde in property name",
+			paramsJSON: `{"type":"object","properties":{"k~v":{"type":"string"}},"required":["k~v"]}`,
+			wantLossy:  false,
+		},
+		{
+			name:       "tilde in enum value",
+			paramsJSON: `{"type":"object","properties":{"mode":{"enum":["a~b","c"]}},"required":["mode"]}`,
+			wantLossy:  false,
+		},
+		{
+			name:       "tilde in default literal",
+			paramsJSON: `{"type":"object","properties":{"sep":{"type":"string","default":"~"}}}`,
+			wantLossy:  false,
+		},
+		{
+			name:       "tilde atom on a genuinely lossy param keeps exactly the marker tilde",
+			paramsJSON: `{"type":"object","properties":{"k~v":{"type":"object"}},"required":["k~v"]}`,
+			wantLossy:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sig, err := Render(tt.paramsJSON, "")
+			if err != nil {
+				t.Fatalf("Render() unexpected error: %v", err)
+			}
+			if sig.Lossy != tt.wantLossy {
+				t.Errorf("Lossy = %v, want %v (sig=%q)", sig.Lossy, tt.wantLossy, sig.Sig)
+			}
+			if got := strings.Contains(sig.Sig, "~"); got != sig.Lossy {
+				t.Errorf("biconditional violated: Lossy=%v but contains(sig,\"~\")=%v (sig=%q)",
+					sig.Lossy, got, sig.Sig)
+			}
+		})
+	}
+
+	// The escape stays reversible: quoteAtom/parseQuotedAtom round-trip a
+	// tilde-bearing atom, and the quoted form is tilde-free.
+	for _, atom := range []string{"k~v", "~", "~~", `a"~\b`} {
+		q := quoteAtom(atom)
+		if strings.Contains(q, "~") {
+			t.Errorf("quoteAtom(%q) = %q still contains a literal ~", atom, q)
+		}
+		got, err := parseQuotedAtom(q)
+		if err != nil || got != atom {
+			t.Errorf("round-trip of %q via %q got %q (err=%v)", atom, q, got, err)
+		}
+	}
+}
+
 // TestRender_NumericEnumValues: numeric enum values render deterministically.
 func TestRender_NumericEnumValues(t *testing.T) {
 	sig, _ := Render(`{"type":"object","properties":{"level":{"enum":[1,2,3]}},"required":["level"]}`, "")

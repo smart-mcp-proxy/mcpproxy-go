@@ -170,6 +170,15 @@ func TestMenuSurface_ExactDeltaFromPreFeature(t *testing.T) {
 func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
+	if surface == "code_execution_mode" {
+		// Spec §Out-of-scope / FR-011: the code_execution surface keeps its
+		// CURRENT shape in v1 — no describe_tool there, hence no detail param
+		// and no compact serialization. Byte-identical to pre-feature.
+		assert.Equal(t, preM, curM,
+			"surface %s: code_execution retrieve_tools must be byte-identical to pre-feature (no detail param — describe_tool is absent on this surface in v1)", surface)
+		return
+	}
+
 	preProps, curProps := schemaProps(preM), schemaProps(curM)
 	require.NotNil(t, curProps, "surface %s: retrieve_tools lost its inputSchema", surface)
 
@@ -203,14 +212,8 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 
 	preDesc, _ := preM["description"].(string)
 	curDesc, _ := curM["description"].(string)
-	if surface == "code_execution_mode" {
-		// describe_tool is not exposed there (v1), so its description must not
-		// point at it; the pre-feature text stays.
-		assert.Equal(t, preDesc, curDesc,
-			"surface %s: code_execution retrieve_tools description unchanged (describe_tool not exposed there in v1)", surface)
-		return
-	}
 	// FR-014: updated description referencing signatures + describe_tool.
+	// (code_execution_mode returned above: its whole definition is pre-feature.)
 	assert.NotEqual(t, preDesc, curDesc,
 		"surface %s: retrieve_tools description must be updated (FR-014)", surface)
 	assert.Contains(t, curDesc, "describe_tool",

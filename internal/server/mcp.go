@@ -1300,6 +1300,16 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// buildToolEntry below, after the query/rank/filter pipeline completed.
 	detailParam := request.GetString("detail", "")
 	responseMode := p.effectiveToolResponseMode(detailParam)
+	if routingMode == config.RoutingModeCodeExecution {
+		// FR-011 / spec §Out-of-scope: describe_tool is not exposed on the
+		// code-execution surface in v1, so a compact response would point the
+		// agent at an unavailable tool. This surface stays CURRENT: always
+		// FULL, ignoring both the global mode and any smuggled detail arg
+		// (the param is absent from this mode's schema, but arguments are not
+		// schema-enforced).
+		detailParam = ""
+		responseMode = config.ToolResponseModeFull
+	}
 
 	// Spec 035 F4: Annotation-based filtering parameters
 	readOnlyOnly := request.GetBool("read_only_only", false)
@@ -1406,10 +1416,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 
-		// Spec 085 (FR-011): the index hit runs through the SAME visibility
-		// pipeline describe_tool uses (scope → server quarantine → tool
-		// approval → callability). Results are index hits by construction, so
-		// the index-presence step is skipped here.
+		// Spec 085 (FR-006/FR-011): the index hit runs through the shared
+		// SEARCH visibility step (scope → isToolCallable) — behavior-preserving
+		// with the merge-base inline filter (main: internal/server/mcp.go
+		// ~:1345-1363; no server-quarantine or pending/changed gate here).
+		// describe_tool layers its stricter contract gates ON TOP of these in
+		// toolVisibleToSession, so it can never return a definition search
+		// would not. Results are index hits by construction, so the
+		// index-presence step is skipped here.
 		visible, reason := p.indexedToolVisible(authCtx, profileScope, serverName, toolName)
 		if visible {
 			callableResults = append(callableResults, result)
@@ -4847,8 +4861,10 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 // an argument-validation failure (Spec 085 FR-013 Path B). Typed HTTP errors
 // are never reclassified (transport/auth/5xx keep their shape); a JSON-RPC
 // error qualifies only with the InvalidParams code (-32602); untyped strings
-// qualify only on unambiguous invalid-params phrasing without an HTTP status
-// shape. Returns the one-line detail for the self-healing error body.
+// qualify only on narrow schema-validation phrasing (invalidParamsMessageRe)
+// AND with no transport/auth/timeout/HTTP-status smell (invalidParamsDenyRe)
+// — e.g. "401 Unauthorized: invalid parameters" is an auth failure, not an
+// argument bug. Returns the one-line detail for the self-healing error body.
 func classifyUpstreamInvalidParams(err error) (detail string, ok bool) {
 	var jsonRPCErr *transport.JSONRPCError
 	if errors.As(err, &jsonRPCErr) {
@@ -4862,7 +4878,7 @@ func classifyUpstreamInvalidParams(err error) (detail string, ok bool) {
 		return "", false
 	}
 	msg := err.Error()
-	if invalidParamsMessageRe.MatchString(msg) && !httpStatusMessageRe.MatchString(msg) {
+	if invalidParamsMessageRe.MatchString(msg) && !invalidParamsDenyRe.MatchString(msg) {
 		return msg, true
 	}
 	return "", false

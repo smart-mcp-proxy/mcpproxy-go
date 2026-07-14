@@ -61,6 +61,26 @@ func (c *Cache) Warm(hash, paramsJSON, description string) {
 	c.Get(hash, paramsJSON, description)
 }
 
+// RetainHashes reconciles the cache to the live tool set: every entry whose
+// hash is NOT in live is evicted, and the number of evictions is returned.
+// The indexing path calls this after index rebuilds/differential updates so
+// stale hashes (removed or redefined tools) do not accumulate for the life of
+// the process — Warm only ever adds. A nil/empty live set clears the cache.
+// Safe for concurrent use with Get/Warm: eviction holds the write lock, and a
+// racing Get for an evicted hash simply recompiles (rendering is pure).
+func (c *Cache) RetainHashes(live map[string]struct{}) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	evicted := 0
+	for hash := range c.m {
+		if _, ok := live[hash]; !ok {
+			delete(c.m, hash)
+			evicted++
+		}
+	}
+	return evicted
+}
+
 // CompileCount reports how many signatures were compiled-and-stored (one per
 // unique hash). Test/observability hook — FR-008's falsifier.
 func (c *Cache) CompileCount() int64 {

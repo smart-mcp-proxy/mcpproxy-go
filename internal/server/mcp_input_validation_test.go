@@ -341,6 +341,81 @@ func TestCreateDetailedErrorResponse_BestEffortInvalidParamsMessage(t *testing.T
 	assert.Contains(t, body["hint"], "describe_tool")
 }
 
+// Path B classifier unit table (FR-013 scenario 2): the untyped best-effort
+// branch must be narrow. Only unambiguous schema-validation phrasing
+// classifies; anything that smells like transport/auth/timeout — including
+// upstream auth errors that merely CONTAIN "invalid parameters", like
+// "401 Unauthorized: invalid parameters" — must keep its existing shape.
+func TestClassifyUpstreamInvalidParams_Table(t *testing.T) {
+	positive := []struct {
+		name string
+		err  error
+	}{
+		{"typed -32602", &transport.JSONRPCError{Code: -32602, Message: "Invalid params"}},
+		{"missing required parameter", errors.New("missing required parameter 'title'")},
+		{"missing required property", errors.New("tool call failed: missing required property 'name'")},
+		{"missing required argument", errors.New("missing required argument: query")},
+		{"missing required field", errors.New("missing required field 'id'")},
+		{"required property phrasing", errors.New("required property 'title' not provided")},
+		{"does not match schema", errors.New("arguments does not match schema for tool echo")},
+		{"validation failed for parameter", errors.New("validation failed for parameter 'limit'")},
+	}
+	for _, c := range positive {
+		t.Run("positive/"+c.name, func(t *testing.T) {
+			detail, ok := classifyUpstreamInvalidParams(c.err)
+			assert.True(t, ok, "must classify as invalid-params: %v", c.err)
+			assert.NotEmpty(t, detail)
+		})
+	}
+
+	negative := []struct {
+		name string
+		err  error
+	}{
+		// The reported false positive: an auth failure carrying the old broad phrase.
+		{"401 unauthorized with invalid parameters", errors.New("401 Unauthorized: invalid parameters")},
+		{"bare invalid parameters", errors.New("invalid parameters")},
+		{"bare invalid params", errors.New("upstream rejected request: invalid params")},
+		{"bare invalid arguments", errors.New("invalid arguments")},
+		{"forbidden", errors.New("403 Forbidden: missing required parameter scope")},
+		{"auth wording wins over schema wording", errors.New("authentication failed: missing required parameter 'token'")},
+		{"token wording", errors.New("token expired; missing required parameter refresh")},
+		{"oauth wording", errors.New("oauth handshake failed: required property missing")},
+		{"timeout", errors.New("request timeout: validation failed for parameter 'q'")},
+		{"deadline", errors.New("context deadline exceeded")},
+		{"connection", errors.New("connection reset by peer")},
+		{"dial", errors.New("dial tcp 127.0.0.1:9: connect: refused")},
+		{"tls", errors.New("tls: handshake failure")},
+		{"http status shape", errors.New("HTTP 400: missing required parameter 'title'")},
+		{"status code shape", errors.New("request failed with status code 422: does not match schema")},
+		{"bare 4xx code", errors.New("upstream returned 422: missing required parameter 'title'")},
+		{"bare 5xx code", errors.New("500 internal error: required property lost")},
+		{"typed HTTP error", &transport.HTTPError{StatusCode: 400, Body: "missing required parameter 'title'", URL: "http://up", Method: "POST"}},
+		{"typed json-rpc non--32602", &transport.JSONRPCError{Code: -32603, Message: "missing required parameter 'title'"}},
+	}
+	for _, c := range negative {
+		t.Run("negative/"+c.name, func(t *testing.T) {
+			_, ok := classifyUpstreamInvalidParams(c.err)
+			assert.False(t, ok, "must NOT classify as invalid-params: %v", c.err)
+		})
+	}
+}
+
+// The 401 false positive end-to-end: even for a tool WITH a stored schema, an
+// auth-flavored string error must keep the generic shape — no input_schema,
+// no invalid_params reclassification.
+func TestCreateDetailedErrorResponse_AuthStringError_NotReclassified(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	seedEntryBuilderFixture(t, proxy) // github:create_issue HAS a schema in the index
+
+	result := proxy.createDetailedErrorResponse(
+		errors.New("401 Unauthorized: invalid parameters"), "github", "create_issue")
+	body := decodeErrorBody(t, result)
+	assert.NotContains(t, body, "input_schema",
+		"an upstream auth error must never be reclassified as invalid_params")
+	assert.NotEqual(t, "invalid_params", body["error_type"])
+}
+
 // T034 (Path B degradation): a -32602 for a tool with NO stored schema keeps
 // the existing JSON-RPC error shape — a self-healing error without a schema
 // would be an empty promise.

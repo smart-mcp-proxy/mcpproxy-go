@@ -128,9 +128,11 @@ func TestRetrieveTools_CompactHintLine(t *testing.T) {
 }
 
 // T022 (FR-005 / US4 FR-014 precondition): the `detail` parameter is
-// registered on every retrieve_tools definition — the default server and
-// both routing-mode builders — as an enum {compact, full} with NO default,
-// and ALL pre-existing parameters are preserved unchanged.
+// registered on the retrieve_tools-mode surfaces — the default server and
+// buildCallToolModeTools — as an enum {compact, full} with NO default, and
+// ALL pre-existing parameters are preserved unchanged. The code_execution
+// surface is OUT of scope in v1 (spec §Out-of-scope, FR-011): describe_tool
+// is not exposed there, so it neither gains `detail` nor serializes compact.
 func TestRetrieveTools_DetailParamRegisteredEverywhere(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
 
@@ -174,12 +176,54 @@ func TestRetrieveTools_DetailParamRegisteredEverywhere(t *testing.T) {
 	t.Run("code-execution routing mode", func(t *testing.T) {
 		for _, st := range proxy.buildCodeExecModeTools() {
 			if st.Tool.Name == "retrieve_tools" {
-				checkTool(t, st.Tool, codeExecModeParams)
+				props := st.Tool.InputSchema.Properties
+				for _, name := range codeExecModeParams {
+					assert.Contains(t, props, name, "pre-existing code-exec retrieve_tools param %q must be preserved", name)
+				}
+				assert.NotContains(t, props, "detail",
+					"code_execution retrieve_tools must NOT expose detail: describe_tool is absent there in v1 (FR-011), so compact output would reference an unavailable tool")
 				return
 			}
 		}
 		t.Fatal("retrieve_tools not found in buildCodeExecModeTools")
 	})
+}
+
+// Regression (FR-011 review finding): code-execution mode has NO describe_tool,
+// so its retrieve_tools must ALWAYS serialize full — regardless of the global
+// tool_response_mode and regardless of a detail argument smuggled past the
+// schema (arguments are not schema-enforced). A compact response there would
+// point agents at a tool that does not exist on the surface.
+func TestRetrieveTools_CodeExecModeAlwaysFull(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	proxy.config.ToolResponseMode = config.ToolResponseModeCompact // global compact
+	seedEntryBuilderFixture(t, proxy)
+
+	callCodeExec := func(args map[string]interface{}) (retrieveToolsResponse, string) {
+		t.Helper()
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = args
+		handler := proxy.handleRetrieveToolsForMode(config.RoutingModeCodeExecution)
+		result, err := handler(context.Background(), req)
+		require.NoError(t, err)
+		require.False(t, result.IsError)
+		return decodeRetrieve(t, result), result.Content[0].(mcp.TextContent).Text
+	}
+
+	// Global compact must not leak into the code-exec surface.
+	resp, raw := callCodeExec(map[string]interface{}{"query": "manage", "limit": float64(10)})
+	assertFullEntries(t, resp)
+	assert.NotContains(t, raw, `"hint"`, "code-exec responses must not carry the compact hint")
+
+	// Even an explicit detail=compact argument is ignored on this surface.
+	resp, raw = callCodeExec(map[string]interface{}{"query": "manage", "limit": float64(10), "detail": "compact"})
+	assertFullEntries(t, resp)
+	assert.NotContains(t, raw, `"hint"`)
+
+	// Sanity: the same proxy DOES serialize compact on the retrieve_tools-mode
+	// surface, so the assertion above is meaningful.
+	compactResp, _ := callRetrieve(t, proxy, map[string]interface{}{"query": "manage", "limit": float64(10)})
+	assertCompactEntries(t, compactResp)
 }
 
 // Cross-cutting response sections survive compaction untouched (data-model

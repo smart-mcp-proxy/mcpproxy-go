@@ -212,13 +212,26 @@ func oneLineValidationDetail(err error) string {
 // jsonRPCInvalidParamsCode is the JSON-RPC 2.0 "Invalid params" error code.
 const jsonRPCInvalidParamsCode = -32602
 
-// invalidParamsMessageRe is the Path B best-effort classifier for untyped
-// upstream errors. Deliberately conservative: it must never reclassify
-// transport/auth/timeout failures (FR-013 scenario 2), so it matches only
-// unambiguous argument-validation phrasing.
+// invalidParamsMessageRe is the Path B best-effort ALLOW list for untyped
+// upstream errors. Deliberately narrow: generic "invalid params/parameters/
+// arguments" wording is NOT enough (auth failures routinely carry it — e.g.
+// "401 Unauthorized: invalid parameters"), so only unambiguous
+// schema-validation phrasing qualifies. Typed errors never reach this regex:
+// JSON-RPC classifies by code (-32602) and HTTP errors are never reclassified.
 var invalidParamsMessageRe = regexp.MustCompile(
-	`(?i)\binvalid (params|parameters|arguments?)\b|\bmissing required (property|parameter|argument|field)\b`)
+	`(?i)\bmissing required (property|parameter|argument|field)\b` +
+		`|\brequired property\b` +
+		`|\bdoes not match (the )?schema\b` +
+		`|\bvalidation failed for (parameter|argument|property|field)\b`)
 
-// httpStatusMessageRe guards the best-effort branch: strings that carry an
-// HTTP status shape stay on the existing HTTP-aware error path.
-var httpStatusMessageRe = regexp.MustCompile(`status code \d|HTTP \d`)
+// invalidParamsDenyRe is the Path B DENY list: any transport/auth/timeout
+// smell — or an HTTP status shape/code — vetoes best-effort classification
+// even when the allow list matched, so those failures keep their existing
+// error shapes (FR-013 scenario 2). Overly broad on purpose: a false denial
+// only costs the self-healing hint, a false classification mislabels an
+// auth/transport failure as an argument bug.
+var invalidParamsDenyRe = regexp.MustCompile(
+	`(?i)\b(unauthorized|forbidden|auth|authenticat\w*|authoriz\w*|token|oauth|api[ _-]?key|credential\w*|permission\w*` +
+		`|timeout|timed out|deadline|connection|dial|tls|certificate|proxyconnect|unreachable|refused)\b` +
+		`|\b[45]\d{2}\b` +
+		`|status code \d|HTTP \d`)
