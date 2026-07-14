@@ -235,18 +235,22 @@ contains per-class savings and decision counts.
 
 ### Tests (write first, must fail)
 
-> **BLOCKED (2026-07-14)**: `bench/arms/` does not exist on this branch — the spec-083 profiler
-> harness it implements against lives on the 083 branch (PR #851) and has not been merged into
-> `main`/this worktree. T035/T036 must follow once #851 lands (the `internal/toonenc` import
-> surface they need — `EncodeBlock`, `Decision`, `Mode` — is complete and stable).
+> **CROSS-BRANCH-BLOCKED on PR #851 (2026-07-14)**: `bench/arms/` does not exist on this branch —
+> the spec-083 profiler harness it implements against lives on the 083 branch (PR #851) and has not
+> been merged into `main`/this worktree. T035/T036 must follow once #851 lands and this branch
+> rebases (the `internal/toonenc` import surface they need — `EncodeBlock`, `Decision`, `Mode` —
+> is complete and stable). Matching sequencing: spec 085 T040/T043.
 
-- [ ] T035 [P] [US4] `bench/arms/toon_results_test.go`: the arm reports the three SC-001 metrics
+- [ ] T035 [P] [US4] **CROSS-BRANCH-BLOCKED on PR #851** (`bench/arms/` lives only on
+      `083-discovery-profiler`; do after #851 merges and this branch rebases — do not fabricate
+      `bench/arms/` here): `bench/arms/toon_results_test.go`: the arm reports the three SC-001 metrics
       (savings on encoded subset; informational savings across all tabular; byte-identical passthrough on
       non-tabular) and the four decision counts; asserts it calls `toonenc.EncodeBlock` (same code path). (SC-001)
 
 ### Implementation
 
-- [ ] T036 [US4] `bench/arms/toon_results.go`: implement the spec-083 `Arm` interface for the results
+- [ ] T036 [US4] **CROSS-BRANCH-BLOCKED on PR #851** (same rationale as T035):
+      `bench/arms/toon_results.go`: implement the spec-083 `Arm` interface for the results
       corpus, importing `internal/toonenc` and calling `toonenc.EncodeBlock` per fixture block; register
       it in the arm index. Depends on the spec-083 harness (PR #851) being merged. (FR-012)
 

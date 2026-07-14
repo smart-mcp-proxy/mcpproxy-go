@@ -114,10 +114,22 @@ func TestEncodeBlockRandomizedKeyOrderDeterministic(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := rand.New(rand.NewSource(42)) //nolint:gosec // deterministic test shuffling
+			// Generate all inputs up front and require at least two DISTINCT
+			// serializations — otherwise the identical-output assertion below
+			// would be vacuous (finding: the test never proved the shuffles
+			// actually differed).
+			texts := make([]string, 20)
+			distinct := make(map[string]struct{}, len(texts))
+			for n := range texts {
+				texts[n] = marshalShuffled(r, tc.value)
+				distinct[texts[n]] = struct{}{}
+			}
+			if len(distinct) < 2 {
+				t.Fatalf("shuffling produced only %d distinct serialization(s) out of %d; determinism assertion would be vacuous", len(distinct), len(texts))
+			}
 			var first string
 			var firstDecision Decision
-			for n := 0; n < 20; n++ {
-				text := marshalShuffled(r, tc.value)
+			for n, text := range texts {
 				out, d := EncodeBlock(text, tc.mode, defaultThreshold, 0)
 				if d.Outcome != OutcomeEncoded {
 					t.Fatalf("iteration %d: expected encoded, got %+v", n, d)
@@ -320,6 +332,74 @@ func TestEncodeBlockMarkerAndRoundTrip(t *testing.T) {
 			if !reflect.DeepEqual(normalizeNums(orig), normalizeNums(decoded)) {
 				t.Fatalf("decoded TOON does not match original value\norig: %#v\ndec:  %#v",
 					normalizeNums(orig), normalizeNums(decoded))
+			}
+		})
+	}
+}
+
+// --- Number fidelity (FR-004/FR-006): non-roundtrippable numbers pass through ---
+
+// bigNumTable returns a tabular fixture that would comfortably encode, except
+// that one row carries num as a raw JSON number literal.
+func bigNumTable(num string) string {
+	var sb strings.Builder
+	sb.WriteString("[")
+	for i := 0; i < 30; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		val := fmt.Sprintf("%d", i*11)
+		if i == 7 {
+			val = num
+		}
+		fmt.Fprintf(&sb, `{"id":%d,"name":"user-%d","email":"user-%d@example.com","count":%s}`, i, i, i, val)
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
+
+// TestEncodeBlockNonRoundtrippableNumberPassthrough (P1): toon-go normalizes
+// json.Number through float64, so any integer beyond 2^53 would be silently
+// corrupted (9007199254740993 rounds to ...992). FR-004/FR-006 forbid data
+// loss: such a block must pass through byte-identically in EVERY mode, with
+// the distinct ReasonNonRoundtrippableNumber.
+func TestEncodeBlockNonRoundtrippableNumberPassthrough(t *testing.T) {
+	fixtures := []struct {
+		name string
+		text string
+	}{
+		{"int beyond 2^53", bigNumTable("9007199254740993")},
+		{"max uint64", bigNumTable("18446744073709551615")},
+		{"scalar int beyond 2^53", "9007199254740993"},
+		{"scalar max uint64", "18446744073709551615"},
+	}
+	for _, mode := range []Mode{ModeAdaptive, ModeAlways} {
+		for _, tt := range fixtures {
+			t.Run(string(mode)+" "+tt.name, func(t *testing.T) {
+				out, d := EncodeBlock(tt.text, mode, defaultThreshold, 0)
+				if out != tt.text {
+					t.Fatalf("non-roundtrippable number must pass through byte-identically, got %q", out)
+				}
+				if d.Outcome != OutcomePassthroughNotTabular {
+					t.Fatalf("expected passthrough-not-tabular, got %+v", d)
+				}
+				if d.Classification.Reason != ReasonNonRoundtrippableNumber {
+					t.Fatalf("expected reason %q, got %+v", ReasonNonRoundtrippableNumber, d)
+				}
+				if strings.Contains(out, Marker) {
+					t.Fatalf("passthrough must carry no marker")
+				}
+			})
+		}
+	}
+
+	// Control: 2^53 itself round-trips exactly, so the same table must still
+	// encode — proving the gate (not classification) causes the passthrough.
+	for _, mode := range []Mode{ModeAdaptive, ModeAlways} {
+		t.Run(string(mode)+" control 2^53 encodes", func(t *testing.T) {
+			_, d := EncodeBlock(bigNumTable("9007199254740992"), mode, defaultThreshold, 0)
+			if d.Outcome != OutcomeEncoded {
+				t.Fatalf("round-trippable fixture must encode, got %+v", d)
 			}
 		})
 	}

@@ -23,6 +23,13 @@ const (
 	// ReasonTooRagged — the rows disagree beyond the 90% key-presence
 	// tolerance, or the union key set collapses to empty.
 	ReasonTooRagged NotTabularReason = "too-ragged"
+	// ReasonNonRoundtrippableNumber — the value contains a JSON number whose
+	// literal does not survive the float64 round-trip toon-go applies to
+	// json.Number (e.g. integers beyond 2^53, large uint64). Encoding would
+	// silently corrupt the number, so the block passes through (FR-004/FR-006
+	// no data loss). Not an encoder fault — it belongs to the
+	// passthrough-not-tabular family, never logged or counted.
+	ReasonNonRoundtrippableNumber NotTabularReason = "non-roundtrippable-number"
 )
 
 // Classification is the deterministic result of the tabular-uniform predicate

@@ -35,6 +35,15 @@ emit TOON or pass the block through unchanged, and returns a full `Decision` rec
          return text, Decision{Outcome: PassthroughNotTabular, Classification:{Reason: ReasonNotJSON}}
          // non-JSON (plain text/base64/binary) never qualifies, in ANY mode — edge case
 
+1b. NUMBER FIDELITY GATE (FR-004/FR-006 — EVERY mode):
+     toon-go normalizes json.Number through float64 (ParseFloat, then FormatFloat(f,'f',-1,64)),
+     so a literal that does not survive that round-trip byte-identically (integers beyond 2^53,
+     large uint64, exotic notations) would be silently corrupted.
+     if any json.Number in v fails the strconv round-trip:
+         return text, Decision{Outcome: PassthroughNotTabular,
+                               Classification:{Reason: ReasonNonRoundtrippableNumber}}
+         // no data loss; NOT an encoder fault — passthrough-not-tabular family, never logged
+
 2. CLASSIFY v := parsed value → Classify(v):    // always computed (informational in always mode)
      ModeAdaptive AND not Classification.Tabular:
          return text, Decision{Outcome: PassthroughNotTabular, Classification: c}

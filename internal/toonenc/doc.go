@@ -4,11 +4,13 @@
 // pass the block through byte-identically.
 //
 // Layering rule: this package depends ONLY on the standard library and
-// github.com/toon-format/toon-go. It is imported by both internal/server
-// (production seam) and bench/arms (spec-083 profiler, FR-012), so it must
-// never import internal/server, internal/config, or any other mcpproxy
-// package — that is what keeps "the profiler exercises the exact production
-// code path" literally true without dragging the server into the bench build.
+// github.com/toon-format/toon-go. It is imported by internal/server
+// (production seam) and designed to be imported by the spec-083 bench
+// adaptive-results arm (FR-012; lands after PR #851 merges and this branch
+// rebases), so it must never import internal/server, internal/config, or any
+// other mcpproxy package — that is what keeps "the profiler exercises the
+// exact production code path" literally true without dragging the server
+// into the bench build.
 //
 // All exported functions are pure and deterministic (FR-011): identical input
 // produces an identical decision and identical bytes. Observability (logging,

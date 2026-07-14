@@ -41,7 +41,9 @@ type Classification struct {
 
 - `NotTabularReason` enum: `ReasonNotJSON`, `ReasonNotArray`, `ReasonTooFewRows` (<4),
   `ReasonNonObjectElements`, `ReasonNestedValues`, `ReasonTooRagged` (union key set collapses / rows
-  disagree beyond the 90% tolerance).
+  disagree beyond the 90% tolerance), `ReasonNonRoundtrippableNumber` (a JSON number literal does
+  not survive toon-go's float64 round-trip — e.g. integers beyond 2^53 — so encoding would corrupt
+  it; passthrough in every mode, never logged).
 - **Rules** (v1, from FR-003b): array of ≥4 objects; every value scalar-or-null (no nested); union
   key = keys present in ≥90% of rows; single-key-object envelope qualifies; empty arrays and arrays
   of non-objects do not; key order irrelevant.
