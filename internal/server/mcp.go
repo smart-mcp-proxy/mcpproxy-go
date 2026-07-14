@@ -27,6 +27,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/outputvalidation"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -117,6 +118,11 @@ type MCPProxyServer struct {
 	logger               *zap.Logger
 	mainServer           *Server        // Reference to main server for config persistence
 	config               *config.Config // Add config reference for security checks
+
+	// workSessionResolver maps an identity to a work session (Spec 082). Normally
+	// nil, and the runtime's tracker is used; tests inject a stub so they do not
+	// have to stand up a whole Runtime to exercise session attribution.
+	workSessionResolver func(runtime.WorkSessionIdentity) string
 
 	// Routing mode MCP server instances (Spec 031)
 	// Each instance has different tools registered for its routing mode.
@@ -213,6 +219,35 @@ func NewMCPProxyServer(
 	// Wire up storage manager for session persistence
 	sessionStore.SetStorageManager(storage)
 
+	// Let the activity log name the MCP client on every record it writes.
+	// Activity is retained for 90 days but only the 100 most recent SESSIONS are
+	// kept — and an IDE that reconnects every few minutes burns through 100
+	// sessions in about a day. So the client name must be stamped on the record
+	// at write time; resolving it later against the session store works for a
+	// day and then decays back to a bare session id.
+	if mainServer != nil && mainServer.runtime != nil {
+		mainServer.runtime.SetSessionClientResolver(func(sessionID string) (name, version string) {
+			if info := sessionStore.GetSession(sessionID); info != nil {
+				return info.ClientName, info.ClientVersion
+			}
+			return "", ""
+		})
+
+		// Spec 082: which WORK session a record belongs to — one client, one
+		// project, across reconnects. Reads the id cached on the connection, so
+		// every record from that connection agrees.
+		mainServer.runtime.SetWorkSessionResolver(func(sessionID string) string {
+			return sessionStore.WorkSessionID(sessionID)
+		})
+	}
+
+	// Forward handles to the MCP server and the proxy, both constructed below but
+	// needed by the hooks above them (to send a roots request back to the client,
+	// and to attribute work to a session). Atomic because the hooks run on client
+	// goroutines.
+	var mcpSrvRef atomic.Pointer[mcpserver.MCPServer]
+	var proxyRef atomic.Pointer[MCPProxyServer]
+
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
 	// Update session activity on every MCP message to prevent premature cleanup.
@@ -224,6 +259,33 @@ func NewMCPProxyServer(
 			return
 		}
 		sessionStore.UpdateActivity(session.SessionID())
+
+		// Spec 082: ask the client which project it is working in — once, lazily,
+		// on the first real request after the handshake.
+		//
+		// The timing is the whole trick, and two obvious options are both wrong:
+		//   - AddAfterInitialize runs BEFORE the initialize response is written,
+		//     so asking there DEADLOCKS: the client cannot answer until it has
+		//     the initialize result it is still waiting for.
+		//   - notifications/initialized never reaches this hook at all — mcp-go
+		//     dispatches notifications before beforeAny is invoked
+		//     (request_handler.go: `if baseMessage.ID == nil { ... return }`).
+		//
+		// The first request with an id (tools/list, tools/call, ...) is the
+		// earliest point that both fires this hook and finds the client able to
+		// answer. Fetching is async and best-effort: a client that will not
+		// answer simply has no workspace.
+		if method != mcp.MethodInitialize && sessionStore.TryClaimWorkspaceFetch(session.SessionID()) {
+			go fetchWorkspaceRoot(ctx, mcpSrvRef.Load(), sessionStore, logger)
+		}
+
+		// Spec 082: attribute this request to a work session before the handler
+		// runs, so every activity record the handler writes carries it. Kicked off
+		// AFTER the roots fetch above, which it may wait on briefly — the fetch is
+		// already in flight by then.
+		if proxy := proxyRef.Load(); proxy != nil {
+			proxy.markWorkIfToolCall(ctx, method)
+		}
 	})
 
 	hooks.AddOnRegisterSession(func(ctx context.Context, sess mcpserver.ClientSession) {
@@ -334,6 +396,10 @@ func NewMCPProxyServer(
 		capabilities...,
 	)
 
+	// Publish the server to the hooks, which need it to ask the client for its
+	// workspace roots (Spec 082). Set before the server ever serves a request.
+	mcpSrvRef.Store(mcpServer)
+
 	// Initialize JavaScript runtime pool if code execution is enabled
 	var jsPool *jsruntime.Pool
 	if config.EnableCodeExecution {
@@ -381,6 +447,9 @@ func NewMCPProxyServer(
 		sessionStore:         sessionStore,
 		hooks:                hooks,
 	}
+
+	// Let the hooks (registered before the proxy existed) reach it.
+	proxyRef.Store(proxy)
 
 	// Register proxy tools for the default (retrieve_tools) server
 	proxy.registerTools(debugSearch)
@@ -476,8 +545,31 @@ func (p *MCPProxyServer) recordBuiltinTool(name string) {
 
 // recordUpstreamTool increments the upstream tool call counter without ever
 // recording the tool name. Spec 042 User Story 2.
+//
+// This counts ATTEMPTS: it runs at the top of handleCallToolVariant, before
+// validation, quarantine checks, connectivity, and the upstream call itself.
+// Do not hang success-semantics metrics off it — see recordRealToolCallSuccess.
 func (p *MCPProxyServer) recordUpstreamTool() {
 	telemetry.RecordUpstreamToolOn(p.telemetryRegistry())
+}
+
+// recordRealToolCallSuccess marks the lifetime first_real_tool_call_ever
+// activation flag — the counterpart of first_retrieve_tools_call_ever, so the
+// retrieve→call funnel step can be measured lifetime-against-lifetime instead
+// of against a 24h counter.
+//
+// It is deliberately NOT called from recordUpstreamTool. That counter fires on
+// every call_tool_* invocation, including ones that are malformed, blocked by
+// quarantine, aimed at a disabled tool, or sent to a disconnected server. An
+// install whose first tool call was blocked has not activated — counting it as
+// activated would hide exactly the breakage this metric exists to surface.
+//
+// Call this only once the upstream has actually returned a successful result.
+// nil-safe.
+func (p *MCPProxyServer) recordRealToolCallSuccess() {
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		p.mainServer.runtime.RecordRealToolCallForActivation()
+	}
 }
 
 // emitActivityEvent safely emits an activity event if runtime is available
@@ -1118,6 +1210,10 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// handler stays unaware of BBolt. nil-safe.
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		p.mainServer.runtime.RecordRetrieveToolsCallForActivation()
+	}
+	// Spec 082: a tool retrieval is real work — it earns the session a record.
+	if sid := sessionIDFromContext(ctx); sid != "" {
+		p.markSessionWorked(ctx, sid)
 	}
 
 	startTime := time.Now()
@@ -1937,6 +2033,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 		// Update session stats even for errors (to track call count)
 		if sessionID != "" && tokenMetrics != nil {
+			p.markSessionWorked(ctx, sessionID)
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
@@ -1953,6 +2050,12 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
 	}
+
+	// The upstream returned a real result: this install has now genuinely made a
+	// real tool call. Stamped here — past every validation / quarantine /
+	// connectivity gate and past the upstream error branch above — so the
+	// activation flag means "succeeded", not merely "attempted".
+	p.recordRealToolCallSuccess()
 
 	// Record successful response
 	toolCallRecord.Response = result
@@ -2032,6 +2135,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 
 	// Update session stats for successful call
 	if sessionID != "" && tokenMetrics != nil {
+		p.markSessionWorked(ctx, sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
@@ -2347,6 +2451,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 		// Update session stats even for errors (to track call count)
 		if sessionID != "" && tokenMetrics != nil {
+			p.markSessionWorked(ctx, sessionID)
 			p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 		}
 
@@ -2434,6 +2539,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Update session stats for successful call
 	if sessionID != "" && tokenMetrics != nil {
+		p.markSessionWorked(ctx, sessionID)
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 

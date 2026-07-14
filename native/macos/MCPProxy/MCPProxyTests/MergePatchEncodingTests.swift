@@ -4,20 +4,31 @@ import XCTest
 /// Pin the wire format of the JSON Merge Patch (RFC 7396) body the
 /// macOS tray sends to PATCH /api/v1/servers/{id}.
 ///
-/// The backend's delete signal is a literal JSON `null` value on the
-/// header / env key (`{"headers": {"X-Stale": null}}`). Swift's default
-/// `JSONEncoder` on `[String: String?]` drops nil entries from the output
-/// entirely — so a naive encoding would send `{"headers": {}}` and the
-/// backend would interpret that as "no headers changed", silently
-/// dropping the user's delete intent.
+/// The backend's delete signal is a literal JSON `null` value on the header /
+/// env key (`{"headers": {"X-Stale": null}}`), and RFC 7396 makes the
+/// distinction load-bearing: an ABSENT key means "leave it alone", `null` means
+/// "delete it". Getting that wrong silently destroys or silently preserves a
+/// user's setting.
 ///
-/// The fix is to build the patch dict as `[String: Any]` with `NSNull()`
-/// in place of Swift `nil`, and to encode via `JSONSerialization` which
-/// faithfully renders NSNull as the literal `null` token. These tests
-/// pin both:
-///   1. NSNull survives the encoder and lands on the wire as `null`.
-///   2. The simpler-but-wrong `[String: String?]` + `JSONEncoder` path
-///      DROPS the key, demonstrating why we use the manual approach.
+/// So the patch is built as `[String: Any]` with `NSNull()` in place of Swift
+/// `nil` and encoded via `JSONSerialization`, whose rendering of NSNull as the
+/// literal `null` token is specified and stable.
+///
+/// The tempting shortcut — `[String: String?]` + `JSONEncoder` — is avoided
+/// because Foundation does NOT specify how it encodes a nil map value, and the
+/// behaviour has already changed once under us: it used to DROP the key (turning
+/// a delete into "no change"), and current Foundation emits `null` (turning it
+/// into a delete). Same source, opposite meaning, decided by whichever toolchain
+/// happens to compile the app. That is the whole argument for the manual path.
+///
+/// These tests pin:
+///   1. NSNull survives the encoder and lands on the wire as `null` (the
+///      invariant that actually protects the feature).
+///   2. `""` (set-to-empty) stays `""` and is never confused with a delete.
+///   3. That `[String: String?]` + `JSONEncoder` remains unfit for purpose —
+///      asserted WITHOUT depending on which of the two known behaviours the
+///      current toolchain has, so CI cannot go red over a Foundation change that
+///      production is immune to.
 final class MergePatchEncodingTests: XCTestCase {
 
     /// JSONSerialization with NSNull renders the JSON null token.
@@ -57,24 +68,56 @@ final class MergePatchEncodingTests: XCTestCase {
         XCTAssertTrue(headers["X-Old"] is NSNull, "X-Old value must round-trip as NSNull, not be coerced to anything else")
     }
 
-    /// Demonstrate the WRONG path so a future refactor can't tell itself
-    /// "JSONEncoder should be fine, let's switch". `[String: String?]`
-    /// run through the default encoder strips nil values silently.
-    func testDefaultJSONEncoderDropsOptionalNilFromMap() throws {
+    /// Tripwire on `[String: String?]` + `JSONEncoder` — the tempting shortcut for
+    /// building the patch, and the reason we don't take it.
+    ///
+    /// Deliberately does NOT assert which encoding the current toolchain produces.
+    /// Both behaviours have shipped (drop the key; emit `null`), they mean OPPOSITE
+    /// things under RFC 7396, and CI runs on a floating `macos-latest` image — so
+    /// pinning either one would make the suite go red on an Xcode bump over a
+    /// behaviour production does not depend on. Asserting "it is one of the two,
+    /// and we cannot tell which" is the honest, stable statement, and it is also
+    /// precisely the reason the shortcut is unusable.
+    ///
+    /// The invariant that actually protects the feature is asserted by the
+    /// JSONSerialization/NSNull tests above, which do not depend on the toolchain.
+    ///
+    /// If this ever fails, Foundation has invented a THIRD behaviour: re-audit
+    /// saveEdits() (it should still be immune — it never uses this path) before
+    /// touching anything else.
+    func testDefaultJSONEncoderIsUnfitForMergePatch() throws {
         struct Body: Encodable {
             let headers: [String: String?]
         }
         let body = Body(headers: ["X-Keep": "v", "X-Stale": nil])
-        let data = try JSONEncoder().encode(body)
-        let str = String(data: data, encoding: .utf8)!
+        let str = String(data: try JSONEncoder().encode(body), encoding: .utf8)!
 
-        // X-Stale must NOT appear in the encoded JSON — which is exactly
-        // why we don't use this approach. If a future change makes the
-        // encoder start emitting nil as `null`, this test fails and the
-        // author has to update both the test and the saveEdits() path.
-        XCTAssertFalse(str.contains("X-Stale"),
-                       "documented pitfall: default JSONEncoder drops nil map values; if this changes, audit saveEdits()")
-        XCTAssertTrue(str.contains("X-Keep"))
+        XCTAssertTrue(str.contains("X-Keep"), "a present value must always survive")
+
+        let dropsTheKey = !str.contains("X-Stale")
+        let emitsNull = str.contains("\"X-Stale\":null") || str.contains("\"X-Stale\" : null")
+
+        // Exactly one of the two known behaviours — we just don't get to choose it,
+        // which is the point.
+        XCTAssertTrue(dropsTheKey != emitsNull,
+                      """
+                      JSONEncoder produced a THIRD encoding for a nil map value (got: \(str)).
+                      Re-audit saveEdits() — it should still be immune, because it builds \
+                      [String: Any] with NSNull() and encodes via JSONSerialization — then \
+                      update this tripwire.
+                      """)
+    }
+
+    /// The load-bearing distinction, stated directly: under RFC 7396 an ABSENT key
+    /// means "leave it alone" and `null` means "delete it". Our builder must be
+    /// able to express both, and JSONSerialization does — no matter the toolchain.
+    func testPatchCanExpressBothLeaveAloneAndDelete() throws {
+        let body: [String: Any] = ["headers": ["X-Delete": NSNull()]]  // X-Untouched deliberately absent
+        let str = String(data: try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]),
+                         encoding: .utf8)!
+
+        XCTAssertTrue(str.contains("\"X-Delete\":null"), "a delete must reach the wire as literal null")
+        XCTAssertFalse(str.contains("X-Untouched"), "an untouched key must be absent, not null")
     }
 
     /// Sanity: an empty-string value (set-to-empty) must NOT be treated

@@ -106,8 +106,8 @@
 
 ### Tests for User Story 3
 
-- [ ] T021 [P] [US3] Add test: CLI prints request_id on error in `cmd/mcpproxy/upstream_cmd_test.go`
-- [ ] T022 [P] [US3] Add test: CLI does NOT print request_id on success in `cmd/mcpproxy/upstream_cmd_test.go`
+- [x] T021 [P] [US3] Add test: CLI prints request_id on error in `cmd/mcpproxy/upstream_cmd_test.go`
+- [x] T022 [P] [US3] Add test: CLI does NOT print request_id on success in `cmd/mcpproxy/upstream_cmd_test.go`
 
 ### Implementation for User Story 3
 

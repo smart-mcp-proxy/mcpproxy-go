@@ -2346,6 +2346,23 @@ func (rw *responseWriter) WriteHeader(code int) {
 	}
 }
 
+// Flush delegates to the underlying ResponseWriter so that SSE keeps working
+// through this wrapper.
+//
+// Without it, wrapping the writer silently strips http.Flusher, and the MCP
+// transport's CanStream() check fails: GET /mcp — the listening stream the
+// protocol uses for every SERVER-TO-CLIENT message — is rejected with
+// "405 Streaming unsupported". That kills roots, sampling and elicitation over
+// HTTP, since the server has no channel on which to ask the client anything.
+//
+// Found while implementing Spec 082: the roots request went out and timed out
+// every time, because the client was never able to receive it.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // logConnectionState logs HTTP connection state changes for debugging client issues
 func (s *Server) logConnectionState(conn net.Conn, state http.ConnState) {
 	// Handle cases where conn or RemoteAddr might be nil

@@ -11,6 +11,16 @@ import Foundation
 struct SSEParser {
     private var eventType: String = ""
     private var dataBuffer: String = ""
+    /// Whether a `data` field appeared in the event being assembled.
+    ///
+    /// The spec appends a LINE FEED to the data buffer for EVERY data field and
+    /// then dispatches whenever the buffer is non-empty (stripping one trailing
+    /// LF). We join data lines with "\n" instead, which is equivalent for content
+    /// — but it loses the one thing the spec's trailing LF encodes: that a data
+    /// field was seen at all. Without this flag, a lone `data:` (empty value)
+    /// leaves the buffer "" and is indistinguishable from an event carrying no
+    /// data field, so a spec-valid empty-data event was silently dropped.
+    private var sawDataField: Bool = false
     private var lastEventId: String?
     private var retryMs: Int?
 
@@ -49,10 +59,11 @@ struct SSEParser {
         case "event":
             eventType = value
         case "data":
-            if !dataBuffer.isEmpty {
+            if sawDataField {
                 dataBuffer += "\n"
             }
             dataBuffer += value
+            sawDataField = true
         case "id":
             // Per spec, id must not contain null
             if !value.contains("\0") {
@@ -72,8 +83,12 @@ struct SSEParser {
 
     /// Assemble and return the current buffered event, then reset buffers.
     private mutating func dispatchEvent() -> SSEEvent? {
-        // If data buffer is empty, no event to dispatch (per spec)
-        guard !dataBuffer.isEmpty else {
+        // An event is dispatched iff a `data` field was seen — NOT merely when the
+        // buffer is non-empty. Per spec, `data:` with an empty value still yields
+        // an event (with empty data); only an event carrying no data field at all
+        // is dropped. Testing the buffer alone conflated the two and swallowed
+        // spec-valid empty-data events.
+        guard sawDataField else {
             // Still reset event type for next event
             eventType = ""
             return nil
@@ -89,6 +104,7 @@ struct SSEParser {
         // Reset per-event state; id and retry persist across events per spec
         eventType = ""
         dataBuffer = ""
+        sawDataField = false
         // Note: retryMs and lastEventId intentionally NOT reset (they persist)
 
         return event
@@ -98,6 +114,7 @@ struct SSEParser {
     mutating func reset() {
         eventType = ""
         dataBuffer = ""
+        sawDataField = false
         lastEventId = nil
         retryMs = nil
     }

@@ -21,14 +21,14 @@ type Actor struct {
 
 	// State machine
 	state atomic.Value // State
-	mu    sync.RWMutex  // Protects state transitions
+	mu    sync.RWMutex // Protects state transitions
 
 	// Communication channels
 	commandCh chan Command
 	eventCh   chan Event
 
 	// Underlying client (wrapped, not directly exposed)
-	client *managed.Client
+	client   *managed.Client
 	clientMu sync.RWMutex
 
 	// Lifecycle
@@ -37,8 +37,8 @@ type Actor struct {
 	wg     sync.WaitGroup
 
 	// Retry tracking
-	retryCount atomic.Int32
-	lastError  error
+	retryCount  atomic.Int32
+	lastError   error
 	lastErrorMu sync.RWMutex
 }
 

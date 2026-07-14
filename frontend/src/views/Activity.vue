@@ -693,7 +693,14 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
-import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
+import { buildSessionLabels } from '@/utils/sessionLabel'
+import {
+  buildWorkSessionIndex,
+  groupKeyOf as workSessionKeyOf,
+  matchesSessionFilter,
+  resolveSessionFilter,
+} from '@/utils/sessionGrouping'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
@@ -766,28 +773,159 @@ interface SessionOption {
   id: string
   label: string
   clientName?: string
+  startTime?: string
+  workspace?: string
 }
+
+// Client identity lives on the session record, not the activity record — an
+// activity row only carries session_id. We join the two here so the filter can
+// show "Claude Code · 14:32" instead of an opaque "...139c9".
+const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string; workspace?: string }>())
+
+// The raw session records behind that map. Kept because they carry the
+// transport -> work session link that groupKeyOf needs (see workSessionIndex).
+const sessionsRaw = ref<MCPSession[]>([])
+
+// Session ids we have already tried and failed to resolve. The core keeps only
+// the 100 most recent sessions, so an old session's activity rows can outlive
+// its record and never become resolvable. Without this set, every refresh would
+// see them as "unknown" and refetch forever.
+const unresolvableSessions = ref(new Set<string>())
+
+let sessionsInFlight: Promise<void> | null = null
+
+const loadSessions = async () => {
+  // Coalesce: a burst of SSE events must not fan out into N parallel fetches.
+  if (sessionsInFlight) return sessionsInFlight
+
+  sessionsInFlight = (async () => {
+    try {
+      const response = await api.getSessions(100)
+      const sessions = response.data?.sessions ?? []
+      sessionsRaw.value = sessions
+      const next = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
+      for (const s of sessions) {
+        const info = {
+          clientName: s.client_name,
+          startTime: s.start_time,
+          workspace: s.workspace_name,
+        }
+        // Key by BOTH ids: the work session (Spec 082 — what we group by) and the
+        // transport session (so pre-082 activity rows still resolve).
+        if (s.work_session_id) {
+          const existing = next.get(s.work_session_id)
+          // A work session spans many connections; keep the EARLIEST start, since
+          // that is when the work began.
+          if (!existing || (s.start_time && existing.startTime && s.start_time < existing.startTime)) {
+            next.set(s.work_session_id, info)
+          }
+        }
+        next.set(s.id, info)
+      }
+      sessionInfo.value = next
+
+      // Anything still unknown after a fresh fetch is gone for good (evicted by
+      // the 100-session cap). Remember it so we stop asking.
+      for (const a of activities.value) {
+        const key = groupKeyOf(a)
+        if (key && !next.has(key)) {
+          unresolvableSessions.value.add(key)
+        }
+      }
+    } catch {
+      // Non-fatal: without session metadata the filter degrades to id suffixes,
+      // which is exactly the previous behaviour. Never block the activity log.
+      // Deliberately NOT marked unresolvable — a transient failure should be
+      // retried the next time an unknown session shows up.
+    } finally {
+      sessionsInFlight = null
+    }
+  })()
+
+  return sessionsInFlight
+}
+
+// The Activity Log is a live page: a client can connect while it is open, and
+// SSE will deliver its rows. Those sessions were not in the map we fetched on
+// mount, so refresh the join whenever a genuinely new session id appears.
+const refreshSessionsIfUnknown = () => {
+  const hasUnknown = activities.value.some(a => {
+    const key = groupKeyOf(a)
+    return key && !sessionInfo.value.has(key) && !unresolvableSessions.value.has(key)
+  })
+  if (hasUnknown) void loadSessions()
+}
+
+// Transport session -> work session, learned from the sessions API and from any
+// sibling row that does carry one. A row with no work session of its own is
+// folded into its connection's, rather than keying on the raw transport id and
+// splitting one client into two entries in the picker.
+const workSessionIndex = computed(() => buildWorkSessionIndex(activities.value, sessionsRaw.value))
+
+// A deep link from the Sessions page arrives with a TRANSPORT session id (see
+// Sessions.vue), while the picker's options are keyed by work session. Rewrite
+// the filter to the work session as soon as the index can tell us what it is —
+// otherwise the filter works but the dropdown shows blank, because no option
+// equals the value it is bound to.
+watch(workSessionIndex, index => {
+  if (!filterSession.value) return
+  const resolved = resolveSessionFilter(filterSession.value, index)
+  if (resolved !== filterSession.value) filterSession.value = resolved
+})
+
+// The key an activity row is grouped and filtered by: its WORK session (Spec
+// 082) — one client, one project, across reconnects. Rows for which no work
+// session is known anywhere still fall back to the transport session.
+const groupKeyOf = (a: ActivityRecord): string => workSessionKeyOf(a, workSessionIndex.value)
+
 const availableSessions = computed((): SessionOption[] => {
-  const sessionsMap = new Map<string, { clientName?: string }>()
+  const seen = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
   activities.value.forEach(a => {
-    if (a.session_id && !sessionsMap.has(a.session_id)) {
-      // Try to get client name from metadata or any available source
-      const clientName = a.metadata?.client_name as string | undefined
-      sessionsMap.set(a.session_id, { clientName })
+    const key = groupKeyOf(a)
+    if (key && !seen.has(key)) {
+      const info = sessionInfo.value.get(key) ?? sessionInfo.value.get(a.session_id ?? '')
+      seen.set(key, {
+        // Prefer the name persisted ON the record: it is that row's own truth and
+        // never expires. The /api/v1/sessions lookup is only a fallback for rows
+        // written before the name was persisted — and it decays, because just the
+        // 100 most recent sessions are kept while activity lives for 90 days.
+        clientName: (a.metadata?.client_name as string | undefined) ?? info?.clientName,
+        startTime: info?.startTime ?? a.timestamp,
+        workspace: info?.workspace,
+      })
     }
   })
 
-  return Array.from(sessionsMap.entries())
-    .map(([sessionId, info]) => {
-      // Format: "ClientName ...12345" or "...12345" if no client name
-      const suffix = sessionId.slice(-5)
-      const label = info.clientName
-        ? `${info.clientName} ...${suffix}`
-        : `...${suffix}`
-      return { id: sessionId, label, clientName: info.clientName }
-    })
-    .sort((a, b) => a.label.localeCompare(b.label))
+  const entries = Array.from(seen.entries()).map(([sessionId, info]) => ({
+    sessionId,
+    clientName: info.clientName,
+    startTime: info.startTime,
+    workspace: info.workspace,
+  }))
+  const labels = buildSessionLabels(entries)
+
+  return entries
+    .map(e => ({
+      id: e.sessionId,
+      label: labels.get(e.sessionId) ?? `...${e.sessionId.slice(-5)}`,
+      clientName: e.clientName,
+      startTime: e.startTime,
+      workspace: e.workspace,
+    }))
+    // Most recent session first — in a session picker, recency beats alphabet.
+    // Compare epoch ms, not the ISO strings: those carry a timezone offset
+    // ("...+03:00"), so lexical order is not chronological order across offsets.
+    // A missing or unparseable start time sorts last; id breaks ties so the
+    // order is stable rather than dependent on Map insertion.
+    .sort((a, b) => epochOf(b.startTime) - epochOf(a.startTime) || a.id.localeCompare(b.id))
 })
+
+/** Epoch ms for sorting; -Infinity for missing/unparseable, so it sorts last. */
+const epochOf = (iso?: string): number => {
+  if (!iso) return -Infinity
+  const t = new Date(iso).getTime()
+  return Number.isNaN(t) ? -Infinity : t
+}
 
 // Get session label by ID for display in Active Filters
 const getSessionLabel = (sessionId: string): string => {
@@ -809,9 +947,11 @@ const filteredActivities = computed(() => {
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
   }
-  // Session filter (Spec 024)
+  // Session filter — a WORK session (Spec 082), falling back to the transport
+  // session for rows written before it. Accepts either id, so a deep link from
+  // the Sessions page (which knows only transport ids) still finds the rows.
   if (filterSession.value) {
-    result = result.filter(a => a.session_id === filterSession.value)
+    result = result.filter(a => matchesSessionFilter(a, filterSession.value, workSessionIndex.value))
   }
   if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
@@ -1182,6 +1322,12 @@ const handleKeydown = (event: KeyboardEvent) => {
   }
 }
 
+// Keep the session join fresh no matter how activities arrived — polling,
+// manual refresh, or an SSE event for a client that connected just now. Watching
+// the list covers every mutation path; refreshSessionsIfUnknown is a no-op
+// unless a genuinely new session id showed up, and coalesces concurrent fetches.
+watch(activities, refreshSessionsIfUnknown)
+
 // Lifecycle
 onMounted(() => {
   // Check for session filter from URL query params (linked from Dashboard/Sessions pages)
@@ -1191,6 +1337,7 @@ onMounted(() => {
   }
 
   loadActivities()
+  loadSessions()
 
   // Listen for SSE activity events
   window.addEventListener('mcpproxy:activity', handleActivityEvent as EventListener)

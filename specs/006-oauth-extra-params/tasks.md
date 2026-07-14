@@ -126,7 +126,7 @@ Go monorepo structure:
 - [x] T038 [US3] Update runAuthStatusClientMode to display OAuth configuration section in cmd/mcpproxy/auth_cmd.go
 - [ ] T039 [US3] Add extra parameters display (with masking) to auth status output in cmd/mcpproxy/auth_cmd.go
 - [ ] T040 [US3] Add scopes, PKCE status, redirect URI display to auth status output in cmd/mcpproxy/auth_cmd.go
-- [ ] T041 [US3] Add authorization/token endpoints display to auth status output in cmd/mcpproxy/auth_cmd.go
+- [x] T041 [US3] Add authorization/token endpoints display to auth status output in cmd/mcpproxy/auth_cmd.go
 - [ ] T042 [US3] Add token expiration and last refresh display to auth status output in cmd/mcpproxy/auth_cmd.go
 
 #### Auth Login Enhancements
@@ -141,7 +141,7 @@ Go monorepo structure:
 - [x] T047 [P] [US3] Add DEBUG logging for authorization URL construction in internal/oauth/transport_wrapper.go
 - [x] T048 [P] [US3] Add DEBUG logging for token exchange requests in internal/oauth/transport_wrapper.go
 - [x] T049 [P] [US3] Add DEBUG logging for token refresh requests in internal/oauth/transport_wrapper.go
-- [ ] T050 [P] [US3] Add DEBUG logging for extra params injection in internal/transport/http.go
+- [x] T050 [P] [US3] Add DEBUG logging for extra params injection in internal/transport/http.go
 
 #### Doctor Command Enhancements
 

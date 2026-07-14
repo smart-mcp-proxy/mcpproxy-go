@@ -241,6 +241,12 @@ type MCPSession struct {
 	HasRoots     bool     `json:"has_roots,omitempty"`
 	HasSampling  bool     `json:"has_sampling,omitempty"`
 	Experimental []string `json:"experimental,omitempty"`
+
+	// Workspace / work session (Spec 082). WorkspaceName is the project's
+	// basename — the full local path is never exposed. WorkSessionID groups the
+	// reconnects that make up one stretch of user work.
+	WorkspaceName string `json:"workspace_name,omitempty"`
+	WorkSessionID string `json:"work_session_id,omitempty"`
 }
 
 // Tool represents an MCP tool with its metadata

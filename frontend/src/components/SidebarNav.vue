@@ -263,6 +263,21 @@
                 <span v-show="!collapsed">Agent Tokens</span>
               </router-link>
             </li>
+          </ul>
+
+          <!-- Section: Observability
+               Workspace is what you CONFIGURE (servers, tools, secrets);
+               these are what you OBSERVE. Keeping them apart stops the two
+               kinds of page reading as one undifferentiated list. -->
+          <div
+            v-if="!collapsed"
+            class="mt-5 mb-1 px-3 text-[10px] font-semibold uppercase tracking-[0.12em] text-base-content/40"
+          >
+            Observability
+          </div>
+          <div v-else class="mt-3 mb-1 mx-auto w-6 h-px bg-base-300"></div>
+
+          <ul class="menu menu-sm w-full gap-0.5 p-0">
             <li>
               <router-link
                 to="/activity"
@@ -272,6 +287,18 @@
               >
                 <IconActivity class="w-5 h-5 shrink-0" />
                 <span v-show="!collapsed">Activity Log</span>
+              </router-link>
+            </li>
+            <li>
+              <router-link
+                to="/sessions"
+                :class="{ 'active': isActiveRoute('/sessions') }"
+                class="rounded-lg font-medium"
+                :title="collapsed ? 'Sessions' : ''"
+                data-test="sidebar-sessions"
+              >
+                <IconSessions class="w-5 h-5 shrink-0" />
+                <span v-show="!collapsed">Sessions</span>
               </router-link>
             </li>
             <li>
@@ -541,6 +568,10 @@ const IconTokens = makeIcon(
 )
 const IconActivity = makeIcon(
   'M4 12h3l3-8 4 16 3-8h3'
+)
+// Two chat bubbles — a session is one AI client's conversation with the proxy.
+const IconSessions = makeIcon(
+  'M8 10h8M8 14h5M4 5a1 1 0 011-1h14a1 1 0 011 1v10a1 1 0 01-1 1H9l-5 4V5z'
 )
 const IconShield = makeIcon(
   'M12 3l8 3v6c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V6l8-3zm-3 9l2 2 4-4'
