@@ -767,11 +767,19 @@ struct SSEEvent: Equatable {
     }
 
     /// Convenience: decode the data payload as a JSON dictionary.
+    ///
+    /// Always throws `SSEError.invalidData` on bad input. The `try` on
+    /// JSONSerialization used to let Foundation's own NSError escape — so an
+    /// event with an empty or malformed payload threw a raw Cocoa error instead
+    /// of the SSEError this function documents, and any caller matching on
+    /// SSEError missed it.
     func decodePayload() throws -> [String: Any] {
-        guard let jsonData = data.data(using: .utf8) else {
+        guard let jsonData = data.data(using: .utf8), !jsonData.isEmpty else {
             throw SSEError.invalidData
         }
-        guard let dict = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+        guard let object = try? JSONSerialization.jsonObject(with: jsonData),
+              let dict = object as? [String: Any]
+        else {
             throw SSEError.invalidData
         }
         return dict
