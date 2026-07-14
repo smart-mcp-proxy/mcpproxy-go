@@ -111,16 +111,18 @@ jobs:
           # Wait for the full tool catalog before scoring: the retrieval index is
           # built after all servers connect (~45 tools across 7 reference servers).
           #
-          # 44 vs 45: the frozen corpus_v2 documents 45 tools, but one tool can
-          # differ at runtime (a reference server occasionally registers one
-          # fewer tool than the snapshot captured), so the readiness poll
-          # accepts >= 44 to avoid flaking the whole run on a single tool.
-          # The same value is passed to the bench as -expected-tools below, so
-          # any actual-vs-expected difference is SURFACED as a corpus-drift
-          # warning in the report and dashboard (FR-021) rather than silently
-          # papered over here.
+          # 44 vs 45: the frozen corpus_v2 documents 45 tools (corpus_expected),
+          # but one tool can differ at runtime (a reference server occasionally
+          # registers one fewer tool than the snapshot captured), so the
+          # readiness poll accepts >= ready_min=44 to avoid flaking the whole
+          # run on a single tool. These are DIFFERENT numbers on purpose:
+          # -expected-tools gets the frozen corpus count (45), so a 44-tool
+          # live catalog still runs but is SURFACED as a corpus-drift warning
+          # in the report and dashboard (FR-021) rather than silently matching
+          # the lowered readiness threshold.
           ready=0
-          expected=44
+          ready_min=44
+          corpus_expected=45
           for i in $(seq 1 60); do
             if ! kill -0 "$server_pid" 2>/dev/null; then
               echo "::error::mcpproxy exited during startup"
@@ -130,7 +132,7 @@ jobs:
             t="$(curl -fsS -H "X-API-Key: $KEY" "$BASE/api/v1/tools" \
                  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len((d.get("data") or {}).get("tools", [])))' 2>/dev/null || echo 0)"
             echo "attempt $i: catalog has $t tool(s)"
-            if [ "$t" -ge "$expected" ]; then
+            if [ "$t" -ge "$ready_min" ]; then
               echo "Catalog full ($t tools); settling 8s for index build."
               sleep 8
               ready=1
@@ -139,7 +141,7 @@ jobs:
             sleep 5
           done
           if [ "$ready" != "1" ]; then
-            echo "::error::mcpproxy catalog did not reach ${expected} tools in 5 minutes"
+            echo "::error::mcpproxy catalog did not reach ${ready_min} tools in 5 minutes"
             tail -80 "$RUNNER_TEMP/mcpproxy-bench.log" || true
             exit 1
           fi
@@ -156,14 +158,15 @@ jobs:
           #   GET /api/v1/tools can serve stub schemas (see
           #   scripts/gen-corpus-v2-dump), so the FR-004 baseline joins live
           #   tools with the frozen full definitions by tool id.
-          # -expected-tools: the readiness threshold above; a differing live
-          #   catalog becomes a rendered corpus-drift warning (FR-021).
+          # -expected-tools: the FROZEN corpus count (not the readiness
+          #   threshold); a differing live catalog becomes a rendered
+          #   corpus-drift warning (FR-021).
           if ! go run ./bench/cmd/bench \
             -live \
             -proxy "$BASE" \
             -api-key "$KEY" \
             -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
-            -expected-tools "$expected" \
+            -expected-tools "$corpus_expected" \
             -lap-json bench/results/lap.json \
             -out bench/results; then
             echo "::error::live bench run failed"
