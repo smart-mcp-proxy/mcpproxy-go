@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,7 +80,7 @@ func TestRunLiveAuthoritativeHeadline(t *testing.T) {
 			{ID: "q1", Query: "read a file", Labels: []Label{{ToolID: "filesystem:read_text_file", Relevance: 2}}},
 		},
 	}
-	rep, err := RunLive(context.Background(), c, golden)
+	rep, err := RunLive(context.Background(), c, golden, LiveRunOptions{})
 	if err != nil {
 		t.Fatalf("RunLive: %v", err)
 	}
@@ -191,7 +194,7 @@ func TestRunLive_ResponseCostWired(t *testing.T) {
 			{ID: "q2", Query: "echo input", Labels: []Label{{ToolID: "memory:echo", Relevance: 2}}},
 		},
 	}
-	rep, err := RunLive(context.Background(), c, golden)
+	rep, err := RunLive(context.Background(), c, golden, LiveRunOptions{})
 	if err != nil {
 		t.Fatalf("RunLive: %v", err)
 	}
@@ -291,6 +294,16 @@ func TestRunLive_ResponseCostWired(t *testing.T) {
 			t.Errorf("session estimate for %d calls not populated: %+v", se.CallsPerSession, se)
 		}
 	}
+
+	// FR-023: the MCP retrieve_tools discovery calls get their OWN latency
+	// aggregate, computed from the DiscoveryResponseMeasurement latencies —
+	// never conflated with the REST /api/v1/index/search percentiles.
+	if rep.MCPDiscoveryLatency == nil {
+		t.Fatal("MCPDiscoveryLatency missing — discovery-call latencies must be aggregated separately from REST search")
+	}
+	if rep.MCPDiscoveryLatency.P50Ms <= 0 || rep.MCPDiscoveryLatency.MaxMs < rep.MCPDiscoveryLatency.P50Ms {
+		t.Errorf("MCPDiscoveryLatency not plausible: %+v", rep.MCPDiscoveryLatency)
+	}
 }
 
 // TestLiveReport_ToReportV2 checks the ReportV2 projection of a live run:
@@ -308,7 +321,7 @@ func TestLiveReport_ToReportV2(t *testing.T) {
 			{ID: "q1", Query: "read a file", Labels: []Label{{ToolID: "filesystem:read_text_file", Relevance: 2}}},
 		},
 	}
-	rep, err := RunLive(context.Background(), c, golden)
+	rep, err := RunLive(context.Background(), c, golden, LiveRunOptions{})
 	if err != nil {
 		t.Fatalf("RunLive: %v", err)
 	}
@@ -338,6 +351,15 @@ func TestLiveReport_ToReportV2(t *testing.T) {
 	}
 	if r2.ResponseCost == nil || r2.BreakEven == nil || r2.Latency == nil || r2.Proxy == nil {
 		t.Fatalf("live sections missing from ReportV2: %+v", r2)
+	}
+	// Latency surfaces (FR-023): the flat fields and RESTSearch label the REST
+	// /api/v1/index/search calls; MCPDiscovery carries the retrieve_tools
+	// aggregate measured over the real MCP protocol.
+	if r2.Latency.RESTSearch == nil || r2.Latency.RESTSearch.P50Ms != r2.Latency.P50Ms {
+		t.Errorf("Latency.RESTSearch must mirror the flat REST fields: %+v", r2.Latency)
+	}
+	if r2.Latency.MCPDiscovery == nil {
+		t.Error("Latency.MCPDiscovery missing from ReportV2 for a run with measured discovery responses")
 	}
 	if len(r2.SessionEstimates) == 0 {
 		t.Error("SessionEstimates missing from ReportV2")
@@ -425,5 +447,245 @@ func TestBuildTokenReportWithholdsWhenBaselineSchemasMissing(t *testing.T) {
 	}
 	if rep.BaselineTokens <= 0 {
 		t.Error("baseline tokens should still be reported for transparency")
+	}
+}
+
+// TestBuildTokenReportTreatsStubSchemasAsMissing guards the FR-004 stub-schema
+// valve: GET /api/v1/tools can serve the supervisor stub
+// ({"type":"object","properties":{}} — see scripts/gen-corpus-v2-dump), which
+// is NOT a full input schema. A baseline where every schema is a stub (or has
+// empty/absent properties) must count as schema-less, so the headline is
+// withheld instead of claiming a full-schema baseline it never had (MCP-3167).
+func TestBuildTokenReportTreatsStubSchemasAsMissing(t *testing.T) {
+	tk, err := NewTokenizer(DefaultEncoding)
+	if err != nil {
+		t.Fatalf("tokenizer: %v", err)
+	}
+	upstreamStubs := []Tool{
+		{Name: "a", Description: "d", Schema: json.RawMessage(`{"type":"object","properties":{}}`)},
+		{Name: "b", Description: "d", Schema: json.RawMessage(`{"type":"object"}`)},
+	}
+	rt := []Tool{{Name: "retrieve_tools", Description: "d", Schema: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}}}`)}}
+	ce := []Tool{{Name: "code_execution", Description: "d", Schema: json.RawMessage(`{"type":"object","properties":{"code":{"type":"string"}}}`)}}
+
+	rep := buildTokenReport(tk, upstreamStubs, rt, ce)
+	if rep.BaselineSchemasCounted {
+		t.Error("BaselineSchemasCounted must be false when every upstream schema is a stub")
+	}
+	if rep.AuthoritativeHeadline {
+		t.Error("headline must be withheld for a stub-schema baseline")
+	}
+	// One real schema among stubs is enough to count as schema-bearing.
+	upstreamMixed := append([]Tool{
+		{Name: "c", Description: "d", Schema: json.RawMessage(`{"type":"object","properties":{"x":{"type":"string"}}}`)},
+	}, upstreamStubs...)
+	rep = buildTokenReport(tk, upstreamMixed, rt, ce)
+	if !rep.BaselineSchemasCounted {
+		t.Error("BaselineSchemasCounted must be true when at least one upstream tool has a real schema")
+	}
+}
+
+// writeCorpusV2Fixture writes a minimal corpus_v2 file with the given
+// tool_id → schema entries and returns its path.
+func writeCorpusV2Fixture(t *testing.T, schemas map[string]string) string {
+	t.Helper()
+	type ct struct {
+		ToolID      string          `json:"tool_id"`
+		Server      string          `json:"server"`
+		Tool        string          `json:"tool"`
+		Description string          `json:"description"`
+		Schema      json.RawMessage `json:"schema"`
+	}
+	var tools []ct
+	for id, schema := range schemas {
+		server, name, _ := strings.Cut(id, ":")
+		tools = append(tools, ct{ToolID: id, Server: server, Tool: name, Description: "corpus description", Schema: json.RawMessage(schema)})
+	}
+	sort.Slice(tools, func(i, j int) bool { return tools[i].ToolID < tools[j].ToolID })
+	raw, err := json.Marshal(map[string]any{"version": "corpus_v2-test", "tools": tools})
+	if err != nil {
+		t.Fatalf("marshal corpus fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "corpus_v2.tools.json")
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write corpus fixture: %v", err)
+	}
+	return path
+}
+
+// stubProxyStubSchemas mimics a proxy whose /api/v1/tools serves only the
+// supervisor stub schema for every tool — the exact live condition the
+// corpus_v2 schema-source join exists for.
+func stubProxyStubSchemas(t *testing.T) *httptest.Server {
+	t.Helper()
+	stub := map[string]any{"type": "object", "properties": map[string]any{}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/tools", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"tools": []map[string]any{
+					{"name": "read_text_file", "server_name": "filesystem", "description": "Read a file as text", "schema": stub},
+					{"name": "echo", "server_name": "memory", "description": "Echo input", "schema": stub},
+				},
+			},
+		})
+	})
+	mux.HandleFunc("/api/v1/index/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"query": r.URL.Query().Get("q"),
+				"results": []map[string]any{
+					{"tool": map[string]any{"name": "read_text_file", "server_name": "filesystem"}, "score": 0.9},
+				},
+				"total": 1,
+				"took":  "0ms",
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func liveGoldenOneQuery() *GoldenSet {
+	return &GoldenSet{
+		CorpusVersion: "corpus_v1",
+		Queries: []GoldenQuery{
+			{ID: "q1", Query: "read a file", Labels: []Label{{ToolID: "filesystem:read_text_file", Relevance: 2}}},
+		},
+	}
+}
+
+// TestRunLive_StubSchemasWithholdHeadline: without a corpus_v2 schema source,
+// a live proxy serving only stub schemas must NOT produce an authoritative
+// headline — the "naive full menu" would be counted over empty schemas.
+func TestRunLive_StubSchemasWithholdHeadline(t *testing.T) {
+	srv := stubProxyStubSchemas(t)
+	c := NewLiveClient(srv.URL, "test-key")
+
+	rep, err := RunLive(context.Background(), c, liveGoldenOneQuery(), LiveRunOptions{})
+	if err != nil {
+		t.Fatalf("RunLive: %v", err)
+	}
+	if rep.Tokens.BaselineSchemasCounted {
+		t.Error("BaselineSchemasCounted must be false when the proxy serves only stub schemas")
+	}
+	if rep.Tokens.AuthoritativeHeadline {
+		t.Error("headline must be withheld for a stub-schema live baseline")
+	}
+	if rep.Tokens.SchemaSource == "" {
+		t.Error("SchemaSource provenance missing")
+	}
+	if !strings.Contains(rep.Tokens.SchemaSource, "/api/v1/tools") {
+		t.Errorf("SchemaSource = %q, want the live endpoint named", rep.Tokens.SchemaSource)
+	}
+}
+
+// TestRunLive_CorpusV2SchemaJoin: providing the corpus_v2 file joins live
+// tools by id with the frozen full schemas, restoring an authoritative
+// full-definition baseline even when /api/v1/tools serves stubs (FR-004).
+func TestRunLive_CorpusV2SchemaJoin(t *testing.T) {
+	srv := stubProxyStubSchemas(t)
+	c := NewLiveClient(srv.URL, "test-key")
+
+	corpusPath := writeCorpusV2Fixture(t, map[string]string{
+		"filesystem:read_text_file": `{"type":"object","properties":{"path":{"type":"string","description":"File location"}},"required":["path"]}`,
+		"memory:echo":               `{"type":"object","properties":{"text":{"type":"string"}}}`,
+	})
+	rep, err := RunLive(context.Background(), c, liveGoldenOneQuery(), LiveRunOptions{CorpusV2Path: corpusPath})
+	if err != nil {
+		t.Fatalf("RunLive: %v", err)
+	}
+	if !rep.Tokens.BaselineSchemasCounted {
+		t.Error("BaselineSchemasCounted must be true after the corpus_v2 join")
+	}
+	if !rep.Tokens.AuthoritativeHeadline {
+		t.Errorf("headline must be authoritative after a complete corpus_v2 join; notes: %v", rep.Tokens.Notes)
+	}
+	if !strings.Contains(rep.Tokens.SchemaSource, "corpus_v2") {
+		t.Errorf("SchemaSource = %q, want corpus_v2 provenance", rep.Tokens.SchemaSource)
+	}
+
+	// The joined baseline must cost more than a name+description-only count.
+	tk, err := NewTokenizer(DefaultEncoding)
+	if err != nil {
+		t.Fatalf("tokenizer: %v", err)
+	}
+	nameDescOnly := tk.CountTool(Tool{Name: "read_text_file", Description: "Read a file as text"}) +
+		tk.CountTool(Tool{Name: "echo", Description: "Echo input"})
+	if rep.Tokens.BaselineTokens <= nameDescOnly {
+		t.Errorf("BaselineTokens = %d, want > %d (corpus schemas must be counted)", rep.Tokens.BaselineTokens, nameDescOnly)
+	}
+}
+
+// TestRunLive_CorpusV2JoinMissWithholdsHeadline: a live tool absent from the
+// corpus_v2 schema source falls back to name+description and the headline is
+// withheld — the MCP-3161/3167 guard pattern, never a silent partial join.
+func TestRunLive_CorpusV2JoinMissWithholdsHeadline(t *testing.T) {
+	srv := stubProxyStubSchemas(t)
+	c := NewLiveClient(srv.URL, "test-key")
+
+	// memory:echo is missing from the corpus on purpose.
+	corpusPath := writeCorpusV2Fixture(t, map[string]string{
+		"filesystem:read_text_file": `{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}`,
+	})
+	rep, err := RunLive(context.Background(), c, liveGoldenOneQuery(), LiveRunOptions{CorpusV2Path: corpusPath})
+	if err != nil {
+		t.Fatalf("RunLive: %v", err)
+	}
+	if rep.Tokens.AuthoritativeHeadline {
+		t.Error("headline must be withheld when a live tool is missing from the corpus_v2 schema source")
+	}
+	for _, m := range rep.Tokens.Modes {
+		if m.SavingsRatio != 0 {
+			t.Errorf("savings ratio must be withheld (0), got %v for %q", m.SavingsRatio, m.Mode)
+		}
+	}
+	found := false
+	for _, n := range rep.Tokens.Notes {
+		if strings.Contains(n, "WITHHELD") && strings.Contains(n, "memory:echo") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("notes must explain the withheld headline and name the missing tool: %v", rep.Tokens.Notes)
+	}
+}
+
+// TestRunLive_ExpectedToolCountDrift wires the FR-021 corpus-drift signal:
+// the caller-supplied expected tool count lands in ProxyInfo (and hence the
+// v2 report), and the dashboard renders a drift warning when actual differs.
+func TestRunLive_ExpectedToolCountDrift(t *testing.T) {
+	srv := stubProxy(t)
+	defer srv.Close()
+	c := NewLiveClient(srv.URL, "test-key")
+
+	rep, err := RunLive(context.Background(), c, liveGoldenOneQuery(), LiveRunOptions{ExpectedToolCount: 5})
+	if err != nil {
+		t.Fatalf("RunLive: %v", err)
+	}
+	if rep.ProxyInfo == nil || rep.ProxyInfo.ExpectedToolCount != 5 {
+		t.Fatalf("ProxyInfo.ExpectedToolCount = %+v, want 5", rep.ProxyInfo)
+	}
+	if rep.ProxyInfo.ToolCount != 2 {
+		t.Fatalf("ProxyInfo.ToolCount = %d, want 2", rep.ProxyInfo.ToolCount)
+	}
+
+	r2 := rep.ToReportV2("2026-07-14T00:00:00Z")
+	if r2.Proxy == nil || r2.Proxy.ExpectedToolCount != 5 {
+		t.Fatalf("ReportV2.Proxy.ExpectedToolCount = %+v, want 5", r2.Proxy)
+	}
+	htmlPath := filepath.Join(t.TempDir(), "dashboard.html")
+	if err := r2.WriteHTML(htmlPath); err != nil {
+		t.Fatalf("WriteHTML: %v", err)
+	}
+	html, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatalf("read dashboard: %v", err)
+	}
+	if !strings.Contains(string(html), "drift") {
+		t.Error("dashboard must render a corpus-drift warning when actual != expected tool count")
 	}
 }

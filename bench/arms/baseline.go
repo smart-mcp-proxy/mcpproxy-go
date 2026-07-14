@@ -1,7 +1,6 @@
 package arms
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -23,26 +22,13 @@ const listingSeparator = "\n\n"
 // (via json.Number — no float round-trip), compact (no insignificant
 // whitespace), and no HTML escaping. Identical JSON content in any key order
 // canonicalizes to identical bytes (FR-010).
+//
+// The implementation lives in bench.CanonicalJSON so every schema ingestion
+// boundary (corpus loaders, live fetch) canonicalizes with the SAME function
+// the arms render with — contract parity between the baseline arm and
+// Tokenizer.CountToolWithSchema. This alias keeps the arms-package API.
 func CanonicalJSON(raw json.RawMessage) (string, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.UseNumber()
-	var v interface{}
-	if err := dec.Decode(&v); err != nil {
-		return "", fmt.Errorf("canonicalize JSON: %w", err)
-	}
-	// Reject trailing garbage after the first value — a silently half-parsed
-	// schema would be a silently truncated encoding (contract rule 2).
-	if dec.More() {
-		return "", fmt.Errorf("canonicalize JSON: trailing data after value")
-	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return "", fmt.Errorf("canonicalize JSON: %w", err)
-	}
-	// Encoder appends a newline; the canonical form is the bare value.
-	return strings.TrimSuffix(buf.String(), "\n"), nil
+	return bench.CanonicalJSON(raw)
 }
 
 // CanonicalToolText is THE canonical full-definition renderer (research D7b):

@@ -24,7 +24,6 @@
 package bench
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -85,9 +84,12 @@ func LoadCorpus(path string) (*Corpus, error) {
 // (specs/083-discovery-profiler/datasets/corpus_v2.tools.json). On top of
 // LoadCorpus it enforces the corpus_v2 contract: every tool MUST carry a
 // non-empty JSON input schema (arm comparison over a schema-less corpus is
-// meaningless — research D4), and each schema is compacted at load so the
-// in-memory bytes are canonical-compact (the on-disk file is pretty-printed
-// for git diffability; its keys are already sorted by the generator's jq -S).
+// meaningless — research D4), and each schema is CANONICALIZED at load
+// (CanonicalJSON: sorted keys, compact, verbatim numbers) so the in-memory
+// bytes match what the arm renderers produce — CountToolWithSchema and the
+// baseline arm count identical bytes even for a non-canonical input file
+// (the committed file is pretty-printed for git diffability; its keys are
+// already sorted by the generator's jq -S, so this is a no-op for it).
 func LoadCorpusV2(path string) (*Corpus, error) {
 	c, err := LoadCorpus(path)
 	if err != nil {
@@ -98,11 +100,11 @@ func LoadCorpusV2(path string) (*Corpus, error) {
 		if len(tl.Schema) == 0 {
 			return nil, fmt.Errorf("corpus %q: tool %s has no input schema — corpus_v2 must be schema-bearing", path, tl.ToolID)
 		}
-		var buf bytes.Buffer
-		if err := json.Compact(&buf, tl.Schema); err != nil {
+		canon, err := CanonicalJSON(tl.Schema)
+		if err != nil {
 			return nil, fmt.Errorf("corpus %q: tool %s schema is invalid JSON: %w", path, tl.ToolID, err)
 		}
-		tl.Schema = json.RawMessage(buf.Bytes())
+		tl.Schema = json.RawMessage(canon)
 	}
 	return c, nil
 }

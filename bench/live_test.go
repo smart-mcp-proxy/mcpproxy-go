@@ -82,6 +82,33 @@ func TestLiveClientFetchUpstreamTools(t *testing.T) {
 	}
 }
 
+// TestLiveClientFetchCanonicalizesSchemas: the live fetch is an ingestion
+// boundary (contract parity, research D7b) — schemas must come out in the
+// same canonical form the baseline arm renders, so CountToolWithSchema and
+// the arm encoders count identical bytes for identical JSON content.
+func TestLiveClientFetchCanonicalizesSchemas(t *testing.T) {
+	nonCanonical := `{"type": "object", "properties": {"b": {"type": "string"}, "a": {"type": "string"}}, "required": ["b"]}`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/tools", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"data":{"tools":[{"name":"t","server_name":"s","description":"d","schema":` + nonCanonical + `}]}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c := NewLiveClient(srv.URL, "test-key")
+	tools, err := c.FetchUpstreamTools(context.Background())
+	if err != nil {
+		t.Fatalf("FetchUpstreamTools: %v", err)
+	}
+	want, err := CanonicalJSON(json.RawMessage(nonCanonical))
+	if err != nil {
+		t.Fatalf("CanonicalJSON: %v", err)
+	}
+	if got := string(tools[0].Schema); got != want {
+		t.Errorf("fetched schema not canonical:\ngot:  %s\nwant: %s", got, want)
+	}
+}
+
 func TestLiveClientSearch(t *testing.T) {
 	srv := stubProxy(t)
 	defer srv.Close()

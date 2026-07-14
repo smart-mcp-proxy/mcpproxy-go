@@ -140,8 +140,8 @@ func compactParams(t bench.Tool) (string, error) {
 	if err := dec.Decode(&s); err != nil {
 		return "", fmt.Errorf("tool %s: parse input schema: %w", t.ToolID, err)
 	}
-	if dec.More() {
-		return "", fmt.Errorf("tool %s: parse input schema: trailing data after value", t.ToolID)
+	if err := bench.RequireEOF(dec); err != nil {
+		return "", fmt.Errorf("tool %s: parse input schema: %w", t.ToolID, err)
 	}
 
 	required := make([]string, 0, len(s.Required))

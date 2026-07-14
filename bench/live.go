@@ -96,26 +96,40 @@ func (c *LiveClient) FetchUpstreamTools(ctx context.Context) ([]Tool, error) {
 	}
 	tools := make([]Tool, 0, len(resp.Tools))
 	for _, t := range resp.Tools {
+		schema, err := normalizeSchema(t.Schema)
+		if err != nil {
+			return nil, fmt.Errorf("tool %s:%s: %w", t.ServerName, t.Name, err)
+		}
 		tools = append(tools, Tool{
 			ToolID:      t.ServerName + ":" + t.Name,
 			Server:      t.ServerName,
 			Name:        t.Name,
 			Description: t.Description,
-			Schema:      normalizeSchema(t.Schema),
+			Schema:      schema,
 		})
 	}
 	return tools, nil
 }
 
-// normalizeSchema treats an empty JSON object ("{}") or JSON null the same as an
-// absent schema so a tool with no real parameters does not inflate token counts.
-func normalizeSchema(raw json.RawMessage) json.RawMessage {
+// normalizeSchema treats an empty JSON object ("{}") or JSON null the same as
+// an absent schema so a tool with no real parameters does not inflate token
+// counts, and CANONICALIZES everything else (CanonicalJSON: sorted keys,
+// compact, verbatim numbers) — the live fetch is an ingestion boundary, so the
+// bytes it hands out must match what the arm renderers produce (contract
+// parity with bench/arms baseline). Invalid schema JSON is an explicit error.
+func normalizeSchema(raw json.RawMessage) (json.RawMessage, error) {
 	switch string(raw) {
-	case "", "null", "{}":
-		return nil
-	default:
-		return raw
+	case "", "null":
+		return nil, nil
 	}
+	canon, err := CanonicalJSON(raw)
+	if err != nil {
+		return nil, fmt.Errorf("normalize input schema: %w", err)
+	}
+	if canon == "{}" || canon == "null" {
+		return nil, nil
+	}
+	return json.RawMessage(canon), nil
 }
 
 // Search replays one query through the proxy's BM25 tool search

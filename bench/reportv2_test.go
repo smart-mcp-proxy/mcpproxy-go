@@ -79,7 +79,11 @@ func sampleReportV2() *ReportV2 {
 		SessionEstimates: []SessionCostEstimate{
 			{Arm: "baseline_json", CallsPerSession: 3, RetryRate: 0, EstimatedTokens: 37000},
 		},
-		Latency: &LatencyV2{P50Ms: 4.2, P95Ms: 9.8, P99Ms: 15.1, MaxMs: 22.0},
+		Latency: &LatencyV2{
+			P50Ms: 4.2, P95Ms: 9.8, P99Ms: 15.1, MaxMs: 22.0,
+			RESTSearch:   &LatencyAggregate{P50Ms: 4.2, P95Ms: 9.8, P99Ms: 15.1, MaxMs: 22.0},
+			MCPDiscovery: &LatencyAggregate{P50Ms: 180.5, P95Ms: 310.0, P99Ms: 402.7, MaxMs: 511.3},
+		},
 		Lap: &LapVerdict{
 			Executed: true, Version: "0.8.0", MenuTokens: 4100, InHouseMenuTokens: 4000,
 			DivergencePct: 2.5, Grade: "B", ArtifactPath: "bench/results/lap.json",

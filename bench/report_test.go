@@ -138,6 +138,30 @@ func TestDashboardV2_ConditionalSections(t *testing.T) {
 	}
 }
 
+// TestDashboardV2_LatencySurfaces: the two latency surfaces are labeled and
+// never conflated (FR-023): the REST /api/v1/index/search percentiles carry
+// their endpoint name, and the MCP retrieve_tools discovery aggregate renders
+// its own labeled block with its own numbers.
+func TestDashboardV2_LatencySurfaces(t *testing.T) {
+	rep := sampleReportV2()
+	html := renderDashboardV2(t, rep)
+	for _, want := range []string{"/api/v1/index/search", "retrieve_tools", "180.5", "511.3"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("latency section missing %q", want)
+		}
+	}
+
+	// Without an MCP aggregate the REST block still renders, clearly labeled.
+	rep.Latency.MCPDiscovery = nil
+	html = renderDashboardV2(t, rep)
+	if !strings.Contains(html, "/api/v1/index/search") {
+		t.Error("REST latency label missing when MCP aggregate absent")
+	}
+	if strings.Contains(html, "180.5") {
+		t.Error("MCP aggregate rendered despite being absent")
+	}
+}
+
 // TestDashboardV2_NoBreakEvenVerdict: the honest NoBreakEven row renders as a
 // verdict, not as "0 calls".
 func TestDashboardV2_NoBreakEven(t *testing.T) {

@@ -3,12 +3,14 @@ package arms
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/bench"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -34,7 +36,25 @@ type TSCGArm struct {
 	// before any tool is processed).
 	nodePath string
 	availErr error
+	// timeout bounds one shim invocation; 0 means the corpus-size-proportional
+	// default (tscgBaseTimeout + tscgPerToolTimeout per tool). Tests set a tiny
+	// value to exercise the kill path.
+	timeout time.Duration
 }
+
+// Shim-invocation bounds: a hung node process (bad shim, wedged runtime) must
+// error out instead of blocking the whole bench run forever and leaving a
+// zombie child.
+const (
+	// tscgBaseTimeout is the fixed floor of one shim invocation.
+	tscgBaseTimeout = 120 * time.Second
+	// tscgPerToolTimeout scales the bound with the batch size (a full-corpus
+	// EncodeListing compiles every tool in one spawn).
+	tscgPerToolTimeout = time.Second
+	// tscgWaitDelay bounds Wait after the context fires: if the killed child
+	// left pipe readers behind, Wait is forcibly released instead of hanging.
+	tscgWaitDelay = 5 * time.Second
+)
 
 // NewTSCG constructs the tscg arm, locating bench/tscg by walking up from the
 // working directory (tests run in bench/arms; the bench CLI runs from the repo
@@ -156,13 +176,29 @@ func (a *TSCGArm) encodeBatch(ts []bench.Tool) (map[string]string, error) {
 		}
 	}
 
-	cmd := exec.Command(a.nodePath, "shim.mjs") //nolint:gosec // nodePath from LookPath, fixed arg
+	timeout := a.timeout
+	if timeout <= 0 {
+		timeout = tscgBaseTimeout + time.Duration(len(ts))*tscgPerToolTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// CommandContext kills the child (cmd.Cancel = Kill) when the deadline
+	// fires; WaitDelay releases Wait even if pipe copies linger after the
+	// kill. Stdin is a fully buffered payload, so exec closes it after the
+	// write — no interactive stdin to deadlock on; stdout/stderr drain into
+	// buffers via exec's own copier goroutines.
+	cmd := exec.CommandContext(ctx, a.nodePath, "shim.mjs") //nolint:gosec // nodePath from LookPath, fixed arg
 	cmd.Dir = a.shimDir
 	cmd.Stdin = &input
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	cmd.WaitDelay = tscgWaitDelay
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("tscg shim timed out after %s and was killed: %w (stderr: %s)", timeout, ctx.Err(), strings.TrimSpace(stderr.String()))
+		}
 		return nil, fmt.Errorf("tscg shim failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 

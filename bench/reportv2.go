@@ -181,12 +181,33 @@ type SessionCostEstimate struct {
 	EstimatedTokens int     `json:"estimated_tokens"`
 }
 
-// LatencyV2 is the client-measured search-latency block (FR-023).
+// LatencyAggregate is one nearest-rank percentile summary of client-measured
+// latencies (FR-023) for a single measured surface.
+type LatencyAggregate struct {
+	P50Ms float64 `json:"p50_ms"`
+	P95Ms float64 `json:"p95_ms"`
+	P99Ms float64 `json:"p99_ms"`
+	MaxMs float64 `json:"max_ms"`
+}
+
+// LatencyV2 is the client-measured latency block (FR-023). Two DIFFERENT
+// surfaces are measured and must never be conflated: the REST
+// /api/v1/index/search calls used for retrieval scoring, and the MCP
+// retrieve_tools calls the discovery-response rows time. The flat fields
+// summarize the REST search calls (kept additive for existing consumers and
+// mirrored in RESTSearch); MCPDiscovery, when present, is the retrieve_tools
+// aggregate over the real MCP protocol.
 type LatencyV2 struct {
 	P50Ms float64 `json:"p50_ms"`
 	P95Ms float64 `json:"p95_ms"`
 	P99Ms float64 `json:"p99_ms"`
 	MaxMs float64 `json:"max_ms"`
+	// RESTSearch labels the flat fields' surface explicitly:
+	// GET /api/v1/index/search round-trips.
+	RESTSearch *LatencyAggregate `json:"rest_search,omitempty"`
+	// MCPDiscovery aggregates the MCP retrieve_tools call latencies from the
+	// per-query DiscoveryResponseMeasurement rows.
+	MCPDiscovery *LatencyAggregate `json:"mcp_discovery,omitempty"`
 }
 
 // LapVerdict is the pinned independent LAP run (FR-015/016, SC-006).

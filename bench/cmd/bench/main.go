@@ -21,7 +21,12 @@
 // latency, and — Spec 083 US1 — the retrieve_tools RESPONSE cost over the
 // real MCP protocol with break-even analysis:
 //
-//	go run ./bench/cmd/bench -live [-proxy URL] [-api-key KEY] [-golden PATH]
+//	go run ./bench/cmd/bench -live [-proxy URL] [-api-key KEY] [-golden PATH] \
+//	  [-corpus-v2 PATH] [-expected-tools N]
+//
+// In live mode -corpus-v2 supplies the full-definition schemas for the naive
+// full-menu count (joined to live tools by id — GET /api/v1/tools can serve
+// stub schemas), and -expected-tools surfaces corpus drift (FR-021).
 //
 // A LAP lint artifact (`uvx --from lap-score==0.8.0 lap lint --json`) merges
 // into either report via -lap-json. Reports land in bench/results/
@@ -59,17 +64,28 @@ func main() {
 
 	// Spec 083 profiler flags (T025/T030/T032).
 	armsFlag := flag.String("arms", "", "comma-separated encoding arms to run, or 'all' (enables profiler mode; see bench/arms)")
-	corpusV2Path := flag.String("corpus-v2", "", "path to the Spec 083 schema-bearing frozen corpus (corpus_v2.tools.json)")
+	corpusV2Path := flag.String("corpus-v2", "", "path to the Spec 083 schema-bearing frozen corpus (corpus_v2.tools.json); with -live it is the schema SOURCE joined to live tools by id (GET /api/v1/tools can serve stub schemas)")
 	toolretDir := flag.String("toolret", "", "ToolRet cache directory from scripts/fetch-toolret.sh (bench/results/cache/toolret[/<revision>]) — runtime fetch, never committed")
 	livemcptoolPath := flag.String("livemcptool", "", "LiveMCPTool committed snapshot directory (or its tools.json)")
 	subset := flag.Int("subset", 250, "seeded ToolRet query-subset size (FR-014)")
 	seed := flag.Int64("seed", 42, "seed for the deterministic query subset (FR-014)")
 	lapJSON := flag.String("lap-json", "", "path to a LAP lint artifact (lap.json) to merge as the independent verdict")
 	resultFixtures := flag.String("result-fixtures", "specs/083-discovery-profiler/datasets/result_fixtures_v1.json", "tool-result fixture set for the toon_results arm")
+	expectedTools := flag.Int("expected-tools", 0, "live mode: expected upstream tool count (from the frozen corpus); a differing live catalog is surfaced as a corpus-drift warning (FR-021)")
 	flag.Parse()
 
 	if *live {
-		runLive(*proxy, *apiKey, *goldenPath, *outDir, *lapJSON)
+		// In live mode -corpus-v2 is the schema SOURCE for the naive
+		// full-menu count (GET /api/v1/tools can serve stub schemas).
+		runLive(liveOptions{
+			proxy:         *proxy,
+			apiKey:        *apiKey,
+			goldenPath:    *goldenPath,
+			outDir:        *outDir,
+			lapPath:       *lapJSON,
+			corpusV2Path:  *corpusV2Path,
+			expectedTools: *expectedTools,
+		})
 		return
 	}
 	if *armsFlag != "" || *corpusV2Path != "" || *toolretDir != "" || *livemcptoolPath != "" {
@@ -403,24 +419,42 @@ func printArmRows(r *bench.ReportV2) {
 	}
 }
 
-func runLive(proxy, apiKey, goldenPath, outDir, lapPath string) {
-	golden, err := bench.LoadGoldenSet(goldenPath)
+// liveOptions carries the live-mode flag values.
+type liveOptions struct {
+	proxy         string
+	apiKey        string
+	goldenPath    string
+	outDir        string
+	lapPath       string
+	corpusV2Path  string
+	expectedTools int
+}
+
+func runLive(opts liveOptions) {
+	golden, err := bench.LoadGoldenSet(opts.goldenPath)
 	if err != nil {
 		log.Fatalf("bench: %v", err)
 	}
-	client := bench.NewLiveClient(proxy, apiKey)
-	report, err := bench.RunLive(context.Background(), client, golden)
+	client := bench.NewLiveClient(opts.proxy, opts.apiKey)
+	report, err := bench.RunLive(context.Background(), client, golden, bench.LiveRunOptions{
+		CorpusV2Path:      opts.corpusV2Path,
+		ExpectedToolCount: opts.expectedTools,
+	})
 	if err != nil {
 		log.Fatalf("bench: %v", err)
 	}
-	jsonPath, err := report.WriteJSON(outDir)
+	jsonPath, err := report.WriteJSON(opts.outDir)
 	if err != nil {
 		log.Fatalf("bench: %v", err)
 	}
 
 	fmt.Fprintf(os.Stdout, "mcpproxy LIVE benchmark (proxy %s, %s)\n", report.Proxy, report.Encoding)
 	tr := report.Tokens
-	fmt.Fprintf(os.Stdout, "  tokens: %d upstream tools, baseline %d tokens (with full schemas)\n", tr.UpstreamTools, tr.BaselineTokens)
+	fmt.Fprintf(os.Stdout, "  tokens: %d upstream tools, baseline %d tokens (schema source: %s)\n", tr.UpstreamTools, tr.BaselineTokens, tr.SchemaSource)
+	if pi := report.ProxyInfo; pi != nil && pi.ExpectedToolCount > 0 && pi.ToolCount != pi.ExpectedToolCount {
+		fmt.Fprintf(os.Stderr, "bench: WARNING: corpus drift — live catalog has %d tools, expected %d (FR-021; the report and dashboard surface this)\n",
+			pi.ToolCount, pi.ExpectedToolCount)
+	}
 	for _, m := range tr.Modes {
 		if m.Mode == bench.ModeBaseline {
 			continue
@@ -440,8 +474,12 @@ func runLive(proxy, apiKey, goldenPath, outDir, lapPath string) {
 	fmt.Fprintf(os.Stdout, "  accuracy (%d queries): Recall@1=%.3f Recall@5=%.3f MRR=%.3f nDCG@10=%.3f MAP=%.3f\n",
 		r.QueryCount, r.Metrics.RecallAt[1], r.Metrics.RecallAt[5], r.Metrics.MRR, r.Metrics.NDCGAt10, r.Metrics.MAP)
 	l := report.Latency
-	fmt.Fprintf(os.Stdout, "  latency (%d searches): p50=%.1fms p95=%.1fms p99=%.1fms max=%.1fms; load-all-tools=%.1fms\n",
+	fmt.Fprintf(os.Stdout, "  REST search latency (%d GET /api/v1/index/search calls): p50=%.1fms p95=%.1fms p99=%.1fms max=%.1fms; load-all-tools=%.1fms\n",
 		l.Samples, l.P50ms, l.P95ms, l.P99ms, l.MaxMs, l.LoadAllToolsMs)
+	if md := report.MCPDiscoveryLatency; md != nil {
+		fmt.Fprintf(os.Stdout, "  MCP discovery latency (retrieve_tools calls): p50=%.1fms p95=%.1fms p99=%.1fms max=%.1fms\n",
+			md.P50Ms, md.P95Ms, md.P99Ms, md.MaxMs)
+	}
 
 	// Spec 083 US1: response cost + break-even over the real MCP protocol.
 	if rc := report.ResponseCost; rc != nil {
@@ -471,8 +509,8 @@ func runLive(proxy, apiKey, goldenPath, outDir, lapPath string) {
 			inHouseMenu = m.Tokens
 		}
 	}
-	mergeLap(r2, lapPath, inHouseMenu)
-	jsonV2Path, htmlPath, err := r2.WriteReports(outDir)
+	mergeLap(r2, opts.lapPath, inHouseMenu)
+	jsonV2Path, htmlPath, err := r2.WriteReports(opts.outDir)
 	if err != nil {
 		log.Fatalf("bench: %v", err)
 	}

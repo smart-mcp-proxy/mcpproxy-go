@@ -57,8 +57,8 @@ func decodeSchemaValue(t bench.Tool) (interface{}, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("tool %s: parse schema for TOON: %w", t.ToolID, err)
 	}
-	if dec.More() {
-		return nil, fmt.Errorf("tool %s: parse schema for TOON: trailing data after value", t.ToolID)
+	if err := bench.RequireEOF(dec); err != nil {
+		return nil, fmt.Errorf("tool %s: parse schema for TOON: %w", t.ToolID, err)
 	}
 	return v, nil
 }
@@ -325,8 +325,8 @@ func decodePayloadValue(r ResultFixture) (interface{}, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("tool %s: parse result payload: %w", r.ToolID, err)
 	}
-	if dec.More() {
-		return nil, fmt.Errorf("tool %s: parse result payload: trailing data after value", r.ToolID)
+	if err := bench.RequireEOF(dec); err != nil {
+		return nil, fmt.Errorf("tool %s: parse result payload: %w", r.ToolID, err)
 	}
 	return v, nil
 }

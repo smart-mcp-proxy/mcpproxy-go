@@ -183,6 +183,9 @@ const dashboardV2HTML = `<!doctype html>
 <p class="sub">Token cost, encoding arms, retrieval quality, and break-even for proxy-mediated tool discovery.</p>
 <p class="small">Report v{{.ReportVersion}} &middot; generated {{.GeneratedAt}} &middot; tokenizer <code>{{.Tokenizer.Name}}</code>{{if .Proxy}}{{if .Proxy.Version}} &middot; proxy <code>{{.Proxy.Version}}</code>{{end}}{{if .Proxy.RoutingMode}} &middot; routing <code>{{.Proxy.RoutingMode}}</code>{{end}}{{if .Proxy.ToolsLimit}} &middot; tools_limit {{.Proxy.ToolsLimit}}{{end}}{{if .Proxy.ToolCount}} &middot; {{.Proxy.ToolCount}} upstream tools{{end}}{{end}}{{if .Subset}} &middot; query subset: size {{.Subset.Size}}, seed {{.Subset.Seed}}{{end}}</p>
 <div class="caveat">&#9888;&#65039; <b>Tokenizer caveat:</b> {{.Tokenizer.Caveat}}</div>
+{{if .Proxy}}{{if and .Proxy.ExpectedToolCount (ne .Proxy.ToolCount .Proxy.ExpectedToolCount)}}
+<p class="warn">&#9888;&#65039; Corpus drift: the live proxy served {{.Proxy.ToolCount}} tools but the frozen corpus documents {{.Proxy.ExpectedToolCount}} (FR-021). Measured numbers describe the live catalog, not the frozen corpus.</p>
+{{end}}{{end}}
 <p class="small">Provenance badges: <span class="badge badge-measured">measured</span> observed over the real protocol/corpus &middot; <span class="badge badge-computed">computed</span> arithmetic over measured inputs &middot; <span class="badge badge-estimated">estimated</span> model with documented assumptions.</p>
 
 {{if .Corpora}}
@@ -286,14 +289,24 @@ const dashboardV2HTML = `<!doctype html>
 {{end}}
 
 {{if .Latency}}
-<h2>Search latency{{with prov .Provenance "latency"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
+<h2>Latency{{with prov .Provenance "latency"}}<span class="badge badge-{{.}}">{{.}}</span>{{end}}</h2>
+<h3>REST search (<code>GET /api/v1/index/search</code>)</h3>
 <div>
   <span class="stat"><b>{{f1 .Latency.P50Ms}}</b>p50 ms</span>
   <span class="stat"><b>{{f1 .Latency.P95Ms}}</b>p95 ms</span>
   <span class="stat"><b>{{f1 .Latency.P99Ms}}</b>p99 ms</span>
   <span class="stat"><b>{{f1 .Latency.MaxMs}}</b>max ms</span>
 </div>
-<p class="small">Client-measured (FR-023): the server-side timing field is a stub.</p>
+{{if .Latency.MCPDiscovery}}
+<h3>MCP discovery (<code>retrieve_tools</code> over the MCP protocol)</h3>
+<div>
+  <span class="stat"><b>{{f1 .Latency.MCPDiscovery.P50Ms}}</b>p50 ms</span>
+  <span class="stat"><b>{{f1 .Latency.MCPDiscovery.P95Ms}}</b>p95 ms</span>
+  <span class="stat"><b>{{f1 .Latency.MCPDiscovery.P99Ms}}</b>p99 ms</span>
+  <span class="stat"><b>{{f1 .Latency.MCPDiscovery.MaxMs}}</b>max ms</span>
+</div>
+{{end}}
+<p class="small">Client-measured (FR-023): the server-side timing field is a stub. The two surfaces are measured separately and never conflated.</p>
 {{end}}
 
 {{if .Lap}}

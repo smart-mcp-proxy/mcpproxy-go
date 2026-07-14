@@ -178,11 +178,14 @@
     },
     "latency": {
       "type": "object",
+      "description": "Client-measured latency (FR-023). Two distinct surfaces, never conflated: the flat p50_ms..max_ms fields summarize the REST GET /api/v1/index/search calls (kept for backward compatibility; mirrored in rest_search), while mcp_discovery aggregates the MCP retrieve_tools calls timed by the discovery-response rows.",
       "properties": {
         "p50_ms": { "type": "number" },
         "p95_ms": { "type": "number" },
         "p99_ms": { "type": "number" },
-        "max_ms": { "type": "number" }
+        "max_ms": { "type": "number" },
+        "rest_search": { "$ref": "#/$defs/latency_aggregate" },
+        "mcp_discovery": { "$ref": "#/$defs/latency_aggregate" }
       }
     },
     "lap": {
@@ -206,6 +209,18 @@
     "provenance": {
       "type": "object",
       "additionalProperties": { "enum": ["measured", "computed", "estimated"] }
+    }
+  },
+  "$defs": {
+    "latency_aggregate": {
+      "type": "object",
+      "description": "Nearest-rank percentile summary of client-measured latencies for one measured surface (FR-023).",
+      "properties": {
+        "p50_ms": { "type": "number" },
+        "p95_ms": { "type": "number" },
+        "p99_ms": { "type": "number" },
+        "max_ms": { "type": "number" }
+      }
     }
   }
 }

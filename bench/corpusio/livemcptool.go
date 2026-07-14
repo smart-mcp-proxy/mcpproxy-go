@@ -6,7 +6,6 @@
 package corpusio
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -109,11 +108,14 @@ func LoadLiveMCPTool(path string) (*bench.Corpus, *bench.GoldenSet, string, erro
 
 		schema := rec.InputSchema
 		if len(schema) > 0 {
-			var buf bytes.Buffer
-			if err := json.Compact(&buf, schema); err != nil {
+			// Canonicalize at the ingestion boundary (sorted keys, compact,
+			// verbatim numbers) so CountToolWithSchema and the arm renderers
+			// count identical bytes (contract parity, research D7b).
+			canon, err := bench.CanonicalJSON(schema)
+			if err != nil {
 				return nil, nil, "", fmt.Errorf("livemcptool snapshot %q: record %d (%s): invalid inputSchema JSON: %w", path, i, toolID, err)
 			}
-			schema = json.RawMessage(buf.Bytes())
+			schema = json.RawMessage(canon)
 		}
 		corpus.Tools = append(corpus.Tools, bench.Tool{
 			ToolID:      toolID,

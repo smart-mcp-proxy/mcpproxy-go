@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -38,12 +39,19 @@ type LiveTokenReport struct {
 	ProxySchemasCounted    bool             `json:"proxy_schemas_counted"`
 	BaselineSchemasCounted bool             `json:"baseline_schemas_counted"`
 	AuthoritativeHeadline  bool             `json:"authoritative_headline"`
-	Notes                  []string         `json:"notes"`
+	// SchemaSource records where the baseline upstream schemas came from
+	// (provenance, SC-005): the live GET /api/v1/tools response, or a
+	// corpus_v2 join when the live endpoint serves stub schemas (FR-004).
+	SchemaSource string   `json:"schema_source,omitempty"`
+	Notes        []string `json:"notes"`
 }
 
-// LatencyReport summarizes proxy-side retrieve_tools search latency versus the
-// fixed one-shot cost of loading every tool. Times are client-measured
-// (milliseconds); the server's SearchToolsResponse "took" field is a "0ms" stub.
+// LatencyReport summarizes the REST /api/v1/index/search (BM25 search
+// endpoint) round-trips replayed for retrieval scoring, versus the fixed
+// one-shot cost of loading every tool. Times are client-measured
+// (milliseconds); the server's SearchToolsResponse "took" field is a "0ms"
+// stub. NOTE: this is NOT the MCP retrieve_tools discovery latency — that is
+// aggregated separately in LiveReport.MCPDiscoveryLatency (FR-023).
 type LatencyReport struct {
 	Samples        int     `json:"samples"`
 	P50ms          float64 `json:"p50_ms"`
@@ -83,6 +91,11 @@ type LiveReport struct {
 	// SessionEstimates are the FR-019 estimator rows for the measured live
 	// encoding (baseline_json — the proxy's own full-JSON responses).
 	SessionEstimates []SessionCostEstimate `json:"session_estimates,omitempty"`
+	// MCPDiscoveryLatency aggregates the MCP retrieve_tools call latencies
+	// from the per-query response-cost rows (FR-023). It is a DIFFERENT
+	// surface than Latency, which times REST /api/v1/index/search calls —
+	// the two are never conflated. nil when responses were not measured.
+	MCPDiscoveryLatency *LatencyAggregate `json:"mcp_discovery_latency,omitempty"`
 	// ResponseCostNote explains a skipped or degraded response-cost /
 	// break-even measurement (never silent, SC-006 spirit). Empty on success.
 	ResponseCostNote string `json:"response_cost_note,omitempty"`
@@ -109,11 +122,28 @@ func (r *LiveReport) WriteJSON(dir string) (string, error) {
 	return path, nil
 }
 
+// LiveRunOptions are the optional knobs of a live benchmark run.
+type LiveRunOptions struct {
+	// CorpusV2Path, when non-empty, is the Spec 083 schema-bearing frozen
+	// corpus used as the full-definition schema SOURCE for the naive
+	// full-menu count: live tools are joined by tool id with the corpus_v2
+	// schemas. This exists because GET /api/v1/tools can serve stub schemas
+	// ({"type":"object","properties":{}} — see scripts/gen-corpus-v2-dump),
+	// which would silently hollow out the FR-004 baseline. Live tools missing
+	// from the corpus fall back to name+description and the headline is
+	// withheld (the MCP-3161/3167 guard pattern).
+	CorpusV2Path string
+	// ExpectedToolCount, when > 0, is the tool count the frozen corpus
+	// documents; it is recorded in ProxyInfo.ExpectedToolCount and drives the
+	// corpus-drift warning when the live catalog differs (FR-021).
+	ExpectedToolCount int
+}
+
 // RunLive gathers the full live benchmark from a running proxy: it pulls the
 // exact tool definitions (with schemas) for the token comparison, replays the
 // golden set through the proxy's BM25 search for accuracy, and records the
 // per-query search latency.
-func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet) (*LiveReport, error) {
+func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet, opts LiveRunOptions) (*LiveReport, error) {
 	tk, err := NewTokenizer(DefaultEncoding)
 	if err != nil {
 		return nil, err
@@ -126,8 +156,29 @@ func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet) (*LiveR
 	if err != nil {
 		return nil, fmt.Errorf("fetch upstream tools: %w", err)
 	}
+
+	// Optional schema-source join (FR-004 honesty): replace live schemas with
+	// the frozen corpus_v2 full definitions, keyed by tool id.
+	schemaSource := "live GET /api/v1/tools"
+	var joinMissing []string
+	if opts.CorpusV2Path != "" {
+		corpus, cerr := LoadCorpusV2(opts.CorpusV2Path)
+		if cerr != nil {
+			return nil, fmt.Errorf("load corpus_v2 schema source: %w", cerr)
+		}
+		upstream, joinMissing = joinCorpusSchemas(upstream, corpus)
+		schemaSource = fmt.Sprintf("corpus_v2 join (%s; live /api/v1/tools schemas replaced by the frozen full definitions)", opts.CorpusV2Path)
+	}
+
 	tokenRep := buildTokenReport(tk, upstream,
 		ProxyToolsForMode(ModeRetrieveTools), ProxyToolsForMode(ModeCodeExecution))
+	tokenRep.SchemaSource = schemaSource
+	tokenRep.Notes = append(tokenRep.Notes, "Baseline upstream schema source: "+schemaSource+".")
+	if len(joinMissing) > 0 {
+		withholdHeadline(tokenRep, fmt.Sprintf(
+			"HEADLINE SAVINGS WITHHELD: %d live tool(s) missing from the corpus_v2 schema source (%s) were counted name+description only, so the baseline is not a uniform full-schema count. Token totals are shown for transparency; regenerate corpus_v2 or fix the drift to restore the headline.",
+			len(joinMissing), strings.Join(joinMissing, ", ")))
+	}
 
 	// 2. Accuracy + 3. Latency: replay the golden set, capturing search latency.
 	var latencies []time.Duration
@@ -162,6 +213,17 @@ func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet) (*LiveR
 	rep.ResponseCost = respCost
 	rep.ResponseCostNote = note
 
+	// MCP-discovery latency (FR-023): the retrieve_tools calls above are a
+	// different surface than the REST search percentiles in rep.Latency, so
+	// they get their own aggregate rather than being conflated.
+	if respCost != nil {
+		lats := make([]float64, 0, len(respCost.PerQuery))
+		for _, m := range respCost.PerQuery {
+			lats = append(lats, m.LatencyMs)
+		}
+		rep.MCPDiscoveryLatency = aggregateLatencyMs(lats)
+	}
+
 	// 5. Break-even (FR-003) + session estimates (FR-019), both derived from
 	// the SAME token report as the headline (research D7b: one denominator).
 	// Non-authoritative menu counts (schemas missing on either side) would
@@ -192,8 +254,49 @@ func RunLive(ctx context.Context, client *LiveClient, golden *GoldenSet) (*LiveR
 	// 6. Proxy identity (FR-021), best-effort: fields the proxy does not
 	// expose stay zero-valued rather than failing the run.
 	rep.ProxyInfo = fetchProxyInfo(ctx, client, len(upstream))
+	rep.ProxyInfo.ExpectedToolCount = opts.ExpectedToolCount
 
 	return rep, nil
+}
+
+// joinCorpusSchemas replaces each live tool's schema with the corpus_v2
+// full-definition schema for the same tool id. Live tools absent from the
+// corpus fall back to name+description (nil schema) and are returned as
+// misses — the caller withholds the headline for a partial join rather than
+// mixing schema shapes in one baseline.
+func joinCorpusSchemas(live []Tool, corpus *Corpus) (joined []Tool, missing []string) {
+	byID := make(map[string]json.RawMessage, len(corpus.Tools))
+	for _, t := range corpus.Tools {
+		byID[t.ToolID] = t.Schema
+	}
+	joined = make([]Tool, len(live))
+	for i, t := range live {
+		if schema, ok := byID[t.ToolID]; ok {
+			t.Schema = schema
+		} else {
+			t.Schema = nil
+			missing = append(missing, t.ToolID)
+		}
+		joined[i] = t
+	}
+	return joined, missing
+}
+
+// withholdHeadline forces a token report into the non-authoritative state:
+// savings ratios are zeroed and the reason REPLACES the authoritative note
+// while the provenance note (schema source) is kept.
+func withholdHeadline(rep *LiveTokenReport, reason string) {
+	rep.AuthoritativeHeadline = false
+	for i := range rep.Modes {
+		rep.Modes[i].SavingsRatio = 0
+	}
+	notes := []string{reason}
+	for _, n := range rep.Notes {
+		if strings.HasPrefix(n, "Baseline upstream schema source:") {
+			notes = append(notes, n)
+		}
+	}
+	rep.Notes = notes
 }
 
 // measureResponseCost opens one MCP session against the proxy and replays the
@@ -300,12 +403,25 @@ func (r *LiveReport) ToReportV2(generatedAt string) *ReportV2 {
 		},
 	}
 	if r.Latency != nil {
-		r2.Latency = &LatencyV2{
+		rest := &LatencyAggregate{
 			P50Ms: r.Latency.P50ms,
 			P95Ms: r.Latency.P95ms,
 			P99Ms: r.Latency.P99ms,
 			MaxMs: r.Latency.MaxMs,
 		}
+		// Flat fields mirror the REST search surface (additive back-compat);
+		// RESTSearch labels it explicitly, MCPDiscovery is the separately
+		// measured retrieve_tools aggregate (FR-023).
+		r2.Latency = &LatencyV2{
+			P50Ms:        rest.P50Ms,
+			P95Ms:        rest.P95Ms,
+			P99Ms:        rest.P99Ms,
+			MaxMs:        rest.MaxMs,
+			RESTSearch:   rest,
+			MCPDiscovery: r.MCPDiscoveryLatency,
+		}
+	} else if r.MCPDiscoveryLatency != nil {
+		r2.Latency = &LatencyV2{MCPDiscovery: r.MCPDiscoveryLatency}
 	}
 	return r2
 }
@@ -324,9 +440,11 @@ func buildTokenReport(tk *Tokenizer, upstream, rt, ce []Tool) *LiveTokenReport {
 	baseTokens := tk.countToolsWithSchema(upstream)
 
 	proxySchemasCounted := allHaveSchema(rt) && allHaveSchema(ce)
-	// A correct full-schema baseline has schemas on at least some upstream tools.
-	// Requiring ALL would wrongly fail on legitimately parameter-less tools, so
-	// "any" is the signal that schemas were not systematically dropped.
+	// A correct full-schema baseline has REAL schemas on at least some upstream
+	// tools. Requiring ALL would wrongly fail on legitimately parameter-less
+	// tools, so "any" is the signal that schemas were not systematically
+	// dropped — and stub schemas ({"type":"object","properties":{}}, the
+	// supervisor placeholder /api/v1/tools can serve) do not count as real.
 	baselineSchemasCounted := anyHaveSchema(upstream)
 	authoritative := proxySchemasCounted && baselineSchemasCounted
 
@@ -355,7 +473,7 @@ func buildTokenReport(tk *Tokenizer, upstream, rt, ce []Tool) *LiveTokenReport {
 		}
 	} else if !baselineSchemasCounted {
 		rep.Notes = []string{
-			"HEADLINE SAVINGS WITHHELD: no upstream baseline tool carried a JSON input schema, so the baseline is NOT the required full-schema token count — typically the /api/v1/tools response dropped upstream schemas (MCP-3167). Reporting savings now would compare a schema-less baseline against schema-counted proxy tools and DISTORT the reduction. Token totals are shown for transparency; the authoritative headline lands once the management endpoint emits upstream schemas.",
+			"HEADLINE SAVINGS WITHHELD: no upstream baseline tool carried a real JSON input schema (schemas were absent or were the stub {\"type\":\"object\",\"properties\":{}} the supervisor StateView serves), so the baseline is NOT the required full-schema token count — typically the /api/v1/tools response dropped or stubbed upstream schemas (MCP-3167). Reporting savings now would compare a schema-less baseline against schema-counted proxy tools and DISTORT the reduction. Token totals are shown for transparency; the authoritative headline lands once real upstream schemas are available (e.g. via the -corpus-v2 schema-source join).",
 		}
 	} else {
 		rep.Notes = []string{
@@ -365,16 +483,33 @@ func buildTokenReport(tk *Tokenizer, upstream, rt, ce []Tool) *LiveTokenReport {
 	return rep
 }
 
-// anyHaveSchema reports whether at least one tool carries a non-empty schema.
-// Used to detect a systematically schema-less baseline (every schema dropped)
-// versus a corpus that merely contains some parameter-less tools.
+// anyHaveSchema reports whether at least one tool carries a REAL (non-stub)
+// schema. Used to detect a systematically schema-less baseline — every schema
+// dropped OR served as the supervisor stub — versus a corpus that merely
+// contains some parameter-less tools.
 func anyHaveSchema(tools []Tool) bool {
 	for _, t := range tools {
-		if len(t.Schema) > 0 {
+		if len(t.Schema) > 0 && !isStubSchema(t.Schema) {
 			return true
 		}
 	}
 	return false
+}
+
+// isStubSchema reports whether raw is a stub input schema: an object whose
+// "properties" are empty or absent after unmarshal. GET /api/v1/tools can
+// serve exactly such stubs ({"type":"object","properties":{}} — the
+// supervisor StateView placeholder, see scripts/gen-corpus-v2-dump), so a
+// baseline of stubs must NOT count as a full-schema baseline (FR-004).
+// A schema that is not a JSON object (e.g. boolean schemas) is not a stub.
+func isStubSchema(raw json.RawMessage) bool {
+	var s struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return false
+	}
+	return len(s.Properties) == 0
 }
 
 func allHaveSchema(tools []Tool) bool {
@@ -407,6 +542,33 @@ func computeLatency(samples []time.Duration, loadAll time.Duration) *LatencyRepo
 	rep.P99ms = ms(percentile(sorted, 99))
 	rep.MaxMs = ms(sorted[len(sorted)-1])
 	return rep
+}
+
+// aggregateLatencyMs summarizes millisecond latency samples with nearest-rank
+// percentiles (same method as computeLatency). nil for no samples.
+func aggregateLatencyMs(samples []float64) *LatencyAggregate {
+	if len(samples) == 0 {
+		return nil
+	}
+	sorted := make([]float64, len(samples))
+	copy(sorted, samples)
+	sort.Float64s(sorted)
+	pick := func(p float64) float64 {
+		rank := int(math.Ceil(p / 100.0 * float64(len(sorted))))
+		if rank < 1 {
+			rank = 1
+		}
+		if rank > len(sorted) {
+			rank = len(sorted)
+		}
+		return sorted[rank-1]
+	}
+	return &LatencyAggregate{
+		P50Ms: pick(50),
+		P95Ms: pick(95),
+		P99Ms: pick(99),
+		MaxMs: sorted[len(sorted)-1],
+	}
 }
 
 // percentile returns the nearest-rank percentile p (0-100) of a sorted slice.
