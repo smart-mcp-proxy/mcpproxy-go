@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -177,7 +178,10 @@ func TestMCPCaller_SessionReuse(t *testing.T) {
 		if raw != fixture {
 			t.Errorf("call %d: raw != fixture", i+1)
 		}
-		if latency <= 0 {
+		// Windows' monotonic clock granularity can round a sub-tick in-process
+		// round-trip down to exactly 0; elsewhere the call is always measurably
+		// positive. Accept 0 only on Windows, and never accept a negative.
+		if latency < 0 || (latency == 0 && runtime.GOOS != "windows") {
 			t.Errorf("call %d: latency = %v, want > 0", i+1, latency)
 		}
 	}

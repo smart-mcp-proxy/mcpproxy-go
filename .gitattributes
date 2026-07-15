@@ -3,6 +3,11 @@
 # CRLF and break cmd/generate-types TestContractsInSync).
 frontend/src/types/contracts.ts text eol=lf
 
+# Spec 083 bench arm golden fixtures are whole-file byte-compared against the
+# LF-only encoder output; without this Windows checks out CRLF and the
+# compact/toon/tron golden tests report spurious encoding drift.
+bench/arms/testdata/*.txt text eol=lf
+
 # Self-contained verification/QA reports embed base64 PNG screenshots, so a
 # single file is multiple MB of "HTML". They are point-in-time artifacts, not
 # source. Mark them linguist-generated so GitHub's language stats reflect the
