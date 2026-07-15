@@ -536,9 +536,25 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 
 func loadDoctorConfig() (*config.Config, error) {
 	if doctorConfigPath != "" {
-		return config.LoadFromFile(doctorConfigPath)
+		cfg, err := config.LoadFromFile(doctorConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		// Respect global --data-dir flag
+		if dataDir != "" {
+			cfg.DataDir = dataDir
+		}
+		return cfg, nil
 	}
-	return config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	return cfg, nil
 }
 
 func createDoctorLogger(level string) (*zap.Logger, error) {
