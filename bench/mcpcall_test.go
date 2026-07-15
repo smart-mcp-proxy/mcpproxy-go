@@ -15,6 +15,14 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
+// zeroLatencyIsClockArtifact reports whether a zero client-measured latency is
+// a platform-clock artifact rather than a real bug: Windows' coarse monotonic
+// clock can round a sub-tick in-process round-trip down to exactly 0, whereas
+// Linux/macOS always resolve a positive duration. The bench latency assertions
+// use it so the FR-023 "> 0" guarantee still holds fully on the canonical Linux
+// CI bench platform while the Windows smoke run tolerates the timer floor.
+func zeroLatencyIsClockArtifact() bool { return runtime.GOOS == "windows" }
+
 func TestMCPEndpointURL(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -107,7 +115,7 @@ func TestInvokeRetrieveTools_Hermetic(t *testing.T) {
 	if raw != fixture {
 		t.Errorf("raw text = %q, want the fixture verbatim (%d vs %d bytes)", raw, len(raw), len(fixture))
 	}
-	if latency <= 0 {
+	if latency < 0 || (latency == 0 && !zeroLatencyIsClockArtifact()) {
 		t.Errorf("latency = %v, want > 0", latency)
 	}
 	if got := calls.Load(); got != 1 {
@@ -178,10 +186,7 @@ func TestMCPCaller_SessionReuse(t *testing.T) {
 		if raw != fixture {
 			t.Errorf("call %d: raw != fixture", i+1)
 		}
-		// Windows' monotonic clock granularity can round a sub-tick in-process
-		// round-trip down to exactly 0; elsewhere the call is always measurably
-		// positive. Accept 0 only on Windows, and never accept a negative.
-		if latency < 0 || (latency == 0 && runtime.GOOS != "windows") {
+		if latency < 0 || (latency == 0 && !zeroLatencyIsClockArtifact()) {
 			t.Errorf("call %d: latency = %v, want > 0", i+1, latency)
 		}
 	}

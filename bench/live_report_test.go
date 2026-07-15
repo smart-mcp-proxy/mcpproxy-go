@@ -224,7 +224,7 @@ func TestRunLive_ResponseCostWired(t *testing.T) {
 		if m.ResultCount != 3 {
 			t.Errorf("PerQuery[%d].ResultCount = %d, want 3", i, m.ResultCount)
 		}
-		if m.LatencyMs <= 0 {
+		if m.LatencyMs < 0 || (m.LatencyMs == 0 && !zeroLatencyIsClockArtifact()) {
 			t.Errorf("PerQuery[%d].LatencyMs = %v, want > 0 (FR-023 client-side)", i, m.LatencyMs)
 		}
 		sum := 0
@@ -301,8 +301,9 @@ func TestRunLive_ResponseCostWired(t *testing.T) {
 	if rep.MCPDiscoveryLatency == nil {
 		t.Fatal("MCPDiscoveryLatency missing — discovery-call latencies must be aggregated separately from REST search")
 	}
-	if rep.MCPDiscoveryLatency.P50Ms <= 0 || rep.MCPDiscoveryLatency.MaxMs < rep.MCPDiscoveryLatency.P50Ms {
-		t.Errorf("MCPDiscoveryLatency not plausible: %+v", rep.MCPDiscoveryLatency)
+	disc := rep.MCPDiscoveryLatency
+	if disc.P50Ms < 0 || (disc.P50Ms == 0 && !zeroLatencyIsClockArtifact()) || disc.MaxMs < disc.P50Ms {
+		t.Errorf("MCPDiscoveryLatency not plausible: %+v", disc)
 	}
 }
 
