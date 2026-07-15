@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean
+.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean bench-discovery
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -33,6 +33,9 @@ help:
 	@echo "  make docs-dev        - Start docs dev server (http://localhost:3000)"
 	@echo "  make docs-build      - Build documentation site locally"
 	@echo "  make docs-clean      - Clean documentation build artifacts"
+	@echo ""
+	@echo "Benchmarks:"
+	@echo "  make bench-discovery - Run the discovery-effectiveness profiler (spec 083, offline arms)"
 
 # Generate OpenAPI specification
 swagger:
@@ -195,3 +198,15 @@ docs-clean:
 	@echo "🧹 Cleaning documentation artifacts..."
 	rm -rf website/build website/.docusaurus website/node_modules website/docs
 	@echo "✅ Documentation cleanup complete"
+
+# Discovery-effectiveness profiler (spec 083, SC-008): pinned TSCG shim deps +
+# offline arm run on the schema-bearing frozen corpus. CI calls this target.
+bench-discovery:
+	@echo "📦 Installing pinned TSCG shim dependencies (bench/tscg)..."
+	npm ci --prefix bench/tscg
+	@echo "📊 Running discovery-effectiveness benchmark (offline, all arms)..."
+	go run ./bench/cmd/bench \
+		-corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+		-arms all \
+		-out bench/results
+	@echo "✅ Reports written to bench/results/ (report.json + dashboard.html)"

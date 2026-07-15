@@ -1,0 +1,11 @@
+{
+  "name": "mcpproxy-bench-tscg-shim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned TSCG encoding shim for the mcpproxy discovery bench (spec 083). Reads JSONL tool records on stdin, writes JSONL encoded records on stdout.",
+  "type": "module",
+  "license": "MIT",
+  "dependencies": {
+    "@tscg/core": "1.4.3"
+  }
+}

@@ -209,6 +209,94 @@ func TestWriteReports_SmokeTest(t *testing.T) {
 	}
 }
 
+// repoCorpusV2 is the committed Spec 083 schema-bearing frozen corpus.
+const repoCorpusV2 = "../specs/083-discovery-profiler/datasets/corpus_v2.tools.json"
+
+// corpusV2ExpectedTools MUST match the tool count recorded in
+// specs/083-discovery-profiler/datasets/README.md — the corpus is immutable
+// once committed, so a mismatch means either drift or an undocumented refresh.
+const corpusV2ExpectedTools = 45
+
+func TestLoadCorpusV2_SchemaBearing(t *testing.T) {
+	corpus, err := LoadCorpusV2(filepath.Clean(repoCorpusV2))
+	if err != nil {
+		t.Fatalf("LoadCorpusV2: %v", err)
+	}
+
+	if got := len(corpus.Tools); got != corpusV2ExpectedTools {
+		t.Errorf("corpus_v2 has %d tools, want %d (datasets/README.md)", got, corpusV2ExpectedTools)
+	}
+	if corpus.Version == "" {
+		t.Error("corpus_v2 must carry a version string")
+	}
+
+	for _, tl := range corpus.Tools {
+		if len(tl.Schema) == 0 {
+			t.Errorf("tool %s has no schema — corpus_v2 must be schema-bearing", tl.ToolID)
+		}
+		if tl.ToolID == "" || tl.Server == "" || tl.Name == "" {
+			t.Errorf("tool %+v missing identity fields", tl)
+		}
+		if tl.ToolID != tl.Server+":"+tl.Name {
+			t.Errorf("tool_id %q != server:tool %q", tl.ToolID, tl.Server+":"+tl.Name)
+		}
+	}
+}
+
+// TestLoadCorpusV2_SchemasCanonicalCompact verifies the loader hands out
+// canonical-compact schema bytes (FR-010): no insignificant whitespace (the
+// on-disk file is pretty-printed for diffability) and object keys already
+// sorted, so CountToolWithSchema and the arm renderers all count the same
+// canonical text without re-encoding.
+func TestLoadCorpusV2_SchemasCanonicalCompact(t *testing.T) {
+	corpus, err := LoadCorpusV2(filepath.Clean(repoCorpusV2))
+	if err != nil {
+		t.Fatalf("LoadCorpusV2: %v", err)
+	}
+	for _, tl := range corpus.Tools {
+		got := string(tl.Schema)
+		want, cerr := canonicalizeJSONForTest(tl.Schema)
+		if cerr != nil {
+			t.Fatalf("tool %s: schema is not valid JSON: %v", tl.ToolID, cerr)
+		}
+		if got != want {
+			t.Errorf("tool %s: schema bytes not canonical-compact:\ngot:  %s\nwant: %s", tl.ToolID, got, want)
+		}
+	}
+}
+
+// canonicalizeJSONForTest re-encodes raw JSON with sorted keys, preserved
+// number literals, compact output, and no HTML escaping — the test-local twin
+// of the arms-package canonicalizer (bench cannot import bench/arms: arms
+// imports bench).
+func canonicalizeJSONForTest(raw json.RawMessage) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v interface{}
+	if err := dec.Decode(&v); err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return string(bytes.TrimSuffix(buf.Bytes(), []byte("\n"))), nil
+}
+
+func TestLoadCorpusV2_RejectsSchemalessCorpus(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.json")
+	bad := `{"version":"test","tools":[{"tool_id":"a:x","server":"a","tool":"x","description":"d"}]}`
+	if err := os.WriteFile(path, []byte(bad), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	if _, err := LoadCorpusV2(path); err == nil {
+		t.Fatal("LoadCorpusV2 must reject a corpus with schema-less tools")
+	}
+}
+
 func toolNames(ts []Tool) []string {
 	out := make([]string, len(ts))
 	for i, t := range ts {

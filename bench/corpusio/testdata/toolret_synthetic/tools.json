@@ -1,0 +1,37 @@
+{
+  "dataset": "synthetic/toolret-tools-shape",
+  "revision": "synthetic-tools-rev-1",
+  "note": "SYNTHETIC fixture for bench/corpusio tests. Matches the JSON shape scripts/fetch-toolret.sh writes (mangopy/ToolRet-Tools: id + documentation per record, config = HF config name). Contains NO real ToolRet data (FR-013: upstream license unstated). Deliberately UNSORTED so loader sort stability is exercised.",
+  "tools": [
+    {
+      "id": "synth_tool_03",
+      "config": "web",
+      "documentation": "{\"name\": \"weather_lookup\", \"description\": \"Synthetic tool that returns fake weather for a fake city.\", \"parameters\": {\"city\": {\"type\": \"string\"}}}"
+    },
+    {
+      "id": "synth_tool_01",
+      "config": "code",
+      "documentation": "{\"name\": \"history_events\", \"description\": \"Synthetic tool that lists made-up historical events for a date.\", \"parameters\": {\"date\": {\"type\": \"string\", \"format\": \"%Y-%m-%d\"}}}"
+    },
+    {
+      "id": "synth_tool_06",
+      "config": "web",
+      "documentation": "Plain-text synthetic documentation without JSON structure, mirroring ToolRet docs that are free text."
+    },
+    {
+      "id": "synth_tool_02",
+      "config": "code",
+      "documentation": "{\"name\": \"calendar_today\", \"description\": \"Synthetic tool that returns a fixed fake date.\", \"parameters\": {}}"
+    },
+    {
+      "id": "synth_tool_05",
+      "config": "web",
+      "documentation": "{\"name\": \"unit_convert\", \"description\": \"Synthetic tool that converts imaginary units.\", \"parameters\": {\"value\": {\"type\": \"number\"}, \"from\": {\"type\": \"string\"}, \"to\": {\"type\": \"string\"}}}"
+    },
+    {
+      "id": "synth_tool_04",
+      "config": "code",
+      "documentation": "{\"name\": \"calculator\", \"description\": \"Synthetic tool that evaluates a fake infix expression.\", \"parameters\": {\"expression\": {\"type\": \"string\"}}}"
+    }
+  ]
+}

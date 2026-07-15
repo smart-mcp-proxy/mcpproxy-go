@@ -1,2 +1,6 @@
 # Benchmark run artifacts are never committed (Spec 065 CN-003).
 results/
+# ToolRet runtime cache (spec 083 FR-013): dataset license is unstated upstream,
+# so fetched bytes must never be committable. Redundant with results/ above on
+# purpose — the rule survives even if results/ is ever narrowed.
+results/cache/

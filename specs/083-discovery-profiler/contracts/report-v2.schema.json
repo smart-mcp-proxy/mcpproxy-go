@@ -1,0 +1,226 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/schemas/bench-report-v2.schema.json",
+  "title": "mcp-discovery-bench report v2",
+  "type": "object",
+  "required": ["report_version", "generated_at", "tokenizer", "corpora", "arms", "provenance"],
+  "properties": {
+    "report_version": { "const": 2 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "tokenizer": {
+      "type": "object",
+      "required": ["name", "caveat"],
+      "properties": {
+        "name": { "type": "string", "examples": ["cl100k_base"] },
+        "caveat": { "type": "string", "minLength": 10 }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" },
+        "tool_count": { "type": "integer" },
+        "expected_tool_count": { "type": "integer" },
+        "tools_limit": { "type": "integer" },
+        "routing_mode": { "type": "string" }
+      }
+    },
+    "corpora": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "version", "tool_count", "license", "committed"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "tool_count": { "type": "integer" },
+          "license": { "type": "string" },
+          "attribution": { "type": "string" },
+          "committed": { "type": "boolean" },
+          "degenerate_descriptions": {
+            "type": "object",
+            "properties": {
+              "count": { "type": "integer" },
+              "rules": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "arms": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["arm", "corpus_id", "skipped"],
+        "allOf": [
+          {
+            "if": { "properties": { "skipped": { "const": false } } },
+            "then": { "required": ["index_altering", "total_tokens", "mean_tokens", "p95_tokens", "savings_vs_baseline_pct", "skipped_tools"] }
+          },
+          {
+            "if": { "properties": { "skipped": { "const": true } } },
+            "then": { "required": ["skip_reason"] }
+          },
+          {
+            "if": {
+              "properties": { "payload_class": { "const": "results" } },
+              "required": ["payload_class"]
+            },
+            "then": { "required": ["fixture_id", "tabular_count", "non_tabular_count"] }
+          },
+          {
+            "if": {
+              "properties": { "index_altering": { "const": true }, "skipped": { "const": false } },
+              "required": ["index_altering"]
+            },
+            "then": {
+              "required": ["quality"],
+              "$comment": "quality is nullable only when the corpus has no relevance labels; metric_note must then explain the absence (enforced by the Go report validator)"
+            }
+          }
+        ],
+        "properties": {
+          "arm": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+          "corpus_id": { "type": "string" },
+          "skipped": { "type": "boolean" },
+          "skip_reason": { "type": "string" },
+          "lower_bound": { "type": "boolean" },
+          "index_altering": { "type": "boolean" },
+          "payload_class": { "enum": ["listing", "results"] },
+          "fixture_id": { "type": "string" },
+          "tabular_count": { "type": "integer" },
+          "non_tabular_count": { "type": "integer" },
+          "total_tokens": { "type": "integer" },
+          "mean_tokens": { "type": "number" },
+          "p95_tokens": { "type": "integer" },
+          "savings_vs_baseline_pct": { "type": "number" },
+          "skipped_tools": { "type": "integer" },
+          "skip_examples": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": { "tool_id": { "type": "string" }, "error": { "type": "string" } }
+            }
+          },
+          "heaviest_tools": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": { "tool_id": { "type": "string" }, "tokens": { "type": "integer" } }
+            }
+          },
+          "quality": {
+            "type": ["object", "null"],
+            "properties": {
+              "recall_at_1": { "type": "number" },
+              "recall_at_3": { "type": "number" },
+              "recall_at_5": { "type": "number" },
+              "recall_at_10": { "type": "number" },
+              "mrr": { "type": "number" },
+              "ndcg_at_10": { "type": "number" },
+              "map": { "type": "number" },
+              "metric_note": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "response_cost": {
+      "type": "object",
+      "properties": {
+        "p50": { "type": "integer" },
+        "p95": { "type": "integer" },
+        "max": { "type": "integer" },
+        "mean": { "type": "number" },
+        "per_query": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["query_id", "total_tokens", "components"],
+            "properties": {
+              "query_id": { "type": "string" },
+              "total_tokens": { "type": "integer" },
+              "result_count": { "type": "integer" },
+              "latency_ms": { "type": "number" },
+              "components": {
+                "type": "object",
+                "required": ["input_schemas", "descriptions", "usage_instructions", "metadata", "other"],
+                "additionalProperties": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "break_even": {
+      "type": "object",
+      "properties": {
+        "naive_full_menu_tokens": { "type": "integer" },
+        "proxy_menu_tokens": { "type": "integer" },
+        "mean_response_tokens": { "type": "number" },
+        "break_even_calls": { "type": "number" },
+        "no_break_even": { "type": "boolean" }
+      }
+    },
+    "session_estimates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["arm", "calls_per_session", "retry_rate", "estimated_tokens"],
+        "properties": {
+          "arm": { "type": "string" },
+          "calls_per_session": { "type": "integer" },
+          "retry_rate": { "type": "number" },
+          "estimated_tokens": { "type": "integer" }
+        }
+      }
+    },
+    "latency": {
+      "type": "object",
+      "description": "Client-measured latency (FR-023). Two distinct surfaces, never conflated: the flat p50_ms..max_ms fields summarize the REST GET /api/v1/index/search calls (kept for backward compatibility; mirrored in rest_search), while mcp_discovery aggregates the MCP retrieve_tools calls timed by the discovery-response rows.",
+      "properties": {
+        "p50_ms": { "type": "number" },
+        "p95_ms": { "type": "number" },
+        "p99_ms": { "type": "number" },
+        "max_ms": { "type": "number" },
+        "rest_search": { "$ref": "#/$defs/latency_aggregate" },
+        "mcp_discovery": { "$ref": "#/$defs/latency_aggregate" }
+      }
+    },
+    "lap": {
+      "type": "object",
+      "required": ["executed"],
+      "properties": {
+        "executed": { "type": "boolean" },
+        "skip_reason": { "type": "string" },
+        "version": { "type": "string" },
+        "menu_tokens": { "type": "integer" },
+        "in_house_menu_tokens": { "type": "integer" },
+        "divergence_pct": { "type": "number" },
+        "grade": { "type": "string" },
+        "artifact_path": { "type": "string" }
+      }
+    },
+    "subset": {
+      "type": "object",
+      "properties": { "seed": { "type": "integer" }, "size": { "type": "integer" } }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": { "enum": ["measured", "computed", "estimated"] }
+    }
+  },
+  "$defs": {
+    "latency_aggregate": {
+      "type": "object",
+      "description": "Nearest-rank percentile summary of client-measured latencies for one measured surface (FR-023).",
+      "properties": {
+        "p50_ms": { "type": "number" },
+        "p95_ms": { "type": "number" },
+        "p99_ms": { "type": "number" },
+        "max_ms": { "type": "number" }
+      }
+    }
+  }
+}
