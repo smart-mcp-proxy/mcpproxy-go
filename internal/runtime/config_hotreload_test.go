@@ -1,9 +1,11 @@
 package runtime
 
 import (
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -455,6 +457,38 @@ func TestDetectConfigChanges_ToonOutput(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "toon_output")
 		assert.NotContains(t, result.ChangedFields, "toon_min_savings_pct")
 	})
+}
+
+// TestDetectConfigChanges_DockerIsolationRoundTripNoFalsePositive (QA API-PATCH):
+// the PATCH /api/v1/config handler round-trips the live config through JSON,
+// which collapses DefaultDockerIsolationConfig's ExtraArgs []string{} to nil
+// via omitempty. That artifact must not surface as a "docker_isolation" change.
+func TestDetectConfigChanges_DockerIsolationRoundTripNoFalsePositive(t *testing.T) {
+	old := &config.Config{DockerIsolation: config.DefaultDockerIsolationConfig()}
+
+	b, err := json.Marshal(old) // simulate handlePatchConfig's round-trip
+	require.NoError(t, err)
+	var next config.Config
+	require.NoError(t, json.Unmarshal(b, &next))
+	next.ToonOutput = "always"
+	next.ToonMinSavingsPct = 1
+
+	result := DetectConfigChanges(old, &next)
+	require.True(t, result.Success)
+	assert.NotContains(t, result.ChangedFields, "docker_isolation",
+		"docker_isolation was not patched — nil vs []string{} ExtraArgs is a JSON round-trip artifact, not a change")
+	assert.ElementsMatch(t, []string{"toon_output", "toon_min_savings_pct"}, result.ChangedFields)
+}
+
+// TestDetectConfigChanges_DockerIsolationRealChangeStillDetected: real
+// docker_isolation edits must still be detected through jsonEqual.
+func TestDetectConfigChanges_DockerIsolationRealChangeStillDetected(t *testing.T) {
+	old := &config.Config{DockerIsolation: config.DefaultDockerIsolationConfig()}
+	next := &config.Config{DockerIsolation: config.DefaultDockerIsolationConfig()}
+	next.DockerIsolation.Enabled = true
+	result := DetectConfigChanges(old, next)
+	require.True(t, result.Success)
+	assert.Contains(t, result.ChangedFields, "docker_isolation")
 }
 
 // TestDetectConfigChanges_ToolResponseMode (Spec 085 T015, ⟲#1a): an API
