@@ -8,6 +8,11 @@ frontend/src/types/contracts.ts text eol=lf
 # compact/toon/tron golden tests report spurious encoding drift.
 bench/arms/testdata/*.txt text eol=lf
 
+# retrieve_tools golden fixtures are compared byte-for-byte (Spec 085
+# GoldenByteIdentity); CRLF on Windows checkout would leave a trailing \r after
+# the test's \n-trim and fail the comparison.
+internal/server/testdata/*.golden.json text eol=lf
+
 # Self-contained verification/QA reports embed base64 PNG screenshots, so a
 # single file is multiple MB of "HTML". They are point-in-time artifacts, not
 # source. Mark them linguist-generated so GitHub's language stats reflect the

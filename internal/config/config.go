@@ -19,6 +19,10 @@ const (
 	RoutingModeRetrieveTools = "retrieve_tools" // Default: BM25 search via retrieve_tools + call_tool_read/write/destructive
 	RoutingModeDirect        = "direct"         // All upstream tools exposed directly with serverName__toolName naming
 	RoutingModeCodeExecution = "code_execution" // JS orchestration via code_execution tool with tool catalog
+
+	// Tool response mode constants (Spec 085)
+	ToolResponseModeFull    = "full"    // Default: today's schema-bearing retrieve_tools entries
+	ToolResponseModeCompact = "compact" // Compact signatures + first-sentence descriptions
 )
 
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
@@ -333,6 +337,14 @@ type Config struct {
 	// Routing mode (Spec 031): how MCP tools are exposed to clients
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
+
+	// Tool response mode (Spec 085): how retrieve_tools serializes results.
+	// Valid values: "" (= full), "full" (default: today's schema-bearing
+	// entries), "compact" (signature + first-sentence entries). Orthogonal to
+	// routing_mode — routing_mode selects the tool SURFACE, this selects the
+	// SERIALIZATION within the retrieve_tools surface. Serialization-only: it
+	// never affects the query, ranking, or result set. Hot-reloadable.
+	ToolResponseMode string `json:"tool_response_mode,omitempty" mapstructure:"tool-response-mode"`
 
 	// Instructions text returned in the MCP initialize response to guide AI agents.
 	// When empty, a built-in default is used that explains retrieve_tools workflow.
@@ -1730,6 +1742,15 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		errors = append(errors, ValidationError{
 			Field:   "toon_min_savings_pct",
 			Message: "must be between 1 and 90 (or 0 for the default 15)",
+		})
+	}
+
+	// Validate tool response mode (Spec 085). Empty is allowed (= full).
+	if c.ToolResponseMode != "" &&
+		c.ToolResponseMode != ToolResponseModeFull && c.ToolResponseMode != ToolResponseModeCompact {
+		errors = append(errors, ValidationError{
+			Field:   "tool_response_mode",
+			Message: fmt.Sprintf("invalid tool response mode: %s (must be full or compact)", c.ToolResponseMode),
 		})
 	}
 

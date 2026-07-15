@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 )
@@ -50,8 +49,9 @@ func (t *Truncator) Truncate(content, toolName string, args map[string]interface
 		return result
 	}
 
-	// Generate cache key
-	timestamp := time.Now()
+	// Generate cache key. NextUniqueTimestamp guarantees same-tick calls
+	// (coarse Windows clock) still produce distinct keys per block.
+	timestamp := cache.NextUniqueTimestamp()
 	cacheKey := cache.GenerateKey(toolName, args, timestamp)
 
 	// Create truncated content with cache instructions

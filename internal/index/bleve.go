@@ -275,6 +275,15 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	searchReq.Fields = []string{"tool_name", "full_tool_name", "server_name", "description", "params_json", "output_schema_json", "hash"}
 	searchReq.Highlight = bleve.NewHighlight()
 
+	// Deterministic tie-break: primary sort by score descending (bleve's
+	// default), secondary by document ID (server:tool) ascending. Without the
+	// secondary key, equally-scored hits come back in bleve's internal order,
+	// which varies between otherwise-identical searches (Spec 085 SC-002:
+	// full/compact ranked-ID identity, and the golden byte-identity fixtures).
+	// SortBy is applied before truncating to Size, so it also stabilizes which
+	// tied hits survive the limit boundary.
+	searchReq.SortBy([]string{"-_score", "_id"})
+
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
 	searchResult, err := b.index.Search(searchReq)

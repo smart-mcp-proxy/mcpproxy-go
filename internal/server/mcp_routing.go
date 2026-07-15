@@ -333,6 +333,11 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
+		// Spec 085 FR-011 / spec §Out-of-scope: NO retrieveToolsDetailOption()
+		// here. describe_tool is absent from the code-execution surface in v1,
+		// so a compact response would reference an unavailable second stage;
+		// this mode's retrieve_tools always serializes FULL (enforced in
+		// handleRetrieveToolsWithMode) and does not expose the detail param.
 	)
 	tools = append(tools, p.setProfileServerTool())
 	tools = append(tools, mcpserver.ServerTool{
@@ -361,6 +366,7 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. "+
 			"Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, "+
 			"and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). "+
+			"Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. "+
 			"Use annotation filters to self-restrict discovery scope. "+
 			"Use natural language to describe what you want to accomplish."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
@@ -395,10 +401,19 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
+		retrieveToolsDetailOption(),
 	)
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),
+	})
+
+	// describe_tool — Spec 085 (US2, FR-011): second-stage full definitions,
+	// beside retrieve_tools. Retrieve_tools routing mode only in v1: not added
+	// to buildCodeExecModeTools or direct mode.
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    buildDescribeToolTool(),
+		Handler: p.handleDescribeTool,
 	})
 
 	// set_profile — Profiles v2 (T2): also available in call-tool mode (/mcp/call,

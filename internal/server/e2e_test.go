@@ -3191,3 +3191,318 @@ func TestE2E_RetrieveToolsAnnotationsAndCallWith(t *testing.T) {
 
 	assert.Empty(t, expectedCallWith, "Not all expected tools were found: %v", expectedCallWith)
 }
+
+// TestE2E_SelfHealingInvalidParams is the Spec 085 US3 E2E (T035, SC-006):
+// a call_tool_read with a missing required argument returns the self-healing
+// invalid_params error (full input_schema + hint) WITHOUT reaching the
+// upstream, one schema-informed retry succeeds, and the error is byte-
+// identical under tool_response_mode full and compact (US3 scenario 3).
+// The fixture is deterministic: a fixed one-tool mock server and a fixed
+// argument omission.
+func TestE2E_SelfHealingInvalidParams(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	ctx := context.Background()
+
+	const serverName = "petstore"
+	tools := []mcp.Tool{
+		{
+			Name:        "create_pet",
+			Description: "Create a pet record in the store.",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"name": map[string]interface{}{"type": "string"},
+					"tag":  map[string]interface{}{"type": "string"},
+				},
+				Required: []string{"name"},
+			},
+		},
+	}
+	env.CreateMockUpstreamServer(serverName, tools)
+	mockServer := env.mockServers[serverName]
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	// Add + unquarantine + reload (standard E2E onboarding recipe).
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      serverName,
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add server should succeed: %v", getToolResultText(addResult))
+
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
+
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+
+	// Wait for connect + index (poll: connection and discovery are async, so
+	// re-trigger discovery until the tool is searchable).
+	time.Sleep(3 * time.Second)
+	require.Eventually(t, func() bool {
+		_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+		searchRequest := mcp.CallToolRequest{}
+		searchRequest.Params.Name = "retrieve_tools"
+		searchRequest.Params.Arguments = map[string]interface{}{"query": "create pet record"}
+		searchResult, sErr := mcpClient.CallTool(ctx, searchRequest)
+		// Indexed names may or may not carry the "server:" prefix (issue
+		// #306), so match the bare tool name like the other discovery E2Es.
+		return sErr == nil && !searchResult.IsError &&
+			strings.Contains(getToolResultText(searchResult), "create_pet")
+	}, 20*time.Second, 500*time.Millisecond, "petstore:create_pet must become discoverable")
+
+	// The deterministic invalid-params fixture: required "name" omitted.
+	callInvalid := func() string {
+		callRequest := mcp.CallToolRequest{}
+		callRequest.Params.Name = "call_tool_read"
+		callRequest.Params.Arguments = map[string]interface{}{
+			"name":      "petstore:create_pet",
+			"args_json": `{"tag":"tabby"}`,
+		}
+		callResult, cErr := mcpClient.CallTool(ctx, callRequest)
+		require.NoError(t, cErr)
+		require.True(t, callResult.IsError, "missing required arg must fail pre-dispatch")
+		return getToolResultText(callResult)
+	}
+
+	fullModeErr := callInvalid()
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(fullModeErr), &body), "error body must be JSON: %s", fullModeErr)
+	assert.Equal(t, "invalid_params", body["error_type"])
+	assert.Equal(t, "petstore:create_pet", body["tool"])
+	assert.Contains(t, body["error"], "name", "error names the missing property")
+	assert.Contains(t, body["hint"], "describe_tool")
+
+	// The embedded input_schema is the FULL stored schema — the retry is
+	// literally schema-informed: read required[] from the error and supply
+	// every listed property.
+	schema, ok := body["input_schema"].(map[string]interface{})
+	require.True(t, ok, "input_schema must be embedded: %s", fullModeErr)
+	required, ok := schema["required"].([]interface{})
+	require.True(t, ok, "input_schema.required must be present")
+	require.Contains(t, required, "name")
+
+	retryArgs := map[string]interface{}{"tag": "tabby"}
+	for _, prop := range required {
+		retryArgs[prop.(string)] = "from-schema"
+	}
+	retryArgsJSON, err := json.Marshal(retryArgs)
+	require.NoError(t, err)
+
+	retryRequest := mcp.CallToolRequest{}
+	retryRequest.Params.Name = "call_tool_read"
+	retryRequest.Params.Arguments = map[string]interface{}{
+		"name":      "petstore:create_pet",
+		"args_json": string(retryArgsJSON),
+	}
+	retryResult, err := mcpClient.CallTool(ctx, retryRequest)
+	require.NoError(t, err)
+	require.False(t, retryResult.IsError,
+		"one schema-informed retry must succeed (SC-006): %v", getToolResultText(retryResult))
+	assert.Contains(t, getToolResultText(retryResult), "create_pet",
+		"the retry must have reached the upstream tool")
+
+	// Mode independence (US3 scenario 3): flip the live config to compact and
+	// re-run the identical failing call — the error must be byte-identical.
+	env.proxyServer.runtime.Config().ToolResponseMode = config.ToolResponseModeCompact
+	compactModeErr := callInvalid()
+	assert.Equal(t, fullModeErr, compactModeErr,
+		"self-healing error must be byte-identical in full and compact mode")
+}
+
+// TestE2E_ToolResponseModeToggle is the Spec 085 US4 E2E (T038, FR-015 /
+// SC-007): on a RUNNING proxy, flipping tool_response_mode full→compact takes
+// effect on the very next retrieve_tools call — no restart — through BOTH
+// hot-reload paths:
+//
+//	(a) the config-FILE reload path (write mcp_config.json, ReloadConfiguration),
+//	(b) an API /config/apply whose ONLY change is tool_response_mode
+//	    (exercises the T015 DetectConfigChanges clause — without it the apply
+//	    is swallowed as "no changes" — and the T016 currentConfig() read).
+//
+// Unset ("") behaves as full (FR-001 default; FR-016 Phase 1).
+func TestE2E_ToolResponseModeToggle(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	ctx := context.Background()
+
+	// The shared harness config leaves tools_limit / call_tool_timeout at
+	// zero, which fails ValidateDetailed on the /config/apply path. Normalize
+	// to the production defaults up front so both legs exercise a config that
+	// differs from its predecessor ONLY in tool_response_mode.
+	def := config.DefaultConfig()
+	env.proxyServer.runtime.Config().ToolsLimit = def.ToolsLimit
+	env.proxyServer.runtime.Config().CallToolTimeout = def.CallToolTimeout
+	require.Empty(t, env.proxyServer.runtime.Config().ValidateDetailed(),
+		"normalized harness config must validate — otherwise the apply legs cannot isolate tool_response_mode")
+
+	const serverName = "toggledemo"
+	tools := []mcp.Tool{
+		{
+			Name:        "create_widget",
+			Description: "Create a widget in the demo store. Widgets are demo objects.",
+			InputSchema: mcp.ToolInputSchema{
+				Type: "object",
+				Properties: map[string]interface{}{
+					"name":  map[string]interface{}{"type": "string"},
+					"color": map[string]interface{}{"type": "string"},
+				},
+				Required: []string{"name"},
+			},
+		},
+	}
+	env.CreateMockUpstreamServer(serverName, tools)
+	mockServer := env.mockServers[serverName]
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	// Add + unquarantine + reload (standard E2E onboarding recipe).
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      serverName,
+		"url":       mockServer.addr,
+		"protocol":  "streamable-http",
+		"enabled":   true,
+	}
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add server should succeed: %v", getToolResultText(addResult))
+
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer(serverName)
+	require.NoError(t, err)
+	serverConfig.Quarantined = false
+	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
+
+	servers, err := env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	cfg := env.proxyServer.runtime.Config()
+	cfg.Servers = servers
+	require.NoError(t, env.proxyServer.runtime.LoadConfiguredServers(cfg))
+
+	// retrieveEntries runs one retrieve_tools call and returns the decoded
+	// response body (tools + optional hint).
+	retrieveResponse := func() map[string]interface{} {
+		searchRequest := mcp.CallToolRequest{}
+		searchRequest.Params.Name = "retrieve_tools"
+		searchRequest.Params.Arguments = map[string]interface{}{"query": "create widget demo store"}
+		searchResult, sErr := mcpClient.CallTool(ctx, searchRequest)
+		require.NoError(t, sErr)
+		require.False(t, searchResult.IsError, "retrieve_tools failed: %v", getToolResultText(searchResult))
+		var body map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(getToolResultText(searchResult)), &body))
+		return body
+	}
+	ourEntry := func(body map[string]interface{}) map[string]interface{} {
+		toolsArr, _ := body["tools"].([]interface{})
+		for _, raw := range toolsArr {
+			entry, _ := raw.(map[string]interface{})
+			if entry == nil {
+				continue
+			}
+			for _, key := range []string{"name", "id"} {
+				if s, _ := entry[key].(string); strings.Contains(s, "create_widget") {
+					return entry
+				}
+			}
+		}
+		return nil
+	}
+	assertFullShape := func(body map[string]interface{}, leg string) {
+		entry := ourEntry(body)
+		require.NotNil(t, entry, "%s: create_widget entry missing: %v", leg, body["tools"])
+		assert.Contains(t, entry, "inputSchema", "%s: full mode carries the schema", leg)
+		assert.NotContains(t, entry, "sig", "%s: full mode has no compact signature", leg)
+		assert.NotContains(t, body, "hint", "%s: full mode has no compact hint (FR-006)", leg)
+	}
+	assertCompactShape := func(body map[string]interface{}, leg string) {
+		entry := ourEntry(body)
+		require.NotNil(t, entry, "%s: create_widget entry missing: %v", leg, body["tools"])
+		assert.Contains(t, entry, "sig", "%s: compact mode carries the signature", leg)
+		assert.Contains(t, entry, "lossy", "%s: compact entries carry the lossy flag", leg)
+		assert.NotContains(t, entry, "inputSchema", "%s: compact mode drops the schema (FR-002)", leg)
+		assert.Equal(t, compactModeHint, body["hint"], "%s: compact response carries the deterministic hint (FR-009)", leg)
+		sig, _ := entry["sig"].(string)
+		assert.Contains(t, sig, "name*:str", "%s: required param marked in the signature", leg)
+	}
+
+	// Wait for connect + index, and assert the DEFAULT (unset) mode is full.
+	time.Sleep(3 * time.Second)
+	require.Eventually(t, func() bool {
+		_ = env.proxyServer.runtime.DiscoverAndIndexTools(ctx)
+		return ourEntry(retrieveResponse()) != nil
+	}, 20*time.Second, 500*time.Millisecond, "toggledemo:create_widget must become discoverable")
+	assertFullShape(retrieveResponse(), "default-unset")
+
+	// ---- Leg A: config-FILE reload path (FR-015, SC-007) ----
+	liveCfg, err := json.Marshal(env.proxyServer.runtime.Config())
+	require.NoError(t, err)
+	var fileCfg config.Config
+	require.NoError(t, json.Unmarshal(liveCfg, &fileCfg))
+	fileCfg.ToolResponseMode = config.ToolResponseModeCompact
+	servers, err = env.proxyServer.runtime.StorageManager().ListUpstreamServers()
+	require.NoError(t, err)
+	fileCfg.Servers = servers
+	require.NoError(t, config.SaveConfig(&fileCfg, env.proxyServer.GetConfigPath()))
+	// The E2E harness builds the server with an in-memory config (no file
+	// path); production always tracks one. Register the path so the disk
+	// reload has a source, without changing the live config itself.
+	env.proxyServer.runtime.UpdateConfig(env.proxyServer.runtime.Config(), env.proxyServer.GetConfigPath())
+	require.NoError(t, env.proxyServer.ReloadConfiguration())
+
+	assertCompactShape(retrieveResponse(), "file-reload")
+
+	// The live snapshot (what effectiveToolResponseMode reads via
+	// currentConfig) must reflect the file reload. NOTE: GET /api/v1/config
+	// reads the legacy runtime cfg field, which the disk-reload path does not
+	// resync — a pre-existing staleness on main (not Spec 085), so the API
+	// view is deliberately not asserted here.
+	require.Equal(t, config.ToolResponseModeCompact, env.proxyServer.runtime.Config().ToolResponseMode,
+		"live config snapshot must reflect the file reload")
+
+	// ---- Leg B: API apply changing ONLY tool_response_mode ----
+	apiCfg, err := env.GetConfig()
+	require.NoError(t, err)
+
+	apiCfg.ToolResponseMode = config.ToolResponseModeFull
+	applyResult, err := env.ApplyConfig(apiCfg)
+	require.NoError(t, err)
+	assert.Contains(t, applyResult.ChangedFields, "tool_response_mode",
+		"DetectConfigChanges must report the mode flip (T015 clause) — otherwise the apply is swallowed")
+	assert.False(t, applyResult.RequiresRestart, "mode flip must not require a restart (SC-007)")
+	assertFullShape(retrieveResponse(), "api-apply-full")
+
+	apiCfg.ToolResponseMode = config.ToolResponseModeCompact
+	applyResult, err = env.ApplyConfig(apiCfg)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tool_response_mode"}, applyResult.ChangedFields,
+		"this apply changes ONLY tool_response_mode — the strict T015 regression")
+	assertCompactShape(retrieveResponse(), "api-apply-compact")
+
+	// ---- Unset ⇒ full (FR-001 default) ----
+	apiCfg.ToolResponseMode = ""
+	_, err = env.ApplyConfig(apiCfg)
+	require.NoError(t, err)
+	assertFullShape(retrieveResponse(), "api-apply-unset")
+}

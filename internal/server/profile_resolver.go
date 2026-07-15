@@ -46,6 +46,24 @@ func (p *MCPProxyServer) currentConfig() *config.Config {
 	return p.config
 }
 
+// effectiveToolResponseMode resolves the retrieve_tools serialization mode
+// for one call (Spec 085 FR-001/FR-005/FR-015). Precedence: per-call `detail`
+// override > configured tool_response_mode > full. It reads the LIVE config
+// snapshot via currentConfig() — never the construction-time p.config the
+// retrieve path historically used — so a hot-reload (config file or API
+// apply) changes the resolved mode on the very next call, without
+// reconstructing the server. Unknown detail values fall through to the
+// configured mode (the tool schema's enum is the real gate).
+func (p *MCPProxyServer) effectiveToolResponseMode(detail string) string {
+	if detail == config.ToolResponseModeFull || detail == config.ToolResponseModeCompact {
+		return detail
+	}
+	if cfg := p.currentConfig(); cfg != nil && cfg.ToolResponseMode != "" {
+		return cfg.ToolResponseMode
+	}
+	return config.ToolResponseModeFull
+}
+
 // profileScopeForSlug builds a ProfileScope for the named profile from the live
 // config, or returns nil when the slug does not match a configured profile.
 func (p *MCPProxyServer) profileScopeForSlug(slug string) *profile.ProfileScope {

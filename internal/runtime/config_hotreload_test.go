@@ -456,3 +456,36 @@ func TestDetectConfigChanges_ToonOutput(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "toon_min_savings_pct")
 	})
 }
+
+// TestDetectConfigChanges_ToolResponseMode (Spec 085 T015, ⟲#1a): an API
+// apply that changes ONLY tool_response_mode must be detected as a
+// hot-reloadable change — without a detector clause the apply computes empty
+// ChangedFields and is swallowed as "no changes detected", so the mode never
+// takes effect (FR-015).
+func TestDetectConfigChanges_ToolResponseMode(t *testing.T) {
+	mk := func(mode string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			ToolResponseMode: mode,
+		}
+	}
+
+	t.Run("only tool_response_mode differs -> detected, hot-reloadable", func(t *testing.T) {
+		result := DetectConfigChanges(mk(""), mk(config.ToolResponseModeCompact))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "tool_response_mode")
+		assert.False(t, result.RequiresRestart, "serialization mode is hot-reloadable")
+	})
+
+	t.Run("flip back compact -> full detected", func(t *testing.T) {
+		result := DetectConfigChanges(mk(config.ToolResponseModeCompact), mk(config.ToolResponseModeFull))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "tool_response_mode")
+	})
+
+	t.Run("unchanged mode not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(config.ToolResponseModeFull), mk(config.ToolResponseModeFull))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "tool_response_mode")
+	})
+}

@@ -34,6 +34,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolsig"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toonenc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -116,10 +117,17 @@ type MCPProxyServer struct {
 	cacheManager         *cache.Manager
 	truncator            *truncate.Truncator
 	outputValidator      *outputvalidation.Validator // Spec 056: output-schema validation (nil when disabled)
+	inputValidator       *inputValidator             // Spec 085 FR-013: pre-dispatch argument validation (never nil)
 	sanitisationDetector *security.Detector          // Spec 054 Track B: secret detector for redact/block (nil when neither used)
 	logger               *zap.Logger
 	mainServer           *Server        // Reference to main server for config persistence
 	config               *config.Config // Add config reference for security checks
+
+	// sigCache memoizes compact tool signatures keyed by the Spec-032 tool
+	// hash (Spec 085 FR-008). It is the SAME instance the Runtime owns and
+	// the indexing path warms — never construct a second one here, or the
+	// warm-up becomes a silent no-op and every request recompiles.
+	sigCache *toolsig.Cache
 
 	// workSessionResolver maps an identity to a work session (Spec 082). Normally
 	// nil, and the runtime's tracker is used; tests inject a stub so they do not
@@ -220,7 +228,14 @@ func NewMCPProxyServer(
 	mainServer *Server,
 	debugSearch bool,
 	config *config.Config,
+	sigCache *toolsig.Cache,
 ) *MCPProxyServer {
+	// The production path passes the Runtime-owned cache (single owner,
+	// Spec 085 FR-008). Standalone constructions (CLI one-shots, tests) may
+	// pass nil and get a private instance — they have no indexing warm-up.
+	if sigCache == nil {
+		sigCache = toolsig.NewCache()
+	}
 	// Initialize session store first (needed for hooks)
 	sessionStore := NewSessionStore(logger)
 	// Wire up storage manager for session persistence
@@ -446,10 +461,12 @@ func NewMCPProxyServer(
 		cacheManager:         cacheManager,
 		truncator:            truncator,
 		outputValidator:      outputValidator,
+		inputValidator:       newInputValidator(logger),
 		sanitisationDetector: sanitisationDetector,
 		logger:               logger,
 		mainServer:           mainServer,
 		config:               config,
+		sigCache:             sigCache,
 		jsPool:               jsPool,
 		sessionStore:         sessionStore,
 		hooks:                hooks,
@@ -631,7 +648,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 
 	switch variant {
 	case contracts.ToolVariantRead:
-		description = "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."
+		description = "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."
 		title = "Call Tool (Read)"
 		nameExample = "github:get_user"
 		sensitivityDesc = "Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns."
@@ -642,7 +659,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		}
 	case contracts.ToolVariantWrite:
-		description = "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."
+		description = "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."
 		title = "Call Tool (Write)"
 		nameExample = "github:create_issue"
 		sensitivityDesc = "Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes."
@@ -653,7 +670,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		}
 	case contracts.ToolVariantDestructive:
-		description = "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results. DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."
+		description = "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."
 		title = "Call Tool (Destructive)"
 		nameExample = "github:delete_repo"
 		sensitivityDesc = "Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data."
@@ -689,7 +706,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.Description(fmt.Sprintf("Tool name in format 'server:tool' (e.g., '%s'). CRITICAL: You MUST use exact names from retrieve_tools results - do NOT guess or invent server names. Unknown servers will fail.", nameExample)),
 		),
 		mcp.WithObject("args",
-			mcp.Description("Arguments to pass to the upstream tool as a native JSON object. Refer to the tool's inputSchema from retrieve_tools for required parameters. Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects."),
+			mcp.Description("Arguments to pass to the upstream tool as a native JSON object. Build arguments from the tool's compact signature ('sig') in retrieve_tools results — '*' marks required parameters, '~' marks a lossy signature (call describe_tool for the full JSON Schema before calling). Example: {\"path\": \"src/index.ts\", \"limit\": 20}. This is the preferred parameter — it eliminates JSON escaping overhead. Use 'args_json' only if your client cannot produce nested JSON objects."),
 		),
 		mcp.WithString("args_json",
 			mcp.Description("Legacy: arguments as a pre-serialized JSON string. Prefer the 'args' parameter instead — it accepts a native JSON object and eliminates escaping overhead. If both are provided, 'args_json' wins for backward compatibility."),
@@ -705,11 +722,23 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 	return mcp.NewTool(variant, allOpts...)
 }
 
+// retrieveToolsDetailOption returns the per-call serialization override
+// parameter (Spec 085 FR-005) shared by every retrieve_tools registration —
+// the default server and both routing-mode builders — so the schema never
+// drifts between surfaces. Enum {compact, full}, deliberately NO default:
+// an unset detail means "use the configured tool_response_mode".
+func retrieveToolsDetailOption() mcp.ToolOption {
+	return mcp.WithString("detail",
+		mcp.Description("Per-call response serialization override: 'compact' returns one-line signatures (sig/desc/lossy) instead of full schemas; 'full' returns complete inputSchema entries. Unset: the server's configured tool_response_mode applies."),
+		mcp.Enum(config.ToolResponseModeCompact, config.ToolResponseModeFull),
+	)
+}
+
 // registerTools registers all proxy tools with the MCP server
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers."),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -736,8 +765,15 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		mcp.WithBoolean("include_disabled",
 			mcp.Description("Set true to also surface tools that exist but are currently locked by config, user, or quarantine (default: false). Returns a 'disabled' list (name/server/description/status) plus a 'remediation' map; callable results are unaffected and listed first."),
 		),
+		retrieveToolsDetailOption(),
 	)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
+
+	// describe_tool — Spec 085 (US2, FR-011): the progressive-disclosure second
+	// stage, exposed beside retrieve_tools in the retrieve_tools routing mode
+	// only (buildCallToolModeTools registers it for /mcp/call; code_execution
+	// and direct mode deliberately do not carry it in v1).
+	p.server.AddTool(buildDescribeToolTool(), p.handleDescribeTool)
 
 	// set_profile - Profiles v2 (T2): switch the session's active profile
 	p.server.AddTool(buildSetProfileTool(), p.handleSetProfile)
@@ -1258,6 +1294,23 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	debugMode := request.GetBool("debug", false)
 	explainTool := request.GetString("explain_tool", "")
 
+	// Spec 085 (FR-001/FR-005): resolve the serialization mode for THIS call —
+	// per-call `detail` override > live-config tool_response_mode > full.
+	// Serialization-only by construction: the mode is consulted exclusively by
+	// buildToolEntry below, after the query/rank/filter pipeline completed.
+	detailParam := request.GetString("detail", "")
+	responseMode := p.effectiveToolResponseMode(detailParam)
+	if routingMode == config.RoutingModeCodeExecution {
+		// FR-011 / spec §Out-of-scope: describe_tool is not exposed on the
+		// code-execution surface in v1, so a compact response would point the
+		// agent at an unavailable tool. This surface stays CURRENT: always
+		// FULL, ignoring both the global mode and any smuggled detail arg
+		// (the param is absent from this mode's schema, but arguments are not
+		// schema-enforced).
+		detailParam = ""
+		responseMode = config.ToolResponseModeFull
+	}
+
 	// Spec 035 F4: Annotation-based filtering parameters
 	readOnlyOnly := request.GetBool("read_only_only", false)
 	excludeDestructive := request.GetBool("exclude_destructive", false)
@@ -1285,6 +1338,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	}
 	if excludeOpenWorld {
 		args["exclude_open_world"] = true
+	}
+	if detailParam != "" {
+		args["detail"] = detailParam
 	}
 
 	// Validate limit
@@ -1323,7 +1379,6 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// per-request value and AuthContextFromContext does a context.Value lookup we don't
 	// want to repeat per result.
 	authCtx := auth.AuthContextFromContext(ctx)
-	enforceAgentScope := authCtx != nil && !authCtx.IsAdmin()
 	// Spec 057 / Profiles v2: profileScope was resolved above (token pin > URL >
 	// session) and filters independently of agent-scope (nil = allow all).
 
@@ -1339,13 +1394,12 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	// serverDiscoverable applies the agent-scope (Spec 049 FR-007) and profile
 	// (Spec 057) filters BEFORE classification so an agent never learns a tool
-	// exists on a server it cannot access. Shared by the callable-result loop
-	// and the quarantined-tool discovery pass below so the two never drift.
+	// exists on a server it cannot access. It delegates to the shared
+	// visibility resolver's scope step (Spec 085, mcp_visibility.go) — shared
+	// by the callable-result loop, the quarantined-tool discovery pass below,
+	// and describe_tool, so they never drift.
 	serverDiscoverable := func(serverName string) bool {
-		if enforceAgentScope && authCtx != nil && !authCtx.CanAccessServer(serverName) {
-			return false
-		}
-		return profileScope.Allows(serverName)
+		return p.serverInScope(authCtx, profileScope, serverName)
 	}
 
 	var callableResults []*config.SearchResult
@@ -1362,24 +1416,34 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 
-		if !serverDiscoverable(serverName) {
+		// Spec 085 (FR-006/FR-011): the index hit runs through the shared
+		// SEARCH visibility step (scope → isToolCallable) — behavior-preserving
+		// with the merge-base inline filter (main: internal/server/mcp.go
+		// ~:1345-1363; no server-quarantine or pending/changed gate here).
+		// describe_tool layers its stricter contract gates ON TOP of these in
+		// toolVisibleToSession, so it can never return a definition search
+		// would not. Results are index hits by construction, so the
+		// index-presence step is skipped here.
+		visible, reason := p.indexedToolVisible(authCtx, profileScope, serverName, toolName)
+		if visible {
+			callableResults = append(callableResults, result)
 			continue
 		}
 
-		if !p.isToolCallable(serverName, toolName) {
-			droppedCount++
-			if includeDisabled {
-				disabledEntries = append(disabledEntries, contracts.LockedToolEntry{
-					Name:        result.Tool.Name,
-					Server:      serverName,
-					Description: result.Tool.Description,
-					Status:      p.classifyDisabledTool(serverName, toolName),
-				})
-			}
+		if reason == visReasonServerNotInScope {
+			// Out-of-scope servers are invisible, never "locked".
 			continue
 		}
 
-		callableResults = append(callableResults, result)
+		droppedCount++
+		if includeDisabled {
+			disabledEntries = append(disabledEntries, contracts.LockedToolEntry{
+				Name:        result.Tool.Name,
+				Server:      serverName,
+				Description: result.Tool.Description,
+				Status:      p.classifyDisabledTool(serverName, toolName),
+			})
+		}
 	}
 	results = callableResults
 
@@ -1459,70 +1523,17 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		results = filteredResults
 	}
 
-	// Convert results to MCP tool format for LLM compatibility
+	// Convert results to MCP tool format for LLM compatibility. Entry
+	// construction lives in buildToolEntry (Spec 085 entry-builder seam) —
+	// full mode is byte-identical to the pre-extraction inline code, guarded
+	// by the T011 golden test (FR-006/SC-003); compact mode renders
+	// {id, score, sig, desc, lossy} from the shared signature cache. The
+	// ranked order of `results` is already final here — the mode selects
+	// serialization only (FR-007).
+	entryOpts := toolEntryOpts{includeStats: includeStats}
 	var mcpTools []map[string]interface{}
 	for _, result := range results {
-		// Parse the input schema from ParamsJSON
-		var inputSchema map[string]interface{}
-		if result.Tool.ParamsJSON != "" {
-			if err := json.Unmarshal([]byte(result.Tool.ParamsJSON), &inputSchema); err != nil {
-				p.logger.Warn("Failed to parse tool params JSON",
-					zap.String("tool_name", result.Tool.Name),
-					zap.Error(err))
-				inputSchema = map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
-				}
-			}
-		} else {
-			inputSchema = map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{},
-			}
-		}
-
-		// Create MCP-compatible tool representation
-		mcpTool := map[string]interface{}{
-			"name":        result.Tool.Name,
-			"description": result.Tool.Description,
-			"inputSchema": inputSchema,
-			"score":       result.Score,
-			"server":      result.Tool.ServerName,
-		}
-
-		// Look up tool annotations and derive recommended call_with variant (Spec 018)
-		// Use ServerName directly - result.Tool.Name may or may not have "server:" prefix
-		// depending on how tools were indexed (Issue #306)
-		serverName := result.Tool.ServerName
-		toolName := result.Tool.Name
-		if serverName == "" {
-			// Fallback: try to extract from "server:tool" format
-			if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
-				serverName = parts[0]
-				toolName = parts[1]
-			}
-		}
-
-		if serverName != "" {
-			annotations := p.lookupToolAnnotations(serverName, toolName)
-			if annotations != nil {
-				mcpTool["annotations"] = annotations
-			}
-			// Add call_with recommendation based on annotations
-			mcpTool["call_with"] = contracts.DeriveCallWith(annotations)
-		} else {
-			mcpTool["call_with"] = contracts.ToolVariantRead // Default to read - safest option
-		}
-
-		// Add usage statistics if requested
-		if includeStats {
-			if stats, err := p.storage.GetToolUsage(result.Tool.Name); err == nil {
-				mcpTool["usage_count"] = stats.Count
-				mcpTool["last_used"] = stats.LastUsed
-			}
-		}
-
-		mcpTools = append(mcpTools, mcpTool)
+		mcpTools = append(mcpTools, p.buildToolEntry(result, responseMode, entryOpts))
 	}
 
 	// Spec 044 (T039): estimate tokens saved by NOT exposing the full catalog.
@@ -1564,6 +1575,13 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		"query":              query,
 		"total":              len(results),
 		"usage_instructions": usageInstructions,
+	}
+
+	// Spec 085 (FR-009): compact responses carry one deterministic hint line
+	// explaining the lossy marker and the describe_tool second stage. Full
+	// mode stays byte-identical (FR-006) — no hint key at all.
+	if responseMode == config.ToolResponseModeCompact {
+		response["hint"] = compactModeHint
 	}
 
 	// Spec 049: opt-in locked-tool discovery. Callable results above are
@@ -1931,6 +1949,32 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		errMsg := p.blockedToolMessage(serverName, actualToolName)
 		p.emitActivityPolicyDecision(serverName, actualToolName, sessionID, "blocked", errMsg)
 		return mcp.NewToolResultError(errMsg), nil
+	}
+
+	// Spec 085 FR-013 (Path A): pre-dispatch argument validation — after the
+	// target is resolved and callable, before any dispatch work. The schema
+	// source is the tool's indexed ParamsJSON (the same source signatures
+	// render from), memoized by the Spec-032 tool hash. Fail-open (FR-013b):
+	// tools absent from the index or with uncompilable schemas dispatch
+	// exactly as today. The self-healing error embeds the FULL stored schema
+	// + hint regardless of tool_response_mode (US3 scenario 3), and the
+	// upstream is never called on a validation failure.
+	if meta := p.lookupIndexedTool(serverName, actualToolName); meta != nil {
+		if ok, verr, _ := p.inputValidator.validateArgs(toolName, meta.Hash, meta.ParamsJSON, args); !ok {
+			detail := oneLineValidationDetail(verr)
+			p.logger.Debug("handleCallToolVariant: pre-dispatch argument validation failed",
+				zap.String("tool_name", toolName),
+				zap.String("tool_variant", toolVariant),
+				zap.String("detail", detail))
+			var intentMap map[string]interface{}
+			if intent != nil {
+				intentMap = intent.ToMap()
+			}
+			errMsg := fmt.Sprintf("invalid arguments for %s: %s", toolName, detail)
+			p.emitActivityToolCallStarted(serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
+			p.emitActivityToolCallCompleted(serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil)
+			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
+		}
 	}
 
 	// Check connection status before attempting tool call to prevent hanging
@@ -4813,8 +4857,47 @@ func (p *MCPProxyServer) handleTailLog(_ context.Context, request mcp.CallToolRe
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
+// classifyUpstreamInvalidParams best-effort-classifies an upstream error as
+// an argument-validation failure (Spec 085 FR-013 Path B). Typed HTTP errors
+// are never reclassified (transport/auth/5xx keep their shape); a JSON-RPC
+// error qualifies only with the InvalidParams code (-32602); untyped strings
+// qualify only on narrow schema-validation phrasing (invalidParamsMessageRe)
+// AND with no transport/auth/timeout/HTTP-status smell (invalidParamsDenyRe)
+// — e.g. "401 Unauthorized: invalid parameters" is an auth failure, not an
+// argument bug. Returns the one-line detail for the self-healing error body.
+func classifyUpstreamInvalidParams(err error) (detail string, ok bool) {
+	var jsonRPCErr *transport.JSONRPCError
+	if errors.As(err, &jsonRPCErr) {
+		if jsonRPCErr.Code == jsonRPCInvalidParamsCode {
+			return jsonRPCErr.Message, true
+		}
+		return "", false
+	}
+	var httpErr *transport.HTTPError
+	if errors.As(err, &httpErr) {
+		return "", false
+	}
+	msg := err.Error()
+	if invalidParamsMessageRe.MatchString(msg) && !invalidParamsDenyRe.MatchString(msg) {
+		return msg, true
+	}
+	return "", false
+}
+
 // createDetailedErrorResponse creates an enhanced error response with HTTP and troubleshooting context
 func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, toolName string) *mcp.CallToolResult {
+	// Spec 085 FR-013 (Path B): upstream invalid-params failures get the same
+	// self-healing error Path A renders — full stored schema + hint — when a
+	// schema source exists in the index. Without a stored schema the existing
+	// shapes below apply unchanged (a self-healing error without a schema
+	// would be an empty promise). Non-argument failures never reach this
+	// branch (classification is conservative by construction).
+	if detail, isInvalidParams := classifyUpstreamInvalidParams(err); isInvalidParams {
+		if meta := p.lookupIndexedTool(serverName, toolName); meta != nil && meta.ParamsJSON != "" {
+			return invalidParamsErrorResult(serverName+":"+toolName, meta.ParamsJSON, detail)
+		}
+	}
+
 	// Try to extract HTTP error details
 	var httpErr *transport.HTTPError
 	var jsonRPCErr *transport.JSONRPCError

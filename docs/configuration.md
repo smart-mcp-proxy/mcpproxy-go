@@ -850,6 +850,28 @@ All three modes are always available on dedicated endpoints regardless of config
 
 See [Routing Modes](features/routing-modes.md) for complete details.
 
+---
+
+## Tool Response Mode
+
+Controls only the *serialization* of `retrieve_tools` responses (Spec 085) — never the query, ranking, or result set. Orthogonal to `routing_mode`.
+
+```json
+{
+  "tool_response_mode": "full"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tool_response_mode` | string | `"full"` | `full` returns complete `inputSchema` entries (pre-Spec-085 behavior, byte-identical). `compact` returns one-line signatures instead: per entry `id`, `score`, `sig`, first-sentence `desc`, and a `lossy` flag, plus one top-level `hint` line. |
+
+- **Compact signatures**: `*` marks a required parameter (never elided), `~` marks a lossy collapse (nested objects, long enums — call `describe_tool` for the full schema), short enums/defaults are inlined (e.g. `(origin*:str, ttl:int=3600)`).
+- **Per-call override**: the `detail` parameter on `retrieve_tools` (`compact` | `full`) overrides the configured mode for that call only.
+- **describe_tool**: in compact mode, agents fetch full definitions on demand with `describe_tool` (batch of 1–5 `server:tool` ids; same visibility rules as search).
+- **Hot-reload**: changes apply on the next call via the config file reload or `POST /api/v1/config/apply` — no restart.
+- Env: `MCPPROXY_TOOL_RESPONSE_MODE` · Flag: `--tool-response-mode`.
+
 ## Server Instructions
 
 Text returned in the MCP `initialize` response to guide AI agents on how to use the proxy (e.g., use `retrieve_tools` to discover existing tools rather than `search_servers`).
@@ -1202,6 +1224,7 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory |
+| `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
 | `MCPPROXY_DISABLE_OAUTH` | - | Disable OAuth for testing |
 | `HEADLESS` | - | Run in headless mode |
 

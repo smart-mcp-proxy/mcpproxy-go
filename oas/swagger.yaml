@@ -221,6 +221,15 @@ components:
           type: string
         tool_response_limit:
           type: integer
+        tool_response_mode:
+          description: |-
+            Tool response mode (Spec 085): how retrieve_tools serializes results.
+            Valid values: "" (= full), "full" (default: today's schema-bearing
+            entries), "compact" (signature + first-sentence entries). Orthogonal to
+            routing_mode — routing_mode selects the tool SURFACE, this selects the
+            SERIALIZATION within the retrieve_tools surface. Serialization-only: it
+            never affects the query, ranking, or result set. Hot-reloadable.
+          type: string
         tool_response_session_risk_warning:
           description: |-
             ToolResponseSessionRiskWarning controls whether the prose `warning` field
