@@ -73,6 +73,12 @@ type Server struct {
 	statusCh chan interface{}
 	eventsCh chan runtime.Event
 
+	// serveErrCh delivers a fatal serve failure (startup bind error or
+	// serve-loop death) out of the async StartServer goroutine so the
+	// process can exit instead of lingering unreachable. Buffered (cap 1)
+	// so the goroutine never blocks; graceful shutdown never fires it.
+	serveErrCh chan error
+
 	// Spec 024: Track server start time for lifecycle events
 	startTime time.Time
 
@@ -168,6 +174,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		runtime:       rt,
 		statusCh:      make(chan interface{}, 10),
 		eventsCh:      rt.SubscribeEvents(),
+		serveErrCh:    make(chan error, 1),
 		observability: obsManager,
 	}
 
@@ -1485,8 +1492,10 @@ func (s *Server) StartServer(ctx context.Context) error {
 			s.runtime.SetRunning(false)
 
 			// Only send "Stopped" status if there was no error
-			// If there was an error, the error status should remain
-			if serverError == nil || serverError == context.Canceled {
+			// If there was an error, the error status should remain.
+			// errors.Is: graceful cancellation may arrive wrapped
+			// (e.g. "MCP Streamable HTTP server error: context canceled").
+			if serverError == nil || errors.Is(serverError, context.Canceled) {
 				s.updateStatus(runtime.PhaseStopped, "Server has stopped")
 			}
 		}()
@@ -1500,13 +1509,28 @@ func (s *Server) StartServer(ctx context.Context) error {
 		s.updateStatus(runtime.PhaseStarting, "Server is starting...")
 
 		serverError = s.Start(s.serverCtx)
-		if serverError != nil && serverError != context.Canceled {
+		if serverError != nil && !errors.Is(serverError, context.Canceled) {
 			s.logger.Error("Server error during background start", zap.Error(serverError))
 			s.updateStatus(runtime.PhaseError, fmt.Sprintf("Server error: %v", serverError))
+			// Deliver the fatal error to ServeErr() so the process can
+			// exit (e.g. exit code 2 on port conflict) instead of
+			// lingering with no listeners. Non-blocking: buffered cap 1
+			// tolerates restarts when nobody is draining the channel.
+			select {
+			case s.serveErrCh <- serverError:
+			default:
+			}
 		}
 	}()
 
 	return nil
+}
+
+// ServeErr delivers a fatal serve failure: a startup bind error (e.g.
+// *PortInUseError) or a serve-loop death after start. Graceful shutdown
+// (context cancellation, http.ErrServerClosed) never fires it.
+func (s *Server) ServeErr() <-chan error {
+	return s.serveErrCh
 }
 
 // StopServer stops the server if it's running

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,6 +35,30 @@ func TestListenerManager_CreateTCPListener(t *testing.T) {
 	assert.Equal(t, ConnectionSourceTCP, listener.Source)
 	assert.NotEmpty(t, listener.Address)
 	assert.Contains(t, listener.Address, "127.0.0.1")
+}
+
+func TestCreateTCPListener_AddrInUse_ReturnsPortInUseError(t *testing.T) {
+	logger := zap.NewNop()
+	tmpDir := t.TempDir()
+
+	// Occupy a port so the manager's bind attempt fails.
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer occupied.Close()
+
+	manager := NewListenerManager(&ListenerConfig{
+		DataDir:    tmpDir,
+		TCPAddress: occupied.Addr().String(),
+		Logger:     logger,
+	})
+
+	listener, err := manager.CreateTCPListener()
+	require.Error(t, err)
+	require.Nil(t, listener)
+
+	var portErr *PortInUseError
+	require.True(t, errors.As(err, &portErr), "expected *PortInUseError, got %T: %v", err, err)
+	assert.Equal(t, occupied.Addr().String(), portErr.Address)
 }
 
 func TestListenerManager_CreateTrayListener_Unix(t *testing.T) {
