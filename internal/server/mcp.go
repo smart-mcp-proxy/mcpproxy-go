@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1381,6 +1382,20 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		callableResults = append(callableResults, result)
 	}
 	results = callableResults
+
+	// Deterministic ordering: Bleve returns hits by score descending but leaves
+	// equally-scored ties in an unstable, backend-dependent order, which makes
+	// the agent-facing tools array (and its JSON serialization) nondeterministic
+	// across otherwise-identical calls. Break ties by full tool name so the
+	// output is stable — required by the Spec 084 surface-isolation test that
+	// compares retrieve_tools byte-for-byte across toon modes, and a better
+	// contract for agents regardless.
+	sort.SliceStable(results, func(i, j int) bool {
+		if results[i].Score != results[j].Score {
+			return results[i].Score > results[j].Score
+		}
+		return results[i].Tool.Name < results[j].Tool.Name
+	})
 
 	// Quarantined tools are deliberately absent from the search index: their
 	// untrusted descriptions/schemas are withheld so a Tool Poisoning Attack
