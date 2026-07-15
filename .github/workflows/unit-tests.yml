@@ -189,7 +189,13 @@ jobs:
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee  # v9.2.1
         with:
           version: v2.6.2
-          args: --config .github/.golangci.yml --timeout=5m
+          args: --config .github/.golangci.yml --timeout=10m
+          # skip-cache: the action's cross-run analysis cache produced stale
+          # staticcheck facts (SA5011 on t.Fatal no-return sites) that do not
+          # reproduce with the same version+config on a clean run. Cold runs
+          # cost ~2-3 min extra; correctness wins. Revisit after upstream
+          # cache-invalidation fix.
+          skip-cache: true
 
   server-edition:
     name: Server Edition
