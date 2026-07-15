@@ -278,6 +278,26 @@ func TestConfigWatcher_ReloadSyncsLegacyGetConfig(t *testing.T) {
 		"legacy GetConfig (backing GET/PATCH /api/v1/config) must see the reloaded config")
 }
 
+// TestConfigWatcher_ReloadPropagatesGlobalConfigToUpstream: a watcher reload
+// must reach the upstream manager (and through it every running managed
+// client), matching what ApplyConfig does via SetGlobalConfig — otherwise
+// external edits to global fields like health_check_interval update the
+// snapshot/API but running clients keep resolving the old values.
+func TestConfigWatcher_ReloadPropagatesGlobalConfigToUpstream(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	require.NoError(t, config.SaveConfig(editedConfig(initialCfg, 99999), cfgPath))
+
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 99999
+	}, 5*time.Second, 25*time.Millisecond, "snapshot must pick up the external edit")
+
+	gc := rt.upstreamManager.GlobalConfig()
+	require.NotNil(t, gc)
+	assert.Equal(t, 99999, gc.ToolResponseLimit,
+		"watcher reload must propagate the new global config to the upstream manager")
+}
+
 // TestConfigWatcher_DebounceCoalesces: a burst of rapid writes must collapse
 // into one (or at most a couple of) reloads, not one per write.
 func TestConfigWatcher_DebounceCoalesces(t *testing.T) {

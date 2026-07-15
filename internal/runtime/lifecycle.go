@@ -1130,6 +1130,15 @@ func (r *Runtime) ReloadConfiguration() error {
 		r.mu.Unlock()
 	}
 
+	// Propagate the reloaded global config to the upstream manager and every
+	// running managed client (parity with ApplyConfig, spec 074): health-check
+	// loops and Docker-recovery decisions re-resolve values like
+	// health_check_interval from this, so external edits must reach it too —
+	// not only API applies.
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetGlobalConfig(newSnapshot.Config)
+	}
+
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)

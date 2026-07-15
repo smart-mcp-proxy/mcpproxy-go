@@ -1373,6 +1373,19 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	if savePath == "" {
 		savePath = r.cfgPath
 	}
+
+	// Record the save for the config watcher's self-write suppression BEFORE
+	// writing, so the fs event can never outrun the marker (a >debounce pause
+	// between rename and record would otherwise let the watcher misread our
+	// own write as external). This matters most for the restart-required
+	// branch below: disk gets the new config while memory intentionally keeps
+	// the old one, so the watcher's snapshot comparison alone would misread
+	// our own save as an external edit and hot-apply it behind the API's back
+	// (config_watcher.go). If the save fails, the stale marker is harmless:
+	// it only ever matches disk content byte-identical to this config, and is
+	// dropped as soon as any diverging content is observed.
+	r.noteConfigSelfWrite(newCfg)
+
 	saveErr := config.SaveConfig(newCfg, savePath)
 	if saveErr != nil {
 		r.logger.Error("Failed to save configuration to disk",
@@ -1386,13 +1399,6 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.logger.Info("Configuration successfully saved to disk",
 			zap.String("path", savePath))
 	}
-
-	// Record the save for the config watcher's self-write suppression. This
-	// matters most for the restart-required branch below: disk gets the new
-	// config while memory intentionally keeps the old one, so the watcher's
-	// snapshot comparison alone would misread our own save as an external
-	// edit and hot-apply it behind the API's back (config_watcher.go).
-	r.noteConfigSelfWrite(newCfg)
 
 	// If restart is required, don't apply changes in-memory (let user restart)
 	if result.RequiresRestart {
