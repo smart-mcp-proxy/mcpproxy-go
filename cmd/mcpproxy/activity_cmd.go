@@ -976,40 +976,12 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}
 
-	// Try socket first, then HTTP (same as getActivityClient)
-	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
-	if cfg.Listen != "" {
-		// Check if socket exists (use IsSocketAvailable which handles unix:// prefix)
-		if !socket.IsSocketAvailable(endpoint) {
-			// Handle listen addresses like ":8080" (no host)
-			listen := cfg.Listen
-			if strings.HasPrefix(listen, ":") {
-				listen = "127.0.0.1" + listen
-			}
-			endpoint = "http://" + listen
-		}
-	}
-
-	// Create HTTP client with socket support
-	transport := &http.Transport{}
-	dialer, baseURL, dialErr := socket.CreateDialer(endpoint)
-	if dialErr != nil {
-		logger.Sugar().Warnw("Failed to create socket dialer, using TCP",
-			"endpoint", endpoint,
-			"error", dialErr)
-		baseURL = endpoint
-	}
-	if dialer != nil {
-		transport.DialContext = dialer
-		logger.Sugar().Debugw("Using socket/pipe connection for SSE", "endpoint", endpoint)
-	} else {
-		baseURL = endpoint
-	}
-
-	// Build SSE URL
-	sseURL := baseURL + "/events"
-	if cfg.APIKey != "" {
-		sseURL += "?apikey=" + cfg.APIKey
+	// Resolve the SSE target via the shared daemon detection: socket first,
+	// then probed TCP fallback with the env>config API key (QA finding
+	// CLI-SOCKET — same semantics as getActivityClient).
+	sseURL, apiKey, transport, ok := activityWatchTarget(cfg, logger.Sugar())
+	if !ok {
+		return outputActivityError(fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve"), "CONNECTION_ERROR")
 	}
 
 	// Setup context with signal handling
@@ -1033,16 +1005,53 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Watch with reconnection
-	return watchWithReconnect(ctx, sseURL, outputFormat, logger.Sugar(), httpClient)
+	return watchWithReconnect(ctx, sseURL, apiKey, outputFormat, logger.Sugar(), httpClient)
+}
+
+// activityWatchTarget resolves the SSE URL, API key, and HTTP transport for
+// `activity watch` using the shared daemon detection (daemonEndpoint):
+// socket first (no API key needed), then probed TCP fallback with the
+// env>config API key. ok=false when no daemon is reachable.
+func activityWatchTarget(cfg *config.Config, logger *zap.SugaredLogger) (sseURL, apiKey string, transport *http.Transport, ok bool) {
+	endpoint, apiKey, ok := daemonEndpoint(cfg)
+	if !ok {
+		return "", "", nil, false
+	}
+	transport, baseURL := activityTransport(endpoint, logger)
+	return baseURL + "/events", apiKey, transport, true
+}
+
+// activityTransport builds an HTTP transport + base URL for a daemonEndpoint
+// result: unix://|npipe:// endpoints get a socket dialer, http(s) endpoints
+// are used as-is.
+func activityTransport(endpoint string, logger *zap.SugaredLogger) (*http.Transport, string) {
+	transport := &http.Transport{}
+	dialer, baseURL, err := socket.CreateDialer(endpoint)
+	if err != nil {
+		if logger != nil {
+			logger.Warnw("Failed to create socket dialer, using endpoint directly",
+				"endpoint", endpoint,
+				"error", err)
+		}
+		return transport, endpoint
+	}
+	if dialer == nil {
+		return transport, endpoint
+	}
+	transport.DialContext = dialer
+	if logger != nil {
+		logger.Debugw("Using socket/pipe connection", "endpoint", endpoint)
+	}
+	return transport, baseURL
 }
 
 // watchWithReconnect watches the SSE stream with automatic reconnection
-func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string, logger *zap.SugaredLogger, httpClient *http.Client) error {
+func watchWithReconnect(ctx context.Context, sseURL, apiKey string, outputFormat string, logger *zap.SugaredLogger, httpClient *http.Client) error {
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
 
 	for {
-		err := watchActivityStream(ctx, sseURL, outputFormat, logger, httpClient)
+		err := watchActivityStream(ctx, sseURL, apiKey, outputFormat, logger, httpClient)
 
 		select {
 		case <-ctx.Done():
@@ -1062,12 +1071,17 @@ func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string,
 }
 
 // watchActivityStream connects to SSE and streams events
-func watchActivityStream(ctx context.Context, sseURL string, outputFormat string, _ *zap.SugaredLogger, httpClient *http.Client) error {
+func watchActivityStream(ctx context.Context, sseURL, apiKey string, outputFormat string, _ *zap.SugaredLogger, httpClient *http.Client) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if apiKey != "" {
+		// TCP fallback: /events sits behind apiKeyAuthMiddleware. Header, not
+		// ?apikey= query param, so the key never lands in URLs/logs.
+		req.Header.Set("X-API-Key", apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1562,12 +1576,13 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}
 
-	// Build export URL
-	listen := cfg.Listen
-	if strings.HasPrefix(listen, ":") {
-		listen = "127.0.0.1" + listen
+	// Resolve the daemon via the shared detection: socket first, then probed
+	// TCP fallback with the env>config API key (QA finding CLI-SOCKET).
+	endpoint, apiKey, ok := daemonEndpoint(cfg)
+	if !ok {
+		return outputActivityError(fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve"), "CONNECTION_ERROR")
 	}
-	baseURL := "http://" + listen
+	transport, baseURL := activityTransport(endpoint, logger.Sugar())
 	exportURL := baseURL + "/api/v1/activity/export"
 
 	q := url.Values{}
@@ -1608,12 +1623,12 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 		return outputActivityError(err, "REQUEST_ERROR")
 	}
 
-	// Add API key header
-	if cfg.APIKey != "" {
-		req.Header.Set("X-API-Key", cfg.APIKey)
+	// Add API key header (empty over socket — OS-level auth)
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return outputActivityError(err, "CONNECTION_ERROR")
