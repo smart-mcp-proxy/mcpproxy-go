@@ -290,9 +290,11 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	// command never appears to hang on the (best-effort) beacon below.
 	fmt.Println("Telemetry disabled.")
 
-	// One-time opt-out beacon. When a daemon is running it does NOT auto-reload
-	// this file (there is no fsnotify watcher), so the CLI is responsible for the
-	// beacon in the CLI-driven path. Route it through the SAME guarded server-side
+	// One-time opt-out beacon. A running daemon now hot-reloads this file via
+	// the fsnotify config watcher (config_watcher.go) and fires its own beacon
+	// through NotifyConfigChanged — but no daemon may be running, so the CLI
+	// stays responsible for the beacon in the CLI-driven path. Route it
+	// through the SAME guarded server-side
 	// entry point (EmitOptOutBeacon applies the dev-build/semver, env, and
 	// anon-id guards and owns the single send) rather than duplicating the send
 	// or bypassing a guard. A short timeout keeps this from blocking on a slow

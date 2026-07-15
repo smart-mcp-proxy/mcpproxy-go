@@ -134,6 +134,13 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Tool discovery callback registered on upstream manager")
 	}
 
+	// Watch the config file for external edits (editors, CLI, `jq > tmp && mv`)
+	// and hot-reload them through the canonical disk-reload path. Failure
+	// degrades gracefully to no hot-reload (warning logged inside).
+	if p := r.ConfigSnapshot().Path; p != "" {
+		_ = r.startConfigFileWatcher(r.appCtx, p)
+	}
+
 	go r.backgroundInitialization()
 }
 
@@ -1114,8 +1121,9 @@ func (r *Runtime) ReloadConfiguration() error {
 
 	// MCP-2482: detect a telemetry enabled->disabled flip across the reload and
 	// fire the one-time opt-out beacon. This covers config changes that arrive
-	// via a disk reload (there is no fsnotify auto-watcher, so this is the
-	// manual/triggered-reload path). nil-safe + fire-and-forget.
+	// via a disk reload — both the manual/triggered-reload path and the
+	// fsnotify config file watcher (config_watcher.go), which funnels external
+	// file edits into this method. nil-safe + fire-and-forget.
 	if r.telemetryService != nil {
 		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
 	}
@@ -1423,11 +1431,10 @@ func (r *Runtime) RestartServer(serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
 	// Issue #467: pull the latest server config from disk before falling
-	// back to BoltDB. There is no fsnotify-style auto file-watcher, so a
-	// user who edits mcp_config.json and then triggers a restart would
-	// otherwise replay stale env / headers / args / isolation data — only
-	// the live REST PATCH path used to update them. Disk-first here closes
-	// that gap for the (much more common) edit-then-restart UX.
+	// back to BoltDB. The fsnotify config file watcher (config_watcher.go)
+	// now hot-reloads external edits, but its debounce window means a fast
+	// edit-then-restart could still race a stale BoltDB record — disk-first
+	// here keeps the edit-then-restart UX deterministic regardless.
 	serverConfig := r.lookupServerConfigForRestart(serverName)
 	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration", serverName)
