@@ -166,6 +166,14 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	trimmedDisk := bytes.TrimSpace(diskBytes)
 	if current, merr := json.MarshalIndent(r.ConfigSnapshot().Config, "", "  "); merr == nil {
 		if bytes.Equal(bytes.TrimSpace(current), trimmedDisk) {
+			// The file now matches memory. If that content differs from the
+			// recorded self-write, the file has moved past our last save
+			// (e.g. an external revert cancelling a pending restart-required
+			// apply) — drop the stale marker so a later external re-write of
+			// those old self-saved bytes still reloads.
+			if !r.matchesLastSelfWrite(trimmedDisk) {
+				r.clearLastSelfWrite()
+			}
 			r.logger.Debug("Config file event matches in-memory config; skipping reload",
 				zap.String("path", absPath))
 			return

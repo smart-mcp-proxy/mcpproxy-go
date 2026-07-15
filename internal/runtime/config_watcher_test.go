@@ -221,6 +221,42 @@ func TestConfigWatcher_ExternalRevertToLastSelfWriteReloads(t *testing.T) {
 		"external revert to the last self-written bytes must still hot-reload")
 }
 
+// TestConfigWatcher_RevertThenRewriteOfSelfWrittenBytesReloads: the recorded
+// self-write must also be invalidated when the file moves past it via the
+// snapshot-match branch. Sequence: restart-required ApplyConfig saves A
+// (marker=A, memory stays O), user externally reverts the file to O
+// (suppressed as disk==memory), then externally writes A again. That last
+// write is a genuine external edit whose hot-reloadable parts must apply —
+// a stale marker would suppress it until restart.
+func TestConfigWatcher_RevertThenRewriteOfSelfWrittenBytesReloads(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	limitBefore := rt.ConfigSnapshot().Config.ToolResponseLimit
+
+	// Restart-required apply: disk=A, memory=O, marker=A.
+	cfgA := editedConfig(initialCfg, 88888)
+	cfgA.Listen = "127.0.0.1:1"
+	result, err := rt.ApplyConfig(cfgA, cfgPath)
+	require.NoError(t, err)
+	require.True(t, result.RequiresRestart)
+
+	// Let the self-write event be (correctly) suppressed.
+	time.Sleep(1200 * time.Millisecond)
+	require.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit)
+
+	// External revert to O: disk==memory, suppressed — but the file has now
+	// moved past our last save, so the marker must be dropped here.
+	require.NoError(t, config.SaveConfig(initialCfg, cfgPath))
+	time.Sleep(1200 * time.Millisecond)
+
+	// External re-write of A: genuine edit, must hot-reload its hot parts.
+	require.NoError(t, config.SaveConfig(cfgA, cfgPath))
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 88888
+	}, 5*time.Second, 25*time.Millisecond,
+		"external re-write of previously self-saved bytes must hot-reload")
+}
+
 // TestConfigWatcher_ReloadSyncsLegacyGetConfig: a watcher reload must land in
 // BOTH config surfaces — the configsvc snapshot AND the legacy r.cfg read by
 // Runtime.GetConfig(), which still backs GET/PATCH /api/v1/config and other
