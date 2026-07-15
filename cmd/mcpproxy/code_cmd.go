@@ -15,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -158,37 +157,24 @@ func runCodeExec(_ *cobra.Command, _ []string) error {
 		return exitError(2)
 	}
 
-	// Detect daemon and choose mode
-	if shouldUseDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runCodeExecClientMode(globalConfig.DataDir, code, inputData, logger)
+	// Detect daemon (socket first, then TCP fallback) and choose mode
+	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+		logger.Info("Detected running daemon, using client mode")
+		return runCodeExecClientMode(client, code, inputData, logger)
 	}
 
 	logger.Info("No daemon detected, using standalone mode")
 	return runCodeExecStandalone(globalConfig, code, inputData, logger)
 }
 
-// shouldUseDaemon checks if daemon is running by detecting socket file.
-func shouldUseDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
-}
-
-// runCodeExecClientMode executes code via daemon HTTP API over socket.
-func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, logger *zap.Logger) error {
-	// Detect socket endpoint
-	socketPath := socket.DetectSocketPath(dataDir)
-
-	// Create CLI client
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+// runCodeExecClientMode executes code via the daemon HTTP API.
+func runCodeExecClientMode(client *cliclient.Client, code string, input map[string]interface{}, logger *zap.Logger) error {
 	// Ping daemon to verify connectivity
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
 			zap.Error(err),
-			zap.String("socket_path", socketPath),
 			zap.Duration("ping_timeout", 2*time.Second),
 			zap.String("fallback_mode", "standalone"))
 		// Fall back to standalone mode
@@ -197,7 +183,7 @@ func runCodeExecClientMode(dataDir, code string, input map[string]interface{}, l
 	}
 
 	// ADD CLI mode indicator
-	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - fast execution\n")
 
 	// Execute code via daemon
 	result, err := client.CodeExec(

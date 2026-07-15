@@ -13,7 +13,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli"
 
 	"github.com/spf13/cobra"
@@ -182,13 +181,13 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 
 	// Handle --all flag: authenticate all servers
 	if authAll {
-		return runAuthLoginAll(ctx, cfg.DataDir)
+		return runAuthLoginAll(ctx, cfg)
 	}
 
 	// Handle single server authentication
-	// Check if daemon is running and use client mode
-	if shouldUseAuthDaemon(cfg.DataDir) {
-		return runAuthLoginClientMode(ctx, cfg.DataDir, authServerName)
+	// Check if daemon is running (socket first, then TCP fallback) and use client mode
+	if client, ok := newDaemonClient(cfg, nil); ok {
+		return runAuthLoginClientMode(ctx, client, authServerName)
 	}
 
 	// No daemon detected, use standalone mode
@@ -196,20 +195,18 @@ func runAuthLogin(cmd *cobra.Command, _ []string) error {
 }
 
 // runAuthLoginAll authenticates all servers that require OAuth authentication.
-func runAuthLoginAll(ctx context.Context, dataDir string) error {
-	// Auth login --all REQUIRES daemon
-	if !shouldUseAuthDaemon(dataDir) {
-		return fmt.Errorf("auth login --all requires running daemon. Start with: mcpproxy serve")
-	}
-
-	socketPath := socket.DetectSocketPath(dataDir)
+func runAuthLoginAll(ctx context.Context, cfg *config.Config) error {
 	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 	defer func() { _ = logger.Sync() }()
 
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	// Auth login --all REQUIRES daemon
+	client, ok := newDaemonClient(cfg, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("auth login --all requires running daemon. Start with: mcpproxy serve")
+	}
 
 	// Ping daemon to verify connectivity
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
@@ -322,24 +319,16 @@ func runAuthStatus(_ *cobra.Command, _ []string) error {
 	}
 
 	// Auth status REQUIRES daemon (to show real daemon state)
-	if !shouldUseAuthDaemon(cfg.DataDir) {
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
 		return fmt.Errorf("auth status requires running daemon. Start with: mcpproxy serve")
 	}
 
-	return runAuthStatusClientMode(ctx, cfg.DataDir, authServerName, authAll)
+	return runAuthStatusClientMode(ctx, client, authServerName, authAll)
 }
 
-// runAuthStatusClientMode fetches auth status from daemon via socket.
-func runAuthStatusClientMode(ctx context.Context, dataDir, serverName string, allServers bool) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
-	if err != nil {
-		return fmt.Errorf("failed to create logger: %w", err)
-	}
-	defer func() { _ = logger.Sync() }()
-
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+// runAuthStatusClientMode fetches auth status from the daemon.
+func runAuthStatusClientMode(ctx context.Context, client *cliclient.Client, serverName string, allServers bool) error {
 	// Fetch all servers to check OAuth status
 	servers, err := client.GetServers(ctx)
 	if err != nil {
@@ -631,15 +620,8 @@ func getAuthAvailableServerNames(cfg *config.Config) []string {
 	return names
 }
 
-// shouldUseAuthDaemon checks if daemon is running by detecting socket file.
-func shouldUseAuthDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
-}
-
-// runAuthLoginClientMode triggers OAuth via daemon HTTP API over socket.
-func runAuthLoginClientMode(ctx context.Context, dataDir, serverName string) error {
-	socketPath := socket.DetectSocketPath(dataDir)
+// runAuthLoginClientMode triggers OAuth via the daemon HTTP API.
+func runAuthLoginClientMode(ctx context.Context, client *cliclient.Client, serverName string) error {
 	// Create simple logger for client (no file logging for command)
 	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
 	if err != nil {
@@ -647,20 +629,17 @@ func runAuthLoginClientMode(ctx context.Context, dataDir, serverName string) err
 	}
 	defer func() { _ = logger.Sync() }()
 
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
 	// Ping daemon to verify connectivity
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
 	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
-			zap.Error(err),
-			zap.String("socket_path", socketPath))
+			zap.Error(err))
 		// Fall back to standalone mode
 		return runAuthLoginStandalone(ctx, serverName)
 	}
 
-	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - coordinating OAuth with running server\n\n")
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - coordinating OAuth with running server\n\n")
 
 	// Trigger OAuth via daemon
 	if err := client.TriggerOAuthLogin(ctx, serverName); err != nil {
@@ -859,18 +838,17 @@ func runAuthLogout(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Check if daemon is running and use client mode
-	if shouldUseAuthDaemon(cfg.DataDir) {
-		return runAuthLogoutClientMode(ctx, cfg.DataDir, authServerName)
+	// Check if daemon is running (socket first, then TCP fallback) and use client mode
+	if client, ok := newDaemonClient(cfg, nil); ok {
+		return runAuthLogoutClientMode(ctx, client, authServerName)
 	}
 
 	// No daemon detected, use standalone mode
 	return runAuthLogoutStandalone(ctx, authServerName, cfg)
 }
 
-// runAuthLogoutClientMode triggers OAuth logout via daemon HTTP API over socket.
-func runAuthLogoutClientMode(ctx context.Context, dataDir, serverName string) error {
-	socketPath := socket.DetectSocketPath(dataDir)
+// runAuthLogoutClientMode triggers OAuth logout via the daemon HTTP API.
+func runAuthLogoutClientMode(ctx context.Context, client *cliclient.Client, serverName string) error {
 	// Create simple logger for client (no file logging for command)
 	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
 	if err != nil {
@@ -878,15 +856,12 @@ func runAuthLogoutClientMode(ctx context.Context, dataDir, serverName string) er
 	}
 	defer func() { _ = logger.Sync() }()
 
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
 	// Ping daemon to verify connectivity
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
 	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
-			zap.Error(err),
-			zap.String("socket_path", socketPath))
+			zap.Error(err))
 
 		// Load config for standalone mode
 		cfg, loadErr := loadAuthConfig()
@@ -896,7 +871,7 @@ func runAuthLogoutClientMode(ctx context.Context, dataDir, serverName string) er
 		return runAuthLogoutStandalone(ctx, serverName, cfg)
 	}
 
-	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - coordinating OAuth logout with running server\n\n")
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - coordinating OAuth logout with running server\n\n")
 
 	// Trigger OAuth logout via daemon
 	if err := client.TriggerOAuthLogout(ctx, serverName); err != nil {

@@ -24,7 +24,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 var (
@@ -392,10 +391,10 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runUpstreamListClientMode(ctx, globalConfig.DataDir, logger)
+	// Check if daemon is running (socket first, then TCP fallback)
+	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+		logger.Info("Detected running daemon, using client mode")
+		return runUpstreamListClientMode(ctx, client, logger)
 	}
 
 	// No daemon - load from config file
@@ -403,15 +402,7 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 	return runUpstreamListFromConfig(globalConfig)
 }
 
-func shouldUseUpstreamDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
-}
-
-func runUpstreamListClientMode(ctx context.Context, dataDir string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ *zap.Logger) error {
 	// Call GET /api/v1/servers
 	servers, err := client.GetServers(ctx)
 	if err != nil {
@@ -706,9 +697,12 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Detect daemon (socket first, then TCP fallback)
+	client, daemonOK := newDaemonClient(globalConfig, logger.Sugar())
+
 	// Follow mode requires daemon
 	if upstreamLogsFollow {
-		if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		if !daemonOK {
 			return fmt.Errorf("--follow requires running daemon")
 		}
 		logger.Info("Following logs from daemon")
@@ -731,13 +725,13 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 			}
 		}()
 
-		return runUpstreamLogsFollowMode(bgCtx, globalConfig.DataDir, serverName, logger)
+		return runUpstreamLogsFollowMode(bgCtx, client, serverName, logger)
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runUpstreamLogsClientMode(ctx, globalConfig.DataDir, serverName, logger)
+	if daemonOK {
+		logger.Info("Detected running daemon, using client mode")
+		return runUpstreamLogsClientMode(ctx, client, serverName)
 	}
 
 	// No daemon - read from log file
@@ -745,10 +739,7 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 	return runUpstreamLogsFromFile(globalConfig, serverName)
 }
 
-func runUpstreamLogsClientMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runUpstreamLogsClientMode(ctx context.Context, client *cliclient.Client, serverName string) error {
 	// Call GET /api/v1/servers/{name}/logs?tail=N
 	logs, err := client.GetServerLogs(ctx, serverName, upstreamLogsTail)
 	if err != nil {
@@ -800,10 +791,7 @@ func runUpstreamLogsFromFile(globalConfig *config.Config, serverName string) err
 	return nil
 }
 
-func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runUpstreamLogsFollowMode(ctx context.Context, client *cliclient.Client, serverName string, logger *zap.Logger) error {
 	fmt.Printf("Following logs for server '%s' (Ctrl+C to stop)...\n", serverName)
 
 	ticker := time.NewTicker(1 * time.Second)
@@ -948,12 +936,10 @@ func runUpstreamAction(serverName, action string) error {
 	}
 
 	// Require daemon for actions
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("server actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	fmt.Printf("Performing action '%s' on server '%s'...\n", action, serverName)
 
@@ -994,12 +980,10 @@ func runUpstreamToolAction(serverName, toolName string, enabled bool) error {
 		return err
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("tool actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// "enable" / "disable" are ASCII verbs, so an inline ASCII-only
 	// title-case is fine here and avoids the deprecated strings.Title.
@@ -1038,12 +1022,10 @@ func runUpstreamToolBulkAction(serverName string, enabled bool) error {
 		return err
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("tool actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	fmt.Printf("Running tools %s on server '%s'...\n", verb, serverName)
 	changed, err := client.SetAllToolsEnabled(ctx, serverName, enabled)
@@ -1085,12 +1067,10 @@ func runUpstreamBulkAction(action string, force bool) error {
 	}
 
 	// Require daemon
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("server actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// Get server count for confirmation
 	servers, err := client.GetServers(ctx)
@@ -1273,18 +1253,15 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return runUpstreamAddDaemonMode(ctx, globalConfig.DataDir, req)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		return runUpstreamAddDaemonMode(ctx, client, req)
 	}
 
 	// Direct config file mode
 	return runUpstreamAddConfigMode(req, globalConfig)
 }
 
-func runUpstreamAddDaemonMode(ctx context.Context, dataDir string, req *cliclient.AddServerRequest) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, nil)
-
+func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) error {
 	result, err := client.AddServer(ctx, req)
 	if err != nil {
 		// Check if it's "already exists" error and --if-not-exists is set
@@ -1392,18 +1369,15 @@ func runUpstreamRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return runUpstreamRemoveDaemonMode(ctx, globalConfig.DataDir, serverName)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		return runUpstreamRemoveDaemonMode(ctx, client, serverName)
 	}
 
 	// Direct config file mode
 	return runUpstreamRemoveConfigMode(serverName, globalConfig)
 }
 
-func runUpstreamRemoveDaemonMode(ctx context.Context, dataDir, serverName string) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, nil)
-
+func runUpstreamRemoveDaemonMode(ctx context.Context, client *cliclient.Client, serverName string) error {
 	err := client.RemoveServer(ctx, serverName)
 	if err != nil {
 		// Check if it's "not found" error and --if-exists is set
@@ -1530,8 +1504,8 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return runUpstreamAddDaemonMode(ctx, globalConfig.DataDir, req)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		return runUpstreamAddDaemonMode(ctx, client, req)
 	}
 
 	// Direct config file mode
@@ -1815,8 +1789,8 @@ func applyImportedServers(imported []*configimport.ImportedServer, globalConfig 
 	defer cancel()
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return applyImportedServersDaemonMode(ctx, globalConfig.DataDir, imported)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		return applyImportedServersDaemonMode(ctx, client, imported)
 	}
 
 	// Direct config file mode
@@ -1824,10 +1798,7 @@ func applyImportedServers(imported []*configimport.ImportedServer, globalConfig 
 }
 
 // applyImportedServersDaemonMode adds servers via the daemon
-func applyImportedServersDaemonMode(ctx context.Context, dataDir string, imported []*configimport.ImportedServer) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, nil)
-
+func applyImportedServersDaemonMode(ctx context.Context, client *cliclient.Client, imported []*configimport.ImportedServer) error {
 	for _, s := range imported {
 		req := &cliclient.AddServerRequest{
 			Name:       s.Server.Name,
@@ -1868,17 +1839,15 @@ func runUpstreamInspect(_ *cobra.Command, args []string) error {
 			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
-	}
-
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
+	}
 
 	// If a specific tool is requested, show the diff
 	if upstreamInspectTool != "" {
@@ -2002,17 +1971,15 @@ func runUpstreamApprove(_ *cobra.Command, args []string) error {
 			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
-	}
-
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
+	}
 
 	approveAll := len(toolNames) == 0
 	count, err := client.ApproveTools(ctx, serverName, toolNames, approveAll)
@@ -2162,15 +2129,14 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first; the `patch` subcommand requires a live backend so configuration changes are applied with full deep-merge semantics and propagated to running upstream connections immediately. Editing the config file by hand only works while the daemon is offline")
-	}
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first; the `patch` subcommand requires a live backend so configuration changes are applied with full deep-merge semantics and propagated to running upstream connections immediately. Editing the config file by hand only works while the daemon is offline")
+	}
 
 	if err := client.PatchServer(ctx, serverName, bodyBytes); err != nil {
 		return err

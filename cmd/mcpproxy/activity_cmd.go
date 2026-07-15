@@ -792,21 +792,12 @@ func getActivityClient(logger *zap.SugaredLogger) (*cliclient.Client, error) {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Try socket first, then HTTP
-	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
-	if cfg.Listen != "" {
-		// Check if socket exists (use IsSocketAvailable which handles unix:// prefix)
-		if !socket.IsSocketAvailable(endpoint) {
-			// Handle listen addresses like ":8080" (no host)
-			listen := cfg.Listen
-			if strings.HasPrefix(listen, ":") {
-				listen = "127.0.0.1" + listen
-			}
-			endpoint = "http://" + listen
-		}
+	// Try socket first, then TCP fallback (cfg.Listen + API key)
+	client, ok := newDaemonClient(cfg, logger)
+	if !ok {
+		return nil, fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve")
 	}
-
-	return cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger), nil
+	return client, nil
 }
 
 // runActivityList implements the activity list command

@@ -1825,9 +1825,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	if cfg.EnableSocket {
 		trayListener, err = listenerManager.CreateTrayListener()
 		if err != nil {
-			s.logger.Warn("Failed to create tray listener, tray will use TCP fallback",
-				zap.Error(err))
-			// Continue without tray listener - tray will fall back to TCP
+			socketPath := cfg.TrayEndpoint
+			if socketPath == "" {
+				socketPath = filepath.Join(cfg.DataDir, "mcpproxy.sock")
+			}
+			s.logger.Warn("Failed to create tray/CLI socket listener; tray and CLI will fall back to TCP (API key required)",
+				zap.Error(err),
+				zap.String("socket_path", socketPath))
+			// Continue without tray listener - tray and CLI fall back to TCP
 		}
 	} else {
 		s.logger.Info("Socket communication disabled by configuration, clients will use TCP")

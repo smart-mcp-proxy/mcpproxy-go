@@ -14,9 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -83,15 +81,14 @@ func runTelemetryShowPayload(_ *cobra.Command, _ []string) error {
 
 	// Require running daemon so runtime stats are populated. Offline mode
 	// would emit zero-valued runtime fields and mislead users.
-	socketPath := socket.DetectSocketPath(cfg.DataDir)
-	if !socket.IsSocketAvailable(socketPath) {
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
 		return fmt.Errorf("telemetry show-payload requires running daemon. Start with: mcpproxy serve")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client := cliclient.NewClient(socketPath, nil)
 	payload, err := client.GetTelemetryPayload(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get telemetry payload from daemon: %w", err)

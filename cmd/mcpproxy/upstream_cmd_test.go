@@ -227,18 +227,18 @@ func TestOutputServers_EmptyList(t *testing.T) {
 	}
 }
 
-func TestShouldUseUpstreamDaemon(t *testing.T) {
+func TestUpstreamDaemonDetection_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+
 	// Test with non-existent directory
-	result := shouldUseUpstreamDaemon("/tmp/nonexistent-mcpproxy-test-dir-12345")
-	if result {
-		t.Error("shouldUseUpstreamDaemon should return false for non-existent directory")
+	if _, ok := newDaemonClient(&config.Config{DataDir: "/tmp/nonexistent-mcpproxy-test-dir-12345"}, nil); ok {
+		t.Error("newDaemonClient should report no daemon for non-existent directory")
 	}
 
 	// Test with existing directory but no socket
 	tmpDir := t.TempDir()
-	result = shouldUseUpstreamDaemon(tmpDir)
-	if result {
-		t.Error("shouldUseUpstreamDaemon should return false when socket doesn't exist")
+	if _, ok := newDaemonClient(&config.Config{DataDir: tmpDir}, nil); ok {
+		t.Error("newDaemonClient should report no daemon when socket doesn't exist")
 	}
 }
 
@@ -377,10 +377,10 @@ func TestCreateUpstreamLogger(t *testing.T) {
 func TestOutputServers_BooleanFields(t *testing.T) {
 	// Test that unified health status is displayed correctly based on server state
 	tests := []struct {
-		name           string
-		healthLevel    string
-		adminState     string
-		expectedEmoji  string
+		name          string
+		healthLevel   string
+		adminState    string
+		expectedEmoji string
 	}{
 		{"healthy enabled", "healthy", "enabled", "✅"},
 		{"disabled", "healthy", "disabled", "⏸️"},

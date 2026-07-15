@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
@@ -160,18 +159,15 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 func collectStatus(cfg *config.Config, configPath string) (*StatusInfo, error) {
 	socketPath := socket.DetectSocketPath(cfg.DataDir)
 
-	if socket.IsSocketAvailable(socketPath) {
-		return collectStatusFromDaemon(cfg, socketPath, configPath)
+	// Daemon detection: socket first, then TCP fallback (cfg.Listen + API key).
+	if client, ok := newDaemonClient(cfg, nil); ok {
+		return collectStatusFromDaemon(cfg, client, socketPath, configPath)
 	}
 
 	return collectStatusFromConfig(cfg, socketPath, configPath), nil
 }
 
-func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) (*StatusInfo, error) {
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
-
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socketPath, configPath string) (*StatusInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
