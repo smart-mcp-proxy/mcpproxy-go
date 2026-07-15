@@ -1114,6 +1114,22 @@ func (r *Runtime) ReloadConfiguration() error {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
 
+	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
+	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
+	// a disk reload only lands in the configsvc snapshot — the API keeps
+	// serving the stale config, and a subsequent PATCH would deep-merge onto
+	// the stale base and save it, silently reverting the external edit.
+	// (configSvc.ReloadFromFile doesn't touch the legacy fields; the legacy
+	// fallback branch above already synced them via UpdateConfig.)
+	if r.configSvc != nil {
+		r.mu.Lock()
+		r.cfg = newSnapshot.Config
+		if newSnapshot.Path != "" {
+			r.cfgPath = newSnapshot.Path
+		}
+		r.mu.Unlock()
+	}
+
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)

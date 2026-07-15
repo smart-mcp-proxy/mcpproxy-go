@@ -221,6 +221,27 @@ func TestConfigWatcher_ExternalRevertToLastSelfWriteReloads(t *testing.T) {
 		"external revert to the last self-written bytes must still hot-reload")
 }
 
+// TestConfigWatcher_ReloadSyncsLegacyGetConfig: a watcher reload must land in
+// BOTH config surfaces — the configsvc snapshot AND the legacy r.cfg read by
+// Runtime.GetConfig(), which still backs GET/PATCH /api/v1/config and other
+// httpapi handlers. If only the snapshot updates, the API keeps serving the
+// stale config and a subsequent PATCH would merge onto the stale base and
+// save it, silently reverting the external edit on disk.
+func TestConfigWatcher_ReloadSyncsLegacyGetConfig(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	require.NoError(t, config.SaveConfig(editedConfig(initialCfg, 77777), cfgPath))
+
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 77777
+	}, 5*time.Second, 25*time.Millisecond, "snapshot must pick up the external edit")
+
+	legacyCfg, err := rt.GetConfig()
+	require.NoError(t, err)
+	assert.Equal(t, 77777, legacyCfg.ToolResponseLimit,
+		"legacy GetConfig (backing GET/PATCH /api/v1/config) must see the reloaded config")
+}
+
 // TestConfigWatcher_DebounceCoalesces: a burst of rapid writes must collapse
 // into one (or at most a couple of) reloads, not one per write.
 func TestConfigWatcher_DebounceCoalesces(t *testing.T) {
