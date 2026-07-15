@@ -698,7 +698,9 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	//   2. Use a 750ms ticker (no tight loop, no 2s lag).
 	//   3. Honor a hard timeout based on the configured per-scanner timeout.
 	//   4. Print one progress line per tick with run/running/failed counts.
-	fmt.Printf("Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
+	// Progress goes to stderr so stdout stays clean for machine formats
+	// (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
 	scanStart := time.Now()
 
 	ticker := time.NewTicker(750 * time.Millisecond)
@@ -708,7 +710,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			return fmt.Errorf("scan timed out after %s for %q (job %s); use 'mcpproxy security status %s' to inspect", hardTimeout, serverName, jobID, serverName)
 		case <-ticker.C:
 		}
@@ -778,24 +780,24 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			if lastProgressLen > len(progress) {
 				pad = strings.Repeat(" ", lastProgressLen-len(progress))
 			}
-			fmt.Print("\r" + progress + pad)
+			fmt.Fprint(os.Stderr, "\r"+progress+pad)
 			lastProgressLen = len(progress)
 		} else {
-			fmt.Println(progress)
+			fmt.Fprintln(os.Stderr, progress)
 		}
 
 		switch jobStatus {
 		case "completed":
 			if stdoutIsTTY() {
-				fmt.Println()
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan completed in %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan completed in %s\n", elapsed)
 			return printScanSummary(client, ctx, serverName)
 		case "failed":
 			if stdoutIsTTY() {
-				fmt.Println()
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan failed after %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan failed after %s\n", elapsed)
 			errMsg := getMapString(status, "error")
 			if errMsg != "" {
 				return fmt.Errorf("scan failed: %s", errMsg)
@@ -803,9 +805,9 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("scan failed for %q", serverName)
 		case "cancelled":
 			if stdoutIsTTY() {
-				fmt.Println()
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan cancelled after %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan cancelled after %s\n", elapsed)
 			return fmt.Errorf("scan was cancelled for %q", serverName)
 		}
 		// pending or running: continue polling
