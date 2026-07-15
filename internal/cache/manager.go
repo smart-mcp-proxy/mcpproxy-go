@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -70,8 +71,9 @@ func NewManager(db *bbolt.DB, logger *zap.Logger) (*Manager, error) {
 // truncation can mint several keys in quick succession. At second granularity
 // any of those that landed in the same wall-clock second collided on one key,
 // so a later Store silently overwrote an earlier payload and the earlier
-// banner resolved to the wrong data. Nanosecond granularity makes each call's
-// key unique in practice.
+// banner resolved to the wrong data. GenerateKey is a PURE function of its
+// inputs (asserted by TestGenerateKey); callers that need per-call uniqueness
+// must supply distinct timestamps — see NextUniqueTimestamp.
 func GenerateKey(toolName string, args map[string]interface{}, timestamp time.Time) string {
 	// Create a consistent string representation
 	argsJSON, _ := json.Marshal(args)
@@ -80,6 +82,28 @@ func GenerateKey(toolName string, args map[string]interface{}, timestamp time.Ti
 	hash := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(hash[:])
 }
+
+// NextUniqueTimestamp returns a strictly increasing timestamp for cache-key
+// generation. time.Now() alone is not collision-safe: Windows wall-clock
+// resolution is ~0.5-15.6ms, so two truncated blocks in the same tick got
+// identical UnixNano readings and therefore identical keys (flaked
+// TestForwardContentResult_MultipleTextBlocksDistinctKeys on windows-latest).
+// A process-wide atomic high-water mark bumps same-tick readings by 1ns each,
+// preserving GenerateKey's purity while guaranteeing distinct inputs.
+func NextUniqueTimestamp() time.Time {
+	for {
+		now := time.Now().UnixNano()
+		last := lastKeyNano.Load()
+		if now <= last {
+			now = last + 1
+		}
+		if lastKeyNano.CompareAndSwap(last, now) {
+			return time.Unix(0, now)
+		}
+	}
+}
+
+var lastKeyNano atomic.Int64
 
 // Store saves a tool response to cache
 func (m *Manager) Store(key, toolName string, args map[string]interface{}, content, recordPath string, totalRecords int) error {
