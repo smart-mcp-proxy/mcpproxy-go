@@ -67,7 +67,9 @@ func Render(paramsJSON, description string) (Signature, error) {
 	}
 	sort.Strings(optionalNames)
 
-	parts := make([]string, 0, len(requiredNames)+len(optionalNames))
+	// Cap the hint by the property count (a single map length, not an
+	// attacker-controlled sum) — parts holds one entry per rendered param.
+	parts := make([]string, 0, len(properties))
 	lossy := false
 	// Required first, in required-array order (never elided — FR-003).
 	for _, name := range requiredNames {
@@ -500,7 +502,9 @@ func parseQuotedAtom(quoted string) (string, error) {
 				if i+4 > len(body) {
 					return "", errors.New("toolsig: truncated \\u escape")
 				}
-				code, err := strconv.ParseUint(body[i:i+4], 16, 32)
+				// Exactly 4 hex digits → at most 0xFFFF, so a 16-bit parse is
+				// wide enough and keeps rune(code) in range (no int32 overflow).
+				code, err := strconv.ParseUint(body[i:i+4], 16, 16)
 				if err != nil {
 					return "", fmt.Errorf("toolsig: invalid \\u escape %q", body[i:i+4])
 				}
