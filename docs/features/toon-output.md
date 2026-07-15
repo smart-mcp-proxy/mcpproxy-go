@@ -108,7 +108,7 @@ Byte savings approximate token savings for this payload class; the spec-083 prof
 
 ## Related Documentation
 
-- [Configuration Reference](../configuration.md#toon-output-adaptive-result-encoding)
+- [Configuration Reference](../configuration/config-file.md)
 - [Output Sanitisation](output-sanitisation.md)
 - [Sensitive Data Detection](sensitive-data-detection.md)
 - [Activity Log](activity-log.md)
