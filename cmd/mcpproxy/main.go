@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -102,7 +101,7 @@ func main() {
 		Short:   "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
 		Version: version,
 	}
-	rootCmd.SetVersionTemplate(fmt.Sprintf("MCPProxy %s (%s) %s/%s\n", version, Edition, runtime.GOOS, runtime.GOARCH))
+	rootCmd.SetVersionTemplate(versionLine())
 
 	// Add global flags
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
@@ -212,6 +211,7 @@ func main() {
 	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
+	rootCmd.AddCommand(GetVersionCommand())
 
 	// Server-edition-only commands (e.g. `credential`). No-op in personal edition.
 	registerServerEditionCommands(rootCmd)
