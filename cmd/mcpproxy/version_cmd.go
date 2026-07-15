@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -45,22 +46,23 @@ func newVersionInfo() VersionInfo {
 }
 
 func printVersionOutput(w io.Writer, info VersionInfo, format string) error {
-	switch format {
-	case "json", "yaml":
-		formatter, err := clioutput.NewFormatter(format)
-		if err != nil {
-			return err
-		}
-		out, err := formatter.Format(info)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(w, out)
-		return nil
-	default:
+	// Table output is the shared human-readable line (byte-identical to
+	// --version), not the generic table formatter.
+	if f := strings.ToLower(format); f == "" || f == "table" {
 		fmt.Fprint(w, versionLine())
 		return nil
 	}
+	// NewFormatter is case-insensitive and rejects unknown formats.
+	formatter, err := clioutput.NewFormatter(format)
+	if err != nil {
+		return err
+	}
+	out, err := formatter.Format(info)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(w, out)
+	return nil
 }
 
 // GetVersionCommand returns the `version` subcommand.

@@ -89,6 +89,36 @@ func TestPrintVersionOutputJSONWithBuildMeta(t *testing.T) {
 	}
 }
 
+func TestPrintVersionOutputCaseInsensitiveFormat(t *testing.T) {
+	var buf bytes.Buffer
+	info := VersionInfo{Version: "v1.2.3", Edition: "personal", OS: "darwin", Arch: "arm64"}
+
+	if err := printVersionOutput(&buf, info, "JSON"); err != nil {
+		t.Fatalf("printVersionOutput(JSON) error: %v", err)
+	}
+
+	var decoded map[string]string
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("-o JSON should produce JSON output, got: %s (err: %v)", buf.String(), err)
+	}
+	if decoded["version"] != "v1.2.3" {
+		t.Errorf("JSON version = %q, want %q", decoded["version"], "v1.2.3")
+	}
+}
+
+func TestPrintVersionOutputRejectsUnknownFormat(t *testing.T) {
+	var buf bytes.Buffer
+	info := VersionInfo{Version: "v1.2.3", Edition: "personal", OS: "darwin", Arch: "arm64"}
+
+	err := printVersionOutput(&buf, info, "xml")
+	if err == nil {
+		t.Fatalf("printVersionOutput(xml) should return an error, got output: %s", buf.String())
+	}
+	if !strings.Contains(err.Error(), "xml") {
+		t.Errorf("error should name the invalid format, got: %v", err)
+	}
+}
+
 func TestPrintVersionOutputYAML(t *testing.T) {
 	var buf bytes.Buffer
 	info := VersionInfo{Version: "v1.2.3", Edition: "personal", OS: "darwin", Arch: "arm64"}
