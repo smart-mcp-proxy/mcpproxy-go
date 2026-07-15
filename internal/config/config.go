@@ -118,6 +118,35 @@ func (c *Config) ResolveInitTimeout(sc *ServerConfig) time.Duration {
 	return resolved
 }
 
+// isValidToonOutput reports whether s is an acceptable toon_output value
+// (spec 084, FR-001). Empty is valid: it means "off" at the top level and
+// "inherit global" per-server. The enum is duplicated from toonenc.Mode by
+// design — internal/config must not import internal/toonenc (finding 4).
+func isValidToonOutput(s string) bool {
+	switch s {
+	case "", "off", "adaptive", "always":
+		return true
+	default:
+		return false
+	}
+}
+
+// ResolveToonOutput resolves the effective toon_output mode for a server
+// (spec 084, FR-001): per-server non-empty value > global non-empty value >
+// "off". It deliberately returns a raw string, NOT a toonenc.Mode —
+// internal/config is imported almost everywhere and must not depend on
+// internal/toonenc; callers parse the string via toonenc.ParseMode at the
+// server/bench boundary.
+func (c *Config) ResolveToonOutput(sc *ServerConfig) string {
+	if sc != nil && sc.ToonOutput != "" {
+		return sc.ToonOutput
+	}
+	if c.ToonOutput != "" {
+		return c.ToonOutput
+	}
+	return "off"
+}
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen       string `json:"listen" mapstructure:"listen"`
@@ -138,6 +167,22 @@ type Config struct {
 	ToolResponseLimit  int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
 	CallToolTimeout    Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
 	MaxResultSizeChars int      `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"` // Advertised on every tool as `_meta.anthropic/maxResultSizeChars`; raises Claude Code's inline-response ceiling from 50k to up to 500k chars. Set to 0 to disable.
+
+	// ToonOutput selects the TOON encoding mode for call_tool_* result text
+	// blocks (spec 084): "off" (default — responses byte-identical to
+	// pre-feature behavior), "adaptive" (encode only tabular-uniform payloads
+	// that beat compact JSON by ToonMinSavingsPct), or "always"
+	// (benchmark/debug only — encodes every JSON-parseable block and can
+	// INCREASE token cost). Per-server override: ServerConfig.ToonOutput.
+	// Resolved by ResolveToonOutput; hot-reloadable.
+	ToonOutput string `json:"toon_output,omitempty" mapstructure:"toon-output"`
+	// ToonMinSavingsPct is the minimum byte-savings percentage (validated
+	// 1-90; 0/unset → 15) the complete TOON emission (marker + hint + body)
+	// must achieve over the exact passthrough emission for adaptive mode to
+	// encode a block. Byte savings approximate token savings for the tabular
+	// payload class; the spec-083 profiler reports true token deltas.
+	// Global-only (no per-server override, FR-001).
+	ToonMinSavingsPct int `json:"toon_min_savings_pct,omitempty" mapstructure:"toon-min-savings-pct"`
 
 	// Discovery & health-check cadence (spec 074, #608). Both are *Duration
 	// tri-state pointers: nil = inherit the built-in default; a pointer to 0s =
@@ -421,6 +466,12 @@ type ServerConfig struct {
 	// this for upstreams that do legitimate first-run warmup (e.g. caching many
 	// channels/users) before responding to `initialize`.
 	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init_timeout" swaggertype:"string"`
+
+	// ToonOutput overrides the global toon_output mode for this server's
+	// tools (spec 084, FR-001). Plain string, not a pointer: ""/absent =
+	// inherit the global value; "off"|"adaptive"|"always" = override ("off"
+	// is the explicit force-off). Resolved by Config.ResolveToonOutput.
+	ToonOutput string `json:"toon_output,omitempty" mapstructure:"toon_output"`
 
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
@@ -1360,6 +1411,11 @@ func DefaultConfig() *Config {
 		CallToolTimeout:    Duration(2 * time.Minute), // Default 2 minutes for tool calls
 		MaxResultSizeChars: 500000,                    // Claude Code's inline-response hard max
 
+		// TOON output (spec 084): off by default — responses byte-identical
+		// to pre-feature behavior (FR-002).
+		ToonOutput:        "off",
+		ToonMinSavingsPct: 15,
+
 		// Default secure environment configuration
 		Environment: secureenv.DefaultEnvConfig(),
 
@@ -1661,6 +1717,22 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		}
 	}
 
+	// Validate TOON output mode + threshold (spec 084, FR-001). Empty is
+	// allowed at the top level (treated as "off"); 0/unset threshold resolves
+	// to the default 15.
+	if !isValidToonOutput(c.ToonOutput) {
+		errors = append(errors, ValidationError{
+			Field:   "toon_output",
+			Message: fmt.Sprintf("invalid toon_output: %s (must be off, adaptive, or always)", c.ToonOutput),
+		})
+	}
+	if c.ToonMinSavingsPct != 0 && (c.ToonMinSavingsPct < 1 || c.ToonMinSavingsPct > 90) {
+		errors = append(errors, ValidationError{
+			Field:   "toon_min_savings_pct",
+			Message: "must be between 1 and 90 (or 0 for the default 15)",
+		})
+	}
+
 	// Validate update-check channel (Spec 079 FR-012/FR-013). Empty is allowed
 	// (resolves to stable); only a non-empty unknown value is invalid.
 	if c.UpdateCheck != nil && c.UpdateCheck.Channel != "" &&
@@ -1756,6 +1828,14 @@ func (c *Config) ValidateDetailed() []ValidationError {
 				Message: "enabled_tools and disabled_tools are mutually exclusive; use one or the other",
 			})
 		}
+		// Spec 084: per-server toon_output override. Empty = inherit global.
+		if !isValidToonOutput(server.ToonOutput) {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".toon_output",
+				Message: fmt.Sprintf("invalid toon_output: %s (must be off, adaptive, or always — or empty to inherit)", server.ToonOutput),
+			})
+		}
+
 		// Spec 074: per-upstream auth_broker validation + default application.
 		// No-op in the personal edition (stub); enforced in the server edition.
 		errors = append(errors, validateServerAuthBroker(server, fieldPrefix)...)

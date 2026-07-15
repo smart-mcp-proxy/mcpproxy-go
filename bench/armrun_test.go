@@ -343,6 +343,7 @@ func TestRunArms_QualityAttach(t *testing.T) {
 	alt := results[1].Quality
 	if alt == nil {
 		t.Fatal("index-altering arm with golden set must carry a quality score")
+		return // unreachable; satisfies golangci-lint v2.6.2 staticcheck SA5011
 	}
 	if alt.RecallAt5 != 1.0 {
 		t.Errorf("altering arm recall@5 = %v, want 1.0 (each query's tool is indexed and findable)", alt.RecallAt5)
@@ -362,6 +363,7 @@ func TestRunArms_QualityAttach(t *testing.T) {
 	q := results[1].Quality
 	if q == nil {
 		t.Fatal("index-altering arm without labels must still carry a quality object with an explanatory note")
+		return // unreachable; satisfies golangci-lint v2.6.2 staticcheck SA5011
 	}
 	if q.MetricNote == "" || q.RecallAt5 != 0 {
 		t.Errorf("unlabeled quality = %+v, want zero metrics + explanatory MetricNote", q)

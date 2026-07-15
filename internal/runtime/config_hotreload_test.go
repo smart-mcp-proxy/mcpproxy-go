@@ -423,3 +423,36 @@ func TestDetectConfigChanges_UpdateCheck(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "update_check")
 	})
 }
+
+// TestDetectConfigChanges_ToonOutput (spec 084 T021, FR-001): a lone
+// toon_output / toon_min_savings_pct edit must be reported as a hot-reloadable
+// change — the encoder reads the config fresh on every call, so the entries
+// exist to acknowledge the reload instead of logging "no changes detected".
+func TestDetectConfigChanges_ToonOutput(t *testing.T) {
+	mk := func(mode string, pct int) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			ToonOutput: mode, ToonMinSavingsPct: pct,
+		}
+	}
+
+	t.Run("toon_output change detected", func(t *testing.T) {
+		result := DetectConfigChanges(mk("off", 15), mk("adaptive", 15))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "toon_output")
+		assert.False(t, result.RequiresRestart, "toon_output is hot-reloadable")
+	})
+
+	t.Run("toon_min_savings_pct change detected", func(t *testing.T) {
+		result := DetectConfigChanges(mk("adaptive", 15), mk("adaptive", 30))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "toon_min_savings_pct")
+		assert.False(t, result.RequiresRestart)
+	})
+
+	t.Run("no toon change means not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk("adaptive", 15), mk("adaptive", 15))
+		assert.NotContains(t, result.ChangedFields, "toon_output")
+		assert.NotContains(t, result.ChangedFields, "toon_min_savings_pct")
+	})
+}

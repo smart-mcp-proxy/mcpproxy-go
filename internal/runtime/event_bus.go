@@ -406,7 +406,10 @@ func (r *Runtime) EmitActivityToolCallStarted(serverName, toolName, sessionID, r
 // arguments is the input parameters passed to the tool call
 // toolVariant is the MCP tool variant used (call_tool_read/write/destructive) - optional
 // intent is the intent declaration metadata - optional
-func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int) {
+// detectionText is the spec-084 pre-encoding sensitive-data scan input (FR-007b);
+// empty means "scan response as before" (feature off / non-call_tool_* paths)
+// toonOutput is the spec-084 per-block encoding decision metadata (FR-010) - optional
+func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, source, status, errorMsg string, durationMs int64, arguments map[string]interface{}, response string, responseTruncated bool, toolVariant string, intent map[string]interface{}, contentTrust, profile string, requestBytes, responseBytes int, detectionText string, toonOutput map[string]interface{}) {
 	// Spec 042: classify failed tool calls into the upstream error categories.
 	// We never record the error message itself; only a fixed enum value.
 	if status == "error" && errorMsg != "" {
@@ -457,6 +460,17 @@ func (r *Runtime) EmitActivityToolCallCompleted(serverName, toolName, sessionID,
 	}
 	if responseBytes > 0 {
 		payload["response_bytes"] = responseBytes
+	}
+	// Spec 084 FR-007b: pre-encoding detection scan input. Only set when
+	// non-empty so every existing path (feature off, non-call_tool_* callers)
+	// keeps the detector scanning response, byte-for-byte unchanged (issue 2).
+	if detectionText != "" {
+		payload["detection_text"] = detectionText
+	}
+	// Spec 084 FR-010: per-block TOON encoding decisions. Only set when the
+	// feature ran, so off-mode records carry no toon_output metadata (SC-002).
+	if toonOutput != nil {
+		payload["toon_output"] = toonOutput
 	}
 	r.publishEvent(newEvent(EventTypeActivityToolCallCompleted, payload))
 }

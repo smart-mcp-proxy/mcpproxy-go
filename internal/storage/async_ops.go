@@ -205,6 +205,7 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		HealthCheckInterval:      serverConfig.HealthCheckInterval,
 		ToolDiscoveryInterval:    serverConfig.ToolDiscoveryInterval,
 		InitTimeout:              serverConfig.InitTimeout,
+		ToonOutput:               serverConfig.ToonOutput,
 	}
 	return am.db.SaveUpstream(record)
 }

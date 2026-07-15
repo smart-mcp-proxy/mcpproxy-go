@@ -291,3 +291,26 @@ Returns: {"records": [...], "meta": {"total_records": %d, "total_size": %d}}`,
 func (t *Truncator) ShouldTruncate(content string) bool {
 	return t.limit > 0 && len(content) > t.limit
 }
+
+// SimpleTruncateBudget returns the number of content bytes the simpleTruncate
+// path actually retains before appending its notice, or 0 when truncation is
+// disabled (limit 0 = unlimited). Spec 084 (T031b): the TOON encoder's
+// too-small-budget guard must match the truncator's REAL retained prefix, not
+// the raw limit — an encoded TOON block is not valid JSON, so Truncate always
+// falls into simpleTruncate for it, which keeps limit - messageSpace bytes
+// (messageSpace = 200, or limit/2 when limit < 200). This mirrors
+// simpleTruncate exactly; keep the two in sync.
+func (t *Truncator) SimpleTruncateBudget() int {
+	if t.limit == 0 {
+		return 0
+	}
+	messageSpace := 200
+	if t.limit < messageSpace {
+		messageSpace = t.limit / 2
+	}
+	budget := t.limit - messageSpace
+	if budget < 0 {
+		budget = 0
+	}
+	return budget
+}

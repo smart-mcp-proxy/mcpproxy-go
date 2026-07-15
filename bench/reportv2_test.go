@@ -260,6 +260,7 @@ func TestMapRetrievalMetrics(t *testing.T) {
 	got := MapRetrievalMetrics(src)
 	if got == nil {
 		t.Fatal("MapRetrievalMetrics returned nil for non-nil input")
+		return // unreachable; satisfies golangci-lint v2.6.2 staticcheck SA5011
 	}
 	checks := []struct {
 		name string

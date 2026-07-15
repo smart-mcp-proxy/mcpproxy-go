@@ -460,6 +460,12 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 	contentTrust := getStringPayload(evt.Payload, "content_trust")
 	// Spec 057 FR-011: profile slug for tool calls from a /mcp/p/<slug> URL.
 	profileSlug := getStringPayload(evt.Payload, "profile")
+	// Spec 084 FR-010: per-block TOON encoding decisions (nil when the feature
+	// did not run, so off-mode records carry no toon_output key).
+	toonOutput := getMapPayload(evt.Payload, "toon_output")
+	// Spec 084 FR-007b: pre-encoding detection scan input; empty means "scan
+	// response as before".
+	detectionText := getStringPayload(evt.Payload, "detection_text")
 	// Default source to "mcp" if not specified (backwards compatibility)
 	activitySource := storage.ActivitySourceMCP
 	if source != "" {
@@ -468,7 +474,7 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 
 	// Build metadata with intent information if present
 	var metadata map[string]interface{}
-	if toolVariant != "" || intent != nil || contentTrust != "" || profileSlug != "" {
+	if toolVariant != "" || intent != nil || contentTrust != "" || profileSlug != "" || toonOutput != nil {
 		metadata = make(map[string]interface{})
 		if toolVariant != "" {
 			metadata["tool_variant"] = toolVariant
@@ -484,6 +490,10 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 		// operators can correlate activity to the profile it came from.
 		if profileSlug != "" {
 			metadata["profile"] = profileSlug
+		}
+		// Spec 084 FR-010: the per-text-block encoding decision record.
+		if toonOutput != nil {
+			metadata["toon_output"] = toonOutput
 		}
 	}
 	// Name the MCP client on the record itself, so it survives session eviction.
@@ -544,11 +554,20 @@ func (s *ActivityService) handleToolCallCompleted(evt Event) {
 
 		// Run async sensitive data detection (Spec 026). Tracked in workersWG:
 		// it updates the record's metadata in BBolt, so Stop must await it.
+		// Spec 084 FR-007b: when the TOON seam supplied a pre-encoding
+		// detection_text, scan THAT instead of the (possibly TOON-encoded)
+		// agent-facing response — finding parity with the feature off. Empty
+		// detection_text (feature off, non-call_tool_* paths) keeps today's
+		// behavior byte-for-byte.
 		if s.detector != nil {
+			scanText := response
+			if detectionText != "" {
+				scanText = detectionText
+			}
 			s.workersWG.Add(1)
 			go func() {
 				defer s.workersWG.Done()
-				s.runAsyncDetection(record.ID, arguments, response)
+				s.runAsyncDetection(record.ID, arguments, scanText)
 			}()
 		}
 	}
