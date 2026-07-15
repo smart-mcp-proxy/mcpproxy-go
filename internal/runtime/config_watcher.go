@@ -10,6 +10,8 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // configWatchDebounce coalesces bursts of file events (editor write patterns,
@@ -102,10 +104,38 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 	}
 }
 
+// noteConfigSelfWrite records the marshaled form of a config mcpproxy itself
+// just saved to disk, so the watcher can suppress the echo even when the
+// in-memory snapshot intentionally diverges from the file — the
+// restart-required ApplyConfig path saves to disk but defers the in-memory
+// apply until restart (`requires_restart` contract), and the watcher must not
+// hot-apply it behind the API's back. Marshals exactly as config.SaveConfig
+// does; a marshal failure just skips recording (the write itself would have
+// failed the same way).
+func (r *Runtime) noteConfigSelfWrite(cfg *config.Config) {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return
+	}
+	r.selfWriteMu.Lock()
+	r.lastSelfWrite = bytes.TrimSpace(data)
+	r.selfWriteMu.Unlock()
+}
+
+// matchesLastSelfWrite reports whether trimmed disk bytes equal the last
+// config mcpproxy itself saved (see noteConfigSelfWrite).
+func (r *Runtime) matchesLastSelfWrite(trimmedDisk []byte) bool {
+	r.selfWriteMu.Lock()
+	defer r.selfWriteMu.Unlock()
+	return len(r.lastSelfWrite) > 0 && bytes.Equal(r.lastSelfWrite, trimmedDisk)
+}
+
 // reloadFromDiskIfChanged reloads the configuration from disk unless the file
-// content matches the in-memory snapshot (self-write suppression: our own
-// ApplyConfig / SaveConfiguration writes must not echo back into a redundant
-// reload, which would re-trigger ConnectAll + reindex churn).
+// content matches the in-memory snapshot or the last self-written config
+// (self-write suppression: our own ApplyConfig / SaveConfiguration writes
+// must not echo back into a redundant reload, which would re-trigger
+// ConnectAll + reindex churn — or, for restart-required applies, hot-apply a
+// change the API just reported as deferred until restart).
 func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	diskBytes, err := os.ReadFile(absPath)
 	if err != nil {
@@ -121,12 +151,22 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	// event came from our own save. If a future save path diverges, this
 	// degrades to one redundant (idempotent) reload — never a loop, since
 	// ReloadConfiguration never writes the file.
+	trimmedDisk := bytes.TrimSpace(diskBytes)
 	if current, merr := json.MarshalIndent(r.ConfigSnapshot().Config, "", "  "); merr == nil {
-		if bytes.Equal(bytes.TrimSpace(current), bytes.TrimSpace(diskBytes)) {
+		if bytes.Equal(bytes.TrimSpace(current), trimmedDisk) {
 			r.logger.Debug("Config file event matches in-memory config; skipping reload",
 				zap.String("path", absPath))
 			return
 		}
+	}
+
+	// Restart-required applies save to disk without touching memory, so the
+	// snapshot comparison above can't recognize them as ours — check the
+	// recorded last self-write too.
+	if r.matchesLastSelfWrite(trimmedDisk) {
+		r.logger.Debug("Config file event matches mcpproxy's own last save; skipping reload",
+			zap.String("path", absPath))
+		return
 	}
 
 	r.logger.Info("Config file changed on disk, hot-reloading", zap.String("path", absPath))

@@ -63,6 +63,15 @@ type Runtime struct {
 	mu      sync.RWMutex
 	running bool
 
+	// Config-watcher self-write suppression (config_watcher.go): marshaled
+	// bytes of the last config mcpproxy itself saved to disk. Needed on top
+	// of the snapshot comparison because a restart-required ApplyConfig saves
+	// the new config to disk while intentionally leaving memory on the old
+	// one (requires_restart contract) — the snapshot alone can't identify
+	// that write as ours.
+	selfWriteMu   sync.Mutex
+	lastSelfWrite []byte
+
 	statusMu sync.RWMutex
 	status   Status
 	statusCh chan Status
@@ -1377,6 +1386,13 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		r.logger.Info("Configuration successfully saved to disk",
 			zap.String("path", savePath))
 	}
+
+	// Record the save for the config watcher's self-write suppression. This
+	// matters most for the restart-required branch below: disk gets the new
+	// config while memory intentionally keeps the old one, so the watcher's
+	// snapshot comparison alone would misread our own save as an external
+	// edit and hot-apply it behind the API's back (config_watcher.go).
+	r.noteConfigSelfWrite(newCfg)
 
 	// If restart is required, don't apply changes in-memory (let user restart)
 	if result.RequiresRestart {

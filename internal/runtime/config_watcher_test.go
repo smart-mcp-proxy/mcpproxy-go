@@ -153,6 +153,44 @@ func TestConfigWatcher_SelfWriteSuppressed(t *testing.T) {
 	}
 }
 
+// TestConfigWatcher_RestartRequiredApplyNotEchoed: a restart-required
+// ApplyConfig (e.g. `listen` change) saves the new config to disk but
+// intentionally does NOT apply it in-memory (`requires_restart=true`,
+// `applied_immediately=false`). The watcher must not treat that self-write as
+// an external edit — otherwise it would hot-apply the change ~500ms after the
+// API just promised it was deferred until restart.
+func TestConfigWatcher_RestartRequiredApplyNotEchoed(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates := rt.ConfigService().Subscribe(ctx)
+	defer rt.ConfigService().Unsubscribe(updates)
+
+	limitBefore := rt.ConfigSnapshot().Config.ToolResponseLimit
+
+	edited := editedConfig(initialCfg, 56789)
+	edited.Listen = "127.0.0.1:1" // restart-required field
+	result, err := rt.ApplyConfig(edited, cfgPath)
+	require.NoError(t, err)
+	require.True(t, result.RequiresRestart, "listen change must require restart")
+
+	// Give the watcher debounce ample time to fire, then assert the deferred
+	// config was NOT hot-applied behind the API's back.
+	timeout := time.After(1500 * time.Millisecond)
+	for {
+		select {
+		case u := <-updates:
+			assert.NotEqual(t, configsvc.UpdateTypeReload, u.Type,
+				"watcher must not echo a restart-required self-save back as a disk reload (source=%s)", u.Source)
+		case <-timeout:
+			assert.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit,
+				"restart-required apply must stay deferred; watcher must not hot-apply it")
+			return
+		}
+	}
+}
+
 // TestConfigWatcher_DebounceCoalesces: a burst of rapid writes must collapse
 // into one (or at most a couple of) reloads, not one per write.
 func TestConfigWatcher_DebounceCoalesces(t *testing.T) {
