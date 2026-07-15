@@ -670,11 +670,12 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 		reasonDesc = "Why is this tool being called?"
 	}
 
-	// Spec 084 (FR-005): echo the TOON marker contract so agents learn it
-	// in-session. toonenc.Marker is the single source of truth
-	// (contracts/marker-format.md); this line is documentation of it.
-	description += " RESULT ENCODING: a result text block may begin with the line \"" +
-		toonenc.Marker + "\" — then the rest of that block is TOON, not JSON."
+	// Spec 084 (FR-005): echo the TOON marker contract as a compact one-line
+	// footprint (spec §137) so agents learn it in-session. toonenc.Marker is the
+	// single source of truth (contracts/marker-format.md) and is embedded
+	// verbatim so the description never drifts into a second copy; the marker's
+	// own text is self-describing, so no additional prose is needed after it.
+	description += " Result blocks may be prefixed by the marker line: " + toonenc.Marker
 
 	allOpts := []mcp.ToolOption{
 		mcp.WithDescription(description),
