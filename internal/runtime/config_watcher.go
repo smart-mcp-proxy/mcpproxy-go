@@ -130,6 +130,18 @@ func (r *Runtime) matchesLastSelfWrite(trimmedDisk []byte) bool {
 	return len(r.lastSelfWrite) > 0 && bytes.Equal(r.lastSelfWrite, trimmedDisk)
 }
 
+// clearLastSelfWrite drops the recorded self-write. Called when a genuine
+// external change is about to reload: from that point the file's history has
+// diverged from our last save, and keeping the stale record would suppress a
+// later external revert to those exact bytes (editor undo, `git checkout`).
+// It is NOT cleared on a suppression match itself, so the restart-required
+// pending state keeps suppressing repeat events for the same bytes.
+func (r *Runtime) clearLastSelfWrite() {
+	r.selfWriteMu.Lock()
+	r.lastSelfWrite = nil
+	r.selfWriteMu.Unlock()
+}
+
 // reloadFromDiskIfChanged reloads the configuration from disk unless the file
 // content matches the in-memory snapshot or the last self-written config
 // (self-write suppression: our own ApplyConfig / SaveConfiguration writes
@@ -168,6 +180,11 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 			zap.String("path", absPath))
 		return
 	}
+
+	// Genuine external change: the file no longer descends from our last
+	// save, so the recorded self-write is stale — drop it (see
+	// clearLastSelfWrite for the revert scenario it would otherwise break).
+	r.clearLastSelfWrite()
 
 	r.logger.Info("Config file changed on disk, hot-reloading", zap.String("path", absPath))
 	if err := r.ReloadConfiguration(); err != nil {

@@ -191,6 +191,36 @@ func TestConfigWatcher_RestartRequiredApplyNotEchoed(t *testing.T) {
 	}
 }
 
+// TestConfigWatcher_ExternalRevertToLastSelfWriteReloads: the recorded
+// self-write must not outlive the next genuine external reload. Sequence:
+// ApplyConfig saves A (recorded), external edit B hot-reloads, then the user
+// reverts the file to byte-identical A (editor undo, `git checkout`). That
+// revert is a genuine external edit and must reload — a stale self-write
+// record would suppress it and leave the running config on B until restart.
+func TestConfigWatcher_ExternalRevertToLastSelfWriteReloads(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	// Self-save A (records lastSelfWrite = A).
+	cfgA := editedConfig(initialCfg, 45678)
+	result, err := rt.ApplyConfig(cfgA, cfgPath)
+	require.NoError(t, err)
+	require.True(t, result.Success)
+	require.Equal(t, 45678, rt.ConfigSnapshot().Config.ToolResponseLimit)
+
+	// External edit B hot-reloads.
+	require.NoError(t, config.SaveConfig(editedConfig(initialCfg, 11111), cfgPath))
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 11111
+	}, 5*time.Second, 25*time.Millisecond, "external edit B must hot-reload")
+
+	// External revert back to byte-identical A must reload too.
+	require.NoError(t, config.SaveConfig(cfgA, cfgPath))
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 45678
+	}, 5*time.Second, 25*time.Millisecond,
+		"external revert to the last self-written bytes must still hot-reload")
+}
+
 // TestConfigWatcher_DebounceCoalesces: a burst of rapid writes must collapse
 // into one (or at most a couple of) reloads, not one per write.
 func TestConfigWatcher_DebounceCoalesces(t *testing.T) {
