@@ -102,7 +102,7 @@ func TestSurfaceIsolation_CodeExecution(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { cm.Close() })
 
-	proxy := NewMCPProxyServer(sm, idx, um, cm, truncate.NewTruncator(0), logger, nil, false, cfg)
+	proxy := NewMCPProxyServer(sm, idx, um, cm, truncate.NewTruncator(0), logger, nil, false, cfg, nil)
 	t.Cleanup(func() { proxy.Close() })
 
 	calls := installToonEncodeRecorder(t)
