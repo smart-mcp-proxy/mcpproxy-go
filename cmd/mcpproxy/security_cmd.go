@@ -774,8 +774,10 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			progress += fmt.Sprintf(" (running: %s)", strings.Join(runningNames, ", "))
 		}
 		// Erase previous line on TTY for a clean rolling display; on a pipe
-		// just print one progress line per tick.
-		if stdoutIsTTY() {
+		// just print one progress line per tick. Progress is written to
+		// stderr, so the TTY check must follow stderr (not stdout) — else
+		// `2>scan.log` on a terminal would fill the log with \r frames.
+		if stderrIsTTY() {
 			pad := ""
 			if lastProgressLen > len(progress) {
 				pad = strings.Repeat(" ", lastProgressLen-len(progress))
@@ -788,13 +790,13 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 
 		switch jobStatus {
 		case "completed":
-			if stdoutIsTTY() {
+			if stderrIsTTY() {
 				fmt.Fprintln(os.Stderr)
 			}
 			fmt.Fprintf(os.Stderr, "  Scan completed in %s\n", elapsed)
 			return printScanSummary(client, ctx, serverName)
 		case "failed":
-			if stdoutIsTTY() {
+			if stderrIsTTY() {
 				fmt.Fprintln(os.Stderr)
 			}
 			fmt.Fprintf(os.Stderr, "  Scan failed after %s\n", elapsed)
@@ -804,7 +806,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			}
 			return fmt.Errorf("scan failed for %q", serverName)
 		case "cancelled":
-			if stdoutIsTTY() {
+			if stderrIsTTY() {
 				fmt.Fprintln(os.Stderr)
 			}
 			fmt.Fprintf(os.Stderr, "  Scan cancelled after %s\n", elapsed)
@@ -2313,6 +2315,13 @@ func scannerStatusColor(status string) (open, reset string) {
 // Used to gate ANSI escapes (colors, cursor moves) so piped output stays clean.
 func stdoutIsTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// stderrIsTTY returns true when stderr is connected to an interactive
+// terminal. Used to gate the rolling (\r) progress display, which is written
+// to stderr so machine formats keep stdout parseable.
+func stderrIsTTY() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 // normalizeOverviewLastScan replaces a Go zero-time `last_scan_at` value with
