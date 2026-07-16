@@ -290,35 +290,27 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	// command never appears to hang on the (best-effort) beacon below.
 	fmt.Println("Telemetry disabled.")
 
-	// One-time opt-out beacon. A running daemon hot-reloads this file via the
-	// fsnotify config watcher (config_watcher.go) and fires its own beacon
-	// through NotifyConfigChanged — its once-latch is process-local, so if the
-	// CLI also sent one the beacon would go out TWICE. When a daemon is
-	// detected (same socket check as the other daemon-aware commands), the CLI
-	// therefore delegates the send to it. With no daemon running the CLI stays
-	// responsible, routing through the SAME guarded server-side entry point
+	// One-time opt-out beacon. The CLI ALWAYS sends it after persisting the
+	// disable, routing through the SAME guarded server-side entry point
 	// (EmitOptOutBeacon applies the dev-build/semver, env, and anon-id guards
 	// and owns the single send) rather than duplicating the send or bypassing
-	// a guard. A short timeout keeps this from blocking on a slow endpoint;
-	// the CLI is short-lived so the send must complete before exit.
+	// a guard. Accepted trade-off (PR #857): a running daemon hot-reloads this
+	// file via the fsnotify config watcher and may ALSO emit the beacon from
+	// its NotifyConfigChanged path — that double-send is benign (the telemetry
+	// backend dedupes opt-outs by anon_id), whereas gating the CLI send on
+	// daemon detection risks DROPPING the beacon entirely on a false positive
+	// (the socket check only stat()s the path, so a stale socket file — or a
+	// daemon on the same data dir that doesn't watch this --config file —
+	// would suppress the only send). A short timeout keeps this from blocking
+	// on a slow endpoint; the CLI is short-lived so the send must complete
+	// before exit.
 	if wasEnabled {
-		if shouldUseTelemetryDaemon(cfg.DataDir) {
-			fmt.Fprintln(os.Stderr, "Running mcpproxy daemon detected; opt-out beacon delegated to it (sent on config hot-reload).")
-		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			beaconSvc := telemetry.New(cfg, "", version, Edition, zap.NewNop())
-			beaconSvc.EmitOptOutBeacon(ctx)
-		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		beaconSvc := telemetry.New(cfg, "", version, Edition, zap.NewNop())
+		beaconSvc.EmitOptOutBeacon(ctx)
 	}
 	return nil
-}
-
-// shouldUseTelemetryDaemon checks if a daemon is running by detecting the
-// socket file (same pattern as shouldUseAuthDaemon / shouldUseCallDaemon).
-func shouldUseTelemetryDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
 }
 
 func loadTelemetryConfig() (*config.Config, error) {

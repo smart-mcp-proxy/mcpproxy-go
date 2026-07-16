@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1433,30 +1434,10 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	r.logger.Info("Applying configuration hot-reload",
 		zap.Strings("changed_fields", result.ChangedFields))
 
-	// Update logging configuration
-	if contains(result.ChangedFields, "logging") {
-		r.logger.Info("Logging configuration changed")
-		if r.upstreamManager != nil && newCfg.Logging != nil {
-			r.upstreamManager.SetLogConfig(newCfg.Logging)
-		}
-	}
-
-	// Update truncator if tool response limit changed
-	if contains(result.ChangedFields, "tool_response_limit") {
-		r.logger.Info("Tool response limit changed, updating truncator",
-			zap.Int("old_limit", oldCfg.ToolResponseLimit),
-			zap.Int("new_limit", newCfg.ToolResponseLimit))
-		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
-	}
-
-	// Apply observability usage cadence (Spec 069 A2 — hot-reloadable). The
-	// usage flush loop re-reads the interval each cycle, so the setter suffices.
-	if contains(result.ChangedFields, "observability") && r.activityService != nil &&
-		newCfg.Observability != nil && newCfg.Observability.UsagePersistInterval.Duration() > 0 {
-		r.logger.Info("Observability usage persist interval changed",
-			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
-		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
-	}
+	// Apply live per-component side effects (logging, truncator, observability
+	// cadence) — shared with the disk-reload path (ReloadConfiguration) so the
+	// two config paths cannot drift.
+	r.applyComponentConfigLocked(oldCfg, newCfg)
 
 	// Apply update-check settings (Spec 079 FR-012 — hot-reloadable). The
 	// checker gates its poll + CheckNow on the flag internally; a
@@ -2521,6 +2502,49 @@ func (r *Runtime) applyUpdateCheckConfig(cfg *config.Config) {
 	}
 	uc := cfg.UpdateCheck
 	r.updateChecker.SetConfig(uc.IsEnabled(), uc.IncludePrereleases())
+}
+
+// applyComponentConfigLocked applies the live per-component side effects of a
+// hot-reloaded configuration: upstream log config, the tool-response
+// truncator, and the observability usage-persist cadence. It is shared by
+// ApplyConfig (API path) and ReloadConfiguration (disk/watcher path) so the
+// two paths cannot drift — the PR #857 review found disk reloads updating the
+// snapshot while these live components kept running on stale values.
+//
+// It performs its own field comparisons (mirroring DetectConfigChanges)
+// instead of taking a ChangedFields list, because DetectConfigChanges returns
+// early on restart-required fields and would under-report hot-reloadable
+// changes riding along in the same external edit. Caller must hold r.mu.
+func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil {
+		return
+	}
+
+	// Update logging configuration
+	if newCfg.Logging != nil && !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
+		r.logger.Info("Logging configuration changed")
+		if r.upstreamManager != nil {
+			r.upstreamManager.SetLogConfig(newCfg.Logging)
+		}
+	}
+
+	// Update truncator if tool response limit changed
+	if oldCfg.ToolResponseLimit != newCfg.ToolResponseLimit {
+		r.logger.Info("Tool response limit changed, updating truncator",
+			zap.Int("old_limit", oldCfg.ToolResponseLimit),
+			zap.Int("new_limit", newCfg.ToolResponseLimit))
+		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
+	}
+
+	// Apply observability usage cadence (Spec 069 A2 — hot-reloadable). The
+	// usage flush loop re-reads the interval each cycle, so the setter suffices.
+	if r.activityService != nil && newCfg.Observability != nil &&
+		newCfg.Observability.UsagePersistInterval.Duration() > 0 &&
+		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability) {
+		r.logger.Info("Observability usage persist interval changed",
+			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
+		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
+	}
 }
 
 // GetVersionInfo returns the current version information from the update checker.

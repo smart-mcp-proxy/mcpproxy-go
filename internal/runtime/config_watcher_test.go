@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -388,4 +389,33 @@ func TestConfigWatcher_FailedSelfSaveDoesNotSuppressExternalWrite(t *testing.T) 
 		return rt.ConfigSnapshot().Config.ToolResponseLimit == 66666
 	}, 5*time.Second, 25*time.Millisecond,
 		"external write byte-identical to a FAILED self-save must still hot-reload")
+}
+
+// TestConfigWatcher_ReloadRebuildsTruncator: a watcher disk reload must apply
+// the same live component side effects as ApplyConfig (PR #857 round-6 review)
+// — here the tool-response truncator: an external edit to tool_response_limit
+// must change actual truncation behavior, not just the snapshot value.
+func TestConfigWatcher_ReloadRebuildsTruncator(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	content := strings.Repeat("x", 200)
+	pre := rt.Truncator().Truncate(content, "srv:tool", nil)
+	require.Equal(t, content, pre.TruncatedContent,
+		"sanity: the default limit (20000) must not truncate 200 chars")
+
+	// External edit shrinks the limit below the content size.
+	require.NoError(t, config.SaveConfig(editedConfig(initialCfg, 50), cfgPath))
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 50
+	}, 5*time.Second, 25*time.Millisecond, "snapshot must pick up the external edit")
+
+	// The LIVE truncator must now enforce the new limit. Read it under r.mu:
+	// the reload path swaps the field under the same lock.
+	require.Eventually(t, func() bool {
+		rt.mu.RLock()
+		tr := rt.truncator
+		rt.mu.RUnlock()
+		return len(tr.Truncate(content, "srv:tool", nil).TruncatedContent) < len(content)
+	}, 5*time.Second, 25*time.Millisecond,
+		"watcher reload must rebuild the truncator with the new tool_response_limit")
 }

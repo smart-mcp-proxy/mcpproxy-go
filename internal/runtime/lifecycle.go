@@ -1139,6 +1139,15 @@ func (r *Runtime) ReloadConfiguration() error {
 		r.upstreamManager.SetGlobalConfig(newSnapshot.Config)
 	}
 
+	// Parity with ApplyConfig's live per-component side effects (PR #857
+	// review): logging via SetLogConfig, the tool-response truncator, and the
+	// observability usage cadence must follow disk reloads too — otherwise an
+	// external edit lands in the snapshot/API while the running components
+	// keep their stale values.
+	r.mu.Lock()
+	r.applyComponentConfigLocked(oldSnapshot.Config, newSnapshot.Config)
+	r.mu.Unlock()
+
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
 		return fmt.Errorf("failed to reload servers: %w", err)

@@ -215,45 +215,23 @@ func beaconTestSetup(t *testing.T) *int32 {
 	return &hits
 }
 
-// TestRunTelemetryDisable_SendsBeaconWhenNoDaemon: with no daemon socket
-// present, the CLI stays responsible for the opt-out beacon and must send it
-// exactly once.
-func TestRunTelemetryDisable_SendsBeaconWhenNoDaemon(t *testing.T) {
+// TestRunTelemetryDisable_SendsBeacon: the CLI always sends the opt-out
+// beacon (exactly once) after persisting the disable — it does NOT gate the
+// send on daemon detection. Accepted trade-off (PR #857): a running daemon
+// may also emit the beacon on config hot-reload, and the backend dedupes by
+// anon_id; a detection false positive dropping the only send would be worse.
+func TestRunTelemetryDisable_SendsBeacon(t *testing.T) {
 	hits := beaconTestSetup(t)
-	// Point daemon detection at a socket path that does not exist.
-	t.Setenv("MCPPROXY_TRAY_ENDPOINT", "unix://"+filepath.Join(t.TempDir(), "absent.sock"))
 
 	if err := runTelemetryDisable(nil, nil); err != nil {
 		t.Fatalf("runTelemetryDisable: %v", err)
 	}
 	if got := atomic.LoadInt32(hits); got != 1 {
-		t.Errorf("beacon sends with no daemon = %d, want 1", got)
+		t.Errorf("beacon sends = %d, want 1", got)
 	}
-}
-
-// TestRunTelemetryDisable_DelegatesBeaconToRunningDaemon: when a daemon is
-// running (socket present), it hot-reloads the changed config file via the
-// fsnotify watcher and fires the beacon itself through NotifyConfigChanged —
-// so the CLI must NOT also send one (the once-latch is process-local and
-// cannot dedupe across the two processes).
-func TestRunTelemetryDisable_DelegatesBeaconToRunningDaemon(t *testing.T) {
-	hits := beaconTestSetup(t)
-	// Simulate a running daemon: IsSocketAvailable stats the unix socket path.
-	sockPath := filepath.Join(t.TempDir(), "present.sock")
-	if err := os.WriteFile(sockPath, nil, 0600); err != nil {
-		t.Fatalf("create fake socket file: %v", err)
-	}
-	t.Setenv("MCPPROXY_TRAY_ENDPOINT", "unix://"+sockPath)
-
-	if err := runTelemetryDisable(nil, nil); err != nil {
-		t.Fatalf("runTelemetryDisable: %v", err)
-	}
-	if got := atomic.LoadInt32(hits); got != 0 {
-		t.Errorf("beacon sends with daemon running = %d, want 0 (daemon owns the beacon)", got)
-	}
-	// The disable itself must still be persisted.
+	// The disable itself must be persisted.
 	enabled := readTelemetryEnabled(t, configFile)
 	if enabled == nil || *enabled {
-		t.Errorf("telemetry.enabled must be persisted false even when the beacon is delegated")
+		t.Errorf("telemetry.enabled must be persisted false")
 	}
 }
