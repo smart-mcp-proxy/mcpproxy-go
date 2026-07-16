@@ -104,42 +104,114 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 	}
 }
 
+// Self-write suppression bounds. Entries expire after selfWriteTTL: the
+// suppression only needs to cover the echo window of our own write (the
+// ~500ms debounce plus fs latency), and any event long after that is an
+// external edit — 10s is generous. The set keeps at most selfWriteMaxEntries
+// payloads so back-to-back ApplyConfig saves cannot evict each other's
+// still-pending markers (single-slot race, PR #857 round 7).
+const (
+	selfWriteTTL        = 10 * time.Second
+	selfWriteMaxEntries = 4
+)
+
+// selfWriteEntry is one recorded self-written config payload (trimmed
+// marshaled bytes) with the time it was armed, for TTL expiry.
+type selfWriteEntry struct {
+	payload []byte
+	at      time.Time
+}
+
 // noteConfigSelfWrite records the marshaled form of a config mcpproxy itself
-// just saved to disk, so the watcher can suppress the echo even when the
-// in-memory snapshot intentionally diverges from the file — the
+// is about to save to disk, so the watcher can suppress the echo even when
+// the in-memory snapshot intentionally diverges from the file — the
 // restart-required ApplyConfig path saves to disk but defers the in-memory
 // apply until restart (`requires_restart` contract), and the watcher must not
 // hot-apply it behind the API's back. Marshals exactly as config.SaveConfig
 // does; a marshal failure just skips recording (the write itself would have
-// failed the same way).
+// failed the same way). Recording an already-present payload refreshes its
+// timestamp; when full, the oldest entry is evicted.
 func (r *Runtime) noteConfigSelfWrite(cfg *config.Config) {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return
 	}
-	r.selfWriteMu.Lock()
-	r.lastSelfWrite = bytes.TrimSpace(data)
-	r.selfWriteMu.Unlock()
-}
+	payload := bytes.TrimSpace(data)
+	now := time.Now()
 
-// matchesLastSelfWrite reports whether trimmed disk bytes equal the last
-// config mcpproxy itself saved (see noteConfigSelfWrite).
-func (r *Runtime) matchesLastSelfWrite(trimmedDisk []byte) bool {
 	r.selfWriteMu.Lock()
 	defer r.selfWriteMu.Unlock()
-	return len(r.lastSelfWrite) > 0 && bytes.Equal(r.lastSelfWrite, trimmedDisk)
+	r.pruneExpiredSelfWritesLocked(now)
+	for i := range r.recentSelfWrites {
+		if bytes.Equal(r.recentSelfWrites[i].payload, payload) {
+			r.recentSelfWrites[i].at = now
+			return
+		}
+	}
+	r.recentSelfWrites = append(r.recentSelfWrites, selfWriteEntry{payload: payload, at: now})
+	if len(r.recentSelfWrites) > selfWriteMaxEntries {
+		r.recentSelfWrites = r.recentSelfWrites[len(r.recentSelfWrites)-selfWriteMaxEntries:]
+	}
 }
 
-// clearLastSelfWrite drops the recorded self-write. Called when a genuine
-// external change is about to reload: from that point the file's history has
-// diverged from our last save, and keeping the stale record would suppress a
-// later external revert to those exact bytes (editor undo, `git checkout`).
-// It is NOT cleared on a suppression match itself, so the restart-required
-// pending state keeps suppressing repeat events for the same bytes.
-func (r *Runtime) clearLastSelfWrite() {
+// forgetConfigSelfWrite removes the entry for a config whose save FAILED:
+// those bytes never reached disk, so a later byte-identical write of them is
+// a genuine external edit the watcher must reload. Only the failed payload is
+// removed — markers pre-armed by other (successful) saves stay live.
+func (r *Runtime) forgetConfigSelfWrite(cfg *config.Config) {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return
+	}
+	payload := bytes.TrimSpace(data)
+
 	r.selfWriteMu.Lock()
-	r.lastSelfWrite = nil
+	defer r.selfWriteMu.Unlock()
+	kept := r.recentSelfWrites[:0]
+	for _, e := range r.recentSelfWrites {
+		if !bytes.Equal(e.payload, payload) {
+			kept = append(kept, e)
+		}
+	}
+	r.recentSelfWrites = kept
+}
+
+// matchesRecentSelfWrite reports whether trimmed disk bytes equal any config
+// mcpproxy itself recently saved (see noteConfigSelfWrite). A match does NOT
+// remove the entry: within the TTL, repeat events for the same bytes (e.g.
+// the pending restart-required state) must keep suppressing.
+func (r *Runtime) matchesRecentSelfWrite(trimmedDisk []byte) bool {
+	r.selfWriteMu.Lock()
+	defer r.selfWriteMu.Unlock()
+	r.pruneExpiredSelfWritesLocked(time.Now())
+	for _, e := range r.recentSelfWrites {
+		if bytes.Equal(e.payload, trimmedDisk) {
+			return true
+		}
+	}
+	return false
+}
+
+// clearSelfWrites drops every recorded self-write. Called when a genuine
+// external change is about to reload: from that point the file's history has
+// diverged from our saves, and keeping the stale records would suppress a
+// later external revert to those exact bytes (editor undo, `git checkout`).
+func (r *Runtime) clearSelfWrites() {
+	r.selfWriteMu.Lock()
+	r.recentSelfWrites = nil
 	r.selfWriteMu.Unlock()
+}
+
+// pruneExpiredSelfWritesLocked drops entries older than selfWriteTTL. Caller
+// must hold selfWriteMu.
+func (r *Runtime) pruneExpiredSelfWritesLocked(now time.Time) {
+	kept := r.recentSelfWrites[:0]
+	for _, e := range r.recentSelfWrites {
+		if now.Sub(e.at) <= selfWriteTTL {
+			kept = append(kept, e)
+		}
+	}
+	r.recentSelfWrites = kept
 }
 
 // reloadFromDiskIfChanged reloads the configuration from disk unless the file
@@ -166,13 +238,13 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	trimmedDisk := bytes.TrimSpace(diskBytes)
 	if current, merr := json.MarshalIndent(r.ConfigSnapshot().Config, "", "  "); merr == nil {
 		if bytes.Equal(bytes.TrimSpace(current), trimmedDisk) {
-			// The file now matches memory. If that content differs from the
-			// recorded self-write, the file has moved past our last save
+			// The file now matches memory. If that content matches none of
+			// the recorded self-writes, the file has moved past our saves
 			// (e.g. an external revert cancelling a pending restart-required
-			// apply) — drop the stale marker so a later external re-write of
+			// apply) — drop the stale markers so a later external re-write of
 			// those old self-saved bytes still reloads.
-			if !r.matchesLastSelfWrite(trimmedDisk) {
-				r.clearLastSelfWrite()
+			if !r.matchesRecentSelfWrite(trimmedDisk) {
+				r.clearSelfWrites()
 			}
 			r.logger.Debug("Config file event matches in-memory config; skipping reload",
 				zap.String("path", absPath))
@@ -182,17 +254,17 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 
 	// Restart-required applies save to disk without touching memory, so the
 	// snapshot comparison above can't recognize them as ours — check the
-	// recorded last self-write too.
-	if r.matchesLastSelfWrite(trimmedDisk) {
-		r.logger.Debug("Config file event matches mcpproxy's own last save; skipping reload",
+	// recorded recent self-writes too.
+	if r.matchesRecentSelfWrite(trimmedDisk) {
+		r.logger.Debug("Config file event matches one of mcpproxy's own recent saves; skipping reload",
 			zap.String("path", absPath))
 		return
 	}
 
-	// Genuine external change: the file no longer descends from our last
-	// save, so the recorded self-write is stale — drop it (see
-	// clearLastSelfWrite for the revert scenario it would otherwise break).
-	r.clearLastSelfWrite()
+	// Genuine external change: the file no longer descends from our saves,
+	// so the recorded self-writes are stale — drop them (see clearSelfWrites
+	// for the revert scenario they would otherwise break).
+	r.clearSelfWrites()
 
 	r.logger.Info("Config file changed on disk, hot-reloading", zap.String("path", absPath))
 	if err := r.ReloadConfiguration(); err != nil {

@@ -419,3 +419,41 @@ func TestConfigWatcher_ReloadRebuildsTruncator(t *testing.T) {
 	}, 5*time.Second, 25*time.Millisecond,
 		"watcher reload must rebuild the truncator with the new tool_response_limit")
 }
+
+// TestConfigWatcher_BackToBackSelfWritesBothSuppressed reproduces the PR #857
+// round-7 marker race: with a SINGLE self-write slot, a second ApplyConfig
+// pre-arming its marker before the first save's debounce fires overwrites the
+// first record — the watcher then reads disk=A, fails the marker check, and
+// hot-applies a restart-required config behind the API's back. A bounded
+// recent-self-writes set must suppress BOTH payloads.
+func TestConfigWatcher_BackToBackSelfWritesBothSuppressed(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	limitBefore := rt.ConfigSnapshot().Config.ToolResponseLimit
+
+	// Restart-required self-save A: disk=A, memory stays O, marker records A.
+	cfgA := editedConfig(initialCfg, 71111)
+	cfgA.Listen = "127.0.0.1:1"
+	resA, err := rt.ApplyConfig(cfgA, cfgPath)
+	require.NoError(t, err)
+	require.True(t, resA.RequiresRestart)
+
+	// Second self-save B pre-arms its marker IMMEDIATELY — before A's debounce
+	// fires — with its own disk write still in flight (ApplyConfig pre-arms
+	// before config.SaveConfig; a slow marshal/fsync/rename widens exactly
+	// this window). With a single slot this evicts A's record.
+	cfgB := editedConfig(initialCfg, 72222)
+	cfgB.Listen = "127.0.0.1:2"
+	rt.noteConfigSelfWrite(cfgB)
+
+	// A's debounce fires while disk still holds A. It must stay suppressed.
+	time.Sleep(1200 * time.Millisecond)
+	require.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit,
+		"watcher must not hot-apply restart-required save A when a second self-write pre-armed in between")
+
+	// B's write lands on disk; that event must be suppressed too.
+	require.NoError(t, config.SaveConfig(cfgB, cfgPath))
+	time.Sleep(1200 * time.Millisecond)
+	require.Equal(t, limitBefore, rt.ConfigSnapshot().Config.ToolResponseLimit,
+		"watcher must not hot-apply restart-required save B either")
+}

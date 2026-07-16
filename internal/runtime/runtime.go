@@ -65,13 +65,15 @@ type Runtime struct {
 	running bool
 
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
-	// bytes of the last config mcpproxy itself saved to disk. Needed on top
-	// of the snapshot comparison because a restart-required ApplyConfig saves
-	// the new config to disk while intentionally leaving memory on the old
-	// one (requires_restart contract) — the snapshot alone can't identify
-	// that write as ours.
-	selfWriteMu   sync.Mutex
-	lastSelfWrite []byte
+	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
+	// top of the snapshot comparison because a restart-required ApplyConfig
+	// saves the new config to disk while intentionally leaving memory on the
+	// old one (requires_restart contract) — the snapshot alone can't identify
+	// that write as ours. A bounded set rather than a single slot: back-to-back
+	// ApplyConfig saves must not evict each other's still-pending markers
+	// before the watcher debounce fires (PR #857 round-7 race).
+	selfWriteMu      sync.Mutex
+	recentSelfWrites []selfWriteEntry
 
 	statusMu sync.RWMutex
 	status   Status
@@ -1382,17 +1384,19 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// branch below: disk gets the new config while memory intentionally keeps
 	// the old one, so the watcher's snapshot comparison alone would misread
 	// our own save as an external edit and hot-apply it behind the API's back
-	// (config_watcher.go). If the save fails, the marker is cleared again on
+	// (config_watcher.go). If the save fails, its entry is removed again on
 	// the error path below — nothing reached disk, so a later byte-identical
 	// EXTERNAL write of this config is a genuine edit the watcher must reload.
 	r.noteConfigSelfWrite(newCfg)
 
 	saveErr := config.SaveConfig(newCfg, savePath)
 	if saveErr != nil {
-		// Drop the pre-armed self-write marker: the save never landed, so no
+		// Drop the pre-armed self-write entry: the save never landed, so no
 		// future fs event for these bytes can be our own echo. Keeping it
 		// would suppress a genuine external write of byte-identical JSON.
-		r.clearLastSelfWrite()
+		// Only this payload is forgotten — markers from other still-pending
+		// successful saves stay live.
+		r.forgetConfigSelfWrite(newCfg)
 		r.logger.Error("Failed to save configuration to disk",
 			zap.String("path", savePath),
 			zap.Error(saveErr))
