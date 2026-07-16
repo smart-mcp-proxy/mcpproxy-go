@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 var (
@@ -80,25 +80,26 @@ func runDoctorFix(_ *cobra.Command, args []string) error {
 		mode = diagnostics.ModeExecute
 	}
 
-	// Resolve the data directory used to locate the daemon socket. Order of
-	// precedence: --data-dir (root persistent flag) > config-file data_dir >
-	// platform default (~/.mcpproxy).
-	resolvedDataDir := dataDir
-	if resolvedDataDir == "" {
-		if globalConfig, err := loadDoctorConfig(); err == nil && globalConfig.DataDir != "" {
-			resolvedDataDir = globalConfig.DataDir
-		}
+	// Resolve the config used to locate the daemon (socket path, listen
+	// address, API key). --data-dir (root persistent flag) overrides the
+	// config-file data_dir; DetectSocketPath falls back to the platform
+	// default (~/.mcpproxy) when both are empty.
+	globalConfig, cfgErr := loadDoctorConfig()
+	if cfgErr != nil || globalConfig == nil {
+		globalConfig = &config.Config{}
+	}
+	if dataDir != "" {
+		globalConfig.DataDir = dataDir
 	}
 
 	logger, err := createDoctorLogger(doctorFixLogLevel)
 	if err != nil {
 		return err
 	}
-	if !shouldUseDoctorDaemon(resolvedDataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("doctor fix requires a running daemon. Start with: mcpproxy serve")
 	}
-	socketPath := socket.DetectSocketPath(resolvedDataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

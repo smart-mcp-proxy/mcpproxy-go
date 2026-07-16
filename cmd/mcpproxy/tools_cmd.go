@@ -13,7 +13,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
@@ -262,14 +261,14 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 
 	// If no --server given → global list (requires daemon)
 	if serverName == "" {
-		return runToolsListGlobal(ctx, globalConfig.DataDir, logger)
+		return runToolsListGlobal(ctx, globalConfig, logger)
 	}
 
 	// --server given → server-scoped path (daemon or standalone)
-	if shouldUseToolsDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket",
+	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+		logger.Info("Detected running daemon, using client mode",
 			zap.String("server", serverName))
-		return runToolsListClientMode(ctx, globalConfig.DataDir, serverName, logger)
+		return runToolsListClientMode(ctx, client, serverName, logger)
 	}
 
 	// No daemon detected, use standalone mode
@@ -279,14 +278,12 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 }
 
 // runToolsListGlobal fetches all tools from the global endpoint via the daemon.
-func runToolsListGlobal(ctx context.Context, dataDir string, logger *zap.Logger) error {
-	if !shouldUseToolsDaemon(dataDir) {
+func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger *zap.Logger) error {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("global tool list requires the daemon to be running.\n" +
 			"Start mcpproxy (mcpproxy serve) and try again, or use --server=<name> for a single-server debug listing")
 	}
-
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
@@ -295,7 +292,7 @@ func runToolsListGlobal(ctx context.Context, dataDir string, logger *zap.Logger)
 			"Start mcpproxy (mcpproxy serve) and try again", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Using daemon mode (via socket)\n\n")
+	fmt.Fprintf(os.Stderr, "Using daemon mode\n\n")
 
 	tools, err := client.GetGlobalTools(ctx)
 	if err != nil {
@@ -391,13 +388,11 @@ func runToolsSetEnabled(args []string, enabled bool) error {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	if !shouldUseToolsDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("enable/disable requires the daemon to be running.\n" +
 			"Start mcpproxy (mcpproxy serve) and try again")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
@@ -537,24 +532,14 @@ func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) er
 	return nil
 }
 
-// shouldUseToolsDaemon checks if daemon is running by detecting socket file.
-func shouldUseToolsDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
-}
-
-// runToolsListClientMode executes tools list via daemon HTTP API over socket.
-func runToolsListClientMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+// runToolsListClientMode executes tools list via the daemon HTTP API.
+func runToolsListClientMode(ctx context.Context, client *cliclient.Client, serverName string, logger *zap.Logger) error {
 	// Ping daemon to verify connectivity
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
 	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
-			zap.Error(err),
-			zap.String("socket_path", socketPath))
+			zap.Error(err))
 		// Fall back to standalone mode
 		cfg, err := loadToolsConfig()
 		if err != nil {
@@ -563,7 +548,7 @@ func runToolsListClientMode(ctx context.Context, dataDir, serverName string, log
 		return runToolsListStandalone(ctx, serverName, cfg, logger)
 	}
 
-	fmt.Fprintf(os.Stderr, "Using daemon mode (via socket) - fast execution\n\n")
+	fmt.Fprintf(os.Stderr, "Using daemon mode - fast execution\n\n")
 
 	// Fetch tools from daemon
 	tools, err := client.GetServerTools(ctx, serverName)

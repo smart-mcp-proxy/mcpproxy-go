@@ -14,7 +14,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 var (
@@ -129,19 +128,15 @@ func newTokenCLIClient() (*cliclient.Client, *config.Config, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
-	cfg.EnsureAPIKey()
-
-	socketPath := socket.DetectSocketPath(cfg.DataDir)
 
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
 
-	var client *cliclient.Client
-	if socket.IsSocketAvailable(socketPath) {
-		client = cliclient.NewClient(socketPath, logger.Sugar())
-	} else {
-		endpoint := fmt.Sprintf("http://%s", cfg.Listen)
-		client = cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger.Sugar())
+	// Socket first, then TCP fallback. Never generate an API key here —
+	// a fabricated key cannot match the running daemon's.
+	client, ok := newDaemonClient(cfg, logger.Sugar())
+	if !ok {
+		return nil, nil, fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve")
 	}
 
 	return client, cfg, nil

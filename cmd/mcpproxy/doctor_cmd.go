@@ -13,7 +13,6 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
 
@@ -98,18 +97,14 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Check if daemon is running
-	if !shouldUseDoctorDaemon(globalConfig.DataDir) {
+	// Check if daemon is running (socket first, then TCP fallback)
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("doctor requires running daemon. Start with: mcpproxy serve")
 	}
 
 	logger.Info("Fetching diagnostics from daemon")
-	return runDoctorClientMode(ctx, globalConfig.DataDir, logger)
-}
-
-func shouldUseDoctorDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
+	return runDoctorClientMode(ctx, client, logger)
 }
 
 // quarantineServerStats holds quarantine stats for a single server.
@@ -119,10 +114,7 @@ type quarantineServerStats struct {
 	ChangedCount int
 }
 
-func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runDoctorClientMode(ctx context.Context, client *cliclient.Client, logger *zap.Logger) error {
 	// Call GET /api/v1/info with refresh=true to get fresh update info
 	info, err := client.GetInfoWithRefresh(ctx, true)
 	if err != nil {

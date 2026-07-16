@@ -8,21 +8,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestShouldUseToolsDaemon(t *testing.T) {
+func TestToolsDaemonDetection_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+
 	// Test with non-existent directory
-	result := shouldUseToolsDaemon("/tmp/nonexistent-mcpproxy-test-dir-tools-99999")
-	assert.False(t, result, "shouldUseToolsDaemon should return false for non-existent directory")
+	_, ok := newDaemonClient(&config.Config{DataDir: "/tmp/nonexistent-mcpproxy-test-dir-tools-99999"}, nil)
+	assert.False(t, ok, "newDaemonClient should report no daemon for non-existent directory")
 
 	// Test with existing directory but no socket
 	tmpDir := t.TempDir()
-	result = shouldUseToolsDaemon(tmpDir)
-	assert.False(t, result, "shouldUseToolsDaemon should return false when socket doesn't exist")
+	_, ok = newDaemonClient(&config.Config{DataDir: tmpDir}, nil)
+	assert.False(t, ok, "newDaemonClient should report no daemon when socket doesn't exist")
 }
 
 func TestDetectSocketPath_Tools(t *testing.T) {

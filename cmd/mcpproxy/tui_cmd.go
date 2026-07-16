@@ -40,16 +40,15 @@ func GetTUICommand() *cobra.Command {
 				cfg = config.DefaultConfig()
 			}
 
-			// Detect socket or fall back to TCP
-			socketPath := socket.DetectSocketPath(cfg.DataDir)
-			var endpoint string
-			if socket.IsSocketAvailable(socketPath) {
-				endpoint = socketPath
-			} else {
-				endpoint = fmt.Sprintf("http://%s", cfg.Listen)
+			// Detect socket or fall back to TCP (probed with the API key)
+			client, ok := newDaemonClient(cfg, logger.Sugar())
+			if !ok {
+				// No reachable daemon: keep prior behavior of starting the
+				// TUI pointed at the socket path so it can surface
+				// connection errors (and recover once the daemon starts).
+				client = cliclient.NewClientWithAPIKey(
+					socket.DetectSocketPath(cfg.DataDir), resolveAPIKey(cfg), logger.Sugar())
 			}
-
-			client := cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger.Sugar())
 
 			ctx, cancel := context.WithCancel(cmd.Context())
 			defer cancel()
