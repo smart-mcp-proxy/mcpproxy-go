@@ -2,8 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -157,5 +160,100 @@ func TestTelemetryConfigSavePath_PrefersConfigFileFlag(t *testing.T) {
 	configFile = "/elsewhere/custom.json"
 	if got := telemetryConfigSavePath(cfg); got != "/elsewhere/custom.json" {
 		t.Errorf("with configFile set: got %q, want %q", got, "/elsewhere/custom.json")
+	}
+}
+
+// writeBeaconTestConfig writes a config with telemetry enabled, a real
+// anonymous_id and the opt-out beacon endpoint pointed at a test server, so
+// runTelemetryDisable's beacon send (if any) is observable and hermetic.
+func writeBeaconTestConfig(t *testing.T, path, dataDir, endpoint string) {
+	t.Helper()
+	cfg := map[string]interface{}{
+		"listen":   "127.0.0.1:0",
+		"data_dir": dataDir,
+		"telemetry": map[string]interface{}{
+			"enabled":      true,
+			"anonymous_id": "0f5b62e0-1111-4222-8333-444455556666",
+			"endpoint":     endpoint,
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+}
+
+// beaconTestSetup neutralizes the telemetry env kill-switches (CI is set on
+// runners and would suppress the beacon entirely), sandboxes HOME, points the
+// beacon endpoint at a counting test server, and wires --config. Returns the
+// request counter.
+func beaconTestSetup(t *testing.T) *int32 {
+	t.Helper()
+	sandboxHome(t)
+	t.Setenv("CI", "")
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("MCPPROXY_TELEMETRY", "")
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	tmpDir := t.TempDir()
+	customPath := filepath.Join(tmpDir, "custom_mcp_config.json")
+	writeBeaconTestConfig(t, customPath, tmpDir, srv.URL)
+
+	prev := configFile
+	configFile = customPath
+	t.Cleanup(func() { configFile = prev })
+
+	return &hits
+}
+
+// TestRunTelemetryDisable_SendsBeaconWhenNoDaemon: with no daemon socket
+// present, the CLI stays responsible for the opt-out beacon and must send it
+// exactly once.
+func TestRunTelemetryDisable_SendsBeaconWhenNoDaemon(t *testing.T) {
+	hits := beaconTestSetup(t)
+	// Point daemon detection at a socket path that does not exist.
+	t.Setenv("MCPPROXY_TRAY_ENDPOINT", "unix://"+filepath.Join(t.TempDir(), "absent.sock"))
+
+	if err := runTelemetryDisable(nil, nil); err != nil {
+		t.Fatalf("runTelemetryDisable: %v", err)
+	}
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Errorf("beacon sends with no daemon = %d, want 1", got)
+	}
+}
+
+// TestRunTelemetryDisable_DelegatesBeaconToRunningDaemon: when a daemon is
+// running (socket present), it hot-reloads the changed config file via the
+// fsnotify watcher and fires the beacon itself through NotifyConfigChanged —
+// so the CLI must NOT also send one (the once-latch is process-local and
+// cannot dedupe across the two processes).
+func TestRunTelemetryDisable_DelegatesBeaconToRunningDaemon(t *testing.T) {
+	hits := beaconTestSetup(t)
+	// Simulate a running daemon: IsSocketAvailable stats the unix socket path.
+	sockPath := filepath.Join(t.TempDir(), "present.sock")
+	if err := os.WriteFile(sockPath, nil, 0600); err != nil {
+		t.Fatalf("create fake socket file: %v", err)
+	}
+	t.Setenv("MCPPROXY_TRAY_ENDPOINT", "unix://"+sockPath)
+
+	if err := runTelemetryDisable(nil, nil); err != nil {
+		t.Fatalf("runTelemetryDisable: %v", err)
+	}
+	if got := atomic.LoadInt32(hits); got != 0 {
+		t.Errorf("beacon sends with daemon running = %d, want 0 (daemon owns the beacon)", got)
+	}
+	// The disable itself must still be persisted.
+	enabled := readTelemetryEnabled(t, configFile)
+	if enabled == nil || *enabled {
+		t.Errorf("telemetry.enabled must be persisted false even when the beacon is delegated")
 	}
 }

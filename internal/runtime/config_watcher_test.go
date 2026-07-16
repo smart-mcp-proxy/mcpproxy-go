@@ -359,3 +359,33 @@ func TestConfigWatcher_MissingDirGracefulDegradation(t *testing.T) {
 	// Runtime still works.
 	assert.NotNil(t, rt.ConfigSnapshot())
 }
+
+// TestConfigWatcher_FailedSelfSaveDoesNotSuppressExternalWrite: the self-write
+// marker is armed BEFORE config.SaveConfig runs (pre-arming closes the
+// event-outruns-marker race), so a FAILED save (permissions, disk) must clear
+// it again. Otherwise a stale marker survives with bytes that never reached
+// disk, and a later genuine external write of byte-identical JSON to the
+// watched file would be misread as our own echo and silently suppressed.
+func TestConfigWatcher_FailedSelfSaveDoesNotSuppressExternalWrite(t *testing.T) {
+	rt, initialCfg, cfgPath := newWatcherTestRuntime(t)
+
+	// A save path whose parent is a regular file makes config.SaveConfig fail
+	// deterministically (MkdirAll -> ENOTDIR), independent of uid/umask.
+	blocker := filepath.Join(filepath.Dir(cfgPath), "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("not a dir"), 0o600))
+	failPath := filepath.Join(blocker, "mcp_config.json")
+
+	cfgA := editedConfig(initialCfg, 66666)
+	_, err := rt.ApplyConfig(cfgA, failPath)
+	require.Error(t, err, "ApplyConfig must fail when the config cannot be saved")
+
+	// Genuine external write of the SAME bytes the failed apply tried to save
+	// (ApplyConfig marshals the config it was handed; SaveConfig serializes it
+	// identically). This is a real edit — nothing ever reached disk — so it
+	// must hot-reload, not be suppressed by the stale pre-armed marker.
+	require.NoError(t, config.SaveConfig(cfgA, cfgPath))
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 66666
+	}, 5*time.Second, 25*time.Millisecond,
+		"external write byte-identical to a FAILED self-save must still hot-reload")
+}

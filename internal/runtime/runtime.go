@@ -1381,13 +1381,17 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	// branch below: disk gets the new config while memory intentionally keeps
 	// the old one, so the watcher's snapshot comparison alone would misread
 	// our own save as an external edit and hot-apply it behind the API's back
-	// (config_watcher.go). If the save fails, the stale marker is harmless:
-	// it only ever matches disk content byte-identical to this config, and is
-	// dropped as soon as any diverging content is observed.
+	// (config_watcher.go). If the save fails, the marker is cleared again on
+	// the error path below — nothing reached disk, so a later byte-identical
+	// EXTERNAL write of this config is a genuine edit the watcher must reload.
 	r.noteConfigSelfWrite(newCfg)
 
 	saveErr := config.SaveConfig(newCfg, savePath)
 	if saveErr != nil {
+		// Drop the pre-armed self-write marker: the save never landed, so no
+		// future fs event for these bytes can be our own echo. Keeping it
+		// would suppress a genuine external write of byte-identical JSON.
+		r.clearLastSelfWrite()
 		r.logger.Error("Failed to save configuration to disk",
 			zap.String("path", savePath),
 			zap.Error(saveErr))
