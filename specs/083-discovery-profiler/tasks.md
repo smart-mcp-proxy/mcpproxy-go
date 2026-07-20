@@ -17,7 +17,7 @@
 - [ ] T006 Implement Arm interface + registry in bench/arms/arm.go per contracts/arm-interface.md: `Name()`, `IndexAltering()`, `EncodeTool`, `EncodeListing`, `EncodeIndexMetadata`, `ErrArmUnavailable`, `LowerBound` self-report; registry rejects duplicate names
 - [ ] T007 Implement `baseline_json` arm in bench/arms/baseline.go (canonical full-definition renderer: name + description + canonical-JSON schema) making T005 pass; export the renderer for naive-menu/break-even reuse
 - [ ] T008 [P] Define ReportV2 Go types in bench/reportv2.go mirroring contracts/report-v2.schema.json (flat RetrievalScore DTO + mapping from existing `RetrievalMetrics`; provenance map; arms/corpora/response_cost/break_even/session_estimates/lap/subset sections) with a schema-validation test in bench/reportv2_test.go validating a sample report against the contract file
-- [ ] T009 [P] Create corpus_v2 generator script scripts/gen-corpus-v2.sh (boot snapshot proxy per quickstart, export GET /api/v1/tools with full input schemas, canonicalize ordering, write specs/083-discovery-profiler/datasets/corpus_v2.tools.json) and run it once; commit the generated corpus with tool count recorded in datasets/README.md
+- [x] T009 [P] Create corpus_v2 generator script scripts/gen-corpus-v2.sh (boot snapshot proxy per quickstart, export GET /api/v1/tools with full input schemas, canonicalize ordering, write specs/083-discovery-profiler/datasets/corpus_v2.tools.json) and run it once; commit the generated corpus with tool count recorded in datasets/README.md
 - [ ] T010 Extend bench/tokens.go to load corpus_v2 (schema-bearing) alongside corpus_v1, with validation test in bench/tokens_test.go (every corpus_v2 tool has non-empty schema; count matches datasets/README.md)
 
 ## Phase 3: User Story 1 — Measure live retrieve_tools response cost (P1) 🎯 MVP
@@ -56,7 +56,7 @@
 **Goal**: ToolRet retrieval-quality end-to-end; LiveMCPTool token/scale.
 **Independent test**: fetch → load → subset → score ToolRet; load committed LiveMCPTool snapshot → arm tokens.
 
-- [ ] T026 [P] [US3] Create scripts/fetch-toolret.sh: `uv run --with huggingface_hub,pyarrow` download of mangopy/ToolRet-Tools + mangopy/ToolRet-Queries at pinned `--revision` (default recorded in script), parquet→JSON into bench/results/cache/toolret/<revision>/ with actionable errors (FR-013, research D5)
+- [x] T026 [P] [US3] Create scripts/fetch-toolret.sh: `uv run --with huggingface_hub,pyarrow` download of mangopy/ToolRet-Tools + mangopy/ToolRet-Queries at pinned `--revision` (default recorded in script), parquet→JSON into bench/results/cache/toolret/<revision>/ with actionable errors (FR-013, research D5)
 - [ ] T027 [US3] Write failing loader tests in bench/corpusio/toolret_test.go on a small committed synthetic fixture matching ToolRet's field shape (NOT real ToolRet data): per-record validation errors, stable-ID sort, seeded subset determinism (same revision+seed+size ⇒ same subset), missing-ID failure
 - [ ] T028 [US3] Implement bench/corpusio/toolret.go making T027 pass, mapping tools→Corpus and queries→GoldenSet with corpus/version stamping (FR-011/012/014)
 - [ ] T029 [P] [US3] Create LiveMCPTool committed snapshot under specs/083-discovery-profiler/datasets/livemcptool_snapshot/ with ATTRIBUTION.md (Apache 2.0, ICIP/LiveMCPBench, arXiv:2508.01780) via a documented one-time download; implement + test loader bench/corpusio/livemcptool.go (Corpus for token/scale; relevance-label derivation from task annotations as stretch — if labels not derivable, record explicit absence per FR-011)
@@ -89,8 +89,8 @@
 
 ## Phase 9: Polish & CI
 
-- [ ] T039 Extend .github/workflows/bench.yml: setup-node + `npm ci --prefix bench/tscg`, run `make bench-discovery`, live run with response-cost measurement, `uvx --from lap-score==0.8.0 lap lint --json` step (pinned; failure → skip with reason), upload lap.json + report.json + dashboard.html artifacts; job stays `continue-on-error: true` (FR-022); add optional `workflow_dispatch` ToolRet-subset job (< 30 min, SC-007)
-- [ ] T040 [P] Update bench/README.md: new modes/flags, arm descriptions, dataset provenance + license notes (ToolRet unstated-license rationale), tokenizer caveat, quickstart parity with specs/083-discovery-profiler/quickstart.md
+- [x] T039 Extend .github/workflows/bench.yml: setup-node + `npm ci --prefix bench/tscg`, run `make bench-discovery`, live run with response-cost measurement, `uvx --from lap-score==0.8.0 lap lint --json` step (pinned; failure → skip with reason), upload lap.json + report.json + dashboard.html artifacts; job stays `continue-on-error: true` (FR-022); add optional `workflow_dispatch` ToolRet-subset job (< 30 min, SC-007)
+- [x] T040 [P] Update bench/README.md: new modes/flags, arm descriptions, dataset provenance + license notes (ToolRet unstated-license rationale), tokenizer caveat, quickstart parity with specs/083-discovery-profiler/quickstart.md
 - [ ] T041 Run full verification: `go test ./bench/... -race`, `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./bench/...`, `./scripts/test-api-e2e.sh`, `make bench-discovery` wall-clock < 15 min budget check (SC-007/SC-008)
 
 ## Dependencies
