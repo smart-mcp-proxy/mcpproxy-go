@@ -32,7 +32,7 @@ description: "Task list for feature 044-retention-telemetry-v3"
 
 **Purpose**: Minor scaffolding. The existing `internal/telemetry` package already has v3 schema version and the build system is mature — no structural setup needed.
 
-- [ ] T001 Confirm `SchemaVersion = 3` constant in `internal/telemetry/telemetry.go` remains 3 (spec 044 extends v3, does not re-bump); add a short comment noting spec 044 additions above the constant.
+- [x] T001 Confirm `SchemaVersion = 3` constant in `internal/telemetry/telemetry.go` remains 3 (spec 044 extends v3, does not re-bump); add a short comment noting spec 044 additions above the constant.
 - [x] T002 Add a new BBolt bucket-name constant `ActivationBucketName = "activation"` in `internal/telemetry/activation.go` (file created in Phase 2).
 - [ ] T003 [P] Extend `docs/features/telemetry.md` skeleton with placeholder sections "Environment Classification", "Activation Tracking", and "Launch Source" (content filled in polish phase).
 
