@@ -683,7 +683,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 43/65 (66%) |
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 93/103 (90%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
-| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 43/87 (49%) |
+| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 24/36 (67%) |
 | [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
@@ -716,14 +716,14 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [039-security-scanner-plugins](./specs/039-security-scanner-plugins/) | — | — |
 | [040-server-ux](./specs/040-server-ux/) | `in-flight` | 28/35 (80%) |
 | [041-quarantine-invariants](./specs/041-quarantine-invariants/) | — | — |
-| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 60/91 (66%) |
+| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 65/91 (71%) |
 | [043-linux-package-repos](./specs/043-linux-package-repos/) | `shipped` | 41/41 (100%) |
 | [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `in-flight` | 59/106 (56%) |
-| [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 54/70 (77%) |
+| [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 55/70 (79%) |
 | [045-paperclip-cockpit](./specs/045-paperclip-cockpit/) | `in-flight` | 40/47 (85%) |
 | [046-local-first-onboarding](./specs/046-local-first-onboarding/) | — | — |
 | [046-local-launcher-for-http-sse](./specs/046-local-launcher-for-http-sse/) | — | — |
-| [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 25/46 (54%) |
+| [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 26/46 (57%) |
 | [048-tray-refetch-elimination](./specs/048-tray-refetch-elimination/) | `in-flight` | 18/31 (58%) |
 | [049-agent-discoverable-disabled-tools](./specs/049-agent-discoverable-disabled-tools/) | `shipped` | 18/18 (100%) |
 | [050-global-tools-page](./specs/050-global-tools-page/) | `in-flight` | 24/26 (92%) |
@@ -752,6 +752,6 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
 | [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
-| [083-discovery-profiler](./specs/083-discovery-profiler/) | `drafted` | 0/41 (0%) |
+| [083-discovery-profiler](./specs/083-discovery-profiler/) | `in-flight` | 4/41 (10%) |
 | [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |
 | [085-compact-router](./specs/085-compact-router/) | `shipped` | 44/46 (96%) |
