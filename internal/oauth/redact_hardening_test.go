@@ -186,3 +186,112 @@ func TestUnmaskHeaders_RestoresEchoedMask(t *testing.T) {
 	got := UnmaskHeaders(incoming, stored)
 	assert.Equal(t, "Bearer realtokenvalue123", got["Authorization"])
 }
+
+// --- Codex round 2 ---
+
+// FINDING 1 (round 2) — UnmaskURL must NOT move a stored secret onto a different
+// scheme/host. Redirecting the URL to an attacker host while echoing the mask
+// back must leave the mask literal, never restore the real credential.
+func TestUnmaskURL_AuthorityChange_DoesNotRestoreQuerySecret(t *testing.T) {
+	stored := "https://api.example.com/mcp?apikey=REALSECRETKEY123&team=eng"
+	masked := RedactURLQueryParams(stored)
+	require.NotContains(t, masked, "REALSECRETKEY123")
+
+	// Attacker swaps the host but keeps the masked apikey.
+	attacker := strings.Replace(masked, "api.example.com", "attacker.example.com", 1)
+	got := UnmaskURL(attacker, stored)
+
+	assert.NotContains(t, got, "REALSECRETKEY123",
+		"stored secret must never be written into a different-host URL")
+	assert.Contains(t, got, "attacker.example.com")
+}
+
+func TestUnmaskURL_AuthorityChange_DoesNotRestoreUserinfoPassword(t *testing.T) {
+	stored := "https://user:realpassword@host.example.com/path"
+	masked := RedactURLQueryParams(stored)
+	require.NotContains(t, masked, "realpassword")
+
+	attacker := strings.Replace(masked, "host.example.com", "evil.example.com", 1)
+	got := UnmaskURL(attacker, stored)
+	assert.NotContains(t, got, "realpassword",
+		"stored password must not be moved to a different host")
+}
+
+func TestUnmaskURL_UsernameChange_DoesNotRestorePassword(t *testing.T) {
+	stored := "https://user:realpassword@host.example.com/path"
+	masked := RedactURLQueryParams(stored)
+	// Same host, but different username — treat as a different principal.
+	other := strings.Replace(masked, "user:", "attacker:", 1)
+	got := UnmaskURL(other, stored)
+	assert.NotContains(t, got, "realpassword",
+		"password must not be restored under a different username")
+}
+
+func TestUnmaskURL_SchemeChange_DoesNotRestore(t *testing.T) {
+	stored := "https://api.example.com/mcp?apikey=REALSECRETKEY123"
+	masked := RedactURLQueryParams(stored)
+	downgraded := strings.Replace(masked, "https://", "http://", 1)
+	got := UnmaskURL(downgraded, stored)
+	assert.NotContains(t, got, "REALSECRETKEY123",
+		"scheme downgrade must not restore the stored secret")
+}
+
+// FINDING 3 (round 2) — duplicate sensitive query keys are masked at every
+// occurrence; restoration must be positional, i-th mask ← i-th stored value.
+func TestUnmaskURL_DuplicateKeys_PositionalRestore(t *testing.T) {
+	stored := "https://api.example.com/mcp?token=FIRSTSECRET111&token=SECONDSECRET222"
+	masked := RedactURLQueryParams(stored)
+	require.NotContains(t, masked, "FIRSTSECRET111")
+	require.NotContains(t, masked, "SECONDSECRET222")
+
+	got := UnmaskURL(masked, stored)
+	assert.Contains(t, got, "token=FIRSTSECRET111", "first occurrence must be restored")
+	assert.Contains(t, got, "token=SECONDSECRET222", "second occurrence must be restored")
+	// Ensure no mask survived.
+	assert.NotContains(t, got, "••••")
+}
+
+// When the incoming occurrence count for a key differs from stored, positional
+// matching is ambiguous — leave the masks literal rather than guess.
+func TestUnmaskURL_DuplicateKeys_CountMismatch_LeavesMasks(t *testing.T) {
+	stored := "https://api.example.com/mcp?token=FIRSTSECRET111&token=SECONDSECRET222"
+	masked := RedactURLQueryParams(stored)
+	// Client dropped one occurrence.
+	single := strings.SplitN(masked, "&", 2)[0] // keep only the first token=...
+	got := UnmaskURL(single, stored)
+	assert.NotContains(t, got, "FIRSTSECRET111",
+		"count mismatch must not positionally restore a secret")
+	assert.NotContains(t, got, "SECONDSECRET222")
+}
+
+// FINDING 2 (round 2) — URL-shaped env values must be unmasked component-wise.
+func TestUnmaskEnvValues_URLValue_PathEditRestoresPassword(t *testing.T) {
+	stored := map[string]string{
+		"DATABASE_URL": "postgres://user:realdbpassword@db.internal:5432/olddb",
+	}
+	masked := RedactEnvValues(stored)
+	require.NotContains(t, masked["DATABASE_URL"], "realdbpassword")
+
+	// User edits only the database name (path); host/authority unchanged.
+	incoming := map[string]string{
+		"DATABASE_URL": strings.Replace(masked["DATABASE_URL"], "olddb", "newdb", 1),
+	}
+	got := UnmaskEnvValues(incoming, stored)
+	assert.Contains(t, got["DATABASE_URL"], "realdbpassword",
+		"password must be restored when only the db name changed")
+	assert.Contains(t, got["DATABASE_URL"], "newdb", "the db-name edit must persist")
+	assert.NotContains(t, got["DATABASE_URL"], "••••", "no mask should survive")
+}
+
+func TestUnmaskEnvValues_URLValue_HostEditDoesNotRestorePassword(t *testing.T) {
+	stored := map[string]string{
+		"DATABASE_URL": "postgres://user:realdbpassword@db.internal:5432/appdb",
+	}
+	masked := RedactEnvValues(stored)
+	incoming := map[string]string{
+		"DATABASE_URL": strings.Replace(masked["DATABASE_URL"], "db.internal", "attacker.internal", 1),
+	}
+	got := UnmaskEnvValues(incoming, stored)
+	assert.NotContains(t, got["DATABASE_URL"], "realdbpassword",
+		"password must not be moved to a different host")
+}

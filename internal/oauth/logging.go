@@ -382,6 +382,13 @@ func MaskValue(v string) string {
 // substituted so the secret survives. Genuinely edited values (anything that is
 // not the mask of the stored value) are kept verbatim. If stored is empty or
 // either URL fails to parse, incoming is returned unchanged.
+//
+// Authority safeguard (Codex round 2, finding 1): a stored secret is restored
+// ONLY when incoming keeps the stored scheme and host:port — and, for the
+// userinfo password, the same username. If the authority changed (e.g. the URL
+// was redirected to an attacker host), nothing is restored and the mask is left
+// literal; the write then fails downstream validation rather than silently
+// leaking the real credential to a new host.
 func UnmaskURL(incoming, stored string) string {
 	if incoming == "" || stored == "" {
 		return incoming
@@ -394,13 +401,21 @@ func UnmaskURL(incoming, stored string) string {
 	if err != nil {
 		return incoming
 	}
+
+	// Never move a stored secret onto a different scheme/host.
+	if inU.Scheme != stU.Scheme || inU.Host != stU.Host {
+		return incoming
+	}
+
 	changed := false
 
-	// Userinfo password: restore if the incoming password is the mask of the
-	// stored one.
-	if inU.User != nil {
-		if inPW, hasPW := inU.User.Password(); hasPW && stU.User != nil {
-			if stPW, stHas := stU.User.Password(); stHas && inPW == MaskValue(stPW) {
+	// Userinfo password: restore only if the incoming password is the mask of
+	// the stored one AND the username is unchanged (same principal).
+	if inU.User != nil && stU.User != nil {
+		if inPW, hasPW := inU.User.Password(); hasPW {
+			if stPW, stHas := stU.User.Password(); stHas &&
+				inU.User.Username() == stU.User.Username() &&
+				inPW == MaskValue(stPW) {
 				inU.User = url.UserPassword(inU.User.Username(), stPW)
 				changed = true
 			}
@@ -409,22 +424,33 @@ func UnmaskURL(incoming, stored string) string {
 
 	// Query params: hand-edit RawQuery (never url.Values.Encode, which reorders
 	// and re-escapes) so untouched params keep their exact original bytes,
-	// mirroring RedactURLQueryParams.
+	// mirroring RedactURLQueryParams. Duplicate keys are masked at every
+	// occurrence by the read path, so restore POSITIONALLY — the i-th masked
+	// occurrence maps to the i-th stored occurrence — and only when the incoming
+	// and stored occurrence counts for that key match (Codex round 2, finding 3).
+	// A count mismatch is ambiguous, so those masks are left literal.
 	if inU.RawQuery != "" {
-		storedRawByKey := map[string]string{} // decoded key -> stored raw value bytes
+		storedByKey := map[string][]string{} // decoded key -> ordered stored raw values
 		for _, part := range strings.Split(stU.RawQuery, "&") {
 			eq := strings.IndexByte(part, '=')
 			if eq < 0 {
 				continue
 			}
-			dk, e := url.QueryUnescape(part[:eq])
-			if e != nil {
-				dk = part[:eq]
-			}
-			storedRawByKey[dk] = part[eq+1:]
+			dk := queryUnescapeOr(part[:eq])
+			storedByKey[dk] = append(storedByKey[dk], part[eq+1:])
 		}
 
 		parts := strings.Split(inU.RawQuery, "&")
+		incomingCountByKey := map[string]int{}
+		for _, part := range parts {
+			eq := strings.IndexByte(part, '=')
+			if eq < 0 {
+				continue
+			}
+			incomingCountByKey[queryUnescapeOr(part[:eq])]++
+		}
+
+		occ := map[string]int{} // per-key occurrence index as we walk incoming
 		queryChanged := false
 		for i, part := range parts {
 			eq := strings.IndexByte(part, '=')
@@ -432,26 +458,18 @@ func UnmaskURL(incoming, stored string) string {
 				continue
 			}
 			key := part[:eq]
-			decKey, keyErr := url.QueryUnescape(key)
-			if keyErr != nil {
-				decKey = key
-			}
+			decKey := queryUnescapeOr(key)
 			if !isSensitiveQueryParam(decKey) {
 				continue
 			}
-			storedRaw, ok := storedRawByKey[decKey]
-			if !ok {
+			n := occ[decKey]
+			occ[decKey]++
+			storedList, ok := storedByKey[decKey]
+			if !ok || incomingCountByKey[decKey] != len(storedList) || n >= len(storedList) {
 				continue
 			}
-			decIn, e := url.QueryUnescape(part[eq+1:])
-			if e != nil {
-				decIn = part[eq+1:]
-			}
-			decStored, e := url.QueryUnescape(storedRaw)
-			if e != nil {
-				decStored = storedRaw
-			}
-			if decIn == MaskValue(decStored) {
+			storedRaw := storedList[n]
+			if queryUnescapeOr(part[eq+1:]) == MaskValue(queryUnescapeOr(storedRaw)) {
 				// Restore the stored value's exact original bytes.
 				parts[i] = key + "=" + storedRaw
 				queryChanged = true
@@ -469,16 +487,51 @@ func UnmaskURL(incoming, stored string) string {
 	return inU.String()
 }
 
-// UnmaskEnvValues is the env-map analogue of UnmaskURL. For each key in incoming
-// whose value is exactly the masked rendering of the stored value
-// (maskedEnvValue), the stored real value is substituted; every other value is
-// kept as sent. Guards against a client echoing a masked `env` map back on the
-// write path (Issue #872, Codex round). Returns incoming unchanged for nil.
-func UnmaskEnvValues(incoming, stored map[string]string) map[string]string {
-	return unmaskMapValues(incoming, stored, maskedEnvValue)
+// queryUnescapeOr percent-decodes a query token, returning the original bytes
+// when decoding fails.
+func queryUnescapeOr(s string) string {
+	if d, err := url.QueryUnescape(s); err == nil {
+		return d
+	}
+	return s
 }
 
-// UnmaskHeaders is the header-map analogue of UnmaskEnvValues.
+// UnmaskEnvValues is the env-map analogue of UnmaskURL. It guards against a
+// client echoing a masked `env` map back on the write path (Issue #872, Codex
+// round). Returns incoming unchanged for nil.
+//
+// A URL-shaped value under a non-sensitive key is masked component-wise by the
+// read path (only the userinfo password / sensitive query params — see
+// maskedEnvValue), so it is unmasked component-wise via UnmaskURL, which
+// restores just the masked components and carries the authority safeguard. This
+// lets an operator edit a non-secret part of a connection string (db name, an
+// option) without the password mask being persisted as the real password
+// (Codex round 2, finding 2). Every other value is a whole-value mask, reverted
+// only when incoming exactly equals maskedEnvValue(key, stored).
+func UnmaskEnvValues(incoming, stored map[string]string) map[string]string {
+	if incoming == nil {
+		return incoming
+	}
+	out := make(map[string]string, len(incoming))
+	for k, v := range incoming {
+		sv, ok := stored[k]
+		switch {
+		case !ok:
+			out[k] = v
+		case !isSensitiveEnvKey(k) && strings.Contains(sv, "://") && strings.Contains(v, "://"):
+			out[k] = UnmaskURL(v, sv)
+		case v == maskedEnvValue(k, sv):
+			out[k] = sv
+		default:
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// UnmaskHeaders is the header-map analogue of UnmaskEnvValues. Headers are
+// always whole-value masked by RedactStringHeaders (no component-wise URL
+// masking), so a plain whole-value comparison is sufficient.
 func UnmaskHeaders(incoming, stored map[string]string) map[string]string {
 	return unmaskMapValues(incoming, stored, maskedHeaderValue)
 }
