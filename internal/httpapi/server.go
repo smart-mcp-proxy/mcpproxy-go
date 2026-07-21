@@ -1654,7 +1654,17 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	hasUpdates := false
 
 	if req.URL != "" {
-		updates.URL = req.URL
+		// #872: the read path masks secrets in the URL query string / userinfo
+		// (redactServerSecrets → oauth.RedactURLQueryParams), but url is a single
+		// string field with no field-level diff. If a client edits a non-secret
+		// part and echoes the masked url back, restore the stored real secrets so
+		// the mask is never persisted over them. Protects ALL clients, not just
+		// the tray.
+		if existingSrv != nil {
+			updates.URL = oauth.UnmaskURL(req.URL, existingSrv.URL)
+		} else {
+			updates.URL = req.URL
+		}
 		hasUpdates = true
 	}
 	if req.Command != "" {
@@ -1685,6 +1695,12 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 				merged[k] = *vp
 			}
 		}
+		// #872: a client could echo a masked env value back (the tray diffs, but
+		// other clients may send the full map). Revert any value that is exactly
+		// the masked rendering of the stored one.
+		if existingSrv != nil {
+			merged = oauth.UnmaskEnvValues(merged, existingSrv.Env)
+		}
 		updates.Env = merged
 		hasUpdates = true
 	}
@@ -1701,6 +1717,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			} else {
 				merged[k] = *vp
 			}
+		}
+		// #872: revert any masked header value echoed back (see env note above).
+		if existingSrv != nil {
+			merged = oauth.UnmaskHeaders(merged, existingSrv.Headers)
 		}
 		updates.Headers = merged
 		hasUpdates = true

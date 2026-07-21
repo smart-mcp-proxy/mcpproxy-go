@@ -4482,7 +4482,10 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 
 	// Scalar fields - only set if provided in request
 	if url := request.GetString("url", ""); url != "" {
-		patch.URL = url
+		// #872: the read path masks URL query/userinfo secrets; if a caller
+		// echoes the masked url back, restore the stored real secrets so the
+		// mask is never persisted over them (parity with the REST PATCH path).
+		patch.URL = oauth.UnmaskURL(url, existingServer.URL)
 	}
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		patch.Protocol = protocol
@@ -4543,6 +4546,8 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid env_json: value for key %q must be string or null, got %T", k, v)
 			}
 		}
+		// #872: revert any masked env value echoed back by the caller.
+		patch.Env = oauth.UnmaskEnvValues(patch.Env, existingServer.Env)
 	}
 
 	// Handle headers JSON string - maps are deep merged with RFC 7396 null-means-remove
@@ -4565,6 +4570,8 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid headers_json: value for key %q must be string or null, got %T", k, v)
 			}
 		}
+		// #872: revert any masked header value echoed back by the caller.
+		patch.Headers = oauth.UnmaskHeaders(patch.Headers, existingServer.Headers)
 	}
 
 	// Handle isolation JSON string - deep merge for nested config
