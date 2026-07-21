@@ -2830,7 +2830,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		switch operation {
-		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "add_from_registry":
+		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "refresh", "add_from_registry":
 			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError(errMsg), nil

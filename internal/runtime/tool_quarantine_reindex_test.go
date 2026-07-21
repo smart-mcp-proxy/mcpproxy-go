@@ -186,6 +186,42 @@ func TestSetToolEnabled_DisableRemovesFromIndex(t *testing.T) {
 	}, 3*time.Second, 20*time.Millisecond, "disabled tool must be removed from the index")
 }
 
+// TestDiscoverAndIndexToolsForServer_QuarantinedSkipped is the SECURITY guard for
+// the upstream_servers "refresh" op (issue #873): DiscoverAndIndexToolsForServer
+// must refuse to (re)index a quarantined server. Without the guard, a refresh —
+// or a reactive discovery callback — would list the still-connected quarantined
+// server's tools and feed applyDifferentialToolUpdate, surfacing its (possibly
+// poisoned) descriptions into the search index the quarantine model withholds.
+func TestDiscoverAndIndexToolsForServer_QuarantinedSkipped(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: true, Quarantined: true},
+	})
+
+	// Guard must short-circuit before touching the (absent) upstream client, so
+	// the call is a clean no-op rather than a "client not found" error.
+	err := rt.DiscoverAndIndexToolsForServer(context.Background(), "github")
+	require.NoError(t, err)
+
+	tools, err := rt.indexManager.GetToolsByServer("github")
+	require.NoError(t, err)
+	require.Empty(t, tools, "a quarantined server's tools must never be indexed via refresh/discovery")
+}
+
+// TestDiscoverAndIndexToolsForServer_DisabledSkipped mirrors the above for a
+// disabled server: it has no business (re)entering the index either.
+func TestDiscoverAndIndexToolsForServer_DisabledSkipped(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "github", Enabled: false},
+	})
+
+	err := rt.DiscoverAndIndexToolsForServer(context.Background(), "github")
+	require.NoError(t, err)
+
+	tools, err := rt.indexManager.GetToolsByServer("github")
+	require.NoError(t, err)
+	require.Empty(t, tools, "a disabled server's tools must never be indexed via refresh/discovery")
+}
+
 // TestQuarantineApprovalFlow_ReindexesNewTool exercises the full flow the issue
 // describes on a trusted server: a NEW post-baseline tool is discovered
 // (pending, blocked), then approve-all makes it visible within seconds rather

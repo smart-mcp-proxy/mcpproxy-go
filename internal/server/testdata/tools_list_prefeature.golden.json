@@ -400,7 +400,7 @@
             "type": "string"
           },
           "operation": {
-            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool.",
+            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry, enable, disable, restart, refresh. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. 'refresh' re-discovers and re-indexes a server's tools without changing any security state - use it to make just-approved tools searchable immediately. For quarantine operations, use the 'quarantine_security' tool.",
             "enum": [
               "list",
               "add",
@@ -408,7 +408,11 @@
               "update",
               "patch",
               "tail_log",
-              "add_from_registry"
+              "add_from_registry",
+              "enable",
+              "disable",
+              "restart",
+              "refresh"
             ],
             "type": "string"
           },
@@ -678,7 +682,7 @@
             "type": "string"
           },
           "operation": {
-            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool.",
+            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry, enable, disable, restart, refresh. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. 'refresh' re-discovers and re-indexes a server's tools without changing any security state - use it to make just-approved tools searchable immediately. For quarantine operations, use the 'quarantine_security' tool.",
             "enum": [
               "list",
               "add",
@@ -686,7 +690,11 @@
               "update",
               "patch",
               "tail_log",
-              "add_from_registry"
+              "add_from_registry",
+              "enable",
+              "disable",
+              "restart",
+              "refresh"
             ],
             "type": "string"
           },
@@ -1088,7 +1096,7 @@
             "type": "string"
           },
           "operation": {
-            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool.",
+            "description": "Operation: list, add, remove, update, patch, tail_log, add_from_registry, enable, disable, restart, refresh. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. 'refresh' re-discovers and re-indexes a server's tools without changing any security state - use it to make just-approved tools searchable immediately. For quarantine operations, use the 'quarantine_security' tool.",
             "enum": [
               "list",
               "add",
@@ -1096,7 +1104,11 @@
               "update",
               "patch",
               "tail_log",
-              "add_from_registry"
+              "add_from_registry",
+              "enable",
+              "disable",
+              "restart",
+              "refresh"
             ],
             "type": "string"
           },

@@ -861,6 +861,25 @@ func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
 	r.logger.Info("Output schema hash migration completed")
 }
 
+// serverEligibleForIndexing reports whether the named server may (re)enter the
+// search index: it must exist in config, be enabled, and NOT be quarantined.
+// applyDifferentialToolUpdate does not itself withhold a quarantined server's
+// tools (checkToolApprovals computes enforceQuarantine but only logs it), so
+// every path that feeds it — the approval-driven reindex and the single-server
+// DiscoverAndIndexToolsForServer reached by the upstream_servers "refresh" op
+// and the reactive discovery callbacks — must gate on this first. Otherwise a
+// quarantined server's (possibly poisoned) tool descriptions leak into the
+// index the search-side quarantine model deliberately withholds (issue #873).
+// A disabled server likewise has no business (re)entering the index.
+func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
+	for _, candidate := range r.Config().Servers {
+		if candidate.Name == serverName {
+			return candidate.Enabled && !candidate.Quarantined
+		}
+	}
+	return false
+}
+
 // reindexServerToolsAfterApprovalChange reconciles the search index with a
 // just-mutated set of tool-approval records for one server (issue #873).
 // Approval mutations (ApproveTools / BlockTools / SetToolEnabled and their bulk
@@ -878,20 +897,8 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 	}
 
 	// SECURITY-CRITICAL GUARD: only reindex a server that exists, is enabled,
-	// and is NOT quarantined. applyDifferentialToolUpdate does not itself
-	// withhold a quarantined server's tools (checkToolApprovals computes
-	// enforceQuarantine but only logs it), so an unguarded call here would index
-	// a quarantined server's tool descriptions — exactly what the search-side
-	// quarantine model deliberately withholds. A disabled server likewise has
-	// no business (re)entering the index.
-	var sc *config.ServerConfig
-	for _, candidate := range r.Config().Servers {
-		if candidate.Name == serverName {
-			sc = candidate
-			break
-		}
-	}
-	if sc == nil || !sc.Enabled || sc.Quarantined {
+	// and is NOT quarantined (see serverEligibleForIndexing).
+	if !r.serverEligibleForIndexing(serverName) {
 		return
 	}
 

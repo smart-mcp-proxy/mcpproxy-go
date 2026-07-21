@@ -462,6 +462,20 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 		return fmt.Errorf("runtime managers not initialized")
 	}
 
+	// SECURITY-CRITICAL GUARD (issue #873): never (re)index a quarantined or
+	// disabled server. applyDifferentialToolUpdate below does not itself withhold
+	// a quarantined server's tools, so the upstream_servers "refresh" op and the
+	// reactive discovery callbacks that reach this function must gate here — else
+	// a quarantined server (kept connected for inspection) has its poisoned tool
+	// descriptions surfaced into retrieve_tools. Unquarantine reindexes via the
+	// full sweep (HandleUpstreamServerChange → DiscoverAndIndexTools), not this
+	// single-server path, so the guard does not strand a newly-trusted server.
+	if !r.serverEligibleForIndexing(serverName) {
+		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
+			zap.String("server", serverName))
+		return nil
+	}
+
 	r.logger.Info("Discovering and indexing tools for server", zap.String("server", serverName))
 
 	// Get the upstream client for this server
