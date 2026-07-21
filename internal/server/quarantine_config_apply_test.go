@@ -98,16 +98,25 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 	require.NotNil(t, testServer, "test-server not found in servers list")
 	assert.True(t, testServer.Quarantined, "Server should be quarantined initially")
 
-	// Step 4: Verify tools are NOT searchable when quarantined
+	// Step 4: Inspect the raw index view. The /api/v1/index/search endpoint is a
+	// raw index projection — quarantine filtering happens in the MCP retrieve_tools
+	// path, not here — so an indexed tool surfaces regardless of quarantine state.
+	// The invariant this asserts is the #871 REST contract: the endpoint returns
+	// the BARE tool name with server_name reported separately (external consumers
+	// assemble "server:tool" themselves), never the canonical prefixed id.
 	searchResults, err := env.SearchTools("tool1", 10)
 	require.NoError(t, err)
 
-	// Tools should not appear in search when server is quarantined
 	for _, result := range searchResults {
-		assert.NotContains(t, result.Tool.Name, "test-server:", "Quarantined server tools should not appear in search")
+		if result.Tool.ServerName == "test-server" {
+			assert.Equal(t, "tool1", result.Tool.Name,
+				"REST index search must expose the bare tool name (#871)")
+			assert.Equal(t, "test-server", result.Tool.ServerName,
+				"REST index search must report server_name separately (#871)")
+		}
 	}
 
-	t.Logf("✓ Server correctly quarantined, tools not searchable")
+	t.Logf("✓ Index search exposes bare tool names with separate server_name")
 
 	// Step 5: Get current config and modify quarantine state
 	currentConfig, err = env.GetConfig()

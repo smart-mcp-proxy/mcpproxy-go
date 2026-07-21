@@ -5717,6 +5717,11 @@ func (p *MCPProxyServer) lookupToolAnnotations(serverName, toolName string) *con
 		return nil
 	}
 
+	// Callers now pass the canonical "server:tool" identity (#871), while the
+	// StateView stores bare tool names on the live path — strip the prefix so
+	// the name match below cannot silently miss (Issue #306 regression guard).
+	serverName, toolName = normalizeServerTool(serverName, toolName)
+
 	supervisor := p.mainServer.runtime.Supervisor()
 	if supervisor == nil {
 		return nil

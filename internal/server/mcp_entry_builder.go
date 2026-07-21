@@ -48,8 +48,10 @@ func (p *MCPProxyServer) buildToolEntry(result *config.SearchResult, mode string
 // buildCompactToolEntry renders one search result as a compact entry (Spec
 // 085 FR-002/003/004, grammar: specs/085-compact-router/contracts/
 // signature-grammar.md). The id equals the full-mode "name" (result.Tool.Name,
-// already "server:tool" as indexed) so ranked identity between modes holds by
-// construction (FR-007) — entries are never re-sorted here.
+// canonicalized to "server:tool" at the index read seam — #871) so ranked
+// identity between modes holds by construction (FR-007), and the id round-trips
+// straight back into describe_tool / call_tool_* — entries are never re-sorted
+// here.
 //
 // include_stats is intentionally ignored in compact mode: the compact entry
 // shape is fixed at exactly {id, score, sig, desc, lossy} (data-model §4);
@@ -117,9 +119,10 @@ func (p *MCPProxyServer) buildFullToolEntry(result *config.SearchResult, opts to
 		"server":      result.Tool.ServerName,
 	}
 
-	// Look up tool annotations and derive recommended call_with variant (Spec 018)
-	// Use ServerName directly - result.Tool.Name may or may not have "server:" prefix
-	// depending on how tools were indexed (Issue #306)
+	// Look up tool annotations and derive recommended call_with variant (Spec 018).
+	// result.Tool.Name is the canonical "server:tool" id (#871); lookupToolAnnotations
+	// normalizes the prefix against the bare StateView names, so the prefixed toolName
+	// passes through cleanly (Issue #306 guard). ServerName is authoritative when set.
 	serverName := result.Tool.ServerName
 	toolName := result.Tool.Name
 	if serverName == "" {
