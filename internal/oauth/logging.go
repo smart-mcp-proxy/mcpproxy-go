@@ -500,14 +500,20 @@ func queryUnescapeOr(s string) string {
 // client echoing a masked `env` map back on the write path (Issue #872, Codex
 // round). Returns incoming unchanged for nil.
 //
-// A URL-shaped value under a non-sensitive key is masked component-wise by the
-// read path (only the userinfo password / sensitive query params — see
-// maskedEnvValue), so it is unmasked component-wise via UnmaskURL, which
-// restores just the masked components and carries the authority safeguard. This
-// lets an operator edit a non-secret part of a connection string (db name, an
-// option) without the password mask being persisted as the real password
-// (Codex round 2, finding 2). Every other value is a whole-value mask, reverted
-// only when incoming exactly equals maskedEnvValue(key, stored).
+// The whole-value revert is tried FIRST: if incoming exactly equals the masked
+// rendering of the stored value it is reverted to the stored value outright.
+// This covers whole-value masks (sensitive keys, RedactSensitiveData fallback)
+// and — importantly (Codex round 3) — a MALFORMED URL-shaped value that
+// RedactURLQueryParams masked via its RedactURL regex fallback: UnmaskURL cannot
+// re-parse such a value, so without this ordering the mask would be persisted
+// over the stored secret on an unedited echo.
+//
+// Only when incoming differs (a genuine edit) does a well-formed URL-shaped
+// value under a non-sensitive key fall to component-wise unmasking via UnmaskURL
+// — which restores just the masked userinfo password / sensitive query params
+// and carries the authority safeguard, letting an operator edit a non-secret
+// part of a connection string (db name, an option) without the password mask
+// being persisted as the real password (Codex round 2, finding 2).
 func UnmaskEnvValues(incoming, stored map[string]string) map[string]string {
 	if incoming == nil {
 		return incoming
@@ -518,10 +524,10 @@ func UnmaskEnvValues(incoming, stored map[string]string) map[string]string {
 		switch {
 		case !ok:
 			out[k] = v
-		case !isSensitiveEnvKey(k) && strings.Contains(sv, "://") && strings.Contains(v, "://"):
-			out[k] = UnmaskURL(v, sv)
 		case v == maskedEnvValue(k, sv):
 			out[k] = sv
+		case !isSensitiveEnvKey(k) && strings.Contains(sv, "://") && strings.Contains(v, "://"):
+			out[k] = UnmaskURL(v, sv)
 		default:
 			out[k] = v
 		}

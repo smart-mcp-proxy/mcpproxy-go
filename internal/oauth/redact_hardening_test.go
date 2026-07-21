@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 
@@ -281,6 +282,33 @@ func TestUnmaskEnvValues_URLValue_PathEditRestoresPassword(t *testing.T) {
 		"password must be restored when only the db name changed")
 	assert.Contains(t, got["DATABASE_URL"], "newdb", "the db-name edit must persist")
 	assert.NotContains(t, got["DATABASE_URL"], "••••", "no mask should survive")
+}
+
+// FINDING (round 3) — a malformed URL-shaped value is masked by
+// RedactURLQueryParams' RedactURL regex fallback (url.Parse fails). UnmaskURL
+// cannot re-parse it, so the whole-value revert must run first: an unedited echo
+// of the mask must be reverted to the stored secret, never persisted as the
+// value.
+func TestUnmaskEnvValues_MalformedURLValue_WholeValueRevert(t *testing.T) {
+	// %zz is an invalid percent-escape, so url.Parse fails and
+	// RedactURLQueryParams falls back to the RedactURL regex path. Built at
+	// runtime (not a const) so staticcheck's SA1007 doesn't flag the deliberately
+	// invalid literal.
+	badEscape := string([]byte{'%', 'z', 'z'})
+	stored := "redis://cache.internal/db" + badEscape + "?token=REALTOKENSECRET99"
+	if _, err := url.Parse(stored); err == nil {
+		t.Fatalf("precondition: expected %q to fail url.Parse", stored)
+	}
+	storedMap := map[string]string{"REDIS_URL": stored}
+	masked := RedactEnvValues(storedMap)
+	require.NotContains(t, masked["REDIS_URL"], "REALTOKENSECRET99",
+		"precondition: regex fallback masked the token")
+
+	// Client echoes the masked value back verbatim.
+	incoming := map[string]string{"REDIS_URL": masked["REDIS_URL"]}
+	got := UnmaskEnvValues(incoming, storedMap)
+	assert.Equal(t, stored, got["REDIS_URL"],
+		"unedited echo of a masked malformed URL must revert to the stored secret")
 }
 
 func TestUnmaskEnvValues_URLValue_HostEditDoesNotRestorePassword(t *testing.T) {
