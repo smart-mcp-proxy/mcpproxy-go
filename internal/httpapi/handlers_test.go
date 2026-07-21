@@ -234,14 +234,30 @@ func (c *refreshNotFoundController) DiscoverServerTools(_ context.Context, _ str
 	return fmt.Errorf("server not found")
 }
 
+// refreshAdminController wraps a ServerController so the auth middleware sees a
+// real *config.Config (required to distinguish admin from agent tokens) with a
+// known admin key. Refresh is admin-only (issue #873), so its tests must
+// authenticate rather than relying on the middleware's testing passthrough.
+type refreshAdminController struct {
+	ServerController
+	apiKey string
+}
+
+func (c *refreshAdminController) GetCurrentConfig() any {
+	return &config.Config{APIKey: c.apiKey}
+}
+
 // TestHandleRefreshServer tests the POST /api/v1/servers/{id}/refresh endpoint
 // (issue #873 operator recovery op).
 func TestHandleRefreshServer(t *testing.T) {
+	const adminKey = "admin-key"
+
 	t.Run("refreshes server successfully", func(t *testing.T) {
 		logger := zap.NewNop().Sugar()
-		srv := NewServer(&MockServerController{}, logger, nil)
+		srv := NewServer(&refreshAdminController{ServerController: &MockServerController{}, apiKey: adminKey}, logger, nil)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/refresh", nil)
+		req.Header.Set("X-API-Key", adminKey)
 		w := httptest.NewRecorder()
 
 		srv.ServeHTTP(w, req)
@@ -261,14 +277,35 @@ func TestHandleRefreshServer(t *testing.T) {
 
 	t.Run("returns 404 when server not found", func(t *testing.T) {
 		logger := zap.NewNop().Sugar()
-		srv := NewServer(&refreshNotFoundController{&MockServerController{}}, logger, nil)
+		ctrl := &refreshAdminController{
+			ServerController: &refreshNotFoundController{&MockServerController{}},
+			apiKey:           adminKey,
+		}
+		srv := NewServer(ctrl, logger, nil)
 
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/ghost/refresh", nil)
+		req.Header.Set("X-API-Key", adminKey)
 		w := httptest.NewRecorder()
 
 		srv.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	// SECURITY (issue #873): the MCP surface blocks 'refresh' for agent tokens;
+	// the REST alias must too, else an agent bypasses the restriction over HTTP.
+	t.Run("agent token forbidden", func(t *testing.T) {
+		ctrl := &refreshAdminController{ServerController: &MockServerController{}, apiKey: "admin-secret"}
+		srv, agentToken := agentTokenServer(t, ctrl)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/refresh", nil)
+		req.Header.Set("X-API-Key", agentToken)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
+		assert.Contains(t, w.Body.String(), "admin access")
 	})
 }
 

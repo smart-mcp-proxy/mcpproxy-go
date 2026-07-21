@@ -2351,8 +2351,19 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Failed to refresh tools"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot refresh)"
 // @Router /api/v1/servers/{id}/refresh [post]
 func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
+	// SECURITY (issue #873): 'refresh' is a write operation. The MCP surface
+	// (handleUpstreamServers) already blocks it for agent tokens; gate the REST
+	// alias the same way so an agent token cannot bypass that restriction over
+	// HTTP. Matches the strictest sibling handler (handleSetToolEnabled).
+	authCtx := auth.AuthContextFromContext(r.Context())
+	if authCtx == nil || !authCtx.IsAdmin() {
+		s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+		return
+	}
+
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")

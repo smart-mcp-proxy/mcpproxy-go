@@ -909,10 +909,21 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 	if len(snapshot) == 0 {
 		// No snapshot captured yet — fall back to a full single-server
 		// rediscover, which indexes and populates the snapshot for next time.
-		if err := r.DiscoverAndIndexToolsForServer(r.AppContext(), serverName); err != nil {
+		// Use the authoritative path so a server now reporting zero tools has
+		// stale entries cleared rather than resurfaced (issue #873).
+		if err := r.RefreshServerTools(r.AppContext(), serverName); err != nil {
 			r.logger.Debug("Approval-driven rediscovery failed",
 				zap.String("server", serverName), zap.Error(err))
 		}
+		return
+	}
+
+	// TOCTOU GUARD (issue #873): eligibility was checked above, before this
+	// (fast, local) snapshot diff. Re-check immediately before the index write
+	// so a server quarantined in the interim — whose tools QuarantineServer
+	// already deleted from the index — is not re-populated. A microsecond window
+	// remains between this check and the mutation inside applyDifferentialToolUpdate.
+	if !r.serverEligibleForIndexing(serverName) {
 		return
 	}
 

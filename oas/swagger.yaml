@@ -5241,6 +5241,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot refresh)
         "404":
           content:
             application/json:

@@ -3481,7 +3481,9 @@ func (p *MCPProxyServer) handleRefreshUpstream(ctx context.Context, request mcp.
 		return mcp.NewToolResultError("Management service not available"), nil
 	}
 
-	if err := p.mainServer.runtime.DiscoverAndIndexToolsForServer(ctx, serverName); err != nil {
+	// Authoritative refresh (issue #873): a server now reporting zero tools has
+	// its stale index entries removed rather than silently retained.
+	if err := p.mainServer.runtime.RefreshServerTools(ctx, serverName); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to refresh server '%s': %v", serverName, err)), nil
 	}
 
