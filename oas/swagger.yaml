@@ -4994,50 +4994,6 @@ paths:
       summary: Discover tools for a specific server
       tags:
       - servers
-  /api/v1/servers/{id}/refresh:
-    post:
-      description: Re-discover and re-index a specific upstream MCP server's tools
-        without changing any security state. Alias of discover-tools, named for the
-        upstream_servers 'refresh' operation; use it to make just-approved tools searchable
-        immediately.
-      parameters:
-      - description: Server ID or name
-        in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        "200":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/contracts.ServerActionResponse'
-          description: Tool refresh triggered successfully
-        "400":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Bad request (missing server ID)
-        "404":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Server not found
-        "500":
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Failed to refresh tools
-      security:
-      - ApiKeyAuth: []
-      - ApiKeyQuery: []
-      summary: Refresh a server's tools
-      tags:
-      - servers
   /api/v1/servers/{id}/enable:
     post:
       description: Enable a specific upstream MCP server
@@ -5257,6 +5213,50 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Quarantine a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/refresh:
+    post:
+      description: Re-discover and re-index a specific upstream MCP server's tools
+        without changing any security state. Alias of discover-tools, named for the
+        upstream_servers 'refresh' operation; use it to make just-approved tools searchable
+        immediately.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+          description: Tool refresh triggered successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request (missing server ID)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to refresh tools
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Refresh a server's tools
       tags:
       - servers
   /api/v1/servers/{id}/restart:
