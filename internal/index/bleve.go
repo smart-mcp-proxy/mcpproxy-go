@@ -296,7 +296,7 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	for _, hit := range searchResult.Hits {
 		serverName := getStringField(hit.Fields, "server_name")
 		toolMeta := &config.ToolMetadata{
-			Name:             canonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
+			Name:             CanonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
 			ServerName:       serverName,
 			Description:      getStringField(hit.Fields, "description"),
 			ParamsJSON:       getStringField(hit.Fields, "params_json"),
@@ -432,7 +432,7 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 		for _, hit := range searchResult.Hits {
 			serverName := getStringField(hit.Fields, "server_name")
 			toolMeta := &config.ToolMetadata{
-				Name:             canonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
+				Name:             CanonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
 				ServerName:       serverName,
 				Description:      getStringField(hit.Fields, "description"),
 				ParamsJSON:       getStringField(hit.Fields, "params_json"),
@@ -485,13 +485,13 @@ func (b *BleveIndex) GetAllIndexedServerNames() ([]string, error) {
 	return names, nil
 }
 
-// canonicalToolName returns the tool's full "server:tool" identity. Discovery
+// CanonicalToolName returns the tool's full "server:tool" identity. Discovery
 // stores the bare tool name in the index (ToolMetadata{ServerName:"github",
 // Name:"create_issue"}), so the read seams must reattach the server prefix for
 // consumers (retrieve_tools/describe_tool/call_tool_*) that require it (#871).
 // The double-prefix guard is mandatory: legacy index data and test fixtures may
 // already store a prefixed name — those pass through unchanged.
-func canonicalToolName(serverName, name string) string {
+func CanonicalToolName(serverName, name string) string {
 	if serverName == "" || strings.HasPrefix(name, serverName+":") {
 		return name
 	}
