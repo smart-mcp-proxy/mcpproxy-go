@@ -4976,6 +4976,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot discover tools)
         "404":
           content:
             application/json:

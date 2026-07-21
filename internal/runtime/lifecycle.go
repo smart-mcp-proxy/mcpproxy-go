@@ -373,22 +373,30 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	}
 	r.lastGoodToolsMu.Unlock()
 
-	// Apply differential update for each server with fallback to last-good snapshots
+	// Apply differential update for each server with fallback to last-good
+	// snapshots. Both writes go through applyServerDiffIfEligible so a quarantined
+	// or disabled server is never (re)indexed by the sweep (issue #873).
 	processedServers := make(map[string]struct{}, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		if err := r.applyDifferentialToolUpdate(ctx, serverName, serverTools); err != nil {
-			r.logger.Error("Failed to apply differential update for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-			// Continue with other servers instead of failing completely
-		}
+		r.applyServerDiffIfEligible(ctx, serverName, serverTools)
 	}
 
 	// For connected servers that were temporarily missing from discovery results,
 	// re-apply last-good snapshot to avoid transient index shrink.
 	for _, serverName := range knownServers {
 		if _, ok := processedServers[serverName]; ok {
+			continue
+		}
+
+		// SECURITY-CRITICAL GUARD (issue #873): this last-good fallback is the
+		// real exposure — DiscoverTools already skips quarantined/disabled servers
+		// (so they never enter the primary loop), but a quarantined server stays
+		// connected and keeps its pre-quarantine snapshot, so without a guard the
+		// fallback would reapply it. QuarantineServer deletes the server's index
+		// entries and then triggers this very sweep, which would immediately
+		// restore them. Skip ineligible servers before doing any snapshot work.
+		if !r.serverEligibleForIndexing(serverName) {
 			continue
 		}
 
@@ -410,11 +418,9 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 			zap.String("server", serverName),
 			zap.Int("snapshot_tools", len(snapshot)))
 
-		if err := r.applyDifferentialToolUpdate(ctx, serverName, snapshot); err != nil {
-			r.logger.Error("Failed to apply last-good snapshot for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
+		// Re-checks eligibility again immediately before the write (the check
+		// above and the connection/snapshot reads are not atomic).
+		r.applyServerDiffIfEligible(ctx, serverName, snapshot)
 	}
 
 	// Invalidate tool count caches since tools may have changed

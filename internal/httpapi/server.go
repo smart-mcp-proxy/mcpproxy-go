@@ -2307,9 +2307,20 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.ServerActionResponse "Tool discovery triggered successfully"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot discover tools)"
 // @Failure 500 {object} contracts.ErrorResponse "Failed to discover tools"
 // @Router /api/v1/servers/{id}/discover-tools [post]
 func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Request) {
+	// SECURITY (issue #873): discover-tools is a write operation that now routes
+	// through the same authoritative RefreshServerTools path as /refresh, so it
+	// must carry the same admin gate — otherwise an agent token blocked from
+	// 'refresh' bypasses that restriction through this alias.
+	authCtx := auth.AuthContextFromContext(r.Context())
+	if authCtx == nil || !authCtx.IsAdmin() {
+		s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+		return
+	}
+
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")

@@ -309,6 +309,42 @@ func TestHandleRefreshServer(t *testing.T) {
 	})
 }
 
+// TestHandleDiscoverServerTools covers the admin gate on the discover-tools
+// endpoint (issue #873): it is the alias of /refresh reaching the same
+// authoritative reindex path, so it must be admin-only too.
+func TestHandleDiscoverServerTools(t *testing.T) {
+	const adminKey = "admin-key"
+
+	t.Run("discovers tools for admin", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		srv := NewServer(&refreshAdminController{ServerController: &MockServerController{}, apiKey: adminKey}, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/discover-tools", nil)
+		req.Header.Set("X-API-Key", adminKey)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+	})
+
+	// SECURITY (issue #873): an agent token blocked from 'refresh' must not
+	// reach the same reindex path through the discover-tools alias.
+	t.Run("agent token forbidden", func(t *testing.T) {
+		ctrl := &refreshAdminController{ServerController: &MockServerController{}, apiKey: "admin-secret"}
+		srv, agentToken := agentTokenServer(t, ctrl)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/discover-tools", nil)
+		req.Header.Set("X-API-Key", agentToken)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusForbidden, w.Code)
+		assert.Contains(t, w.Body.String(), "admin access")
+	})
+}
+
 // TestHandleRemoveServer tests the DELETE /api/v1/servers/{name} endpoint
 func TestHandleRemoveServer(t *testing.T) {
 	t.Run("removes server successfully", func(t *testing.T) {

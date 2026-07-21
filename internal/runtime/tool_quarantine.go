@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -878,6 +879,27 @@ func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
 		}
 	}
 	return false
+}
+
+// applyServerDiffIfEligible is the guarded per-server index write shared by the
+// discovery sweep's primary loop and its last-good fallback (issue #873). It
+// re-checks eligibility immediately before the write so a server quarantined or
+// disabled mid-sweep — or one that somehow reached this point (e.g. a stale
+// last-good snapshot for a since-quarantined server) — is never (re)indexed.
+// Returns true only when the differential update actually ran.
+func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata) bool {
+	if !r.serverEligibleForIndexing(serverName) {
+		r.logger.Info("Skipping sweep index write for ineligible server (disabled or quarantined)",
+			zap.String("server", serverName))
+		return false
+	}
+	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+		r.logger.Error("Failed to apply differential update for server during sweep",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return false
+	}
+	return true
 }
 
 // reindexServerToolsAfterApprovalChange reconciles the search index with a
