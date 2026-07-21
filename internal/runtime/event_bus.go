@@ -250,7 +250,7 @@ func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason s
 					redacted = append(redacted, *s)
 				}
 			}
-			r.redactServerHeaders(redacted)
+			r.redactServerSecrets(redacted)
 			// Mirror httpapi.enrichServersWithQuarantineStats so SSE
 			// subscribers see the same Quarantine.{Pending,Changed,Blocked}
 			// counts the REST list returns. Without this, the Web UI's
@@ -316,12 +316,15 @@ func (r *Runtime) enrichServersWithQuarantineStats(servers []contracts.Server) {
 	}
 }
 
-// redactServerHeaders mirrors httpapi.(*Server).redactServerHeaders. It strips
-// sensitive header values (Authorization, Cookie, X-API-Key, ...) unless the
-// loaded config opts out via reveal_secret_headers: true. Centralising this in
-// the runtime keeps SSE subscribers behind the same trust boundary as the
-// REST API.
-func (r *Runtime) redactServerHeaders(servers []contracts.Server) {
+// redactServerSecrets mirrors httpapi.(*Server).redactServerSecrets. It masks
+// the secret-bearing fields (sensitive headers, env-var secrets, URL query
+// credentials, and secrets echoed into last_error / health.detail) unless the
+// loaded config opts out via reveal_secret_headers: true. Keeping SSE
+// subscribers behind the exact same trust boundary as the REST list is
+// load-bearing: the Web UI's mergeServers treats each payload as authoritative,
+// so a masked-vs-plaintext mismatch between the two would flicker on every
+// delivery.
+func (r *Runtime) redactServerSecrets(servers []contracts.Server) {
 	cfg := r.Config()
 	if cfg != nil && cfg.RevealSecretHeaders {
 		return
@@ -329,6 +332,18 @@ func (r *Runtime) redactServerHeaders(servers []contracts.Server) {
 	for i := range servers {
 		if len(servers[i].Headers) > 0 {
 			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
+		}
+		if len(servers[i].Env) > 0 {
+			servers[i].Env = oauth.RedactEnvValues(servers[i].Env)
+		}
+		if servers[i].URL != "" {
+			servers[i].URL = oauth.RedactURLQueryParams(servers[i].URL)
+		}
+		if servers[i].LastError != "" {
+			servers[i].LastError = oauth.RedactSensitiveData(servers[i].LastError)
+		}
+		if servers[i].Health != nil && servers[i].Health.Detail != "" {
+			servers[i].Health.Detail = oauth.RedactSensitiveData(servers[i].Health.Detail)
 		}
 	}
 }

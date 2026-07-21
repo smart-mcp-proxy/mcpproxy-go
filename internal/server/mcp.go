@@ -3199,21 +3199,26 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	revealHeaders := p.config != nil && p.config.RevealSecretHeaders
 	for i, server := range servers {
 		// Redact sensitive header values (Authorization, X-API-Key, Cookie,
-		// etc.) before surfacing them through the MCP tool. An MCP agent
-		// inside a sandbox should never be able to read another upstream's
-		// Bearer token via `upstream_servers list`. Operators who genuinely
-		// need to see them can set `reveal_secret_headers: true` in config.
+		// etc.), env-var secrets, and URL query credentials before surfacing
+		// them through the MCP tool. An MCP agent inside a sandbox should
+		// never be able to read another upstream's Bearer token, API key, or
+		// URL-embedded secret via `upstream_servers list`. Operators who
+		// genuinely need the raw values can set `reveal_secret_headers: true`.
 		headers := server.Headers
+		serverURL := server.URL
+		serverEnv := server.Env
 		if !revealHeaders {
 			headers = oauth.RedactStringHeaders(server.Headers)
+			serverEnv = oauth.RedactEnvValues(server.Env)
+			serverURL = oauth.RedactURLQueryParams(server.URL)
 		}
 		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"protocol":    server.Protocol,
 			"command":     server.Command,
 			"args":        server.Args,
-			"url":         server.URL,
-			"env":         server.Env,
+			"url":         serverURL,
+			"env":         serverEnv,
 			"headers":     headers,
 			"enabled":     server.Enabled,
 			"quarantined": server.Quarantined,
@@ -3235,6 +3240,12 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			connState = connInfo.State.String()
 			if connInfo.LastError != nil {
 				lastError = connInfo.LastError.Error()
+				// On connect failure the raw upstream URL (query secrets and
+				// all) is commonly echoed into the error; scrub it before it
+				// reaches connection_status.last_error and health.detail.
+				if !revealHeaders {
+					lastError = oauth.RedactSensitiveData(lastError)
+				}
 			}
 			isConnected = connInfo.State.String() == "connected"
 			userLoggedOut = client.IsUserLoggedOut()

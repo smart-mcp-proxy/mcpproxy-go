@@ -4,6 +4,7 @@ package oauth
 
 import (
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -123,6 +124,130 @@ func RedactStringHeaders(headers map[string]string) map[string]string {
 		}
 	}
 	return redacted
+}
+
+// sensitiveEnvMarkers are substrings that, when present in an env var name
+// (case-insensitive), mark its value as a secret to be masked. The list is
+// deliberately broad — masking a non-secret value is safe (it just becomes
+// less readable), whereas leaking a real secret is not — but the markers are
+// specific enough to leave ordinary configuration (LOG_LEVEL, HOME, NODE_ENV,
+// HTTP_PROXY, …) readable. Covers API_KEY/APIKEY (KEY), PASSWORD/PASSWD/PASS,
+// CREDENTIAL, AUTH, BEARER, PRIVATE, CERT.
+var sensitiveEnvMarkers = []string{
+	"TOKEN", "SECRET", "KEY", "PASSWORD", "PASSWD", "PASS",
+	"CREDENTIAL", "AUTH", "BEARER", "PRIVATE", "CERT",
+}
+
+// isSensitiveEnvKey reports whether an env var name looks like it holds a
+// secret, based on a case-insensitive substring match against
+// sensitiveEnvMarkers.
+func isSensitiveEnvKey(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, marker := range sensitiveEnvMarkers {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// RedactEnvValues is the env-var analogue of RedactStringHeaders, for the
+// per-server config `env` map surfaced by the upstream_servers MCP tool, the
+// /api/v1/servers REST response, and the SSE event stream. Returns a new map;
+// the input is not mutated. Returns nil for nil input so JSON callers keep
+// emitting `null` rather than `{}` (same back-compat contract as
+// RedactStringHeaders).
+//
+// Values under a sensitive-looking key (see isSensitiveEnvKey) are replaced
+// with MaskValue — which passes ${env:...}/${keyring:...} references through
+// unchanged and renders literals as `••••<last2> (<N> chars)`. Non-sensitive
+// keys stay readable so operators can still see LOG_LEVEL, NODE_ENV, etc.,
+// with a RedactSensitiveData pass over the value as a defence-in-depth fallback
+// for embedded secrets (it leaves ordinary values like `debug` untouched).
+func RedactEnvValues(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	redacted := make(map[string]string, len(env))
+	for key, value := range env {
+		if isSensitiveEnvKey(key) {
+			redacted[key] = MaskValue(value)
+		} else {
+			redacted[key] = RedactSensitiveData(value)
+		}
+	}
+	return redacted
+}
+
+// sensitiveQueryParams are the URL query parameter names (case-insensitive)
+// whose values are masked by RedactURLQueryParams. It extends the base
+// sensitiveParams set (used by the log redactors) with the parameter names
+// commonly seen carrying credentials in MCP server URLs.
+var sensitiveQueryParams = func() map[string]bool {
+	m := make(map[string]bool, len(sensitiveParams)+6)
+	for _, p := range sensitiveParams {
+		m[p] = true
+	}
+	for _, p := range []string{"apikey", "api_key", "key", "sig", "signature", "secret"} {
+		m[p] = true
+	}
+	return m
+}()
+
+// RedactURLQueryParams masks the values of sensitive query parameters in a URL
+// while leaving the rest of the URL — path, non-sensitive params, and any
+// ${env:...}/${keyring:...} reference values — verbatim. Unlike RedactURL
+// (regex, log-oriented, emits `***REDACTED***`) it parses with net/url and
+// masks with MaskValue, giving the same client-facing representation as the
+// header/env redactors. References are passed through unchanged because they
+// are labels, not secrets. A URL with no query, or no sensitive params, is
+// returned unchanged. On parse failure it falls back to the regex RedactURL.
+func RedactURLQueryParams(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return RedactURL(rawURL)
+	}
+	if u.RawQuery == "" {
+		return rawURL
+	}
+	// Edit RawQuery by hand rather than via url.Values.Encode(): Encode
+	// re-percent-encodes and reorders every parameter, which would mangle
+	// reference values like ${env:NAME} into an unrecognizable form and
+	// defeat the UI's keyring-chip detection. Here only the masked value
+	// changes; untouched parameters keep their exact original bytes.
+	parts := strings.Split(u.RawQuery, "&")
+	changed := false
+	for i, part := range parts {
+		eq := strings.IndexByte(part, '=')
+		if eq < 0 {
+			continue
+		}
+		key := part[:eq]
+		decKey, keyErr := url.QueryUnescape(key)
+		if keyErr != nil {
+			decKey = key
+		}
+		if !sensitiveQueryParams[strings.ToLower(decKey)] {
+			continue
+		}
+		decVal, valErr := url.QueryUnescape(part[eq+1:])
+		if valErr != nil {
+			decVal = part[eq+1:]
+		}
+		if isConfigReference(decVal) {
+			continue
+		}
+		parts[i] = key + "=" + url.QueryEscape(MaskValue(decVal))
+		changed = true
+	}
+	if !changed {
+		return rawURL
+	}
+	u.RawQuery = strings.Join(parts, "&")
+	return u.String()
 }
 
 // isConfigReference reports whether the given value is already a

@@ -2030,7 +2030,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			}
 			if len(serverStatus.Config.Headers) > 0 {
 				// Headers are redacted at the httpapi/MCP serialization
-				// boundary (see Server.redactServerHeaders) — emit the
+				// boundary (see Server.redactServerSecrets) — emit the
 				// raw values here so reveal-secret-headers users still
 				// see plaintext.
 				serverMap["headers"] = serverStatus.Config.Headers

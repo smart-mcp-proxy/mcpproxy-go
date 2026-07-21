@@ -156,6 +156,46 @@ func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
 	assert.Equal(t, "application/json", contentVal, "Content-Type is not sensitive; must not be redacted")
 }
 
+// Issue #872: the SSE servers.changed payload must mask env-var secrets and
+// URL query credentials with the same trust boundary it already applies to
+// headers, while leaving non-sensitive env, references, and the path visible.
+func TestEmitServersChanged_RedactsEnvAndURLSecrets(t *testing.T) {
+	servers := []*contracts.Server{
+		{
+			Name: "alpha",
+			URL:  "https://api.example.com/mcp?apikey=supersecretkey123&region=eu",
+			Env: map[string]string{
+				"GITHUB_TOKEN": "ghp_fake_secret_value_1234",
+				"LOG_LEVEL":    "debug",
+				"API_KEY":      "${env:REAL_KEY}",
+			},
+		},
+	}
+	stats := &contracts.ServerStats{TotalServers: 1}
+
+	rt := newPayloadTestRuntime(t, &fakeServersLister{servers: servers, stats: stats})
+	rt.cfg = &config.Config{}
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	rt.emitServersChanged("redact-env-url", nil)
+
+	evt := receiveServersChanged(t, ch)
+	gotServers, ok := evt.Payload["servers"].([]contracts.Server)
+	require.True(t, ok)
+	require.Len(t, gotServers, 1)
+
+	gotURL := gotServers[0].URL
+	assert.NotContains(t, gotURL, "supersecretkey123", "URL query secret must not survive")
+	assert.Contains(t, gotURL, "region=eu", "non-sensitive query param stays readable")
+
+	gotEnv := gotServers[0].Env
+	assert.NotContains(t, gotEnv["GITHUB_TOKEN"], "ghp_fake_secret_value_1234", "env secret must be masked")
+	assert.Contains(t, gotEnv["GITHUB_TOKEN"], "••••", "env secret uses the masked-display format")
+	assert.Equal(t, "debug", gotEnv["LOG_LEVEL"], "non-sensitive env stays readable")
+	assert.Equal(t, "${env:REAL_KEY}", gotEnv["API_KEY"], "config references pass through unchanged")
+}
+
 // ctxAwareLister is a serversLister that blocks ListServers until the
 // caller-supplied ctx fires Done. Used to verify the parent ctx is threaded
 // through buildServersChangedPayload — without that threading the call sits

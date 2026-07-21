@@ -217,6 +217,116 @@ func TestRedactURL(t *testing.T) {
 	})
 }
 
+func TestRedactEnvValues(t *testing.T) {
+	t.Run("masks sensitive env keys with the display format", func(t *testing.T) {
+		got := RedactEnvValues(map[string]string{
+			"GITHUB_TOKEN":  "ghp_fake_token_value_1234",
+			"API_KEY":       "supersecretkey",
+			"DB_PASSWORD":   "hunter2hunter2",
+			"AWS_SECRET":    "aws-secret-value",
+			"AUTH_BEARER":   "bearer-material-x",
+			"SIGNING_CERT":  "cert-body-material",
+			"PRIVATE_STUFF": "private-material",
+		})
+		assert.Equal(t, "••••34 (25 chars)", got["GITHUB_TOKEN"])
+		assert.Equal(t, "••••ey (14 chars)", got["API_KEY"])
+		assert.Equal(t, "••••r2 (14 chars)", got["DB_PASSWORD"])
+		assert.NotContains(t, got["AWS_SECRET"], "aws-secret-value")
+		assert.NotContains(t, got["AUTH_BEARER"], "bearer-material")
+		assert.NotContains(t, got["SIGNING_CERT"], "cert-body")
+		assert.NotContains(t, got["PRIVATE_STUFF"], "private-material")
+	})
+
+	t.Run("leaves non-sensitive env values readable", func(t *testing.T) {
+		got := RedactEnvValues(map[string]string{
+			"LOG_LEVEL":    "debug",
+			"HOME":         "/home/user",
+			"EXISTING_VAR": "existing_value",
+			"NODE_ENV":     "production",
+			"HTTP_PROXY":   "http://proxy:8080",
+			"MAX_RETRIES":  "5",
+		})
+		assert.Equal(t, "debug", got["LOG_LEVEL"])
+		assert.Equal(t, "/home/user", got["HOME"])
+		assert.Equal(t, "existing_value", got["EXISTING_VAR"])
+		assert.Equal(t, "production", got["NODE_ENV"])
+		assert.Equal(t, "http://proxy:8080", got["HTTP_PROXY"])
+		assert.Equal(t, "5", got["MAX_RETRIES"])
+	})
+
+	t.Run("config references on sensitive keys pass through unchanged", func(t *testing.T) {
+		got := RedactEnvValues(map[string]string{
+			"GITHUB_TOKEN": "${env:REAL_GITHUB_TOKEN}",
+			"API_KEY":      "${keyring:my-api-key}",
+		})
+		assert.Equal(t, "${env:REAL_GITHUB_TOKEN}", got["GITHUB_TOKEN"])
+		assert.Equal(t, "${keyring:my-api-key}", got["API_KEY"])
+	})
+
+	t.Run("nil input returns nil", func(t *testing.T) {
+		assert.Nil(t, RedactEnvValues(nil))
+	})
+
+	t.Run("empty input returns empty map", func(t *testing.T) {
+		got := RedactEnvValues(map[string]string{})
+		assert.NotNil(t, got)
+		assert.Empty(t, got)
+	})
+
+	t.Run("does not mutate input", func(t *testing.T) {
+		input := map[string]string{"API_KEY": "supersecretkey"}
+		_ = RedactEnvValues(input)
+		assert.Equal(t, "supersecretkey", input["API_KEY"], "input should be unchanged")
+	})
+}
+
+func TestRedactURLQueryParams(t *testing.T) {
+	t.Run("masks sensitive query params, keeps others", func(t *testing.T) {
+		got := RedactURLQueryParams("https://api.example.com/mcp?apikey=supersecretkey&region=eu")
+		assert.NotContains(t, got, "supersecretkey", "plaintext secret must not survive")
+		assert.Contains(t, got, "region=eu", "non-sensitive params stay readable")
+	})
+
+	t.Run("masks token, key, sig, signature params", func(t *testing.T) {
+		got := RedactURLQueryParams("https://h/mcp?token=aaaaaaaaaa&key=bbbbbbbbbb&sig=cccccccccc&signature=dddddddddd")
+		assert.NotContains(t, got, "aaaaaaaaaa")
+		assert.NotContains(t, got, "bbbbbbbbbb")
+		assert.NotContains(t, got, "cccccccccc")
+		assert.NotContains(t, got, "dddddddddd")
+	})
+
+	t.Run("reference-valued sensitive params pass through unchanged", func(t *testing.T) {
+		in := "https://api.example.com/mcp?apikey=${env:MY_KEY}&region=eu"
+		got := RedactURLQueryParams(in)
+		assert.Equal(t, in, got, "config references are labels, not secrets — leave verbatim")
+	})
+
+	t.Run("mixed reference and secret preserves the reference verbatim", func(t *testing.T) {
+		got := RedactURLQueryParams("https://h/mcp?apikey=${env:MY_KEY}&token=realsecret99")
+		assert.Contains(t, got, "apikey=${env:MY_KEY}", "reference must remain recognizable")
+		assert.NotContains(t, got, "realsecret99", "the real secret must be masked")
+	})
+
+	t.Run("no query string returns URL unchanged", func(t *testing.T) {
+		in := "https://api.example.com/mcp"
+		assert.Equal(t, in, RedactURLQueryParams(in))
+	})
+
+	t.Run("no sensitive params returns URL unchanged", func(t *testing.T) {
+		in := "https://api.example.com/mcp?region=eu&limit=10"
+		assert.Equal(t, in, RedactURLQueryParams(in))
+	})
+
+	t.Run("empty URL returns empty", func(t *testing.T) {
+		assert.Empty(t, RedactURLQueryParams(""))
+	})
+
+	t.Run("case-insensitive param matching", func(t *testing.T) {
+		got := RedactURLQueryParams("https://h/mcp?ApiKey=supersecretkey")
+		assert.NotContains(t, got, "supersecretkey")
+	})
+}
+
 func TestLogOAuthRequest(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	headers := http.Header{
