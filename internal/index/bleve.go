@@ -294,9 +294,10 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 	// Convert results
 	var results []*config.SearchResult
 	for _, hit := range searchResult.Hits {
+		serverName := getStringField(hit.Fields, "server_name")
 		toolMeta := &config.ToolMetadata{
-			Name:             getStringField(hit.Fields, "full_tool_name"),
-			ServerName:       getStringField(hit.Fields, "server_name"),
+			Name:             canonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
+			ServerName:       serverName,
 			Description:      getStringField(hit.Fields, "description"),
 			ParamsJSON:       getStringField(hit.Fields, "params_json"),
 			OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
@@ -429,9 +430,10 @@ func (b *BleveIndex) GetToolsByServer(serverName string) ([]*config.ToolMetadata
 		}
 
 		for _, hit := range searchResult.Hits {
+			serverName := getStringField(hit.Fields, "server_name")
 			toolMeta := &config.ToolMetadata{
-				Name:             getStringField(hit.Fields, "full_tool_name"),
-				ServerName:       getStringField(hit.Fields, "server_name"),
+				Name:             canonicalToolName(serverName, getStringField(hit.Fields, "full_tool_name")),
+				ServerName:       serverName,
 				Description:      getStringField(hit.Fields, "description"),
 				ParamsJSON:       getStringField(hit.Fields, "params_json"),
 				OutputSchemaJSON: getStringField(hit.Fields, "output_schema_json"),
@@ -481,6 +483,19 @@ func (b *BleveIndex) GetAllIndexedServerNames() ([]string, error) {
 	b.logger.Debug("Retrieved indexed server names",
 		zap.Int("count", len(names)))
 	return names, nil
+}
+
+// canonicalToolName returns the tool's full "server:tool" identity. Discovery
+// stores the bare tool name in the index (ToolMetadata{ServerName:"github",
+// Name:"create_issue"}), so the read seams must reattach the server prefix for
+// consumers (retrieve_tools/describe_tool/call_tool_*) that require it (#871).
+// The double-prefix guard is mandatory: legacy index data and test fixtures may
+// already store a prefixed name — those pass through unchanged.
+func canonicalToolName(serverName, name string) string {
+	if serverName == "" || strings.HasPrefix(name, serverName+":") {
+		return name
+	}
+	return serverName + ":" + name
 }
 
 // Helper function to get string field from search results

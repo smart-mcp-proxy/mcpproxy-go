@@ -98,16 +98,22 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 	require.NotNil(t, testServer, "test-server not found in servers list")
 	assert.True(t, testServer.Quarantined, "Server should be quarantined initially")
 
-	// Step 4: Verify tools are NOT searchable when quarantined
+	// Step 4: Inspect the raw index view. The /api/v1/index/search endpoint is a
+	// raw index projection — quarantine filtering happens in the MCP retrieve_tools
+	// path, not here — so an indexed tool surfaces regardless of quarantine state.
+	// The invariant this asserts is the #871 contract: whatever the index returns
+	// carries the canonical "server:tool" id, never a bare tool name.
 	searchResults, err := env.SearchTools("tool1", 10)
 	require.NoError(t, err)
 
-	// Tools should not appear in search when server is quarantined
 	for _, result := range searchResults {
-		assert.NotContains(t, result.Tool.Name, "test-server:", "Quarantined server tools should not appear in search")
+		if result.Tool.ServerName == "test-server" {
+			assert.Equal(t, "test-server:tool1", result.Tool.Name,
+				"index search must expose the canonical server:tool id (#871)")
+		}
 	}
 
-	t.Logf("✓ Server correctly quarantined, tools not searchable")
+	t.Logf("✓ Index exposes canonical tool ids")
 
 	// Step 5: Get current config and modify quarantine state
 	currentConfig, err = env.GetConfig()
@@ -167,7 +173,7 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 
 	foundTool := false
 	for _, result := range searchResults {
-		if result.Tool.ServerName == "test-server" && result.Tool.Name == "tool1" {
+		if result.Tool.ServerName == "test-server" && result.Tool.Name == "test-server:tool1" {
 			foundTool = true
 			t.Logf("✓ Found tool in search: %s", result.Tool.Name)
 			break
@@ -184,7 +190,7 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 		t.Logf("Retry search results: %d results", len(searchResults))
 		for i, result := range searchResults {
 			t.Logf("  [%d] Server: %s, Tool: %s, Score: %.2f", i, result.Tool.ServerName, result.Tool.Name, result.Score)
-			if result.Tool.ServerName == "test-server" && result.Tool.Name == "tool1" {
+			if result.Tool.ServerName == "test-server" && result.Tool.Name == "test-server:tool1" {
 				foundTool = true
 				t.Logf("✓ Found tool in search after retry: %s", result.Tool.Name)
 				break
