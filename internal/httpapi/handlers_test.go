@@ -224,6 +224,54 @@ func TestHandleAddServer(t *testing.T) {
 	})
 }
 
+// refreshNotFoundController makes DiscoverServerTools report a not-found error
+// so the refresh endpoint's 404 mapping can be exercised.
+type refreshNotFoundController struct {
+	*MockServerController
+}
+
+func (c *refreshNotFoundController) DiscoverServerTools(_ context.Context, _ string) error {
+	return fmt.Errorf("server not found")
+}
+
+// TestHandleRefreshServer tests the POST /api/v1/servers/{id}/refresh endpoint
+// (issue #873 operator recovery op).
+func TestHandleRefreshServer(t *testing.T) {
+	t.Run("refreshes server successfully", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		srv := NewServer(&MockServerController{}, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/test-server/refresh", nil)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Success bool                           `json:"success"`
+			Data    contracts.ServerActionResponse `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+		assert.True(t, resp.Success)
+		assert.Equal(t, "test-server", resp.Data.Server)
+		assert.Equal(t, "refresh", resp.Data.Action)
+		assert.True(t, resp.Data.Success)
+	})
+
+	t.Run("returns 404 when server not found", func(t *testing.T) {
+		logger := zap.NewNop().Sugar()
+		srv := NewServer(&refreshNotFoundController{&MockServerController{}}, logger, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/servers/ghost/refresh", nil)
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
 // TestHandleRemoveServer tests the DELETE /api/v1/servers/{name} endpoint
 func TestHandleRemoveServer(t *testing.T) {
 	t.Run("removes server successfully", func(t *testing.T) {

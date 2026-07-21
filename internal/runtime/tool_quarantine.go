@@ -861,6 +861,65 @@ func (r *Runtime) markOutputSchemaHashMigrationCompleteIfReady() {
 	r.logger.Info("Output schema hash migration completed")
 }
 
+// reindexServerToolsAfterApprovalChange reconciles the search index with a
+// just-mutated set of tool-approval records for one server (issue #873).
+// Approval mutations (ApproveTools / BlockTools / SetToolEnabled and their bulk
+// variants) only write BBolt records and emit events; indexing otherwise
+// happens solely in applyDifferentialToolUpdate, reached from discovery (boot
+// sweep, periodic sweep, connect, tools/list_changed). Without this an approved
+// tool is callable immediately (call-time gates read BBolt live) but stays
+// invisible to retrieve_tools/describe_tool until the next sweep, and a
+// blocked/disabled tool lingers in the index just as long.
+//
+// Callers invoke this in a goroutine so request handlers return fast.
+func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
+	if r.indexManager == nil || r.storageManager == nil {
+		return
+	}
+
+	// SECURITY-CRITICAL GUARD: only reindex a server that exists, is enabled,
+	// and is NOT quarantined. applyDifferentialToolUpdate does not itself
+	// withhold a quarantined server's tools (checkToolApprovals computes
+	// enforceQuarantine but only logs it), so an unguarded call here would index
+	// a quarantined server's tool descriptions — exactly what the search-side
+	// quarantine model deliberately withholds. A disabled server likewise has
+	// no business (re)entering the index.
+	var sc *config.ServerConfig
+	for _, candidate := range r.Config().Servers {
+		if candidate.Name == serverName {
+			sc = candidate
+			break
+		}
+	}
+	if sc == nil || !sc.Enabled || sc.Quarantined {
+		return
+	}
+
+	// Prefer the last-good snapshot so the reindex is a pure local diff with no
+	// network round-trip. It is populated by the full sweep and by
+	// DiscoverAndIndexToolsForServer.
+	snapshot := r.lastGoodToolsSnapshot(serverName)
+	if len(snapshot) == 0 {
+		// No snapshot captured yet — fall back to a full single-server
+		// rediscover, which indexes and populates the snapshot for next time.
+		if err := r.DiscoverAndIndexToolsForServer(r.AppContext(), serverName); err != nil {
+			r.logger.Debug("Approval-driven rediscovery failed",
+				zap.String("server", serverName), zap.Error(err))
+		}
+		return
+	}
+
+	// Re-run the differential update against the current approval records.
+	// Approved records now pass checkToolApprovals and get indexed;
+	// blocked/disabled ones are removed. Rug-pull safety is preserved: if the
+	// tool mutated after approval, checkToolApprovals re-flags it changed and it
+	// stays blocked.
+	if err := r.applyDifferentialToolUpdate(r.AppContext(), serverName, snapshot); err != nil {
+		r.logger.Warn("Failed to reindex tools after approval change",
+			zap.String("server", serverName), zap.Error(err))
+	}
+}
+
 // ApproveTools approves specific tools for a server, updating their status to approved.
 func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
 	if r.storageManager == nil {
@@ -917,6 +976,10 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 			"approved_count": approved,
 			"approved_by":    approvedBy,
 		})
+		// Index the newly approved tools now (issue #873) instead of waiting for
+		// the next discovery sweep. Async so the caller returns fast. Also covers
+		// ApproveAllTools and approveBaselineToolsForServer, which delegate here.
+		go r.reindexServerToolsAfterApprovalChange(serverName)
 	}
 
 	return nil
@@ -1025,6 +1088,10 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 		"updated_by": updatedBy,
 	})
 
+	// Reconcile the index with the new visibility state (issue #873): a disabled
+	// tool is removed, a re-enabled tool re-indexed.
+	go r.reindexServerToolsAfterApprovalChange(serverName)
+
 	return nil
 }
 
@@ -1092,6 +1159,8 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 			"changed":    changed,
 			"updated_by": updatedBy,
 		})
+		// Reconcile the index with the bulk visibility change (issue #873).
+		go r.reindexServerToolsAfterApprovalChange(serverName)
 	}
 
 	return changed, nil
@@ -1296,6 +1365,9 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 			"blocked_count": blocked,
 			"blocked_by":    blockedBy,
 		})
+		// Evict the now-disabled tools from the index promptly (issue #873).
+		// Covers BlockAllTools, which delegates here.
+		go r.reindexServerToolsAfterApprovalChange(serverName)
 	}
 
 	return blocked, nil

@@ -652,6 +652,9 @@ func (s *Server) setupRoutes() {
 			r.Post("/quarantine", s.handleQuarantineServer)
 			r.Post("/unquarantine", s.handleUnquarantineServer)
 			r.Post("/discover-tools", s.handleDiscoverServerTools)
+			// Alias of discover-tools named for the upstream_servers 'refresh'
+			// operation (issue #873): pure rediscover + reindex, no state change.
+			r.Post("/refresh", s.handleRefreshServer)
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
@@ -2330,6 +2333,49 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 	response := contracts.ServerActionResponse{
 		Server:  serverID,
 		Action:  "discover_tools",
+		Success: true,
+		Async:   false,
+	}
+	s.writeSuccess(w, response)
+}
+
+// handleRefreshServer godoc
+// @Summary Refresh a server's tools
+// @Description Re-discover and re-index a specific upstream MCP server's tools without changing any security state. Alias of discover-tools, named for the upstream_servers 'refresh' operation; use it to make just-approved tools searchable immediately.
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Tool refresh triggered successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Failed to refresh tools"
+// @Router /api/v1/servers/{id}/refresh [post]
+func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	s.logger.Info("Manual tool refresh triggered via API", "server", serverID)
+
+	if err := s.controller.DiscoverServerTools(r.Context(), serverID); err != nil {
+		s.logger.Error("Failed to refresh tools for server", "server", serverID, "error", err)
+
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
+
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to refresh tools: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "refresh",
 		Success: true,
 		Async:   false,
 	}

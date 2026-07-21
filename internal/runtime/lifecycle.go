@@ -439,6 +439,21 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	return nil
 }
 
+// lastGoodToolsSnapshot returns a copy of the most recently discovered tool set
+// for a server, or nil when none has been captured yet. Returning a copy lets
+// callers pass it to applyDifferentialToolUpdate without holding the lock.
+func (r *Runtime) lastGoodToolsSnapshot(serverName string) []*config.ToolMetadata {
+	r.lastGoodToolsMu.RLock()
+	defer r.lastGoodToolsMu.RUnlock()
+	snapshot := r.lastGoodTools[serverName]
+	if len(snapshot) == 0 {
+		return nil
+	}
+	cp := make([]*config.ToolMetadata, len(snapshot))
+	copy(cp, snapshot)
+	return cp
+}
+
 // DiscoverAndIndexToolsForServer discovers and indexes tools for a single server.
 // This is used for reactive tool discovery when a server connects.
 // Implements retry logic with exponential backoff for robustness.
@@ -505,6 +520,16 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 		r.logger.Warn("No tools discovered from server", zap.String("server", serverName))
 		return nil
 	}
+
+	// Persist a last-good snapshot for this server so the approval-driven
+	// reindex (issue #873) has a source without a fresh network round-trip.
+	// The full sweep populates this map too; single-server connects otherwise
+	// would leave it empty, forcing the reindex path back through discovery.
+	r.lastGoodToolsMu.Lock()
+	snapshot := make([]*config.ToolMetadata, len(tools))
+	copy(snapshot, tools)
+	r.lastGoodTools[serverName] = snapshot
+	r.lastGoodToolsMu.Unlock()
 
 	// Apply differential update: compare new tools with existing indexed tools
 	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
