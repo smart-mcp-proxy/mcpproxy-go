@@ -1408,10 +1408,14 @@ func (s *Server) RestartServer(serverName string) error {
 	return s.runtime.RestartServer(serverName)
 }
 
-// DiscoverServerTools triggers manual tool discovery for a specific server
+// DiscoverServerTools triggers manual tool discovery for a specific server.
+// This backs the explicit REST operator actions (POST .../discover-tools and
+// its .../refresh alias), so it uses the AUTHORITATIVE refresh path (issue
+// #873): a server that now reports zero tools has its stale index entries
+// removed rather than silently retained.
 func (s *Server) DiscoverServerTools(ctx context.Context, serverName string) error {
 	s.logger.Info("Manual tool discovery requested", zap.String("server", serverName))
-	return s.runtime.DiscoverAndIndexToolsForServer(ctx, serverName)
+	return s.runtime.RefreshServerTools(ctx, serverName)
 }
 
 // ForceReconnectAllServers triggers reconnection attempts for all managed servers.

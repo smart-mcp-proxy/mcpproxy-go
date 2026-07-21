@@ -859,8 +859,8 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithOpenWorldHintAnnotation(false),
 			mcp.WithString("operation",
 				mcp.Required(),
-				mcp.Description("Operation: list, add, remove, update, patch, tail_log, add_from_registry. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. For quarantine operations, use the 'quarantine_security' tool."),
-				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log", "add_from_registry"),
+				mcp.Description("Operation: list, add, remove, update, patch, tail_log, add_from_registry, enable, disable, restart, refresh. 'update' and 'patch' use smart merge - only specified fields change, others preserved. 'add_from_registry' adds an upstream from a registry reference (registry+id) so you need not hand-construct command/args/url - the server re-derives the runnable config and quarantines it. 'refresh' re-discovers and re-indexes a server's tools without changing any security state - use it to make just-approved tools searchable immediately. For quarantine operations, use the 'quarantine_security' tool."),
+				mcp.Enum("list", "add", "remove", "update", "patch", "tail_log", "add_from_registry", "enable", "disable", "restart", "refresh"),
 			),
 			mcp.WithString("name",
 				mcp.Description("Server name (required for add/remove/update/patch/tail_log operations; optional name override for add_from_registry)"),
@@ -2830,7 +2830,7 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
 	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
 		switch operation {
-		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "add_from_registry":
+		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "refresh", "add_from_registry":
 			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
 			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
 			return mcp.NewToolResultError(errMsg), nil
@@ -2860,6 +2860,8 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		result, opErr = p.handleEnableUpstream(ctx, request, false)
 	case "restart":
 		result, opErr = p.handleRestartUpstream(ctx, request)
+	case "refresh":
+		result, opErr = p.handleRefreshUpstream(ctx, request)
 	case "add_from_registry":
 		result, opErr = p.handleAddServerFromRegistry(ctx, request)
 	default:
@@ -3474,6 +3476,40 @@ func (p *MCPProxyServer) handleRestartUpstream(ctx context.Context, request mcp.
 
 	// Fallback: management service not available
 	return mcp.NewToolResultError("Management service not available"), nil
+}
+
+// handleRefreshUpstream re-discovers and re-indexes a server's tools without
+// touching any security state (issue #873). It is the operator recovery path
+// for making just-approved tools searchable immediately, independent of the
+// automatic reindex that now runs on approval.
+func (p *MCPProxyServer) handleRefreshUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	serverName, err := request.RequireString("name")
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Missing required parameter 'name': %v", err)), nil
+	}
+
+	if p.mainServer == nil || p.mainServer.runtime == nil {
+		return mcp.NewToolResultError("Management service not available"), nil
+	}
+
+	// Authoritative refresh (issue #873): a server now reporting zero tools has
+	// its stale index entries removed rather than silently retained.
+	if err := p.mainServer.runtime.RefreshServerTools(ctx, serverName); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to refresh server '%s': %v", serverName, err)), nil
+	}
+
+	result := map[string]interface{}{
+		"success": true,
+		"server":  serverName,
+		"action":  "refreshed",
+	}
+
+	jsonResult, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to serialize result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
 // handleDoctor returns comprehensive health diagnostics from the management service

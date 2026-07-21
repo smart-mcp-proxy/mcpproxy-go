@@ -373,22 +373,30 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	}
 	r.lastGoodToolsMu.Unlock()
 
-	// Apply differential update for each server with fallback to last-good snapshots
+	// Apply differential update for each server with fallback to last-good
+	// snapshots. Both writes go through applyServerDiffIfEligible so a quarantined
+	// or disabled server is never (re)indexed by the sweep (issue #873).
 	processedServers := make(map[string]struct{}, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		if err := r.applyDifferentialToolUpdate(ctx, serverName, serverTools); err != nil {
-			r.logger.Error("Failed to apply differential update for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-			// Continue with other servers instead of failing completely
-		}
+		r.applyServerDiffIfEligible(ctx, serverName, serverTools)
 	}
 
 	// For connected servers that were temporarily missing from discovery results,
 	// re-apply last-good snapshot to avoid transient index shrink.
 	for _, serverName := range knownServers {
 		if _, ok := processedServers[serverName]; ok {
+			continue
+		}
+
+		// SECURITY-CRITICAL GUARD (issue #873): this last-good fallback is the
+		// real exposure — DiscoverTools already skips quarantined/disabled servers
+		// (so they never enter the primary loop), but a quarantined server stays
+		// connected and keeps its pre-quarantine snapshot, so without a guard the
+		// fallback would reapply it. QuarantineServer deletes the server's index
+		// entries and then triggers this very sweep, which would immediately
+		// restore them. Skip ineligible servers before doing any snapshot work.
+		if !r.serverEligibleForIndexing(serverName) {
 			continue
 		}
 
@@ -410,11 +418,9 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 			zap.String("server", serverName),
 			zap.Int("snapshot_tools", len(snapshot)))
 
-		if err := r.applyDifferentialToolUpdate(ctx, serverName, snapshot); err != nil {
-			r.logger.Error("Failed to apply last-good snapshot for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
+		// Re-checks eligibility again immediately before the write (the check
+		// above and the connection/snapshot reads are not atomic).
+		r.applyServerDiffIfEligible(ctx, serverName, snapshot)
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -439,12 +445,58 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	return nil
 }
 
+// lastGoodToolsSnapshot returns a copy of the most recently discovered tool set
+// for a server, or nil when none has been captured yet. Returning a copy lets
+// callers pass it to applyDifferentialToolUpdate without holding the lock.
+func (r *Runtime) lastGoodToolsSnapshot(serverName string) []*config.ToolMetadata {
+	r.lastGoodToolsMu.RLock()
+	defer r.lastGoodToolsMu.RUnlock()
+	snapshot := r.lastGoodTools[serverName]
+	if len(snapshot) == 0 {
+		return nil
+	}
+	cp := make([]*config.ToolMetadata, len(snapshot))
+	copy(cp, snapshot)
+	return cp
+}
+
 // DiscoverAndIndexToolsForServer discovers and indexes tools for a single server.
-// This is used for reactive tool discovery when a server connects.
+// This is the LENIENT entry point used by reactive tool discovery (server
+// connect, notifications/tools/list_changed): a successful ListTools that
+// returns zero tools is treated as a transient blip and leaves the existing
+// index untouched (see the authoritative variant for the explicit-refresh path).
 // Implements retry logic with exponential backoff for robustness.
 func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName string) error {
+	return r.discoverAndIndexToolsForServer(ctx, serverName, false)
+}
+
+// RefreshServerTools re-discovers and re-indexes a single server AUTHORITATIVELY
+// (issue #873): a successful ListTools that returns zero tools is taken as the
+// truth — the server's stale index entries are removed and its last-good
+// snapshot is cleared, so a later approval-driven reindex cannot resurface tools
+// that no longer exist upstream. This is the explicit operator refresh/discover
+// path; the reactive callbacks keep the lenient behavior above.
+func (r *Runtime) RefreshServerTools(ctx context.Context, serverName string) error {
+	return r.discoverAndIndexToolsForServer(ctx, serverName, true)
+}
+
+func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
 	if r.upstreamManager == nil || r.indexManager == nil {
 		return fmt.Errorf("runtime managers not initialized")
+	}
+
+	// SECURITY-CRITICAL GUARD (issue #873): never (re)index a quarantined or
+	// disabled server. applyDifferentialToolUpdate below does not itself withhold
+	// a quarantined server's tools, so the upstream_servers "refresh" op and the
+	// reactive discovery callbacks that reach this function must gate here — else
+	// a quarantined server (kept connected for inspection) has its poisoned tool
+	// descriptions surfaced into retrieve_tools. Unquarantine reindexes via the
+	// full sweep (HandleUpstreamServerChange → DiscoverAndIndexTools), not this
+	// single-server path, so the guard does not strand a newly-trusted server.
+	if !r.serverEligibleForIndexing(serverName) {
+		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
+			zap.String("server", serverName))
+		return nil
 	}
 
 	r.logger.Info("Discovering and indexing tools for server", zap.String("server", serverName))
@@ -502,7 +554,45 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 	}
 
 	if len(tools) == 0 {
-		r.logger.Warn("No tools discovered from server", zap.String("server", serverName))
+		if !authoritative {
+			// Lenient path (reactive discovery): a transient empty result must
+			// not wipe a server's tools. Leave the index and last-good snapshot
+			// untouched; the next sweep or a real change will reconcile.
+			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
+				zap.String("server", serverName))
+			return nil
+		}
+		// Authoritative path (explicit refresh/discover, issue #873): zero tools
+		// is the truth. Fall through with an empty toolset so the differential
+		// update removes stale index entries and the snapshot below is cleared —
+		// otherwise refresh would report success while stale tools stayed
+		// searchable and a later approval reindex could resurface them.
+		r.logger.Info("Refresh discovered zero tools; clearing server's index entries and snapshot",
+			zap.String("server", serverName))
+	}
+
+	// Persist a last-good snapshot for this server so the approval-driven
+	// reindex (issue #873) has a source without a fresh network round-trip.
+	// The full sweep populates this map too; single-server connects otherwise
+	// would leave it empty, forcing the reindex path back through discovery.
+	// On an authoritative empty refresh this stores an empty slice, so
+	// lastGoodToolsSnapshot reports "no snapshot" and no stale set lingers.
+	r.lastGoodToolsMu.Lock()
+	snapshot := make([]*config.ToolMetadata, len(tools))
+	copy(snapshot, tools)
+	r.lastGoodTools[serverName] = snapshot
+	r.lastGoodToolsMu.Unlock()
+
+	// TOCTOU GUARD (issue #873): the eligibility check at the top of this
+	// function ran BEFORE the seconds-wide ListTools above. The server may have
+	// been quarantined in that window — in which case QuarantineServer already
+	// deleted its tools from the index — so re-check immediately before we write
+	// them back. A microsecond window remains between this check and the index
+	// mutation inside applyDifferentialToolUpdate; closing it fully would require
+	// holding a lock across the index write, which is deliberately not done.
+	if !r.serverEligibleForIndexing(serverName) {
+		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
+			zap.String("server", serverName))
 		return nil
 	}
 

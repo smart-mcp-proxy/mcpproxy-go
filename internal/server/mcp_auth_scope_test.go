@@ -183,7 +183,7 @@ func TestHandleUpstreamServers_AgentBlocked_WriteOps(t *testing.T) {
 	}
 	ctx := auth.WithAuthContext(context.Background(), agentCtx)
 
-	blockedOps := []string{"add", "remove", "update", "patch", "enable", "disable", "restart"}
+	blockedOps := []string{"add", "remove", "update", "patch", "enable", "disable", "restart", "refresh"}
 	for _, op := range blockedOps {
 		t.Run("operation_"+op, func(t *testing.T) {
 			request := mcp.CallToolRequest{}
