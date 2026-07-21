@@ -2860,6 +2860,16 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed search results
 	typedResults := contracts.ConvertGenericSearchResultsToTyped(results)
 
+	// Restore the bare-tool-name contract on this REST surface (#871). The index
+	// read seams canonicalize the name to "server:tool" for the MCP discovery
+	// path, but external consumers of /api/v1/index/search assemble the id
+	// themselves from server_name + name — a prefixed name double-prefixes (e.g.
+	// the D1 retrieval-regression scorer). Strip the server prefix here so the
+	// REST envelope keeps its historical shape (bare name + separate server_name).
+	for i := range typedResults {
+		typedResults[i].Tool.Name = stripServerPrefix(typedResults[i].Tool.ServerName, typedResults[i].Tool.Name)
+	}
+
 	response := contracts.SearchToolsResponse{
 		Query:   query,
 		Results: typedResults,
@@ -2868,6 +2878,17 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// stripServerPrefix reverses index.CanonicalToolName for the REST index-search
+// surface: given serverName "github" and name "github:create_issue" it returns
+// "create_issue". Names without the "<serverName>:" prefix (already bare, or a
+// missing server name) pass through unchanged.
+func stripServerPrefix(serverName, name string) string {
+	if serverName == "" {
+		return name
+	}
+	return strings.TrimPrefix(name, serverName+":")
 }
 
 func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
