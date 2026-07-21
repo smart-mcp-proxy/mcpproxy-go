@@ -49,6 +49,16 @@ func TestRedactSensitiveData(t *testing.T) {
 		result := RedactSensitiveData(input)
 		assert.Equal(t, input, result)
 	})
+
+	// Issue #872: Azure-SAS-style URL secrets (?sig=...) echoed into a connect
+	// error must be scrubbed from the free-form last_error / health.detail /
+	// diagnostic.cause strings, in parity with RedactURLQueryParams.
+	t.Run("redacts sig and signature params", func(t *testing.T) {
+		input := `Post "https://host/mcp?sig=SAS_SECRET_VALUE&signature=OTHER_SECRET": no host`
+		result := RedactSensitiveData(input)
+		assert.NotContains(t, result, "SAS_SECRET_VALUE")
+		assert.NotContains(t, result, "OTHER_SECRET")
+	})
 }
 
 func TestRedactHeaders(t *testing.T) {
@@ -324,6 +334,28 @@ func TestRedactURLQueryParams(t *testing.T) {
 	t.Run("case-insensitive param matching", func(t *testing.T) {
 		got := RedactURLQueryParams("https://h/mcp?ApiKey=supersecretkey")
 		assert.NotContains(t, got, "supersecretkey")
+	})
+
+	// Issue #872: basic-auth credentials embedded in the URL userinfo
+	// (https://user:pass@host) are a secret on the same seams — mask the
+	// password while keeping the username and the rest of the URL.
+	t.Run("masks basic-auth userinfo password", func(t *testing.T) {
+		got := RedactURLQueryParams("https://svc:hunter2secret@internal.host/mcp")
+		assert.NotContains(t, got, "hunter2secret", "userinfo password must be masked")
+		assert.Contains(t, got, "svc", "username stays readable")
+		assert.Contains(t, got, "internal.host/mcp", "host and path stay intact")
+	})
+
+	t.Run("masks userinfo password alongside query secret", func(t *testing.T) {
+		got := RedactURLQueryParams("https://svc:pwdsecret123@h/mcp?token=qsecret456&region=eu")
+		assert.NotContains(t, got, "pwdsecret123")
+		assert.NotContains(t, got, "qsecret456")
+		assert.Contains(t, got, "region=eu")
+	})
+
+	t.Run("userinfo without password left unchanged", func(t *testing.T) {
+		in := "https://user@internal.host/mcp"
+		assert.Equal(t, in, RedactURLQueryParams(in))
 	})
 }
 

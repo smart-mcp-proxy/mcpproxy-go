@@ -3355,6 +3355,14 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed servers
 	servers := contracts.ConvertGenericServersToTyped(genericServers)
 
+	// Issue #872: last_error can echo the full upstream URL, including query
+	// credentials. Scrub it before surfacing on the doctor route unless the
+	// operator opted out via reveal_secret_headers.
+	reveal := false
+	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
+		reveal = cfg.RevealSecretHeaders
+	}
+
 	// Collect diagnostics (legacy format)
 	var upstreamErrors []contracts.DiagnosticIssue
 	var oauthRequired []string
@@ -3366,12 +3374,16 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Check for upstream errors
 	for _, server := range servers {
 		if server.LastError != "" {
+			errMsg := server.LastError
+			if !reveal {
+				errMsg = oauth.RedactSensitiveData(errMsg)
+			}
 			upstreamErrors = append(upstreamErrors, contracts.DiagnosticIssue{
 				Type:      "error",
 				Category:  "connection",
 				Server:    server.Name,
 				Title:     "Server Connection Error",
-				Message:   server.LastError,
+				Message:   errMsg,
 				Timestamp: now,
 				Severity:  "high",
 				Metadata: map[string]interface{}{

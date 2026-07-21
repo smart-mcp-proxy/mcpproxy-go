@@ -35,6 +35,13 @@ var sensitiveParams = []string{
 	"token",
 	"id_token",
 	"assertion",
+	// Issue #872: Azure-SAS-style URL credentials. sig/signature are not
+	// caught by secretPattern (which keys off secret|password|token|key), so
+	// list them explicitly here — this list feeds RedactSensitiveData/RedactURL
+	// (the free-form last_error / health.detail scrubbers) as well as
+	// sensitiveQueryParams below.
+	"sig",
+	"signature",
 }
 
 // tokenPattern matches Bearer tokens and other sensitive token patterns.
@@ -188,7 +195,8 @@ var sensitiveQueryParams = func() map[string]bool {
 	for _, p := range sensitiveParams {
 		m[p] = true
 	}
-	for _, p := range []string{"apikey", "api_key", "key", "sig", "signature", "secret"} {
+	// sig/signature already come from sensitiveParams above.
+	for _, p := range []string{"apikey", "api_key", "key", "secret"} {
 		m[p] = true
 	}
 	return m
@@ -210,43 +218,60 @@ func RedactURLQueryParams(rawURL string) string {
 	if err != nil {
 		return RedactURL(rawURL)
 	}
-	if u.RawQuery == "" {
-		return rawURL
+	changed := false
+
+	// Issue #872: basic-auth credentials embedded in the URL userinfo
+	// (https://user:pass@host) are just as sensitive as a query secret. Mask
+	// the password, keep the username. u.String() writes RawQuery verbatim, so
+	// re-encoding the userinfo does not disturb the query bytes we hand-edit
+	// below.
+	if u.User != nil {
+		if pw, hasPW := u.User.Password(); hasPW && !isConfigReference(pw) {
+			u.User = url.UserPassword(u.User.Username(), MaskValue(pw))
+			changed = true
+		}
 	}
+
 	// Edit RawQuery by hand rather than via url.Values.Encode(): Encode
 	// re-percent-encodes and reorders every parameter, which would mangle
 	// reference values like ${env:NAME} into an unrecognizable form and
 	// defeat the UI's keyring-chip detection. Here only the masked value
 	// changes; untouched parameters keep their exact original bytes.
-	parts := strings.Split(u.RawQuery, "&")
-	changed := false
-	for i, part := range parts {
-		eq := strings.IndexByte(part, '=')
-		if eq < 0 {
-			continue
+	if u.RawQuery != "" {
+		parts := strings.Split(u.RawQuery, "&")
+		queryChanged := false
+		for i, part := range parts {
+			eq := strings.IndexByte(part, '=')
+			if eq < 0 {
+				continue
+			}
+			key := part[:eq]
+			decKey, keyErr := url.QueryUnescape(key)
+			if keyErr != nil {
+				decKey = key
+			}
+			if !sensitiveQueryParams[strings.ToLower(decKey)] {
+				continue
+			}
+			decVal, valErr := url.QueryUnescape(part[eq+1:])
+			if valErr != nil {
+				decVal = part[eq+1:]
+			}
+			if isConfigReference(decVal) {
+				continue
+			}
+			parts[i] = key + "=" + url.QueryEscape(MaskValue(decVal))
+			queryChanged = true
 		}
-		key := part[:eq]
-		decKey, keyErr := url.QueryUnescape(key)
-		if keyErr != nil {
-			decKey = key
+		if queryChanged {
+			u.RawQuery = strings.Join(parts, "&")
+			changed = true
 		}
-		if !sensitiveQueryParams[strings.ToLower(decKey)] {
-			continue
-		}
-		decVal, valErr := url.QueryUnescape(part[eq+1:])
-		if valErr != nil {
-			decVal = part[eq+1:]
-		}
-		if isConfigReference(decVal) {
-			continue
-		}
-		parts[i] = key + "=" + url.QueryEscape(MaskValue(decVal))
-		changed = true
 	}
+
 	if !changed {
 		return rawURL
 	}
-	u.RawQuery = strings.Join(parts, "&")
 	return u.String()
 }
 

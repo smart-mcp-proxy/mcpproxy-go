@@ -1040,12 +1040,6 @@ struct ServerDetailView: View {
         let wd = editWorkingDir.trimmingCharacters(in: .whitespaces)
         if !wd.isEmpty { updates["working_dir"] = wd }
 
-        // Parse env vars. The textarea is the user's authoritative copy on
-        // save — sending an empty map clears all env vars on the backend
-        // (matches the existing add-server flow). We pass it through
-        // unconditionally so deletes round-trip.
-        updates["env"] = parseKVTextarea(editEnvVars)
-
         // Compute JSON Merge Patch (RFC 7396) diffs for env and headers.
         // The backend treats each value in the map as: non-null → upsert,
         // `null` → delete, omitted key → preserve. So we emit a single
@@ -1053,6 +1047,12 @@ struct ServerDetailView: View {
         // sentinels. JSONSerialization renders NSNull as the literal
         // `null` token — see the SwiftEncoder unit test that pins this
         // invariant in case a future refactor swaps the encoder.
+        //
+        // env MUST be diffed, never sent as a full map: the read path now
+        // returns masked secrets like `••••23 (14 chars)` (see #872), so a
+        // full-map send would upsert the mask over the real on-disk secret
+        // for every key the user left untouched. The diff omits unchanged
+        // (still-masked) keys, mirroring how headers are handled below.
         if let envPatch = diffKVMap(original: server.env ?? [:], next: parseKVTextarea(editEnvVars)) {
             updates["env"] = envPatch
         }
