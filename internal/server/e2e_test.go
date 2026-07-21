@@ -958,9 +958,15 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 					assert.Equal(t, "stdio", serverMap["protocol"])
 					assert.Equal(t, false, serverMap["enabled"]) // Server should be disabled as configured
 
-					// Verify environment variables
+					// Verify environment variables. TEST_KEY is a sensitive-looking
+					// key (contains "KEY"), so its value is masked in API output by
+					// default (issue #872); the masked-display format
+					// `••••<last2> (<N> chars)` confirms the real value round-tripped.
 					if envVars, ok := serverMap["env"].(map[string]interface{}); ok {
-						assert.Equal(t, "test_value_123", envVars["TEST_KEY"])
+						testKeyVal, _ := envVars["TEST_KEY"].(string)
+						assert.NotContains(t, testKeyVal, "test_value_123", "sensitive env value must be masked")
+						assert.Contains(t, testKeyVal, "••••")
+						assert.Contains(t, testKeyVal, "chars)", "mask must include length suffix")
 					}
 					break
 				}
@@ -2321,7 +2327,7 @@ func TestE2E_PatchDeepMergesEnvAndHeaders(t *testing.T) {
 		"command":      "echo",
 		"args_json":    `["test"]`,
 		"enabled":      false,
-		"env_json":     `{"EXISTING_VAR": "existing_value", "ANOTHER_VAR": "another_value"}`,
+		"env_json":     `{"EXISTING_VAR": "existing_value", "ANOTHER_VAR": "another_value", "GITHUB_TOKEN": "ghp_fake_secret_value_1234"}`,
 		"headers_json": `{"Authorization": "Bearer token", "X-Custom": "custom-value"}`,
 	}
 
@@ -2380,6 +2386,14 @@ func TestE2E_PatchDeepMergesEnvAndHeaders(t *testing.T) {
 	assert.Equal(t, "another_value", envMap["ANOTHER_VAR"], "ANOTHER_VAR must be preserved")
 	assert.Equal(t, "new_value", envMap["NEW_VAR"], "NEW_VAR must be added")
 
+	// Issue #872: a sensitive-looking env key (GITHUB_TOKEN) is masked in the
+	// list response with the same masked-display format as headers, while the
+	// non-sensitive vars above stay readable.
+	tokenVal, _ := envMap["GITHUB_TOKEN"].(string)
+	assert.Contains(t, tokenVal, "••••", "GITHUB_TOKEN should be masked")
+	assert.Contains(t, tokenVal, "chars)", "env mask should include the length suffix")
+	assert.NotContains(t, tokenVal, "ghp_fake_secret_value_1234", "env secret plaintext must not survive")
+
 	// CRITICAL: Verify existing headers are preserved (deep merge).
 	// The Authorization value is redacted in the API response by default
 	// (see config.RevealSecretHeaders) — we assert the key is still
@@ -2407,6 +2421,71 @@ func TestE2E_PatchDeepMergesEnvAndHeaders(t *testing.T) {
 	_, _ = mcpClient.CallTool(ctx, deleteRequest)
 
 	t.Log("✅ Test passed: Patch deep merges env and headers")
+}
+
+// TestE2E_ListMasksURLQuerySecrets verifies issue #872: a URL with a secret in
+// its query string is masked in the upstream_servers list response, while the
+// path and non-sensitive query params stay readable.
+func TestE2E_ListMasksURLQuerySecrets(t *testing.T) {
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mcpClient := env.CreateProxyClient()
+	defer mcpClient.Close()
+	env.ConnectClient(mcpClient)
+
+	ctx := context.Background()
+
+	addRequest := mcp.CallToolRequest{}
+	addRequest.Params.Name = "upstream_servers"
+	addRequest.Params.Arguments = map[string]interface{}{
+		"operation": "add",
+		"name":      "url-secret-test",
+		"url":       "https://api.example.com/mcp?apikey=supersecretkey123&region=eu",
+		"protocol":  "http",
+		"enabled":   false,
+	}
+	addResult, err := mcpClient.CallTool(ctx, addRequest)
+	require.NoError(t, err)
+	require.False(t, addResult.IsError, "Add operation should succeed: %v", getToolResultText(addResult))
+
+	listRequest := mcp.CallToolRequest{}
+	listRequest.Params.Name = "upstream_servers"
+	listRequest.Params.Arguments = map[string]interface{}{"operation": "list"}
+	listResult, err := mcpClient.CallTool(ctx, listRequest)
+	require.NoError(t, err)
+	require.False(t, listResult.IsError, "List operation should succeed")
+
+	listText := getToolResultText(listResult)
+	assert.NotContains(t, listText, "supersecretkey123",
+		"URL query secret must not appear anywhere in the list response")
+
+	var listResponse map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(listText), &listResponse))
+	serversList, ok := listResponse["servers"].([]interface{})
+	require.True(t, ok)
+	var found map[string]interface{}
+	for _, s := range serversList {
+		srv := s.(map[string]interface{})
+		if srv["name"] == "url-secret-test" {
+			found = srv
+			break
+		}
+	}
+	require.NotNil(t, found, "Should find the test server")
+	urlVal, _ := found["url"].(string)
+	assert.NotContains(t, urlVal, "supersecretkey123", "URL secret must be masked")
+	assert.Contains(t, urlVal, "region=eu", "non-sensitive query param stays readable")
+
+	deleteRequest := mcp.CallToolRequest{}
+	deleteRequest.Params.Name = "upstream_servers"
+	deleteRequest.Params.Arguments = map[string]interface{}{
+		"operation": "remove",
+		"name":      "url-secret-test",
+	}
+	_, _ = mcpClient.CallTool(ctx, deleteRequest)
+
+	t.Log("✅ Test passed: List masks URL query secrets")
 }
 
 // TestE2E_MultipleEnableDisablePreservesConfig verifies that toggling a server's
@@ -2498,7 +2577,14 @@ func TestE2E_MultipleEnableDisablePreservesConfig(t *testing.T) {
 	// Verify env
 	envMap, ok := foundServer["env"].(map[string]interface{})
 	require.True(t, ok, "env should be a map")
-	assert.Equal(t, "secret", envMap["API_KEY"], "API_KEY must be preserved")
+	// API_KEY is a sensitive-looking key (contains "KEY"), so its value is masked
+	// in API output by default (issue #872). The masked-display format
+	// `••••<last2> (<N> chars)` confirms the real secret was preserved across the 5
+	// toggles. DEBUG is not sensitive, so its value stays readable.
+	apiKeyVal, _ := envMap["API_KEY"].(string)
+	assert.NotContains(t, apiKeyVal, "secret", "sensitive env value must be masked")
+	assert.Contains(t, apiKeyVal, "••••", "API_KEY must be preserved across toggles (value masked in API output)")
+	assert.Contains(t, apiKeyVal, "chars)", "mask must include length suffix")
 	assert.Equal(t, "true", envMap["DEBUG"], "DEBUG must be preserved")
 
 	// Verify headers — Authorization is masked in API output by default

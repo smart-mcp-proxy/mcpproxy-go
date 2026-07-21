@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -653,6 +655,121 @@ func TestHandleGetServers_ExposesInitTimeout(t *testing.T) {
 	require.Len(t, resp.Data.Servers, 1)
 	assert.Equal(t, "2m0s", resp.Data.Servers[0].InitTimeout,
 		"init_timeout must appear in the GET payload as a duration string")
+}
+
+// TestHandlePatchServer_URLMaskAwareWritePath is the #872 (Codex round)
+// regression: unlike env/headers, `url` is a single string field with no
+// field-level diff on the client. The read path masks secrets in the URL query
+// string (redactServerSecrets → oauth.RedactURLQueryParams), so a client that
+// edits a non-secret part of the URL and echoes the masked value back would
+// otherwise persist the mask over the real credential. The write path must
+// substitute the stored real secret back in.
+func TestHandlePatchServer_URLMaskAwareWritePath(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	const storedURL = "https://api.example.com/mcp?apikey=REALSECRETKEY123&team=eng"
+
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name:     "synapbus",
+			Protocol: "streamable-http",
+			URL:      storedURL,
+			Enabled:  true,
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	// What the client saw on the read path, then edited a non-secret part of.
+	masked := oauth.RedactURLQueryParams(storedURL)
+	require.NotContains(t, masked, "REALSECRETKEY123", "precondition: read path masked the secret")
+	echoed := strings.Replace(masked, "team=eng", "team=ops", 1)
+
+	body, _ := json.Marshal(map[string]any{"url": echoed})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/synapbus", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, mockCtrl.capturedUpdates)
+
+	got := mockCtrl.capturedUpdates.URL
+	assert.Contains(t, got, "apikey=REALSECRETKEY123",
+		"the real secret must survive — the echoed mask must not be persisted over it")
+	assert.Contains(t, got, "team=ops", "the genuine non-secret edit must be preserved")
+}
+
+// TestHandlePatchServer_URLGenuineSecretEditPersists ensures the mask-aware
+// guard does not clobber a real new secret the user actually typed.
+func TestHandlePatchServer_URLGenuineSecretEditPersists(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name:     "synapbus",
+			Protocol: "streamable-http",
+			URL:      "https://api.example.com/mcp?apikey=OLDSECRET12345",
+			Enabled:  true,
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	const newURL = "https://api.example.com/mcp?apikey=BRANDNEWSECRET999"
+	body, _ := json.Marshal(map[string]any{"url": newURL})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/synapbus", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, mockCtrl.capturedUpdates)
+	assert.Equal(t, newURL, mockCtrl.capturedUpdates.URL,
+		"a genuinely edited secret must persist verbatim")
+}
+
+// TestHandlePatchServer_EnvMaskEchoRestored covers a non-tray client that
+// echoes the FULL masked env map back (the tray diffs, but other clients may
+// not). Any value equal to the masked rendering of the stored one must revert.
+func TestHandlePatchServer_EnvMaskEchoRestored(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	stored := map[string]string{
+		"API_KEY":   "live-secret-value",
+		"LOG_LEVEL": "debug",
+	}
+	mockCtrl := &mockPatchServerController{
+		apiKey: "test-key",
+		existingServer: &config.ServerConfig{
+			Name:     "demo",
+			Protocol: "stdio",
+			Command:  "uvx",
+			Enabled:  true,
+			Env:      stored,
+		},
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	// Client sends the masked API_KEY back verbatim while changing LOG_LEVEL.
+	maskedEnv := oauth.RedactEnvValues(stored)
+	rawBody, _ := json.Marshal(map[string]any{
+		"env": map[string]any{
+			"API_KEY":   maskedEnv["API_KEY"],
+			"LOG_LEVEL": "info",
+		},
+	})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/demo", bytes.NewReader(rawBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	require.NotNil(t, mockCtrl.capturedUpdates)
+	got := mockCtrl.capturedUpdates.Env
+	assert.Equal(t, "live-secret-value", got["API_KEY"],
+		"the echoed masked secret must be reverted to the stored real value")
+	assert.Equal(t, "info", got["LOG_LEVEL"], "the genuine edit must persist")
 }
 
 // TestHandleConvertConfigToSecret_ServerNotFound verifies the 404 path

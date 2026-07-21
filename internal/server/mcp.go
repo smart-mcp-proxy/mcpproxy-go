@@ -3199,21 +3199,26 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 	revealHeaders := p.config != nil && p.config.RevealSecretHeaders
 	for i, server := range servers {
 		// Redact sensitive header values (Authorization, X-API-Key, Cookie,
-		// etc.) before surfacing them through the MCP tool. An MCP agent
-		// inside a sandbox should never be able to read another upstream's
-		// Bearer token via `upstream_servers list`. Operators who genuinely
-		// need to see them can set `reveal_secret_headers: true` in config.
+		// etc.), env-var secrets, and URL query credentials before surfacing
+		// them through the MCP tool. An MCP agent inside a sandbox should
+		// never be able to read another upstream's Bearer token, API key, or
+		// URL-embedded secret via `upstream_servers list`. Operators who
+		// genuinely need the raw values can set `reveal_secret_headers: true`.
 		headers := server.Headers
+		serverURL := server.URL
+		serverEnv := server.Env
 		if !revealHeaders {
 			headers = oauth.RedactStringHeaders(server.Headers)
+			serverEnv = oauth.RedactEnvValues(server.Env)
+			serverURL = oauth.RedactURLQueryParams(server.URL)
 		}
 		serverMap := map[string]interface{}{
 			"name":        server.Name,
 			"protocol":    server.Protocol,
 			"command":     server.Command,
 			"args":        server.Args,
-			"url":         server.URL,
-			"env":         server.Env,
+			"url":         serverURL,
+			"env":         serverEnv,
 			"headers":     headers,
 			"enabled":     server.Enabled,
 			"quarantined": server.Quarantined,
@@ -3235,6 +3240,12 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			connState = connInfo.State.String()
 			if connInfo.LastError != nil {
 				lastError = connInfo.LastError.Error()
+				// On connect failure the raw upstream URL (query secrets and
+				// all) is commonly echoed into the error; scrub it before it
+				// reaches connection_status.last_error and health.detail.
+				if !revealHeaders {
+					lastError = oauth.RedactSensitiveData(lastError)
+				}
 			}
 			isConnected = connInfo.State.String() == "connected"
 			userLoggedOut = client.IsUserLoggedOut()
@@ -4471,7 +4482,10 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 
 	// Scalar fields - only set if provided in request
 	if url := request.GetString("url", ""); url != "" {
-		patch.URL = url
+		// #872: the read path masks URL query/userinfo secrets; if a caller
+		// echoes the masked url back, restore the stored real secrets so the
+		// mask is never persisted over them (parity with the REST PATCH path).
+		patch.URL = oauth.UnmaskURL(url, existingServer.URL)
 	}
 	if protocol := request.GetString("protocol", ""); protocol != "" {
 		patch.Protocol = protocol
@@ -4532,6 +4546,8 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid env_json: value for key %q must be string or null, got %T", k, v)
 			}
 		}
+		// #872: revert any masked env value echoed back by the caller.
+		patch.Env = oauth.UnmaskEnvValues(patch.Env, existingServer.Env)
 	}
 
 	// Handle headers JSON string - maps are deep merged with RFC 7396 null-means-remove
@@ -4554,6 +4570,8 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 				return nil, opts, fmt.Errorf("invalid headers_json: value for key %q must be string or null, got %T", k, v)
 			}
 		}
+		// #872: revert any masked header value echoed back by the caller.
+		patch.Headers = oauth.UnmaskHeaders(patch.Headers, existingServer.Headers)
 	}
 
 	// Handle isolation JSON string - deep merge for nested config

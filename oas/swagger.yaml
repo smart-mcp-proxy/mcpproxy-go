@@ -185,14 +185,18 @@ components:
           type: boolean
         reveal_secret_headers:
           description: |-
-            RevealSecretHeaders, when true, disables the redaction of sensitive
-            header values (Authorization, X-API-Key, Cookie, …) in responses
-            from the `upstream_servers` MCP tool, the `/api/v1/servers` REST
-            API, and the SSE event stream.
+            RevealSecretHeaders, when true, disables the redaction of the
+            secret-bearing server fields — sensitive header values (Authorization,
+            X-API-Key, Cookie, …), env-var secrets, and URL query credentials — in
+            responses from the `upstream_servers` MCP tool, the `/api/v1/servers`
+            REST API, and the SSE event stream. It also lets URL secrets echoed
+            into last_error / health.detail through unscrubbed.
 
-            Default false — sensitive header values are surfaced as
-            `***REDACTED***` so an MCP agent cannot read Bearer tokens / API
-            keys out of another upstream's config (PR #425).
+            Default false — sensitive values are surfaced masked as
+            `••••<last2> (<N> chars)` (error strings use `***REDACTED***`) so an
+            MCP agent cannot read Bearer tokens / API keys / URL secrets out of
+            another upstream's config (PR #425, issue #872). ${env:…}/${keyring:…}
+            references are labels, not secrets, and pass through unchanged.
 
             The Web UI / macOS tray edit forms work without seeing the real
             values: PATCH /api/v1/servers/{id} deep-merges (omitted keys are

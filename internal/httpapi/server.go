@@ -1203,7 +1203,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// so they send only the diff — redacted-but-unchanged values
 		// stay out of the patch and the backend keeps the real string.
 		// See PR #425 for the original threat model.
-		s.redactServerHeaders(serverValues)
+		s.redactServerSecrets(serverValues)
 
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
@@ -1234,7 +1234,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	s.enrichServersWithQuarantineStats(servers)
 
 	// See note above the management-service path for redaction rationale.
-	s.redactServerHeaders(servers)
+	s.redactServerSecrets(servers)
 
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
 
@@ -1264,25 +1264,55 @@ func flattenNullableMap(m map[string]*string) map[string]string {
 	return out
 }
 
-// redactServerHeaders walks each server in the slice and replaces sensitive
-// header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
-// Skips redaction entirely when `reveal_secret_headers: true` is set in the
-// loaded config, matching the behaviour of the `upstream_servers` MCP tool.
+// redactServerSecrets walks each server in the slice and masks the secret-
+// bearing fields: sensitive header values (Authorization, X-API-Key, Cookie,
+// …), env-var secrets, URL query credentials, and any URL secrets echoed into
+// the last_error / health.detail strings. Sensitive values render as the
+// masked-display format `••••<last2> (<N> chars)` (references pass through);
+// error strings use the `***REDACTED***` sentinel. Skips redaction entirely
+// when `reveal_secret_headers: true` is set in the loaded config, matching the
+// behaviour of the `upstream_servers` MCP tool and the SSE event stream.
 //
 // The UI edit-and-save flow works without seeing the real values because
 // PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved), so the
 // client computes a diff and only sends the keys that actually changed.
 // Redacted-but-unchanged values never round-trip — the backend keeps the
 // real string on disk.
-func (s *Server) redactServerHeaders(servers []contracts.Server) {
+func (s *Server) redactServerSecrets(servers []contracts.Server) {
 	cfg, err := s.controller.GetConfig()
 	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
 		return
 	}
 	for i := range servers {
-		if len(servers[i].Headers) > 0 {
-			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
-		}
+		redactServerSecretFields(&servers[i])
+	}
+}
+
+// redactServerSecretFields masks the secret-bearing fields of a single server
+// in place. Shared by the REST list/get path and the SSE event stream so both
+// sit behind the same trust boundary (parity is load-bearing: the Web UI's
+// mergeServers would flicker masked-vs-plaintext otherwise).
+func redactServerSecretFields(server *contracts.Server) {
+	if len(server.Headers) > 0 {
+		server.Headers = oauth.RedactStringHeaders(server.Headers)
+	}
+	if len(server.Env) > 0 {
+		server.Env = oauth.RedactEnvValues(server.Env)
+	}
+	if server.URL != "" {
+		server.URL = oauth.RedactURLQueryParams(server.URL)
+	}
+	if server.LastError != "" {
+		server.LastError = oauth.RedactSensitiveData(server.LastError)
+	}
+	if server.Health != nil && server.Health.Detail != "" {
+		server.Health.Detail = oauth.RedactSensitiveData(server.Health.Detail)
+	}
+	// Spec 044 diagnostic — its Cause echoes the raw connect error, which
+	// carries the full upstream URL (query secrets and all); scrub it in
+	// parity with LastError / Health.Detail.
+	if server.Diagnostic != nil && server.Diagnostic.Cause != "" {
+		server.Diagnostic.Cause = oauth.RedactSensitiveData(server.Diagnostic.Cause)
 	}
 }
 
@@ -1624,7 +1654,17 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	hasUpdates := false
 
 	if req.URL != "" {
-		updates.URL = req.URL
+		// #872: the read path masks secrets in the URL query string / userinfo
+		// (redactServerSecrets → oauth.RedactURLQueryParams), but url is a single
+		// string field with no field-level diff. If a client edits a non-secret
+		// part and echoes the masked url back, restore the stored real secrets so
+		// the mask is never persisted over them. Protects ALL clients, not just
+		// the tray.
+		if existingSrv != nil {
+			updates.URL = oauth.UnmaskURL(req.URL, existingSrv.URL)
+		} else {
+			updates.URL = req.URL
+		}
 		hasUpdates = true
 	}
 	if req.Command != "" {
@@ -1639,7 +1679,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// (RFC 7396): keys with a non-null value upsert, keys with a null
 	// value delete, omitted keys are preserved. This lets the Web UI /
 	// macOS tray / CLI send a minimal diff so redacted-but-unchanged
-	// values (returned by the GET path via `redactServerHeaders`)
+	// values (returned by the GET path via `redactServerSecrets`)
 	// never round-trip through the client.
 	if req.Env != nil {
 		merged := map[string]string{}
@@ -1654,6 +1694,12 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			} else {
 				merged[k] = *vp
 			}
+		}
+		// #872: a client could echo a masked env value back (the tray diffs, but
+		// other clients may send the full map). Revert any value that is exactly
+		// the masked rendering of the stored one.
+		if existingSrv != nil {
+			merged = oauth.UnmaskEnvValues(merged, existingSrv.Env)
 		}
 		updates.Env = merged
 		hasUpdates = true
@@ -1671,6 +1717,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			} else {
 				merged[k] = *vp
 			}
+		}
+		// #872: revert any masked header value echoed back (see env note above).
+		if existingSrv != nil {
+			merged = oauth.UnmaskHeaders(merged, existingSrv.Headers)
 		}
 		updates.Headers = merged
 		hasUpdates = true
@@ -3346,6 +3396,14 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed servers
 	servers := contracts.ConvertGenericServersToTyped(genericServers)
 
+	// Issue #872: last_error can echo the full upstream URL, including query
+	// credentials. Scrub it before surfacing on the doctor route unless the
+	// operator opted out via reveal_secret_headers.
+	reveal := false
+	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
+		reveal = cfg.RevealSecretHeaders
+	}
+
 	// Collect diagnostics (legacy format)
 	var upstreamErrors []contracts.DiagnosticIssue
 	var oauthRequired []string
@@ -3357,12 +3415,16 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Check for upstream errors
 	for _, server := range servers {
 		if server.LastError != "" {
+			errMsg := server.LastError
+			if !reveal {
+				errMsg = oauth.RedactSensitiveData(errMsg)
+			}
 			upstreamErrors = append(upstreamErrors, contracts.DiagnosticIssue{
 				Type:      "error",
 				Category:  "connection",
 				Server:    server.Name,
 				Title:     "Server Connection Error",
-				Message:   server.LastError,
+				Message:   errMsg,
 				Timestamp: now,
 				Severity:  "high",
 				Metadata: map[string]interface{}{
