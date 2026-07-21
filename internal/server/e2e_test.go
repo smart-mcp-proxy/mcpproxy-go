@@ -958,9 +958,15 @@ func TestE2E_AddUpstreamServerCommand(t *testing.T) {
 					assert.Equal(t, "stdio", serverMap["protocol"])
 					assert.Equal(t, false, serverMap["enabled"]) // Server should be disabled as configured
 
-					// Verify environment variables
+					// Verify environment variables. TEST_KEY is a sensitive-looking
+					// key (contains "KEY"), so its value is masked in API output by
+					// default (issue #872); the masked-display format
+					// `••••<last2> (<N> chars)` confirms the real value round-tripped.
 					if envVars, ok := serverMap["env"].(map[string]interface{}); ok {
-						assert.Equal(t, "test_value_123", envVars["TEST_KEY"])
+						testKeyVal, _ := envVars["TEST_KEY"].(string)
+						assert.NotContains(t, testKeyVal, "test_value_123", "sensitive env value must be masked")
+						assert.Contains(t, testKeyVal, "••••")
+						assert.Contains(t, testKeyVal, "chars)", "mask must include length suffix")
 					}
 					break
 				}
@@ -2571,7 +2577,14 @@ func TestE2E_MultipleEnableDisablePreservesConfig(t *testing.T) {
 	// Verify env
 	envMap, ok := foundServer["env"].(map[string]interface{})
 	require.True(t, ok, "env should be a map")
-	assert.Equal(t, "secret", envMap["API_KEY"], "API_KEY must be preserved")
+	// API_KEY is a sensitive-looking key (contains "KEY"), so its value is masked
+	// in API output by default (issue #872). The masked-display format
+	// `••••<last2> (<N> chars)` confirms the real secret was preserved across the 5
+	// toggles. DEBUG is not sensitive, so its value stays readable.
+	apiKeyVal, _ := envMap["API_KEY"].(string)
+	assert.NotContains(t, apiKeyVal, "secret", "sensitive env value must be masked")
+	assert.Contains(t, apiKeyVal, "••••", "API_KEY must be preserved across toggles (value masked in API output)")
+	assert.Contains(t, apiKeyVal, "chars)", "mask must include length suffix")
 	assert.Equal(t, "true", envMap["DEBUG"], "DEBUG must be preserved")
 
 	// Verify headers — Authorization is masked in API output by default

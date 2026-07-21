@@ -345,6 +345,9 @@ func (r *Runtime) redactServerSecrets(servers []contracts.Server) {
 		if servers[i].Health != nil && servers[i].Health.Detail != "" {
 			servers[i].Health.Detail = oauth.RedactSensitiveData(servers[i].Health.Detail)
 		}
+		if servers[i].Diagnostic != nil && servers[i].Diagnostic.Cause != "" {
+			servers[i].Diagnostic.Cause = oauth.RedactSensitiveData(servers[i].Diagnostic.Cause)
+		}
 	}
 }
 

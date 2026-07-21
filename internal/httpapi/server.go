@@ -1308,6 +1308,12 @@ func redactServerSecretFields(server *contracts.Server) {
 	if server.Health != nil && server.Health.Detail != "" {
 		server.Health.Detail = oauth.RedactSensitiveData(server.Health.Detail)
 	}
+	// Spec 044 diagnostic — its Cause echoes the raw connect error, which
+	// carries the full upstream URL (query secrets and all); scrub it in
+	// parity with LastError / Health.Detail.
+	if server.Diagnostic != nil && server.Diagnostic.Cause != "" {
+		server.Diagnostic.Cause = oauth.RedactSensitiveData(server.Diagnostic.Cause)
+	}
 }
 
 // enrichServersWithQuarantineStats adds quarantine metrics (pending/changed tool counts)

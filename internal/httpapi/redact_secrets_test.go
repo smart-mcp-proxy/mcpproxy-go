@@ -29,6 +29,12 @@ func TestRedactServerSecretFields(t *testing.T) {
 		Health: &contracts.HealthStatus{
 			Detail: "connect error: apikey=anothersecret rejected",
 		},
+		// Spec 044 diagnostic — its Cause echoes the raw connect error, which
+		// commonly carries the full upstream URL (query secrets and all).
+		Diagnostic: &contracts.Diagnostic{
+			Code:  "MCPX_HTTP_DNS_FAILED",
+			Cause: "Post \"https://api.example.com/mcp?access_token=diagsecret999&region=eu\": no such host",
+		},
 	}
 
 	redactServerSecretFields(srv)
@@ -50,6 +56,9 @@ func TestRedactServerSecretFields(t *testing.T) {
 	// URL secrets scrubbed from error/detail strings.
 	assert.NotContains(t, srv.LastError, "leakedsecret")
 	assert.NotContains(t, srv.Health.Detail, "anothersecret")
+
+	// URL secrets scrubbed from the structured diagnostic cause too.
+	assert.NotContains(t, srv.Diagnostic.Cause, "diagsecret999")
 }
 
 // nil-safe: a server with no secret-bearing fields must pass through untouched.
