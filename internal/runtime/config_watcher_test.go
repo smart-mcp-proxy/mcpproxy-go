@@ -409,12 +409,10 @@ func TestConfigWatcher_ReloadRebuildsTruncator(t *testing.T) {
 		return rt.ConfigSnapshot().Config.ToolResponseLimit == 50
 	}, 5*time.Second, 25*time.Millisecond, "snapshot must pick up the external edit")
 
-	// The LIVE truncator must now enforce the new limit. Read it under r.mu:
-	// the reload path swaps the field under the same lock.
+	// The LIVE truncator must now enforce the new limit. Read it via the
+	// lock-free accessor: the field is an atomic.Pointer swapped on reload (#861).
 	require.Eventually(t, func() bool {
-		rt.mu.RLock()
-		tr := rt.truncator
-		rt.mu.RUnlock()
+		tr := rt.Truncator()
 		return len(tr.Truncate(content, "srv:tool", nil).TruncatedContent) < len(content)
 	}, 5*time.Second, 25*time.Millisecond,
 		"watcher reload must rebuild the truncator with the new tool_response_limit")

@@ -46,7 +46,7 @@ func TestToonStructuredContent_UnaffectedByEncoding(t *testing.T) {
 	for _, mode := range []string{"adaptive", "always"} {
 		t.Run(mode, func(t *testing.T) {
 			p := newToonProxy(mode)
-			p.truncator = truncate.NewTruncator(0)
+			p.setStaticTruncator(truncate.NewTruncator(0))
 			result, structured := structuredTabularResult(t)
 
 			_, decisions := p.encodeToonBlocks("srv", "tool", contracts.ContentTrustTrusted, nil, result)
@@ -54,7 +54,7 @@ func TestToonStructuredContent_UnaffectedByEncoding(t *testing.T) {
 			require.Equal(t, toonenc.OutcomeEncoded, decisions[0].Outcome,
 				"fixture text must encode (envelope over a uniform array)")
 
-			forwarded, _, _ := forwardContentResult(result, p.truncator, nil, nil, "srv:tool", nil)
+			forwarded, _, _ := forwardContentResult(result, p.currentTruncator(), nil, nil, "srv:tool", nil)
 			require.NotNil(t, forwarded)
 
 			// The text block is TOON…
@@ -82,11 +82,11 @@ func TestToonStructuredContent_ViolationStillDetected(t *testing.T) {
 	verdicts := map[string]ovDecision{}
 	for _, mode := range []string{"off", "always"} {
 		p := newToonProxy(mode)
-		p.truncator = truncate.NewTruncator(0)
+		p.setStaticTruncator(truncate.NewTruncator(0))
 		result, _ := structuredTabularResult(t)
 
 		p.encodeToonBlocks("srv", "tool", contracts.ContentTrustTrusted, nil, result)
-		forwarded, _, _ := forwardContentResult(result, p.truncator, nil, nil, "srv:tool", nil)
+		forwarded, _, _ := forwardContentResult(result, p.currentTruncator(), nil, nil, "srv:tool", nil)
 		verdicts[mode] = evaluateOutputValidation(newTestValidator(), "srv:tool", violatedSchema, true, true, forwarded)
 	}
 

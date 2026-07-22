@@ -486,7 +486,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil, // mainServer not needed for CLI calls
 		false,

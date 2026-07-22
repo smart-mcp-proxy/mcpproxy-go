@@ -253,7 +253,7 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil,
 		false,
