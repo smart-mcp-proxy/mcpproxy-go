@@ -1088,6 +1088,16 @@ func (r *Runtime) SaveConfiguration() error {
 func (r *Runtime) ReloadConfiguration() error {
 	r.logger.Info("Reloading configuration from disk")
 
+	// Serialize the whole reload against ApplyConfig: both paths update the
+	// configSvc snapshot AND the legacy r.cfg/live components, but in different
+	// orders and releasing r.mu in between. Without this outer lock a
+	// watcher-triggered reload of config A can interleave with an API apply of
+	// B and leave r.cfg=A while configSvc=B persistently (PR #857 review). Held
+	// across configSvc.ReloadFromFile → r.cfg swap → live-component apply.
+	// MUST be acquired before r.mu (matches ApplyConfig's lock ordering).
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
 	// Get current snapshot before reload
 	oldSnapshot := r.ConfigSnapshot()
 	oldServerCount := oldSnapshot.ServerCount()

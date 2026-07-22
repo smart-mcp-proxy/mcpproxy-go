@@ -64,6 +64,21 @@ type Runtime struct {
 	mu      sync.RWMutex
 	running bool
 
+	// configCommitMu serializes whole config-commit operations against each
+	// other. ApplyConfig (API path) and ReloadConfiguration (disk-reload path,
+	// incl. the fsnotify watcher) each update TWO stores that must stay in
+	// sync — configSvc (snapshot/subscribers) and the legacy r.cfg/live
+	// components — but they do so under r.mu in different orders and release
+	// r.mu between the two stores. Without a wider lock, a watcher reload of
+	// config A can interleave with an API apply of B and leave r.cfg=A while
+	// configSvc=B persistently (PR #857 review). This mutex is held across the
+	// entire load→validate→commit sequence in both paths so they can never
+	// interleave. Lock ordering: acquire configCommitMu OUTSIDE r.mu — never
+	// take configCommitMu while holding r.mu. configSvc updates only notify
+	// subscribers over buffered channels (no synchronous re-entry into the
+	// runtime), so there is no callback deadlock.
+	configCommitMu sync.Mutex
+
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
 	// top of the snapshot comparison because a restart-required ApplyConfig
@@ -1343,6 +1358,13 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 			Success: false,
 		}, fmt.Errorf("config cannot be nil")
 	}
+
+	// Serialize the whole commit against ReloadConfiguration so the two config
+	// stores (configSvc + r.cfg/live components) can't be updated in an
+	// interleaved order that leaves them divergent. Held across save →
+	// r.cfg swap → configSvc.Update below. MUST be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
 
 	r.mu.Lock()
 
