@@ -187,6 +187,30 @@ mcpproxy upstream list -o json | jq -r '.[] | select(.connected) | .name'
 mcpproxy upstream list -o json | jq '[.[].tool_count] | add'
 ```
 
+### Show version information
+
+```bash
+# Human-readable (same output as `mcpproxy --version`)
+mcpproxy version
+# MCPProxy v0.51.0 (personal) darwin/arm64
+
+# JSON for scripting
+mcpproxy version -o json
+```
+
+JSON payload (`commit` and `date` appear only when injected at build time, e.g. `make build`):
+
+```json
+{
+  "version": "v0.51.0",
+  "edition": "personal",
+  "os": "darwin",
+  "arch": "arm64",
+  "commit": "15458bd5",
+  "date": "2026-07-15T00:00:00Z"
+}
+```
+
 ### Discover commands for AI agents
 
 ```bash
