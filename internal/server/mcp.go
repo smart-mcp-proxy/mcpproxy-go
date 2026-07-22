@@ -2827,14 +2827,14 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		}
 	}
 
-	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
-		switch operation {
-		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "refresh", "add_from_registry":
-			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
-			return mcp.NewToolResultError(errMsg), nil
-		}
+	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block
+	// all write operations. The denied set is the shared agent-operation policy
+	// (internal/auth) consumed by both this MCP surface and the REST
+	// /api/v1/servers handlers, so the two can never drift (issues #877/#878).
+	if authCtx := auth.AuthContextFromContext(ctx); !auth.AuthorizeServerOp(authCtx, operation) {
+		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Execute operation and track result

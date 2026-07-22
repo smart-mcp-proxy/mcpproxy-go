@@ -29,6 +29,13 @@ curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
 
 **Note:** Unix socket connections bypass API key authentication (OS-level auth).
 
+### Admin key vs. agent tokens
+
+Two kinds of credential authenticate against the REST API:
+
+- **Admin API key** — full access to every endpoint.
+- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. Agent tokens may **read** (`GET /api/v1/servers`, diagnostics, `GET /api/v1/index/search`) but may **not** perform server-mutating operations. Any mutating `/api/v1/servers/...` route (add, remove, patch, enable, disable, restart, reconnect, quarantine, unquarantine, login, logout, config-to-secret, discover-tools, refresh, tool approve/block, and the bulk `enable_all`/`disable_all`/`restart_all`) returns **`403 Forbidden`** with `operation requires admin access` for an agent token. This mirrors the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected.
+
 ## Base URL
 
 ```
@@ -555,6 +562,14 @@ server — including disabled servers and individually disabled / config-denied 
 enriched with approval state and 30-day usage. Read-only; consumers apply their own
 search/filter/sort over the full set. For relevance-ranked discovery use
 `GET /api/v1/index/search` instead.
+
+> **Quarantine visibility:** `GET /api/v1/index/search` withholds the tools of
+> **quarantined** servers — their descriptions/schemas are the Tool Poisoning
+> Attack payload quarantine exists to contain, so the REST search path applies
+> the same server-level visibility gate as MCP `retrieve_tools`. Response shape
+> is unchanged (bare tool `name` + separate `server_name`); only which tools
+> appear is filtered. `GET /api/v1/tools` (above) is the unfiltered operator
+> overview and still lists quarantined servers' tools with their state.
 
 **Response:**
 ```json

@@ -176,6 +176,17 @@ Server scoping is enforced at two levels:
 1. **Tool discovery** (`retrieve_tools`) — only returns tools from allowed servers
 2. **Tool execution** (`call_tool_*`) — blocks calls to out-of-scope servers
 
+## Administrative Operations Are Admin-Only
+
+Agent tokens can **discover and call** tools (within their scope and permission tier) but can **never administer servers**. Server-mutating operations require the admin API key (or a local tray/socket connection, which is admin by OS-level auth) on **every** surface — the MCP tools and the REST API share one policy (`internal/auth`), so an agent cannot do over HTTP what it is blocked from doing over MCP.
+
+Denied to agent tokens on both surfaces:
+
+- **Lifecycle**: add, remove, update/patch, enable, disable, restart, reconnect, refresh/discover-tools, add-from-registry, login/logout, move-config-value-to-secret
+- **Security state**: quarantine, unquarantine, and tool approve/block
+
+On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (`POST/PATCH/DELETE /api/v1/servers/...`) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface).
+
 ## Profile Pinning
 
 A [profile](./profiles.md) scopes tool discovery and calls to a named subset of upstream servers. With `--profile-pin`, you can **bind a token to a single profile** so it can never operate outside it — regardless of the URL it connects to or any `set_profile` call it makes.

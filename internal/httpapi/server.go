@@ -514,6 +514,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
 
+// requireServerOp wraps a mutating /servers handler with the shared
+// agent-operation policy (internal/auth). Agent tokens (non-admin) are rejected
+// with 403 for any operation on the denylist — the same set the MCP
+// upstream_servers / quarantine_security tools deny — so the REST surface can
+// never drift from MCP and let an agent perform over HTTP what it cannot over
+// MCP (issues #877/#878).
+//
+// Admin API keys pass, and OS-authenticated socket (tray) connections pass
+// because the auth middleware authenticates them as admin. A nil AuthContext
+// (the middleware's test/no-config passthrough, unreachable once a real config
+// is loaded) also passes — auth.AuthorizeServerOp centralises that decision.
+func (s *Server) requireServerOp(op string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authCtx := auth.AuthContextFromContext(r.Context())
+		if !auth.AuthorizeServerOp(authCtx, op) {
+			s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+			return
+		}
+		next(w, r)
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -621,16 +643,19 @@ func (s *Server) setupRoutes() {
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
-		r.Post("/servers", s.handleAddServer)                           // T001: Add server
-		r.Post("/servers/import", s.handleImportServers)                // Import from file upload
-		r.Post("/servers/import/json", s.handleImportServersJSON)       // Import from JSON/TOML content
-		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths) // Get canonical config paths
-		r.Post("/servers/import/path", s.handleImportFromPath)          // Import from file path
-		r.Post("/servers/reconnect", s.handleForceReconnectServers)
+		// Mutating server routes are agent-token-gated via the shared policy
+		// (issues #877/#878) so an agent cannot do over REST what the MCP
+		// upstream_servers denylist blocks.
+		r.Post("/servers", s.requireServerOp(auth.ServerOpAdd, s.handleAddServer))                     // T001: Add server
+		r.Post("/servers/import", s.requireServerOp(auth.ServerOpAdd, s.handleImportServers))          // Import from file upload
+		r.Post("/servers/import/json", s.requireServerOp(auth.ServerOpAdd, s.handleImportServersJSON)) // Import from JSON/TOML content
+		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths)                                // Get canonical config paths
+		r.Post("/servers/import/path", s.requireServerOp(auth.ServerOpAdd, s.handleImportFromPath))    // Import from file path
+		r.Post("/servers/reconnect", s.requireServerOp(auth.ServerOpRestart, s.handleForceReconnectServers))
 		// T076-T077: Bulk operation routes
-		r.Post("/servers/restart_all", s.handleRestartAll)
-		r.Post("/servers/enable_all", s.handleEnableAll)
-		r.Post("/servers/disable_all", s.handleDisableAll)
+		r.Post("/servers/restart_all", s.requireServerOp(auth.ServerOpRestart, s.handleRestartAll))
+		r.Post("/servers/enable_all", s.requireServerOp(auth.ServerOpEnable, s.handleEnableAll))
+		r.Post("/servers/disable_all", s.requireServerOp(auth.ServerOpDisable, s.handleDisableAll))
 		r.Route("/servers/{id}", func(r chi.Router) {
 			// chi routes on RawPath, so the {id} param arrives percent-encoded.
 			// Official modelcontextprotocol/registry v0.1 ids are namespace/name,
@@ -641,31 +666,35 @@ func (s *Server) setupRoutes() {
 			// MCP-1056). Centralising the decode also prevents new sub-resource
 			// routes from silently reintroducing the gap.
 			r.Use(decodeServerIDParam)
-			r.Patch("/", s.handlePatchServer)                          // Partial update server config
-			r.Delete("/", s.handleRemoveServer)                        // T002: Remove server
-			r.Post("/config-to-secret", s.handleConvertConfigToSecret) // Move a header / env value into OS keyring
-			r.Post("/enable", s.handleEnableServer)
-			r.Post("/disable", s.handleDisableServer)
-			r.Post("/restart", s.handleRestartServer)
-			r.Post("/login", s.handleServerLogin)
-			r.Post("/logout", s.handleServerLogout)
-			r.Post("/quarantine", s.handleQuarantineServer)
-			r.Post("/unquarantine", s.handleUnquarantineServer)
-			r.Post("/discover-tools", s.handleDiscoverServerTools)
+			// Mutating per-server routes carry the shared agent-token gate
+			// (issues #877/#878).
+			r.Patch("/", s.requireServerOp(auth.ServerOpPatch, s.handlePatchServer))                                   // Partial update server config
+			r.Delete("/", s.requireServerOp(auth.ServerOpRemove, s.handleRemoveServer))                                // T002: Remove server
+			r.Post("/config-to-secret", s.requireServerOp(auth.ServerOpConfigToSecret, s.handleConvertConfigToSecret)) // Move a header / env value into OS keyring
+			r.Post("/enable", s.requireServerOp(auth.ServerOpEnable, s.handleEnableServer))
+			r.Post("/disable", s.requireServerOp(auth.ServerOpDisable, s.handleDisableServer))
+			r.Post("/restart", s.requireServerOp(auth.ServerOpRestart, s.handleRestartServer))
+			r.Post("/login", s.requireServerOp(auth.ServerOpLogin, s.handleServerLogin))
+			r.Post("/logout", s.requireServerOp(auth.ServerOpLogout, s.handleServerLogout))
+			r.Post("/quarantine", s.requireServerOp(auth.ServerOpQuarantine, s.handleQuarantineServer))
+			r.Post("/unquarantine", s.requireServerOp(auth.ServerOpUnquarantine, s.handleUnquarantineServer))
+			r.Post("/discover-tools", s.requireServerOp(auth.ServerOpDiscoverTools, s.handleDiscoverServerTools))
 			// Alias of discover-tools named for the upstream_servers 'refresh'
 			// operation (issue #873): pure rediscover + reindex, no state change.
-			r.Post("/refresh", s.handleRefreshServer)
+			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
 			r.Get("/diagnostics", s.handleGetServerDiagnostics)
 			r.Get("/tool-calls", s.handleGetServerToolCalls)
 
-			// Tool-level quarantine (Spec 032)
-			r.Post("/tools/approve", s.handleApproveTools)
+			// Tool-level quarantine (Spec 032). Approving/blocking a tool is a
+			// security-state mutation the MCP quarantine_security tool denies to
+			// agents; gate the REST twins the same way (issue #878 class).
+			r.Post("/tools/approve", s.requireServerOp(auth.ServerOpApproveTools, s.handleApproveTools))
 			// Atomic block = approve+disable (MCP-2198). Server-side so the
 			// pair is all-or-nothing — a tool is never left approved+enabled.
-			r.Post("/tools/block", s.handleBlockTools)
+			r.Post("/tools/block", s.requireServerOp(auth.ServerOpBlockTools, s.handleBlockTools))
 			r.Post("/tools/{tool}/enabled", s.handleSetToolEnabled)
 			// Bulk per-tool enable/disable. Mirrors /servers/enable_all
 			// + /servers/disable_all but scoped to a single server's tools.
@@ -1460,6 +1489,7 @@ func (r *IsolationRequest) toConfig() *config.IsolationConfig {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request - invalid configuration"
 // @Failure 409 {object} contracts.ErrorResponse "Conflict - server with this name already exists"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers [post]
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var req AddServerRequest
@@ -1579,6 +1609,7 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id} [delete]
 func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -1623,6 +1654,7 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id} [patch]
 func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	serverName := chi.URLParam(r, "id")
@@ -1826,6 +1858,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad scope/key/secret_name, or value is already a reference / empty"
 // @Failure 404 {object} contracts.ErrorResponse "Server or key not found"
 // @Failure 500 {object} contracts.ErrorResponse "Secret resolver or config update failed"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/config-to-secret [post]
 func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Request) {
 	serverName := chi.URLParam(r, "id")
@@ -1974,6 +2007,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/enable [post]
 func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2040,6 +2074,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/disable [post]
 func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2104,6 +2139,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 // @Param reason query string false "Reason for reconnection"
 // @Success 200 {object} contracts.ServerActionResponse "All servers reconnected successfully"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/reconnect [post]
 func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Request) {
 	reason := r.URL.Query().Get("reason")
@@ -2233,6 +2269,7 @@ func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/restart [post]
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2361,16 +2398,11 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} contracts.ErrorResponse "Failed to discover tools"
 // @Router /api/v1/servers/{id}/discover-tools [post]
 func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Request) {
-	// SECURITY (issue #873): discover-tools is a write operation that now routes
-	// through the same authoritative RefreshServerTools path as /refresh, so it
-	// must carry the same admin gate — otherwise an agent token blocked from
-	// 'refresh' bypasses that restriction through this alias.
-	authCtx := auth.AuthContextFromContext(r.Context())
-	if authCtx == nil || !authCtx.IsAdmin() {
-		s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
-		return
-	}
-
+	// SECURITY (issues #873/#878): discover-tools is a write operation routing
+	// through the same authoritative RefreshServerTools path as /refresh. The
+	// agent-token gate lives in the route wrapper (requireServerOp) so it can
+	// never drift from the MCP denylist; an agent blocked from 'refresh' cannot
+	// bypass that restriction through this alias.
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
@@ -2415,16 +2447,9 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 // @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot refresh)"
 // @Router /api/v1/servers/{id}/refresh [post]
 func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
-	// SECURITY (issue #873): 'refresh' is a write operation. The MCP surface
-	// (handleUpstreamServers) already blocks it for agent tokens; gate the REST
-	// alias the same way so an agent token cannot bypass that restriction over
-	// HTTP. Matches the strictest sibling handler (handleSetToolEnabled).
-	authCtx := auth.AuthContextFromContext(r.Context())
-	if authCtx == nil || !authCtx.IsAdmin() {
-		s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
-		return
-	}
-
+	// SECURITY (issues #873/#878): 'refresh' is a write operation the MCP surface
+	// blocks for agent tokens. The agent-token gate lives in the route wrapper
+	// (requireServerOp) via the shared auth policy so REST cannot drift from MCP.
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
@@ -2485,6 +2510,7 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 // @Failure 400 {object} contracts.OAuthFlowError "OAuth error (client_id required, DCR failed, etc.)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/login [post]
 func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2645,6 +2671,7 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/quarantine [post]
 func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2680,6 +2707,7 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/unquarantine [post]
 func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -4942,6 +4970,7 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SuccessResponse "Block result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/tools/block [post]
 func (s *Server) handleBlockTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
