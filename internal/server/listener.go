@@ -77,6 +77,9 @@ func (m *ListenerManager) CreateTCPListener() (*Listener, error) {
 
 	ln, err := net.Listen("tcp", m.config.TCPAddress)
 	if err != nil {
+		if isAddrInUseError(err) {
+			return nil, &PortInUseError{Address: m.config.TCPAddress, Err: err}
+		}
 		return nil, fmt.Errorf("failed to create TCP listener: %w", err)
 	}
 
