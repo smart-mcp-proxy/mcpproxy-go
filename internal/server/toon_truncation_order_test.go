@@ -26,7 +26,7 @@ import (
 // encodeToonBlocks → forwardContentResult (mcp.go ~2124-2129).
 func runSeamThenForward(p *MCPProxyServer, result *mcp.CallToolResult) (decisions []toonenc.Decision, finalText string, wasTruncated bool) {
 	_, decisions = p.encodeToonBlocks("srv", "tool", contracts.ContentTrustTrusted, nil, result)
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, nil, nil, "srv:tool", nil)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), nil, nil, "srv:tool", nil)
 	_ = forwarded
 	return decisions, response, wasTruncated
 }
@@ -43,7 +43,7 @@ func TestToonEncodeThenTruncate_MarkerAndNoticeSurvive(t *testing.T) {
 	for _, mode := range []string{"adaptive", "always"} {
 		t.Run(mode, func(t *testing.T) {
 			p := newToonProxy(mode)
-			p.truncator = truncate.NewTruncator(limit)
+			p.setStaticTruncator(truncate.NewTruncator(limit))
 			result := toonTextResult(original)
 
 			decisions, finalText, wasTruncated := runSeamThenForward(p, result)
@@ -90,7 +90,7 @@ func TestToonEncodeThenTruncate_BudgetBoundary(t *testing.T) {
 	for _, mode := range []string{"adaptive", "always"} {
 		t.Run(mode+"/just below guard passes through", func(t *testing.T) {
 			p := newToonProxy(mode)
-			p.truncator = truncate.NewTruncator(limitBelow)
+			p.setStaticTruncator(truncate.NewTruncator(limitBelow))
 			result := toonTextResult(original)
 
 			decisions, finalText, _ := runSeamThenForward(p, result)
@@ -102,7 +102,7 @@ func TestToonEncodeThenTruncate_BudgetBoundary(t *testing.T) {
 				"passthrough must carry no marker")
 			// Truncation then behaves exactly as today, on the original JSON.
 			offP := newToonProxy("off")
-			offP.truncator = truncate.NewTruncator(limitBelow)
+			offP.setStaticTruncator(truncate.NewTruncator(limitBelow))
 			offResult := toonTextResult(original)
 			_, offText, offTruncated := runSeamThenForward(offP, offResult)
 			assert.True(t, offTruncated)
@@ -114,7 +114,7 @@ func TestToonEncodeThenTruncate_BudgetBoundary(t *testing.T) {
 
 		t.Run(mode+"/at guard encodes", func(t *testing.T) {
 			p := newToonProxy(mode)
-			p.truncator = truncate.NewTruncator(limitAt)
+			p.setStaticTruncator(truncate.NewTruncator(limitAt))
 			result := toonTextResult(original)
 
 			decisions, finalText, _ := runSeamThenForward(p, result)
@@ -132,7 +132,7 @@ func TestToonEncodeThenTruncate_BudgetBoundary(t *testing.T) {
 // untouched.
 func TestToonEncodeThenTruncate_UnlimitedNoTruncation(t *testing.T) {
 	p := newToonProxy("adaptive")
-	p.truncator = truncate.NewTruncator(0)
+	p.setStaticTruncator(truncate.NewTruncator(0))
 	result := toonTextResult(tabularJSON(100))
 
 	decisions, finalText, wasTruncated := runSeamThenForward(p, result)
@@ -148,7 +148,7 @@ func TestToonEncodeThenTruncate_UnlimitedNoTruncation(t *testing.T) {
 // means unlimited — the seam passes retainedBudget 0 and encoding proceeds.
 func TestToonEncodeThenTruncate_NilTruncator(t *testing.T) {
 	p := newToonProxy("adaptive")
-	p.truncator = nil
+	p.setStaticTruncator(nil)
 	result := toonTextResult(tabularJSON(100))
 
 	_, decisions := p.encodeToonBlocks("srv", "tool", contracts.ContentTrustTrusted, nil, result)

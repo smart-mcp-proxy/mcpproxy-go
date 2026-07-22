@@ -183,7 +183,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		rt.IndexManager(),
 		rt.UpstreamManager(),
 		rt.CacheManager(),
-		rt.Truncator(),
+		rt.Truncator, // getter, re-read at use time so hot-reloaded limits apply (#861)
 		logger,
 		server,
 		cfg.DebugSearch,

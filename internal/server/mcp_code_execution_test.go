@@ -59,7 +59,7 @@ func TestCodeExecution_WithNilMainServer(t *testing.T) {
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil, // mainServer = nil (CLI mode)
 		false,
@@ -121,7 +121,7 @@ func newCodeExecProxy(t *testing.T) *server.MCPProxyServer {
 
 	mcpProxy := server.NewMCPProxyServer(
 		storageManager, indexManager, upstreamManager, cacheManager,
-		truncator, logger, nil, false, cfg, nil,
+		func() *truncate.Truncator { return truncator }, logger, nil, false, cfg, nil,
 	)
 	t.Cleanup(func() { mcpProxy.Close() })
 	return mcpProxy
@@ -257,7 +257,7 @@ func TestCodeExecution_TypeScript(t *testing.T) {
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil,
 		false,
@@ -319,7 +319,7 @@ func TestCodeExecution_JavaScriptBackwardCompat(t *testing.T) {
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil,
 		false,
@@ -381,7 +381,7 @@ func TestCodeExecution_InvalidLanguage(t *testing.T) {
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil,
 		false,
