@@ -3478,6 +3478,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -3522,6 +3528,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -3569,6 +3581,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -4325,8 +4343,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: registries_locked
+                oneOf:
+                - $ref: '#/components/schemas/contracts.ErrorResponse'
+                - $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate registries)
         "409":
           content:
             application/json:
@@ -4574,6 +4594,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: no_install_info | missing_required_input | duplicate_name
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot add servers)
         "404":
           content:
             application/json:

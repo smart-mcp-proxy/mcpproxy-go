@@ -59,6 +59,19 @@ var mutatingServerRoutes = []struct {
 	{"refresh", http.MethodPost, "/api/v1/servers/test-server/refresh"},
 	{"tools-approve", http.MethodPost, "/api/v1/servers/test-server/tools/approve"},
 	{"tools-block", http.MethodPost, "/api/v1/servers/test-server/tools/block"},
+	{"scan", http.MethodPost, "/api/v1/servers/test-server/scan"},
+	{"scan-cancel", http.MethodPost, "/api/v1/servers/test-server/scan/cancel"},
+	{"security-approve", http.MethodPost, "/api/v1/servers/test-server/security/approve"},
+	{"security-reject", http.MethodPost, "/api/v1/servers/test-server/security/reject"},
+	// Sibling routes that mutate server/registry state OUTSIDE /servers/{id} —
+	// an agent must not bypass the /servers gate through them (issue #878).
+	{"config-apply", http.MethodPost, "/api/v1/config/apply"},
+	{"config-patch", http.MethodPatch, "/api/v1/config"},
+	{"config-docker-isolation", http.MethodPatch, "/api/v1/config/docker-isolation"},
+	{"registry-add-source", http.MethodPost, "/api/v1/registries"},
+	{"registry-edit-source", http.MethodPut, "/api/v1/registries/reg1"},
+	{"registry-remove-source", http.MethodDelete, "/api/v1/registries/reg1"},
+	{"registry-add-server", http.MethodPost, "/api/v1/registries/reg1/servers/srv1/add"},
 }
 
 // TestMutatingServerRoutes_AgentTokenForbidden asserts every mutating server

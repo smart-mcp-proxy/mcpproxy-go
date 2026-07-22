@@ -703,14 +703,16 @@ func (s *Server) setupRoutes() {
 			r.Get("/tools/{tool}/diff", s.handleGetToolDiff)
 			r.Get("/tools/export", s.handleExportToolDescriptions)
 
-			// Security scanner scan/approval routes (Spec 039)
-			r.Post("/scan", s.handleStartScan)
+			// Security scanner scan/approval routes (Spec 039). Scan start/cancel
+			// and security approve/reject mutate a server's scan/approval state,
+			// so they carry the same agent-token gate (issue #878 class).
+			r.Post("/scan", s.requireServerOp(auth.ServerOpScan, s.handleStartScan))
 			r.Get("/scan/status", s.handleGetScanStatus)
 			r.Get("/scan/report", s.handleGetScanReport)
-			r.Post("/scan/cancel", s.handleCancelScan)
+			r.Post("/scan/cancel", s.requireServerOp(auth.ServerOpScan, s.handleCancelScan))
 			r.Get("/scan/files", s.handleGetScanFiles)
-			r.Post("/security/approve", s.handleSecurityApprove)
-			r.Post("/security/reject", s.handleSecurityReject)
+			r.Post("/security/approve", s.requireServerOp(auth.ServerOpSecurityApprove, s.handleSecurityApprove))
+			r.Post("/security/reject", s.requireServerOp(auth.ServerOpSecurityReject, s.handleSecurityReject))
 			r.Get("/integrity", s.handleCheckIntegrity)
 		})
 
@@ -760,21 +762,27 @@ func (s *Server) setupRoutes() {
 		// Code execution endpoint (for CLI client mode)
 		r.Post("/code/exec", NewCodeExecHandler(s.controller, s.logger).ServeHTTP)
 
-		// Configuration management
+		// Configuration management. Applying/patching config can add, remove,
+		// enable, disable or quarantine upstream servers (mcpServers), so these
+		// mutating routes carry the agent-token gate too — otherwise an agent
+		// bypasses the /servers gate by rewriting config wholesale (issue #878).
+		// validate is read-only (no state change) and stays open.
 		r.Get("/config", s.handleGetConfig)
 		r.Post("/config/validate", s.handleValidateConfig)
-		r.Post("/config/apply", s.handleApplyConfig)
-		r.Patch("/config", s.handlePatchConfig)
-		r.Patch("/config/docker-isolation", s.handlePatchDockerIsolation)
+		r.Post("/config/apply", s.requireServerOp(auth.ServerOpConfigWrite, s.handleApplyConfig))
+		r.Patch("/config", s.requireServerOp(auth.ServerOpConfigWrite, s.handlePatchConfig))
+		r.Patch("/config/docker-isolation", s.requireServerOp(auth.ServerOpConfigWrite, s.handlePatchDockerIsolation))
 
-		// Registry browsing (Phase 7)
+		// Registry browsing (Phase 7). Browsing (GET) stays open; mutating a
+		// registry source or adding a server from a registry is admin-only
+		// (the latter mirrors the MCP 'add_from_registry' denial).
 		r.Get("/registries", s.handleListRegistries)
-		r.Post("/registries", s.handleAddRegistrySource)           // MCP-866 user-added registry source
-		r.Put("/registries/{id}", s.handleEditRegistrySource)      // MCP-1072 edit user-added source
-		r.Delete("/registries/{id}", s.handleRemoveRegistrySource) // MCP-1057 remove user-added source
+		r.Post("/registries", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAddRegistrySource))           // MCP-866 user-added registry source
+		r.Put("/registries/{id}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleEditRegistrySource))      // MCP-1072 edit user-added source
+		r.Delete("/registries/{id}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRemoveRegistrySource)) // MCP-1057 remove user-added source
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
-		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)           // spec 070 FR-007
-		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
+		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
+		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
@@ -4008,6 +4016,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Failure      500     {object}  contracts.ErrorResponse         "Failed to apply configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -4058,6 +4067,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 // @Failure      500      {object}  contracts.ErrorResponse       "Failed to apply configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config/docker-isolation [patch]
 func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
@@ -4124,6 +4134,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Failure      500    {object}  contracts.ErrorResponse       "Failed to read or apply configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	var patchMap map[string]interface{}
@@ -4445,6 +4456,7 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 // @Failure      500       {object}  contracts.ErrorResponse           "Internal server error"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot add servers)"
 // @Router       /api/v1/registries/{id}/servers/{serverId}/add [post]
 // decodePathParam percent-decodes a chi path parameter. chi matches routes on
 // the raw (encoded) path, so parameters that legitimately contain reserved
@@ -4536,6 +4548,7 @@ func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
 // @Failure      409   {object}  contracts.ErrorResponse             "registry_shadows_builtin | duplicate_registry"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate registries)"
 // @Router       /api/v1/registries [post]
 func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request) {
 	var req contracts.AddRegistrySourceRequest

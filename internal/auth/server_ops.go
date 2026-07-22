@@ -34,6 +34,16 @@ const (
 	ServerOpConfigToSecret  = "config_to_secret"
 	ServerOpApproveTools    = "approve_tools"
 	ServerOpBlockTools      = "block_tools"
+
+	// REST-only mutating operations that reach server/security/config state
+	// through routes OTHER than /api/v1/servers/{id}. They are denied to agents
+	// so the /servers gate cannot be bypassed via a sibling endpoint
+	// (config apply rewrites mcpServers; registry add creates a server; the
+	// security scanner mutates a server's approval state).
+	ServerOpConfigWrite     = "config_write"
+	ServerOpScan            = "scan"
+	ServerOpSecurityApprove = "security_approve"
+	ServerOpSecurityReject  = "security_reject"
 )
 
 // agentDeniedServerOps is the canonical set of server/tool-mutating operations
@@ -62,6 +72,10 @@ var agentDeniedServerOps = map[string]struct{}{
 	ServerOpConfigToSecret:  {},
 	ServerOpApproveTools:    {},
 	ServerOpBlockTools:      {},
+	ServerOpConfigWrite:     {},
+	ServerOpScan:            {},
+	ServerOpSecurityApprove: {},
+	ServerOpSecurityReject:  {},
 }
 
 // AgentDeniedServerOp reports whether the named operation is forbidden to agent

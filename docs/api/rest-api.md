@@ -34,7 +34,10 @@ curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
 Two kinds of credential authenticate against the REST API:
 
 - **Admin API key** — full access to every endpoint.
-- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. Agent tokens may **read** (`GET /api/v1/servers`, diagnostics, `GET /api/v1/index/search`) but may **not** perform server-mutating operations. Any mutating `/api/v1/servers/...` route (add, remove, patch, enable, disable, restart, reconnect, quarantine, unquarantine, login, logout, config-to-secret, discover-tools, refresh, tool approve/block, and the bulk `enable_all`/`disable_all`/`restart_all`) returns **`403 Forbidden`** with `operation requires admin access` for an agent token. This mirrors the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected.
+- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. Agent tokens may **read** (`GET /api/v1/servers`, diagnostics, config/registry reads, `GET /api/v1/index/search`) but may **not** perform mutating operations that touch server/security/config state. These return **`403 Forbidden`** with `operation requires admin access` for an agent token, mirroring the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected. Gated routes:
+  - **Servers** — add, remove, patch, enable, disable, restart, reconnect, quarantine, unquarantine, login, logout, config-to-secret, discover-tools, refresh, tool approve/block, the bulk `enable_all`/`disable_all`/`restart_all`, and the security scanner (`scan`, `scan/cancel`, `security/approve`, `security/reject`).
+  - **Config** — `POST /config/apply`, `PATCH /config`, `PATCH /config/docker-isolation` (config can add/remove/enable/disable servers). `POST /config/validate` is read-only and stays open.
+  - **Registries** — `POST/PUT/DELETE /registries[/{id}]` (source management) and `POST /registries/{id}/servers/{serverId}/add`. Registry browsing (`GET`) stays open.
 
 ## Base URL
 

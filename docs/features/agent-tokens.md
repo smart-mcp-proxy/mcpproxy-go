@@ -183,9 +183,10 @@ Agent tokens can **discover and call** tools (within their scope and permission 
 Denied to agent tokens on both surfaces:
 
 - **Lifecycle**: add, remove, update/patch, enable, disable, restart, reconnect, refresh/discover-tools, add-from-registry, login/logout, move-config-value-to-secret
-- **Security state**: quarantine, unquarantine, and tool approve/block
+- **Security state**: quarantine, unquarantine, tool approve/block, and the security scanner (scan start/cancel, security approve/reject)
+- **Config & registries**: applying/patching configuration (which can add/remove/enable/disable servers) and mutating registry sources — an agent must not bypass the per-server gate by rewriting config or a registry wholesale
 
-On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (`POST/PATCH/DELETE /api/v1/servers/...`) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface).
+On the MCP surface (`upstream_servers`, `quarantine_security`) these return a tool error; on the REST surface (mutating `/api/v1/servers/...`, `/api/v1/config/...`, and `/api/v1/registries/...` routes) they return **`403 Forbidden`** (`operation requires admin access`). Read-only operations stay available to scoped tokens: `upstream_servers` `list`/`tail_log`, `GET /api/v1/servers`, per-server diagnostics, config/registry reads, and `GET /api/v1/index/search` (which honors quarantine — a quarantined server's tools are withheld from search on every surface).
 
 ## Profile Pinning
 

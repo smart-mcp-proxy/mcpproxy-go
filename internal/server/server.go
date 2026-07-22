@@ -2592,7 +2592,7 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 	// server-level visibility gate rather than returning raw index hits. Names
 	// stay bare (server_name is a separate field) — only which tools appear is
 	// filtered, so the /api/v1/index/search response shape is unchanged.
-	quarantined := s.quarantinedServerFilter()
+	withheld := s.quarantinedServerFilter()
 
 	// Convert to map format for API
 	var resultMaps []map[string]interface{}
@@ -2606,7 +2606,7 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 					serverName = parts[0]
 				}
 			}
-			if quarantined(serverName) {
+			if withheld(serverName) {
 				continue
 			}
 			toolData := map[string]interface{}{
@@ -2635,31 +2635,35 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 	return resultMaps, nil
 }
 
-// quarantinedServerFilter returns a predicate reporting whether a server is
-// currently quarantined, memoizing storage lookups for the duration of a single
+// quarantinedServerFilter returns a predicate reporting whether a search hit
+// must be WITHHELD, memoizing storage lookups for the duration of a single
 // search so a result set spanning N servers costs at most N storage reads. It
 // reads authoritative server-level quarantine state from storage — the same
 // source describeGateReason (the MCP visibility gate) consults — so the REST
 // index-search surface and retrieve_tools agree on which servers are withheld
-// (issue #877). A server that cannot be resolved (removed, storage error) is
-// treated as NOT quarantined, matching the prior visible-by-default behavior;
-// missing storage disables the filter (no state to gate on).
+// (issue #877).
+//
+// It FAILS CLOSED: a hit is withheld unless it can be positively attributed to
+// a resolvable, non-quarantined server. An empty server name (a stale/legacy
+// index entry that cannot be attributed), a nil storage manager, a storage
+// error, or a missing record all withhold the hit rather than risk exposing a
+// description the quarantine boundary is meant to hide.
 func (s *Server) quarantinedServerFilter() func(serverName string) bool {
 	cache := make(map[string]bool)
 	storageMgr := s.runtime.StorageManager()
 	return func(serverName string) bool {
 		if serverName == "" || storageMgr == nil {
-			return false
+			return true
 		}
-		if q, ok := cache[serverName]; ok {
-			return q
+		if withheld, ok := cache[serverName]; ok {
+			return withheld
 		}
-		q := false
+		withheld := true
 		if cfg, err := storageMgr.GetUpstreamServer(serverName); err == nil && cfg != nil {
-			q = cfg.Quarantined
+			withheld = cfg.Quarantined
 		}
-		cache[serverName] = q
-		return q
+		cache[serverName] = withheld
+		return withheld
 	}
 }
 
