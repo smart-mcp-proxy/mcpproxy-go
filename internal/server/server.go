@@ -2584,10 +2584,31 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 		return nil, err
 	}
 
+	// SECURITY (issue #877): the MCP retrieve_tools path never surfaces a
+	// quarantined server's tools — their descriptions/schemas are withheld
+	// because they are the Tool Poisoning Attack vector quarantine exists to
+	// contain. The Bleve index can still hold entries for a server quarantined
+	// after it was indexed, so this REST read path must apply the same
+	// server-level visibility gate rather than returning raw index hits. Names
+	// stay bare (server_name is a separate field) — only which tools appear is
+	// filtered, so the /api/v1/index/search response shape is unchanged.
+	withheld := s.quarantinedServerFilter()
+
 	// Convert to map format for API
 	var resultMaps []map[string]interface{}
 	for _, result := range results {
 		if result.Tool != nil {
+			serverName := result.Tool.ServerName
+			if serverName == "" {
+				// Fallback: recover the server from a "server:tool" index name so
+				// the quarantine gate still applies when ServerName is unset.
+				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+					serverName = parts[0]
+				}
+			}
+			if withheld(serverName) {
+				continue
+			}
 			toolData := map[string]interface{}{
 				"name":        result.Tool.Name,
 				"description": result.Tool.Description,
@@ -2612,6 +2633,38 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 
 	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
 	return resultMaps, nil
+}
+
+// quarantinedServerFilter returns a predicate reporting whether a search hit
+// must be WITHHELD, memoizing storage lookups for the duration of a single
+// search so a result set spanning N servers costs at most N storage reads. It
+// reads authoritative server-level quarantine state from storage — the same
+// source describeGateReason (the MCP visibility gate) consults — so the REST
+// index-search surface and retrieve_tools agree on which servers are withheld
+// (issue #877).
+//
+// It FAILS CLOSED: a hit is withheld unless it can be positively attributed to
+// a resolvable, non-quarantined server. An empty server name (a stale/legacy
+// index entry that cannot be attributed), a nil storage manager, a storage
+// error, or a missing record all withhold the hit rather than risk exposing a
+// description the quarantine boundary is meant to hide.
+func (s *Server) quarantinedServerFilter() func(serverName string) bool {
+	cache := make(map[string]bool)
+	storageMgr := s.runtime.StorageManager()
+	return func(serverName string) bool {
+		if serverName == "" || storageMgr == nil {
+			return true
+		}
+		if withheld, ok := cache[serverName]; ok {
+			return withheld
+		}
+		withheld := true
+		if cfg, err := storageMgr.GetUpstreamServer(serverName); err == nil && cfg != nil {
+			withheld = cfg.Quarantined
+		}
+		cache[serverName] = withheld
+		return withheld
+	}
 }
 
 // GetServerLogs returns recent log lines for a specific server

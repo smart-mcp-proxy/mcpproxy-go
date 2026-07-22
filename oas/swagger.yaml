@@ -3478,6 +3478,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -3522,6 +3528,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -3569,6 +3581,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -4325,8 +4343,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: registries_locked
+                oneOf:
+                - $ref: '#/components/schemas/contracts.ErrorResponse'
+                - $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate registries)
         "409":
           content:
             application/json:
@@ -4574,6 +4594,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: no_install_info | missing_required_input | duplicate_name
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot add servers)
         "404":
           content:
             application/json:
@@ -4757,6 +4783,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request - invalid configuration
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "409":
           content:
             application/json:
@@ -4799,6 +4831,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -4846,6 +4884,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request - no fields or invalid body
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -4897,6 +4941,12 @@ paths:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad scope/key/secret_name, or value is already a reference
             / empty
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -4938,6 +4988,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5027,6 +5083,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5069,6 +5131,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.OAuthFlowError'
           description: OAuth error (client_id required, DCR failed, etc.)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5207,6 +5275,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5298,6 +5372,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5442,6 +5522,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "500":
           content:
             application/json:
@@ -5558,6 +5644,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5809,6 +5901,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: All servers reconnected successfully
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "500":
           content:
             application/json:
