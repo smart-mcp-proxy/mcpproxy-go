@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfigCommit_ApplyAndReloadConverge is a regression test for the PR #857
+// TestConfigCommit_CommitPathsConverge is a regression test for the PR #857
 // config-store divergence race.
 //
 // The runtime keeps the active config in TWO stores that must stay in sync:
@@ -20,21 +20,23 @@ import (
 //   - the legacy r.cfg field (served by GetConfig / the REST /api/v1/config
 //     handlers).
 //
-// ReloadConfiguration (disk-reload / fsnotify-watcher path) updates configSvc
-// via ReloadFromFile BEFORE taking r.mu to set r.cfg, while ApplyConfig (API
-// path) sets r.cfg under r.mu and only updates configSvc AFTER releasing it.
-// A watcher-triggered reload of config A interleaving with an API apply of B
-// could therefore end with r.cfg=A while configSvc=B permanently — the REST
-// surface and the live components disagreeing with no further event to
-// reconcile them.
+// Several methods commit to BOTH stores but historically did so under r.mu in
+// different orders, releasing r.mu between the two writes:
+//   - ApplyConfig       (REST apply path)      — r.cfg first, configSvc last.
+//   - ReloadConfiguration (disk / fsnotify)    — configSvc first, r.cfg last.
+//   - UpdateConfig      (registry-source CRUD) — configSvc first, r.cfg last.
+//   - SaveConfiguration (enable/quarantine/…)  — snapshot read, then configSvc
+//   - r.cfg.Servers.
 //
-// Running the two paths concurrently many times, the two stores must always
-// converge to the same value after each round. Before the fix (a shared
-// configCommitMu serializing the whole commit in both paths) this fails on
-// some round; after it, it always converges. This is a logical lost-update
-// race, not a data race, so -race alone won't flag it — the convergence
-// assertion is what catches it.
-func TestConfigCommit_ApplyAndReloadConverge(t *testing.T) {
+// Interleaved, two of these could leave r.cfg and configSvc reporting
+// different configs permanently — the REST surface disagreeing with the live
+// components with no further event to reconcile them. The fix serializes every
+// two-store commit under a shared configCommitMu (acquired outside r.mu). This
+// test drives all four paths concurrently and asserts the two stores always
+// converge. It is a logical lost-update race, not a data race, so -race alone
+// won't flag it — the convergence assertion is what catches it. Before the fix
+// this fails on an early round; after it, it always converges.
+func TestConfigCommit_CommitPathsConverge(t *testing.T) {
 	tmpDir := t.TempDir()
 	cfgPath := filepath.Join(tmpDir, "mcp_config.json")
 
@@ -47,31 +49,43 @@ func TestConfigCommit_ApplyAndReloadConverge(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 
+	editedWithLimit := func(limit int) *config.Config {
+		c := config.DefaultConfig()
+		c.Listen = base.Listen
+		c.DataDir = base.DataDir
+		c.ToolResponseLimit = limit
+		return c
+	}
+
 	const rounds = 200
 	for i := 0; i < rounds; i++ {
-		// Disk currently holds the previous round's config; the reload reads
-		// whatever is on disk, while the apply writes a fresh, distinct value
-		// (and overwrites disk). Distinct limits make a divergence observable.
+		// Distinct per-path limits make any divergence between the two stores
+		// observable regardless of which path commits last.
 		applyLimit := 100000 + i
+		updateLimit := 200000 + i
 
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(4)
 		go func() {
 			defer wg.Done()
 			_ = rt.ReloadConfiguration()
 		}()
-		go func(limit int) {
+		go func() {
 			defer wg.Done()
-			edited := config.DefaultConfig()
-			edited.Listen = base.Listen
-			edited.DataDir = base.DataDir
-			edited.ToolResponseLimit = limit
-			_, _ = rt.ApplyConfig(edited, cfgPath)
-		}(applyLimit)
+			_, _ = rt.ApplyConfig(editedWithLimit(applyLimit), cfgPath)
+		}()
+		go func() {
+			defer wg.Done()
+			rt.UpdateConfig(editedWithLimit(updateLimit), cfgPath)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = rt.SaveConfiguration()
+		}()
 		wg.Wait()
 
-		// r.cfg (GetConfig / REST) and configSvc (ConfigSnapshot / subscribers)
-		// must report the same config once both commits have settled.
+		// Once all commits have settled, r.cfg (GetConfig / REST) and configSvc
+		// (ConfigSnapshot / subscribers) must report the same config.
 		legacy, gerr := rt.GetConfig()
 		require.NoError(t, gerr)
 		snap := rt.ConfigSnapshot().Config

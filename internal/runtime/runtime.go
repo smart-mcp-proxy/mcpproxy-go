@@ -412,6 +412,19 @@ func (r *Runtime) ConfigPath() string {
 // UpdateConfig replaces the runtime configuration in-place.
 // This now updates both the legacy field and the ConfigService.
 func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
+	// Serialize against the other two-store commit paths (ApplyConfig,
+	// ReloadConfiguration, SaveConfiguration) so configSvc and the legacy
+	// r.cfg field can't be updated in an interleaved order that leaves them
+	// divergent (PR #857 review). MUST be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+	r.updateConfigLocked(cfg, cfgPath)
+}
+
+// updateConfigLocked performs the UpdateConfig work assuming the caller already
+// holds configCommitMu (e.g. ReloadConfiguration's legacy configSvc==nil
+// fallback, which must not re-acquire the non-reentrant mutex).
+func (r *Runtime) updateConfigLocked(cfg *config.Config, cfgPath string) {
 	// Update ConfigService first
 	if r.configSvc != nil {
 		if cfgPath != "" {

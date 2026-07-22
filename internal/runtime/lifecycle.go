@@ -1011,6 +1011,17 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 // SaveConfiguration persists the runtime configuration to disk.
 func (r *Runtime) SaveConfiguration() error {
+	// Serialize the read-modify-write against the other two-store commit paths
+	// (ApplyConfig, ReloadConfiguration, UpdateConfig). This reads the current
+	// configSvc snapshot, splices in the latest servers, then writes both
+	// configSvc and r.cfg.Servers; without the lock a concurrent ApplyConfig
+	// could land its new config between the snapshot read and these writes,
+	// and this stale-based write would clobber configSvc while r.cfg keeps the
+	// applied value — leaving the two stores divergent (PR #857 review). MUST
+	// be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
 	latestServers, err := r.storageManager.ListUpstreamServers()
 	if err != nil {
 		r.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
@@ -1116,7 +1127,9 @@ func (r *Runtime) ReloadConfiguration() error {
 		if loadErr != nil {
 			return fmt.Errorf("failed to reload config: %w", loadErr)
 		}
-		r.UpdateConfig(newConfig, cfgPath)
+		// Already holding configCommitMu; use the locked helper so we don't
+		// re-acquire the non-reentrant mutex (would deadlock).
+		r.updateConfigLocked(newConfig, cfgPath)
 		newSnapshot = r.ConfigSnapshot()
 	}
 
