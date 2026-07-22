@@ -1054,12 +1054,18 @@ func (r *Runtime) SaveConfiguration() error {
 		zap.Bool("using_config_service", r.configSvc != nil))
 
 	// Use ConfigService to save (doesn't hold locks, handles file I/O)
+	oldServerCount := 0
 	if r.configSvc != nil {
 		// Update the config service with latest servers first
 		if err := r.configSvc.Update(configCopy, configsvc.UpdateTypeModify, "save_configuration"); err != nil {
 			r.logger.Error("Failed to update config service", zap.Error(err))
 			return err
 		}
+		// Keep the legacy r.cfg store in sync with configSvc BEFORE the disk
+		// write. If SaveToFile then fails we return an error, but the two
+		// in-memory stores still agree (only disk is stale) — a failed save
+		// must not leave configSvc and r.cfg divergent (PR #857 review).
+		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		// Then persist to disk
 		if err := r.configSvc.SaveToFile(); err != nil {
 			r.logger.Error("Failed to save config to file via config service", zap.Error(err))
@@ -1067,22 +1073,14 @@ func (r *Runtime) SaveConfiguration() error {
 		}
 		r.logger.Debug("Config saved to disk via config service")
 	} else {
-		// Fallback to legacy save
+		// Fallback to legacy save (no configSvc store to keep in sync)
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
 			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
 			return err
 		}
+		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		r.logger.Debug("Config saved to disk via legacy path")
 	}
-
-	// Update in-memory config (applies to both configSvc and legacy paths)
-	r.logger.Debug("Updating in-memory config with latest servers",
-		zap.Int("server_count", len(latestServers)))
-
-	r.mu.Lock()
-	oldServerCount := len(r.cfg.Servers)
-	r.cfg.Servers = latestServers
-	r.mu.Unlock()
 
 	r.logger.Debug("Configuration saved and in-memory config updated",
 		zap.Int("old_server_count", oldServerCount),
@@ -1093,6 +1091,18 @@ func (r *Runtime) SaveConfiguration() error {
 	r.emitConfigSaved(snapshot.Path)
 
 	return nil
+}
+
+// syncServersToLegacyConfig writes the latest server list into the legacy
+// r.cfg store under r.mu and returns the previous server count. Callers must
+// hold configCommitMu so this stays serialized with the other config-commit
+// paths.
+func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	oldServerCount := len(r.cfg.Servers)
+	r.cfg.Servers = latestServers
+	return oldServerCount
 }
 
 // ReloadConfiguration reloads the configuration from disk and resyncs state.

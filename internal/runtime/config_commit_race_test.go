@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -64,8 +65,10 @@ func TestConfigCommit_CommitPathsConverge(t *testing.T) {
 		applyLimit := 100000 + i
 		updateLimit := 200000 + i
 
+		listenAddr := fmt.Sprintf("127.0.0.1:%d", 40000+i)
+
 		var wg sync.WaitGroup
-		wg.Add(4)
+		wg.Add(5)
 		go func() {
 			defer wg.Done()
 			_ = rt.ReloadConfiguration()
@@ -82,15 +85,23 @@ func TestConfigCommit_CommitPathsConverge(t *testing.T) {
 			defer wg.Done()
 			_ = rt.SaveConfiguration()
 		}()
+		go func() {
+			defer wg.Done()
+			_ = rt.UpdateListenAddress(listenAddr)
+		}()
 		wg.Wait()
 
 		// Once all commits have settled, r.cfg (GetConfig / REST) and configSvc
-		// (ConfigSnapshot / subscribers) must report the same config.
+		// (ConfigSnapshot / subscribers) must report the same config — both the
+		// hot-reloadable ToolResponseLimit and the Listen address.
 		legacy, gerr := rt.GetConfig()
 		require.NoError(t, gerr)
 		snap := rt.ConfigSnapshot().Config
 		require.Equal(t, legacy.ToolResponseLimit, snap.ToolResponseLimit,
-			"round %d: r.cfg and configSvc diverged (r.cfg=%d configSvc=%d)",
+			"round %d: r.cfg and configSvc diverged on ToolResponseLimit (r.cfg=%d configSvc=%d)",
 			i, legacy.ToolResponseLimit, snap.ToolResponseLimit)
+		require.Equal(t, legacy.Listen, snap.Listen,
+			"round %d: r.cfg and configSvc diverged on Listen (r.cfg=%q configSvc=%q)",
+			i, legacy.Listen, snap.Listen)
 	}
 }

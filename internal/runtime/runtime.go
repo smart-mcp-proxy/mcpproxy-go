@@ -456,12 +456,26 @@ func (r *Runtime) UpdateListenAddress(addr string) error {
 		return fmt.Errorf("invalid listen address %q: %w", addr, err)
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cfg == nil {
+	// Commit the listen change to BOTH config stores atomically. Mutating only
+	// r.cfg.Listen (as this used to) left configSvc's snapshot stale forever —
+	// and a subsequent SaveConfiguration, which clones that stale snapshot,
+	// would even persist the OLD address. Routing through updateConfigLocked
+	// under configCommitMu keeps configSvc and r.cfg in agreement and serializes
+	// against the other commit paths (PR #857 review). MUST be acquired before
+	// r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
+	snapshot := r.ConfigSnapshot()
+	if snapshot == nil || snapshot.Config == nil {
 		return fmt.Errorf("runtime configuration is not available")
 	}
-	r.cfg.Listen = addr
+	updated := snapshot.Clone()
+	if updated == nil {
+		return fmt.Errorf("failed to clone configuration")
+	}
+	updated.Listen = addr
+	r.updateConfigLocked(updated, "")
 	return nil
 }
 
