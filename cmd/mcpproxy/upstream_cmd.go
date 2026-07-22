@@ -1261,13 +1261,35 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 	return runUpstreamAddConfigMode(req, globalConfig)
 }
 
+// outputSkipNotice prints a human skip notice (for --if-not-exists /
+// --if-exists) to stderr and, in machine formats, emits a structured skip
+// object on stdout so `-o json` consumers always receive parseable output.
+func outputSkipNotice(notice string, payload map[string]interface{}) error {
+	fmt.Fprintln(os.Stderr, notice)
+	outputFormat := ResolveOutputFormat()
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, err := GetOutputFormatter()
+		if err != nil {
+			return err
+		}
+		formatted, err := formatter.Format(payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println(formatted)
+	}
+	return nil
+}
+
 func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) error {
 	result, err := client.AddServer(ctx, req)
 	if err != nil {
 		// Check if it's "already exists" error and --if-not-exists is set
 		if upstreamAddIfNotExists && strings.Contains(err.Error(), "already exists") {
-			fmt.Printf("Server '%s' already exists (skipped)\n", req.Name)
-			return nil
+			return outputSkipNotice(
+				fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
+				map[string]interface{}{"name": req.Name, "skipped": true},
+			)
 		}
 		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
 			WithGuidance("Check the server name and configuration"), output.ErrCodeOperationFailed)
@@ -1294,8 +1316,10 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 	for _, srv := range globalConfig.Servers {
 		if srv.Name == req.Name {
 			if upstreamAddIfNotExists {
-				fmt.Printf("Server '%s' already exists (skipped)\n", req.Name)
-				return nil
+				return outputSkipNotice(
+					fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
+					map[string]interface{}{"name": req.Name, "skipped": true},
+				)
 			}
 			return fmt.Errorf("server '%s' already exists", req.Name)
 		}
@@ -1382,8 +1406,10 @@ func runUpstreamRemoveDaemonMode(ctx context.Context, client *cliclient.Client, 
 	if err != nil {
 		// Check if it's "not found" error and --if-exists is set
 		if upstreamRemoveIfExists && strings.Contains(err.Error(), "not found") {
-			fmt.Printf("Server '%s' not found (skipped)\n", serverName)
-			return nil
+			return outputSkipNotice(
+				fmt.Sprintf("Server '%s' not found (skipped)", serverName),
+				map[string]interface{}{"name": serverName, "skipped": true},
+			)
 		}
 		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
 			WithGuidance("Check the server name"), output.ErrCodeOperationFailed)
@@ -1419,8 +1445,10 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 
 	if !found {
 		if upstreamRemoveIfExists {
-			fmt.Printf("Server '%s' not found (skipped)\n", serverName)
-			return nil
+			return outputSkipNotice(
+				fmt.Sprintf("Server '%s' not found (skipped)", serverName),
+				map[string]interface{}{"name": serverName, "skipped": true},
+			)
 		}
 		return fmt.Errorf("server '%s' not found", serverName)
 	}

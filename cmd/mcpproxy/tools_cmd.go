@@ -241,9 +241,9 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 	// Enable transport tracing if requested
 	if traceTransport {
 		transport.GlobalTraceEnabled = true
-		fmt.Println("HTTP/SSE TRANSPORT TRACING ENABLED")
-		fmt.Println("   All HTTP requests/responses and SSE frames will be logged")
-		fmt.Println()
+		fmt.Fprintln(os.Stderr, "HTTP/SSE TRANSPORT TRACING ENABLED")
+		fmt.Fprintln(os.Stderr, "   All HTTP requests/responses and SSE frames will be logged")
+		fmt.Fprintln(os.Stderr)
 	}
 
 	// Load configuration
@@ -617,10 +617,12 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 			serverName, getAvailableServerNames(globalConfig))
 	}
 
-	fmt.Printf("MCP Tools List - Server: %s\n", serverName)
-	fmt.Printf("Log Level: %s\n", toolsLogLevel)
-	fmt.Printf("Timeout: %v\n", timeout)
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	// Human banner/progress goes to stderr so machine formats (-o json|yaml)
+	// keep stdout parseable (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "MCP Tools List - Server: %s\n", serverName)
+	fmt.Fprintf(os.Stderr, "Log Level: %s\n", toolsLogLevel)
+	fmt.Fprintf(os.Stderr, "Timeout: %v\n", timeout)
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Create storage (optional, for OAuth persistence)
 	var db *storage.BoltDB
@@ -652,14 +654,14 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 	}
 
 	// Connect to server
-	fmt.Printf("Connecting to server '%s'...\n", serverName)
+	fmt.Fprintf(os.Stderr, "Connecting to server '%s'...\n", serverName)
 	if err := managedClient.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
 	}
 
 	// Ensure cleanup on exit
 	defer func() {
-		fmt.Printf("Disconnecting from server...\n")
+		fmt.Fprintf(os.Stderr, "Disconnecting from server...\n")
 		if disconnectErr := managedClient.Disconnect(); disconnectErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
 		}
