@@ -24,6 +24,12 @@ updates:
     open-pull-requests-limit: 10
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # Revisit when vue-tsc + typescript-eslint support TypeScript 7.
+      # TS 7 cannot even `npm ci`: typescript-eslint peer-caps at <6.1.0 and
+      # vue-tsc fails on TS 7's package exports (see PR #869).
+      - dependency-name: "typescript"
+        versions: ["7.x"]
     groups:
       frontend-dependencies:
         patterns:
