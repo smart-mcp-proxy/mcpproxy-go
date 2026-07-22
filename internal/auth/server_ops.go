@@ -44,6 +44,8 @@ const (
 	ServerOpScan            = "scan"
 	ServerOpSecurityApprove = "security_approve"
 	ServerOpSecurityReject  = "security_reject"
+	ServerOpSecretWrite     = "secret_write"
+	ServerOpDiagnosticsFix  = "diagnostics_fix"
 )
 
 // agentDeniedServerOps is the canonical set of server/tool-mutating operations
@@ -76,6 +78,8 @@ var agentDeniedServerOps = map[string]struct{}{
 	ServerOpScan:            {},
 	ServerOpSecurityApprove: {},
 	ServerOpSecurityReject:  {},
+	ServerOpSecretWrite:     {},
+	ServerOpDiagnosticsFix:  {},
 }
 
 // AgentDeniedServerOp reports whether the named operation is forbidden to agent

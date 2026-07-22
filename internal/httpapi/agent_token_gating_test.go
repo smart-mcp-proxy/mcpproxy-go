@@ -72,6 +72,17 @@ var mutatingServerRoutes = []struct {
 	{"registry-edit-source", http.MethodPut, "/api/v1/registries/reg1"},
 	{"registry-remove-source", http.MethodDelete, "/api/v1/registries/reg1"},
 	{"registry-add-server", http.MethodPost, "/api/v1/registries/reg1/servers/srv1/add"},
+	{"secret-set", http.MethodPost, "/api/v1/secrets"},
+	{"secret-delete", http.MethodDelete, "/api/v1/secrets/tok"},
+	{"secret-migrate", http.MethodPost, "/api/v1/secrets/migrate"},
+	{"diagnostics-fix", http.MethodPost, "/api/v1/diagnostics/fix"},
+	{"scanner-enable", http.MethodPost, "/api/v1/security/scanners/s1/enable"},
+	{"scanner-disable", http.MethodPost, "/api/v1/security/scanners/s1/disable"},
+	{"scanner-config", http.MethodPut, "/api/v1/security/scanners/s1/config"},
+	{"scanner-install", http.MethodPost, "/api/v1/security/scanners/install"},
+	{"scanner-remove", http.MethodDelete, "/api/v1/security/scanners/s1"},
+	{"scan-all", http.MethodPost, "/api/v1/security/scan-all"},
+	{"cancel-all", http.MethodPost, "/api/v1/security/cancel-all"},
 }
 
 // TestMutatingServerRoutes_AgentTokenForbidden asserts every mutating server

@@ -10,7 +10,7 @@ func TestAgentDeniedServerOp(t *testing.T) {
 		ServerOpAddFromRegistry, ServerOpLogin, ServerOpLogout,
 		ServerOpConfigToSecret, ServerOpApproveTools, ServerOpBlockTools,
 		ServerOpConfigWrite, ServerOpScan, ServerOpSecurityApprove,
-		ServerOpSecurityReject,
+		ServerOpSecurityReject, ServerOpSecretWrite, ServerOpDiagnosticsFix,
 	}
 	for _, op := range denied {
 		if !AgentDeniedServerOp(op) {

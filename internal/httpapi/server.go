@@ -725,20 +725,24 @@ func (s *Server) setupRoutes() {
 		// Docker recovery status
 		r.Get("/docker/status", s.handleGetDockerStatus)
 
-		// Secrets management
+		// Secrets management. Writing/deleting/migrating keyring entries mutates
+		// upstream credentials and restarts affected servers, so mutating routes
+		// are agent-token-gated (issue #878 class); reads stay open.
 		r.Route("/secrets", func(r chi.Router) {
 			r.Get("/refs", s.handleGetSecretRefs)
 			r.Get("/config", s.handleGetConfigSecrets)
-			r.Post("/migrate", s.handleMigrateSecrets)
-			r.Post("/", s.handleSetSecret)
-			r.Delete("/{name}", s.handleDeleteSecret)
+			r.Post("/migrate", s.requireServerOp(auth.ServerOpSecretWrite, s.handleMigrateSecrets))
+			r.Post("/", s.requireServerOp(auth.ServerOpSecretWrite, s.handleSetSecret))
+			r.Delete("/{name}", s.requireServerOp(auth.ServerOpSecretWrite, s.handleDeleteSecret))
 		})
 
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
 		r.Get("/doctor", s.handleGetDiagnostics) // Alias for consistency with CLI command
-		// Spec 044: per-server diagnostics + fix invocation.
-		r.Post("/diagnostics/fix", s.handleInvokeFix)
+		// Spec 044: per-server diagnostics + fix invocation. Fixers execute
+		// administrative actions (OAuth reauth, scanner disable, config
+		// migration), so invocation is admin-only.
+		r.Post("/diagnostics/fix", s.requireServerOp(auth.ServerOpDiagnosticsFix, s.handleInvokeFix))
 
 		// Telemetry payload preview (Spec 042) — renders the next heartbeat
 		// payload with runtime stats attached. No network call is made.
@@ -821,23 +825,26 @@ func (s *Server) setupRoutes() {
 		r.Get("/onboarding/state", s.handleGetOnboardingState)
 		r.Post("/onboarding/mark", s.handleMarkOnboardingState)
 
-		// Security scanner management routes (Spec 039)
+		// Security scanner management routes (Spec 039). Installing/removing/
+		// configuring scanners and batch scans mutate security state, so the
+		// mutating routes are agent-token-gated; reads (list/status/overview/
+		// queue/history) stay open.
 		r.Route("/security", func(r chi.Router) {
 			r.Get("/scanners", s.handleListScanners)
-			r.Post("/scanners/{id}/enable", s.handleInstallScanner)
-			r.Post("/scanners/{id}/disable", s.handleRemoveScanner)
-			r.Put("/scanners/{id}/config", s.handleConfigureScanner)
+			r.Post("/scanners/{id}/enable", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
+			r.Post("/scanners/{id}/disable", s.requireServerOp(auth.ServerOpScan, s.handleRemoveScanner))
+			r.Put("/scanners/{id}/config", s.requireServerOp(auth.ServerOpScan, s.handleConfigureScanner))
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
 
 			// Legacy routes (backwards compatibility)
-			r.Post("/scanners/install", s.handleInstallScanner)
-			r.Delete("/scanners/{id}", s.handleRemoveScanner)
+			r.Post("/scanners/install", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
+			r.Delete("/scanners/{id}", s.requireServerOp(auth.ServerOpScan, s.handleRemoveScanner))
 
 			// Batch scan operations
-			r.Post("/scan-all", s.handleScanAll)
+			r.Post("/scan-all", s.requireServerOp(auth.ServerOpScan, s.handleScanAll))
 			r.Get("/queue", s.handleGetQueueProgress)
-			r.Post("/cancel-all", s.handleCancelAllScans)
+			r.Post("/cancel-all", s.requireServerOp(auth.ServerOpScan, s.handleCancelAllScans))
 
 			// Scan history
 			r.Get("/scans", s.handleListScanHistory)
