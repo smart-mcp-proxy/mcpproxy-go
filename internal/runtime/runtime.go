@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -62,6 +63,32 @@ type Runtime struct {
 
 	mu      sync.RWMutex
 	running bool
+
+	// configCommitMu serializes whole config-commit operations against each
+	// other. ApplyConfig (API path) and ReloadConfiguration (disk-reload path,
+	// incl. the fsnotify watcher) each update TWO stores that must stay in
+	// sync — configSvc (snapshot/subscribers) and the legacy r.cfg/live
+	// components — but they do so under r.mu in different orders and release
+	// r.mu between the two stores. Without a wider lock, a watcher reload of
+	// config A can interleave with an API apply of B and leave r.cfg=A while
+	// configSvc=B persistently (PR #857 review). This mutex is held across the
+	// entire load→validate→commit sequence in both paths so they can never
+	// interleave. Lock ordering: acquire configCommitMu OUTSIDE r.mu — never
+	// take configCommitMu while holding r.mu. configSvc updates only notify
+	// subscribers over buffered channels (no synchronous re-entry into the
+	// runtime), so there is no callback deadlock.
+	configCommitMu sync.Mutex
+
+	// Config-watcher self-write suppression (config_watcher.go): marshaled
+	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
+	// top of the snapshot comparison because a restart-required ApplyConfig
+	// saves the new config to disk while intentionally leaving memory on the
+	// old one (requires_restart contract) — the snapshot alone can't identify
+	// that write as ours. A bounded set rather than a single slot: back-to-back
+	// ApplyConfig saves must not evict each other's still-pending markers
+	// before the watcher debounce fires (PR #857 round-7 race).
+	selfWriteMu      sync.Mutex
+	recentSelfWrites []selfWriteEntry
 
 	statusMu sync.RWMutex
 	status   Status
@@ -385,6 +412,19 @@ func (r *Runtime) ConfigPath() string {
 // UpdateConfig replaces the runtime configuration in-place.
 // This now updates both the legacy field and the ConfigService.
 func (r *Runtime) UpdateConfig(cfg *config.Config, cfgPath string) {
+	// Serialize against the other two-store commit paths (ApplyConfig,
+	// ReloadConfiguration, SaveConfiguration) so configSvc and the legacy
+	// r.cfg field can't be updated in an interleaved order that leaves them
+	// divergent (PR #857 review). MUST be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+	r.updateConfigLocked(cfg, cfgPath)
+}
+
+// updateConfigLocked performs the UpdateConfig work assuming the caller already
+// holds configCommitMu (e.g. ReloadConfiguration's legacy configSvc==nil
+// fallback, which must not re-acquire the non-reentrant mutex).
+func (r *Runtime) updateConfigLocked(cfg *config.Config, cfgPath string) {
 	// Update ConfigService first
 	if r.configSvc != nil {
 		if cfgPath != "" {
@@ -416,12 +456,26 @@ func (r *Runtime) UpdateListenAddress(addr string) error {
 		return fmt.Errorf("invalid listen address %q: %w", addr, err)
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cfg == nil {
+	// Commit the listen change to BOTH config stores atomically. Mutating only
+	// r.cfg.Listen (as this used to) left configSvc's snapshot stale forever —
+	// and a subsequent SaveConfiguration, which clones that stale snapshot,
+	// would even persist the OLD address. Routing through updateConfigLocked
+	// under configCommitMu keeps configSvc and r.cfg in agreement and serializes
+	// against the other commit paths (PR #857 review). MUST be acquired before
+	// r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
+	snapshot := r.ConfigSnapshot()
+	if snapshot == nil || snapshot.Config == nil {
 		return fmt.Errorf("runtime configuration is not available")
 	}
-	r.cfg.Listen = addr
+	updated := snapshot.Clone()
+	if updated == nil {
+		return fmt.Errorf("failed to clone configuration")
+	}
+	updated.Listen = addr
+	r.updateConfigLocked(updated, "")
 	return nil
 }
 
@@ -1332,6 +1386,13 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 		}, fmt.Errorf("config cannot be nil")
 	}
 
+	// Serialize the whole commit against ReloadConfiguration so the two config
+	// stores (configSvc + r.cfg/live components) can't be updated in an
+	// interleaved order that leaves them divergent. Held across save →
+	// r.cfg swap → configSvc.Update below. MUST be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
 	r.mu.Lock()
 
 	// Validate the new configuration first
@@ -1364,8 +1425,27 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	if savePath == "" {
 		savePath = r.cfgPath
 	}
+
+	// Record the save for the config watcher's self-write suppression BEFORE
+	// writing, so the fs event can never outrun the marker (a >debounce pause
+	// between rename and record would otherwise let the watcher misread our
+	// own write as external). This matters most for the restart-required
+	// branch below: disk gets the new config while memory intentionally keeps
+	// the old one, so the watcher's snapshot comparison alone would misread
+	// our own save as an external edit and hot-apply it behind the API's back
+	// (config_watcher.go). If the save fails, its entry is removed again on
+	// the error path below — nothing reached disk, so a later byte-identical
+	// EXTERNAL write of this config is a genuine edit the watcher must reload.
+	r.noteConfigSelfWrite(newCfg)
+
 	saveErr := config.SaveConfig(newCfg, savePath)
 	if saveErr != nil {
+		// Drop the pre-armed self-write entry: the save never landed, so no
+		// future fs event for these bytes can be our own echo. Keeping it
+		// would suppress a genuine external write of byte-identical JSON.
+		// Only this payload is forgotten — markers from other still-pending
+		// successful saves stay live.
+		r.forgetConfigSelfWrite(newCfg)
 		r.logger.Error("Failed to save configuration to disk",
 			zap.String("path", savePath),
 			zap.Error(saveErr))
@@ -1407,30 +1487,10 @@ func (r *Runtime) ApplyConfig(newCfg *config.Config, cfgPath string) (*ConfigApp
 	r.logger.Info("Applying configuration hot-reload",
 		zap.Strings("changed_fields", result.ChangedFields))
 
-	// Update logging configuration
-	if contains(result.ChangedFields, "logging") {
-		r.logger.Info("Logging configuration changed")
-		if r.upstreamManager != nil && newCfg.Logging != nil {
-			r.upstreamManager.SetLogConfig(newCfg.Logging)
-		}
-	}
-
-	// Update truncator if tool response limit changed
-	if contains(result.ChangedFields, "tool_response_limit") {
-		r.logger.Info("Tool response limit changed, updating truncator",
-			zap.Int("old_limit", oldCfg.ToolResponseLimit),
-			zap.Int("new_limit", newCfg.ToolResponseLimit))
-		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
-	}
-
-	// Apply observability usage cadence (Spec 069 A2 — hot-reloadable). The
-	// usage flush loop re-reads the interval each cycle, so the setter suffices.
-	if contains(result.ChangedFields, "observability") && r.activityService != nil &&
-		newCfg.Observability != nil && newCfg.Observability.UsagePersistInterval.Duration() > 0 {
-		r.logger.Info("Observability usage persist interval changed",
-			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
-		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
-	}
+	// Apply live per-component side effects (logging, truncator, observability
+	// cadence) — shared with the disk-reload path (ReloadConfiguration) so the
+	// two config paths cannot drift.
+	r.applyComponentConfigLocked(oldCfg, newCfg)
 
 	// Apply update-check settings (Spec 079 FR-012 — hot-reloadable). The
 	// checker gates its poll + CheckNow on the flag internally; a
@@ -2495,6 +2555,49 @@ func (r *Runtime) applyUpdateCheckConfig(cfg *config.Config) {
 	}
 	uc := cfg.UpdateCheck
 	r.updateChecker.SetConfig(uc.IsEnabled(), uc.IncludePrereleases())
+}
+
+// applyComponentConfigLocked applies the live per-component side effects of a
+// hot-reloaded configuration: upstream log config, the tool-response
+// truncator, and the observability usage-persist cadence. It is shared by
+// ApplyConfig (API path) and ReloadConfiguration (disk/watcher path) so the
+// two paths cannot drift — the PR #857 review found disk reloads updating the
+// snapshot while these live components kept running on stale values.
+//
+// It performs its own field comparisons (mirroring DetectConfigChanges)
+// instead of taking a ChangedFields list, because DetectConfigChanges returns
+// early on restart-required fields and would under-report hot-reloadable
+// changes riding along in the same external edit. Caller must hold r.mu.
+func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil {
+		return
+	}
+
+	// Update logging configuration
+	if newCfg.Logging != nil && !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
+		r.logger.Info("Logging configuration changed")
+		if r.upstreamManager != nil {
+			r.upstreamManager.SetLogConfig(newCfg.Logging)
+		}
+	}
+
+	// Update truncator if tool response limit changed
+	if oldCfg.ToolResponseLimit != newCfg.ToolResponseLimit {
+		r.logger.Info("Tool response limit changed, updating truncator",
+			zap.Int("old_limit", oldCfg.ToolResponseLimit),
+			zap.Int("new_limit", newCfg.ToolResponseLimit))
+		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
+	}
+
+	// Apply observability usage cadence (Spec 069 A2 — hot-reloadable). The
+	// usage flush loop re-reads the interval each cycle, so the setter suffices.
+	if r.activityService != nil && newCfg.Observability != nil &&
+		newCfg.Observability.UsagePersistInterval.Duration() > 0 &&
+		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability) {
+		r.logger.Info("Observability usage persist interval changed",
+			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
+		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
+	}
 }
 
 // GetVersionInfo returns the current version information from the update checker.

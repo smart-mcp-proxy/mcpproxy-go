@@ -34,6 +34,15 @@ MCPProxy looks for configuration in these locations (in order):
 
 **Note:** At first launch, MCPProxy automatically generates a minimal configuration file if none exists.
 
+### Hot-Reload on File Edits
+
+A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits automatically — whether written in place (`echo ... > mcp_config.json`) or atomically (`jq ... > tmp && mv tmp mcp_config.json`, the pattern most editors use). Behavior details:
+
+- Edits are debounced for ~500 ms, so rapid write bursts collapse into a single reload.
+- Invalid JSON is rejected safely: the running configuration is kept unchanged (a warning is logged) and the watcher picks up the next valid write.
+- MCPProxy's own saves (Web UI, REST `PATCH /api/v1/config`, CLI commands) do not trigger a redundant second reload.
+- Restart-required fields (e.g. `listen`, `data_dir`) are reloaded into memory but only take effect after a restart.
+
 ---
 
 ## Basic Configuration

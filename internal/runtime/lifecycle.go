@@ -134,6 +134,13 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Tool discovery callback registered on upstream manager")
 	}
 
+	// Watch the config file for external edits (editors, CLI, `jq > tmp && mv`)
+	// and hot-reload them through the canonical disk-reload path. Failure
+	// degrades gracefully to no hot-reload (warning logged inside).
+	if p := r.ConfigSnapshot().Path; p != "" {
+		_ = r.startConfigFileWatcher(r.appCtx, p)
+	}
+
 	go r.backgroundInitialization()
 }
 
@@ -1094,6 +1101,17 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 // SaveConfiguration persists the runtime configuration to disk.
 func (r *Runtime) SaveConfiguration() error {
+	// Serialize the read-modify-write against the other two-store commit paths
+	// (ApplyConfig, ReloadConfiguration, UpdateConfig). This reads the current
+	// configSvc snapshot, splices in the latest servers, then writes both
+	// configSvc and r.cfg.Servers; without the lock a concurrent ApplyConfig
+	// could land its new config between the snapshot read and these writes,
+	// and this stale-based write would clobber configSvc while r.cfg keeps the
+	// applied value — leaving the two stores divergent (PR #857 review). MUST
+	// be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
 	latestServers, err := r.storageManager.ListUpstreamServers()
 	if err != nil {
 		r.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
@@ -1126,12 +1144,18 @@ func (r *Runtime) SaveConfiguration() error {
 		zap.Bool("using_config_service", r.configSvc != nil))
 
 	// Use ConfigService to save (doesn't hold locks, handles file I/O)
+	oldServerCount := 0
 	if r.configSvc != nil {
 		// Update the config service with latest servers first
 		if err := r.configSvc.Update(configCopy, configsvc.UpdateTypeModify, "save_configuration"); err != nil {
 			r.logger.Error("Failed to update config service", zap.Error(err))
 			return err
 		}
+		// Keep the legacy r.cfg store in sync with configSvc BEFORE the disk
+		// write. If SaveToFile then fails we return an error, but the two
+		// in-memory stores still agree (only disk is stale) — a failed save
+		// must not leave configSvc and r.cfg divergent (PR #857 review).
+		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		// Then persist to disk
 		if err := r.configSvc.SaveToFile(); err != nil {
 			r.logger.Error("Failed to save config to file via config service", zap.Error(err))
@@ -1139,22 +1163,14 @@ func (r *Runtime) SaveConfiguration() error {
 		}
 		r.logger.Debug("Config saved to disk via config service")
 	} else {
-		// Fallback to legacy save
+		// Fallback to legacy save (no configSvc store to keep in sync)
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
 			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
 			return err
 		}
+		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		r.logger.Debug("Config saved to disk via legacy path")
 	}
-
-	// Update in-memory config (applies to both configSvc and legacy paths)
-	r.logger.Debug("Updating in-memory config with latest servers",
-		zap.Int("server_count", len(latestServers)))
-
-	r.mu.Lock()
-	oldServerCount := len(r.cfg.Servers)
-	r.cfg.Servers = latestServers
-	r.mu.Unlock()
 
 	r.logger.Debug("Configuration saved and in-memory config updated",
 		zap.Int("old_server_count", oldServerCount),
@@ -1167,9 +1183,31 @@ func (r *Runtime) SaveConfiguration() error {
 	return nil
 }
 
+// syncServersToLegacyConfig writes the latest server list into the legacy
+// r.cfg store under r.mu and returns the previous server count. Callers must
+// hold configCommitMu so this stays serialized with the other config-commit
+// paths.
+func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	oldServerCount := len(r.cfg.Servers)
+	r.cfg.Servers = latestServers
+	return oldServerCount
+}
+
 // ReloadConfiguration reloads the configuration from disk and resyncs state.
 func (r *Runtime) ReloadConfiguration() error {
 	r.logger.Info("Reloading configuration from disk")
+
+	// Serialize the whole reload against ApplyConfig: both paths update the
+	// configSvc snapshot AND the legacy r.cfg/live components, but in different
+	// orders and releasing r.mu in between. Without this outer lock a
+	// watcher-triggered reload of config A can interleave with an API apply of
+	// B and leave r.cfg=A while configSvc=B persistently (PR #857 review). Held
+	// across configSvc.ReloadFromFile → r.cfg swap → live-component apply.
+	// MUST be acquired before r.mu (matches ApplyConfig's lock ordering).
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
 
 	// Get current snapshot before reload
 	oldSnapshot := r.ConfigSnapshot()
@@ -1189,13 +1227,49 @@ func (r *Runtime) ReloadConfiguration() error {
 		if loadErr != nil {
 			return fmt.Errorf("failed to reload config: %w", loadErr)
 		}
-		r.UpdateConfig(newConfig, cfgPath)
+		// Already holding configCommitMu; use the locked helper so we don't
+		// re-acquire the non-reentrant mutex (would deadlock).
+		r.updateConfigLocked(newConfig, cfgPath)
 		newSnapshot = r.ConfigSnapshot()
 	}
 
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
+
+	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
+	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
+	// a disk reload only lands in the configsvc snapshot — the API keeps
+	// serving the stale config, and a subsequent PATCH would deep-merge onto
+	// the stale base and save it, silently reverting the external edit.
+	// (configSvc.ReloadFromFile doesn't touch the legacy fields; the legacy
+	// fallback branch above already synced them via UpdateConfig.)
+	if r.configSvc != nil {
+		r.mu.Lock()
+		r.cfg = newSnapshot.Config
+		if newSnapshot.Path != "" {
+			r.cfgPath = newSnapshot.Path
+		}
+		r.mu.Unlock()
+	}
+
+	// Propagate the reloaded global config to the upstream manager and every
+	// running managed client (parity with ApplyConfig, spec 074): health-check
+	// loops and Docker-recovery decisions re-resolve values like
+	// health_check_interval from this, so external edits must reach it too —
+	// not only API applies.
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetGlobalConfig(newSnapshot.Config)
+	}
+
+	// Parity with ApplyConfig's live per-component side effects (PR #857
+	// review): logging via SetLogConfig, the tool-response truncator, and the
+	// observability usage cadence must follow disk reloads too — otherwise an
+	// external edit lands in the snapshot/API while the running components
+	// keep their stale values.
+	r.mu.Lock()
+	r.applyComponentConfigLocked(oldSnapshot.Config, newSnapshot.Config)
+	r.mu.Unlock()
 
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
@@ -1204,8 +1278,9 @@ func (r *Runtime) ReloadConfiguration() error {
 
 	// MCP-2482: detect a telemetry enabled->disabled flip across the reload and
 	// fire the one-time opt-out beacon. This covers config changes that arrive
-	// via a disk reload (there is no fsnotify auto-watcher, so this is the
-	// manual/triggered-reload path). nil-safe + fire-and-forget.
+	// via a disk reload — both the manual/triggered-reload path and the
+	// fsnotify config file watcher (config_watcher.go), which funnels external
+	// file edits into this method. nil-safe + fire-and-forget.
 	if r.telemetryService != nil {
 		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
 	}
@@ -1513,11 +1588,10 @@ func (r *Runtime) RestartServer(serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
 	// Issue #467: pull the latest server config from disk before falling
-	// back to BoltDB. There is no fsnotify-style auto file-watcher, so a
-	// user who edits mcp_config.json and then triggers a restart would
-	// otherwise replay stale env / headers / args / isolation data — only
-	// the live REST PATCH path used to update them. Disk-first here closes
-	// that gap for the (much more common) edit-then-restart UX.
+	// back to BoltDB. The fsnotify config file watcher (config_watcher.go)
+	// now hot-reloads external edits, but its debounce window means a fast
+	// edit-then-restart could still race a stale BoltDB record — disk-first
+	// here keeps the edit-then-restart UX deterministic regardless.
 	serverConfig := r.lookupServerConfigForRestart(serverName)
 	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration", serverName)
