@@ -231,6 +231,11 @@ func loadCallConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("failed to load config from %s: %w", configFilePath, err)
 	}
 
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		globalConfig.DataDir = dataDir
+	}
+
 	return globalConfig, nil
 }
 

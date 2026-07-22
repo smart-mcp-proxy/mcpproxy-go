@@ -600,6 +600,11 @@ func loadAuthConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("failed to load config from %s: %w", configFile, err)
 	}
 
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		globalConfig.DataDir = dataDir
+	}
+
 	return globalConfig, nil
 }
 
