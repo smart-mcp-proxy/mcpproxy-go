@@ -83,6 +83,9 @@ var mutatingServerRoutes = []struct {
 	{"scanner-remove", http.MethodDelete, "/api/v1/security/scanners/s1"},
 	{"scan-all", http.MethodPost, "/api/v1/security/scan-all"},
 	{"cancel-all", http.MethodPost, "/api/v1/security/cancel-all"},
+	{"connect-client", http.MethodPost, "/api/v1/connect/claude"},
+	{"connect-undo", http.MethodPost, "/api/v1/connect/claude/undo"},
+	{"connect-disconnect", http.MethodDelete, "/api/v1/connect/claude"},
 }
 
 // TestMutatingServerRoutes_AgentTokenForbidden asserts every mutating server
