@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 
 	"go.uber.org/zap"
@@ -32,8 +33,10 @@ func isLoopbackHost(addr string) bool {
 // hostMatchesTrusted reports whether the request Host header matches one of the
 // configured trusted_hosts entries. Matching is case-insensitive on the
 // hostname. An entry without a port matches that hostname on any port; an
-// entry with a port requires the request port to match too. The single entry
-// "*" disables Host validation entirely.
+// entry with a port requires the request port to match too. An entry with a
+// leading dot is a subdomain wildcard (Django/Vite/webpack convention):
+// ".example.com" matches example.com and every subdomain of it. The single
+// entry "*" disables Host validation entirely.
 func hostMatchesTrusted(host string, trusted []string) bool {
 	reqHost, reqPort, err := net.SplitHostPort(host)
 	if err != nil {
@@ -51,7 +54,11 @@ func hostMatchesTrusted(host string, trusted []string) bool {
 		if err != nil {
 			entryHost, entryPort = strings.Trim(entry, "[]"), ""
 		}
-		if !strings.EqualFold(reqHost, entryHost) {
+		if bare, isWildcard := strings.CutPrefix(entryHost, "."); isWildcard {
+			if !strings.EqualFold(reqHost, bare) && !hasSuffixFold(reqHost, "."+bare) {
+				continue
+			}
+		} else if !strings.EqualFold(reqHost, entryHost) {
 			continue
 		}
 		if entryPort == "" || entryPort == reqPort {
@@ -59,6 +66,23 @@ func hostMatchesTrusted(host string, trusted []string) bool {
 		}
 	}
 	return false
+}
+
+// hasSuffixFold reports whether s ends with suffix, case-insensitively.
+func hasSuffixFold(s, suffix string) bool {
+	return len(s) >= len(suffix) && strings.EqualFold(s[len(s)-len(suffix):], suffix)
+}
+
+// originAllowed implements the MCP spec's Origin validation (2025-11-25 basic
+// security best practices): an absent Origin header always passes (non-browser
+// clients and reverse proxies don't send one), a present Origin must carry a
+// loopback or trusted host. "null" and unparseable origins are invalid.
+func originAllowed(origin string, trusted []string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return isLoopbackHost(u.Host) || hostMatchesTrusted(u.Host, trusted)
 }
 
 // newHostValidationHandler applies DNS-rebinding protection with a
@@ -77,7 +101,7 @@ func hostMatchesTrusted(host string, trusted []string) bool {
 func newHostValidationHandler(next http.Handler, trustedHosts func() []string, logger *zap.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		localAddr, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
-		if !ok || localAddr == nil || !isLoopbackHost(localAddr.String()) || isLoopbackHost(r.Host) {
+		if !ok || localAddr == nil || !isLoopbackHost(localAddr.String()) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -85,15 +109,25 @@ func newHostValidationHandler(next http.Handler, trustedHosts func() []string, l
 		if trustedHosts != nil {
 			trusted = trustedHosts()
 		}
-		if hostMatchesTrusted(r.Host, trusted) {
-			next.ServeHTTP(w, r)
+		if !isLoopbackHost(r.Host) && !hostMatchesTrusted(r.Host, trusted) {
+			logger.Warn("Rejected MCP request with untrusted Host header (DNS-rebinding protection)",
+				zap.String("host", r.Host),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("hint", "if this is a reverse-proxy deployment, add the public domain to trusted_hosts in mcp_config.json"))
+			http.Error(w, fmt.Sprintf("Forbidden: invalid Host header %q — add this host to trusted_hosts in mcp_config.json to allow reverse-proxy access", r.Host), http.StatusForbidden)
 			return
 		}
-		logger.Warn("Rejected MCP request with untrusted Host header (DNS-rebinding protection)",
-			zap.String("host", r.Host),
-			zap.String("remote_addr", r.RemoteAddr),
-			zap.String("hint", "if this is a reverse-proxy deployment, add the public domain to trusted_hosts in mcp_config.json"))
-		http.Error(w, fmt.Sprintf("Forbidden: invalid Host header %q — add this host to trusted_hosts in mcp_config.json to allow reverse-proxy access", r.Host), http.StatusForbidden)
+		// MCP spec: reject only when Origin is present AND invalid, so
+		// header-less non-browser clients and proxied traffic pass untouched.
+		if origin := r.Header.Get("Origin"); origin != "" && !originAllowed(origin, trusted) {
+			logger.Warn("Rejected MCP request with untrusted Origin header (DNS-rebinding protection)",
+				zap.String("origin", origin),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("hint", "if this browser origin is legitimate, add its host to trusted_hosts in mcp_config.json"))
+			http.Error(w, fmt.Sprintf("Forbidden: invalid Origin header %q — add this host to trusted_hosts in mcp_config.json if the origin is legitimate", origin), http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

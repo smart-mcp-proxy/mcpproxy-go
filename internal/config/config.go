@@ -227,9 +227,12 @@ type Config struct {
 	// header is not a loopback address when mcpproxy listens on loopback; a
 	// reverse proxy (nginx → 127.0.0.1) forwarding the public domain in Host
 	// trips it. Entries are hostnames, case-insensitive; an entry without a
-	// port matches any port, with a port it must match exactly. The single
-	// entry "*" disables Host validation entirely. Empty (default) keeps full
-	// protection. Env override: MCPPROXY_TRUSTED_HOSTS (comma-separated).
+	// port matches any port, with a port it must match exactly; a leading dot
+	// (".example.com") is a subdomain wildcard. The single entry "*" disables
+	// Host and Origin validation entirely. The same list also validates the
+	// Origin header when present (MCP spec DNS-rebinding defense). Empty
+	// (default) keeps full protection. Env override: MCPPROXY_TRUSTED_HOSTS
+	// (comma-separated).
 	TrustedHosts      []string `json:"trusted_hosts,omitempty" mapstructure:"trusted-hosts"`
 	ReadOnlyMode      bool     `json:"read_only_mode" mapstructure:"read-only-mode"`
 	DisableManagement bool     `json:"disable_management" mapstructure:"disable-management"`

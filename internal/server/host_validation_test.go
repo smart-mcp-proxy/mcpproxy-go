@@ -73,6 +73,15 @@ func TestHostValidation(t *testing.T) {
 
 		// "*" wildcard disables Host validation entirely.
 		{"wildcard allows anything", []string{"*"}, "127.0.0.1:8080", "anything.example.com", http.StatusOK},
+
+		// Leading-dot entries are subdomain wildcards (Django/Vite/webpack
+		// convention): ".example.com" matches the bare domain and any subdomain.
+		{"dot wildcard matches bare domain", []string{".example.com"}, "127.0.0.1:8080", "example.com", http.StatusOK},
+		{"dot wildcard matches subdomain", []string{".example.com"}, "127.0.0.1:8080", "mcp.example.com", http.StatusOK},
+		{"dot wildcard matches nested subdomain", []string{".example.com"}, "127.0.0.1:8080", "a.b.example.com:443", http.StatusOK},
+		{"dot wildcard case-insensitive", []string{".Example.COM"}, "127.0.0.1:8080", "MCP.example.com", http.StatusOK},
+		{"dot wildcard rejects suffix-collision domain", []string{".example.com"}, "127.0.0.1:8080", "evilexample.com", http.StatusForbidden},
+		{"dot wildcard rejects domain as prefix", []string{".example.com"}, "127.0.0.1:8080", "example.com.evil.net", http.StatusForbidden},
 	}
 
 	for _, tc := range cases {
@@ -81,6 +90,62 @@ func TestHostValidation(t *testing.T) {
 			if got != tc.want {
 				t.Fatalf("trusted=%v localAddr=%q host=%q: got status %d, want %d",
 					tc.trusted, tc.localAddr, tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
+// doOriginValidation is doHostValidation with an Origin header attached.
+func doOriginValidation(t *testing.T, trusted []string, localAddr, host, origin string) int {
+	t.Helper()
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := newHostValidationHandler(next, func() []string { return trusted }, zap.NewNop())
+
+	req := httptest.NewRequest(http.MethodPost, "http://placeholder/mcp", nil)
+	req.Host = host
+	req.Header.Set("Origin", origin)
+	if localAddr != "" {
+		ctx := context.WithValue(req.Context(), http.LocalAddrContextKey, net.Addr(fakeAddr{addr: localAddr}))
+		req = req.WithContext(ctx)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// MCP spec (2025-11-25): "Servers MUST validate the Origin header... If the
+// Origin header is present and invalid, servers MUST respond with 403".
+// Absent Origin (non-browser clients, reverse proxies) always passes, so this
+// cannot re-break proxied deployments.
+func TestOriginValidation(t *testing.T) {
+	cases := []struct {
+		name      string
+		trusted   []string
+		localAddr string
+		host      string
+		origin    string
+		want      int
+	}{
+		{"loopback origin allowed", nil, "127.0.0.1:8080", "127.0.0.1:8080", "http://localhost:5173", http.StatusOK},
+		{"loopback ip origin allowed", nil, "127.0.0.1:8080", "localhost:8080", "http://127.0.0.1:8080", http.StatusOK},
+		{"external origin rejected on loopback listener", nil, "127.0.0.1:8080", "127.0.0.1:8080", "https://evil.example.net", http.StatusForbidden},
+		{"null origin rejected", nil, "127.0.0.1:8080", "127.0.0.1:8080", "null", http.StatusForbidden},
+		{"malformed origin rejected", nil, "127.0.0.1:8080", "127.0.0.1:8080", "not a url", http.StatusForbidden},
+		{"trusted origin allowed", []string{"mcp.example.com"}, "127.0.0.1:8080", "mcp.example.com", "https://mcp.example.com", http.StatusOK},
+		{"dot-wildcard origin allowed", []string{".example.com"}, "127.0.0.1:8080", "mcp.example.com", "https://app.example.com", http.StatusOK},
+		{"untrusted origin rejected despite trusted host", []string{"mcp.example.com"}, "127.0.0.1:8080", "mcp.example.com", "https://evil.example.net", http.StatusForbidden},
+		{"star wildcard allows any origin", []string{"*"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://anything.example.com", http.StatusOK},
+		{"non-loopback listener skips origin check", nil, "10.0.0.5:8080", "mcp.example.com", "https://evil.example.net", http.StatusOK},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := doOriginValidation(t, tc.trusted, tc.localAddr, tc.host, tc.origin)
+			if got != tc.want {
+				t.Fatalf("trusted=%v localAddr=%q host=%q origin=%q: got status %d, want %d",
+					tc.trusted, tc.localAddr, tc.host, tc.origin, got, tc.want)
 			}
 		})
 	}

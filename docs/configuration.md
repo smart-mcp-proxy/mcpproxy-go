@@ -422,7 +422,14 @@ Add the public domain(s) to `trusted_hosts` to allow them:
 - Entries are hostnames, matched case-insensitively. An entry without a port matches that
   host on **any** port; an entry with a port (`"mcp.example.com:8443"`) requires an exact
   port match.
-- The single entry `"*"` disables Host validation entirely (not recommended).
+- A leading dot makes an entry a subdomain wildcard: `".example.com"` matches
+  `example.com` and every subdomain of it (Django/Vite convention).
+- The single entry `"*"` disables Host and Origin validation entirely. **Not
+  recommended** — it re-opens DNS-rebinding: any website the local user visits could
+  drive requests into the proxy.
+- A request that carries an `Origin` header must likewise have a loopback or trusted
+  origin host (MCP spec requirement); requests without `Origin` (non-browser clients,
+  reverse proxies) are never rejected by the Origin check.
 - Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) are always accepted; requests on
   non-loopback listeners are never subject to Host validation.
 - Environment override: `MCPPROXY_TRUSTED_HOSTS` (comma-separated list).

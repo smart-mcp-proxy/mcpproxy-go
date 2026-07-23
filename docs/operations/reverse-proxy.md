@@ -43,7 +43,8 @@ The fix is to add your public domain(s) to the `trusted_hosts` allowlist.
 | Matching | Hostnames, compared **case-insensitively** |
 | Without a port | `"mcp.example.com"` matches that host on **any** port |
 | With a port | `"mcp.example.com:8443"` requires an **exact** port match |
-| Wildcard | The single entry `"*"` disables Host validation entirely (not recommended) |
+| Subdomain wildcard | A leading dot — `".example.com"` — matches `example.com` **and every subdomain** (`mcp.example.com`, `a.b.example.com`), same convention as Django's `ALLOWED_HOSTS` and Vite's `server.allowedHosts` |
+| Disable entirely | The single entry `"*"` turns Host **and Origin** validation off. **Not recommended:** it re-opens DNS rebinding — any website the local user visits can then drive requests into the proxy |
 | Loopback | `localhost`, `127.0.0.1`, `[::1]` are **always** accepted — no need to list them |
 | Non-loopback listeners | If `listen` is already a non-loopback address, Host validation never runs |
 | Unix socket | Socket/named-pipe connections are never subject to Host validation |
@@ -52,6 +53,16 @@ The fix is to add your public domain(s) to the `trusted_hosts` allowlist.
 - **Environment override:** `MCPPROXY_TRUSTED_HOSTS` (comma-separated), e.g.
   `MCPPROXY_TRUSTED_HOSTS="mcp.example.com,mcp.internal:8443"`.
 - **Hot-reloadable:** editing the config file applies without a restart.
+
+### Origin validation (browser requests)
+
+Per the MCP specification's security best practices, MCPProxy also validates the
+`Origin` header on loopback listeners: when a request **carries** an `Origin` and its
+host is neither loopback nor in `trusted_hosts`, it is rejected with
+`403 Forbidden: invalid Origin header`. Requests **without** an `Origin` header —
+every non-browser MCP client, and anything forwarded by a reverse proxy — are
+unaffected, so this cannot break proxied deployments. Browser-based clients served
+from your public domain work as soon as that domain is in `trusted_hosts`.
 
 ## nginx
 
