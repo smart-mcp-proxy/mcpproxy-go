@@ -438,6 +438,10 @@ location / {
 }
 ```
 
+See [Reverse Proxy Deployment](operations/reverse-proxy.md) for a full guide covering
+nginx and Caddy examples, streaming/SSE buffering, and enabling `require_mcp_auth` when
+exposing MCPProxy beyond localhost.
+
 ### Security Scanner (`security`)
 
 The deterministic, offline `tpa-descriptions` baseline scanner always runs and is

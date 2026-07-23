@@ -55,6 +55,8 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `listen` | string | `127.0.0.1:8080` | Address and port to listen on |
 | `data_dir` | string | `~/.mcpproxy` | Directory for data storage |
 | `api_key` | string | auto-generated | API key for REST API authentication |
+| `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on a loopback listener. Needed when running behind a reverse proxy — see [Reverse Proxy Deployment](/operations/reverse-proxy) |
+| `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost |
 | `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
 
 ### Feature Flags
