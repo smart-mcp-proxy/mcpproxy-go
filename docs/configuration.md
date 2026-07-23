@@ -378,6 +378,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 ```json
 {
   "api_key": "your-secret-api-key",
+  "trusted_hosts": ["mcp.example.com"],
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -388,6 +389,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated and enforced (logged on startup) |
+| `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on loopback listeners (reverse-proxy deployments). See below |
 | `read_only_mode` | boolean | `false` | Prevent all configuration modifications |
 | `disable_management` | boolean | `false` | Disable server management operations (restart, enable, disable) |
 | `allow_server_add` | boolean | `true` | Allow adding new servers via API/tools |
@@ -398,6 +400,43 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 - **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
 - **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
 - **Tray Integration**: Tray app automatically manages API keys for core communication
+
+### Reverse Proxy Deployments (`trusted_hosts`)
+
+When mcpproxy listens on a loopback address (the default `127.0.0.1:8080`), DNS-rebinding
+protection rejects any request whose `Host` header is not itself a loopback address with
+`403 Forbidden: invalid Host header`. This blocks malicious websites from rebinding their
+domain to `127.0.0.1` and driving a victim's browser into the local MCP server — but it
+also blocks legitimate reverse proxies (nginx, Caddy, CloudPanel) that forward the public
+domain in the `Host` header.
+
+Add the public domain(s) to `trusted_hosts` to allow them:
+
+```json
+{
+  "listen": "127.0.0.1:8004",
+  "trusted_hosts": ["mcp.example.com"]
+}
+```
+
+- Entries are hostnames, matched case-insensitively. An entry without a port matches that
+  host on **any** port; an entry with a port (`"mcp.example.com:8443"`) requires an exact
+  port match.
+- The single entry `"*"` disables Host validation entirely (not recommended).
+- Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) are always accepted; requests on
+  non-loopback listeners are never subject to Host validation.
+- Environment override: `MCPPROXY_TRUSTED_HOSTS` (comma-separated list).
+- Hot-reloadable: editing the config file applies without a restart.
+
+With `trusted_hosts` configured, a standard nginx block works without overriding `Host`:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8004;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+}
+```
 
 ### Security Scanner (`security`)
 

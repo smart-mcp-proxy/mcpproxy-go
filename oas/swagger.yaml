@@ -272,6 +272,20 @@ components:
         tray_endpoint:
           description: Tray endpoint override (unix:// or npipe://)
           type: string
+        trusted_hosts:
+          description: |-
+            TrustedHosts lists non-loopback Host header values accepted on loopback
+            listeners (GH #898). DNS-rebinding protection rejects requests whose Host
+            header is not a loopback address when mcpproxy listens on loopback; a
+            reverse proxy (nginx → 127.0.0.1) forwarding the public domain in Host
+            trips it. Entries are hostnames, case-insensitive; an entry without a
+            port matches any port, with a port it must match exactly. The single
+            entry "*" disables Host validation entirely. Empty (default) keeps full
+            protection. Env override: MCPPROXY_TRUSTED_HOSTS (comma-separated).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         update_check:
           $ref: '#/components/schemas/config.UpdateCheckConfig'
       type: object
