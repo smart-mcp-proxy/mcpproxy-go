@@ -82,6 +82,11 @@ func TestHostValidation(t *testing.T) {
 		{"dot wildcard case-insensitive", []string{".Example.COM"}, "127.0.0.1:8080", "MCP.example.com", http.StatusOK},
 		{"dot wildcard rejects suffix-collision domain", []string{".example.com"}, "127.0.0.1:8080", "evilexample.com", http.StatusForbidden},
 		{"dot wildcard rejects domain as prefix", []string{".example.com"}, "127.0.0.1:8080", "example.com.evil.net", http.StatusForbidden},
+
+		// Trailing-dot FQDNs are DNS-equivalent to their undotted form.
+		{"trailing-dot host matches exact entry", []string{"mcp.example.com"}, "127.0.0.1:8080", "mcp.example.com.", http.StatusOK},
+		{"trailing-dot host matches dot wildcard", []string{".example.com"}, "127.0.0.1:8080", "app.example.com.:443", http.StatusOK},
+		{"trailing-dot bare domain matches dot wildcard", []string{".example.com"}, "127.0.0.1:8080", "example.com.", http.StatusOK},
 	}
 
 	for _, tc := range cases {
@@ -138,6 +143,15 @@ func TestOriginValidation(t *testing.T) {
 		{"untrusted origin rejected despite trusted host", []string{"mcp.example.com"}, "127.0.0.1:8080", "mcp.example.com", "https://evil.example.net", http.StatusForbidden},
 		{"star wildcard allows any origin", []string{"*"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://anything.example.com", http.StatusOK},
 		{"non-loopback listener skips origin check", nil, "10.0.0.5:8080", "mcp.example.com", "https://evil.example.net", http.StatusOK},
+
+		// A serialized browser origin is exactly scheme://host[:port] over an
+		// HTTP(S)/WS(S) scheme — anything else is invalid per spec.
+		{"schemeless origin rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "//mcp.example.com", http.StatusForbidden},
+		{"non-http scheme origin rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "ftp://mcp.example.com", http.StatusForbidden},
+		{"origin with userinfo rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://user@mcp.example.com", http.StatusForbidden},
+		{"origin with path rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://mcp.example.com/path", http.StatusForbidden},
+		{"ws scheme origin allowed", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "ws://mcp.example.com", http.StatusOK},
+		{"ipv6 loopback origin allowed", nil, "127.0.0.1:8080", "127.0.0.1:8080", "http://[::1]:8080", http.StatusOK},
 	}
 
 	for _, tc := range cases {

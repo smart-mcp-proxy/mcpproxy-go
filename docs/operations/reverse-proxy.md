@@ -60,9 +60,13 @@ Per the MCP specification's security best practices, MCPProxy also validates the
 `Origin` header on loopback listeners: when a request **carries** an `Origin` and its
 host is neither loopback nor in `trusted_hosts`, it is rejected with
 `403 Forbidden: invalid Origin header`. Requests **without** an `Origin` header —
-every non-browser MCP client, and anything forwarded by a reverse proxy — are
-unaffected, so this cannot break proxied deployments. Browser-based clients served
-from your public domain work as soon as that domain is in `trusted_hosts`.
+every non-browser MCP client, CLI tool, and server-side integration — are unaffected.
+
+Note that reverse proxies forward a browser's `Origin` header as-is. A browser
+client served **from your public domain** works as soon as that domain is in
+`trusted_hosts` (its `Origin` matches the same entry as its `Host`). A browser
+frontend hosted on a **different** origin must have its own host added to
+`trusted_hosts` too, or its requests are rejected.
 
 ## nginx
 

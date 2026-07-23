@@ -42,6 +42,8 @@ func hostMatchesTrusted(host string, trusted []string) bool {
 	if err != nil {
 		reqHost, reqPort = strings.Trim(host, "[]"), ""
 	}
+	// A trailing dot ("example.com.") is DNS-equivalent to the undotted name.
+	reqHost = strings.TrimSuffix(reqHost, ".")
 	for _, entry := range trusted {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -74,12 +76,19 @@ func hasSuffixFold(s, suffix string) bool {
 }
 
 // originAllowed implements the MCP spec's Origin validation (2025-11-25 basic
-// security best practices): an absent Origin header always passes (non-browser
-// clients and reverse proxies don't send one), a present Origin must carry a
-// loopback or trusted host. "null" and unparseable origins are invalid.
+// security best practices): a present Origin must be a well-formed serialized
+// origin — scheme://host[:port] over http(s)/ws(s), no userinfo, path, query,
+// or fragment — whose host is loopback or trusted. "null", unparseable, and
+// non-origin-shaped values are invalid. Absence is handled by the caller
+// (non-browser clients don't send Origin at all).
 func originAllowed(origin string, trusted []string) bool {
 	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "ws", "wss":
+	default:
 		return false
 	}
 	return isLoopbackHost(u.Host) || hostMatchesTrusted(u.Host, trusted)
