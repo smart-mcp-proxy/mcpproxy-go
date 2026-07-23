@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -90,6 +91,16 @@ func originAllowed(origin string, trusted []string) bool {
 	case "http", "https", "ws", "wss":
 	default:
 		return false
+	}
+	// url.Parse tolerates a dangling colon ("host:") and any digit run as a
+	// port; a serialized origin's port must be a real one.
+	if strings.HasSuffix(u.Host, ":") {
+		return false
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return false
+		}
 	}
 	return isLoopbackHost(u.Host) || hostMatchesTrusted(u.Host, trusted)
 }

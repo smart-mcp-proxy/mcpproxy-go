@@ -152,6 +152,9 @@ func TestOriginValidation(t *testing.T) {
 		{"origin with path rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://mcp.example.com/path", http.StatusForbidden},
 		{"ws scheme origin allowed", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "ws://mcp.example.com", http.StatusOK},
 		{"ipv6 loopback origin allowed", nil, "127.0.0.1:8080", "127.0.0.1:8080", "http://[::1]:8080", http.StatusOK},
+		{"origin with dangling colon rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://mcp.example.com:", http.StatusForbidden},
+		{"origin with out-of-range port rejected", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://mcp.example.com:99999", http.StatusForbidden},
+		{"origin with valid port allowed", []string{"mcp.example.com"}, "127.0.0.1:8080", "127.0.0.1:8080", "https://mcp.example.com:8443", http.StatusOK},
 	}
 
 	for _, tc := range cases {
