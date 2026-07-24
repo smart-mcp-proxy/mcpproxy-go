@@ -140,6 +140,10 @@ async function copyCommand() {
 const visible = computed(
   () =>
     systemStore.updateAvailable &&
+    // Spec 079 US3 (FR-019): the core stamps nudges_suppressed in CI /
+    // non-interactive contexts — status/doctor/info keep the facts, the
+    // banner stays quiet.
+    !systemStore.info?.update?.nudges_suppressed &&
     !!latestVersion.value &&
     latestVersion.value !== dismissedVersion.value
 )

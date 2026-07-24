@@ -116,6 +116,14 @@ func TestChecker_UpdateAvailableLoggedOncePerVersion(t *testing.T) {
 	logger := zap.New(core)
 
 	checker := New(logger, "v1.0.0")
+	// Step the clock past any FR-018 failure-backoff window between periodic
+	// checks — this test is about announce dedupe, not backoff (which has its
+	// own tests in checker_us3_test.go).
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	checker.nowFn = func() time.Time {
+		now = now.Add(30 * 24 * time.Hour)
+		return now
+	}
 	release := &GitHubRelease{
 		TagName: "v1.1.0",
 		HTMLURL: "https://github.com/test/repo/releases/tag/v1.1.0",
