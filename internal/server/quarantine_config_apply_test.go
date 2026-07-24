@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -98,25 +99,26 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 	require.NotNil(t, testServer, "test-server not found in servers list")
 	assert.True(t, testServer.Quarantined, "Server should be quarantined initially")
 
-	// Step 4: Inspect the raw index view. The /api/v1/index/search endpoint is a
-	// raw index projection — quarantine filtering happens in the MCP retrieve_tools
-	// path, not here — so an indexed tool surfaces regardless of quarantine state.
-	// The invariant this asserts is the #871 REST contract: the endpoint returns
-	// the BARE tool name with server_name reported separately (external consumers
-	// assemble "server:tool" themselves), never the canonical prefixed id.
+	// Step 4: A quarantined server's tools must NOT appear in /api/v1/index/search
+	// (issue #877). Quarantine withholds a server's tool descriptions/schemas
+	// because they are the Tool Poisoning Attack vector; the MCP retrieve_tools
+	// path never surfaces them and this REST read path must agree.
+	//
+	// The endpoint returns BARE tool names ("tool1", never "test-server:tool1"),
+	// so the old assertion that result.Tool.Name doesn't contain "test-server:"
+	// was vacuously true and never caught the leak — assert on the server_name
+	// field the response actually carries. The #871 bare-name contract is still
+	// exercised after unquarantine in Step 9 (foundTool matches Name == "tool1").
 	searchResults, err := env.SearchTools("tool1", 10)
 	require.NoError(t, err)
 
 	for _, result := range searchResults {
-		if result.Tool.ServerName == "test-server" {
-			assert.Equal(t, "tool1", result.Tool.Name,
-				"REST index search must expose the bare tool name (#871)")
-			assert.Equal(t, "test-server", result.Tool.ServerName,
-				"REST index search must report server_name separately (#871)")
-		}
+		assert.NotEqual(t, "test-server", result.Tool.ServerName,
+			"quarantined server tools must be withheld from index search (leaked tool %q from server %q) (#877)",
+			result.Tool.Name, result.Tool.ServerName)
 	}
 
-	t.Logf("✓ Index search exposes bare tool names with separate server_name")
+	t.Logf("✓ Server correctly quarantined, tools withheld from index search")
 
 	// Step 5: Get current config and modify quarantine state
 	currentConfig, err = env.GetConfig()
@@ -204,6 +206,96 @@ func TestE2E_QuarantineConfigApply(t *testing.T) {
 	assert.True(t, foundTool, "Tools from unquarantined server should be searchable")
 
 	t.Logf("✓ All tests passed - quarantine state properly updates via config apply")
+}
+
+// TestE2E_IndexSearchHonorsQuarantine reproduces issue #877 deterministically:
+// a server indexed while trusted, then quarantined, must have its tools withheld
+// from GET /api/v1/index/search. Quarantining does not always evict a server's
+// already-indexed entries from Bleve, so the REST read path must apply the same
+// server-level visibility gate the MCP retrieve_tools path relies on. This test
+// pins the exact leaking state — index entry present + server quarantined in
+// storage — so it fails if the REST filter is removed.
+func TestE2E_IndexSearchHonorsQuarantine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping E2E test in short mode")
+	}
+	if raceEnabled {
+		t.Skip("Skipping test with race detector enabled - known race in shutdown path")
+	}
+
+	env := NewTestEnvironment(t)
+	defer env.Cleanup()
+
+	mockTools := []mcp.Tool{
+		{Name: "widget_search", Description: "Search widgets in the catalog"},
+	}
+	mockServer := env.CreateMockUpstreamServer("catalog-server", mockTools)
+	require.NotNil(t, mockServer)
+
+	// Step 1: add the server UNQUARANTINED so its tools get indexed.
+	currentConfig, err := env.GetConfig()
+	require.NoError(t, err)
+	if currentConfig.ToolsLimit == 0 {
+		currentConfig.ToolsLimit = 15
+	}
+	if currentConfig.ToolResponseLimit == 0 {
+		currentConfig.ToolResponseLimit = 10000
+	}
+	if currentConfig.CallToolTimeout == 0 {
+		currentConfig.CallToolTimeout = config.Duration(60 * time.Second)
+	}
+	if currentConfig.DataDir == "" {
+		currentConfig.DataDir = env.tempDir
+	}
+	if currentConfig.Listen == "" {
+		currentConfig.Listen = env.proxyServer.GetListenAddress()
+	}
+	currentConfig.Servers = append(currentConfig.Servers, &config.ServerConfig{
+		Name:        "catalog-server",
+		URL:         mockServer.addr,
+		Protocol:    "http",
+		Enabled:     true,
+		Quarantined: false,
+	})
+	applyResult, err := env.ApplyConfig(currentConfig)
+	require.NoError(t, err)
+	require.True(t, applyResult.Success)
+
+	// Wait for connect + index, then trigger discovery explicitly for determinism.
+	time.Sleep(2 * time.Second)
+	_ = env.proxyServer.runtime.DiscoverAndIndexTools(context.Background())
+	time.Sleep(2 * time.Second)
+
+	// Step 2: confirm the tool IS indexed and searchable while trusted (proves
+	// the index-entry precondition — this is what makes Step 4 non-vacuous).
+	results, err := env.SearchTools("widget", 10)
+	require.NoError(t, err)
+	indexed := false
+	for _, r := range results {
+		if r.Tool.ServerName == "catalog-server" {
+			indexed = true
+			break
+		}
+	}
+	require.True(t, indexed, "tool must be indexed while the server is trusted")
+	t.Logf("✓ Tool indexed & searchable while trusted")
+
+	// Step 3: quarantine the server directly in storage — WITHOUT reloading
+	// config or reindexing — so the Bleve entry lingers. This is the #877 state:
+	// index still holds the tool, storage says the server is quarantined.
+	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("catalog-server")
+	require.NoError(t, err)
+	serverConfig.Quarantined = true
+	require.NoError(t, env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig))
+
+	// Step 4: the REST search must now withhold the quarantined server's tools.
+	results, err = env.SearchTools("widget", 10)
+	require.NoError(t, err)
+	for _, r := range results {
+		assert.NotEqual(t, "catalog-server", r.Tool.ServerName,
+			"quarantined server tools must be withheld from index search (leaked %q) (#877)", r.Tool.Name)
+	}
+	t.Logf("✓ Quarantined server tools withheld from index search")
 }
 
 // Helper methods for TestEnvironment

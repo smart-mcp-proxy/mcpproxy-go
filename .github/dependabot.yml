@@ -17,6 +17,14 @@ updates:
       interval: weekly
     commit-message:
       prefix: "chore(ci)"
+    groups:
+      # codeql-action's init/autobuild/analyze subpaths are separate
+      # dependencies to dependabot but must stay on the same version —
+      # skew makes analyze reject init's config file (broke CI: #895
+      # bumped only init to 4.37.3 while analyze stayed on 4.37.0).
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
   - package-ecosystem: npm
     directory: "/frontend"
     schedule:

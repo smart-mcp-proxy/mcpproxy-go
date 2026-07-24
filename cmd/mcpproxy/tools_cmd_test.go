@@ -2,17 +2,20 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func TestToolsDaemonDetection_NoDaemon(t *testing.T) {
@@ -303,6 +306,85 @@ func TestToolsEnableCmd_ArgValidation(t *testing.T) {
 	require.NotNil(t, disableCmd)
 	assert.Error(t, disableCmd.Args(disableCmd, []string{}), "disable must reject zero args")
 	assert.NoError(t, disableCmd.Args(disableCmd, []string{"server:tool"}), "disable must accept one arg")
+}
+
+// ---------------------------------------------------------------------------
+// CLI-JSON (v0.51.0-rc.1 QA): standalone mode must keep stdout clean for
+// machine formats — banners/progress go to stderr.
+// ---------------------------------------------------------------------------
+
+// runStandaloneCapture runs runToolsListStandalone against a server whose
+// command does not exist (Connect fails fast, no live MCP server needed) and
+// returns everything written to stdout and stderr. The banner prints before
+// Connect, so it is exercised regardless of the connection failure.
+func runStandaloneCapture(t *testing.T, format string) (stdoutStr, stderrStr string) {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	rOut, wOut, err := os.Pipe()
+	require.NoError(t, err)
+	rErr, wErr, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = wOut
+	os.Stderr = wErr
+
+	oldFormat := globalOutputFormat
+	oldJSON := globalJSONOutput
+	globalOutputFormat = format
+	globalJSONOutput = false
+	t.Cleanup(func() {
+		globalOutputFormat = oldFormat
+		globalJSONOutput = oldJSON
+	})
+
+	cfg := &config.Config{Servers: []*config.ServerConfig{{
+		Name:     "everything",
+		Command:  "/nonexistent-mcpproxy-test-cmd",
+		Protocol: "stdio",
+		Enabled:  true,
+	}}} // DataDir empty → bbolt storage is skipped
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Connect fails (command does not exist); the returned error is irrelevant
+	// here — we only assert on where the banner/progress text landed.
+	_ = runToolsListStandalone(ctx, "everything", cfg, zap.NewNop())
+
+	wOut.Close()
+	wErr.Close()
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	var bufOut, bufErr bytes.Buffer
+	_, _ = bufOut.ReadFrom(rOut)
+	_, _ = bufErr.ReadFrom(rErr)
+	return bufOut.String(), bufErr.String()
+}
+
+// TestRunToolsListStandalone_MachineModeStdoutClean is the QA finding: with
+// -o json, stdout must contain only the JSON payload — no human banner or
+// progress text.
+func TestRunToolsListStandalone_MachineModeStdoutClean(t *testing.T) {
+	stdoutStr, stderrStr := runStandaloneCapture(t, "json")
+
+	assert.NotContains(t, stdoutStr, "MCP Tools List", "banner must not pollute stdout in json mode")
+	assert.NotContains(t, stdoutStr, "Connecting to server", "progress must not pollute stdout in json mode")
+	assert.NotContains(t, stdoutStr, "Disconnecting from server", "progress must not pollute stdout in json mode")
+	assert.Contains(t, stderrStr, "MCP Tools List", "banner should move to stderr")
+}
+
+// TestRunToolsListStandalone_TableModeBannerOnStderr locks the
+// unconditional-stderr convention: banners go to stderr in table mode too, so
+// `-o table | tee file` stays clean.
+func TestRunToolsListStandalone_TableModeBannerOnStderr(t *testing.T) {
+	stdoutStr, stderrStr := runStandaloneCapture(t, "table")
+
+	assert.NotContains(t, stdoutStr, "MCP Tools List", "banner must not pollute stdout in table mode")
+	assert.NotContains(t, stdoutStr, "Connecting to server", "progress must not pollute stdout in table mode")
+	assert.Contains(t, stderrStr, "MCP Tools List", "banner should be on stderr")
+	assert.Contains(t, stderrStr, "Connecting to server", "progress should be on stderr")
 }
 
 // ---------------------------------------------------------------------------

@@ -65,7 +65,7 @@ func TestUpstreamServersHandlerPerformance(t *testing.T) {
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		zap.NewNop(),
 		nil, // mainServer not needed for this test
 		false,
@@ -161,7 +161,7 @@ func TestUpstreamServersListOperation(t *testing.T) {
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		zap.NewNop(),
 		nil, // mainServer not needed for this test
 		false,

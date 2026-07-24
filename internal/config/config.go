@@ -220,12 +220,24 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
-	RequireMCPAuth    bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
-	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
-	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
-	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
-	AllowServerRemove bool   `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+	APIKey         string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
+	RequireMCPAuth bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
+	// TrustedHosts lists non-loopback Host header values accepted on loopback
+	// listeners (GH #898). DNS-rebinding protection rejects requests whose Host
+	// header is not a loopback address when mcpproxy listens on loopback; a
+	// reverse proxy (nginx → 127.0.0.1) forwarding the public domain in Host
+	// trips it. Entries are hostnames, case-insensitive; an entry without a
+	// port matches any port, with a port it must match exactly; a leading dot
+	// (".example.com") is a subdomain wildcard. The single entry "*" disables
+	// Host and Origin validation entirely. The same list also validates the
+	// Origin header when present (MCP spec DNS-rebinding defense). Empty
+	// (default) keeps full protection. Env override: MCPPROXY_TRUSTED_HOSTS
+	// (comma-separated).
+	TrustedHosts      []string `json:"trusted_hosts,omitempty" mapstructure:"trusted-hosts"`
+	ReadOnlyMode      bool     `json:"read_only_mode" mapstructure:"read-only-mode"`
+	DisableManagement bool     `json:"disable_management" mapstructure:"disable-management"`
+	AllowServerAdd    bool     `json:"allow_server_add" mapstructure:"allow-server-add"`
+	AllowServerRemove bool     `json:"allow_server_remove" mapstructure:"allow-server-remove"`
 
 	// Internal field to track if API key was explicitly set in config
 	apiKeyExplicitlySet bool `json:"-"`

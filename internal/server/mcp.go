@@ -110,12 +110,16 @@ func mcpServerVersion() string {
 
 // MCPProxyServer implements an MCP server that acts as a proxy
 type MCPProxyServer struct {
-	server               *mcpserver.MCPServer
-	storage              *storage.Manager
-	index                *index.Manager
-	upstreamManager      *upstream.Manager
-	cacheManager         *cache.Manager
-	truncator            *truncate.Truncator
+	server          *mcpserver.MCPServer
+	storage         *storage.Manager
+	index           *index.Manager
+	upstreamManager *upstream.Manager
+	cacheManager    *cache.Manager
+	// truncatorFn resolves the current tool-response truncator at use time. It
+	// must NOT be replaced with a captured *truncate.Truncator: the runtime
+	// swaps its truncator on a tool_response_limit hot-reload, and the serving
+	// path has to observe the new limit (#861). Access via currentTruncator().
+	truncatorFn          func() *truncate.Truncator
 	outputValidator      *outputvalidation.Validator // Spec 056: output-schema validation (nil when disabled)
 	inputValidator       *inputValidator             // Spec 085 FR-013: pre-dispatch argument validation (never nil)
 	sanitisationDetector *security.Detector          // Spec 054 Track B: secret detector for redact/block (nil when neither used)
@@ -217,13 +221,24 @@ func (p *MCPProxyServer) finishToolCall(span oteltrace.Span, serverName, toolNam
 	}
 }
 
+// currentTruncator resolves the live tool-response truncator. The serving path
+// must call this at use time (never cache the result) so a hot-reloaded
+// tool_response_limit takes effect on the next tool call (#861). Returns nil
+// when no truncator is wired (standalone/test constructions may pass nil).
+func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
+	if p.truncatorFn == nil {
+		return nil
+	}
+	return p.truncatorFn()
+}
+
 // NewMCPProxyServer creates a new MCP proxy server
 func NewMCPProxyServer(
 	storage *storage.Manager,
 	index *index.Manager,
 	upstreamManager *upstream.Manager,
 	cacheManager *cache.Manager,
-	truncator *truncate.Truncator,
+	truncatorFn func() *truncate.Truncator,
 	logger *zap.Logger,
 	mainServer *Server,
 	debugSearch bool,
@@ -459,7 +474,7 @@ func NewMCPProxyServer(
 		index:                index,
 		upstreamManager:      upstreamManager,
 		cacheManager:         cacheManager,
-		truncator:            truncator,
+		truncatorFn:          truncatorFn,
 		outputValidator:      outputValidator,
 		inputValidator:       newInputValidator(logger),
 		sanitisationDetector: sanitisationDetector,
@@ -2191,7 +2206,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
 	}
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -2597,7 +2612,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	legacyResponseBytes := rawByteSize(result)
 	legacyRequestBytes := rawByteSize(activityArgs)
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.truncator, p.cacheManager, p.logger, toolName, args)
+	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheManager, p.logger, toolName, args)
 
 	// Spec 056: output-schema validation. Strict mode blocks a violating result
 	// (returns an error); warn mode forwards unchanged after recording a
@@ -2827,14 +2842,14 @@ func (p *MCPProxyServer) handleUpstreamServers(ctx context.Context, request mcp.
 		}
 	}
 
-	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block all write operations
-	if authCtx := auth.AuthContextFromContext(ctx); authCtx != nil && !authCtx.IsAdmin() {
-		switch operation {
-		case operationAdd, operationRemove, "update", "patch", "enable", "disable", "restart", "refresh", "add_from_registry":
-			errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
-			p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
-			return mcp.NewToolResultError(errMsg), nil
-		}
+	// Spec 028: Agent tokens can only list servers (filtered to allowed) — block
+	// all write operations. The denied set is the shared agent-operation policy
+	// (internal/auth) consumed by both this MCP surface and the REST
+	// /api/v1/servers handlers, so the two can never drift (issues #877/#878).
+	if authCtx := auth.AuthContextFromContext(ctx); !auth.AuthorizeServerOp(authCtx, operation) {
+		errMsg := fmt.Sprintf("Agent tokens cannot perform '%s' operations on upstream servers", operation)
+		p.emitActivityInternalToolCall("upstream_servers", "", "", "", sessionID, requestID, "error", errMsg, time.Since(startTime).Milliseconds(), args, nil, nil, "")
+		return mcp.NewToolResultError(errMsg), nil
 	}
 
 	// Execute operation and track result
@@ -4812,7 +4827,7 @@ func (p *MCPProxyServer) handleReadCache(ctx context.Context, request mcp.CallTo
 		"read_cache",
 		args,
 		len(response.Records),
-		p.truncator,
+		p.currentTruncator(),
 		p.cacheManager,
 		p.logger,
 	)

@@ -523,3 +523,34 @@ func TestDetectConfigChanges_ToolResponseMode(t *testing.T) {
 		assert.NotContains(t, result.ChangedFields, "tool_response_mode")
 	})
 }
+
+// GH #898: a lone trusted_hosts edit must be reported as a hot-reloadable
+// change — hostValidationMiddleware reads the live snapshot per request, so
+// the entry exists to acknowledge the reload instead of logging "no changes
+// detected". nil vs []string{} (the PATCH round-trip artifact) must not be
+// reported as a change.
+func TestDetectConfigChanges_TrustedHosts(t *testing.T) {
+	mk := func(hosts []string) *config.Config {
+		return &config.Config{
+			Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},
+			TrustedHosts: hosts,
+		}
+	}
+
+	t.Run("trusted_hosts change detected", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk([]string{"mcp.example.com"}))
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "trusted_hosts")
+		assert.False(t, result.RequiresRestart, "trusted_hosts is hot-reloadable")
+	})
+
+	t.Run("nil vs empty slice not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk(nil), mk([]string{}))
+		assert.NotContains(t, result.ChangedFields, "trusted_hosts")
+	})
+
+	t.Run("unchanged list not reported", func(t *testing.T) {
+		result := DetectConfigChanges(mk([]string{"a.example.com"}), mk([]string{"a.example.com"}))
+		assert.NotContains(t, result.ChangedFields, "trusted_hosts")
+	})
+}

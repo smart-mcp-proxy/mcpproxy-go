@@ -819,24 +819,43 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		upstreamAddIfNotExists = true
 		defer func() { upstreamAddIfNotExists = oldIfNotExists }()
 
-		// Capture output
+		// Pin table format so the structured skip payload is not emitted.
+		oldFormat := globalOutputFormat
+		oldJSON := globalJSONOutput
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+		defer func() {
+			globalOutputFormat = oldFormat
+			globalJSONOutput = oldJSON
+		}()
+
+		// Capture output. Since the CLI-JSON fix, the human skip notice goes
+		// to stderr so machine formats keep stdout parseable.
 		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
+		oldStderr := os.Stderr
+		rOut, wOut, _ := os.Pipe()
+		rErr, wErr, _ := os.Pipe()
+		os.Stdout = wOut
+		os.Stderr = wErr
 
 		err = runUpstreamAddConfigMode(req, cfg)
 
-		w.Close()
+		wOut.Close()
+		wErr.Close()
 		os.Stdout = oldStdout
-		var buf bytes.Buffer
-		buf.ReadFrom(r)
-		output := buf.String()
+		os.Stderr = oldStderr
+		var bufOut, bufErr bytes.Buffer
+		bufOut.ReadFrom(rOut)
+		bufErr.ReadFrom(rErr)
 
 		if err != nil {
 			t.Errorf("Expected no error with --if-not-exists, got: %v", err)
 		}
-		if !strings.Contains(output, "already exists") || !strings.Contains(output, "skipped") {
-			t.Error("Expected skip message for existing server")
+		if !strings.Contains(bufErr.String(), "already exists") || !strings.Contains(bufErr.String(), "skipped") {
+			t.Error("Expected skip message on stderr for existing server")
+		}
+		if bufOut.String() != "" {
+			t.Errorf("Expected empty stdout in table mode, got %q", bufOut.String())
 		}
 	})
 }
@@ -1110,24 +1129,43 @@ func TestRemoveServerConfigMode(t *testing.T) {
 		upstreamRemoveIfExists = true
 		defer func() { upstreamRemoveIfExists = oldIfExists }()
 
-		// Capture output
+		// Pin table format so the structured skip payload is not emitted.
+		oldFormat := globalOutputFormat
+		oldJSON := globalJSONOutput
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+		defer func() {
+			globalOutputFormat = oldFormat
+			globalJSONOutput = oldJSON
+		}()
+
+		// Capture output. Since the CLI-JSON fix, the human skip notice goes
+		// to stderr so machine formats keep stdout parseable.
 		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
+		oldStderr := os.Stderr
+		rOut, wOut, _ := os.Pipe()
+		rErr, wErr, _ := os.Pipe()
+		os.Stdout = wOut
+		os.Stderr = wErr
 
 		err = runUpstreamRemoveConfigMode("nonexistent", cfg)
 
-		w.Close()
+		wOut.Close()
+		wErr.Close()
 		os.Stdout = oldStdout
-		var buf bytes.Buffer
-		buf.ReadFrom(r)
-		output := buf.String()
+		os.Stderr = oldStderr
+		var bufOut, bufErr bytes.Buffer
+		bufOut.ReadFrom(rOut)
+		bufErr.ReadFrom(rErr)
 
 		if err != nil {
 			t.Errorf("Expected no error with --if-exists, got: %v", err)
 		}
-		if !strings.Contains(output, "not found") || !strings.Contains(output, "skipped") {
-			t.Error("Expected skip message for non-existent server")
+		if !strings.Contains(bufErr.String(), "not found") || !strings.Contains(bufErr.String(), "skipped") {
+			t.Error("Expected skip message on stderr for non-existent server")
+		}
+		if bufOut.String() != "" {
+			t.Errorf("Expected empty stdout in table mode, got %q", bufOut.String())
 		}
 	})
 }
@@ -1513,6 +1551,76 @@ func TestOutputError_WithoutRequestID(t *testing.T) {
 		// Verify "Request ID:" is NOT printed
 		if strings.Contains(output, "Request ID:") {
 			t.Errorf("Expected output to NOT contain 'Request ID:' for regular errors, got: %s", output)
+		}
+	})
+}
+
+// TestOutputSkipNotice verifies the CLI-JSON contract for --if-not-exists /
+// --if-exists skip paths: the human notice goes to stderr, and in json mode
+// stdout carries a structured skip object (parseable by jq); in table mode
+// stdout stays empty.
+func TestOutputSkipNotice(t *testing.T) {
+	capture := func(t *testing.T, format string) (stdoutStr, stderrStr string) {
+		t.Helper()
+		oldStdout := os.Stdout
+		oldStderr := os.Stderr
+		rOut, wOut, _ := os.Pipe()
+		rErr, wErr, _ := os.Pipe()
+		os.Stdout = wOut
+		os.Stderr = wErr
+
+		oldFormat := globalOutputFormat
+		oldJSON := globalJSONOutput
+		globalOutputFormat = format
+		globalJSONOutput = false
+		t.Cleanup(func() {
+			globalOutputFormat = oldFormat
+			globalJSONOutput = oldJSON
+		})
+
+		err := outputSkipNotice("Server 'foo' already exists (skipped)", map[string]interface{}{
+			"name":    "foo",
+			"skipped": true,
+		})
+
+		wOut.Close()
+		wErr.Close()
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+
+		if err != nil {
+			t.Fatalf("outputSkipNotice returned error: %v", err)
+		}
+
+		var bufOut, bufErr bytes.Buffer
+		bufOut.ReadFrom(rOut)
+		bufErr.ReadFrom(rErr)
+		return bufOut.String(), bufErr.String()
+	}
+
+	t.Run("json mode emits structured object on stdout, notice on stderr", func(t *testing.T) {
+		stdoutStr, stderrStr := capture(t, "json")
+
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(stdoutStr), &parsed); err != nil {
+			t.Fatalf("stdout must be valid JSON, got %q: %v", stdoutStr, err)
+		}
+		if parsed["name"] != "foo" || parsed["skipped"] != true {
+			t.Errorf("unexpected skip payload: %v", parsed)
+		}
+		if !strings.Contains(stderrStr, "already exists (skipped)") {
+			t.Errorf("human notice must be on stderr, got %q", stderrStr)
+		}
+	})
+
+	t.Run("table mode keeps stdout empty, notice on stderr", func(t *testing.T) {
+		stdoutStr, stderrStr := capture(t, "table")
+
+		if stdoutStr != "" {
+			t.Errorf("table-mode skip must not write to stdout, got %q", stdoutStr)
+		}
+		if !strings.Contains(stderrStr, "already exists (skipped)") {
+			t.Errorf("human notice must be on stderr, got %q", stderrStr)
 		}
 	})
 }

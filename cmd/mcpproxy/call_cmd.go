@@ -373,17 +373,18 @@ func runCallToolVariant(toolVariant, operationType string) error {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Display intent information
-	fmt.Printf("🚀 Intent-Based Tool Call\n")
-	fmt.Printf("   Tool: %s\n", callToolName)
-	fmt.Printf("   Variant: %s (operation_type=%s)\n", toolVariant, operationType)
+	// Display intent information on stderr so machine formats (-o json)
+	// keep stdout parseable (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "🚀 Intent-Based Tool Call\n")
+	fmt.Fprintf(os.Stderr, "   Tool: %s\n", callToolName)
+	fmt.Fprintf(os.Stderr, "   Variant: %s (operation_type=%s)\n", toolVariant, operationType)
 	if callIntentSensitivity != "" {
-		fmt.Printf("   Sensitivity: %s\n", callIntentSensitivity)
+		fmt.Fprintf(os.Stderr, "   Sensitivity: %s\n", callIntentSensitivity)
 	}
 	if callIntentReason != "" {
-		fmt.Printf("   Reason: %s\n", callIntentReason)
+		fmt.Fprintf(os.Stderr, "   Reason: %s\n", callIntentReason)
 	}
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Detect daemon (socket first, then TCP fallback) and use client mode if available
 	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
@@ -413,7 +414,7 @@ func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, 
 	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - fast execution\n")
 
 	// Call tool via daemon
-	fmt.Printf("🔗 Calling %s via daemon socket...\n", toolVariant)
+	fmt.Fprintf(os.Stderr, "🔗 Calling %s via daemon socket...\n", toolVariant)
 	callCtx, callCancel := context.WithTimeout(context.Background(), callTimeout)
 	defer callCancel()
 
@@ -432,7 +433,7 @@ func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, 
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
 		outputCallResultPretty(result)
 	}
 
@@ -485,7 +486,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil, // mainServer not needed for CLI calls
 		false,
@@ -493,7 +494,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 		nil, // standalone one-shot: no runtime-owned signature cache
 	)
 
-	fmt.Printf("🛠️  Calling %s...\n", toolVariant)
+	fmt.Fprintf(os.Stderr, "🛠️  Calling %s...\n", toolVariant)
 
 	// Call the tool variant through the proxy server's public method
 	result, err := mcpProxy.CallBuiltInTool(ctx, toolVariant, args)
@@ -508,7 +509,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
 		outputCallResultPretty(result)
 	}
 

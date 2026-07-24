@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -167,6 +168,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	}
 	if oldCfg.AllowServerRemove != newCfg.AllowServerRemove {
 		result.ChangedFields = append(result.ChangedFields, "allow_server_remove")
+	}
+	// trusted_hosts (GH #898 — hot-reloadable). hostValidationMiddleware reads
+	// the live snapshot per request, so reporting the change is all the
+	// propagation needed. slices.Equal, not DeepEqual: the PATCH round-trip
+	// collapses []string{} to nil (omitempty), which DeepEqual would
+	// spuriously report as a change.
+	if !slices.Equal(oldCfg.TrustedHosts, newCfg.TrustedHosts) {
+		result.ChangedFields = append(result.ChangedFields, "trusted_hosts")
 	}
 
 	// Environment configuration (can be hot-reloaded)
