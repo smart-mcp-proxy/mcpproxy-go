@@ -780,14 +780,7 @@ func init() {
 
 // getActivityClient creates an HTTP client for the daemon
 func getActivityClient(logger *zap.SugaredLogger) (*cliclient.Client, error) {
-	// Load config - use explicit config file if provided via -c flag
-	var cfg *config.Config
-	var err error
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadActivityConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -966,12 +959,7 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = logger.Sync() }()
 
 	// Load config to get endpoint - use same logic as getActivityClient
-	var cfg *config.Config
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadActivityConfig()
 	if err != nil {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}
@@ -1566,12 +1554,7 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Load config - use explicit config file if provided via -c flag
-	var cfg *config.Config
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadActivityConfig()
 	if err != nil {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}

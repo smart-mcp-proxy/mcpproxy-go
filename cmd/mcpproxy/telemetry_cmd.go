@@ -311,24 +311,7 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 }
 
 func loadTelemetryConfig() (*config.Config, error) {
-	if configFile != "" {
-		cfg, err := config.LoadFromFile(configFile)
-		if err != nil {
-			return nil, err
-		}
-		if dataDir != "" {
-			cfg.DataDir = dataDir
-		}
-		return cfg, nil
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	return cfg, nil
+	return loadCLIConfig(configFile)
 }
 
 // telemetryConfigSavePath returns the config path that telemetry subcommands
