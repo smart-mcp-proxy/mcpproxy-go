@@ -144,6 +144,34 @@ func TestChecker_CheckNowBypassesBackoff(t *testing.T) {
 	}
 }
 
+func TestChecker_SetConfigClearsBackoff(t *testing.T) {
+	checker := New(zaptest.NewLogger(t), "v1.0.0")
+	checker.SetCheckInterval(time.Hour)
+
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	checker.nowFn = func() time.Time { return now }
+
+	calls := 0
+	checker.SetCheckFunc(func() (*GitHubRelease, error) {
+		calls++
+		return nil, errors.New("offline")
+	})
+
+	checker.check() // failure -> backoff active
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
+	}
+
+	// An effective config change (e.g. channel switch or re-enable) starts a
+	// new generation: the pre-change failure must not impose its backoff on
+	// the new configuration, so the next periodic check runs immediately.
+	checker.SetConfig(true, true)
+	checker.check()
+	if calls != 2 {
+		t.Fatalf("post-SetConfig check: calls = %d, want 2 (config change must clear backoff)", calls)
+	}
+}
+
 // Spec 079 US3 / FR-019: in CI / non-interactive contexts UI nudges are
 // suppressed while machine-readable surfaces still report the facts.
 

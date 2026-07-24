@@ -163,6 +163,11 @@ func (c *Checker) SetConfig(enabled, includePrereleases bool) {
 		// channel switch never briefly serves stale (possibly wrong-channel)
 		// info before the prompt re-check completes (FR-013).
 		c.versionInfo = &VersionInfo{CurrentVersion: c.version, InstallChannel: c.installChannel, NudgesSuppressed: c.nudgesSuppressed}
+		// A pre-change failure must not impose its backoff window (FR-018) on
+		// the new configuration — the prompt re-enable/channel-switch check
+		// below must actually run.
+		c.consecutiveFailures = 0
+		c.nextCheckAt = time.Time{}
 	}
 	c.mu.Unlock()
 
@@ -331,12 +336,17 @@ func (c *Checker) runCheck(force bool) {
 	release, err := c.checkFunc()
 	if err != nil {
 		c.mu.Lock()
-		c.consecutiveFailures++
-		factor := c.consecutiveFailures
-		if factor > maxBackoffFactor {
-			factor = maxBackoffFactor
+		// Generation guard (mirrors updateVersionInfo): a failure from a
+		// check that raced a SetConfig change must not impose backoff on the
+		// new configuration.
+		if gen == c.cfgGen {
+			c.consecutiveFailures++
+			factor := c.consecutiveFailures
+			if factor > maxBackoffFactor {
+				factor = maxBackoffFactor
+			}
+			c.nextCheckAt = c.nowFn().Add(c.checkInterval * (1 << factor))
 		}
-		c.nextCheckAt = c.nowFn().Add(c.checkInterval * (1 << factor))
 		c.mu.Unlock()
 		c.logger.Debug("Update check failed", zap.Error(err))
 		c.updateVersionInfo(nil, err.Error(), gen)
@@ -344,8 +354,10 @@ func (c *Checker) runCheck(force bool) {
 	}
 
 	c.mu.Lock()
-	c.consecutiveFailures = 0
-	c.nextCheckAt = time.Time{}
+	if gen == c.cfgGen {
+		c.consecutiveFailures = 0
+		c.nextCheckAt = time.Time{}
+	}
 	c.mu.Unlock()
 	c.updateVersionInfo(release, "", gen)
 }

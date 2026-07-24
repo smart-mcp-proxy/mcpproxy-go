@@ -1849,6 +1849,9 @@ type coreUpdateInfo struct {
 	LatestVersion string `json:"latest_version"`
 	ReleaseURL    string `json:"release_url"`
 	IsPrerelease  bool   `json:"is_prerelease"`
+	// NudgesSuppressed: the core runs in a CI / non-interactive context and
+	// UI nudges must stay quiet (Spec 079 FR-019).
+	NudgesSuppressed bool `json:"nudges_suppressed"`
 }
 
 // fetchCoreUpdateInfo queries the core's /api/v1/info endpoint. It returns the
@@ -1958,8 +1961,10 @@ func (a *App) checkUpdateFromAPI() {
 	a.latestReleaseURL = update.ReleaseURL
 	a.updateCheckMu.Unlock()
 
-	// Update menu visibility
-	if update.Available {
+	// Update menu visibility. When the core reports nudges_suppressed
+	// (CI / non-interactive context, Spec 079 FR-019) the tray keeps the
+	// facts in its state but shows no nudge and logs at debug only.
+	if update.Available && !update.NudgesSuppressed {
 		if !wasAvailable {
 			a.logger.Info("Update available",
 				zap.String("current", a.version),
@@ -1967,6 +1972,10 @@ func (a *App) checkUpdateFromAPI() {
 		}
 		a.showUpdateMenuItem(update.LatestVersion, update.IsPrerelease)
 	} else {
+		if update.Available && update.NudgesSuppressed {
+			a.logger.Debug("Update available but nudges suppressed (CI/non-interactive)",
+				zap.String("latest", update.LatestVersion))
+		}
 		a.hideUpdateMenuItem()
 	}
 }
