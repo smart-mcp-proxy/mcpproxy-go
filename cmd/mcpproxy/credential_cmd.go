@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Server-edition flags for the credential command group. The credential broker
