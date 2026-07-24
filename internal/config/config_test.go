@@ -1758,3 +1758,36 @@ func TestToolResponseModeEnvOverride(t *testing.T) {
 		assert.Contains(t, err.Error(), "tool_response_mode")
 	})
 }
+
+// GH #898: trusted_hosts loads from the config file and the
+// MCPPROXY_TRUSTED_HOSTS env var (comma-separated) overrides it.
+func TestTrustedHostsLoadAndEnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "mcp_config.json")
+	raw, err := json.Marshal(map[string]any{
+		"listen":        "127.0.0.1:0",
+		"data_dir":      tmp,
+		"trusted_hosts": []string{"mcp.example.com"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, raw, 0o600))
+
+	t.Run("file value loads", func(t *testing.T) {
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"mcp.example.com"}, cfg.TrustedHosts)
+	})
+
+	t.Run("env wins over file", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TRUSTED_HOSTS", "a.example.com, b.example.com:8443 ,")
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a.example.com", "b.example.com:8443"}, cfg.TrustedHosts)
+	})
+
+	t.Run("unset by default", func(t *testing.T) {
+		cfg := &Config{}
+		require.NoError(t, cfg.Validate())
+		assert.Empty(t, cfg.TrustedHosts)
+	})
+}
