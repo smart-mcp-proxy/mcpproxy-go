@@ -134,3 +134,33 @@ func TestTokenCreateCmd_RequiredFlags(t *testing.T) {
 	assert.NotNil(t, expiresFlag, "should have --expires flag")
 	assert.Equal(t, "30d", expiresFlag.DefValue, "default expires should be 30d")
 }
+
+// GH #897 verification follow-up: the REST API wraps token responses in the
+// standard envelope {"success":true,"data":{...}}, but the CLI table paths
+// read top-level keys — so `token list` always printed "No agent tokens
+// configured" and `token create` never displayed the minted token.
+// parseTokenAPIResponse must unwrap the envelope (and tolerate the bare
+// legacy shape).
+func TestParseTokenAPIResponse(t *testing.T) {
+	t.Run("unwraps success envelope", func(t *testing.T) {
+		body := []byte(`{"success":true,"data":{"tokens":[{"name":"a"}],"token":"mcp_agt_x"}}`)
+		result, err := parseTokenAPIResponse(body)
+		assert.NoError(t, err)
+		assert.Equal(t, "mcp_agt_x", result["token"])
+		tokens, ok := result["tokens"].([]interface{})
+		assert.True(t, ok)
+		assert.Len(t, tokens, 1)
+	})
+
+	t.Run("passes through bare legacy shape", func(t *testing.T) {
+		body := []byte(`{"tokens":[],"token":"mcp_agt_y"}`)
+		result, err := parseTokenAPIResponse(body)
+		assert.NoError(t, err)
+		assert.Equal(t, "mcp_agt_y", result["token"])
+	})
+
+	t.Run("invalid json errors", func(t *testing.T) {
+		_, err := parseTokenAPIResponse([]byte("not json"))
+		assert.Error(t, err)
+	})
+}

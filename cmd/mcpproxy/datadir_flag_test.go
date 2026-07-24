@@ -29,6 +29,7 @@ func TestLoadersHonorGlobalDataDirFlag(t *testing.T) {
 		{"call", func(p string) { callConfigPath = p }, loadCallConfig},
 		{"code", func(p string) { codeConfigPath = p }, loadCodeConfig},
 		{"tools", func(p string) { configPath = p }, loadToolsConfig},
+		{"token", func(p string) { tokenConfigPath = p }, loadTokenConfig},
 	}
 
 	for _, tc := range cases {

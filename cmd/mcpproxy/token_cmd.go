@@ -23,6 +23,9 @@ var (
 	tokenPermissions string
 	tokenExpires     string
 	tokenProfilePin  string
+
+	// tokenConfigPath is the token command's --config override (GH #897).
+	tokenConfigPath string
 )
 
 // GetTokenCommand returns the token parent command.
@@ -42,6 +45,8 @@ Examples:
   mcpproxy token show deploy-bot
   mcpproxy token revoke deploy-bot`,
 	}
+
+	tokenCmd.PersistentFlags().StringVarP(&tokenConfigPath, "config", "c", "", "Path to configuration file")
 
 	// Subcommands
 	tokenCmd.AddCommand(newTokenCreateCmd())
@@ -122,9 +127,37 @@ Examples:
 	}
 }
 
+// loadTokenConfig loads the token command's config, honoring the --config and
+// global --data-dir flags (GH #897, same class as #854). Without the DataDir
+// override, socket.DetectSocketPath probes the default data dir and the CLI
+// either reports "daemon is not reachable" or silently talks to the wrong
+// daemon instance.
+func loadTokenConfig() (*config.Config, error) {
+	if tokenConfigPath != "" {
+		cfg, err := config.LoadFromFile(tokenConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		// Respect global --data-dir flag
+		if dataDir != "" {
+			cfg.DataDir = dataDir
+		}
+		return cfg, nil
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		cfg.DataDir = dataDir
+	}
+	return cfg, nil
+}
+
 // newTokenCLIClient creates a cliclient.Client connected to the running MCPProxy.
 func newTokenCLIClient() (*cliclient.Client, *config.Config, error) {
-	cfg, err := config.Load()
+	cfg, err := loadTokenConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
@@ -185,9 +218,9 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 		return parseAPIError(respBody, resp.StatusCode, "create token")
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	result, err := parseTokenAPIResponse(respBody)
+	if err != nil {
+		return err
 	}
 
 	// Format output
@@ -242,9 +275,9 @@ func runTokenList(_ *cobra.Command, _ []string) error {
 		return parseAPIError(respBody, resp.StatusCode, "list tokens")
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	result, err := parseTokenAPIResponse(respBody)
+	if err != nil {
+		return err
 	}
 
 	format := ResolveOutputFormat()
@@ -327,9 +360,9 @@ func runTokenShow(_ *cobra.Command, args []string) error {
 		return parseAPIError(respBody, resp.StatusCode, "get token")
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	result, err := parseTokenAPIResponse(respBody)
+	if err != nil {
+		return err
 	}
 
 	format := ResolveOutputFormat()
@@ -484,9 +517,9 @@ func runTokenRegenerate(_ *cobra.Command, args []string) error {
 		return parseAPIError(respBody, resp.StatusCode, "regenerate token")
 	}
 
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return fmt.Errorf("failed to parse response: %w", err)
+	result, err := parseTokenAPIResponse(respBody)
+	if err != nil {
+		return err
 	}
 
 	format := ResolveOutputFormat()
@@ -521,6 +554,23 @@ func splitAndTrim(s string) []string {
 		}
 	}
 	return result
+}
+
+// parseTokenAPIResponse unmarshals a token REST response and unwraps the
+// standard {"success":true,"data":{...}} envelope (contracts.APIResponse).
+// The CLI table paths read fields like "token"/"tokens" at the top level, so
+// without unwrapping, `token list` always printed "No agent tokens configured"
+// and `token create` never displayed the minted token (found verifying #897).
+// A body without the envelope is passed through unchanged.
+func parseTokenAPIResponse(body []byte) (map[string]interface{}, error) {
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	if data, ok := result["data"].(map[string]interface{}); ok {
+		return data, nil
+	}
+	return result, nil
 }
 
 func parseAPIError(body []byte, statusCode int, operation string) error {
