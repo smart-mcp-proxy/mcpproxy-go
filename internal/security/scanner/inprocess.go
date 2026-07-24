@@ -86,22 +86,31 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 		}
 	}
 
+	engineChecks := []detect.Check{
+		// Spec 076 US1 hard checks (#770).
+		&checks.UnicodeHidden{},
+		&checks.Shadowing{},
+		&checks.PayloadDecoded{},
+		// Spec 077 US1 hard check: curated injection/exfiltration phrases.
+		// Restores the approval-blocking posture of the deleted legacy
+		// tpaRules without their false positives.
+		&checks.PhraseInjection{},
+		// Spec 076 US2 soft checks (MCP-3577).
+		&checks.DirectiveImperative{},
+		&checks.CapabilityMismatch{},
+		&checks.EmbeddedSecret{},
+	}
+	// Spec 086 US1 (FR-005): the offline tpa-db bundle-backed check. It is
+	// loaded once (embedded default) at package init; if the bundle failed to
+	// load we log and continue WITHOUT it — a bundle problem must never break
+	// scanning. A live bundle is the expected path.
+	if bundleCheck := defaultBundleCheck(); bundleCheck != nil {
+		engineChecks = append(engineChecks, bundleCheck)
+	}
+
 	engine := detect.NewEngine(detect.Options{
 		ScannerID: scannerID,
-		Checks: []detect.Check{
-			// Spec 076 US1 hard checks (#770).
-			&checks.UnicodeHidden{},
-			&checks.Shadowing{},
-			&checks.PayloadDecoded{},
-			// Spec 077 US1 hard check: curated injection/exfiltration phrases.
-			// Restores the approval-blocking posture of the deleted legacy
-			// tpaRules without their false positives.
-			&checks.PhraseInjection{},
-			// Spec 076 US2 soft checks (MCP-3577).
-			&checks.DirectiveImperative{},
-			&checks.CapabilityMismatch{},
-			&checks.EmbeddedSecret{},
-		},
+		Checks:    engineChecks,
 	})
 	result := engine.Scan(detect.NewRegistryView(views))
 
