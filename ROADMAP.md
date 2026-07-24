@@ -131,9 +131,9 @@ graph LR
 
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   class connect_trust_preview,connect_trust_backup_visibility,connect_trust_undo done;
-  class connect_trust_tcc_copy todo;
+  class connect_trust_tcc_copy in_review;
 ```
 
 | Task | Status | Refs |
@@ -141,7 +141,7 @@ graph LR
 | US1: preview API + wizard diff UI (exact entry, API-key masking) | 🟢 Done | #802 |
 | US1: surface backup_path in Web UI + retention policy | 🟢 Done | #799 |
 | US2: one-click undo/disconnect in wizard | 🟢 Done | #804 |
-| US2: pre-emptive macOS TCC explanation in wizard | ⚪ Todo | — |
+| US2: pre-emptive macOS TCC explanation in wizard | 🟡 In review | #910 |
 
 </details>
 
