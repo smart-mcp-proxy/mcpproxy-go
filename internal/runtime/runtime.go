@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -99,11 +100,15 @@ type Runtime struct {
 	eventMu   sync.RWMutex
 	eventSubs map[chan Event]struct{}
 
-	storageManager   *storage.Manager
-	indexManager     *index.Manager
-	upstreamManager  *upstream.Manager
-	cacheManager     *cache.Manager
-	truncator        *truncate.Truncator
+	storageManager  *storage.Manager
+	indexManager    *index.Manager
+	upstreamManager *upstream.Manager
+	cacheManager    *cache.Manager
+	// truncator is swapped on config hot-reload (tool_response_limit) while the
+	// MCP serving path reads it via Truncator(). An atomic.Pointer makes the
+	// swap/read race-free (#861) and independent of r.mu, so the accessor stays
+	// lock-free on the hot path and composes with the config commit serialization.
+	truncator        atomic.Pointer[truncate.Truncator]
 	sigCache         *toolsig.Cache // Spec 085 FR-008: single process-wide signature cache (indexing warms, MCP reads)
 	secretResolver   *secret.Resolver
 	tokenizer        tokens.Tokenizer
@@ -319,7 +324,6 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		indexManager:     indexManager,
 		upstreamManager:  upstreamManager,
 		cacheManager:     cacheManager,
-		truncator:        truncator,
 		sigCache:         toolsig.NewCache(),
 		secretResolver:   secretResolver,
 		tokenizer:        tokenizer,
@@ -341,6 +345,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		lastGoodTools:     make(map[string][]*config.ToolMetadata),
 		profileMembership: make(map[string][]string),
 	}
+	rt.truncator.Store(truncator)
 
 	// Spec 047: drainer goroutine that publishes coalesced servers.changed
 	// events. Lifetime is tied to appCtx so it shuts down with the runtime.
@@ -635,9 +640,13 @@ func (r *Runtime) CacheManager() *cache.Manager {
 	return r.cacheManager
 }
 
-// Truncator exposes the truncator utility.
+// Truncator exposes the current tool-response truncator. It is safe to call
+// concurrently with a config hot-reload that swaps the truncator (#861): the
+// field is an atomic.Pointer, so the read never tears against the swap. Callers
+// on the serving path MUST call this at use time rather than caching the
+// returned pointer, so a hot-reloaded tool_response_limit takes effect.
 func (r *Runtime) Truncator() *truncate.Truncator {
-	return r.truncator
+	return r.truncator.Load()
 }
 
 // SignatureCache exposes the process-wide compact-signature cache (Spec 085
@@ -2586,7 +2595,9 @@ func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
 		r.logger.Info("Tool response limit changed, updating truncator",
 			zap.Int("old_limit", oldCfg.ToolResponseLimit),
 			zap.Int("new_limit", newCfg.ToolResponseLimit))
-		r.truncator = truncate.NewTruncator(newCfg.ToolResponseLimit)
+		// Atomic swap: the serving path reads via Truncator() without r.mu, so
+		// the new limit takes effect on the next tool call (#861).
+		r.truncator.Store(truncate.NewTruncator(newCfg.ToolResponseLimit))
 	}
 
 	// Apply observability usage cadence (Spec 069 A2 — hot-reloadable). The

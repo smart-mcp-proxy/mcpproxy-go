@@ -35,7 +35,7 @@ func newRuntimeBackedProxy(t *testing.T) (*MCPProxyServer, *runtime.Runtime) {
 		rt.IndexManager(),
 		rt.UpstreamManager(),
 		rt.CacheManager(),
-		rt.Truncator(),
+		rt.Truncator,
 		logger,
 		srv,
 		false,

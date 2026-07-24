@@ -56,7 +56,7 @@ func createTestProxyWithRuntime(t *testing.T, servers []*config.ServerConfig) (*
 	tr := truncate.NewTruncator(0)
 
 	mainSrv := &Server{runtime: rt}
-	proxy := NewMCPProxyServer(sm, idx, um, cm, tr, logger, mainSrv, false, cfg, rt.SignatureCache())
+	proxy := NewMCPProxyServer(sm, idx, um, cm, func() *truncate.Truncator { return tr }, logger, mainSrv, false, cfg, rt.SignatureCache())
 	return proxy, rt
 }
 
