@@ -2407,6 +2407,10 @@ components:
         latest_version:
           description: Latest version available (e.g., "v1.2.3")
           type: string
+        nudges_suppressed:
+          description: UI surfaces must stay quiet (CI / non-interactive context);
+            machine-readable fields still report the facts — Spec 079 FR-019
+          type: boolean
         release_url:
           description: URL to the release page
           type: string
