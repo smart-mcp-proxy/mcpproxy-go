@@ -34,9 +34,14 @@ func GetTUICommand() *cobra.Command {
 			}
 			defer func() { _ = logger.Sync() }()
 
-			// Load config to find daemon connection
+			// Load config to find daemon connection. An explicitly passed
+			// --config must fail loudly; only the implicit default-path load
+			// keeps the fall-back-to-defaults behavior.
 			cfg, err := loadTUIConfig()
 			if err != nil {
+				if configFile != "" {
+					return fmt.Errorf("failed to load config: %w", err)
+				}
 				cfg = config.DefaultConfig()
 				if dataDir != "" {
 					cfg.DataDir = dataDir

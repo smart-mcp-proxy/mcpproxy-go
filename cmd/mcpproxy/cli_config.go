@@ -43,6 +43,10 @@ func loadSecurityConfig() (*config.Config, error) {
 	return loadCLIConfig(configFile)
 }
 
+func loadTrustCertConfig() (*config.Config, error) {
+	return loadCLIConfig(configFile)
+}
+
 func loadTUIConfig() (*config.Config, error) {
 	return loadCLIConfig(configFile)
 }

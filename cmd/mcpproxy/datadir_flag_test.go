@@ -38,6 +38,7 @@ func TestLoadersHonorGlobalDataDirFlag(t *testing.T) {
 		{"security", func(p string) { configFile = p }, loadSecurityConfig},
 		{"status", func(p string) { configFile = p }, loadStatusConfig},
 		{"telemetry", func(p string) { configFile = p }, loadTelemetryConfig},
+		{"trust-cert", func(p string) { configFile = p }, loadTrustCertConfig},
 		{"tui", func(p string) { configFile = p }, loadTUIConfig},
 		{"upstream", func(p string) { upstreamConfigPath = p }, loadUpstreamConfig},
 	}

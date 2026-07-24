@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tlslocal"
 
 	"github.com/spf13/cobra"
@@ -55,7 +54,7 @@ func init() {
 
 func runTrustCert(_ *cobra.Command, _ []string) error {
 	// Load configuration to get certificate directory
-	cfg, err := config.LoadFromFile(configFile)
+	cfg, err := loadTrustCertConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
