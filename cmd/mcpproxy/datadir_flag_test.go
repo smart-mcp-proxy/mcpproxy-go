@@ -30,6 +30,16 @@ func TestLoadersHonorGlobalDataDirFlag(t *testing.T) {
 		{"code", func(p string) { codeConfigPath = p }, loadCodeConfig},
 		{"tools", func(p string) { configPath = p }, loadToolsConfig},
 		{"token", func(p string) { tokenConfigPath = p }, loadTokenConfig},
+		{"activity", func(p string) { configFile = p }, loadActivityConfig},
+		{"connect", func(p string) { configFile = p }, loadConnectConfig},
+		{"credential", func(p string) { configFile = p }, loadCredentialConfig},
+		{"feedback", func(p string) { configFile = p }, loadFeedbackConfig},
+		{"registry", func(p string) { registryConfigPath = p }, loadRegistryConfig},
+		{"security", func(p string) { configFile = p }, loadSecurityConfig},
+		{"status", func(p string) { configFile = p }, loadStatusConfig},
+		{"telemetry", func(p string) { configFile = p }, loadTelemetryConfig},
+		{"tui", func(p string) { configFile = p }, loadTUIConfig},
+		{"upstream", func(p string) { upstreamConfigPath = p }, loadUpstreamConfig},
 	}
 
 	for _, tc := range cases {

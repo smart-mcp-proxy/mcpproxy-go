@@ -128,31 +128,9 @@ Examples:
 }
 
 // loadTokenConfig loads the token command's config, honoring the --config and
-// global --data-dir flags (GH #897, same class as #854). Without the DataDir
-// override, socket.DetectSocketPath probes the default data dir and the CLI
-// either reports "daemon is not reachable" or silently talks to the wrong
-// daemon instance.
+// global --data-dir flags (GH #897, same class as #854).
 func loadTokenConfig() (*config.Config, error) {
-	if tokenConfigPath != "" {
-		cfg, err := config.LoadFromFile(tokenConfigPath)
-		if err != nil {
-			return nil, err
-		}
-		// Respect global --data-dir flag
-		if dataDir != "" {
-			cfg.DataDir = dataDir
-		}
-		return cfg, nil
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	// Respect global --data-dir flag
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	return cfg, nil
+	return loadCLIConfig(tokenConfigPath)
 }
 
 // newTokenCLIClient creates a cliclient.Client connected to the running MCPProxy.

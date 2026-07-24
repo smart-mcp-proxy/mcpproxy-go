@@ -530,22 +530,5 @@ func printStatusTable(info *StatusInfo) {
 }
 
 func loadStatusConfig() (*config.Config, error) {
-	if configFile != "" {
-		cfg, err := config.LoadFromFile(configFile)
-		if err != nil {
-			return nil, err
-		}
-		if dataDir != "" {
-			cfg.DataDir = dataDir
-		}
-		return cfg, nil
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	return cfg, nil
+	return loadCLIConfig(configFile)
 }

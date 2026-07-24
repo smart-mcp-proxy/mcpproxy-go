@@ -79,20 +79,9 @@ Examples:
 // `mcpproxy security ...` commands behave consistently with `mcpproxy serve`,
 // `mcpproxy status`, and `mcpproxy upstream ...`.
 func newSecurityCLIClient() (*cliclient.Client, *config.Config, error) {
-	var (
-		cfg *config.Config
-		err error
-	)
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadSecurityConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
 	}
 
 	logger, _ := zap.NewProduction()

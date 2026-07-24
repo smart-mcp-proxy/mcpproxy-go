@@ -35,9 +35,12 @@ func GetTUICommand() *cobra.Command {
 			defer func() { _ = logger.Sync() }()
 
 			// Load config to find daemon connection
-			cfg, err := config.Load()
+			cfg, err := loadTUIConfig()
 			if err != nil {
 				cfg = config.DefaultConfig()
+				if dataDir != "" {
+					cfg.DataDir = dataDir
+				}
 			}
 
 			// Detect socket or fall back to TCP (probed with the API key)

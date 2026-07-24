@@ -127,7 +127,7 @@ func resolveCredentialBaseURL() string {
 	if env := os.Getenv("MCPPROXY_SERVER_URL"); env != "" {
 		return strings.TrimRight(env, "/")
 	}
-	if cfg, err := config.Load(); err == nil && cfg.Listen != "" {
+	if cfg, err := loadCredentialConfig(); err == nil && cfg.Listen != "" {
 		listen := cfg.Listen
 		if strings.HasPrefix(listen, ":") {
 			listen = "127.0.0.1" + listen
