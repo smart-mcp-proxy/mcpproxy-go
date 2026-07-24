@@ -180,7 +180,7 @@ jobs:
           echo "notes_file=$NOTES_FILE" >> $GITHUB_OUTPUT
 
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: release-notes
           path: RELEASE_NOTES-${{ github.ref_name }}.md
@@ -702,7 +702,7 @@ jobs:
 
       - name: Upload unsigned Windows installer for signing
         if: matrix.goos == 'windows'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         id: upload-unsigned-installer
         with:
           name: unsigned-installer-windows-${{ matrix.goarch }}
@@ -916,13 +916,13 @@ jobs:
           fi
 
       - name: Upload versioned archive artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: versioned-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload latest archive artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: latest-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
@@ -958,7 +958,7 @@ jobs:
 
       - name: Upload macOS installers artifact
         if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
           path: installers-artifact/*
@@ -983,7 +983,7 @@ jobs:
 
       - name: Re-upload for SignPath
         id: reupload
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: signpath-input-windows-${{ matrix.arch }}
           # Upload exe - GitHub Actions will ZIP it for SignPath
@@ -1028,7 +1028,7 @@ jobs:
           fi
 
       - name: Upload signed Windows installer
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: installer-windows-${{ matrix.arch }}
           path: signed/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.arch }}.exe
