@@ -1,10 +1,19 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 )
 
 func TestGetTokenCommand(t *testing.T) {
@@ -163,4 +172,131 @@ func TestParseTokenAPIResponse(t *testing.T) {
 		_, err := parseTokenAPIResponse([]byte("not json"))
 		assert.Error(t, err)
 	})
+}
+
+// --- GH #897 / PR #907 handler-level regression tests ---
+//
+// These drive the real run* handlers against an httptest daemon (via the
+// MCPPROXY_TRAY_ENDPOINT seam in daemonEndpoint) with responses marshaled
+// through contracts.NewSuccessResponse — the exact envelope the httpapi
+// handlers emit — so CLI/handler drift like the pre-#907 "No agent tokens
+// configured" bug cannot regress silently. They mutate package globals, so
+// no t.Parallel.
+
+func newTokenTestDaemon(t *testing.T, tokensHandler http.HandlerFunc) string {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{"running": true}})
+	})
+	mux.HandleFunc("/api/v1/tokens", tokensHandler)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "cfg.json")
+	cfgJSON := fmt.Sprintf(`{"listen":"127.0.0.1:0","data_dir":%q,"api_key":"test-key","mcpServers":[]}`, filepath.Join(tmp, "data"))
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("MCPPROXY_TRAY_ENDPOINT", server.URL)
+	t.Setenv("MCPPROXY_OUTPUT", "")
+	oldCfgPath := tokenConfigPath
+	tokenConfigPath = cfgPath
+	t.Cleanup(func() { tokenConfigPath = oldCfgPath })
+	return server.URL
+}
+
+func captureTokenStdout(t *testing.T, fn func() error) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	fnErr := fn()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if fnErr != nil {
+		t.Fatalf("handler returned error: %v\noutput so far:\n%s", fnErr, out)
+	}
+	return string(out)
+}
+
+func TestRunTokenList_TableOutput(t *testing.T) {
+	newTokenTestDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		resp := contracts.NewSuccessResponse(map[string]interface{}{
+			"tokens": []map[string]interface{}{{
+				"name": "qa-list-token", "token_prefix": "mcp_agt_ab12",
+				"allowed_servers": []string{"*"}, "permissions": []string{"read"},
+				"revoked": false, "expires_at": "2026-08-23T00:00:00Z", "created_at": "2026-07-24T00:00:00Z",
+			}},
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	out := captureTokenStdout(t, func() error { return runTokenList(nil, nil) })
+	assert.Contains(t, out, "qa-list-token", "table must list the token")
+	assert.Contains(t, out, "mcp_agt_ab12")
+	assert.NotContains(t, out, "No agent tokens configured", "pre-#907 envelope bug must not regress")
+}
+
+func TestRunTokenCreate_DisplaysMintedToken(t *testing.T) {
+	const minted = "mcp_agt_deadbeefcafe0123456789"
+	newTokenTestDaemon(t, func(w http.ResponseWriter, _ *http.Request) {
+		resp := contracts.NewSuccessResponse(map[string]interface{}{
+			"name": "qa-create", "token": minted,
+			"allowed_servers": []string{"*"}, "permissions": []string{"read"},
+			"expires_at": "2026-08-23T00:00:00Z",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	oldName, oldServers, oldPerms, oldExpires := tokenName, tokenServers, tokenPermissions, tokenExpires
+	tokenName, tokenServers, tokenPermissions, tokenExpires = "qa-create", "*", "read", "30d"
+	defer func() {
+		tokenName, tokenServers, tokenPermissions, tokenExpires = oldName, oldServers, oldPerms, oldExpires
+	}()
+
+	out := captureTokenStdout(t, func() error { return runTokenCreate(nil, nil) })
+	assert.Contains(t, out, minted, "create must display the minted token — it is shown only once")
+}
+
+// GH #897: the config.Load() branch of loadTokenConfig (no --config flag) is
+// the exact reported user flow. Sandbox HOME so config.Load touches only a
+// temp dir, then assert the global --data-dir flag overrides the default.
+func TestLoadTokenConfig_LoadBranchHonorsDataDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows os.UserHomeDir
+	t.Setenv("MCPPROXY_API_KEY", "")
+
+	oldCfgPath, oldDataDir := tokenConfigPath, dataDir
+	tokenConfigPath = ""
+	flagDir := filepath.Join(home, "flag-data")
+	dataDir = flagDir
+	defer func() { tokenConfigPath, dataDir = oldCfgPath, oldDataDir }()
+
+	cfg, err := loadTokenConfig()
+	if err != nil {
+		t.Fatalf("loadTokenConfig via config.Load(): %v", err)
+	}
+	if cfg.DataDir != flagDir {
+		t.Errorf("config.Load() branch DataDir = %q, want --data-dir %q (GH #897 regression)", cfg.DataDir, flagDir)
+	}
+}
+
+func TestTokenCommand_ConfigFlagRegistered(t *testing.T) {
+	cmd := GetTokenCommand()
+	flag := cmd.PersistentFlags().Lookup("config")
+	if assert.NotNil(t, flag, "token command must have persistent --config flag") {
+		assert.Equal(t, "c", flag.Shorthand)
+	}
 }
