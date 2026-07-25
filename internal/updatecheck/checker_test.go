@@ -112,6 +112,11 @@ func TestChecker_CheckNow_NonSemverVersionSkipsCheck(t *testing.T) {
 // Info log is emitted exactly once per detected latest version, not on every
 // periodic tick (FR-004 of specs/079-upgrade-nudge: no repeated log spam).
 func TestChecker_UpdateAvailableLoggedOncePerVersion(t *testing.T) {
+	// This test asserts the interactive-environment announcement behavior;
+	// pin CI="" so the FR-019 nudge suppression (which demotes the very log
+	// line under test) doesn't fire when the suite itself runs in CI.
+	t.Setenv("CI", "")
+
 	core, logs := observer.New(zap.InfoLevel)
 	logger := zap.New(core)
 
