@@ -112,10 +112,23 @@ func TestChecker_CheckNow_NonSemverVersionSkipsCheck(t *testing.T) {
 // Info log is emitted exactly once per detected latest version, not on every
 // periodic tick (FR-004 of specs/079-upgrade-nudge: no repeated log spam).
 func TestChecker_UpdateAvailableLoggedOncePerVersion(t *testing.T) {
+	// This test asserts the interactive-environment announcement behavior;
+	// pin CI="" so the FR-019 nudge suppression (which demotes the very log
+	// line under test) doesn't fire when the suite itself runs in CI.
+	t.Setenv("CI", "")
+
 	core, logs := observer.New(zap.InfoLevel)
 	logger := zap.New(core)
 
 	checker := New(logger, "v1.0.0")
+	// Step the clock past any FR-018 failure-backoff window between periodic
+	// checks — this test is about announce dedupe, not backoff (which has its
+	// own tests in checker_us3_test.go).
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	checker.nowFn = func() time.Time {
+		now = now.Add(30 * 24 * time.Hour)
+		return now
+	}
 	release := &GitHubRelease{
 		TagName: "v1.1.0",
 		HTMLURL: "https://github.com/test/repo/releases/tag/v1.1.0",
