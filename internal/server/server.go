@@ -1269,6 +1269,14 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
 	}
 
+	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
+	// non-empty value is applied. The PATCH handler preserves the existing value
+	// when the request omits the field, so this empty-guard is the second half of
+	// the leave-unchanged contract.
+	if updates.TrustMode != "" {
+		existing.TrustMode = updates.TrustMode
+	}
+
 	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
 	// unchanged"; a non-nil pointer is applied. The PATCH handler preserves the
 	// existing pointer when the request omits the field, so this nil-guard is

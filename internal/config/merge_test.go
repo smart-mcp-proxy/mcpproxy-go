@@ -56,6 +56,35 @@ func TestMergeServerConfig_ScalarFieldReplacement(t *testing.T) {
 	}
 }
 
+// Spec 086: a PATCH sets trust_mode; omitting it preserves the base value
+// (CopyServerConfig carries it forward).
+func TestMergeServerConfig_TrustMode(t *testing.T) {
+	base := &ServerConfig{Name: "srv", TrustMode: string(TrustModeScan)}
+
+	t.Run("patch changes trust_mode and captures diff", func(t *testing.T) {
+		merged, diff, err := MergeServerConfig(base, &ServerConfig{TrustMode: string(TrustModeAuto)}, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if merged.TrustMode != string(TrustModeAuto) {
+			t.Errorf("trust_mode not patched: got %q, want %q", merged.TrustMode, TrustModeAuto)
+		}
+		if _, ok := diff.Modified["trust_mode"]; !ok {
+			t.Error("trust_mode change not captured in diff")
+		}
+	})
+
+	t.Run("omitted trust_mode preserves base", func(t *testing.T) {
+		merged, _, err := MergeServerConfig(base, &ServerConfig{Command: "x"}, DefaultMergeOptions())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if merged.TrustMode != string(TrustModeScan) {
+			t.Errorf("base trust_mode not preserved: got %q, want %q", merged.TrustMode, TrustModeScan)
+		}
+	})
+}
+
 // T3.2: Test deep merge for map fields
 func TestMergeServerConfig_MapFieldDeepMerge(t *testing.T) {
 	base := &ServerConfig{

@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -112,6 +113,13 @@ const (
 	// besides explicit user action, that may clear a changed (rug-pull) record —
 	// because the operator opted into auto-approving changes for that server.
 	ReasonAutoApproveChanges TransitionReason = "auto_approve_changes"
+	// ReasonScanApproved marks a change/addition auto-approved because the server
+	// runs in trust_mode: scan AND a synchronous, offline TPA scan of the changed
+	// tool returned a green (clean) verdict (spec 086 stage 2). Like
+	// ReasonAutoApproveChanges it may clear a changed (rug-pull) record, but only
+	// with the scanner's positive attestation — a non-green or degraded/absent
+	// verdict never reaches this reason (the gate fails closed before it).
+	ReasonScanApproved TransitionReason = "scan_approved"
 )
 
 // assertToolApprovalInvariant checks that a state transition is valid according
@@ -133,7 +141,7 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 		switch reason {
 		case ReasonHashMatch, ReasonDescriptionRevert, ReasonFormulaMigration,
 			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,
-			ReasonAutoApproveChanges:
+			ReasonAutoApproveChanges, ReasonScanApproved:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: changed→approved with reason %q "+
@@ -141,7 +149,7 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 		}
 	case storage.ToolApprovalStatusPending:
 		switch reason {
-		case ReasonUserApprove, ReasonAutoApprove, ReasonBaselineTrust, ReasonAutoApproveChanges:
+		case ReasonUserApprove, ReasonAutoApprove, ReasonBaselineTrust, ReasonAutoApproveChanges, ReasonScanApproved:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: pending→approved with reason %q "+
@@ -165,6 +173,127 @@ func (r *Runtime) enforceInvariant(serverName, toolName, oldStatus, newStatus st
 		zap.String("reason", string(reason)),
 		zap.Error(err))
 	return err
+}
+
+// scanChangeIsClean runs a synchronous, offline (no Docker/network/filesystem)
+// TPA scan of a single changed tool and reports whether trust_mode: scan may
+// auto-approve it (spec 086 stage 2, FR-012/FR-013/FR-014). Green — the ONLY
+// auto-approvable state — is a "clean" verdict with full scanner coverage. A
+// non-clean verdict ("warnings"/"dangerous"), degraded/absent coverage, or a
+// missing bundle all fail closed (return false) so the record stays held for
+// human review. Matched TPA signal ids are logged for operator transparency
+// (FR-018).
+func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata) bool {
+	// Feed the changed tool the SAME cross-server context the async full-server
+	// scan gets: every OTHER connected server's current tools. Without this the
+	// hard-tier shadowing/impersonation checks are inert (they only see the single
+	// changed tool) and a cross-server rug-pull would resolve to a green,
+	// full-coverage verdict — a fail-open. See ScanToolMetadataVerdict's peerTools
+	// contract.
+	peers := r.collectPeerToolMetadata(serverName)
+	verdict, findings, coverageOK := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{tool}, peers)
+	if coverageOK && verdict == "clean" {
+		return true
+	}
+	var signals []string
+	for _, f := range findings {
+		signals = append(signals, f.Signals...)
+	}
+	r.logger.Info("trust_mode scan held tool change for review (non-green verdict)",
+		zap.String("server", serverName),
+		zap.String("tool", extractToolName(tool.Name)),
+		zap.String("verdict", verdict),
+		zap.Bool("coverage_ok", coverageOK),
+		zap.Strings("tpa_signals", signals))
+	return false
+}
+
+// collectPeerToolMetadata returns every OTHER connected server's current tools,
+// keyed by server name, projected onto config.ToolMetadata for the synchronous
+// scan gate. It is the cross-server context that lets the peer-dependent
+// shadowing/impersonation checks fire inline (parity with the async full-server
+// scan). Sourced from the lock-free StateView snapshot; returns nil when no
+// supervisor/snapshot is available (best effort — a genuinely single-server
+// deployment has no peers to shadow anyway).
+func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*config.ToolMetadata {
+	if r.supervisor == nil {
+		return nil
+	}
+	snapshot := r.supervisor.StateView().Snapshot()
+	if snapshot == nil {
+		return nil
+	}
+	peers := make(map[string][]*config.ToolMetadata)
+	for name, status := range snapshot.Servers {
+		if name == serverName || status == nil {
+			continue
+		}
+		metas := make([]*config.ToolMetadata, 0, len(status.Tools))
+		for i := range status.Tools {
+			t := status.Tools[i]
+			paramsJSON := ""
+			if t.InputSchema != nil {
+				if raw, err := json.Marshal(t.InputSchema); err == nil {
+					paramsJSON = string(raw)
+				}
+			}
+			metas = append(metas, &config.ToolMetadata{
+				ServerName:       name,
+				Name:             t.Name,
+				Description:      t.Description,
+				ParamsJSON:       paramsJSON,
+				OutputSchemaJSON: t.OutputSchemaJSON,
+			})
+		}
+		if len(metas) > 0 {
+			peers[name] = metas
+		}
+	}
+	if len(peers) == 0 {
+		return nil
+	}
+	return peers
+}
+
+// scanApproveChange re-baselines a changed (or approved-then-changed) tool record
+// to approved under trust_mode: scan after scanChangeIsClean returned a green
+// verdict (spec 086 stage 2). It routes through enforceInvariant with
+// ReasonScanApproved; returns true when the record was saved approved, false when
+// the invariant refused or the save failed — in which case the caller MUST fall
+// through to the fail-closed (held) path.
+func (r *Runtime) scanApproveChange(serverName, toolName string, existing *storage.ToolApprovalRecord, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) bool {
+	if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonScanApproved); invErr != nil {
+		return false
+	}
+	// Snapshot the pre-mutation record so a save failure leaves `existing`
+	// byte-identical to what the caller passed in. Otherwise the caller's
+	// fail-closed mark-changed path would read the already-overwritten fields
+	// (new description/hash) as the "old" values and persist a corrupted rug-pull
+	// record.
+	snapshot := *existing
+	existing.Status = storage.ToolApprovalStatusApproved
+	existing.ApprovedHash = currentHash
+	existing.CurrentHash = currentHash
+	existing.HashSchemaVersion = storage.OutputSchemaHashSchemaVersion
+	existing.ApprovedAt = time.Now().UTC()
+	existing.ApprovedBy = "scan-approved"
+	existing.CurrentDescription = tool.Description
+	existing.CurrentSchema = schemaJSON
+	existing.CurrentOutputSchema = outputSchemaJSON
+	existing.PreviousDescription = ""
+	existing.PreviousSchema = ""
+	existing.PreviousOutputSchema = ""
+	if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+		*existing = snapshot // restore so the caller's mark-changed path sees true old values
+		r.logger.Error("Failed to scan-approve tool change",
+			zap.String("server", serverName), zap.String("tool", toolName), zap.Error(saveErr))
+		return false
+	}
+	r.logger.Info("Tool change scan-approved (trust_mode: scan, clean verdict)",
+		zap.String("server", serverName), zap.String("tool", toolName))
+	r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
+		"", tool.Description, "", schemaJSON)
+	return true
 }
 
 // ToolApprovalResult contains the result of checking tool approvals for a server.
@@ -194,15 +323,19 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 	serverSkipped := false
 	serverQuarantined := false
 	autoApproveChanges := false
+	scanMode := false
 	for _, sc := range cfg.Servers {
 		if sc.Name == serverName {
+			// Single trust-tier resolution point (spec 086):
+			//   auto   -> autoApproveChanges=true (today's behavior)
+			//   scan   -> scanMode=true; a change auto-approves ONLY on a green
+			//             in-process TPA verdict, else it is held (fail closed)
+			//   manual -> both false; every change/addition is held
+			mode := sc.EffectiveTrustMode()
 			serverSkipped = sc.IsQuarantineSkipped()
 			serverQuarantined = sc.Quarantined
-			// Per-server opt-in to auto-approve post-baseline changes AND
-			// additions (MCP-2931). Note: a legacy skip_quarantine:true is
-			// migrated onto this flag at config load (MCP-2930), so it also
-			// reads true for skip_quarantine servers.
-			autoApproveChanges = sc.IsAutoApproveToolChanges()
+			autoApproveChanges = mode == config.TrustModeAuto
+			scanMode = mode == config.TrustModeScan
 			break
 		}
 	}
@@ -582,6 +715,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				}
 				continue
 			}
+			// trust_mode: scan (spec 086 stage 2): a still-changed record is
+			// re-baselined ONLY when a synchronous in-process TPA scan of the
+			// current (changed) tool returns a green verdict. A non-green/degraded
+			// verdict falls through and keeps the tool blocked (fail closed).
+			if scanMode && r.scanChangeIsClean(serverName, tool) {
+				if r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
+					continue
+				}
+			}
 			// Tool still has the changed description — keep it blocked
 			if globalEnabled {
 				result.BlockedTools[toolName] = true
@@ -709,7 +851,15 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// LAST RESORT: If description and output schema match, auto-approve even
 			// if input schema normalization differs. Output schema is part of the
 			// approved contract and must not be bypassed here.
-			if descMatch && outputSchemaMatch {
+			//
+			// EXCLUDED under trust_mode: scan. This fallback fires when the input
+			// schema genuinely differs after normalization (pure key-order/whitespace
+			// noise is already absorbed by the schemaMatch check above), and the
+			// scanner covers InputSchema — a TPA payload injected into an
+			// input-schema field description would otherwise auto-approve here without
+			// ever being scanned. In scan mode we fall through to the scan gate so
+			// the changed definition is actually scanned (fail closed on non-green).
+			if !scanMode && descMatch && outputSchemaMatch {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -766,6 +916,18 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
 					"", tool.Description, "", schemaJSON)
 				continue
+			}
+
+			// trust_mode: scan (spec 086 stage 2) — PRIMARY change gate. A genuine
+			// tool change (rug pull) auto-approves ONLY when a synchronous, offline
+			// TPA scan of the new tool definition returns a green (clean) verdict.
+			// Any non-green ("warnings"/"dangerous"), degraded, or absent verdict
+			// falls through to mark-changed below (fail closed) — the change is held
+			// for human review exactly as in manual mode.
+			if scanMode && r.scanChangeIsClean(serverName, tool) {
+				if r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
+					continue
+				}
 			}
 
 			oldDesc := existing.CurrentDescription

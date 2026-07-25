@@ -62,6 +62,11 @@ type Server struct {
 	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
 	// AddServerRequest.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// TrustMode mirrors config.ServerConfig.TrustMode (spec 086): the per-server
+	// trust tier ("auto"/"scan"/"manual"). Surfaced on the GET path so clients can
+	// read back the persisted mode; PATCH/POST accept it via AddServerRequest.
+	// Omitted when empty (server predates the field / relies on legacy flags).
+	TrustMode string `json:"trust_mode,omitempty"`
 	// InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
 	// the per-server MCP `initialize` handshake deadline override. Serialized as
 	// a duration string (e.g. "120s"); nil/omitted means "inherit the global

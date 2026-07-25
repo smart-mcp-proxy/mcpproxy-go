@@ -139,6 +139,60 @@ func TestHandlePatchServer_ExplicitBoolsTakePrecedence(t *testing.T) {
 		"ReconnectOnUse must be preserved from existing server (was true)")
 }
 
+// TestHandlePatchServer_TrustMode verifies spec 086 trust_mode is wired through
+// the REST PATCH DTO: an explicit value is mapped into ServerConfig.TrustMode,
+// and omitting it preserves the existing server's value (a bare PATCH of another
+// field must not reset the trust tier).
+func TestHandlePatchServer_TrustMode(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+
+	t.Run("explicit trust_mode is applied", func(t *testing.T) {
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name: "github", Protocol: "stdio", Enabled: true,
+				TrustMode: string(config.TrustModeManual),
+			},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		body, _ := json.Marshal(map[string]any{"trust_mode": "scan"})
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		assert.Equal(t, string(config.TrustModeScan), mockCtrl.capturedUpdates.TrustMode,
+			"trust_mode from the PATCH body must be mapped into ServerConfig")
+	})
+
+	t.Run("omitted trust_mode preserves existing", func(t *testing.T) {
+		mockCtrl := &mockPatchServerController{
+			apiKey: "test-key",
+			existingServer: &config.ServerConfig{
+				Name: "github", Protocol: "stdio", Enabled: true,
+				TrustMode: string(config.TrustModeScan),
+			},
+		}
+		srv := NewServer(mockCtrl, logger, nil)
+
+		body, _ := json.Marshal(map[string]any{"args": []string{"x"}})
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/github", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+		require.NotNil(t, mockCtrl.capturedUpdates)
+		assert.Equal(t, string(config.TrustModeScan), mockCtrl.capturedUpdates.TrustMode,
+			"omitted trust_mode must preserve the existing value")
+	})
+}
+
 // TestHandlePatchServer_HeadersDeepMerge verifies that PATCH /api/v1/servers
 // preserves existing header keys not mentioned in the request body. This is
 // the foundation of the Web UI / macOS tray edit flow: clients send a diff

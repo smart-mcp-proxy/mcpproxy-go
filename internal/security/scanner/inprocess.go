@@ -9,9 +9,128 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect/checks"
 )
+
+// baselineEngineChecks is the ordered check set shared by the async scan path
+// and the synchronous ScanToolMetadataVerdict gate (spec 086 stage 2). Keeping a
+// single constructor means the inline change-gate verdict can never diverge from
+// the full server scan's baseline detectors. The tpa-db bundle check is appended
+// by the caller when available.
+func baselineEngineChecks() []detect.Check {
+	return []detect.Check{
+		// Spec 076 US1 hard checks (#770).
+		&checks.UnicodeHidden{},
+		&checks.Shadowing{},
+		&checks.PayloadDecoded{},
+		// Spec 077 US1 hard check: curated injection/exfiltration phrases.
+		&checks.PhraseInjection{},
+		// Spec 076 US2 soft checks (MCP-3577).
+		&checks.DirectiveImperative{},
+		&checks.CapabilityMismatch{},
+		&checks.EmbeddedSecret{},
+	}
+}
+
+// ScanToolMetadataVerdict runs the deterministic, offline detect.Engine over the
+// given tools and returns the baseline-only verdict (spec 086 stage 2). It is the
+// synchronous seam the runtime tool-change gate consults under trust_mode: scan
+// — it performs NO Docker, network, or filesystem I/O, so it is safe to call
+// inline on the discovery path.
+//
+// peerTools maps each OTHER connected server's name to its current tool
+// definitions. It is fed into the RegistryView so the cross-server, peer-dependent
+// hard checks (checks.Shadowing — name-collision and cross-server-reference
+// impersonation) have the SAME context they get on the async full-server scan.
+// Without it those checks are structurally inert (they consult reg.ToolsByName,
+// which only holds the single changed tool), so a shadowing/impersonation
+// rug-pull would resolve to "clean" while coverageOK stayed true — a fail-open.
+// Passing the real peer registry keeps the change gate's "green == fully-covered
+// verdict" promise honest. nil/empty is legitimate for a genuinely single-server
+// deployment (there is nothing to shadow).
+//
+// Returns:
+//   - verdict: deriveBaselineVerdict's string — "clean", "warnings", or
+//     "dangerous". Green (auto-approvable) is "clean" ONLY (FR-013).
+//   - findings: the baseline findings, carrying the matched TPA signal ids so a
+//     non-clean verdict can be surfaced to the operator (FR-018).
+//   - coverageOK: false when the scan degraded (a check panicked/failed) OR the
+//     embedded tpa-db bundle was unavailable OR there was nothing to scan. The
+//     caller MUST fail closed (hold for review) whenever coverageOK is false,
+//     regardless of the verdict string (FR-014).
+func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, peerTools map[string][]*config.ToolMetadata) (verdict string, findings []ScanFinding, coverageOK bool) {
+	views := make([]detect.ToolView, 0, len(tools))
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		views = append(views, toolView(serverName, toolDef{
+			Name:         t.Name,
+			Description:  t.Description,
+			InputSchema:  json.RawMessage(t.ParamsJSON),
+			OutputSchema: json.RawMessage(t.OutputSchemaJSON),
+		}))
+	}
+	if len(views) == 0 {
+		// Nothing to scan — fail closed (absent verdict, FR-014).
+		return "clean", nil, false
+	}
+
+	// Append every peer server's tools (tagged with their TRUE owning server) so
+	// the cross-server shadowing/impersonation checks can fire. Deterministic peer
+	// ordering keeps findings stable across runs. Peer findings are filtered out
+	// below (only serverName's findings are reported), so peers are pure context.
+	peerNames := make([]string, 0, len(peerTools))
+	for name := range peerTools {
+		if name != serverName {
+			peerNames = append(peerNames, name)
+		}
+	}
+	sort.Strings(peerNames)
+	for _, name := range peerNames {
+		for _, t := range peerTools[name] {
+			if t == nil {
+				continue
+			}
+			views = append(views, toolView(name, toolDef{
+				Name:         t.Name,
+				Description:  t.Description,
+				InputSchema:  json.RawMessage(t.ParamsJSON),
+				OutputSchema: json.RawMessage(t.OutputSchemaJSON),
+			}))
+		}
+	}
+
+	engineChecks := baselineEngineChecks()
+	bundlePresent := false
+	if bundleCheck := defaultBundleCheck(); bundleCheck != nil {
+		engineChecks = append(engineChecks, bundleCheck)
+		bundlePresent = true
+	}
+
+	engine := detect.NewEngine(detect.Options{
+		ScannerID: inProcessTPAScannerID,
+		Checks:    engineChecks,
+	})
+	result := engine.Scan(detect.NewRegistryView(views))
+
+	prefix := serverName + ":"
+	out := make([]ScanFinding, 0, len(result.Findings))
+	for _, f := range result.Findings {
+		if !strings.HasPrefix(f.Location, prefix) {
+			continue
+		}
+		out = append(out, detectFindingToScanFinding(f))
+	}
+
+	verdict, _ = deriveBaselineVerdict(out)
+	// Fail closed on degraded coverage or a missing bundle: only a fully-covered,
+	// bundle-backed scan may yield an auto-approvable verdict (FR-014).
+	coverageOK = bundlePresent && result.Coverage.ChecksFailed == 0
+	return verdict, out, coverageOK
+}
 
 // inProcessTPAScannerID is the bundled, Docker-less scanner that analyzes a
 // connected server's tool descriptions/schemas for Tool-Poisoning-Attack (TPA)
@@ -86,20 +205,7 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 		}
 	}
 
-	engineChecks := []detect.Check{
-		// Spec 076 US1 hard checks (#770).
-		&checks.UnicodeHidden{},
-		&checks.Shadowing{},
-		&checks.PayloadDecoded{},
-		// Spec 077 US1 hard check: curated injection/exfiltration phrases.
-		// Restores the approval-blocking posture of the deleted legacy
-		// tpaRules without their false positives.
-		&checks.PhraseInjection{},
-		// Spec 076 US2 soft checks (MCP-3577).
-		&checks.DirectiveImperative{},
-		&checks.CapabilityMismatch{},
-		&checks.EmbeddedSecret{},
-	}
+	engineChecks := baselineEngineChecks()
 	// Spec 086 US1 (FR-005): the offline tpa-db bundle-backed check. It is
 	// loaded once (embedded default) at package init; if the bundle failed to
 	// load we log and continue WITHOUT it — a bundle problem must never break
