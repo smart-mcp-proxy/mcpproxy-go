@@ -335,10 +335,14 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		// because SaveConfiguration rebuilds the JSON config's server list from
 		// these records — without it the REST/UI toggle would be wiped on save.
 		"AutoApproveToolChanges": true,
-		"ReconnectOnUse":         true, // Spec 354: persisted to BBolt for on-demand reconnection
-		"LauncherWaitTimeout":    true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
-		"EnabledTools":           true, // feat/config-tool-allowlist: persisted to BBolt
-		"DisabledTools":          true, // feat/config-tool-allowlist: persisted to BBolt
+		// Spec 086: per-server trust tier (auto|scan|manual); persisted to BBolt
+		// (like AutoApproveToolChanges) so a REST/UI/MCP-set trust_mode survives
+		// a SaveConfiguration rebuild of the JSON server list.
+		"TrustMode":           true,
+		"ReconnectOnUse":      true, // Spec 354: persisted to BBolt for on-demand reconnection
+		"LauncherWaitTimeout": true, // Spec 046: persisted to BBolt so REST-API-added launcher servers survive restarts
+		"EnabledTools":        true, // feat/config-tool-allowlist: persisted to BBolt
+		"DisabledTools":       true, // feat/config-tool-allowlist: persisted to BBolt
 		// MCP-866: persisted to BBolt so a server's registry origin/provenance
 		// (and the custom-origin skip_quarantine guard) survive a restart.
 		"SourceRegistryID":         true,
