@@ -902,6 +902,15 @@ components:
             inherit the global value; "off"|"adaptive"|"always" = override ("off"
             is the explicit force-off). Resolved by Config.ResolveToonOutput.
           type: string
+        trust_mode:
+          description: |-
+            TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
+            auto_approve_tool_changes (spec 086). An empty value is derived from the
+            legacy fields at load via normalizeServerQuarantineFlags; the single
+            resolution point is EffectiveTrustMode(), which treats an empty or
+            unrecognized value as manual (secure by default). Read via
+            EffectiveTrustMode(), never the raw string.
+          type: string
         updated:
           type: string
         url:
@@ -2173,6 +2182,13 @@ components:
         tool_list_token_size:
           description: Token size for this server's tools
           type: integer
+        trust_mode:
+          description: |-
+            TrustMode mirrors config.ServerConfig.TrustMode (spec 086): the per-server
+            trust tier ("auto"/"scan"/"manual"). Surfaced on the GET path so clients can
+            read back the persisted mode; PATCH/POST accept it via AddServerRequest.
+            Omitted when empty (server predates the field / relies on legacy flags).
+          type: string
         updated:
           type: string
         url:
@@ -2555,6 +2571,15 @@ components:
           type: boolean
         reconnect_on_use:
           type: boolean
+        trust_mode:
+          description: |-
+            TrustMode is the per-server trust tier (spec 086): "auto", "scan", or
+            "manual". Empty means "leave unchanged" on PATCH (and inherit the migrated
+            default on create). A non-empty value is applied to ServerConfig.TrustMode
+            and resolved by EffectiveTrustMode (an unrecognized value fails closed to
+            manual). This is the REST seam for changing the trust tier via
+            POST/PATCH /api/v1/servers.
+          type: string
         url:
           type: string
         working_dir:
