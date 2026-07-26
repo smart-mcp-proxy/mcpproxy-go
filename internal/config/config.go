@@ -1616,6 +1616,29 @@ func (c *Config) DefaultQuarantineForNewServer() bool {
 	return c.IsQuarantineEnabled()
 }
 
+// QuarantineDefaultForServer resolves the add-time Quarantined default for a
+// specific new server from its trust_mode (spec 086 stage 3, FR-011). Secure by
+// default: a server is admitted UNQUARANTINED only under trust_mode auto; scan
+// and manual are quarantined on add (scan is later auto-unquarantined once its
+// baseline scan settles green — see the EventTypeSecurityScanSettled handler).
+//
+// The global quarantine_enabled=false escape hatch (#370) still wins: when
+// quarantine is disabled globally, every new server is admitted unquarantined
+// regardless of its trust_mode, preserving DefaultQuarantineForNewServer's
+// semantics. A nil server config fails closed to quarantine.
+//
+// CN-002: the mode is read from the server's config/registry-derived trust_mode,
+// never from a request-driven admission override.
+func (c *Config) QuarantineDefaultForServer(sc *ServerConfig) bool {
+	if !c.IsQuarantineEnabled() {
+		return false
+	}
+	if sc == nil {
+		return true
+	}
+	return sc.EffectiveTrustMode() != TrustModeAuto
+}
+
 // EffectiveTrustMode is the single resolution point for a server's trust tier
 // (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
 // (secure by default) for empty OR unrecognized trust_mode values (FR-009 —

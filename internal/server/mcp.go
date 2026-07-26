@@ -3933,10 +3933,19 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	// (issue #370). Secure by default: true unless the operator has
 	// explicitly set quarantine_enabled=false. An explicit quarantined
 	// field in the request still wins over the default.
+	// Spec 086 stage 3 (FR-011): the quarantine default is per-server, resolved
+	// from the server's trust_mode — auto is admitted unquarantined, scan|manual
+	// are quarantined on add. trust_mode is the server's own persisted setting
+	// (not a request-driven admission override — CN-002), so it also flows onto
+	// the built serverConfig below. Empty trust_mode resolves to manual (quarantine),
+	// so this is behavior-identical to the old global default when omitted. The
+	// explicit `quarantined` request boolean (#370) still wins after, as a
+	// distinct pre-existing escape hatch.
+	trustMode := request.GetString("trust_mode", "")
 	defaultQuarantined := true
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if cfg := p.mainServer.runtime.Config(); cfg != nil {
-			defaultQuarantined = cfg.DefaultQuarantineForNewServer()
+			defaultQuarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{TrustMode: trustMode})
 		}
 	}
 	quarantined := request.GetBool("quarantined", defaultQuarantined)
@@ -4078,6 +4087,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Isolation:   isolation,
 		OAuth:       oauth,
 		InitTimeout: initTimeout,
+		TrustMode:   trustMode, // spec 086: carry the per-server trust_mode through on create
 	}
 
 	// Save to storage

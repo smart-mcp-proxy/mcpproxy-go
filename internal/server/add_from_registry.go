@@ -118,6 +118,17 @@ func (s *Server) AddServerFromRegistry(ctx context.Context, req *AddFromRegistry
 		return nil, err
 	}
 
+	// Spec 086 stage 3 (FR-011): re-resolve the quarantine default per-server from
+	// the derived server's trust_mode now that the ServerConfig exists. The
+	// registry path never carries a client-supplied trust_mode (CN-002), so
+	// serverCfg.TrustMode is empty and this resolves to manual -> quarantine,
+	// identical to the global default computed above. Routing through the helper
+	// keeps a single admission seam and lets a future registry entry that carries
+	// a trust_mode admit auto servers unquarantined without touching this site.
+	if cfg := s.runtime.Config(); cfg != nil {
+		serverCfg.Quarantined = cfg.QuarantineDefaultForServer(serverCfg)
+	}
+
 	// Persist via the shared add path (duplicate check + storage + runtime sync).
 	if err := s.AddServer(ctx, serverCfg); err != nil {
 		if strings.Contains(err.Error(), "already exists") {

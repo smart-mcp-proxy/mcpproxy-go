@@ -1472,10 +1472,16 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	// Spec 086 stage 3 (FR-011): the add-time quarantine default is per-server,
+	// derived from the server's trust_mode — auto is admitted unquarantined,
+	// scan|manual are quarantined on add. req.TrustMode is the only add-request
+	// field consulted (CN-002 reads the mode from config/registry defaults, not a
+	// separate admission override); the request Quarantined boolean (#370) still
+	// wins after, as a distinct pre-existing escape hatch.
 	quarantined := true
 	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
 		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
-			quarantined = cfg.DefaultQuarantineForNewServer()
+			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{TrustMode: req.TrustMode})
 		}
 	}
 	if req.Quarantined != nil {

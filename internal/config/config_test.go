@@ -1012,6 +1012,76 @@ func TestConfig_DefaultQuarantineForNewServer(t *testing.T) {
 	}
 }
 
+func TestConfig_QuarantineDefaultForServer(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   Config
+		sc       *ServerConfig
+		expected bool
+	}{
+		{
+			name:     "quarantine disabled globally: never quarantine (escape hatch preserved)",
+			config:   Config{QuarantineEnabled: boolPtr(false)},
+			sc:       &ServerConfig{TrustMode: string(TrustModeManual)},
+			expected: false,
+		},
+		{
+			name:     "quarantine disabled globally: even scan mode is admitted unquarantined",
+			config:   Config{QuarantineEnabled: boolPtr(false)},
+			sc:       &ServerConfig{TrustMode: string(TrustModeScan)},
+			expected: false,
+		},
+		{
+			name:     "nil server config: quarantine (fail closed)",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       nil,
+			expected: true,
+		},
+		{
+			name:     "auto mode: admit unquarantined",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: string(TrustModeAuto)},
+			expected: false,
+		},
+		{
+			name:     "scan mode: quarantine on add",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: string(TrustModeScan)},
+			expected: true,
+		},
+		{
+			name:     "manual mode: quarantine on add",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: string(TrustModeManual)},
+			expected: true,
+		},
+		{
+			name:     "empty trust mode resolves to manual: quarantine",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{},
+			expected: true,
+		},
+		{
+			name:     "unrecognized trust mode fails closed to manual: quarantine",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: "Scan"},
+			expected: true,
+		},
+		{
+			name:     "legacy auto_approve_tool_changes=true resolves to auto: admit unquarantined",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{AutoApproveToolChanges: boolPtr(true)},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.QuarantineDefaultForServer(tt.sc))
+		})
+	}
+}
+
 func TestServerConfig_IsQuarantineSkipped(t *testing.T) {
 	tests := []struct {
 		name     string

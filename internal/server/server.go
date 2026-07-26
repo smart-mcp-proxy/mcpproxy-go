@@ -443,8 +443,91 @@ func (s *Server) listenForRoutingModeRefresh() {
 			// effect without a restart. Fires on both reload paths, which both
 			// emit config.reloaded.
 			s.reapplyScannerSecurityConfig()
+		case runtime.EventTypeSecurityScanSettled:
+			// Spec 086 stage 3 (FR-011): a scan-mode server that was quarantined on
+			// add stays quarantined until its baseline scan settles GREEN. React to
+			// the single debounced settle event: on a clean verdict, auto-approve
+			// (unquarantine + baseline-approve pending tools); otherwise fail closed.
+			serverName, _ := evt.Payload["server_name"].(string)
+			s.maybeAutoApproveScanSettled(context.Background(), serverName)
 		}
 	}
+}
+
+// shouldAutoApproveScanSettled is the pure spec 086 stage-3 async admission
+// predicate (FR-011). It returns true ONLY for a scan-mode server that is still
+// quarantined and whose freshly-read baseline verdict is GREEN ("clean" —
+// FR-013). Every other combination fails closed (SC-003): manual servers never
+// auto-approve (US2 scenario 4); auto servers are never quarantined so there is
+// nothing to do; a non-quarantined server is skipped to break the
+// ApproveServer -> unquarantine -> reconnect re-entrancy loop and to ignore
+// stale/replayed settle events; any verdict other than "clean" (warnings,
+// dangerous, failed, not_scanned, scanning) or an empty verdict leaves the
+// server quarantined.
+func shouldAutoApproveScanSettled(mode config.TrustMode, quarantined bool, verdict string) bool {
+	return mode == config.TrustModeScan && quarantined && verdict == "clean"
+}
+
+// maybeAutoApproveScanSettled implements the spec 086 stage-3 async new-server
+// admission gate (FR-011). Given the server named in a settled scan event, it
+// re-resolves the server's trust mode and current quarantine state from the live
+// config and re-reads a FRESH baseline verdict (the settle payload carries only
+// status + finding counts, never the verdict), then approves only when
+// shouldAutoApproveScanSettled says so. ApproveServer(force=false) provides
+// defense in depth: it independently re-gates on hard-tier findings and refuses
+// if there is no scan report, so a stale or buggy verdict still cannot
+// unquarantine a dangerous or unscanned server.
+func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName string) {
+	if serverName == "" || s.securityScanner == nil {
+		return
+	}
+	sc := s.findServerConfig(serverName)
+	if sc == nil {
+		// No live config entry (not-yet-loaded / removed): fail closed, skip.
+		return
+	}
+	mode := sc.EffectiveTrustMode()
+	// Cheap trust-mode gate before the (cached) verdict read: only scan-mode,
+	// still-quarantined servers can possibly auto-approve.
+	if mode != config.TrustModeScan || !sc.Quarantined {
+		return
+	}
+	verdict := ""
+	if summary := s.securityScanner.GetScanSummary(ctx, serverName); summary != nil {
+		verdict = summary.Status
+	}
+	if !shouldAutoApproveScanSettled(mode, sc.Quarantined, verdict) {
+		s.logger.Debug("scan-mode server not auto-approved on settle (fail closed)",
+			zap.String("server", serverName),
+			zap.String("verdict", verdict))
+		return
+	}
+	if err := s.securityScanner.ApproveServer(ctx, serverName, false, "scan-auto"); err != nil {
+		// ApproveServer's own hard-tier/missing-report gate can reject; that is the
+		// intended fail-closed outcome, not a fatal error. Log and leave quarantined.
+		s.logger.Warn("auto-approve of scan-mode server after green scan was rejected",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+	s.logger.Info("auto-approved scan-mode server after green baseline scan (spec 086 FR-011)",
+		zap.String("server", serverName))
+}
+
+// findServerConfig returns the live ServerConfig for serverName from the current
+// config snapshot, or nil if absent. Read-only lookup over the immutable
+// snapshot — safe to call from event-loop goroutines.
+func (s *Server) findServerConfig(serverName string) *config.ServerConfig {
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return nil
+	}
+	for _, sc := range cfg.Servers {
+		if sc != nil && sc.Name == serverName {
+			return sc
+		}
+	}
+	return nil
 }
 
 // reapplyScannerSecurityConfig re-applies the opt-in deep-scan gate (and the
