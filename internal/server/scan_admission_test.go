@@ -94,6 +94,15 @@ func newAdmissionTestServer(t *testing.T, fake securityScannerService, servers .
 	rt, err := runtime.New(cfg, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// Persist the servers to storage too: maybeStartAdmissionScans reads the
+	// server list from StorageManager().ListUpstreamServers() (a synchronized
+	// snapshot) rather than the shared live config, mirroring production where an
+	// added server is always saved to BBolt before servers.changed fires.
+	for _, sc := range servers {
+		if sc != nil {
+			require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
+		}
+	}
 	return &Server{
 		logger:              zap.NewNop(),
 		runtime:             rt,
