@@ -1716,6 +1716,19 @@ func (s *Service) RejectServer(ctx context.Context, serverName string) error {
 
 // --- Integrity ---
 
+// HasApprovalBaseline reports whether an integrity baseline already exists for
+// the server — i.e. it has been approved/unquarantined at least once. The
+// spec-086 admission gate uses this to distinguish a first-time admission
+// quarantine (auto-approve on a clean baseline scan) from a deliberate operator
+// re-quarantine of an already-admitted server (never silently auto-approved).
+func (s *Service) HasApprovalBaseline(serverName string) bool {
+	if s.storage == nil {
+		return false
+	}
+	baseline, err := s.storage.GetIntegrityBaseline(serverName)
+	return err == nil && baseline != nil
+}
+
 // CheckIntegrity verifies a server's runtime integrity against its baseline
 func (s *Service) CheckIntegrity(ctx context.Context, serverName string) (*IntegrityCheckResult, error) {
 	baseline, err := s.storage.GetIntegrityBaseline(serverName)

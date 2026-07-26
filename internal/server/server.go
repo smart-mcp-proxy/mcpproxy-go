@@ -53,6 +53,21 @@ type Status struct {
 	LastUpdated   time.Time              `json:"last_updated"`
 }
 
+// securityScannerService is the subset of *scanner.Service the runtime hot
+// paths depend on (scan-verdict reads, admission scan triggering, approval, and
+// the deep-scan re-gate). Declaring it as an interface lets tests inject a fake
+// to exercise the spec-086 async admission gate (maybeStartAdmissionScan /
+// maybeAutoApproveScanSettled) without standing up a full scanner backend.
+type securityScannerService interface {
+	GetScanSummary(ctx context.Context, serverName string) *scanner.ScanSummary
+	ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error
+	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error)
+	HasApprovalBaseline(serverName string) bool
+	ApplySecurityConfig(sec *config.SecurityConfig)
+	SetIsolationMode(mode string)
+	DeepScanEnabled() bool
+}
+
 // Server wraps the MCP proxy server with all its dependencies
 type Server struct {
 	logger   *zap.Logger
@@ -77,7 +92,14 @@ type Server struct {
 	startTime time.Time
 
 	// Spec 039: Security scanner service (for scan summaries in server list)
-	securityScanner *scanner.Service
+	securityScanner securityScannerService
+
+	// Spec 086 stage 3 (FR-011): tracks scan-mode servers for which a one-shot
+	// admission baseline scan has already been triggered this process, so the
+	// stream of servers.changed events does not restart the scan. Guarded by
+	// admissionScanMu.
+	admissionScanMu     sync.Mutex
+	admissionScanKicked map[string]bool
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
@@ -164,11 +186,12 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	rt.SetManagementService(mgmtService)
 
 	server := &Server{
-		logger:        logger,
-		runtime:       rt,
-		statusCh:      make(chan interface{}, 10),
-		eventsCh:      rt.SubscribeEvents(),
-		observability: obsManager,
+		logger:              logger,
+		runtime:             rt,
+		statusCh:            make(chan interface{}, 10),
+		eventsCh:            rt.SubscribeEvents(),
+		observability:       obsManager,
+		admissionScanKicked: make(map[string]bool),
 	}
 
 	mcpProxy := NewMCPProxyServer(
@@ -437,6 +460,12 @@ func (s *Server) listenForRoutingModeRefresh() {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 			}
+			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
+			// and must have its baseline scan triggered so the settle handler can
+			// auto-approve it. servers.changed is the add/reconcile signal; kick a
+			// one-shot admission scan for any scan-mode, still-quarantined,
+			// never-scanned server. Idempotent (see maybeStartAdmissionScans).
+			s.maybeStartAdmissionScans(context.Background())
 		case runtime.EventTypeConfigReloaded:
 			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
 			// must re-gate the scanner so a security.deep_scan.* toggle takes
@@ -492,6 +521,16 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 	if mode != config.TrustModeScan || !sc.Quarantined {
 		return
 	}
+	// Admission-window gate (spec 086 FR-011 is a NEW-server admission gate).
+	// A prior integrity baseline means the server was already approved/
+	// unquarantined at least once, so this quarantine is a deliberate operator
+	// re-quarantine (or a rug-pull re-quarantine), NOT the initial admission —
+	// never silently override that by auto-approving on a later clean settle.
+	if s.securityScanner.HasApprovalBaseline(serverName) {
+		s.logger.Debug("scan-mode server has a prior approval baseline; not auto-approving on settle (respect operator re-quarantine)",
+			zap.String("server", serverName))
+		return
+	}
 	verdict := ""
 	if summary := s.securityScanner.GetScanSummary(ctx, serverName); summary != nil {
 		verdict = summary.Status
@@ -512,6 +551,79 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 	}
 	s.logger.Info("auto-approved scan-mode server after green baseline scan (spec 086 FR-011)",
 		zap.String("server", serverName))
+}
+
+// maybeStartAdmissionScans implements the "trigger a scan" half of spec 086
+// stage-3 new-server admission (FR-011). A scan-mode server is quarantined on
+// add; without this, nothing ever starts its baseline scan, so it would stay
+// quarantined forever (the settle handler never fires). Called on every
+// servers.changed, it kicks a one-shot baseline scan for each scan-mode,
+// still-quarantined, never-scanned server. Idempotent: the in-memory kicked-set
+// plus the "already scanned" verdict guard keep the servers.changed stream from
+// restarting an in-flight or completed scan.
+func (s *Server) maybeStartAdmissionScans(ctx context.Context) {
+	if s.securityScanner == nil {
+		return
+	}
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return
+	}
+	for _, sc := range cfg.Servers {
+		if sc == nil {
+			continue
+		}
+		s.maybeStartAdmissionScan(ctx, sc)
+	}
+}
+
+// maybeStartAdmissionScan triggers the one-shot admission baseline scan for a
+// single server if it is scan-mode, still quarantined, and has never been
+// scanned. StartScan auto-connects the quarantined server (for tool-definition
+// export), scans, and emits the debounced EventTypeSecurityScanSettled that
+// maybeAutoApproveScanSettled consumes. The scan is launched on its own
+// goroutine so the event loop is never blocked; a launch failure clears the
+// kicked flag so a later servers.changed can retry.
+func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerConfig) {
+	if sc == nil || s.securityScanner == nil {
+		return
+	}
+	if sc.EffectiveTrustMode() != config.TrustModeScan || !sc.Quarantined {
+		return
+	}
+	// Already scanned (scanning/clean/failed/…): the admission scan already ran
+	// or a manual scan is in flight. GetScanSummary returns nil only when no
+	// scan job exists yet — the sole "never scanned" signal.
+	if summary := s.securityScanner.GetScanSummary(ctx, sc.Name); summary != nil {
+		return
+	}
+	// A prior approval baseline means this is a re-quarantine of a server that
+	// was already admitted once, not a first-time admission — do not re-scan or
+	// auto-approve it (aligns with the settle handler's admission-window gate).
+	if s.securityScanner.HasApprovalBaseline(sc.Name) {
+		return
+	}
+	name := sc.Name
+	s.admissionScanMu.Lock()
+	if s.admissionScanKicked[name] {
+		s.admissionScanMu.Unlock()
+		return
+	}
+	s.admissionScanKicked[name] = true
+	s.admissionScanMu.Unlock()
+
+	s.logger.Info("triggering admission baseline scan for scan-mode server (spec 086 FR-011)",
+		zap.String("server", name))
+	go func() {
+		if _, err := s.securityScanner.StartScan(ctx, name, false, nil, ""); err != nil {
+			s.logger.Warn("admission baseline scan failed to start; will retry on next servers.changed",
+				zap.String("server", name),
+				zap.Error(err))
+			s.admissionScanMu.Lock()
+			delete(s.admissionScanKicked, name)
+			s.admissionScanMu.Unlock()
+		}
+	}()
 }
 
 // findServerConfig returns the live ServerConfig for serverName from the current
