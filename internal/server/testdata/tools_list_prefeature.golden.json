@@ -331,7 +331,7 @@
         "idempotentHint": false,
         "openWorldHint": false
       },
-      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/\u003cslug\u003e URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
+      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/<slug> URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
       "inputSchema": {
         "properties": {
           "profile": {
@@ -429,6 +429,15 @@
           },
           "url": {
             "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
+            "type": "string"
+          },
+          "trust_mode": {
+            "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
+            "enum": [
+              "auto",
+              "scan",
+              "manual"
+            ],
             "type": "string"
           }
         },
@@ -609,7 +618,7 @@
         "idempotentHint": false,
         "openWorldHint": false
       },
-      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/\u003cslug\u003e URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
+      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/<slug> URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
       "inputSchema": {
         "properties": {
           "profile": {
@@ -707,6 +716,15 @@
           },
           "url": {
             "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
+            "type": "string"
+          },
+          "trust_mode": {
+            "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
+            "enum": [
+              "auto",
+              "scan",
+              "manual"
+            ],
             "type": "string"
           }
         },
@@ -1019,7 +1037,7 @@
         "idempotentHint": false,
         "openWorldHint": false
       },
-      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/\u003cslug\u003e URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
+      "description": "Switch the active profile for THIS session. A profile scopes tool discovery (retrieve_tools) and tool calls to a named subset of upstream servers — useful to focus an agent on one task domain (e.g. 'research', 'deploy'). The selection persists for the lifetime of the current MCP session and applies to subsequent retrieve_tools / call_tool_* / code_execution calls on the base /mcp endpoint without re-indexing. Pass an empty string to clear the selection and go back to all servers. Note: an explicit /mcp/p/<slug> URL still overrides the session profile for that request, and a profile-pinned agent token cannot switch away from its pinned profile.",
       "inputSchema": {
         "properties": {
           "profile": {
@@ -1117,6 +1135,15 @@
           },
           "url": {
             "description": "Server URL for HTTP/SSE servers (e.g., 'http://localhost:3001')",
+            "type": "string"
+          },
+          "trust_mode": {
+            "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
+            "enum": [
+              "auto",
+              "scan",
+              "manual"
+            ],
             "type": "string"
           }
         },
