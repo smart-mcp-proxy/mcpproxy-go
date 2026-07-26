@@ -572,11 +572,22 @@ func (s *Server) maybeStartAdmissionScans(ctx context.Context) {
 	if s.securityScanner == nil {
 		return
 	}
-	cfg := s.runtime.Config()
-	if cfg == nil {
+	// Read servers from storage (RLock-guarded, returns fresh ServerConfig copies)
+	// rather than ranging runtime.Config().Servers: Config() hands back a shared,
+	// lock-free snapshot whose Servers slice/structs other goroutines (and some
+	// tests) mutate in place, so iterating it from this background event-loop
+	// goroutine is a data race. ListUpstreamServers is serialized against
+	// SaveUpstreamServer by the storage manager mutex.
+	sm := s.runtime.StorageManager()
+	if sm == nil {
 		return
 	}
-	for _, sc := range cfg.Servers {
+	servers, err := sm.ListUpstreamServers()
+	if err != nil {
+		s.logger.Debug("admission scan sweep: failed to list servers", zap.Error(err))
+		return
+	}
+	for _, sc := range servers {
 		if sc == nil {
 			continue
 		}
