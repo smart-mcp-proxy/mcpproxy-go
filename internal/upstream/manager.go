@@ -312,6 +312,13 @@ func (m *Manager) SetGlobalConfig(globalConfig *config.Config) {
 	}
 }
 
+// GlobalConfig returns the proxy-wide config the manager currently uses for
+// newly created clients and Docker-recovery decisions (see SetGlobalConfig).
+// May be nil before the first Store.
+func (m *Manager) GlobalConfig() *config.Config {
+	return m.globalConfig.Load()
+}
+
 // AddNotificationHandler adds a notification handler to receive state change notifications
 func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 	m.notificationMgr.AddHandler(handler)

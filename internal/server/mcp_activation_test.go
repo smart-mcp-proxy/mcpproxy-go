@@ -79,7 +79,7 @@ func buildMCPProxyWithActivation(t *testing.T) (*MCPProxyServer, *runtime.Runtim
 	tr := truncate.NewTruncator(0)
 
 	mainSrv := &Server{runtime: rt, logger: logger}
-	proxy := NewMCPProxyServer(rt.StorageManager(), idx, um, cm, tr, logger, mainSrv, false, cfg, rt.SignatureCache())
+	proxy := NewMCPProxyServer(rt.StorageManager(), idx, um, cm, func() *truncate.Truncator { return tr }, logger, mainSrv, false, cfg, rt.SignatureCache())
 
 	return proxy, rt, svc.ActivationDB()
 }

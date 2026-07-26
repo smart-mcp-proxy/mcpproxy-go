@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 )
 
@@ -62,6 +63,17 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	// Aggregate by secret name for cross-cutting view
 	secretsMap := make(map[string][]string) // secret name -> list of servers using it
 
+	// Issue #872: connect errors echoed into Health.Detail / last_error can
+	// carry the full upstream URL, including query-string credentials. Scrub
+	// them before they land in UpstreamErrors.ErrorMessage — parity with the
+	// /api/v1/servers list route — unless the operator opted out.
+	redactErr := func(msg string) string {
+		if s.config != nil && s.config.RevealSecretHeaders {
+			return msg
+		}
+		return oauth.RedactSensitiveData(msg)
+	}
+
 	// Aggregate diagnostics from Health.Action (single source of truth)
 	for _, srvRaw := range serversRaw {
 		serverName := getStringFromMap(srvRaw, "name")
@@ -82,7 +94,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			}
 			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
 				ServerName:   serverName,
-				ErrorMessage: healthDetail,
+				ErrorMessage: redactErr(healthDetail),
 				Timestamp:    errorTime,
 			})
 
@@ -126,7 +138,7 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 			}
 			diag.UpstreamErrors = append(diag.UpstreamErrors, contracts.UpstreamError{
 				ServerName:   serverName,
-				ErrorMessage: lastError,
+				ErrorMessage: redactErr(lastError),
 				Timestamp:    errorTime,
 			})
 		}

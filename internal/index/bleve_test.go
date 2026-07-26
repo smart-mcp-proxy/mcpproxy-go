@@ -601,3 +601,55 @@ func TestBleveIndex_DeleteAll_BeyondPageCap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), count, "DeleteAll must remove every document across all pages")
 }
+
+// TestBleveIndex_CanonicalToolName verifies that both index read seams return a
+// canonical "server:tool" identity even when discovery stored a BARE tool name
+// (the real live path: ToolMetadata{ServerName:"github", Name:"create_issue"}),
+// and that an already-prefixed stored name is not double-prefixed (#871).
+func TestBleveIndex_CanonicalToolName(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_canon_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	tools := []*config.ToolMetadata{
+		// Bare name — how discovery actually stores tools.
+		{Name: "create_issue", ServerName: "github", Description: "Create a GitHub issue", Hash: "h_bare"},
+		// Already prefixed — legacy index data / test fixtures.
+		{Name: "acme:list_widgets", ServerName: "acme", Description: "List widgets", Hash: "h_pref"},
+	}
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	t.Run("SearchTools returns canonical name for bare-stored tool", func(t *testing.T) {
+		results, err := bleveIndex.SearchTools("create_issue", 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+		assert.Equal(t, "github:create_issue", results[0].Tool.Name)
+		assert.Equal(t, "github", results[0].Tool.ServerName)
+	})
+
+	t.Run("SearchTools does not double-prefix an already-prefixed tool", func(t *testing.T) {
+		results, err := bleveIndex.SearchTools("list_widgets", 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+		assert.Equal(t, "acme:list_widgets", results[0].Tool.Name)
+	})
+
+	t.Run("GetToolsByServer returns canonical name for bare-stored tool", func(t *testing.T) {
+		tools, err := bleveIndex.GetToolsByServer("github")
+		require.NoError(t, err)
+		require.Len(t, tools, 1)
+		assert.Equal(t, "github:create_issue", tools[0].Name)
+	})
+
+	t.Run("GetToolsByServer does not double-prefix an already-prefixed tool", func(t *testing.T) {
+		tools, err := bleveIndex.GetToolsByServer("acme")
+		require.NoError(t, err)
+		require.Len(t, tools, 1)
+		assert.Equal(t, "acme:list_widgets", tools[0].Name)
+	})
+}

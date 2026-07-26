@@ -3,6 +3,7 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -93,13 +94,24 @@ func TestCredentialConnectURL_EscapesServer(t *testing.T) {
 func TestResolveCredentialBaseURL_FlagAndEnv(t *testing.T) {
 	t.Setenv("MCPPROXY_SERVER_URL", "https://env.example.com/")
 	credServerURL = ""
-	if got := resolveCredentialBaseURL(); got != "https://env.example.com" {
-		t.Errorf("env base URL = %q", got)
+	if got, err := resolveCredentialBaseURL(); err != nil || got != "https://env.example.com" {
+		t.Errorf("env base URL = %q, err = %v", got, err)
 	}
 	credServerURL = "https://flag.example.com/"
 	defer func() { credServerURL = "" }()
-	if got := resolveCredentialBaseURL(); got != "https://flag.example.com" {
-		t.Errorf("flag base URL = %q (flag should win)", got)
+	if got, err := resolveCredentialBaseURL(); err != nil || got != "https://flag.example.com" {
+		t.Errorf("flag base URL = %q, err = %v (flag should win)", got, err)
+	}
+}
+
+func TestResolveCredentialBaseURL_ExplicitConfigErrors(t *testing.T) {
+	t.Setenv("MCPPROXY_SERVER_URL", "")
+	credServerURL = ""
+	oldConfigFile := configFile
+	configFile = filepath.Join(t.TempDir(), "missing.json")
+	defer func() { configFile = oldConfigFile }()
+	if got, err := resolveCredentialBaseURL(); err == nil {
+		t.Errorf("expected error for missing explicit --config, got base URL %q", got)
 	}
 }
 

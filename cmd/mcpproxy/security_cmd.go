@@ -17,7 +17,6 @@ import (
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 var (
@@ -80,34 +79,19 @@ Examples:
 // `mcpproxy security ...` commands behave consistently with `mcpproxy serve`,
 // `mcpproxy status`, and `mcpproxy upstream ...`.
 func newSecurityCLIClient() (*cliclient.Client, *config.Config, error) {
-	var (
-		cfg *config.Config
-		err error
-	)
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadSecurityConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	cfg.EnsureAPIKey()
-
-	socketPath := socket.DetectSocketPath(cfg.DataDir)
 
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
 
-	var client *cliclient.Client
-	if socket.IsSocketAvailable(socketPath) {
-		client = cliclient.NewClient(socketPath, logger.Sugar())
-	} else {
-		endpoint := fmt.Sprintf("http://%s", cfg.Listen)
-		client = cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger.Sugar())
+	// Socket first, then TCP fallback. Never generate an API key here —
+	// a fabricated key cannot match the running daemon's.
+	client, ok := newDaemonClient(cfg, logger.Sugar())
+	if !ok {
+		return nil, nil, fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve")
 	}
 
 	return client, cfg, nil
@@ -703,7 +687,9 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	//   2. Use a 750ms ticker (no tight loop, no 2s lag).
 	//   3. Honor a hard timeout based on the configured per-scanner timeout.
 	//   4. Print one progress line per tick with run/running/failed counts.
-	fmt.Printf("Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
+	// Progress goes to stderr so stdout stays clean for machine formats
+	// (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
 	scanStart := time.Now()
 
 	ticker := time.NewTicker(750 * time.Millisecond)
@@ -713,7 +699,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			return fmt.Errorf("scan timed out after %s for %q (job %s); use 'mcpproxy security status %s' to inspect", hardTimeout, serverName, jobID, serverName)
 		case <-ticker.C:
 		}
@@ -777,40 +763,42 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			progress += fmt.Sprintf(" (running: %s)", strings.Join(runningNames, ", "))
 		}
 		// Erase previous line on TTY for a clean rolling display; on a pipe
-		// just print one progress line per tick.
-		if stdoutIsTTY() {
+		// just print one progress line per tick. Progress is written to
+		// stderr, so the TTY check must follow stderr (not stdout) — else
+		// `2>scan.log` on a terminal would fill the log with \r frames.
+		if stderrIsTTY() {
 			pad := ""
 			if lastProgressLen > len(progress) {
 				pad = strings.Repeat(" ", lastProgressLen-len(progress))
 			}
-			fmt.Print("\r" + progress + pad)
+			fmt.Fprint(os.Stderr, "\r"+progress+pad)
 			lastProgressLen = len(progress)
 		} else {
-			fmt.Println(progress)
+			fmt.Fprintln(os.Stderr, progress)
 		}
 
 		switch jobStatus {
 		case "completed":
-			if stdoutIsTTY() {
-				fmt.Println()
+			if stderrIsTTY() {
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan completed in %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan completed in %s\n", elapsed)
 			return printScanSummary(client, ctx, serverName)
 		case "failed":
-			if stdoutIsTTY() {
-				fmt.Println()
+			if stderrIsTTY() {
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan failed after %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan failed after %s\n", elapsed)
 			errMsg := getMapString(status, "error")
 			if errMsg != "" {
 				return fmt.Errorf("scan failed: %s", errMsg)
 			}
 			return fmt.Errorf("scan failed for %q", serverName)
 		case "cancelled":
-			if stdoutIsTTY() {
-				fmt.Println()
+			if stderrIsTTY() {
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan cancelled after %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan cancelled after %s\n", elapsed)
 			return fmt.Errorf("scan was cancelled for %q", serverName)
 		}
 		// pending or running: continue polling
@@ -2316,6 +2304,13 @@ func scannerStatusColor(status string) (open, reset string) {
 // Used to gate ANSI escapes (colors, cursor moves) so piped output stays clean.
 func stdoutIsTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// stderrIsTTY returns true when stderr is connected to an interactive
+// terminal. Used to gate the rolling (\r) progress display, which is written
+// to stderr so machine formats keep stdout parseable.
+func stderrIsTTY() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 // normalizeOverviewLastScan replaces a Go zero-time `last_scan_at` value with

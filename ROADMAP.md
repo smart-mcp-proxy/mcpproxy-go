@@ -63,7 +63,6 @@ graph LR
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Upgrade awareness & guided update** — In progress · P0
-- 🔵 **Connect step trust: preview, visible backup, one-click undo** — In progress · P0
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🟡 **Windows native tray app** — In review · P2
 - 🔴 **MCP protocol upgrade to 2026-07-28 revision** — Blocked · P3
@@ -75,6 +74,7 @@ graph LR
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
 - ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
+- 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
 
@@ -101,9 +101,9 @@ graph LR
   upgrade_nudge_surfacing --> upgrade_nudge_quiet
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel done;
-  class upgrade_nudge_quiet todo;
+  class upgrade_nudge_quiet in_review;
 ```
 
 | Task | Status | Refs |
@@ -111,37 +111,7 @@ graph LR
 | US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
 | US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
 | US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
-| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | ⚪ Todo | — |
-
-</details>
-
-<details>
-<summary>🔵 Connect step trust: preview, visible backup, one-click undo — In progress · P0</summary>
-
-> Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
-
-Spec: [078-connect-trust-preview](./specs/078-connect-trust-preview/)
-
-```mermaid
-graph LR
-  connect_trust_preview["US1: preview API + wizard diff UI (exact entr…"]
-  connect_trust_backup_visibility["US1: surface backup_path in Web UI + retentio…"]
-  connect_trust_undo["US2: one-click undo/disconnect in wizard"]
-  connect_trust_tcc_copy["US2: pre-emptive macOS TCC explanation in wiz…"]
-
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class connect_trust_preview,connect_trust_backup_visibility,connect_trust_undo done;
-  class connect_trust_tcc_copy todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| US1: preview API + wizard diff UI (exact entry, API-key masking) | 🟢 Done | #802 |
-| US1: surface backup_path in Web UI + retention policy | 🟢 Done | #799 |
-| US2: one-click undo/disconnect in wizard | 🟢 Done | #804 |
-| US2: pre-emptive macOS TCC explanation in wizard | ⚪ Todo | — |
+| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | 🟡 In review | #911 |
 
 </details>
 
@@ -476,6 +446,34 @@ Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 </details>
 
 <details>
+<summary>🟢 Connect step trust: preview, visible backup, one-click undo — Done · P0</summary>
+
+> Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
+
+Spec: [078-connect-trust-preview](./specs/078-connect-trust-preview/)
+
+```mermaid
+graph LR
+  connect_trust_preview["US1: preview API + wizard diff UI (exact entr…"]
+  connect_trust_backup_visibility["US1: surface backup_path in Web UI + retentio…"]
+  connect_trust_undo["US2: one-click undo/disconnect in wizard"]
+  connect_trust_tcc_copy["US2: pre-emptive macOS TCC explanation in wiz…"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class connect_trust_preview,connect_trust_backup_visibility,connect_trust_undo,connect_trust_tcc_copy done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| US1: preview API + wizard diff UI (exact entry, API-key masking) | 🟢 Done | #802 |
+| US1: surface backup_path in Web UI + retention policy | 🟢 Done | #799 |
+| US2: one-click undo/disconnect in wizard | 🟢 Done | #804 |
+| US2: pre-emptive macOS TCC explanation in wizard | 🟢 Done | #910 |
+
+</details>
+
+<details>
 <summary>🟢 Non-Docker sandbox isolation (Landlock) — Done · P1 · MCP-34</summary>
 
 > Landlock LSM + setrlimit native sandbox for stdio upstreams; no userns (Ubuntu 24.04 safe). Originated from roadmap item #11 (no dedicated spec — 054 is the unrelated security-gateway spec). Code in internal/sandbox/; PRs #754/#759/#768/#781/#782.
@@ -632,7 +630,6 @@ graph LR
 | Epic | Status | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- |
 | Upgrade awareness & guided update | In progress | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
-| Connect step trust: preview, visible backup, one-click undo | In progress | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
@@ -650,6 +647,7 @@ graph LR
 | Paid-tier MVP (billing / seats / license) `MCP-40` | Todo (parked) | P3 | — |  |  |
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | SSO (server edition) | Todo (parked) | P3 | — |  |  |
+| Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |

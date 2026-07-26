@@ -340,12 +340,13 @@ epics:
         depends_on: [upgrade-nudge-surfacing]
       - id: upgrade-nudge-quiet
         title: "US3: operator control + CI/offline quiet + no prerelease downgrade nudges"
-        status: todo
+        status: in_review
+        pr: "#911"
         depends_on: [upgrade-nudge-surfacing]
 
   - id: connect-trust
     title: "Connect step trust: preview, visible backup, one-click undo"
-    status: in_progress
+    status: done
     priority: P0
     spec: specs/078-connect-trust-preview
     depends_on: []
@@ -368,7 +369,8 @@ epics:
         depends_on: []
       - id: connect-trust-tcc-copy
         title: "US2: pre-emptive macOS TCC explanation in wizard"
-        status: todo
+        status: done
+        pr: "#910"
         depends_on: []
 
   - id: telemetry-identity

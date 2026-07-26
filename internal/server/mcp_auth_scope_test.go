@@ -51,7 +51,7 @@ func createTestMCPProxyServer(t *testing.T) *MCPProxyServer {
 
 	tr := truncate.NewTruncator(0)
 
-	proxy := NewMCPProxyServer(sm, idx, um, cm, tr, logger, nil, false, cfg, nil)
+	proxy := NewMCPProxyServer(sm, idx, um, cm, func() *truncate.Truncator { return tr }, logger, nil, false, cfg, nil)
 	return proxy
 }
 
@@ -183,7 +183,7 @@ func TestHandleUpstreamServers_AgentBlocked_WriteOps(t *testing.T) {
 	}
 	ctx := auth.WithAuthContext(context.Background(), agentCtx)
 
-	blockedOps := []string{"add", "remove", "update", "patch", "enable", "disable", "restart"}
+	blockedOps := []string{"add", "remove", "update", "patch", "enable", "disable", "restart", "refresh"}
 	for _, op := range blockedOps {
 		t.Run("operation_"+op, func(t *testing.T) {
 			request := mcp.CallToolRequest{}

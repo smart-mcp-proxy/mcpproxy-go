@@ -251,7 +251,7 @@ func TestEncodeToonBlocks_DetectionTextSpotlight(t *testing.T) {
 func TestEncodeToonBlocks_DetectionTextTruncated(t *testing.T) {
 	p := newToonProxy("adaptive")
 	tr := truncate.NewTruncator(500)
-	p.truncator = tr
+	p.setStaticTruncator(tr)
 
 	// Non-JSON so the truncator's deterministic simpleTruncate path runs both
 	// here and in the seam (JSON-analyzable content mints a timestamped cache

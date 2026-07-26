@@ -326,7 +326,7 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// (map[string]interface{}, the shape after a JSON round-trip)
 		// so this works regardless of how the runtime layer delivered
 		// the server map. Header redaction is applied later in the HTTP
-		// layer (see httpapi/server.go:redactServerHeaders).
+		// layer (see httpapi/server.go:redactServerSecrets).
 		if headersTyped, ok := srvRaw["headers"].(map[string]string); ok && len(headersTyped) > 0 {
 			srv.Headers = headersTyped
 		} else if headersGeneric, ok := srvRaw["headers"].(map[string]interface{}); ok && len(headersGeneric) > 0 {

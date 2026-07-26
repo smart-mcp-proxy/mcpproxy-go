@@ -16,7 +16,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 // Registry command flags (spec 070).
@@ -97,7 +96,8 @@ from it.`,
 
 			// remove MUST go through the daemon: the registry list lives on the
 			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"removing a registry source requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -106,8 +106,6 @@ from it.`,
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			reg, err := client.RemoveRegistrySource(ctx, registryID)
 			if err != nil {
 				return registryRemoveErrorOutput(err)
@@ -183,7 +181,8 @@ with quarantine enabled (the default) they land quarantined for review:
 
 			// add-source MUST go through the daemon: the registry list lives on the
 			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"adding a registry source requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -192,8 +191,6 @@ with quarantine enabled (the default) they land quarantined for review:
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			reg, err := client.AddRegistrySource(ctx, sourceURL, registryAddSourceProto, registryAddSourceID, registryAddSourceName)
 			if err != nil {
 				return registryAddErrorOutput(err)
@@ -245,7 +242,8 @@ also given.
 
 			// edit MUST go through the daemon: the registry list lives on the
 			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"editing a registry source requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -254,8 +252,6 @@ also given.
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			reg, err := client.EditRegistrySource(ctx, registryID, registryEditName, registryEditURL, registryEditServersURL)
 			if err != nil {
 				return registryEditErrorOutput(err)
@@ -324,8 +320,7 @@ func newRegistryListCmd() *cobra.Command {
 			}
 
 			// Daemon-first.
-			if shouldUseUpstreamDaemon(cfg.DataDir) {
-				client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			if client, ok := newDaemonClient(cfg, nil); ok {
 				if regs, derr := client.ListRegistries(ctx); derr == nil {
 					return renderRegistries(formatter, regs)
 				}
@@ -381,8 +376,7 @@ The printed ID column is what you pass to 'registry add'.`,
 			}
 
 			// Daemon-first.
-			if shouldUseUpstreamDaemon(cfg.DataDir) {
-				client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			if client, ok := newDaemonClient(cfg, nil); ok {
 				if servers, derr := client.SearchRegistry(ctx, registryID, registrySearchTag, query, registryLimit); derr == nil {
 					return renderRegistryServers(formatter, servers)
 				}
@@ -450,7 +444,8 @@ inputs, supply them with --env KEY=VALUE.`,
 			}
 
 			// add MUST go through the daemon (keystone op is server-side).
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"adding from a registry requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -459,8 +454,6 @@ inputs, supply them with --env KEY=VALUE.`,
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			enabled := registryAddEnabled
 			result, err := client.AddFromRegistry(ctx, registryID, serverID, registryAddName, env, &enabled)
 			if err != nil {

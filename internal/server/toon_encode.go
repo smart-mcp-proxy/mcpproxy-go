@@ -69,9 +69,12 @@ func (p *MCPProxyServer) encodeToonBlocks(serverName, toolName, contentTrust str
 	if pct < 1 || pct > 90 {
 		pct = 15 // validated range is 1-90; 0/unset resolves to the default
 	}
+	// Snapshot the live truncator once for this encode so budget derivation and
+	// detection-rendering use one consistent limit (#861).
+	truncator := p.currentTruncator()
 	retainedBudget := 0
-	if p.truncator != nil {
-		retainedBudget = p.truncator.SimpleTruncateBudget()
+	if truncator != nil {
+		retainedBudget = truncator.SimpleTruncateBudget()
 	}
 
 	// Spotlight framing must match spotlightForwarded's decision EXACTLY so
@@ -104,8 +107,8 @@ func (p *MCPProxyServer) encodeToonBlocks(serverName, toolName, contentTrust str
 			// real forwardContentResult), then spotlight, matching the order
 			// of the off path (forward → spotlight).
 			det := original
-			if p.truncator != nil && p.truncator.ShouldTruncate(det) {
-				det = p.truncator.Truncate(det, qualifiedTool, args).TruncatedContent
+			if truncator != nil && truncator.ShouldTruncate(det) {
+				det = truncator.Truncate(det, qualifiedTool, args).TruncatedContent
 			}
 			if spotlight {
 				det = security.SpotlightUntrusted(det, serverName, toolName)

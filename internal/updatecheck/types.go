@@ -45,6 +45,12 @@ type VersionInfo struct {
 	// prerelease, only go-install gets a command (version-pinned) — the
 	// package-manager channels serve stable artifacts only.
 	UpdateCommand string `json:"update_command,omitempty"`
+
+	// NudgesSuppressed tells UI surfaces (Web UI banner, tray indicator) to
+	// stay quiet: the process runs in a CI / non-interactive context where a
+	// nudge is noise. Machine-readable consumers still get the full facts
+	// (Spec 079 FR-019, additive per FR-021).
+	NudgesSuppressed bool `json:"nudges_suppressed,omitempty"`
 }
 
 // GitHubRelease represents a release from the GitHub Releases API.
@@ -116,6 +122,10 @@ type InfoResponseUpdate struct {
 	// UpdateCommand is the channel's one-line update command, only present
 	// when an update is available and the channel has one (Spec 079 FR-009)
 	UpdateCommand string `json:"update_command,omitempty"`
+
+	// NudgesSuppressed tells UI surfaces to stay quiet in CI /
+	// non-interactive contexts (Spec 079 FR-019)
+	NudgesSuppressed bool `json:"nudges_suppressed,omitempty"`
 }
 
 // ToAPIResponse converts VersionInfo to the API response format.
@@ -124,13 +134,14 @@ func (v *VersionInfo) ToAPIResponse() *InfoResponseUpdate {
 		return nil
 	}
 	return &InfoResponseUpdate{
-		Available:      v.UpdateAvailable,
-		LatestVersion:  v.LatestVersion,
-		ReleaseURL:     v.ReleaseURL,
-		CheckedAt:      v.CheckedAt,
-		IsPrerelease:   v.IsPrerelease,
-		CheckError:     v.CheckError,
-		InstallChannel: v.InstallChannel,
-		UpdateCommand:  v.UpdateCommand,
+		Available:        v.UpdateAvailable,
+		LatestVersion:    v.LatestVersion,
+		ReleaseURL:       v.ReleaseURL,
+		CheckedAt:        v.CheckedAt,
+		IsPrerelease:     v.IsPrerelease,
+		CheckError:       v.CheckError,
+		InstallChannel:   v.InstallChannel,
+		UpdateCommand:    v.UpdateCommand,
+		NudgesSuppressed: v.NudgesSuppressed,
 	}
 }

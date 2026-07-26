@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -102,7 +101,7 @@ func main() {
 		Short:   "Smart MCP Proxy - Intelligent tool discovery and proxying for Model Context Protocol servers",
 		Version: version,
 	}
-	rootCmd.SetVersionTemplate(fmt.Sprintf("MCPProxy %s (%s) %s/%s\n", version, Edition, runtime.GOOS, runtime.GOARCH))
+	rootCmd.SetVersionTemplate(versionLine())
 
 	// Add global flags
 	rootCmd.PersistentFlags().StringVarP(&configFile, "config", "c", "", "Configuration file path")
@@ -212,6 +211,7 @@ func main() {
 	rootCmd.AddCommand(securityCmd)
 	rootCmd.AddCommand(connectCmd)
 	rootCmd.AddCommand(disconnectCmd)
+	rootCmd.AddCommand(GetVersionCommand())
 
 	// Server-edition-only commands (e.g. `credential`). No-op in personal edition.
 	registerServerEditionCommands(rootCmd)
@@ -680,18 +680,32 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	// Spec 042: clean start.
 	recordStartupOutcome(cfg, actualConfigPath, "success")
 
-	// Wait for context to be cancelled
-	<-ctx.Done()
-	logger.Info("Shutting down server")
-	// Spec 024: Set shutdown info for activity logging
-	srv.SetShutdownInfo("signal", receivedSignal.Load().(string))
-	// Use Shutdown() instead of StopServer() to ensure proper container cleanup
-	// Shutdown() calls runtime.Close() which triggers ShutdownAll() for Docker cleanup
-	if err := srv.Shutdown(); err != nil {
-		logger.Error("Error shutting down server", zap.Error(err))
+	// Wait for context cancellation (signal) or a fatal serve failure
+	select {
+	case <-ctx.Done():
+		logger.Info("Shutting down server")
+		// Spec 024: Set shutdown info for activity logging
+		srv.SetShutdownInfo("signal", receivedSignal.Load().(string))
+		// Use Shutdown() instead of StopServer() to ensure proper container cleanup
+		// Shutdown() calls runtime.Close() which triggers ShutdownAll() for Docker cleanup
+		if err := srv.Shutdown(); err != nil {
+			logger.Error("Error shutting down server", zap.Error(err))
+		}
+		return nil
+	case err := <-srv.ServeErr():
+		// The async StartServer goroutine hit a fatal error (e.g. the listen
+		// port is already in use). Exit instead of lingering with no
+		// listeners so the tray sees the documented exit code (2 for port
+		// conflicts) and can react via its state machine.
+		logger.Error("Server failed, shutting down", zap.Error(err))
+		// Spec 042: overwrite the optimistic "success" outcome recorded above.
+		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err))
+		srv.SetShutdownInfo("error", "")
+		if shutdownErr := srv.Shutdown(); shutdownErr != nil {
+			logger.Error("Error shutting down server", zap.Error(shutdownErr))
+		}
+		return fmt.Errorf("server failed: %w", err)
 	}
-
-	return nil
 }
 
 func loadConfig(cmd *cobra.Command) (*config.Config, error) {

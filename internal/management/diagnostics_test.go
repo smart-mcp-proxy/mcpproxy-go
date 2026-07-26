@@ -50,12 +50,12 @@ func TestDoctor(t *testing.T) {
 		runtime := newMockRuntime()
 		runtime.servers = []map[string]interface{}{
 			{
-				"id":          "server1",
-				"name":        "failing-server",
-				"enabled":     true,
-				"connected":   false,
-				"last_error":  "connection refused",
-				"error_time":  "2025-11-23T10:00:00Z",
+				"id":         "server1",
+				"name":       "failing-server",
+				"enabled":    true,
+				"connected":  false,
+				"last_error": "connection refused",
+				"error_time": "2025-11-23T10:00:00Z",
 			},
 		}
 
@@ -81,6 +81,78 @@ func TestDoctor(t *testing.T) {
 		assert.Error(t, err)
 		assert.Nil(t, diag)
 		assert.Contains(t, err.Error(), "failed to get servers")
+	})
+}
+
+// Issue #872: the doctor surface must scrub URL query secrets echoed into
+// connect errors before copying them into UpstreamErrors.ErrorMessage — both
+// the Health.Detail path (health action=restart) and the last_error fallback
+// path — unless the operator opted out via reveal_secret_headers.
+func TestDoctorRedactsUpstreamErrorSecrets(t *testing.T) {
+	logger := zaptest.NewLogger(t).Sugar()
+
+	t.Run("scrubs URL secret from health.detail path", func(t *testing.T) {
+		cfg := &config.Config{}
+		emitter := &mockEventEmitter{}
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"name":       "leaky",
+				"last_error": "",
+				"health": map[string]interface{}{
+					"level":       "unhealthy",
+					"admin_state": "enabled",
+					"summary":     "Connection error",
+					"detail":      `Post "https://api.example.com/mcp?access_token=SUPERSECRET": no such host`,
+					"action":      "restart",
+				},
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		diag, err := svc.Doctor(context.Background())
+
+		require.NoError(t, err)
+		require.Len(t, diag.UpstreamErrors, 1)
+		assert.NotContains(t, diag.UpstreamErrors[0].ErrorMessage, "SUPERSECRET")
+	})
+
+	t.Run("scrubs URL secret from last_error fallback path", func(t *testing.T) {
+		cfg := &config.Config{}
+		emitter := &mockEventEmitter{}
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"name":       "leaky",
+				"last_error": `Post "https://api.example.com/mcp?token=LEAKED123": no such host`,
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		diag, err := svc.Doctor(context.Background())
+
+		require.NoError(t, err)
+		require.Len(t, diag.UpstreamErrors, 1)
+		assert.NotContains(t, diag.UpstreamErrors[0].ErrorMessage, "LEAKED123")
+	})
+
+	t.Run("reveal_secret_headers keeps the raw error", func(t *testing.T) {
+		cfg := &config.Config{RevealSecretHeaders: true}
+		emitter := &mockEventEmitter{}
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"name":       "leaky",
+				"last_error": `Post "https://api.example.com/mcp?token=LEAKED123": no such host`,
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		diag, err := svc.Doctor(context.Background())
+
+		require.NoError(t, err)
+		require.Len(t, diag.UpstreamErrors, 1)
+		assert.Contains(t, diag.UpstreamErrors[0].ErrorMessage, "LEAKED123")
 	})
 }
 

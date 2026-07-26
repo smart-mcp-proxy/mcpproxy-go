@@ -34,6 +34,15 @@ MCPProxy looks for configuration in these locations (in order):
 
 **Note:** At first launch, MCPProxy automatically generates a minimal configuration file if none exists.
 
+### Hot-Reload on File Edits
+
+A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits automatically — whether written in place (`echo ... > mcp_config.json`) or atomically (`jq ... > tmp && mv tmp mcp_config.json`, the pattern most editors use). Behavior details:
+
+- Edits are debounced for ~500 ms, so rapid write bursts collapse into a single reload.
+- Invalid JSON is rejected safely: the running configuration is kept unchanged (a warning is logged) and the watcher picks up the next valid write.
+- MCPProxy's own saves (Web UI, REST `PATCH /api/v1/config`, CLI commands) do not trigger a redundant second reload.
+- Restart-required fields (e.g. `listen`, `data_dir`) are reloaded into memory but only take effect after a restart.
+
 ---
 
 ## Basic Configuration
@@ -369,6 +378,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 ```json
 {
   "api_key": "your-secret-api-key",
+  "trusted_hosts": ["mcp.example.com"],
   "read_only_mode": false,
   "disable_management": false,
   "allow_server_add": true,
@@ -379,6 +389,7 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `api_key` | string | Auto-generated | API key for REST API authentication. Required; if empty, one is auto-generated and enforced (logged on startup) |
+| `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on loopback listeners (reverse-proxy deployments). See below |
 | `read_only_mode` | boolean | `false` | Prevent all configuration modifications |
 | `disable_management` | boolean | `false` | Disable server management operations (restart, enable, disable) |
 | `allow_server_add` | boolean | `true` | Allow adding new servers via API/tools |
@@ -389,6 +400,54 @@ See [OAuth Documentation](mcp-go-oauth.md) for complete details.
 - **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
 - **Auto-Generation**: If no API key is provided, one is generated and logged for easy access
 - **Tray Integration**: Tray app automatically manages API keys for core communication
+
+### Reverse Proxy Deployments (`trusted_hosts`)
+
+When mcpproxy listens on a loopback address (the default `127.0.0.1:8080`), DNS-rebinding
+protection rejects any request whose `Host` header is not itself a loopback address with
+`403 Forbidden: invalid Host header`. This blocks malicious websites from rebinding their
+domain to `127.0.0.1` and driving a victim's browser into the local MCP server — but it
+also blocks legitimate reverse proxies (nginx, Caddy, CloudPanel) that forward the public
+domain in the `Host` header.
+
+Add the public domain(s) to `trusted_hosts` to allow them:
+
+```json
+{
+  "listen": "127.0.0.1:8004",
+  "trusted_hosts": ["mcp.example.com"]
+}
+```
+
+- Entries are hostnames, matched case-insensitively. An entry without a port matches that
+  host on **any** port; an entry with a port (`"mcp.example.com:8443"`) requires an exact
+  port match.
+- A leading dot makes an entry a subdomain wildcard: `".example.com"` matches
+  `example.com` and every subdomain of it (Django/Vite convention).
+- The single entry `"*"` disables Host and Origin validation entirely. **Not
+  recommended** — it re-opens DNS-rebinding: any website the local user visits could
+  drive requests into the proxy.
+- A request that carries an `Origin` header must likewise have a loopback or trusted
+  origin host (MCP spec requirement); requests without `Origin` (non-browser clients,
+  reverse proxies) are never rejected by the Origin check.
+- Loopback hosts (`localhost`, `127.0.0.1`, `[::1]`) are always accepted; requests on
+  non-loopback listeners are never subject to Host validation.
+- Environment override: `MCPPROXY_TRUSTED_HOSTS` (comma-separated list).
+- Hot-reloadable: editing the config file applies without a restart.
+
+With `trusted_hosts` configured, a standard nginx block works without overriding `Host`:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8004;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+}
+```
+
+See [Reverse Proxy Deployment](operations/reverse-proxy.md) for a full guide covering
+nginx and Caddy examples, streaming/SSE buffering, and enabling `require_mcp_auth` when
+exposing MCPProxy beyond localhost.
 
 ### Security Scanner (`security`)
 
@@ -1110,6 +1169,20 @@ triggers a prompt re-check.
 The env vars only widen in one direction (disable checks / enable
 prereleases); they cannot force-enable checking that config disabled — with
 `update_check.enabled: false`, checks stay off regardless of environment.
+
+**Check cadence and quiet environments** (Spec 079 US3):
+
+- The background check runs **at most daily** and **backs off on failure**
+  (each consecutive failed check doubles the wait, capped at 8× the
+  interval) — offline or rate-limited environments are treated as
+  "unknown", never retried aggressively and never surfaced as an error.
+  A manual `/api/v1/info?refresh=true` bypasses the backoff.
+- With `CI=true` (or `CI=1`, the same convention the telemetry filter
+  uses) the process is treated as **non-interactive**: the startup
+  "Update available" log line is demoted to debug and the `update` payload
+  carries `nudges_suppressed: true`, which hides the Web UI banner. The
+  machine-readable facts (`mcpproxy status`, `doctor`, `/api/v1/info`)
+  are unaffected.
 
 See [Version Updates](features/version-updates.md) for where updates are
 surfaced.

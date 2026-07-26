@@ -16,7 +16,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
@@ -232,6 +231,11 @@ func loadCallConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("failed to load config from %s: %w", configFilePath, err)
 	}
 
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		globalConfig.DataDir = dataDir
+	}
+
 	return globalConfig, nil
 }
 
@@ -318,12 +322,6 @@ func createLogger(level string) (*zap.Logger, error) {
 	return config.Build()
 }
 
-// shouldUseCallDaemon checks if daemon is running by detecting socket file.
-func shouldUseCallDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
-}
-
 // runCallToolRead handles the tool-read command (Spec 018)
 func runCallToolRead(_ *cobra.Command, _ []string) error {
 	return runCallToolVariant("call_tool_read", "read")
@@ -375,22 +373,23 @@ func runCallToolVariant(toolVariant, operationType string) error {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 
-	// Display intent information
-	fmt.Printf("🚀 Intent-Based Tool Call\n")
-	fmt.Printf("   Tool: %s\n", callToolName)
-	fmt.Printf("   Variant: %s (operation_type=%s)\n", toolVariant, operationType)
+	// Display intent information on stderr so machine formats (-o json)
+	// keep stdout parseable (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "🚀 Intent-Based Tool Call\n")
+	fmt.Fprintf(os.Stderr, "   Tool: %s\n", callToolName)
+	fmt.Fprintf(os.Stderr, "   Variant: %s (operation_type=%s)\n", toolVariant, operationType)
 	if callIntentSensitivity != "" {
-		fmt.Printf("   Sensitivity: %s\n", callIntentSensitivity)
+		fmt.Fprintf(os.Stderr, "   Sensitivity: %s\n", callIntentSensitivity)
 	}
 	if callIntentReason != "" {
-		fmt.Printf("   Reason: %s\n", callIntentReason)
+		fmt.Fprintf(os.Stderr, "   Reason: %s\n", callIntentReason)
 	}
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
-	// Detect daemon and use client mode if available
-	if shouldUseCallDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runCallToolVariantClientMode(globalConfig.DataDir, toolVariant, variantArgs, logger)
+	// Detect daemon (socket first, then TCP fallback) and use client mode if available
+	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+		logger.Info("Detected running daemon, using client mode")
+		return runCallToolVariantClientMode(client, toolVariant, variantArgs, logger)
 	}
 
 	// No daemon - use standalone mode
@@ -398,31 +397,24 @@ func runCallToolVariant(toolVariant, operationType string) error {
 	return runCallToolVariantStandalone(ctx, toolVariant, variantArgs, globalConfig)
 }
 
-// runCallToolVariantClientMode calls tool variant via daemon HTTP API over socket
-func runCallToolVariantClientMode(dataDir, toolVariant string, args map[string]interface{}, logger *zap.Logger) error {
-	// Detect socket endpoint
-	socketPath := socket.DetectSocketPath(dataDir)
-
-	// Create CLI client
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+// runCallToolVariantClientMode calls tool variant via the daemon HTTP API
+func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, args map[string]interface{}, logger *zap.Logger) error {
 	// Ping daemon to verify connectivity
 	pingCtx, pingCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer pingCancel()
 	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
-			zap.Error(err),
-			zap.String("socket_path", socketPath))
+			zap.Error(err))
 		// Fall back to standalone mode
 		cfg, _ := loadCallConfig()
 		standaloneCtx := context.Background()
 		return runCallToolVariantStandalone(standaloneCtx, toolVariant, args, cfg)
 	}
 
-	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode (via socket) - fast execution\n")
+	fmt.Fprintf(os.Stderr, "ℹ️  Using daemon mode - fast execution\n")
 
 	// Call tool via daemon
-	fmt.Printf("🔗 Calling %s via daemon socket...\n", toolVariant)
+	fmt.Fprintf(os.Stderr, "🔗 Calling %s via daemon socket...\n", toolVariant)
 	callCtx, callCancel := context.WithTimeout(context.Background(), callTimeout)
 	defer callCancel()
 
@@ -441,7 +433,7 @@ func runCallToolVariantClientMode(dataDir, toolVariant string, args map[string]i
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
 		outputCallResultPretty(result)
 	}
 
@@ -494,7 +486,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 		indexManager,
 		upstreamManager,
 		cacheManager,
-		truncator,
+		func() *truncate.Truncator { return truncator },
 		logger,
 		nil, // mainServer not needed for CLI calls
 		false,
@@ -502,7 +494,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 		nil, // standalone one-shot: no runtime-owned signature cache
 	)
 
-	fmt.Printf("🛠️  Calling %s...\n", toolVariant)
+	fmt.Fprintf(os.Stderr, "🛠️  Calling %s...\n", toolVariant)
 
 	// Call the tool variant through the proxy server's public method
 	result, err := mcpProxy.CallBuiltInTool(ctx, toolVariant, args)
@@ -517,7 +509,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Printf("✅ Tool call completed successfully!\n\n")
+		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
 		outputCallResultPretty(result)
 	}
 

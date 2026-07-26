@@ -331,6 +331,9 @@ export interface UpdateInfo {
   // One-line update command for the channel; only present when an update is
   // available and the channel has a safe command (FR-009).
   update_command?: string;
+  // Spec 079 US3 (FR-019): the core runs in a CI / non-interactive context —
+  // UI surfaces must stay quiet while the facts remain machine-readable.
+  nudges_suppressed?: boolean;
 }
 
 export interface InfoResponse {

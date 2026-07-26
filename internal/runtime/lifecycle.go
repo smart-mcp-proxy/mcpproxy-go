@@ -134,6 +134,13 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Tool discovery callback registered on upstream manager")
 	}
 
+	// Watch the config file for external edits (editors, CLI, `jq > tmp && mv`)
+	// and hot-reload them through the canonical disk-reload path. Failure
+	// degrades gracefully to no hot-reload (warning logged inside).
+	if p := r.ConfigSnapshot().Path; p != "" {
+		_ = r.startConfigFileWatcher(r.appCtx, p)
+	}
+
 	go r.backgroundInitialization()
 }
 
@@ -373,22 +380,30 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	}
 	r.lastGoodToolsMu.Unlock()
 
-	// Apply differential update for each server with fallback to last-good snapshots
+	// Apply differential update for each server with fallback to last-good
+	// snapshots. Both writes go through applyServerDiffIfEligible so a quarantined
+	// or disabled server is never (re)indexed by the sweep (issue #873).
 	processedServers := make(map[string]struct{}, len(toolsByServer))
 	for serverName, serverTools := range toolsByServer {
 		processedServers[serverName] = struct{}{}
-		if err := r.applyDifferentialToolUpdate(ctx, serverName, serverTools); err != nil {
-			r.logger.Error("Failed to apply differential update for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-			// Continue with other servers instead of failing completely
-		}
+		r.applyServerDiffIfEligible(ctx, serverName, serverTools)
 	}
 
 	// For connected servers that were temporarily missing from discovery results,
 	// re-apply last-good snapshot to avoid transient index shrink.
 	for _, serverName := range knownServers {
 		if _, ok := processedServers[serverName]; ok {
+			continue
+		}
+
+		// SECURITY-CRITICAL GUARD (issue #873): this last-good fallback is the
+		// real exposure — DiscoverTools already skips quarantined/disabled servers
+		// (so they never enter the primary loop), but a quarantined server stays
+		// connected and keeps its pre-quarantine snapshot, so without a guard the
+		// fallback would reapply it. QuarantineServer deletes the server's index
+		// entries and then triggers this very sweep, which would immediately
+		// restore them. Skip ineligible servers before doing any snapshot work.
+		if !r.serverEligibleForIndexing(serverName) {
 			continue
 		}
 
@@ -410,11 +425,9 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 			zap.String("server", serverName),
 			zap.Int("snapshot_tools", len(snapshot)))
 
-		if err := r.applyDifferentialToolUpdate(ctx, serverName, snapshot); err != nil {
-			r.logger.Error("Failed to apply last-good snapshot for server",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
+		// Re-checks eligibility again immediately before the write (the check
+		// above and the connection/snapshot reads are not atomic).
+		r.applyServerDiffIfEligible(ctx, serverName, snapshot)
 	}
 
 	// Invalidate tool count caches since tools may have changed
@@ -439,12 +452,58 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	return nil
 }
 
+// lastGoodToolsSnapshot returns a copy of the most recently discovered tool set
+// for a server, or nil when none has been captured yet. Returning a copy lets
+// callers pass it to applyDifferentialToolUpdate without holding the lock.
+func (r *Runtime) lastGoodToolsSnapshot(serverName string) []*config.ToolMetadata {
+	r.lastGoodToolsMu.RLock()
+	defer r.lastGoodToolsMu.RUnlock()
+	snapshot := r.lastGoodTools[serverName]
+	if len(snapshot) == 0 {
+		return nil
+	}
+	cp := make([]*config.ToolMetadata, len(snapshot))
+	copy(cp, snapshot)
+	return cp
+}
+
 // DiscoverAndIndexToolsForServer discovers and indexes tools for a single server.
-// This is used for reactive tool discovery when a server connects.
+// This is the LENIENT entry point used by reactive tool discovery (server
+// connect, notifications/tools/list_changed): a successful ListTools that
+// returns zero tools is treated as a transient blip and leaves the existing
+// index untouched (see the authoritative variant for the explicit-refresh path).
 // Implements retry logic with exponential backoff for robustness.
 func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName string) error {
+	return r.discoverAndIndexToolsForServer(ctx, serverName, false)
+}
+
+// RefreshServerTools re-discovers and re-indexes a single server AUTHORITATIVELY
+// (issue #873): a successful ListTools that returns zero tools is taken as the
+// truth — the server's stale index entries are removed and its last-good
+// snapshot is cleared, so a later approval-driven reindex cannot resurface tools
+// that no longer exist upstream. This is the explicit operator refresh/discover
+// path; the reactive callbacks keep the lenient behavior above.
+func (r *Runtime) RefreshServerTools(ctx context.Context, serverName string) error {
+	return r.discoverAndIndexToolsForServer(ctx, serverName, true)
+}
+
+func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
 	if r.upstreamManager == nil || r.indexManager == nil {
 		return fmt.Errorf("runtime managers not initialized")
+	}
+
+	// SECURITY-CRITICAL GUARD (issue #873): never (re)index a quarantined or
+	// disabled server. applyDifferentialToolUpdate below does not itself withhold
+	// a quarantined server's tools, so the upstream_servers "refresh" op and the
+	// reactive discovery callbacks that reach this function must gate here — else
+	// a quarantined server (kept connected for inspection) has its poisoned tool
+	// descriptions surfaced into retrieve_tools. Unquarantine reindexes via the
+	// full sweep (HandleUpstreamServerChange → DiscoverAndIndexTools), not this
+	// single-server path, so the guard does not strand a newly-trusted server.
+	if !r.serverEligibleForIndexing(serverName) {
+		r.logger.Info("Skipping single-server tool discovery for ineligible server (disabled or quarantined)",
+			zap.String("server", serverName))
+		return nil
 	}
 
 	r.logger.Info("Discovering and indexing tools for server", zap.String("server", serverName))
@@ -502,7 +561,45 @@ func (r *Runtime) DiscoverAndIndexToolsForServer(ctx context.Context, serverName
 	}
 
 	if len(tools) == 0 {
-		r.logger.Warn("No tools discovered from server", zap.String("server", serverName))
+		if !authoritative {
+			// Lenient path (reactive discovery): a transient empty result must
+			// not wipe a server's tools. Leave the index and last-good snapshot
+			// untouched; the next sweep or a real change will reconcile.
+			r.logger.Warn("No tools discovered from server; keeping existing index (lenient path)",
+				zap.String("server", serverName))
+			return nil
+		}
+		// Authoritative path (explicit refresh/discover, issue #873): zero tools
+		// is the truth. Fall through with an empty toolset so the differential
+		// update removes stale index entries and the snapshot below is cleared —
+		// otherwise refresh would report success while stale tools stayed
+		// searchable and a later approval reindex could resurface them.
+		r.logger.Info("Refresh discovered zero tools; clearing server's index entries and snapshot",
+			zap.String("server", serverName))
+	}
+
+	// Persist a last-good snapshot for this server so the approval-driven
+	// reindex (issue #873) has a source without a fresh network round-trip.
+	// The full sweep populates this map too; single-server connects otherwise
+	// would leave it empty, forcing the reindex path back through discovery.
+	// On an authoritative empty refresh this stores an empty slice, so
+	// lastGoodToolsSnapshot reports "no snapshot" and no stale set lingers.
+	r.lastGoodToolsMu.Lock()
+	snapshot := make([]*config.ToolMetadata, len(tools))
+	copy(snapshot, tools)
+	r.lastGoodTools[serverName] = snapshot
+	r.lastGoodToolsMu.Unlock()
+
+	// TOCTOU GUARD (issue #873): the eligibility check at the top of this
+	// function ran BEFORE the seconds-wide ListTools above. The server may have
+	// been quarantined in that window — in which case QuarantineServer already
+	// deleted its tools from the index — so re-check immediately before we write
+	// them back. A microsecond window remains between this check and the index
+	// mutation inside applyDifferentialToolUpdate; closing it fully would require
+	// holding a lock across the index write, which is deliberately not done.
+	if !r.serverEligibleForIndexing(serverName) {
+		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
+			zap.String("server", serverName))
 		return nil
 	}
 
@@ -1004,6 +1101,17 @@ func (r *Runtime) LoadConfiguredServers(cfg *config.Config) error {
 
 // SaveConfiguration persists the runtime configuration to disk.
 func (r *Runtime) SaveConfiguration() error {
+	// Serialize the read-modify-write against the other two-store commit paths
+	// (ApplyConfig, ReloadConfiguration, UpdateConfig). This reads the current
+	// configSvc snapshot, splices in the latest servers, then writes both
+	// configSvc and r.cfg.Servers; without the lock a concurrent ApplyConfig
+	// could land its new config between the snapshot read and these writes,
+	// and this stale-based write would clobber configSvc while r.cfg keeps the
+	// applied value — leaving the two stores divergent (PR #857 review). MUST
+	// be acquired before r.mu.
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
+
 	latestServers, err := r.storageManager.ListUpstreamServers()
 	if err != nil {
 		r.logger.Error("Failed to get latest server list from storage for saving", zap.Error(err))
@@ -1036,12 +1144,18 @@ func (r *Runtime) SaveConfiguration() error {
 		zap.Bool("using_config_service", r.configSvc != nil))
 
 	// Use ConfigService to save (doesn't hold locks, handles file I/O)
+	oldServerCount := 0
 	if r.configSvc != nil {
 		// Update the config service with latest servers first
 		if err := r.configSvc.Update(configCopy, configsvc.UpdateTypeModify, "save_configuration"); err != nil {
 			r.logger.Error("Failed to update config service", zap.Error(err))
 			return err
 		}
+		// Keep the legacy r.cfg store in sync with configSvc BEFORE the disk
+		// write. If SaveToFile then fails we return an error, but the two
+		// in-memory stores still agree (only disk is stale) — a failed save
+		// must not leave configSvc and r.cfg divergent (PR #857 review).
+		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		// Then persist to disk
 		if err := r.configSvc.SaveToFile(); err != nil {
 			r.logger.Error("Failed to save config to file via config service", zap.Error(err))
@@ -1049,22 +1163,14 @@ func (r *Runtime) SaveConfiguration() error {
 		}
 		r.logger.Debug("Config saved to disk via config service")
 	} else {
-		// Fallback to legacy save
+		// Fallback to legacy save (no configSvc store to keep in sync)
 		if err := config.SaveConfig(configCopy, snapshot.Path); err != nil {
 			r.logger.Error("Failed to save config to file (legacy path)", zap.Error(err))
 			return err
 		}
+		oldServerCount = r.syncServersToLegacyConfig(latestServers)
 		r.logger.Debug("Config saved to disk via legacy path")
 	}
-
-	// Update in-memory config (applies to both configSvc and legacy paths)
-	r.logger.Debug("Updating in-memory config with latest servers",
-		zap.Int("server_count", len(latestServers)))
-
-	r.mu.Lock()
-	oldServerCount := len(r.cfg.Servers)
-	r.cfg.Servers = latestServers
-	r.mu.Unlock()
 
 	r.logger.Debug("Configuration saved and in-memory config updated",
 		zap.Int("old_server_count", oldServerCount),
@@ -1077,9 +1183,31 @@ func (r *Runtime) SaveConfiguration() error {
 	return nil
 }
 
+// syncServersToLegacyConfig writes the latest server list into the legacy
+// r.cfg store under r.mu and returns the previous server count. Callers must
+// hold configCommitMu so this stays serialized with the other config-commit
+// paths.
+func (r *Runtime) syncServersToLegacyConfig(latestServers []*config.ServerConfig) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	oldServerCount := len(r.cfg.Servers)
+	r.cfg.Servers = latestServers
+	return oldServerCount
+}
+
 // ReloadConfiguration reloads the configuration from disk and resyncs state.
 func (r *Runtime) ReloadConfiguration() error {
 	r.logger.Info("Reloading configuration from disk")
+
+	// Serialize the whole reload against ApplyConfig: both paths update the
+	// configSvc snapshot AND the legacy r.cfg/live components, but in different
+	// orders and releasing r.mu in between. Without this outer lock a
+	// watcher-triggered reload of config A can interleave with an API apply of
+	// B and leave r.cfg=A while configSvc=B persistently (PR #857 review). Held
+	// across configSvc.ReloadFromFile → r.cfg swap → live-component apply.
+	// MUST be acquired before r.mu (matches ApplyConfig's lock ordering).
+	r.configCommitMu.Lock()
+	defer r.configCommitMu.Unlock()
 
 	// Get current snapshot before reload
 	oldSnapshot := r.ConfigSnapshot()
@@ -1099,13 +1227,49 @@ func (r *Runtime) ReloadConfiguration() error {
 		if loadErr != nil {
 			return fmt.Errorf("failed to reload config: %w", loadErr)
 		}
-		r.UpdateConfig(newConfig, cfgPath)
+		// Already holding configCommitMu; use the locked helper so we don't
+		// re-acquire the non-reentrant mutex (would deadlock).
+		r.updateConfigLocked(newConfig, cfgPath)
 		newSnapshot = r.ConfigSnapshot()
 	}
 
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %w", err)
 	}
+
+	// Sync the legacy r.cfg/r.cfgPath fields too: Runtime.GetConfig() still
+	// backs GET/PATCH /api/v1/config and other httpapi handlers. Without this,
+	// a disk reload only lands in the configsvc snapshot — the API keeps
+	// serving the stale config, and a subsequent PATCH would deep-merge onto
+	// the stale base and save it, silently reverting the external edit.
+	// (configSvc.ReloadFromFile doesn't touch the legacy fields; the legacy
+	// fallback branch above already synced them via UpdateConfig.)
+	if r.configSvc != nil {
+		r.mu.Lock()
+		r.cfg = newSnapshot.Config
+		if newSnapshot.Path != "" {
+			r.cfgPath = newSnapshot.Path
+		}
+		r.mu.Unlock()
+	}
+
+	// Propagate the reloaded global config to the upstream manager and every
+	// running managed client (parity with ApplyConfig, spec 074): health-check
+	// loops and Docker-recovery decisions re-resolve values like
+	// health_check_interval from this, so external edits must reach it too —
+	// not only API applies.
+	if r.upstreamManager != nil {
+		r.upstreamManager.SetGlobalConfig(newSnapshot.Config)
+	}
+
+	// Parity with ApplyConfig's live per-component side effects (PR #857
+	// review): logging via SetLogConfig, the tool-response truncator, and the
+	// observability usage cadence must follow disk reloads too — otherwise an
+	// external edit lands in the snapshot/API while the running components
+	// keep their stale values.
+	r.mu.Lock()
+	r.applyComponentConfigLocked(oldSnapshot.Config, newSnapshot.Config)
+	r.mu.Unlock()
 
 	if err := r.LoadConfiguredServers(nil); err != nil {
 		r.logger.Error("loadConfiguredServers failed", zap.Error(err))
@@ -1114,8 +1278,9 @@ func (r *Runtime) ReloadConfiguration() error {
 
 	// MCP-2482: detect a telemetry enabled->disabled flip across the reload and
 	// fire the one-time opt-out beacon. This covers config changes that arrive
-	// via a disk reload (there is no fsnotify auto-watcher, so this is the
-	// manual/triggered-reload path). nil-safe + fire-and-forget.
+	// via a disk reload — both the manual/triggered-reload path and the
+	// fsnotify config file watcher (config_watcher.go), which funnels external
+	// file edits into this method. nil-safe + fire-and-forget.
 	if r.telemetryService != nil {
 		r.telemetryService.NotifyConfigChanged(newSnapshot.Config)
 	}
@@ -1423,11 +1588,10 @@ func (r *Runtime) RestartServer(serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
 	// Issue #467: pull the latest server config from disk before falling
-	// back to BoltDB. There is no fsnotify-style auto file-watcher, so a
-	// user who edits mcp_config.json and then triggers a restart would
-	// otherwise replay stale env / headers / args / isolation data — only
-	// the live REST PATCH path used to update them. Disk-first here closes
-	// that gap for the (much more common) edit-then-restart UX.
+	// back to BoltDB. The fsnotify config file watcher (config_watcher.go)
+	// now hot-reloads external edits, but its debounce window means a fast
+	// edit-then-restart could still race a stale BoltDB record — disk-first
+	// here keeps the edit-then-restart UX deterministic regardless.
 	serverConfig := r.lookupServerConfigForRestart(serverName)
 	if serverConfig == nil {
 		return fmt.Errorf("server '%s' not found in configuration", serverName)

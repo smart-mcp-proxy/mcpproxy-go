@@ -37,6 +37,7 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MCPPROXY_TRUSTED_HOSTS` | Comma-separated `Host` header allowlist for loopback listeners behind a reverse proxy (see [Reverse Proxy Deployment](/operations/reverse-proxy)) | - |
 | `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
 | `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
 | `MCPPROXY_TLS_KEY` | Path to TLS private key | - |

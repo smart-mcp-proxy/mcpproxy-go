@@ -1,9 +1,13 @@
 package runtime
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"reflect"
+	"slices"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ConfigApplyResult represents the result of applying a configuration
@@ -139,8 +143,11 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "logging")
 	}
 
-	// Docker isolation configuration (can be hot-reloaded for new servers)
-	if !reflect.DeepEqual(oldCfg.DockerIsolation, newCfg.DockerIsolation) {
+	// Docker isolation configuration (can be hot-reloaded for new servers).
+	// Compared via jsonEqual, not reflect.DeepEqual: the PATCH /api/v1/config
+	// round-trip collapses ExtraArgs []string{} to nil (omitempty), which
+	// DeepEqual would spuriously report as a change.
+	if !jsonEqual(oldCfg.DockerIsolation, newCfg.DockerIsolation) {
 		result.ChangedFields = append(result.ChangedFields, "docker_isolation")
 	}
 
@@ -161,6 +168,14 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	}
 	if oldCfg.AllowServerRemove != newCfg.AllowServerRemove {
 		result.ChangedFields = append(result.ChangedFields, "allow_server_remove")
+	}
+	// trusted_hosts (GH #898 — hot-reloadable). hostValidationMiddleware reads
+	// the live snapshot per request, so reporting the change is all the
+	// propagation needed. slices.Equal, not DeepEqual: the PATCH round-trip
+	// collapses []string{} to nil (omitempty), which DeepEqual would
+	// spuriously report as a change.
+	if !slices.Equal(oldCfg.TrustedHosts, newCfg.TrustedHosts) {
+		result.ChangedFields = append(result.ChangedFields, "trusted_hosts")
 	}
 
 	// Environment configuration (can be hot-reloaded)
@@ -201,6 +216,23 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	}
 
 	return result
+}
+
+// jsonEqual reports whether a and b marshal to identical JSON. Config
+// sub-structs round-trip through JSON on the PATCH /api/v1/config path,
+// where `omitempty` collapses empty slices to absent keys; comparing the
+// JSON form treats nil and []T{} as the same effective value, unlike
+// reflect.DeepEqual (which spuriously reported "docker_isolation" as
+// changed because DefaultDockerIsolationConfig's ExtraArgs: []string{}
+// round-trips to nil). json.Marshal sorts map keys, so the comparison is
+// deterministic.
+func jsonEqual(a, b interface{}) bool {
+	ab, errA := json.Marshal(a)
+	bb, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false // conservative: unmarshalable => treat as changed
+	}
+	return bytes.Equal(ab, bb)
 }
 
 // FormatChangedFields returns a human-readable string of changed fields

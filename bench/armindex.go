@@ -69,7 +69,7 @@ func (ai *ArmIndex) SearchFunc() SearchFunc {
 		}
 		ranked := make([]string, 0, len(results))
 		for _, r := range results {
-			ranked = append(ranked, r.Tool.ServerName+":"+r.Tool.Name)
+			ranked = append(ranked, index.CanonicalToolName(r.Tool.ServerName, r.Tool.Name))
 		}
 		return ranked, nil
 	}

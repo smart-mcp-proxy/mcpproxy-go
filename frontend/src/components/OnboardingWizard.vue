@@ -1349,6 +1349,32 @@ const ClientRow: FunctionalComponent<
       ]),
     ]
   )
+  // Spec 078 US4 / FR-011: pre-emptive macOS App-Data forewarning. The preview
+  // read behind "Review & connect" is the first access that can fire the macOS
+  // privacy prompt, and only for configs under another app's protected data
+  // (~/Library/Application Support/…) — so the note is keyed off config_path
+  // (inherently macOS-only) and shown exactly where the action is offered,
+  // before it can fire. Once a preview is open the read already succeeded, so
+  // the note is dropped. The Spec 075 post-denial remediation is unchanged.
+  const offersConnect = c.supported && (c.exists || c.bridge) && !c.connected
+  const tccNote =
+    offersConnect && !props.preview && c.config_path.includes('/Library/Application Support/')
+      ? h(
+          'p',
+          {
+            class: 'mt-1 text-[11px] opacity-60 leading-relaxed',
+            'data-test': `client-tcc-note-${c.id}`,
+          },
+          [
+            'macOS may ask for permission when you review or connect — the ',
+            h('span', { class: 'italic' }, '“mcpproxy” wants to access data from other apps'),
+            ' prompt refers to this config file. Choose ',
+            h('strong', {}, 'Allow'),
+            ' so mcpproxy can read and update it.',
+          ]
+        )
+      : null
+
   // Spec 078 US2 / FR-006: after a connect performed in this wizard session,
   // surface the timestamped backup (or the honest "no prior file" case) right
   // in the row. undefined = no connect happened for this client yet.
@@ -1566,6 +1592,7 @@ const ClientRow: FunctionalComponent<
       : null
 
   const children = [row]
+  if (tccNote) children.push(tccNote)
   if (backupLine) children.push(backupLine)
   if (undoPanel) children.push(undoPanel)
   if (previewPanel) children.push(previewPanel)

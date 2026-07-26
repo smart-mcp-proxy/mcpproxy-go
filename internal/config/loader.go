@@ -591,6 +591,18 @@ func applyTLSEnvOverrides(cfg *Config) {
 		cfg.DataDir = value
 	}
 
+	// Override trusted hosts for reverse-proxy deployments (GH #898).
+	// Comma-separated list of Host header values accepted on loopback listeners.
+	if value := os.Getenv("MCPPROXY_TRUSTED_HOSTS"); value != "" {
+		var hosts []string
+		for _, h := range strings.Split(value, ",") {
+			if h = strings.TrimSpace(h); h != "" {
+				hosts = append(hosts, h)
+			}
+		}
+		cfg.TrustedHosts = hosts
+	}
+
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the
 	// value is validated by cfg.Validate() right after these overrides apply.

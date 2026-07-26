@@ -185,14 +185,18 @@ components:
           type: boolean
         reveal_secret_headers:
           description: |-
-            RevealSecretHeaders, when true, disables the redaction of sensitive
-            header values (Authorization, X-API-Key, Cookie, …) in responses
-            from the `upstream_servers` MCP tool, the `/api/v1/servers` REST
-            API, and the SSE event stream.
+            RevealSecretHeaders, when true, disables the redaction of the
+            secret-bearing server fields — sensitive header values (Authorization,
+            X-API-Key, Cookie, …), env-var secrets, and URL query credentials — in
+            responses from the `upstream_servers` MCP tool, the `/api/v1/servers`
+            REST API, and the SSE event stream. It also lets URL secrets echoed
+            into last_error / health.detail through unscrubbed.
 
-            Default false — sensitive header values are surfaced as
-            `***REDACTED***` so an MCP agent cannot read Bearer tokens / API
-            keys out of another upstream's config (PR #425).
+            Default false — sensitive values are surfaced masked as
+            `••••<last2> (<N> chars)` (error strings use `***REDACTED***`) so an
+            MCP agent cannot read Bearer tokens / API keys / URL secrets out of
+            another upstream's config (PR #425, issue #872). ${env:…}/${keyring:…}
+            references are labels, not secrets, and pass through unchanged.
 
             The Web UI / macOS tray edit forms work without seeing the real
             values: PATCH /api/v1/servers/{id} deep-merges (omitted keys are
@@ -268,6 +272,23 @@ components:
         tray_endpoint:
           description: Tray endpoint override (unix:// or npipe://)
           type: string
+        trusted_hosts:
+          description: |-
+            TrustedHosts lists non-loopback Host header values accepted on loopback
+            listeners (GH #898). DNS-rebinding protection rejects requests whose Host
+            header is not a loopback address when mcpproxy listens on loopback; a
+            reverse proxy (nginx → 127.0.0.1) forwarding the public domain in Host
+            trips it. Entries are hostnames, case-insensitive; an entry without a
+            port matches any port, with a port it must match exactly; a leading dot
+            (".example.com") is a subdomain wildcard. The single entry "*" disables
+            Host and Origin validation entirely. The same list also validates the
+            Origin header when present (MCP spec DNS-rebinding defense). Empty
+            (default) keeps full protection. Env override: MCPPROXY_TRUSTED_HOSTS
+            (comma-separated).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         update_check:
           $ref: '#/components/schemas/config.UpdateCheckConfig'
       type: object
@@ -2402,6 +2423,10 @@ components:
         latest_version:
           description: Latest version available (e.g., "v1.2.3")
           type: string
+        nudges_suppressed:
+          description: UI surfaces must stay quiet (CI / non-interactive context);
+            machine-readable fields still report the facts — Spec 079 FR-019
+          type: boolean
         release_url:
           description: URL to the release page
           type: string
@@ -3499,6 +3524,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -3543,6 +3574,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -3590,6 +3627,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate configuration)
         "500":
           content:
             application/json:
@@ -4346,8 +4389,10 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: registries_locked
+                oneOf:
+                - $ref: '#/components/schemas/contracts.ErrorResponse'
+                - $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate registries)
         "409":
           content:
             application/json:
@@ -4595,6 +4640,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: no_install_info | missing_required_input | duplicate_name
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot add servers)
         "404":
           content:
             application/json:
@@ -4778,6 +4829,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request - invalid configuration
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "409":
           content:
             application/json:
@@ -4820,6 +4877,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -4867,6 +4930,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request - no fields or invalid body
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -4918,6 +4987,12 @@ paths:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad scope/key/secret_name, or value is already a reference
             / empty
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -4959,6 +5034,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5001,6 +5082,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot discover tools)
         "404":
           content:
             application/json:
@@ -5042,6 +5129,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5084,6 +5177,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.OAuthFlowError'
           description: OAuth error (client_id required, DCR failed, etc.)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5222,6 +5321,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5238,6 +5343,56 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Quarantine a server
+      tags:
+      - servers
+  /api/v1/servers/{id}/refresh:
+    post:
+      description: Re-discover and re-index a specific upstream MCP server's tools
+        without changing any security state. Alias of discover-tools, named for the
+        upstream_servers 'refresh' operation; use it to make just-approved tools searchable
+        immediately.
+      parameters:
+      - description: Server ID or name
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ServerActionResponse'
+          description: Tool refresh triggered successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot refresh)
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Server not found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Failed to refresh tools
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Refresh a server's tools
       tags:
       - servers
   /api/v1/servers/{id}/restart:
@@ -5263,6 +5418,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5407,6 +5568,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "500":
           content:
             application/json:
@@ -5523,6 +5690,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Bad request (missing server ID)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "404":
           content:
             application/json:
@@ -5774,6 +5947,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ServerActionResponse'
           description: All servers reconnected successfully
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Forbidden (agent tokens cannot mutate servers)
         "500":
           content:
             application/json:

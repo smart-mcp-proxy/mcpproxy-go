@@ -55,7 +55,7 @@ func findingSet(det *security.Detector, text string) []security.Detection {
 // handleCallToolVariant runs at mcp.go ~2129-2141 when the seam returns
 // ("", nil). The result is mutated the same way the real pipeline mutates it.
 func offPathScanText(p *MCPProxyServer, serverName, toolName, contentTrust string, args map[string]interface{}, result *mcp.CallToolResult) string {
-	forwarded, response, _ := forwardContentResult(result, p.truncator, nil, nil, serverName+":"+toolName, args)
+	forwarded, response, _ := forwardContentResult(result, p.currentTruncator(), nil, nil, serverName+":"+toolName, args)
 	p.spotlightForwarded(serverName, toolName, contentTrust, forwarded)
 	return forwardedText(forwarded, response)
 }
@@ -197,7 +197,7 @@ func TestToonDetectionParity_OverLimit(t *testing.T) {
 
 	t.Run("secret survives truncation", func(t *testing.T) {
 		p := newToonProxy("off")
-		p.truncator = truncate.NewTruncator(1500)
+		p.setStaticTruncator(truncate.NewTruncator(1500))
 		payload := secretTable(40, 0, secret) // ~5KB, secret in the first row
 		require.Greater(t, len(payload), 1500, "fixture must exceed the limit")
 		mkResult := func() *mcp.CallToolResult { return toonTextResult(payload) }
@@ -209,7 +209,7 @@ func TestToonDetectionParity_OverLimit(t *testing.T) {
 
 	t.Run("secret truncated away on both paths", func(t *testing.T) {
 		p := newToonProxy("off")
-		p.truncator = truncate.NewTruncator(1500)
+		p.setStaticTruncator(truncate.NewTruncator(1500))
 		payload := secretTable(40, 39, secret) // secret in the last row, past the budget
 		require.Greater(t, len(payload), 1500, "fixture must exceed the limit")
 		mkResult := func() *mcp.CallToolResult { return toonTextResult(payload) }

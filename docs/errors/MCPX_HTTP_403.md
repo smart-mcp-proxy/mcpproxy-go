@@ -16,6 +16,13 @@ The upstream MCP server accepted mcpproxy's credentials but rejected the
 request: 403 Forbidden. Unlike 401, the identity is recognised — it just isn't
 authorised for what was attempted.
 
+:::note Different 403?
+If mcpproxy's **own** HTTP server returns `403 Forbidden: invalid Host header`
+(rather than an upstream server), that is DNS-rebinding protection on a loopback
+listener, not an authorisation failure. See
+[Reverse Proxy Deployment](../operations/reverse-proxy.md) for the `trusted_hosts` fix.
+:::
+
 ## Common causes
 
 - The OAuth scopes granted at login don't include the scopes required for this
@@ -55,3 +62,4 @@ mcpproxy activity show <id>
 
 - [`MCPX_HTTP_401`](MCPX_HTTP_401.md) — credentials missing or invalid
 - [OAuth Authentication](../features/oauth-authentication.md)
+- [Reverse Proxy Deployment](../operations/reverse-proxy.md) — for `403 Forbidden: invalid Host header`

@@ -514,6 +514,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
 
+// requireServerOp wraps a mutating /servers handler with the shared
+// agent-operation policy (internal/auth). Agent tokens (non-admin) are rejected
+// with 403 for any operation on the denylist — the same set the MCP
+// upstream_servers / quarantine_security tools deny — so the REST surface can
+// never drift from MCP and let an agent perform over HTTP what it cannot over
+// MCP (issues #877/#878).
+//
+// Admin API keys pass, and OS-authenticated socket (tray) connections pass
+// because the auth middleware authenticates them as admin. A nil AuthContext
+// (the middleware's test/no-config passthrough, unreachable once a real config
+// is loaded) also passes — auth.AuthorizeServerOp centralises that decision.
+func (s *Server) requireServerOp(op string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authCtx := auth.AuthContextFromContext(r.Context())
+		if !auth.AuthorizeServerOp(authCtx, op) {
+			s.writeError(w, r, http.StatusForbidden, "operation requires admin access")
+			return
+		}
+		next(w, r)
+	}
+}
+
 // setupRoutes configures all API routes
 func (s *Server) setupRoutes() {
 	s.logger.Debug("Setting up HTTP API routes")
@@ -621,16 +643,19 @@ func (s *Server) setupRoutes() {
 
 		// Server management
 		r.Get("/servers", s.handleGetServers)
-		r.Post("/servers", s.handleAddServer)                           // T001: Add server
-		r.Post("/servers/import", s.handleImportServers)                // Import from file upload
-		r.Post("/servers/import/json", s.handleImportServersJSON)       // Import from JSON/TOML content
-		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths) // Get canonical config paths
-		r.Post("/servers/import/path", s.handleImportFromPath)          // Import from file path
-		r.Post("/servers/reconnect", s.handleForceReconnectServers)
+		// Mutating server routes are agent-token-gated via the shared policy
+		// (issues #877/#878) so an agent cannot do over REST what the MCP
+		// upstream_servers denylist blocks.
+		r.Post("/servers", s.requireServerOp(auth.ServerOpAdd, s.handleAddServer))                     // T001: Add server
+		r.Post("/servers/import", s.requireServerOp(auth.ServerOpAdd, s.handleImportServers))          // Import from file upload
+		r.Post("/servers/import/json", s.requireServerOp(auth.ServerOpAdd, s.handleImportServersJSON)) // Import from JSON/TOML content
+		r.Get("/servers/import/paths", s.handleGetCanonicalConfigPaths)                                // Get canonical config paths
+		r.Post("/servers/import/path", s.requireServerOp(auth.ServerOpAdd, s.handleImportFromPath))    // Import from file path
+		r.Post("/servers/reconnect", s.requireServerOp(auth.ServerOpRestart, s.handleForceReconnectServers))
 		// T076-T077: Bulk operation routes
-		r.Post("/servers/restart_all", s.handleRestartAll)
-		r.Post("/servers/enable_all", s.handleEnableAll)
-		r.Post("/servers/disable_all", s.handleDisableAll)
+		r.Post("/servers/restart_all", s.requireServerOp(auth.ServerOpRestart, s.handleRestartAll))
+		r.Post("/servers/enable_all", s.requireServerOp(auth.ServerOpEnable, s.handleEnableAll))
+		r.Post("/servers/disable_all", s.requireServerOp(auth.ServerOpDisable, s.handleDisableAll))
 		r.Route("/servers/{id}", func(r chi.Router) {
 			// chi routes on RawPath, so the {id} param arrives percent-encoded.
 			// Official modelcontextprotocol/registry v0.1 ids are namespace/name,
@@ -641,28 +666,35 @@ func (s *Server) setupRoutes() {
 			// MCP-1056). Centralising the decode also prevents new sub-resource
 			// routes from silently reintroducing the gap.
 			r.Use(decodeServerIDParam)
-			r.Patch("/", s.handlePatchServer)                          // Partial update server config
-			r.Delete("/", s.handleRemoveServer)                        // T002: Remove server
-			r.Post("/config-to-secret", s.handleConvertConfigToSecret) // Move a header / env value into OS keyring
-			r.Post("/enable", s.handleEnableServer)
-			r.Post("/disable", s.handleDisableServer)
-			r.Post("/restart", s.handleRestartServer)
-			r.Post("/login", s.handleServerLogin)
-			r.Post("/logout", s.handleServerLogout)
-			r.Post("/quarantine", s.handleQuarantineServer)
-			r.Post("/unquarantine", s.handleUnquarantineServer)
-			r.Post("/discover-tools", s.handleDiscoverServerTools)
+			// Mutating per-server routes carry the shared agent-token gate
+			// (issues #877/#878).
+			r.Patch("/", s.requireServerOp(auth.ServerOpPatch, s.handlePatchServer))                                   // Partial update server config
+			r.Delete("/", s.requireServerOp(auth.ServerOpRemove, s.handleRemoveServer))                                // T002: Remove server
+			r.Post("/config-to-secret", s.requireServerOp(auth.ServerOpConfigToSecret, s.handleConvertConfigToSecret)) // Move a header / env value into OS keyring
+			r.Post("/enable", s.requireServerOp(auth.ServerOpEnable, s.handleEnableServer))
+			r.Post("/disable", s.requireServerOp(auth.ServerOpDisable, s.handleDisableServer))
+			r.Post("/restart", s.requireServerOp(auth.ServerOpRestart, s.handleRestartServer))
+			r.Post("/login", s.requireServerOp(auth.ServerOpLogin, s.handleServerLogin))
+			r.Post("/logout", s.requireServerOp(auth.ServerOpLogout, s.handleServerLogout))
+			r.Post("/quarantine", s.requireServerOp(auth.ServerOpQuarantine, s.handleQuarantineServer))
+			r.Post("/unquarantine", s.requireServerOp(auth.ServerOpUnquarantine, s.handleUnquarantineServer))
+			r.Post("/discover-tools", s.requireServerOp(auth.ServerOpDiscoverTools, s.handleDiscoverServerTools))
+			// Alias of discover-tools named for the upstream_servers 'refresh'
+			// operation (issue #873): pure rediscover + reindex, no state change.
+			r.Post("/refresh", s.requireServerOp(auth.ServerOpRefresh, s.handleRefreshServer))
 			r.Get("/tools", s.handleGetServerTools)
 			r.Get("/logs", s.handleGetServerLogs)
 			// Spec 044: per-server diagnostics with stable error_code.
 			r.Get("/diagnostics", s.handleGetServerDiagnostics)
 			r.Get("/tool-calls", s.handleGetServerToolCalls)
 
-			// Tool-level quarantine (Spec 032)
-			r.Post("/tools/approve", s.handleApproveTools)
+			// Tool-level quarantine (Spec 032). Approving/blocking a tool is a
+			// security-state mutation the MCP quarantine_security tool denies to
+			// agents; gate the REST twins the same way (issue #878 class).
+			r.Post("/tools/approve", s.requireServerOp(auth.ServerOpApproveTools, s.handleApproveTools))
 			// Atomic block = approve+disable (MCP-2198). Server-side so the
 			// pair is all-or-nothing — a tool is never left approved+enabled.
-			r.Post("/tools/block", s.handleBlockTools)
+			r.Post("/tools/block", s.requireServerOp(auth.ServerOpBlockTools, s.handleBlockTools))
 			r.Post("/tools/{tool}/enabled", s.handleSetToolEnabled)
 			// Bulk per-tool enable/disable. Mirrors /servers/enable_all
 			// + /servers/disable_all but scoped to a single server's tools.
@@ -671,14 +703,16 @@ func (s *Server) setupRoutes() {
 			r.Get("/tools/{tool}/diff", s.handleGetToolDiff)
 			r.Get("/tools/export", s.handleExportToolDescriptions)
 
-			// Security scanner scan/approval routes (Spec 039)
-			r.Post("/scan", s.handleStartScan)
+			// Security scanner scan/approval routes (Spec 039). Scan start/cancel
+			// and security approve/reject mutate a server's scan/approval state,
+			// so they carry the same agent-token gate (issue #878 class).
+			r.Post("/scan", s.requireServerOp(auth.ServerOpScan, s.handleStartScan))
 			r.Get("/scan/status", s.handleGetScanStatus)
 			r.Get("/scan/report", s.handleGetScanReport)
-			r.Post("/scan/cancel", s.handleCancelScan)
+			r.Post("/scan/cancel", s.requireServerOp(auth.ServerOpScan, s.handleCancelScan))
 			r.Get("/scan/files", s.handleGetScanFiles)
-			r.Post("/security/approve", s.handleSecurityApprove)
-			r.Post("/security/reject", s.handleSecurityReject)
+			r.Post("/security/approve", s.requireServerOp(auth.ServerOpSecurityApprove, s.handleSecurityApprove))
+			r.Post("/security/reject", s.requireServerOp(auth.ServerOpSecurityReject, s.handleSecurityReject))
 			r.Get("/integrity", s.handleCheckIntegrity)
 		})
 
@@ -691,20 +725,24 @@ func (s *Server) setupRoutes() {
 		// Docker recovery status
 		r.Get("/docker/status", s.handleGetDockerStatus)
 
-		// Secrets management
+		// Secrets management. Writing/deleting/migrating keyring entries mutates
+		// upstream credentials and restarts affected servers, so mutating routes
+		// are agent-token-gated (issue #878 class); reads stay open.
 		r.Route("/secrets", func(r chi.Router) {
 			r.Get("/refs", s.handleGetSecretRefs)
 			r.Get("/config", s.handleGetConfigSecrets)
-			r.Post("/migrate", s.handleMigrateSecrets)
-			r.Post("/", s.handleSetSecret)
-			r.Delete("/{name}", s.handleDeleteSecret)
+			r.Post("/migrate", s.requireServerOp(auth.ServerOpSecretWrite, s.handleMigrateSecrets))
+			r.Post("/", s.requireServerOp(auth.ServerOpSecretWrite, s.handleSetSecret))
+			r.Delete("/{name}", s.requireServerOp(auth.ServerOpSecretWrite, s.handleDeleteSecret))
 		})
 
 		// Diagnostics
 		r.Get("/diagnostics", s.handleGetDiagnostics)
 		r.Get("/doctor", s.handleGetDiagnostics) // Alias for consistency with CLI command
-		// Spec 044: per-server diagnostics + fix invocation.
-		r.Post("/diagnostics/fix", s.handleInvokeFix)
+		// Spec 044: per-server diagnostics + fix invocation. Fixers execute
+		// administrative actions (OAuth reauth, scanner disable, config
+		// migration), so invocation is admin-only.
+		r.Post("/diagnostics/fix", s.requireServerOp(auth.ServerOpDiagnosticsFix, s.handleInvokeFix))
 
 		// Telemetry payload preview (Spec 042) — renders the next heartbeat
 		// payload with runtime stats attached. No network call is made.
@@ -728,21 +766,27 @@ func (s *Server) setupRoutes() {
 		// Code execution endpoint (for CLI client mode)
 		r.Post("/code/exec", NewCodeExecHandler(s.controller, s.logger).ServeHTTP)
 
-		// Configuration management
+		// Configuration management. Applying/patching config can add, remove,
+		// enable, disable or quarantine upstream servers (mcpServers), so these
+		// mutating routes carry the agent-token gate too — otherwise an agent
+		// bypasses the /servers gate by rewriting config wholesale (issue #878).
+		// validate is read-only (no state change) and stays open.
 		r.Get("/config", s.handleGetConfig)
 		r.Post("/config/validate", s.handleValidateConfig)
-		r.Post("/config/apply", s.handleApplyConfig)
-		r.Patch("/config", s.handlePatchConfig)
-		r.Patch("/config/docker-isolation", s.handlePatchDockerIsolation)
+		r.Post("/config/apply", s.requireServerOp(auth.ServerOpConfigWrite, s.handleApplyConfig))
+		r.Patch("/config", s.requireServerOp(auth.ServerOpConfigWrite, s.handlePatchConfig))
+		r.Patch("/config/docker-isolation", s.requireServerOp(auth.ServerOpConfigWrite, s.handlePatchDockerIsolation))
 
-		// Registry browsing (Phase 7)
+		// Registry browsing (Phase 7). Browsing (GET) stays open; mutating a
+		// registry source or adding a server from a registry is admin-only
+		// (the latter mirrors the MCP 'add_from_registry' denial).
 		r.Get("/registries", s.handleListRegistries)
-		r.Post("/registries", s.handleAddRegistrySource)           // MCP-866 user-added registry source
-		r.Put("/registries/{id}", s.handleEditRegistrySource)      // MCP-1072 edit user-added source
-		r.Delete("/registries/{id}", s.handleRemoveRegistrySource) // MCP-1057 remove user-added source
+		r.Post("/registries", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAddRegistrySource))           // MCP-866 user-added registry source
+		r.Put("/registries/{id}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleEditRegistrySource))      // MCP-1072 edit user-added source
+		r.Delete("/registries/{id}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRemoveRegistrySource)) // MCP-1057 remove user-added source
 		r.Get("/registries/{id}/servers", s.handleSearchRegistryServers)
-		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)           // spec 070 FR-007
-		r.Post("/registries/{id}/servers/{serverId}/add", s.handleAddFromRegistry) // spec 070 keystone add
+		r.Post("/registries/{id}/refresh", s.handleRefreshRegistryCache)                                                            // spec 070 FR-007
+		r.Post("/registries/{id}/servers/{serverId}/add", s.requireServerOp(auth.ServerOpAddFromRegistry, s.handleAddFromRegistry)) // spec 070 keystone add
 
 		// Activity logging (RFC-003)
 		r.Get("/activity", s.handleListActivity)
@@ -769,35 +813,41 @@ func (s *Server) setupRoutes() {
 		// Feedback submission (Spec 036)
 		r.Post("/feedback", s.handleFeedback)
 
-		// Client connect/disconnect
+		// Client connect/disconnect. Connecting/undo/disconnect write, restore,
+		// or delete local MCP client config files and can embed the admin API
+		// key into that config — an agent must not trigger them (issue #878
+		// class). Status/preview reads stay open.
 		r.Get("/connect", s.handleGetConnectStatus)
 		r.Get("/connect/{client}", s.handleGetConnectClientStatus)
 		r.Get("/connect/{client}/preview", s.handleConnectClientPreview)
-		r.Post("/connect/{client}", s.handleConnectClient)
-		r.Post("/connect/{client}/undo", s.handleUndoConnectClient)
-		r.Delete("/connect/{client}", s.handleDisconnectClient)
+		r.Post("/connect/{client}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleConnectClient))
+		r.Post("/connect/{client}/undo", s.requireServerOp(auth.ServerOpConfigWrite, s.handleUndoConnectClient))
+		r.Delete("/connect/{client}", s.requireServerOp(auth.ServerOpConfigWrite, s.handleDisconnectClient))
 
 		// Onboarding wizard (Spec 046)
 		r.Get("/onboarding/state", s.handleGetOnboardingState)
 		r.Post("/onboarding/mark", s.handleMarkOnboardingState)
 
-		// Security scanner management routes (Spec 039)
+		// Security scanner management routes (Spec 039). Installing/removing/
+		// configuring scanners and batch scans mutate security state, so the
+		// mutating routes are agent-token-gated; reads (list/status/overview/
+		// queue/history) stay open.
 		r.Route("/security", func(r chi.Router) {
 			r.Get("/scanners", s.handleListScanners)
-			r.Post("/scanners/{id}/enable", s.handleInstallScanner)
-			r.Post("/scanners/{id}/disable", s.handleRemoveScanner)
-			r.Put("/scanners/{id}/config", s.handleConfigureScanner)
+			r.Post("/scanners/{id}/enable", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
+			r.Post("/scanners/{id}/disable", s.requireServerOp(auth.ServerOpScan, s.handleRemoveScanner))
+			r.Put("/scanners/{id}/config", s.requireServerOp(auth.ServerOpScan, s.handleConfigureScanner))
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
 
 			// Legacy routes (backwards compatibility)
-			r.Post("/scanners/install", s.handleInstallScanner)
-			r.Delete("/scanners/{id}", s.handleRemoveScanner)
+			r.Post("/scanners/install", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
+			r.Delete("/scanners/{id}", s.requireServerOp(auth.ServerOpScan, s.handleRemoveScanner))
 
 			// Batch scan operations
-			r.Post("/scan-all", s.handleScanAll)
+			r.Post("/scan-all", s.requireServerOp(auth.ServerOpScan, s.handleScanAll))
 			r.Get("/queue", s.handleGetQueueProgress)
-			r.Post("/cancel-all", s.handleCancelAllScans)
+			r.Post("/cancel-all", s.requireServerOp(auth.ServerOpScan, s.handleCancelAllScans))
 
 			// Scan history
 			r.Get("/scans", s.handleListScanHistory)
@@ -1203,7 +1253,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		// so they send only the diff — redacted-but-unchanged values
 		// stay out of the patch and the backend keeps the real string.
 		// See PR #425 for the original threat model.
-		s.redactServerHeaders(serverValues)
+		s.redactServerSecrets(serverValues)
 
 		// Dereference stats pointer
 		var statsValue contracts.ServerStats
@@ -1234,7 +1284,7 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	s.enrichServersWithQuarantineStats(servers)
 
 	// See note above the management-service path for redaction rationale.
-	s.redactServerHeaders(servers)
+	s.redactServerSecrets(servers)
 
 	stats := contracts.ConvertUpstreamStatsToServerStats(s.controller.GetUpstreamStats())
 
@@ -1264,25 +1314,55 @@ func flattenNullableMap(m map[string]*string) map[string]string {
 	return out
 }
 
-// redactServerHeaders walks each server in the slice and replaces sensitive
-// header values (Authorization, X-API-Key, Cookie, etc.) with `***REDACTED***`.
-// Skips redaction entirely when `reveal_secret_headers: true` is set in the
-// loaded config, matching the behaviour of the `upstream_servers` MCP tool.
+// redactServerSecrets walks each server in the slice and masks the secret-
+// bearing fields: sensitive header values (Authorization, X-API-Key, Cookie,
+// …), env-var secrets, URL query credentials, and any URL secrets echoed into
+// the last_error / health.detail strings. Sensitive values render as the
+// masked-display format `••••<last2> (<N> chars)` (references pass through);
+// error strings use the `***REDACTED***` sentinel. Skips redaction entirely
+// when `reveal_secret_headers: true` is set in the loaded config, matching the
+// behaviour of the `upstream_servers` MCP tool and the SSE event stream.
 //
 // The UI edit-and-save flow works without seeing the real values because
 // PATCH /api/v1/servers/{id} deep-merges (omitted keys preserved), so the
 // client computes a diff and only sends the keys that actually changed.
 // Redacted-but-unchanged values never round-trip — the backend keeps the
 // real string on disk.
-func (s *Server) redactServerHeaders(servers []contracts.Server) {
+func (s *Server) redactServerSecrets(servers []contracts.Server) {
 	cfg, err := s.controller.GetConfig()
 	if err == nil && cfg != nil && cfg.RevealSecretHeaders {
 		return
 	}
 	for i := range servers {
-		if len(servers[i].Headers) > 0 {
-			servers[i].Headers = oauth.RedactStringHeaders(servers[i].Headers)
-		}
+		redactServerSecretFields(&servers[i])
+	}
+}
+
+// redactServerSecretFields masks the secret-bearing fields of a single server
+// in place. Shared by the REST list/get path and the SSE event stream so both
+// sit behind the same trust boundary (parity is load-bearing: the Web UI's
+// mergeServers would flicker masked-vs-plaintext otherwise).
+func redactServerSecretFields(server *contracts.Server) {
+	if len(server.Headers) > 0 {
+		server.Headers = oauth.RedactStringHeaders(server.Headers)
+	}
+	if len(server.Env) > 0 {
+		server.Env = oauth.RedactEnvValues(server.Env)
+	}
+	if server.URL != "" {
+		server.URL = oauth.RedactURLQueryParams(server.URL)
+	}
+	if server.LastError != "" {
+		server.LastError = oauth.RedactSensitiveData(server.LastError)
+	}
+	if server.Health != nil && server.Health.Detail != "" {
+		server.Health.Detail = oauth.RedactSensitiveData(server.Health.Detail)
+	}
+	// Spec 044 diagnostic — its Cause echoes the raw connect error, which
+	// carries the full upstream URL (query secrets and all); scrub it in
+	// parity with LastError / Health.Detail.
+	if server.Diagnostic != nil && server.Diagnostic.Cause != "" {
+		server.Diagnostic.Cause = oauth.RedactSensitiveData(server.Diagnostic.Cause)
 	}
 }
 
@@ -1434,6 +1514,7 @@ func (r *IsolationRequest) toConfig() *config.IsolationConfig {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request - invalid configuration"
 // @Failure 409 {object} contracts.ErrorResponse "Conflict - server with this name already exists"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers [post]
 func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	var req AddServerRequest
@@ -1574,6 +1655,7 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id} [delete]
 func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -1618,6 +1700,7 @@ func (s *Server) handleRemoveServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request - no fields or invalid body"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id} [patch]
 func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	serverName := chi.URLParam(r, "id")
@@ -1652,7 +1735,17 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	hasUpdates := false
 
 	if req.URL != "" {
-		updates.URL = req.URL
+		// #872: the read path masks secrets in the URL query string / userinfo
+		// (redactServerSecrets → oauth.RedactURLQueryParams), but url is a single
+		// string field with no field-level diff. If a client edits a non-secret
+		// part and echoes the masked url back, restore the stored real secrets so
+		// the mask is never persisted over them. Protects ALL clients, not just
+		// the tray.
+		if existingSrv != nil {
+			updates.URL = oauth.UnmaskURL(req.URL, existingSrv.URL)
+		} else {
+			updates.URL = req.URL
+		}
 		hasUpdates = true
 	}
 	if req.Command != "" {
@@ -1667,7 +1760,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	// (RFC 7396): keys with a non-null value upsert, keys with a null
 	// value delete, omitted keys are preserved. This lets the Web UI /
 	// macOS tray / CLI send a minimal diff so redacted-but-unchanged
-	// values (returned by the GET path via `redactServerHeaders`)
+	// values (returned by the GET path via `redactServerSecrets`)
 	// never round-trip through the client.
 	if req.Env != nil {
 		merged := map[string]string{}
@@ -1682,6 +1775,12 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			} else {
 				merged[k] = *vp
 			}
+		}
+		// #872: a client could echo a masked env value back (the tray diffs, but
+		// other clients may send the full map). Revert any value that is exactly
+		// the masked rendering of the stored one.
+		if existingSrv != nil {
+			merged = oauth.UnmaskEnvValues(merged, existingSrv.Env)
 		}
 		updates.Env = merged
 		hasUpdates = true
@@ -1699,6 +1798,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			} else {
 				merged[k] = *vp
 			}
+		}
+		// #872: revert any masked header value echoed back (see env note above).
+		if existingSrv != nil {
+			merged = oauth.UnmaskHeaders(merged, existingSrv.Headers)
 		}
 		updates.Headers = merged
 		hasUpdates = true
@@ -1810,6 +1913,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad scope/key/secret_name, or value is already a reference / empty"
 // @Failure 404 {object} contracts.ErrorResponse "Server or key not found"
 // @Failure 500 {object} contracts.ErrorResponse "Secret resolver or config update failed"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/config-to-secret [post]
 func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Request) {
 	serverName := chi.URLParam(r, "id")
@@ -1958,6 +2062,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/enable [post]
 func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2024,6 +2129,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/disable [post]
 func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2088,6 +2194,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 // @Param reason query string false "Reason for reconnection"
 // @Success 200 {object} contracts.ServerActionResponse "All servers reconnected successfully"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/reconnect [post]
 func (s *Server) handleForceReconnectServers(w http.ResponseWriter, r *http.Request) {
 	reason := r.URL.Query().Get("reason")
@@ -2217,6 +2324,7 @@ func (s *Server) handleDisableAll(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/restart [post]
 func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2341,9 +2449,15 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.ServerActionResponse "Tool discovery triggered successfully"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot discover tools)"
 // @Failure 500 {object} contracts.ErrorResponse "Failed to discover tools"
 // @Router /api/v1/servers/{id}/discover-tools [post]
 func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Request) {
+	// SECURITY (issues #873/#878): discover-tools is a write operation routing
+	// through the same authoritative RefreshServerTools path as /refresh. The
+	// agent-token gate lives in the route wrapper (requireServerOp) so it can
+	// never drift from the MCP denylist; an agent blocked from 'refresh' cannot
+	// bypass that restriction through this alias.
 	serverID := chi.URLParam(r, "id")
 	if serverID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
@@ -2367,6 +2481,53 @@ func (s *Server) handleDiscoverServerTools(w http.ResponseWriter, r *http.Reques
 	response := contracts.ServerActionResponse{
 		Server:  serverID,
 		Action:  "discover_tools",
+		Success: true,
+		Async:   false,
+	}
+	s.writeSuccess(w, response)
+}
+
+// handleRefreshServer godoc
+// @Summary Refresh a server's tools
+// @Description Re-discover and re-index a specific upstream MCP server's tools without changing any security state. Alias of discover-tools, named for the upstream_servers 'refresh' operation; use it to make just-approved tools searchable immediately.
+// @Tags servers
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server ID or name"
+// @Success 200 {object} contracts.ServerActionResponse "Tool refresh triggered successfully"
+// @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not found"
+// @Failure 500 {object} contracts.ErrorResponse "Failed to refresh tools"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot refresh)"
+// @Router /api/v1/servers/{id}/refresh [post]
+func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
+	// SECURITY (issues #873/#878): 'refresh' is a write operation the MCP surface
+	// blocks for agent tokens. The agent-token gate lives in the route wrapper
+	// (requireServerOp) via the shared auth policy so REST cannot drift from MCP.
+	serverID := chi.URLParam(r, "id")
+	if serverID == "" {
+		s.writeError(w, r, http.StatusBadRequest, "Server ID required")
+		return
+	}
+
+	s.logger.Info("Manual tool refresh triggered via API", "server", serverID)
+
+	if err := s.controller.DiscoverServerTools(r.Context(), serverID); err != nil {
+		s.logger.Error("Failed to refresh tools for server", "server", serverID, "error", err)
+
+		if strings.Contains(err.Error(), "not found") {
+			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Server not found: %s", serverID))
+			return
+		}
+
+		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to refresh tools: %v", err))
+		return
+	}
+
+	response := contracts.ServerActionResponse{
+		Server:  serverID,
+		Action:  "refresh",
 		Success: true,
 		Async:   false,
 	}
@@ -2404,6 +2565,7 @@ func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) 
 // @Failure 400 {object} contracts.OAuthFlowError "OAuth error (client_id required, DCR failed, etc.)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/login [post]
 func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2564,6 +2726,7 @@ func (s *Server) handleServerLogout(w http.ResponseWriter, r *http.Request) {
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/quarantine [post]
 func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2599,6 +2762,7 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (missing server ID)"
 // @Failure 404 {object} contracts.ErrorResponse "Server not found"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/unquarantine [post]
 func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
@@ -2897,6 +3061,16 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed search results
 	typedResults := contracts.ConvertGenericSearchResultsToTyped(results)
 
+	// Restore the bare-tool-name contract on this REST surface (#871). The index
+	// read seams canonicalize the name to "server:tool" for the MCP discovery
+	// path, but external consumers of /api/v1/index/search assemble the id
+	// themselves from server_name + name — a prefixed name double-prefixes (e.g.
+	// the D1 retrieval-regression scorer). Strip the server prefix here so the
+	// REST envelope keeps its historical shape (bare name + separate server_name).
+	for i := range typedResults {
+		typedResults[i].Tool.Name = stripServerPrefix(typedResults[i].Tool.ServerName, typedResults[i].Tool.Name)
+	}
+
 	response := contracts.SearchToolsResponse{
 		Query:   query,
 		Results: typedResults,
@@ -2905,6 +3079,17 @@ func (s *Server) handleSearchTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// stripServerPrefix reverses index.CanonicalToolName for the REST index-search
+// surface: given serverName "github" and name "github:create_issue" it returns
+// "create_issue". Names without the "<serverName>:" prefix (already bare, or a
+// missing server name) pass through unchanged.
+func stripServerPrefix(serverName, name string) string {
+	if serverName == "" {
+		return name
+	}
+	return strings.TrimPrefix(name, serverName+":")
 }
 
 func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
@@ -3362,6 +3547,14 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Convert to typed servers
 	servers := contracts.ConvertGenericServersToTyped(genericServers)
 
+	// Issue #872: last_error can echo the full upstream URL, including query
+	// credentials. Scrub it before surfacing on the doctor route unless the
+	// operator opted out via reveal_secret_headers.
+	reveal := false
+	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
+		reveal = cfg.RevealSecretHeaders
+	}
+
 	// Collect diagnostics (legacy format)
 	var upstreamErrors []contracts.DiagnosticIssue
 	var oauthRequired []string
@@ -3373,12 +3566,16 @@ func (s *Server) handleGetDiagnostics(w http.ResponseWriter, r *http.Request) {
 	// Check for upstream errors
 	for _, server := range servers {
 		if server.LastError != "" {
+			errMsg := server.LastError
+			if !reveal {
+				errMsg = oauth.RedactSensitiveData(errMsg)
+			}
 			upstreamErrors = append(upstreamErrors, contracts.DiagnosticIssue{
 				Type:      "error",
 				Category:  "connection",
 				Server:    server.Name,
 				Title:     "Server Connection Error",
-				Message:   server.LastError,
+				Message:   errMsg,
 				Timestamp: now,
 				Severity:  "high",
 				Metadata: map[string]interface{}{
@@ -3866,6 +4063,7 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 // @Failure      500     {object}  contracts.ErrorResponse         "Failed to apply configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config/apply [post]
 func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -3916,6 +4114,7 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 // @Failure      500      {object}  contracts.ErrorResponse       "Failed to apply configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config/docker-isolation [patch]
 func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
@@ -3982,6 +4181,7 @@ func (s *Server) handlePatchDockerIsolation(w http.ResponseWriter, r *http.Reque
 // @Failure      500    {object}  contracts.ErrorResponse       "Failed to read or apply configuration"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate configuration)"
 // @Router       /api/v1/config [patch]
 func (s *Server) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	var patchMap map[string]interface{}
@@ -4303,6 +4503,7 @@ func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Requ
 // @Failure      500       {object}  contracts.ErrorResponse           "Internal server error"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot add servers)"
 // @Router       /api/v1/registries/{id}/servers/{serverId}/add [post]
 // decodePathParam percent-decodes a chi path parameter. chi matches routes on
 // the raw (encoded) path, so parameters that legitimately contain reserved
@@ -4394,6 +4595,7 @@ func (s *Server) handleAddFromRegistry(w http.ResponseWriter, r *http.Request) {
 // @Failure      409   {object}  contracts.ErrorResponse             "registry_shadows_builtin | duplicate_registry"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
+// @Failure      403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate registries)"
 // @Router       /api/v1/registries [post]
 func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request) {
 	var req contracts.AddRegistrySourceRequest
@@ -4828,6 +5030,7 @@ func (s *Server) handleApproveTools(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} contracts.SuccessResponse "Block result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error"
+// @Failure 403 {object} contracts.ErrorResponse "Forbidden (agent tokens cannot mutate servers)"
 // @Router /api/v1/servers/{id}/tools/block [post]
 func (s *Server) handleBlockTools(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")

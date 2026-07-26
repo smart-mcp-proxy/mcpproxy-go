@@ -80,6 +80,7 @@ const sidebars = {
       type: 'category',
       label: 'Operations',
       items: [
+        'operations/reverse-proxy',
         'operations/shutdown-behavior',
       ],
     },

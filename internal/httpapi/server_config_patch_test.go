@@ -24,6 +24,11 @@ type mockPatchConfigController struct {
 	live         *config.Config
 	captured     *config.Config
 	changedField string
+	// detectChanges routes ApplyConfig through the real
+	// runtime.DetectConfigChanges(live, merged) so tests can assert the
+	// changed_fields the real change detector would compute for the
+	// handler's deep-merge output.
+	detectChanges bool
 	// validationErrs, when non-empty, is returned from ApplyConfig so a test
 	// can assert that invalid values surface as validation errors rather than
 	// corrupting config.
@@ -43,6 +48,9 @@ func (m *mockPatchConfigController) GetConfigPath() string { return "/tmp/mcp_co
 func (m *mockPatchConfigController) ApplyConfig(cfg *config.Config, _ string) (*runtime.ConfigApplyResult, error) {
 	clone := *cfg
 	m.captured = &clone
+	if m.detectChanges {
+		return runtime.DetectConfigChanges(m.live, cfg), nil
+	}
 	if len(m.validationErrs) > 0 {
 		return &runtime.ConfigApplyResult{
 			Success:          false,
@@ -167,6 +175,35 @@ func TestHandlePatchConfig_ChangedFields(t *testing.T) {
 	changed, _ := result["changed_fields"].([]interface{})
 	require.NotEmpty(t, changed, "changed_fields must be populated, got %v", result)
 	assert.Contains(t, changed, "quarantine_enabled")
+}
+
+// TestHandlePatchConfig_NoSpuriousDockerIsolation (QA API-PATCH): patching only
+// the toon fields must not report docker_isolation in changed_fields. The
+// handler's JSON round-trip drops DockerIsolation.ExtraArgs []string{} via
+// omitempty; change detection must treat that as unchanged.
+func TestHandlePatchConfig_NoSpuriousDockerIsolation(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchConfigController{
+		apiKey:        "test-key",
+		live:          &config.Config{DockerIsolation: config.DefaultDockerIsolationConfig()},
+		detectChanges: true, // route through real runtime.DetectConfigChanges
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	body := []byte(`{"toon_output":"always","toon_min_savings_pct":1}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	result := decodePatchResult(t, w.Body.Bytes())
+	changed, _ := result["changed_fields"].([]interface{})
+	assert.Contains(t, changed, "toon_output")
+	assert.Contains(t, changed, "toon_min_savings_pct")
+	assert.NotContains(t, changed, "docker_isolation",
+		"docker_isolation was not in the PATCH body and its effective value did not change")
 }
 
 // TestHandlePatchConfig_EmptyBody rejects an empty object with 400.

@@ -41,18 +41,31 @@ func SetClientVersion(v string) {
 // surfaceHeaderTransport wraps another http.RoundTripper to inject the
 // X-MCPProxy-Client header on every outbound request. The header value is
 // "cli/<version>". Spec 042 User Story 1.
+//
+// It also injects X-API-Key when the client was constructed with an API key.
+// Doing this at the transport level guarantees every request authenticates
+// over TCP, including methods that skip prepareRequest (e.g. Ping) — the REST
+// API always requires a key on TCP; only socket connections bypass it.
 type surfaceHeaderTransport struct {
-	base http.RoundTripper
+	base   http.RoundTripper
+	apiKey string
 }
 
 func (t *surfaceHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Header.Get("X-MCPProxy-Client") == "" {
+	needClientHeader := req.Header.Get("X-MCPProxy-Client") == ""
+	needAPIKey := t.apiKey != "" && req.Header.Get("X-API-Key") == ""
+	if needClientHeader || needAPIKey {
 		// Clone the header map so we don't mutate caller-owned state.
 		newHeaders := req.Header.Clone()
 		if newHeaders == nil {
 			newHeaders = http.Header{}
 		}
-		newHeaders.Set("X-MCPProxy-Client", "cli/"+clientVersion)
+		if needClientHeader {
+			newHeaders.Set("X-MCPProxy-Client", "cli/"+clientVersion)
+		}
+		if needAPIKey {
+			newHeaders.Set("X-API-Key", t.apiKey)
+		}
 		reqCopy := req.Clone(req.Context())
 		reqCopy.Header = newHeaders
 		req = reqCopy
@@ -140,8 +153,9 @@ func NewClientWithAPIKey(endpoint, apiKey string, logger *zap.SugaredLogger) *Cl
 		httpClient: &http.Client{
 			Timeout: 5 * time.Minute, // Generous timeout for long operations
 			// Spec 042: wrap transport so every request carries the
-			// X-MCPProxy-Client: cli/<version> header.
-			Transport: &surfaceHeaderTransport{base: transport},
+			// X-MCPProxy-Client: cli/<version> header, plus X-API-Key
+			// when the client was constructed with one.
+			Transport: &surfaceHeaderTransport{base: transport, apiKey: apiKey},
 		},
 		logger: logger,
 	}

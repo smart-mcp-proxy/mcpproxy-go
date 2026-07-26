@@ -88,6 +88,12 @@ type Server struct {
 	statusCh chan interface{}
 	eventsCh chan runtime.Event
 
+	// serveErrCh delivers a fatal serve failure (startup bind error or
+	// serve-loop death) out of the async StartServer goroutine so the
+	// process can exit instead of lingering unreachable. Buffered (cap 1)
+	// so the goroutine never blocks; graceful shutdown never fires it.
+	serveErrCh chan error
+
 	// Spec 024: Track server start time for lifecycle events
 	startTime time.Time
 
@@ -190,6 +196,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		runtime:             rt,
 		statusCh:            make(chan interface{}, 10),
 		eventsCh:            rt.SubscribeEvents(),
+		serveErrCh:          make(chan error, 1),
 		observability:       obsManager,
 		admissionScanKicked: make(map[string]bool),
 	}
@@ -199,7 +206,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 		rt.IndexManager(),
 		rt.UpstreamManager(),
 		rt.CacheManager(),
-		rt.Truncator(),
+		rt.Truncator, // getter, re-read at use time so hot-reloaded limits apply (#861)
 		logger,
 		server,
 		cfg.DebugSearch,
@@ -719,7 +726,11 @@ func (s *Server) Start(ctx context.Context) error {
 		if cfg != nil {
 			routingMode = cfg.RoutingMode
 		}
-		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode))
+		// mcp-go's built-in DNS-rebinding protection is disabled in favor of
+		// hostValidationMiddleware, which applies the same check but honors the
+		// trusted_hosts allowlist for reverse-proxy deployments (GH #898).
+		streamableServer := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(routingMode),
+			server.WithDisableLocalhostProtection(true))
 
 		// Create custom HTTP server for handling multiple routes
 		if err := s.startCustomHTTPServer(ctx, streamableServer); err != nil {
@@ -1611,10 +1622,14 @@ func (s *Server) RestartServer(serverName string) error {
 	return s.runtime.RestartServer(serverName)
 }
 
-// DiscoverServerTools triggers manual tool discovery for a specific server
+// DiscoverServerTools triggers manual tool discovery for a specific server.
+// This backs the explicit REST operator actions (POST .../discover-tools and
+// its .../refresh alias), so it uses the AUTHORITATIVE refresh path (issue
+// #873): a server that now reports zero tools has its stale index entries
+// removed rather than silently retained.
 func (s *Server) DiscoverServerTools(ctx context.Context, serverName string) error {
 	s.logger.Info("Manual tool discovery requested", zap.String("server", serverName))
-	return s.runtime.DiscoverAndIndexToolsForServer(ctx, serverName)
+	return s.runtime.RefreshServerTools(ctx, serverName)
 }
 
 // ForceReconnectAllServers triggers reconnection attempts for all managed servers.
@@ -1688,8 +1703,10 @@ func (s *Server) StartServer(ctx context.Context) error {
 			s.runtime.SetRunning(false)
 
 			// Only send "Stopped" status if there was no error
-			// If there was an error, the error status should remain
-			if serverError == nil || serverError == context.Canceled {
+			// If there was an error, the error status should remain.
+			// errors.Is: graceful cancellation may arrive wrapped
+			// (e.g. "MCP Streamable HTTP server error: context canceled").
+			if serverError == nil || errors.Is(serverError, context.Canceled) {
 				s.updateStatus(runtime.PhaseStopped, "Server has stopped")
 			}
 		}()
@@ -1703,13 +1720,28 @@ func (s *Server) StartServer(ctx context.Context) error {
 		s.updateStatus(runtime.PhaseStarting, "Server is starting...")
 
 		serverError = s.Start(s.serverCtx)
-		if serverError != nil && serverError != context.Canceled {
+		if serverError != nil && !errors.Is(serverError, context.Canceled) {
 			s.logger.Error("Server error during background start", zap.Error(serverError))
 			s.updateStatus(runtime.PhaseError, fmt.Sprintf("Server error: %v", serverError))
+			// Deliver the fatal error to ServeErr() so the process can
+			// exit (e.g. exit code 2 on port conflict) instead of
+			// lingering with no listeners. Non-blocking: buffered cap 1
+			// tolerates restarts when nobody is draining the channel.
+			select {
+			case s.serveErrCh <- serverError:
+			default:
+			}
 		}
 	}()
 
 	return nil
+}
+
+// ServeErr delivers a fatal serve failure: a startup bind error (e.g.
+// *PortInUseError) or a serve-loop death after start. Graceful shutdown
+// (context cancellation, http.ErrServerClosed) never fires it.
+func (s *Server) ServeErr() <-chan error {
+	return s.serveErrCh
 }
 
 // StopServer stops the server if it's running
@@ -2028,9 +2060,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	if cfg.EnableSocket {
 		trayListener, err = listenerManager.CreateTrayListener()
 		if err != nil {
-			s.logger.Warn("Failed to create tray listener, tray will use TCP fallback",
-				zap.Error(err))
-			// Continue without tray listener - tray will fall back to TCP
+			socketPath := cfg.TrayEndpoint
+			if socketPath == "" {
+				socketPath = filepath.Join(cfg.DataDir, "mcpproxy.sock")
+			}
+			s.logger.Warn("Failed to create tray/CLI socket listener; tray and CLI will fall back to TCP (API key required)",
+				zap.Error(err),
+				zap.String("socket_path", socketPath))
+			// Continue without tray listener - tray and CLI fall back to TCP
 		}
 	} else {
 		s.logger.Info("Socket communication disabled by configuration, clients will use TCP")
@@ -2095,36 +2132,43 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	}
 
 	// Standard MCP endpoint according to the specification
-	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement
-	mcpHandler := s.mcpAuthMiddleware(loggingHandler(streamableServer))
+	// Wrap with auth middleware to inject AuthContext for agent token scope enforcement.
+	// hostValidationMiddleware (outermost) replaces mcp-go's DNS-rebinding
+	// protection — disabled on every StreamableHTTPServer below — adding the
+	// trusted_hosts allowlist for reverse-proxy deployments (GH #898).
+	mcpHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(streamableServer)))
 	mux.Handle("/mcp", mcpHandler)
 	mux.Handle("/mcp/", mcpHandler) // Handle trailing slash
 
 	// Routing mode dedicated endpoints (Spec 031)
 	// Each endpoint always serves its specific routing mode regardless of config.
 	// /mcp/all → direct mode (all tools with serverName__toolName naming)
-	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect))
-	directHandler := s.mcpAuthMiddleware(loggingHandler(directStreamable))
+	directStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeDirect),
+		server.WithDisableLocalhostProtection(true))
+	directHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(directStreamable)))
 	mux.Handle("/mcp/all", directHandler)
 	mux.Handle("/mcp/all/", directHandler)
 
 	// /mcp/code → code_execution mode (JS orchestration)
-	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution))
-	codeExecHandler := s.mcpAuthMiddleware(loggingHandler(codeExecStreamable))
+	codeExecStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeCodeExecution),
+		server.WithDisableLocalhostProtection(true))
+	codeExecHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(codeExecStreamable)))
 	mux.Handle("/mcp/code", codeExecHandler)
 	mux.Handle("/mcp/code/", codeExecHandler)
 
 	// /mcp/call → retrieve_tools mode (focused: retrieve_tools + call_tool_read/write/destructive)
-	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools))
-	callToolHandler := s.mcpAuthMiddleware(loggingHandler(callToolStreamable))
+	callToolStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
+		server.WithDisableLocalhostProtection(true))
+	callToolHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(loggingHandler(callToolStreamable)))
 	mux.Handle("/mcp/call", callToolHandler)
 	mux.Handle("/mcp/call/", callToolHandler)
 
 	// /mcp/p/<slug> → profile-scoped retrieve_tools mode (Spec 057)
 	// Profile resolution is done by profileMiddleware which runs AFTER mcpAuthMiddleware
 	// so that agent-token scope can compose downstream with the profile scope.
-	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools))
-	profileHandler := s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable)))
+	profileStreamable := server.NewStreamableHTTPServer(s.mcpProxy.GetMCPServerForMode(config.RoutingModeRetrieveTools),
+		server.WithDisableLocalhostProtection(true))
+	profileHandler := s.hostValidationMiddleware(s.mcpAuthMiddleware(s.profileMiddleware(loggingHandler(profileStreamable))))
 	mux.Handle("/mcp/p/", profileHandler)
 	mux.Handle("/mcp/p", profileHandler)
 
@@ -2754,10 +2798,31 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 		return nil, err
 	}
 
+	// SECURITY (issue #877): the MCP retrieve_tools path never surfaces a
+	// quarantined server's tools — their descriptions/schemas are withheld
+	// because they are the Tool Poisoning Attack vector quarantine exists to
+	// contain. The Bleve index can still hold entries for a server quarantined
+	// after it was indexed, so this REST read path must apply the same
+	// server-level visibility gate rather than returning raw index hits. Names
+	// stay bare (server_name is a separate field) — only which tools appear is
+	// filtered, so the /api/v1/index/search response shape is unchanged.
+	withheld := s.quarantinedServerFilter()
+
 	// Convert to map format for API
 	var resultMaps []map[string]interface{}
 	for _, result := range results {
 		if result.Tool != nil {
+			serverName := result.Tool.ServerName
+			if serverName == "" {
+				// Fallback: recover the server from a "server:tool" index name so
+				// the quarantine gate still applies when ServerName is unset.
+				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
+					serverName = parts[0]
+				}
+			}
+			if withheld(serverName) {
+				continue
+			}
 			toolData := map[string]interface{}{
 				"name":        result.Tool.Name,
 				"description": result.Tool.Description,
@@ -2782,6 +2847,38 @@ func (s *Server) SearchTools(query string, limit int) ([]map[string]interface{},
 
 	s.logger.Debug("Search completed", zap.String("query", query), zap.Int("results", len(resultMaps)))
 	return resultMaps, nil
+}
+
+// quarantinedServerFilter returns a predicate reporting whether a search hit
+// must be WITHHELD, memoizing storage lookups for the duration of a single
+// search so a result set spanning N servers costs at most N storage reads. It
+// reads authoritative server-level quarantine state from storage — the same
+// source describeGateReason (the MCP visibility gate) consults — so the REST
+// index-search surface and retrieve_tools agree on which servers are withheld
+// (issue #877).
+//
+// It FAILS CLOSED: a hit is withheld unless it can be positively attributed to
+// a resolvable, non-quarantined server. An empty server name (a stale/legacy
+// index entry that cannot be attributed), a nil storage manager, a storage
+// error, or a missing record all withhold the hit rather than risk exposing a
+// description the quarantine boundary is meant to hide.
+func (s *Server) quarantinedServerFilter() func(serverName string) bool {
+	cache := make(map[string]bool)
+	storageMgr := s.runtime.StorageManager()
+	return func(serverName string) bool {
+		if serverName == "" || storageMgr == nil {
+			return true
+		}
+		if withheld, ok := cache[serverName]; ok {
+			return withheld
+		}
+		withheld := true
+		if cfg, err := storageMgr.GetUpstreamServer(serverName); err == nil && cfg != nil {
+			withheld = cfg.Quarantined
+		}
+		cache[serverName] = withheld
+		return withheld
+	}
 }
 
 // GetServerLogs returns recent log lines for a specific server

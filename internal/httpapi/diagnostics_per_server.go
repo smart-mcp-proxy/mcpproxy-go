@@ -16,8 +16,38 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
+
+// redactHealthDetail returns the health value with any URL secrets scrubbed
+// from its Detail string (Issue #872). The value from GetAllServers is a
+// *contracts.HealthStatus; it is cloned so the shared map is not mutated. When
+// reveal is true, or the value is not a health struct, it passes through as-is.
+func redactHealthDetail(healthRaw interface{}, reveal bool) interface{} {
+	if reveal {
+		return healthRaw
+	}
+	hs, ok := healthRaw.(*contracts.HealthStatus)
+	if !ok || hs == nil || hs.Detail == "" {
+		return healthRaw
+	}
+	clone := *hs
+	clone.Detail = oauth.RedactSensitiveData(clone.Detail)
+	return &clone
+}
+
+// redactDiagnosticCause scrubs URL secrets from the diagnostic `cause` string
+// in place (Issue #872). No-op when reveal is true or no cause is present.
+func redactDiagnosticCause(diag map[string]interface{}, reveal bool) {
+	if reveal || diag == nil {
+		return
+	}
+	if cause, ok := diag["cause"].(string); ok && cause != "" {
+		diag["cause"] = oauth.RedactSensitiveData(cause)
+	}
+}
 
 // handleGetServerDiagnostics returns the per-server diagnostic snapshot.
 // See spec 044 / contracts/diagnostics-openapi.yaml.
@@ -49,11 +79,20 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Issue #872: health.detail and diagnostic.cause echo the raw connect
+	// error, which carries the full upstream URL (query secrets and all).
+	// Scrub them in parity with the /api/v1/servers list route unless the
+	// operator opted out via reveal_secret_headers.
+	reveal := false
+	if cfg, cfgErr := s.controller.GetConfig(); cfgErr == nil && cfg != nil {
+		reveal = cfg.RevealSecretHeaders
+	}
+
 	resp := map[string]interface{}{
 		"server":    serverID,
 		"connected": hit["connected"],
 		"status":    hit["status"],
-		"health":    hit["health"],
+		"health":    redactHealthDetail(hit["health"], reveal),
 	}
 	// The raw map values for diagnostic fields are typed
 	// (diagnostics.Code, diagnostics.Severity, []diagnostics.FixStep) which
@@ -65,8 +104,14 @@ func (s *Server) handleGetServerDiagnostics(w http.ResponseWriter, r *http.Reque
 			_ = json.Unmarshal(raw, &normalized)
 		}
 		if normalized != nil {
+			redactDiagnosticCause(normalized, reveal)
 			resp["diagnostic"] = normalized
 		} else {
+			// Normalization failed (rare); still scrub the raw map if that's
+			// what we're about to emit so the secret doesn't leak on this path.
+			if rawMap, ok2 := diag.(map[string]interface{}); ok2 {
+				redactDiagnosticCause(rawMap, reveal)
+			}
 			resp["diagnostic"] = diag
 		}
 		if code, ok2 := hit["error_code"]; ok2 {

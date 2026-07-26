@@ -10,6 +10,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 )
 
 // LiveClient talks to a running mcpproxy instance (e.g. the bench
@@ -159,7 +161,10 @@ func (c *LiveClient) Search(ctx context.Context, query string, limit int) (ranke
 	}
 	ranked = make([]string, 0, len(resp.Results))
 	for _, r := range resp.Results {
-		ranked = append(ranked, r.Tool.ServerName+":"+r.Tool.Name)
+		// The search endpoint returns canonical "server:tool" names since #871;
+		// CanonicalToolName keeps compatibility with older proxies that return
+		// the bare tool name.
+		ranked = append(ranked, index.CanonicalToolName(r.Tool.ServerName, r.Tool.Name))
 	}
 	return ranked, latency, nil
 }

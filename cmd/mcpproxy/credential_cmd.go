@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Server-edition flags for the credential command group. The credential broker
@@ -119,22 +118,29 @@ Examples:
 // --- client wiring ---
 
 // resolveCredentialBaseURL determines the server base URL from the --url flag,
-// the MCPPROXY_SERVER_URL env var, or the local listen address in config.
-func resolveCredentialBaseURL() string {
+// the MCPPROXY_SERVER_URL env var, or the local listen address in config. An
+// explicitly passed --config must fail loudly; only the implicit default-path
+// load falls back to the default URL.
+func resolveCredentialBaseURL() (string, error) {
 	if credServerURL != "" {
-		return strings.TrimRight(credServerURL, "/")
+		return strings.TrimRight(credServerURL, "/"), nil
 	}
 	if env := os.Getenv("MCPPROXY_SERVER_URL"); env != "" {
-		return strings.TrimRight(env, "/")
+		return strings.TrimRight(env, "/"), nil
 	}
-	if cfg, err := config.Load(); err == nil && cfg.Listen != "" {
+	cfg, err := loadCredentialConfig()
+	if err != nil {
+		if configFile != "" {
+			return "", fmt.Errorf("failed to load config: %w", err)
+		}
+	} else if cfg.Listen != "" {
 		listen := cfg.Listen
 		if strings.HasPrefix(listen, ":") {
 			listen = "127.0.0.1" + listen
 		}
-		return "http://" + listen
+		return "http://" + listen, nil
 	}
-	return "http://127.0.0.1:8080"
+	return "http://127.0.0.1:8080", nil
 }
 
 // resolveCredentialToken returns the user JWT from --token or MCPPROXY_TOKEN.
@@ -145,16 +151,22 @@ func resolveCredentialToken() string {
 	return os.Getenv("MCPPROXY_TOKEN")
 }
 
-func newCredentialClient() (*cliclient.Client, string) {
-	baseURL := resolveCredentialBaseURL()
+func newCredentialClient() (*cliclient.Client, string, error) {
+	baseURL, err := resolveCredentialBaseURL()
+	if err != nil {
+		return nil, "", err
+	}
 	logger, _ := zap.NewProduction()
-	return cliclient.NewClientWithBearer(baseURL, resolveCredentialToken(), logger.Sugar()), baseURL
+	return cliclient.NewClientWithBearer(baseURL, resolveCredentialToken(), logger.Sugar()), baseURL, nil
 }
 
 // --- run functions ---
 
 func runCredentialList(_ *cobra.Command, _ []string) error {
-	client, _ := newCredentialClient()
+	client, _, err := newCredentialClient()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -166,7 +178,10 @@ func runCredentialList(_ *cobra.Command, _ []string) error {
 }
 
 func runCredentialStatus(_ *cobra.Command, args []string) error {
-	client, _ := newCredentialClient()
+	client, _, err := newCredentialClient()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -182,7 +197,10 @@ func runCredentialStatus(_ *cobra.Command, args []string) error {
 }
 
 func runCredentialConnect(_ *cobra.Command, args []string) error {
-	baseURL := resolveCredentialBaseURL()
+	baseURL, err := resolveCredentialBaseURL()
+	if err != nil {
+		return err
+	}
 	connectURL := credentialConnectURL(baseURL, args[0])
 
 	format := ResolveOutputFormat()
@@ -196,7 +214,10 @@ func runCredentialConnect(_ *cobra.Command, args []string) error {
 }
 
 func runCredentialRemove(_ *cobra.Command, args []string) error {
-	client, _ := newCredentialClient()
+	client, _, err := newCredentialClient()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
