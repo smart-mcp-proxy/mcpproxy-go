@@ -444,6 +444,9 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			//   - "auto"               quarantine disabled globally or skip_quarantine
 			//   - "auto-baseline"      trusted server establishing its baseline (MCP-2931 #1)
 			//   - "auto-approve-changes" trusted server, post-baseline addition, operator opted in (MCP-2931 #3)
+			//   - "scan-approved"      spec 086: trust_mode:scan, offline TPA scan of
+			//                          the new tool came back green (fails closed to
+			//                          pending on any non-green/degraded/absent verdict)
 			// Otherwise the tool is pending and blocked until reviewed (MCP-2931 #2).
 			autoApprove := false
 			approvedBy := ""
@@ -454,6 +457,8 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				autoApprove, approvedBy = true, "auto-baseline"
 			case autoApproveChanges:
 				autoApprove, approvedBy = true, "auto-approve-changes"
+			case scanMode && r.scanChangeIsClean(serverName, tool):
+				autoApprove, approvedBy = true, "scan-approved"
 			}
 
 			if autoApprove {

@@ -1481,7 +1481,16 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	quarantined := true
 	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
 		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
-			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{TrustMode: req.TrustMode})
+			// Carry BOTH the explicit trust_mode AND the legacy
+			// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
+			// admission decision it will resolve on the persisted server: a client
+			// that sets auto_approve_tool_changes:true but omits trust_mode must be
+			// admitted as auto (not left quarantined while the saved server reads
+			// auto — a contradictory state). (codex review, spec 086.)
+			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
+				TrustMode:              req.TrustMode,
+				AutoApproveToolChanges: req.AutoApproveToolChanges,
+			})
 		}
 	}
 	if req.Quarantined != nil {

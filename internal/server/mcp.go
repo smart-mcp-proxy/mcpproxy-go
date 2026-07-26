@@ -905,6 +905,10 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithString("init_timeout",
 				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
 			),
+			mcp.WithString("trust_mode",
+				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch."),
+				mcp.Enum("auto", "scan", "manual"),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -4491,6 +4495,9 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 	}
 	if command := request.GetString("command", ""); command != "" {
 		patch.Command = command
+	}
+	if trustMode := request.GetString("trust_mode", ""); trustMode != "" {
+		patch.TrustMode = trustMode // spec 086: allow changing the per-server trust tier via update/patch
 	}
 
 	// Boolean fields - only update if explicitly changed from existing value
