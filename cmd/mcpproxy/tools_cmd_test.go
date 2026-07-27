@@ -416,7 +416,8 @@ func TestFormatToolHold_ExtractsTPASignature(t *testing.T) {
 }
 
 // TestFormatToolHold_NonBundleAndOverflow: non-bundle check ids render verbatim,
-// duplicates collapse, and the list is capped with a "+N" suffix.
+// duplicates collapse, and the list is capped with a "+N" suffix. Matched TPA
+// ids are hoisted ahead of the raw heuristic check ids so truncation keeps them.
 func TestFormatToolHold_NonBundleAndOverflow(t *testing.T) {
 	tool := map[string]interface{}{
 		"held_reason": "scan_findings",
@@ -427,7 +428,28 @@ func TestFormatToolHold_NonBundleAndOverflow(t *testing.T) {
 			"unicode.hidden",
 		},
 	}
-	assert.Equal(t, "phrase.injection,TPA-2026-0001 +1", formatToolHold(tool))
+	assert.Equal(t, "TPA-2026-0001,phrase.injection +1", formatToolHold(tool))
+}
+
+// TestFormatToolHold_TPAPrioritizedOverHeuristics reproduces the RT-SRF-05
+// regression: the real scanner emits its heuristic checks BEFORE the tpa.*
+// checks, so a naive "first two in producer order" truncation would collapse the
+// matched TPA id into the "+N" suffix and never name it. FR-018 requires the
+// operator-facing HELD column to surface the TPA id, so it must win the cap.
+func TestFormatToolHold_TPAPrioritizedOverHeuristics(t *testing.T) {
+	tool := map[string]interface{}{
+		"held_reason": "scan_findings",
+		"held_signals": []interface{}{
+			"directive.imperative",
+			"capability.mismatch",
+			"secret.embedded",
+			"tpa.TPA-2026-0001.hidden_instruction",
+			"tpa.TPA-2026-0003.hidden_tag",
+		},
+	}
+	got := formatToolHold(tool)
+	assert.Equal(t, "TPA-2026-0001,TPA-2026-0003 +3", got)
+	assert.Contains(t, got, "TPA-2026-0001")
 }
 
 // TestFormatToolHold_BackCompat: tools with no hold evidence (every record

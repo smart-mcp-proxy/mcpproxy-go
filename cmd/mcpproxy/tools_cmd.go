@@ -320,7 +320,13 @@ const maxHeldSignalsShown = 2
 // that are not held by the scan gate, so records predating the field render
 // exactly as before.
 func formatToolHold(t map[string]interface{}) string {
-	labels := make([]string, 0, maxHeldSignalsShown)
+	// Collect matched TPA signature ids and the remaining raw check ids
+	// separately, preserving producer order within each group. TPA ids are
+	// rendered first so the "+N" truncation never hides them — the scanner
+	// emits its heuristic checks (directive.imperative, capability.mismatch, …)
+	// ahead of the tpa.* checks, and FR-018 requires the operator-facing view
+	// to name the matched TPA-YYYY-NNNN id(s).
+	var tpaLabels, otherLabels []string
 	seen := make(map[string]bool)
 	for _, raw := range getArrayField(t, "held_signals") {
 		signal, ok := raw.(string)
@@ -328,15 +334,22 @@ func formatToolHold(t map[string]interface{}) string {
 			continue
 		}
 		label := signal
+		isTPA := false
 		if m := tpaSignatureRe.FindString(signal); m != "" {
 			label = m
+			isTPA = true
 		}
 		if seen[label] {
 			continue
 		}
 		seen[label] = true
-		labels = append(labels, label)
+		if isTPA {
+			tpaLabels = append(tpaLabels, label)
+		} else {
+			otherLabels = append(otherLabels, label)
+		}
 	}
+	labels := append(tpaLabels, otherLabels...)
 
 	if len(labels) == 0 {
 		// A hold with no signals means the scan itself could not be trusted
