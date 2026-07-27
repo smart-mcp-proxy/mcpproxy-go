@@ -3321,7 +3321,26 @@ type configServerInfoProvider struct {
 	cfg        *config.Config
 	liveConfig func() *config.Config
 	server     *Server
+	// liveTools resolves the live upstream client used as the tool-export
+	// fallback for quarantined servers (see GetServerTools). nil in production —
+	// it defaults to the upstream manager's managed client; tests inject a stub.
+	liveTools func(serverName string) (scanToolLister, bool)
 }
+
+// scanToolLister is the minimal live-client capability the security-scan tool
+// export needs: ask a CONNECTED upstream server for its current tool
+// definitions. *managed.Client satisfies it. Kept as a narrow interface so the
+// export path is unit-testable without a real upstream process.
+type scanToolLister interface {
+	IsConnected() bool
+	ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
+}
+
+// liveToolExportTimeout bounds the inspection-only tools/list call made when a
+// quarantined server's tool definitions are exported for a security scan. Same
+// order of magnitude as the quarantine-inspection surface's own 10s budget,
+// with headroom for slow stdio servers.
+const liveToolExportTimeout = 15 * time.Second
 
 // currentConfig returns the live config when an accessor is wired, otherwise the
 // boot-time snapshot.
@@ -3355,11 +3374,157 @@ func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.Se
 	return nil, fmt.Errorf("server %q not found in config", serverName)
 }
 
+// GetServerTools returns a server's tool definitions for security scanning.
+//
+// Fast path: the StateView tool cache (Server.GetServerTools).
+//
+// Fallback (spec 086 FR-011): a LIVE tools/list against the managed upstream
+// client. This is required, not an optimization — quarantined servers are
+// deliberately excluded from tool discovery and indexing (issue #873:
+// "Skipping quarantined client for tool discovery"), so their StateView tool
+// cache is empty BY CONSTRUCTION. A scan-mode server is quarantined on
+// admission, which is precisely when the admission baseline scan runs, so the
+// export always returned 0 tools and StartScan aborted with "tool export failed
+// (server is connected but returned 0 tools)": the server could never be
+// scanned, never auto-admitted on a green verdict, and never surfaced a TPA
+// finding on a red one.
+//
+// The fallback uses the same direct-client seam the quarantine inspection
+// surface already uses (quarantine_security/inspect_quarantined →
+// managed.Client.ListTools) and is scoped to scanning/inspection: the retrieved
+// definitions are written only into the scan's tools.json, never into StateView
+// or the Bleve index, so quarantined tools stay un-indexed and un-callable.
+// Only this scanner-facing provider has the fallback; general tool discovery is
+// untouched.
 func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	var (
+		cached    []map[string]interface{}
+		cachedErr error
+	)
 	if p.server != nil {
-		return p.server.GetServerTools(serverName)
+		cached, cachedErr = p.server.GetServerTools(serverName)
+		if cachedErr == nil && len(cached) > 0 {
+			return cached, nil
+		}
+	} else {
+		cachedErr = fmt.Errorf("server tools not available")
 	}
-	return nil, fmt.Errorf("server tools not available")
+
+	live, liveErr := p.liveServerTools(serverName)
+	if liveErr == nil && len(live) > 0 {
+		return live, nil
+	}
+	if liveErr != nil && p.server != nil {
+		// Diagnosability: without this the only trace of a failed admission scan
+		// is the scanner's generic "returned 0 tools" warning.
+		p.server.logger.Debug("Live tool export fallback unavailable for scan",
+			zap.String("server", serverName), zap.Error(liveErr))
+	}
+
+	if cachedErr != nil {
+		return nil, cachedErr
+	}
+	return cached, nil
+}
+
+// liveServerTools performs the inspection-only tools/list against the live
+// upstream client and maps the result into the same wire shape the cached path
+// returns (what exportToolDefinitions writes to tools.json).
+func (p *configServerInfoProvider) liveServerTools(serverName string) ([]map[string]interface{}, error) {
+	lister, ok := p.resolveToolLister(serverName)
+	if !ok || lister == nil {
+		return nil, fmt.Errorf("no live client for server %q", serverName)
+	}
+	// Never poke a disconnected client: ListTools would fail anyway, and the
+	// caller's "server is disconnected" error is the more useful message.
+	if !lister.IsConnected() {
+		return nil, fmt.Errorf("server %q is not connected", serverName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), liveToolExportTimeout)
+	defer cancel()
+	tools, err := lister.ListTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		result = append(result, toolMetadataToScanMap(serverName, tool))
+	}
+	if p.server != nil {
+		p.server.logger.Info("Exported tool definitions for scanning via live client (quarantine-safe path)",
+			zap.String("server", serverName),
+			zap.Int("tools", len(result)))
+	}
+	return result, nil
+}
+
+// resolveToolLister returns the live upstream client for serverName. Tests
+// override it via the liveTools hook.
+func (p *configServerInfoProvider) resolveToolLister(serverName string) (scanToolLister, bool) {
+	if p.liveTools != nil {
+		return p.liveTools(serverName)
+	}
+	if p.server == nil || p.server.runtime == nil {
+		return nil, false
+	}
+	mgr := p.server.runtime.UpstreamManager()
+	if mgr == nil {
+		return nil, false
+	}
+	client, exists := mgr.GetClient(serverName)
+	if !exists || client == nil {
+		return nil, false
+	}
+	return client, true
+}
+
+// toolMetadataToScanMap converts a live tool definition into the tools.json
+// shape the scanners parse (name / description / inputSchema), mirroring
+// Server.GetServerTools' output.
+func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[string]interface{} {
+	inputSchema := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+	if tool.ParamsJSON != "" {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(tool.ParamsJSON), &parsed); err == nil {
+			inputSchema = parsed
+		}
+	}
+	toolMap := map[string]interface{}{
+		"name":        tool.Name,
+		"description": tool.Description,
+		"inputSchema": inputSchema,
+		"server_name": serverName,
+	}
+	if tool.Annotations != nil {
+		annotations := map[string]interface{}{}
+		if tool.Annotations.Title != "" {
+			annotations["title"] = tool.Annotations.Title
+		}
+		if tool.Annotations.ReadOnlyHint != nil {
+			annotations["readOnlyHint"] = *tool.Annotations.ReadOnlyHint
+		}
+		if tool.Annotations.DestructiveHint != nil {
+			annotations["destructiveHint"] = *tool.Annotations.DestructiveHint
+		}
+		if tool.Annotations.IdempotentHint != nil {
+			annotations["idempotentHint"] = *tool.Annotations.IdempotentHint
+		}
+		if tool.Annotations.OpenWorldHint != nil {
+			annotations["openWorldHint"] = *tool.Annotations.OpenWorldHint
+		}
+		if len(annotations) > 0 {
+			toolMap["annotations"] = annotations
+		}
+	}
+	return toolMap
 }
 
 // GetAllServerTools implements scanner's optional allServerToolsProvider: it
