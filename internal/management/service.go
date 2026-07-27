@@ -974,6 +974,14 @@ func (s *service) GetServerTools(ctx context.Context, name string) ([]map[string
 		}
 		if record, err := s.runtime.GetToolApproval(name, toolName); err == nil && record != nil {
 			tools[i]["approval_status"] = string(record.Status)
+			// Scan-gate hold evidence (spec 086 FR-018): why the tool is held,
+			// including the matched TPA signature / check ids. Omitted entirely
+			// when there is no scan hold, so pre-existing records are unchanged.
+			if record.HeldReason != "" {
+				tools[i]["held_reason"] = record.HeldReason
+				tools[i]["held_verdict"] = record.HeldVerdict
+				tools[i]["held_signals"] = record.HeldSignals
+			}
 		}
 	}
 

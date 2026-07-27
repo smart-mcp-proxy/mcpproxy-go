@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -182,9 +183,11 @@ func (r *Runtime) enforceInvariant(serverName, toolName, oldStatus, newStatus st
 // auto-approvable state — is a "clean" verdict with full scanner coverage. A
 // non-clean verdict ("warnings"/"dangerous"), degraded/absent coverage, or a
 // missing bundle all fail closed (return false) so the record stays held for
-// human review. Matched TPA signal ids are logged for operator transparency
-// (FR-018).
-func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata) bool {
+// human review. On a hold it also returns the scan evidence (verdict + matched
+// check ids) so the caller can persist it onto the approval record and the
+// tool-approval surfaces can tell the operator WHY the tool is held (FR-018).
+// The evidence is nil when the tool is clean.
+func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata) (bool, *scanHoldEvidence) {
 	// Feed the changed tool the SAME cross-server context the async full-server
 	// scan gets: every OTHER connected server's current tools. Without this the
 	// hard-tier shadowing/impersonation checks are inert (they only see the single
@@ -194,11 +197,18 @@ func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata
 	peers := r.collectPeerToolMetadata(serverName)
 	verdict, findings, coverageOK := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{tool}, peers)
 	if coverageOK && verdict == "clean" {
-		return true
+		return true, nil
 	}
 	var signals []string
 	for _, f := range findings {
 		signals = append(signals, f.Signals...)
+	}
+	// Distinguish "the scan found something" from "the scan could not be
+	// trusted": the latter has no findings to show, so the operator needs the
+	// reason itself to make sense of an evidence-free hold.
+	reason := storage.ToolHeldReasonScanFindings
+	if !coverageOK && len(signals) == 0 {
+		reason = storage.ToolHeldReasonScanCoverage
 	}
 	r.logger.Info("trust_mode scan held tool change for review (non-green verdict)",
 		zap.String("server", serverName),
@@ -206,7 +216,50 @@ func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata
 		zap.String("verdict", verdict),
 		zap.Bool("coverage_ok", coverageOK),
 		zap.Strings("tpa_signals", signals))
-	return false
+	return false, &scanHoldEvidence{Reason: reason, Verdict: verdict, Signals: signals}
+}
+
+// scanHoldEvidence is the compact, serializable explanation of a trust_mode:
+// scan hold, carried from the gate onto the tool-approval record (FR-018).
+type scanHoldEvidence struct {
+	Reason  string   // one of storage.ToolHeldReason*
+	Verdict string   // "clean" | "warnings" | "dangerous"
+	Signals []string // matched deterministic check ids (incl. TPA signature ids)
+}
+
+// applyTo writes the evidence onto an approval record; a nil evidence clears any
+// previously recorded hold so the record always describes its CURRENT state.
+func (e *scanHoldEvidence) applyTo(record *storage.ToolApprovalRecord) {
+	if record == nil {
+		return
+	}
+	if e == nil {
+		record.ClearScanHold()
+		return
+	}
+	record.SetScanHold(e.Reason, e.Verdict, e.Signals)
+}
+
+// recordScanHold updates an ALREADY-PERSISTED approval record with the current
+// scan-hold evidence, persisting only when it actually changed. Discovery runs
+// this gate on every reconnect, so the no-op guard keeps a steady-state held
+// tool from generating a BBolt write per pass.
+func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.ToolApprovalRecord, evidence *scanHoldEvidence) {
+	if existing == nil || r.storageManager == nil {
+		return
+	}
+	prevReason, prevVerdict, prevSignals := existing.HeldReason, existing.HeldVerdict, existing.HeldSignals
+	evidence.applyTo(existing)
+	if existing.HeldReason == prevReason && existing.HeldVerdict == prevVerdict &&
+		slices.Equal(existing.HeldSignals, prevSignals) {
+		return
+	}
+	if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
+		r.logger.Debug("Failed to persist scan-hold evidence on tool approval",
+			zap.String("server", serverName),
+			zap.String("tool", toolName),
+			zap.Error(saveErr))
+	}
 }
 
 // collectPeerToolMetadata returns every OTHER connected server's current tools,
@@ -284,6 +337,7 @@ func (r *Runtime) scanApproveChange(serverName, toolName string, existing *stora
 	existing.PreviousDescription = ""
 	existing.PreviousSchema = ""
 	existing.PreviousOutputSchema = ""
+	existing.ClearScanHold() // the record is no longer held — drop stale evidence
 	if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 		*existing = snapshot // restore so the caller's mark-changed path sees true old values
 		r.logger.Error("Failed to scan-approve tool change",
@@ -451,6 +505,9 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// Otherwise the tool is pending and blocked until reviewed (MCP-2931 #2).
 			autoApprove := false
 			approvedBy := ""
+			// holdEvidence carries the scan verdict + matched TPA/check ids onto
+			// the pending record when the scan gate refuses a new tool (FR-018).
+			var holdEvidence *scanHoldEvidence
 			switch {
 			case !enforceNewTools:
 				autoApprove, approvedBy = true, "auto"
@@ -458,8 +515,12 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				autoApprove, approvedBy = true, "auto-baseline"
 			case autoApproveChanges:
 				autoApprove, approvedBy = true, "auto-approve-changes"
-			case scanMode && r.scanChangeIsClean(serverName, tool):
-				autoApprove, approvedBy = true, "scan-approved"
+			case scanMode:
+				if clean, evidence := r.scanChangeIsClean(serverName, tool); clean {
+					autoApprove, approvedBy = true, "scan-approved"
+				} else {
+					holdEvidence = evidence
+				}
 			}
 
 			if autoApprove {
@@ -512,6 +573,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				CurrentSchema:       schemaJSON,
 				CurrentOutputSchema: outputSchemaJSON,
 			}
+			holdEvidence.applyTo(record)
 
 			if saveErr := r.storageManager.SaveToolApproval(record); saveErr != nil {
 				r.logger.Error("Failed to save tool approval record",
@@ -554,6 +616,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
+				existing.ClearScanHold()
 				needsSave = true
 				r.logger.Info("Tool restored to approved (hash matches after formula update)",
 					zap.String("server", serverName),
@@ -626,6 +689,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 					r.logger.Error("Failed to promote pending tool approval",
 						zap.String("server", serverName), zap.String("tool", toolName),
@@ -684,6 +748,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Changed tool restored (reverted to previous description)",
 						zap.String("server", serverName),
@@ -712,6 +777,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Changed tool auto-approved (auto_approve_tool_changes enabled)",
 						zap.String("server", serverName),
@@ -724,11 +790,14 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// trust_mode: scan (spec 086 stage 2): a still-changed record is
 			// re-baselined ONLY when a synchronous in-process TPA scan of the
 			// current (changed) tool returns a green verdict. A non-green/degraded
-			// verdict falls through and keeps the tool blocked (fail closed).
-			if scanMode && r.scanChangeIsClean(serverName, tool) {
-				if r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
+			// verdict falls through and keeps the tool blocked (fail closed), with
+			// the matched TPA/check ids recorded on the record (FR-018).
+			if scanMode {
+				clean, evidence := r.scanChangeIsClean(serverName, tool)
+				if clean && r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
 					continue
 				}
+				r.recordScanHold(serverName, toolName, existing, evidence)
 			}
 			// Tool still has the changed description — keep it blocked
 			if globalEnabled {
@@ -782,6 +851,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 					r.logger.Debug("Failed to migrate changed tool approval hash",
 						zap.String("server", serverName),
@@ -834,6 +904,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Tool auto-approved (identical content, hash formula change)",
 						zap.String("server", serverName),
@@ -879,6 +950,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.CurrentOutputSchema = outputSchemaJSON
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr == nil {
 					r.logger.Info("Tool auto-approved (description matches, schema format differs)",
 						zap.String("server", serverName),
@@ -909,6 +981,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 				existing.PreviousDescription = ""
 				existing.PreviousSchema = ""
 				existing.PreviousOutputSchema = ""
+				existing.ClearScanHold()
 				if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 					r.logger.Error("Failed to auto-approve changed tool",
 						zap.String("server", serverName),
@@ -930,10 +1003,16 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			// Any non-green ("warnings"/"dangerous"), degraded, or absent verdict
 			// falls through to mark-changed below (fail closed) — the change is held
 			// for human review exactly as in manual mode.
-			if scanMode && r.scanChangeIsClean(serverName, tool) {
-				if r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
+			// The hold evidence (verdict + matched TPA/check ids) rides along onto
+			// the changed record so the tool-approval surfaces can explain the hold
+			// (FR-018).
+			var holdEvidence *scanHoldEvidence
+			if scanMode {
+				clean, evidence := r.scanChangeIsClean(serverName, tool)
+				if clean && r.scanApproveChange(serverName, toolName, existing, tool, schemaJSON, outputSchemaJSON, currentHash) {
 					continue
 				}
+				holdEvidence = evidence
 			}
 
 			oldDesc := existing.CurrentDescription
@@ -955,6 +1034,7 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 			existing.CurrentDescription = tool.Description
 			existing.CurrentSchema = schemaJSON
 			existing.CurrentOutputSchema = outputSchemaJSON
+			holdEvidence.applyTo(existing)
 
 			if saveErr := r.storageManager.SaveToolApproval(existing); saveErr != nil {
 				r.logger.Error("Failed to update changed tool approval",
@@ -1156,6 +1236,7 @@ func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy
 		record.PreviousDescription = ""
 		record.PreviousSchema = ""
 		record.PreviousOutputSchema = ""
+		record.ClearScanHold()
 
 		if err := r.storageManager.SaveToolApproval(record); err != nil {
 			return err
@@ -1547,6 +1628,7 @@ func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy st
 		record.PreviousDescription = ""
 		record.PreviousSchema = ""
 		record.PreviousOutputSchema = ""
+		record.ClearScanHold()
 		record.Disabled = true
 
 		if err := r.storageManager.SaveToolApproval(record); err != nil {

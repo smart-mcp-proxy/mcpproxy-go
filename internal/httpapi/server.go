@@ -2867,6 +2867,11 @@ func (s *Server) enrichServerTools(serverID string, tools []map[string]interface
 		if err == nil && record != nil {
 			typedTools[i].ApprovalStatus = record.Status
 			typedTools[i].Disabled = record.Disabled
+			// Scan-gate hold evidence (spec 086 FR-018) — empty for tools that
+			// are not held by trust_mode: scan and for pre-existing records.
+			typedTools[i].HeldReason = record.HeldReason
+			typedTools[i].HeldVerdict = record.HeldVerdict
+			typedTools[i].HeldSignals = record.HeldSignals
 			enrichedCount++
 		} else if i == 0 {
 			firstErr = err
@@ -5230,6 +5235,11 @@ func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 		"current_schema":         record.CurrentSchema,
 		"previous_output_schema": record.PreviousOutputSchema,
 		"current_output_schema":  record.CurrentOutputSchema,
+		// Why the change is held, when trust_mode: scan produced the hold
+		// (spec 086 FR-018). Absent for holds with no scan evidence.
+		"held_reason":  record.HeldReason,
+		"held_verdict": record.HeldVerdict,
+		"held_signals": record.HeldSignals,
 	})
 }
 

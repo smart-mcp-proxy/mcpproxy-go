@@ -2320,6 +2320,23 @@ components:
             available without a second round-trip to the approvals endpoint. Absent
             in the JSON when false (default) to keep responses compact.
           type: boolean
+        held_reason:
+          description: |-
+            HeldReason, HeldVerdict and HeldSignals mirror the same-named fields on
+            storage.ToolApprovalRecord: the offline-scan evidence that made
+            trust_mode: scan hold this tool for review (spec 086 FR-018). HeldSignals
+            names the matched deterministic check ids, e.g.
+            "tpa.TPA-2026-0001.hidden_instruction", so a reviewer can see WHY the tool
+            is held. All three are omitted for tools that are not held by the scan gate
+            (including every record written before the field existed).
+          type: string
+        held_signals:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        held_verdict:
+          type: string
         last_used:
           type: string
         name:

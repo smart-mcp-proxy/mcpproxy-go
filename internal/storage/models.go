@@ -193,6 +193,27 @@ const (
 	ToolApprovalStatusChanged  = "changed"
 )
 
+// Tool hold reasons (spec 086, FR-018). They explain why the trust_mode: scan
+// gate refused to auto-approve a tool and left it for human review, so the
+// tool-approval surfaces can show WHY a tool is held, not merely THAT it is.
+// Empty on records held for any other reason (manual mode, plain quarantine) and
+// on every record written before this field existed — back-compat by omission.
+const (
+	// ToolHeldReasonScanFindings: the offline TPA scan returned a non-clean
+	// verdict. HeldSignals names the matched check ids.
+	ToolHeldReasonScanFindings = "scan_findings"
+	// ToolHeldReasonScanCoverage: the scan itself could not be trusted (a check
+	// failed, or the signature bundle was unavailable), so the gate failed closed
+	// with no findings to show.
+	ToolHeldReasonScanCoverage = "scan_coverage"
+)
+
+// MaxToolHeldSignals caps how many matched check ids are persisted on an
+// approval record. The evidence is a review hint, not an audit log (the full
+// finding set lives on the scan report), so a small deterministic prefix keeps
+// records compact.
+const MaxToolHeldSignals = 16
+
 // ToolApprovalRecord represents a tool's approval status for tool-level quarantine.
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
@@ -212,6 +233,56 @@ type ToolApprovalRecord struct {
 	PreviousOutputSchema string    `json:"previous_output_schema,omitempty"`
 	CurrentOutputSchema  string    `json:"current_output_schema,omitempty"`
 	Disabled             bool      `json:"disabled,omitempty"`
+
+	// HeldReason, HeldVerdict and HeldSignals carry the scan evidence that made
+	// the trust_mode: scan gate hold this tool for human review (spec 086
+	// FR-018). They are set ONLY on the pass that performs the hold and cleared
+	// whenever the record leaves the held state, so they always describe the
+	// CURRENT hold. All three are additive and omitempty: records written before
+	// this field existed (and every record held for a non-scan reason) decode
+	// with them empty and render as they always did.
+	//
+	// HeldReason is one of the ToolHeldReason* constants.
+	HeldReason string `json:"held_reason,omitempty"`
+	// HeldVerdict is the offline scanner's baseline verdict at hold time
+	// ("dangerous" / "warnings"; "clean" when only coverage failed).
+	HeldVerdict string `json:"held_verdict,omitempty"`
+	// HeldSignals lists the deterministic check ids that matched, e.g.
+	// "tpa.TPA-2026-0001.hidden_instruction" or "phrase.injection". Deduplicated,
+	// order-stable, capped at MaxToolHeldSignals.
+	HeldSignals []string `json:"held_signals,omitempty"`
+}
+
+// SetScanHold records the evidence of a trust_mode: scan hold on the record.
+// Signals are deduplicated in first-seen order and capped at MaxToolHeldSignals.
+func (r *ToolApprovalRecord) SetScanHold(reason, verdict string, signals []string) {
+	seen := make(map[string]bool, len(signals))
+	out := make([]string, 0, len(signals))
+	for _, s := range signals {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+		if len(out) == MaxToolHeldSignals {
+			break
+		}
+	}
+	r.HeldReason = reason
+	r.HeldVerdict = verdict
+	if len(out) == 0 {
+		r.HeldSignals = nil
+		return
+	}
+	r.HeldSignals = out
+}
+
+// ClearScanHold drops any scan-hold evidence. Called on every transition out of
+// the held state so an approved record never renders a stale TPA badge.
+func (r *ToolApprovalRecord) ClearScanHold() {
+	r.HeldReason = ""
+	r.HeldVerdict = ""
+	r.HeldSignals = nil
 }
 
 // ToolApprovalKey returns the storage key for a tool approval record.

@@ -3044,6 +3044,15 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 			"enabled":     !r.Disabled,
 			"disabled":    r.Disabled,
 		}
+		// Scan-gate hold evidence (spec 086 FR-018): name the matched TPA
+		// signature / check ids so a reviewer sees WHY the tool is held, not just
+		// that it is. Omitted when the hold has no scan evidence (manual mode,
+		// plain quarantine, records predating the field).
+		if r.HeldReason != "" {
+			tool["held_reason"] = r.HeldReason
+			tool["held_verdict"] = r.HeldVerdict
+			tool["held_signals"] = r.HeldSignals
+		}
 		if r.Disabled {
 			disabledCount++
 		}

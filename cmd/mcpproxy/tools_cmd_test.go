@@ -400,3 +400,76 @@ func toolNames(tools []map[string]interface{}) []string {
 	}
 	return names
 }
+
+// TestFormatToolHold_ExtractsTPASignature: the HELD column must name the matched
+// TPA signature id (spec 086 FR-018) so an operator reviewing a held tool change
+// sees WHY it is held, not merely that it is.
+func TestFormatToolHold_ExtractsTPASignature(t *testing.T) {
+	tool := map[string]interface{}{
+		"name":            "create_issue",
+		"approval_status": "changed",
+		"held_reason":     "scan_findings",
+		"held_verdict":    "dangerous",
+		"held_signals":    []interface{}{"tpa.TPA-2026-0001.hidden_instruction"},
+	}
+	assert.Equal(t, "TPA-2026-0001", formatToolHold(tool))
+}
+
+// TestFormatToolHold_NonBundleAndOverflow: non-bundle check ids render verbatim,
+// duplicates collapse, and the list is capped with a "+N" suffix.
+func TestFormatToolHold_NonBundleAndOverflow(t *testing.T) {
+	tool := map[string]interface{}{
+		"held_reason": "scan_findings",
+		"held_signals": []interface{}{
+			"phrase.injection",
+			"tpa.TPA-2026-0001.hidden_instruction",
+			"tpa.TPA-2026-0001.hidden_comment_directive", // same signature → deduped
+			"unicode.hidden",
+		},
+	}
+	assert.Equal(t, "phrase.injection,TPA-2026-0001 +1", formatToolHold(tool))
+}
+
+// TestFormatToolHold_BackCompat: tools with no hold evidence (every record
+// written before the field existed, and every non-scan hold) render as "-";
+// an evidence-free coverage hold still names its reason.
+func TestFormatToolHold_BackCompat(t *testing.T) {
+	assert.Equal(t, "-", formatToolHold(map[string]interface{}{"name": "create_issue", "approval_status": "changed"}))
+	assert.Equal(t, "-", formatToolHold(map[string]interface{}{"held_signals": []interface{}{}}))
+	assert.Equal(t, "scan_coverage", formatToolHold(map[string]interface{}{"held_reason": "scan_coverage"}))
+}
+
+// TestOutputGlobalTools_HeldColumn verifies the global table renders the HELD
+// column and the matched TPA id for a scan-held tool.
+func TestOutputGlobalTools_HeldColumn(t *testing.T) {
+	tools := []map[string]interface{}{
+		{
+			"name":            "create_issue",
+			"server_name":     "github",
+			"description":     "Create a new issue",
+			"approval_status": "changed",
+			"held_reason":     "scan_findings",
+			"held_verdict":    "dangerous",
+			"held_signals":    []interface{}{"tpa.TPA-2026-0001.hidden_instruction"},
+			"usage":           float64(7),
+		},
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	globalOutputFormat = "table"
+	globalJSONOutput = false
+	err := outputGlobalTools(tools)
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	outStr := buf.String()
+
+	require.NoError(t, err)
+	assert.Contains(t, outStr, "HELD", "table must contain the HELD column")
+	assert.Contains(t, outStr, "TPA-2026-0001", "held tool must surface its matched TPA signature")
+}
