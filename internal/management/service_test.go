@@ -237,6 +237,38 @@ func TestListServers(t *testing.T) {
 		assert.Nil(t, byName["unset"].InitTimeout, "a server that never set init_timeout must omit it (nil)")
 	})
 
+	// Spec 086 (QA #919 CFG-06/SRF-07): trust_mode must project from the runtime
+	// serverMap onto contracts.Server so the per-server trust tier is readable
+	// back through GET /api/v1/servers, `mcpproxy upstream list -o json` and the
+	// SSE servers.changed embed — all of which share this projection.
+	t.Run("trust_mode projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "scanner", "name": "scanner", "enabled": true, "trust_mode": "scan"},
+			{"id": "trusted", "name": "trusted", "enabled": true, "trust_mode": "auto"},
+			{"id": "unset", "name": "unset", "enabled": true},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 3)
+
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "scanner")
+		assert.Equal(t, "scan", byName["scanner"].TrustMode)
+
+		require.Contains(t, byName, "trusted")
+		assert.Equal(t, "auto", byName["trusted"].TrustMode)
+
+		require.Contains(t, byName, "unset")
+		assert.Empty(t, byName["unset"].TrustMode,
+			"a server that never set trust_mode must keep it empty (omitted), not synthesized")
+	})
+
 	// T094: Test that TotalTools only counts enabled servers' tools (Issue #285 fix)
 	t.Run("TotalTools excludes disabled servers", func(t *testing.T) {
 		runtime := newMockRuntime()

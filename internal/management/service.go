@@ -486,6 +486,14 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.AutoApproveToolChanges = &v
 		}
 
+		// Spec 086: project the per-server trust tier (auto|scan|manual) so the
+		// GET payload, `mcpproxy upstream list` and the SSE servers.changed
+		// embed can read back the persisted mode. Plain string — an absent key
+		// leaves it empty, which contracts.Server omits from the wire.
+		if trustMode, ok := srvRaw["trust_mode"].(string); ok {
+			srv.TrustMode = trustMode
+		}
+
 		// MCP-3322: project the per-server init_timeout override. The runtime
 		// emits it as a duration string; accept a typed *config.Duration too in
 		// case the map was delivered without a JSON round-trip.

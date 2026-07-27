@@ -1188,6 +1188,14 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"health":          healthStatus, // Spec 013: Health is source of truth
 		}
 
+		// Spec 086: surface the per-server trust tier on the tray/legacy-REST
+		// projection too, so the httpapi fallback path (which runs this map
+		// through contracts.ConvertGenericServersToTyped) reads back the same
+		// mode as the management-service path. Raw value; omitted when unset.
+		if cfg != nil && cfg.TrustMode != "" {
+			serverMap["trust_mode"] = cfg.TrustMode
+		}
+
 		// Spec 039: Add security scan summary if available
 		if s.securityScanner != nil {
 			scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name)
@@ -1293,7 +1301,7 @@ func (s *Server) getAllServersLegacy() ([]map[string]interface{}, error) {
 			}
 		}
 
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":            server.Name,
 			"url":             server.URL,
 			"command":         server.Command,
@@ -1309,7 +1317,14 @@ func (s *Server) getAllServersLegacy() ([]map[string]interface{}, error) {
 			"should_retry":    false,
 			"retry_count":     0,
 			"last_retry_time": nil,
-		})
+		}
+
+		// Spec 086: per-server trust tier in parity with the StateView path.
+		if server.TrustMode != "" {
+			serverMap["trust_mode"] = server.TrustMode
+		}
+
+		result = append(result, serverMap)
 	}
 
 	return result, nil

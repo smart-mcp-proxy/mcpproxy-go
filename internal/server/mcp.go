@@ -3247,6 +3247,13 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			"updated":     server.Updated,
 		}
 
+		// Spec 086: surface the per-server trust tier so an agent can read back
+		// the mode it set via operation=add/update/patch. Raw configured value;
+		// omitted when never configured (resolution stays in EffectiveTrustMode).
+		if server.TrustMode != "" {
+			serverMap["trust_mode"] = server.TrustMode
+		}
+
 		// Add connection status information and calculate health
 		var connState string
 		var lastError string
