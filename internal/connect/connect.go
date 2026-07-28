@@ -439,7 +439,13 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 				continue
 			}
 			altRes, altErr := s.disconnectJSON(client, alt, serverName)
-			if altErr == nil && altRes != nil && altRes.Success {
+			if altErr != nil {
+				// An unreadable/malformed/comment-guarded alternate is a real
+				// failure — surfacing "not_found" would wrongly claim the entry
+				// is absent when we could not actually check the file.
+				return altRes, s.asAccessError(client, alt, altErr)
+			}
+			if altRes != nil && altRes.Success {
 				return altRes, nil
 			}
 		}

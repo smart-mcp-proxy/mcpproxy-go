@@ -268,6 +268,24 @@ func TestDisconnectOpencodeFindsEntryInOtherCandidate(t *testing.T) {
 	}
 }
 
+func TestDisconnectOpencodeAlternateCandidateErrorPropagates(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	home := t.TempDir()
+	// Resolved target: comment-free .jsonc without the entry. Alternate: a
+	// commented .json... comments only guard .jsonc, so use malformed JSON to
+	// force a real error on the alternate path instead.
+	writeOpencodeFile(t, home, "opencode.jsonc", jsoncStub)
+	writeOpencodeFile(t, home, "opencode.json", `{"mcp": not-valid-json`)
+	s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+	_, err := s.Disconnect("opencode", "mcpproxy")
+	if err == nil {
+		t.Fatal("an unreadable/malformed alternate candidate must surface an error, not a silent not_found")
+	}
+}
+
 func TestUndoOpencodeBackupTargetsItsOwnFileAfterDrift(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Setenv("LOCALAPPDATA", "")
