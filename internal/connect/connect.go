@@ -426,6 +426,24 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 	} else {
 		res, err = s.disconnectJSON(client, cfgPath, serverName)
 	}
+	// OpenCode candidate drift (#922): if the entry was written to opencode.json
+	// and OpenCode later bootstrapped opencode.jsonc, the resolver now targets
+	// the .jsonc — but the entry still lives in the .json. When the resolved
+	// file has no entry, retry the other existing candidate before giving up.
+	if err == nil && res != nil && !res.Success && res.Action == "not_found" && clientID == "opencode" {
+		for _, alt := range opencodeConfigCandidates(s.homeDir) {
+			if alt == cfgPath {
+				continue
+			}
+			if _, statErr := os.Stat(alt); statErr != nil {
+				continue
+			}
+			altRes, altErr := s.disconnectJSON(client, alt, serverName)
+			if altErr == nil && altRes != nil && altRes.Success {
+				return altRes, nil
+			}
+		}
+	}
 	return res, s.asAccessError(client, cfgPath, err)
 }
 
@@ -977,7 +995,10 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	// JSONC tolerance (#922): OpenCode bootstraps opencode.jsonc, which may
 	// carry // and /* */ comments plus trailing commas. Strip comments first —
 	// comment removal can expose new trailing commas — then clean commas.
-	cleaned := stripJSONComments(raw)
+	cleaned, cerr := stripJSONComments(raw)
+	if cerr != nil {
+		return cerr
+	}
 	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
 	return json.Unmarshal(cleaned, out)
 }
@@ -985,7 +1006,9 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 // stripJSONComments removes // line and /* */ block comments from JSONC input,
 // string-aware so slashes inside JSON strings survive. Comment bytes are
 // replaced with spaces (newlines kept) to preserve offsets for error messages.
-func stripJSONComments(raw []byte) []byte {
+// An unterminated /* block is an error — silently blanking to EOF would make
+// truncated/malformed files parse as valid.
+func stripJSONComments(raw []byte) ([]byte, error) {
 	out := make([]byte, len(raw))
 	copy(out, raw)
 	inString := false
@@ -1013,10 +1036,12 @@ func stripJSONComments(raw []byte) []byte {
 		case c == '/' && i+1 < len(out) && out[i+1] == '*':
 			out[i], out[i+1] = ' ', ' '
 			i += 2
+			closed := false
 			for i < len(out) {
 				if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
 					out[i], out[i+1] = ' ', ' '
 					i++
+					closed = true
 					break
 				}
 				if out[i] != '\n' {
@@ -1024,15 +1049,20 @@ func stripJSONComments(raw []byte) []byte {
 				}
 				i++
 			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated /* block comment")
+			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // jsonHasComments reports whether stripping comments would change the content —
 // i.e. the file actually uses JSONC comments (not just slashes inside strings).
+// An unterminated block comment counts as commented (the write guard refuses).
 func jsonHasComments(raw []byte) bool {
-	return !bytes.Equal(stripJSONComments(raw), raw)
+	stripped, err := stripJSONComments(raw)
+	return err != nil || !bytes.Equal(stripped, raw)
 }
 
 // findEntryTOMLBytes parses TOML config bytes and looks for an entry that points

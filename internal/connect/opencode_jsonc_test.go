@@ -194,6 +194,111 @@ func TestConnectOpencodeCommentedJsoncRefusedSafely(t *testing.T) {
 	}
 }
 
+func TestUnmarshalLenientJSONEdgeCases(t *testing.T) {
+	t.Run("unterminated block comment is an error, not silently valid", func(t *testing.T) {
+		var data map[string]interface{}
+		if err := unmarshalLenientJSON([]byte(`{"mcp":{}} /* unterminated`), &data); err == nil {
+			t.Fatal("unterminated /* must not parse as valid JSONC")
+		}
+	})
+	t.Run("escaped quote inside string does not end string state", func(t *testing.T) {
+		var data map[string]interface{}
+		raw := []byte(`{"k": "quote \" then // not a comment", "n": 1}`)
+		if err := unmarshalLenientJSON(raw, &data); err != nil {
+			t.Fatalf("escaped-quote input failed: %v", err)
+		}
+		if data["k"] != `quote " then // not a comment` {
+			t.Fatalf("string mangled: %q", data["k"])
+		}
+	})
+	t.Run("line comment at EOF without newline", func(t *testing.T) {
+		var data map[string]interface{}
+		if err := unmarshalLenientJSON([]byte("{\"n\": 1} // trailing"), &data); err != nil {
+			t.Fatalf("EOF line comment failed: %v", err)
+		}
+	})
+}
+
+func TestDisconnectOpencodeCommentedJsoncRefusedWithoutBackup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	home := t.TempDir()
+	content := "{\n  // comments\n  \"mcp\": {\"mcpproxy\": {\"type\": \"remote\", \"url\": \"http://127.0.0.1:8080/mcp\"}}\n}\n"
+	writeOpencodeFile(t, home, "opencode.jsonc", content)
+	s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+	_, err := s.Disconnect("opencode", "mcpproxy")
+	if err == nil {
+		t.Fatal("Disconnect must refuse a commented .jsonc")
+	}
+	entries, _ := os.ReadDir(opencodeDir(home))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".bak.") {
+			t.Fatalf("refusal must not leave a backup behind, found %s", e.Name())
+		}
+	}
+}
+
+func TestDisconnectOpencodeFindsEntryInOtherCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	home := t.TempDir()
+	// Entry written into opencode.json first; opencode.jsonc bootstrapped later
+	// (resolver now prefers it). Disconnect must still find and remove the entry.
+	writeOpencodeFile(t, home, "opencode.json",
+		`{"mcp":{"mcpproxy":{"type":"remote","url":"http://127.0.0.1:8080/mcp","enabled":true}}}`)
+	writeOpencodeFile(t, home, "opencode.jsonc", jsoncStub)
+	s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+	res, err := s.Disconnect("opencode", "mcpproxy")
+	if err != nil || !res.Success {
+		t.Fatalf("Disconnect across candidates: err=%v res=%+v", err, res)
+	}
+	raw, _ := os.ReadFile(filepath.Join(opencodeDir(home), "opencode.json"))
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if mcp, _ := data["mcp"].(map[string]interface{}); mcp != nil {
+		if _, still := mcp["mcpproxy"]; still {
+			t.Fatal("entry still present in opencode.json after cross-candidate disconnect")
+		}
+	}
+}
+
+func TestUndoOpencodeBackupTargetsItsOwnFileAfterDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Setenv("LOCALAPPDATA", "")
+	}
+	home := t.TempDir()
+	writeOpencodeFile(t, home, "opencode.json", `{"theme":"dark"}`)
+	s := NewServiceWithHome("127.0.0.1:8080", "key", home)
+
+	res, err := s.Connect("opencode", "mcpproxy", false)
+	if err != nil || !res.Success || res.BackupPath == "" {
+		t.Fatalf("connect: err=%v res=%+v", err, res)
+	}
+	backupName := filepath.Base(res.BackupPath)
+
+	// OpenCode upgrade bootstraps a .jsonc — resolver drift.
+	writeOpencodeFile(t, home, "opencode.jsonc", jsoncStub)
+
+	ures, err := s.Undo("opencode", "mcpproxy", backupName)
+	if err != nil || !ures.Success {
+		t.Fatalf("undo after drift must accept the opencode.json backup: err=%v res=%+v", err, ures)
+	}
+	raw, _ := os.ReadFile(filepath.Join(opencodeDir(home), "opencode.json"))
+	if string(raw) != `{"theme":"dark"}` {
+		t.Fatalf("opencode.json not restored to pre-connect content: %s", raw)
+	}
+	jsoncRaw, _ := os.ReadFile(filepath.Join(opencodeDir(home), "opencode.jsonc"))
+	if string(jsoncRaw) != jsoncStub {
+		t.Fatal("undo must not touch the unrelated opencode.jsonc")
+	}
+}
+
 func TestConnectOpencodeNoConfigMentionsBothCandidates(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Setenv("LOCALAPPDATA", "")
