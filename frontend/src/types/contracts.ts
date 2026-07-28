@@ -78,6 +78,34 @@ export interface Server {
   token_expires_at?: string; // ISO date string when OAuth token expires
   user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus; // Unified health status calculated by the backend
+  trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: manual)
+  security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
+}
+
+export interface SecurityScanSummary {
+  last_scan_at?: string; // ISO date string
+  risk_score: number; // 0-100
+  status: string; // 'clean' | 'warnings' | 'dangerous' | 'failed' | 'scanning' (absence of the whole summary = never scanned)
+  finding_counts?: FindingCounts;
+  scanners_run: number;
+  scanners_failed: number;
+  scanners_total: number;
+  deep_scan?: DeepScanDescriptor; // Opt-in deep-scan layer status; never influences status
+}
+
+export interface FindingCounts {
+  dangerous: number;
+  warning: number;
+  info: number;
+  total: number;
+}
+
+export interface DeepScanDescriptor {
+  enabled: boolean;
+  ran: boolean;
+  available: boolean;
+  scanners_failed?: { id: string; reason: string }[];
+  skipped_scanners?: string[]; // Docker scanners enabled but skipped while deep scan is off
 }
 
 export interface OAuthConfig {
