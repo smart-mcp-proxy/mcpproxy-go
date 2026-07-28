@@ -224,9 +224,11 @@
             <h3 data-test="quarantine-banner-headline" class="font-bold">{{ quarantineBanner.headline }}</h3>
             <div data-test="quarantine-banner-detail" class="text-sm">{{ quarantineBanner.detail }}</div>
             <!-- Latest scan outcome, when one exists (FR-014). Read-only mirror
-                 of `security_scan`; absent entirely until a scan has run. -->
+                 of `security_scan`; absent entirely until a scan has run. A
+                 legacy `not_scanned` status is equivalent to absence
+                 (data-model.md) — never render it as an outcome. -->
             <div
-              v-if="server.security_scan"
+              v-if="server.security_scan && server.security_scan.status !== 'not_scanned'"
               data-test="quarantine-scan-summary"
               class="text-sm mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"
             >
@@ -1865,7 +1867,14 @@ watch(
     activeScanJobId.value = null
     scanFiles.value = []
     scanFilesLoaded.value = false
-    void loadServerDetails()
+    // Per-server UI state must not leak onto the next server's page.
+    trustModeRestartRequired.value = false
+    void loadServerDetails().then(() => {
+      // Same reasons as onMounted: banner (US3) + hold-evidence report links
+      // (US2) need the latest report's job id on every tab — onMounted does
+      // not rerun on a route-param change within the same component.
+      void loadScanReport()
+    })
   }
 )
 

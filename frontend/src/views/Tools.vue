@@ -349,6 +349,14 @@
                     data-test="tool-hold-evidence"
                   >
                     <span aria-hidden="true">{{ holdEvidenceFor(tool)!.icon }}</span>
+                    <span
+                      v-if="holdEvidenceFor(tool)!.verdict"
+                      class="badge badge-xs"
+                      :class="holdEvidenceFor(tool)!.verdict!.badgeClass"
+                      data-test="tool-hold-verdict"
+                    >
+                      {{ holdEvidenceFor(tool)!.verdict!.label }}
+                    </span>
                     <!-- The reason reads inline when no signal chips crowd it out;
                          otherwise it stays available to screen readers. -->
                     <span :class="holdEvidenceFor(tool)!.signals.length ? 'sr-only' : ''">
@@ -498,7 +506,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
-import { parseHoldEvidence, displaySignals, reasonPresentation } from '@/utils/holdEvidence'
+import { parseHoldEvidence, displaySignals, reasonPresentation, verdictPresentation } from '@/utils/holdEvidence'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 
@@ -774,6 +782,9 @@ interface CompactHoldEvidence {
   signals: { label: string; raw: string }[]
   /** Delivered-but-collapsed signals only — never a claim beyond the list. */
   collapsedCount: number
+  /** FR-009: verdict severity must be visible, or a warnings hold and a
+      dangerous hold with the same signals would look identical. */
+  verdict: { label: string; badgeClass: string } | null
 }
 
 function buildHoldEvidence(tool: GlobalTool): CompactHoldEvidence | null {
@@ -806,6 +817,14 @@ function buildHoldEvidence(tool: GlobalTool): CompactHoldEvidence | null {
           : 'badge-ghost',
     signals: visible.map(s => ({ label: s.label, raw: s.raw })),
     collapsedCount,
+    verdict: (() => {
+      const v = verdictPresentation(evidence.verdict)
+      if (!v) return null
+      return {
+        label: v.label,
+        badgeClass: v.tone === 'danger' ? 'badge-error' : v.tone === 'warning' ? 'badge-warning' : 'badge-ghost',
+      }
+    })(),
   }
 }
 

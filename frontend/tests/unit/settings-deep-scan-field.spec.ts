@@ -53,11 +53,19 @@ describe('Settings deep-scan toggle (spec 088 US4, FR-018)', () => {
     expect(validateField(field, false)).toBeNull()
   })
 
-  it('gets the registry-systematic data-test id derived from its key', () => {
-    // Mirrors SettingField.vue's toggle binding.
-    expect(`setting-toggle-${deepScanField()!.key}`).toBe(
-      'setting-toggle-security.deep_scan.enabled'
-    )
+  it('actually renders as a toggle with the registry-systematic data-test id', async () => {
+    // Mounts the real control — a string-equality mirror of the binding would
+    // pass even if the toggle were never rendered (Codex impl-review F5).
+    const { mount } = await import('@vue/test-utils')
+    const SettingField = (await import('@/components/settings/SettingField.vue')).default
+    const wrapper = mount(SettingField, {
+      props: { field: deepScanField()!, modelValue: false },
+    })
+    const toggle = wrapper.find('[data-test="setting-toggle-security.deep_scan.enabled"]')
+    expect(toggle.exists()).toBe(true)
+    expect((toggle.element as HTMLInputElement).type).toBe('checkbox')
+    await toggle.setValue(true)
+    expect(wrapper.emitted('update:modelValue')?.[0]).toEqual([true])
   })
 })
 

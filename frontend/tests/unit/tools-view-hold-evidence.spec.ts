@@ -83,6 +83,9 @@ describe('Tools view — compact hold evidence on held rows', () => {
     // signal was delivered first.
     const signals = evidence.findAll('[data-test="tool-hold-signal"]')
     expect(signals.map(s => s.text())).toEqual(['TPA-2026-0001'])
+    // FR-009: the verdict severity must render, or a warnings hold and a
+    // dangerous hold with identical signals would be indistinguishable.
+    expect(evidence.find('[data-test="tool-hold-verdict"]').text()).toBe('dangerous')
 
     // Overflow counts only the two collapsed heuristic ids.
     expect(evidence.find('[data-test="tool-hold-signal-more"]').text()).toBe('+2')
