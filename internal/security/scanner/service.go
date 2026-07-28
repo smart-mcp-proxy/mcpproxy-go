@@ -1040,18 +1040,28 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 			}
 			scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
 
-			// If export failed but server should be connected, retry once after
-			// ensuring connection (handles quarantined servers that need an
-			// inspection exemption, and stale StateView snapshots)
+			// If export failed, retry once. Reconnect ONLY when the server is
+			// actually disconnected (that path handles quarantined servers
+			// needing an inspection exemption). EnsureConnected RESTARTS the
+			// server, so calling it on an already-connected server tore down a
+			// healthy connection mid-export and turned a recoverable "0 tools"
+			// into a misleading "server is disconnected" — the retry churn seen
+			// on spec-086 admission scans. A connected server just re-exports.
 			if scanCtx.ToolsExported == 0 {
-				s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
-					zap.String("server", serverName))
-				if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
-					s.logger.Warn("Retry EnsureConnected failed",
-						zap.String("server", serverName), zap.Error(err))
-				} else {
-					s.waitForConnection(serverName, 30*time.Second)
+				if s.serverInfo.IsConnected(serverName) {
+					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
+						zap.String("server", serverName))
 					scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+				} else {
+					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
+						zap.String("server", serverName))
+					if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
+						s.logger.Warn("Retry EnsureConnected failed",
+							zap.String("server", serverName), zap.Error(err))
+					} else {
+						s.waitForConnection(serverName, 30*time.Second)
+						scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+					}
 				}
 			}
 		}
@@ -1715,6 +1725,19 @@ func (s *Service) RejectServer(ctx context.Context, serverName string) error {
 }
 
 // --- Integrity ---
+
+// HasApprovalBaseline reports whether an integrity baseline already exists for
+// the server — i.e. it has been approved/unquarantined at least once. The
+// spec-086 admission gate uses this to distinguish a first-time admission
+// quarantine (auto-approve on a clean baseline scan) from a deliberate operator
+// re-quarantine of an already-admitted server (never silently auto-approved).
+func (s *Service) HasApprovalBaseline(serverName string) bool {
+	if s.storage == nil {
+		return false
+	}
+	baseline, err := s.storage.GetIntegrityBaseline(serverName)
+	return err == nil && baseline != nil
+}
 
 // CheckIntegrity verifies a server's runtime integrity against its baseline
 func (s *Service) CheckIntegrity(ctx context.Context, serverName string) (*IntegrityCheckResult, error) {

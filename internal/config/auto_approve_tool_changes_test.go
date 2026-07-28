@@ -113,6 +113,88 @@ func TestNormalizeServerQuarantineFlags(t *testing.T) {
 		cfg := &Config{Servers: []*ServerConfig{nil}}
 		assert.NotPanics(t, func() { normalizeServerQuarantineFlags(cfg) })
 	})
+
+	// --- spec 086: trust_mode derivation (pass 2) ---
+
+	t.Run("legacy skip_quarantine true converges to trust_mode auto", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{{Name: "legacy", SkipQuarantine: true}}}
+		normalizeServerQuarantineFlags(cfg)
+		// skip -> auto_approve -> trust_mode auto (layering skip->auto->trust).
+		assert.Equal(t, string(TrustModeAuto), cfg.Servers[0].TrustMode)
+		assert.Equal(t, TrustModeAuto, cfg.Servers[0].EffectiveTrustMode())
+	})
+
+	t.Run("explicit auto_approve_tool_changes false converges to trust_mode manual", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{{Name: "off", AutoApproveToolChanges: boolPtr(false)}}}
+		normalizeServerQuarantineFlags(cfg)
+		assert.Equal(t, string(TrustModeManual), cfg.Servers[0].TrustMode, "false must map to manual, NOT auto")
+		// AutoApproveToolChanges must NOT be clobbered by the trust migration.
+		require.NotNil(t, cfg.Servers[0].AutoApproveToolChanges)
+		assert.False(t, *cfg.Servers[0].AutoApproveToolChanges)
+		assert.Equal(t, TrustModeManual, cfg.Servers[0].EffectiveTrustMode())
+	})
+
+	t.Run("auto_approve_tool_changes true maps to trust_mode auto", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{{Name: "on", AutoApproveToolChanges: boolPtr(true)}}}
+		normalizeServerQuarantineFlags(cfg)
+		assert.Equal(t, string(TrustModeAuto), cfg.Servers[0].TrustMode)
+	})
+
+	t.Run("neither legacy field set leaves trust_mode empty (resolves manual)", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{{Name: "none"}}}
+		normalizeServerQuarantineFlags(cfg)
+		assert.Equal(t, "", cfg.Servers[0].TrustMode, "nil auto_approve leaves trust_mode empty")
+		assert.Equal(t, TrustModeManual, cfg.Servers[0].EffectiveTrustMode(), "empty resolves to manual (secure by default)")
+	})
+
+	t.Run("explicit trust_mode scan wins over legacy skip_quarantine true (not clobbered)", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{
+			{Name: "scan", SkipQuarantine: true, TrustMode: string(TrustModeScan)},
+		}}
+		normalizeServerQuarantineFlags(cfg)
+		assert.Equal(t, string(TrustModeScan), cfg.Servers[0].TrustMode, "explicit trust_mode must survive migration")
+		assert.Equal(t, TrustModeScan, cfg.Servers[0].EffectiveTrustMode())
+	})
+
+	t.Run("migration is idempotent for trust_mode", func(t *testing.T) {
+		cfg := &Config{Servers: []*ServerConfig{{Name: "legacy", SkipQuarantine: true}}}
+		normalizeServerQuarantineFlags(cfg)
+		normalizeServerQuarantineFlags(cfg)
+		assert.Equal(t, string(TrustModeAuto), cfg.Servers[0].TrustMode)
+	})
+}
+
+// TestServerConfig_EffectiveTrustMode covers the single resolution point,
+// including the in-memory legacy fallback and fail-closed for unknown values.
+func TestServerConfig_EffectiveTrustMode(t *testing.T) {
+	tests := []struct {
+		name   string
+		config ServerConfig
+		want   TrustMode
+	}{
+		{"explicit auto", ServerConfig{TrustMode: "auto"}, TrustModeAuto},
+		{"explicit scan", ServerConfig{TrustMode: "scan"}, TrustModeScan},
+		{"explicit manual", ServerConfig{TrustMode: "manual"}, TrustModeManual},
+		{"empty resolves manual", ServerConfig{}, TrustModeManual},
+		{"unknown value fails closed to manual", ServerConfig{TrustMode: "off"}, TrustModeManual},
+		{"case-typo fails closed to manual", ServerConfig{TrustMode: "Scan"}, TrustModeManual},
+		{"in-memory legacy auto_approve true -> auto", ServerConfig{AutoApproveToolChanges: boolPtr(true)}, TrustModeAuto},
+		{"in-memory legacy auto_approve false -> manual", ServerConfig{AutoApproveToolChanges: boolPtr(false)}, TrustModeManual},
+		{"in-memory legacy skip_quarantine -> auto", ServerConfig{SkipQuarantine: true}, TrustModeAuto},
+		{"explicit trust_mode wins over legacy skip", ServerConfig{SkipQuarantine: true, TrustMode: "manual"}, TrustModeManual},
+		// A NON-EMPTY but invalid trust_mode must fail closed to manual and must
+		// NOT consult the legacy flags — otherwise a typo'd mode combined with a
+		// migrated skip_quarantine/auto_approve would silently resolve to auto and
+		// disable quarantine (FR-009).
+		{"typo mode + legacy skip does NOT fall open to auto", ServerConfig{TrustMode: "Scan", SkipQuarantine: true}, TrustModeManual},
+		{"typo mode + legacy auto_approve true does NOT fall open to auto", ServerConfig{TrustMode: "scnn", AutoApproveToolChanges: boolPtr(true)}, TrustModeManual},
+		{"unknown mode + legacy skip does NOT fall open to auto", ServerConfig{TrustMode: "off", SkipQuarantine: true}, TrustModeManual},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.config.EffectiveTrustMode())
+		})
+	}
 }
 
 // TestAutoApproveToolChanges_RoundTrip_SaveLoad verifies the field survives a

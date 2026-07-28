@@ -126,6 +126,13 @@ export interface Tool {
   // Tool-level quarantine status surfaced by the same approval record.
   // Optional because non-quarantined tools simply omit the field.
   approval_status?: string;
+  // Why the trust_mode: scan gate held this tool for review (spec 086
+  // FR-018). held_signals names the matched deterministic check ids, e.g.
+  // "tpa.TPA-2026-0001.hidden_instruction". All three are absent unless the
+  // tool is currently held by the scan gate.
+  held_reason?: string;
+  held_verdict?: string;
+  held_signals?: string[];
 }
 
 export interface SearchResult {

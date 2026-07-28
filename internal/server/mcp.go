@@ -920,6 +920,10 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithString("init_timeout",
 				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
 			),
+			mcp.WithString("trust_mode",
+				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch."),
+				mcp.Enum("auto", "scan", "manual"),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -3040,6 +3044,15 @@ func (p *MCPProxyServer) handleInspectToolApprovals(request mcp.CallToolRequest)
 			"enabled":     !r.Disabled,
 			"disabled":    r.Disabled,
 		}
+		// Scan-gate hold evidence (spec 086 FR-018): name the matched TPA
+		// signature / check ids so a reviewer sees WHY the tool is held, not just
+		// that it is. Omitted when the hold has no scan evidence (manual mode,
+		// plain quarantine, records predating the field).
+		if r.HeldReason != "" {
+			tool["held_reason"] = r.HeldReason
+			tool["held_verdict"] = r.HeldVerdict
+			tool["held_signals"] = r.HeldSignals
+		}
 		if r.Disabled {
 			disabledCount++
 		}
@@ -3241,6 +3254,13 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 			"quarantined": server.Quarantined,
 			"created":     server.Created,
 			"updated":     server.Updated,
+		}
+
+		// Spec 086: surface the per-server trust tier so an agent can read back
+		// the mode it set via operation=add/update/patch. Raw configured value;
+		// omitted when never configured (resolution stays in EffectiveTrustMode).
+		if server.TrustMode != "" {
+			serverMap["trust_mode"] = server.TrustMode
 		}
 
 		// Add connection status information and calculate health
@@ -3995,10 +4015,19 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	// (issue #370). Secure by default: true unless the operator has
 	// explicitly set quarantine_enabled=false. An explicit quarantined
 	// field in the request still wins over the default.
+	// Spec 086 stage 3 (FR-011): the quarantine default is per-server, resolved
+	// from the server's trust_mode — auto is admitted unquarantined, scan|manual
+	// are quarantined on add. trust_mode is the server's own persisted setting
+	// (not a request-driven admission override — CN-002), so it also flows onto
+	// the built serverConfig below. Empty trust_mode resolves to manual (quarantine),
+	// so this is behavior-identical to the old global default when omitted. The
+	// explicit `quarantined` request boolean (#370) still wins after, as a
+	// distinct pre-existing escape hatch.
+	trustMode := request.GetString("trust_mode", "")
 	defaultQuarantined := true
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if cfg := p.mainServer.runtime.Config(); cfg != nil {
-			defaultQuarantined = cfg.DefaultQuarantineForNewServer()
+			defaultQuarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{TrustMode: trustMode})
 		}
 	}
 	quarantined := request.GetBool("quarantined", defaultQuarantined)
@@ -4140,6 +4169,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		Isolation:   isolation,
 		OAuth:       oauth,
 		InitTimeout: initTimeout,
+		TrustMode:   trustMode, // spec 086: carry the per-server trust_mode through on create
 	}
 
 	// Save to storage
@@ -4546,6 +4576,9 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 	}
 	if command := request.GetString("command", ""); command != "" {
 		patch.Command = command
+	}
+	if trustMode := request.GetString("trust_mode", ""); trustMode != "" {
+		patch.TrustMode = trustMode // spec 086: allow changing the per-server trust tier via update/patch
 	}
 
 	// Boolean fields - only update if explicitly changed from existing value

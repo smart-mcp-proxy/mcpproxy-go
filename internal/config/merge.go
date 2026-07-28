@@ -226,6 +226,16 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.WorkingDir = patch.WorkingDir
 	}
 
+	// TrustMode (spec 086): a PATCH that omits trust_mode keeps the base value
+	// (merged started as CopyServerConfig(base)); a non-empty, differing value
+	// updates it. Enables REST PATCH /api/v1/servers/{id} to change the trust tier.
+	if patch.TrustMode != "" && patch.TrustMode != base.TrustMode {
+		if diff != nil {
+			diff.Modified["trust_mode"] = FieldChange{Path: "trust_mode", From: base.TrustMode, To: patch.TrustMode}
+		}
+		merged.TrustMode = patch.TrustMode
+	}
+
 	// Boolean fields - use reflection to detect if explicitly set
 	// For booleans, we check if the patch has them set differently from base
 	// Since Go booleans default to false, we need a different approach for explicit false
@@ -547,6 +557,7 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		Enabled:                  src.Enabled,
 		Quarantined:              src.Quarantined,
 		SkipQuarantine:           src.SkipQuarantine,
+		TrustMode:                src.TrustMode,
 		Shared:                   src.Shared,
 		Created:                  src.Created,
 		Updated:                  src.Updated,

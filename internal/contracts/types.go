@@ -62,6 +62,11 @@ type Server struct {
 	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
 	// AddServerRequest.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// TrustMode mirrors config.ServerConfig.TrustMode (spec 086): the per-server
+	// trust tier ("auto"/"scan"/"manual"). Surfaced on the GET path so clients can
+	// read back the persisted mode; PATCH/POST accept it via AddServerRequest.
+	// Omitted when empty (server predates the field / relies on legacy flags).
+	TrustMode string `json:"trust_mode,omitempty"`
 	// InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
 	// the per-server MCP `initialize` handshake deadline override. Serialized as
 	// a duration string (e.g. "120s"); nil/omitted means "inherit the global
@@ -266,6 +271,16 @@ type Tool struct {
 	// ConfigDenied is true when the tool is denied by the server's static
 	// enabled_tools / disabled_tools config. The user cannot override this toggle.
 	ConfigDenied bool `json:"config_denied,omitempty"`
+	// HeldReason, HeldVerdict and HeldSignals mirror the same-named fields on
+	// storage.ToolApprovalRecord: the offline-scan evidence that made
+	// trust_mode: scan hold this tool for review (spec 086 FR-018). HeldSignals
+	// names the matched deterministic check ids, e.g.
+	// "tpa.TPA-2026-0001.hidden_instruction", so a reviewer can see WHY the tool
+	// is held. All three are omitted for tools that are not held by the scan gate
+	// (including every record written before the field existed).
+	HeldReason  string   `json:"held_reason,omitempty"`
+	HeldVerdict string   `json:"held_verdict,omitempty"`
+	HeldSignals []string `json:"held_signals,omitempty"`
 }
 
 // DisabledToolStatus is the single machine-branchable reason a tool exists but

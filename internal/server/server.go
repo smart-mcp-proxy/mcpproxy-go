@@ -53,6 +53,21 @@ type Status struct {
 	LastUpdated   time.Time              `json:"last_updated"`
 }
 
+// securityScannerService is the subset of *scanner.Service the runtime hot
+// paths depend on (scan-verdict reads, admission scan triggering, approval, and
+// the deep-scan re-gate). Declaring it as an interface lets tests inject a fake
+// to exercise the spec-086 async admission gate (maybeStartAdmissionScan /
+// maybeAutoApproveScanSettled) without standing up a full scanner backend.
+type securityScannerService interface {
+	GetScanSummary(ctx context.Context, serverName string) *scanner.ScanSummary
+	ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error
+	StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*scanner.ScanJob, error)
+	HasApprovalBaseline(serverName string) bool
+	ApplySecurityConfig(sec *config.SecurityConfig)
+	SetIsolationMode(mode string)
+	DeepScanEnabled() bool
+}
+
 // Server wraps the MCP proxy server with all its dependencies
 type Server struct {
 	logger   *zap.Logger
@@ -83,7 +98,14 @@ type Server struct {
 	startTime time.Time
 
 	// Spec 039: Security scanner service (for scan summaries in server list)
-	securityScanner *scanner.Service
+	securityScanner securityScannerService
+
+	// Spec 086 stage 3 (FR-011): tracks scan-mode servers for which a one-shot
+	// admission baseline scan has already been triggered this process, so the
+	// stream of servers.changed events does not restart the scan. Guarded by
+	// admissionScanMu.
+	admissionScanMu     sync.Mutex
+	admissionScanKicked map[string]bool
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
@@ -170,12 +192,13 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	rt.SetManagementService(mgmtService)
 
 	server := &Server{
-		logger:        logger,
-		runtime:       rt,
-		statusCh:      make(chan interface{}, 10),
-		eventsCh:      rt.SubscribeEvents(),
-		serveErrCh:    make(chan error, 1),
-		observability: obsManager,
+		logger:              logger,
+		runtime:             rt,
+		statusCh:            make(chan interface{}, 10),
+		eventsCh:            rt.SubscribeEvents(),
+		serveErrCh:          make(chan error, 1),
+		observability:       obsManager,
+		admissionScanKicked: make(map[string]bool),
 	}
 
 	mcpProxy := NewMCPProxyServer(
@@ -444,14 +467,197 @@ func (s *Server) listenForRoutingModeRefresh() {
 				s.mcpProxy.RefreshDirectModeTools()
 				s.mcpProxy.RefreshCodeExecModeTools()
 			}
+			// Spec 086 stage 3 (FR-011): a scan-mode server is quarantined on add
+			// and must have its baseline scan triggered so the settle handler can
+			// auto-approve it. servers.changed is the add/reconcile signal; kick a
+			// one-shot admission scan for any scan-mode, still-quarantined,
+			// never-scanned server. Idempotent (see maybeStartAdmissionScans).
+			s.maybeStartAdmissionScans(context.Background())
 		case runtime.EventTypeConfigReloaded:
 			// Spec 077 US3: config hot-reload (file edit or /api/v1/config/apply)
 			// must re-gate the scanner so a security.deep_scan.* toggle takes
 			// effect without a restart. Fires on both reload paths, which both
 			// emit config.reloaded.
 			s.reapplyScannerSecurityConfig()
+		case runtime.EventTypeSecurityScanSettled:
+			// Spec 086 stage 3 (FR-011): a scan-mode server that was quarantined on
+			// add stays quarantined until its baseline scan settles GREEN. React to
+			// the single debounced settle event: on a clean verdict, auto-approve
+			// (unquarantine + baseline-approve pending tools); otherwise fail closed.
+			serverName, _ := evt.Payload["server_name"].(string)
+			s.maybeAutoApproveScanSettled(context.Background(), serverName)
 		}
 	}
+}
+
+// shouldAutoApproveScanSettled is the pure spec 086 stage-3 async admission
+// predicate (FR-011). It returns true ONLY for a scan-mode server that is still
+// quarantined and whose freshly-read baseline verdict is GREEN ("clean" —
+// FR-013). Every other combination fails closed (SC-003): manual servers never
+// auto-approve (US2 scenario 4); auto servers are never quarantined so there is
+// nothing to do; a non-quarantined server is skipped to break the
+// ApproveServer -> unquarantine -> reconnect re-entrancy loop and to ignore
+// stale/replayed settle events; any verdict other than "clean" (warnings,
+// dangerous, failed, not_scanned, scanning) or an empty verdict leaves the
+// server quarantined.
+func shouldAutoApproveScanSettled(mode config.TrustMode, quarantined bool, verdict string) bool {
+	return mode == config.TrustModeScan && quarantined && verdict == "clean"
+}
+
+// maybeAutoApproveScanSettled implements the spec 086 stage-3 async new-server
+// admission gate (FR-011). Given the server named in a settled scan event, it
+// re-resolves the server's trust mode and current quarantine state from the live
+// config and re-reads a FRESH baseline verdict (the settle payload carries only
+// status + finding counts, never the verdict), then approves only when
+// shouldAutoApproveScanSettled says so. ApproveServer(force=false) provides
+// defense in depth: it independently re-gates on hard-tier findings and refuses
+// if there is no scan report, so a stale or buggy verdict still cannot
+// unquarantine a dangerous or unscanned server.
+func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName string) {
+	if serverName == "" || s.securityScanner == nil {
+		return
+	}
+	sc := s.findServerConfig(serverName)
+	if sc == nil {
+		// No live config entry (not-yet-loaded / removed): fail closed, skip.
+		return
+	}
+	mode := sc.EffectiveTrustMode()
+	// Cheap trust-mode gate before the (cached) verdict read: only scan-mode,
+	// still-quarantined servers can possibly auto-approve.
+	if mode != config.TrustModeScan || !sc.Quarantined {
+		return
+	}
+	// Admission-window gate (spec 086 FR-011 is a NEW-server admission gate).
+	// A prior integrity baseline means the server was already approved/
+	// unquarantined at least once, so this quarantine is a deliberate operator
+	// re-quarantine (or a rug-pull re-quarantine), NOT the initial admission —
+	// never silently override that by auto-approving on a later clean settle.
+	if s.securityScanner.HasApprovalBaseline(serverName) {
+		s.logger.Debug("scan-mode server has a prior approval baseline; not auto-approving on settle (respect operator re-quarantine)",
+			zap.String("server", serverName))
+		return
+	}
+	verdict := ""
+	if summary := s.securityScanner.GetScanSummary(ctx, serverName); summary != nil {
+		verdict = summary.Status
+	}
+	if !shouldAutoApproveScanSettled(mode, sc.Quarantined, verdict) {
+		s.logger.Debug("scan-mode server not auto-approved on settle (fail closed)",
+			zap.String("server", serverName),
+			zap.String("verdict", verdict))
+		return
+	}
+	if err := s.securityScanner.ApproveServer(ctx, serverName, false, "scan-auto"); err != nil {
+		// ApproveServer's own hard-tier/missing-report gate can reject; that is the
+		// intended fail-closed outcome, not a fatal error. Log and leave quarantined.
+		s.logger.Warn("auto-approve of scan-mode server after green scan was rejected",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+	s.logger.Info("auto-approved scan-mode server after green baseline scan (spec 086 FR-011)",
+		zap.String("server", serverName))
+}
+
+// maybeStartAdmissionScans implements the "trigger a scan" half of spec 086
+// stage-3 new-server admission (FR-011). A scan-mode server is quarantined on
+// add; without this, nothing ever starts its baseline scan, so it would stay
+// quarantined forever (the settle handler never fires). Called on every
+// servers.changed, it kicks a one-shot baseline scan for each scan-mode,
+// still-quarantined, never-scanned server. Idempotent: the in-memory kicked-set
+// plus the "already scanned" verdict guard keep the servers.changed stream from
+// restarting an in-flight or completed scan.
+func (s *Server) maybeStartAdmissionScans(ctx context.Context) {
+	if s.securityScanner == nil {
+		return
+	}
+	// Read servers from storage (RLock-guarded, returns fresh ServerConfig copies)
+	// rather than ranging runtime.Config().Servers: Config() hands back a shared,
+	// lock-free snapshot whose Servers slice/structs other goroutines (and some
+	// tests) mutate in place, so iterating it from this background event-loop
+	// goroutine is a data race. ListUpstreamServers is serialized against
+	// SaveUpstreamServer by the storage manager mutex.
+	sm := s.runtime.StorageManager()
+	if sm == nil {
+		return
+	}
+	servers, err := sm.ListUpstreamServers()
+	if err != nil {
+		s.logger.Debug("admission scan sweep: failed to list servers", zap.Error(err))
+		return
+	}
+	for _, sc := range servers {
+		if sc == nil {
+			continue
+		}
+		s.maybeStartAdmissionScan(ctx, sc)
+	}
+}
+
+// maybeStartAdmissionScan triggers the one-shot admission baseline scan for a
+// single server if it is scan-mode, still quarantined, and has never been
+// scanned. StartScan auto-connects the quarantined server (for tool-definition
+// export), scans, and emits the debounced EventTypeSecurityScanSettled that
+// maybeAutoApproveScanSettled consumes. The scan is launched on its own
+// goroutine so the event loop is never blocked; a launch failure clears the
+// kicked flag so a later servers.changed can retry.
+func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerConfig) {
+	if sc == nil || s.securityScanner == nil {
+		return
+	}
+	if sc.EffectiveTrustMode() != config.TrustModeScan || !sc.Quarantined {
+		return
+	}
+	// Already scanned (scanning/clean/failed/…): the admission scan already ran
+	// or a manual scan is in flight. GetScanSummary returns nil only when no
+	// scan job exists yet — the sole "never scanned" signal.
+	if summary := s.securityScanner.GetScanSummary(ctx, sc.Name); summary != nil {
+		return
+	}
+	// A prior approval baseline means this is a re-quarantine of a server that
+	// was already admitted once, not a first-time admission — do not re-scan or
+	// auto-approve it (aligns with the settle handler's admission-window gate).
+	if s.securityScanner.HasApprovalBaseline(sc.Name) {
+		return
+	}
+	name := sc.Name
+	s.admissionScanMu.Lock()
+	if s.admissionScanKicked[name] {
+		s.admissionScanMu.Unlock()
+		return
+	}
+	s.admissionScanKicked[name] = true
+	s.admissionScanMu.Unlock()
+
+	s.logger.Info("triggering admission baseline scan for scan-mode server (spec 086 FR-011)",
+		zap.String("server", name))
+	go func() {
+		if _, err := s.securityScanner.StartScan(ctx, name, false, nil, ""); err != nil {
+			s.logger.Warn("admission baseline scan failed to start; will retry on next servers.changed",
+				zap.String("server", name),
+				zap.Error(err))
+			s.admissionScanMu.Lock()
+			delete(s.admissionScanKicked, name)
+			s.admissionScanMu.Unlock()
+		}
+	}()
+}
+
+// findServerConfig returns the live ServerConfig for serverName from the current
+// config snapshot, or nil if absent. Read-only lookup over the immutable
+// snapshot — safe to call from event-loop goroutines.
+func (s *Server) findServerConfig(serverName string) *config.ServerConfig {
+	cfg := s.runtime.Config()
+	if cfg == nil {
+		return nil
+	}
+	for _, sc := range cfg.Servers {
+		if sc != nil && sc.Name == serverName {
+			return sc
+		}
+	}
+	return nil
 }
 
 // reapplyScannerSecurityConfig re-applies the opt-in deep-scan gate (and the
@@ -982,6 +1188,14 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			"health":          healthStatus, // Spec 013: Health is source of truth
 		}
 
+		// Spec 086: surface the per-server trust tier on the tray/legacy-REST
+		// projection too, so the httpapi fallback path (which runs this map
+		// through contracts.ConvertGenericServersToTyped) reads back the same
+		// mode as the management-service path. Raw value; omitted when unset.
+		if cfg != nil && cfg.TrustMode != "" {
+			serverMap["trust_mode"] = cfg.TrustMode
+		}
+
 		// Spec 039: Add security scan summary if available
 		if s.securityScanner != nil {
 			scanSummary := s.securityScanner.GetScanSummary(context.Background(), serverStatus.Name)
@@ -1087,7 +1301,7 @@ func (s *Server) getAllServersLegacy() ([]map[string]interface{}, error) {
 			}
 		}
 
-		result = append(result, map[string]interface{}{
+		serverMap := map[string]interface{}{
 			"name":            server.Name,
 			"url":             server.URL,
 			"command":         server.Command,
@@ -1103,7 +1317,14 @@ func (s *Server) getAllServersLegacy() ([]map[string]interface{}, error) {
 			"should_retry":    false,
 			"retry_count":     0,
 			"last_retry_time": nil,
-		})
+		}
+
+		// Spec 086: per-server trust tier in parity with the StateView path.
+		if server.TrustMode != "" {
+			serverMap["trust_mode"] = server.TrustMode
+		}
+
+		result = append(result, serverMap)
 	}
 
 	return result, nil
@@ -1278,6 +1499,14 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 	// nil-preserve contract.
 	if updates.AutoApproveToolChanges != nil {
 		existing.AutoApproveToolChanges = updates.AutoApproveToolChanges
+	}
+
+	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
+	// non-empty value is applied. The PATCH handler preserves the existing value
+	// when the request omits the field, so this empty-guard is the second half of
+	// the leave-unchanged contract.
+	if updates.TrustMode != "" {
+		existing.TrustMode = updates.TrustMode
 	}
 
 	// InitTimeout (MCP-3322) is a tri-state *Duration: nil means "leave
@@ -3107,7 +3336,26 @@ type configServerInfoProvider struct {
 	cfg        *config.Config
 	liveConfig func() *config.Config
 	server     *Server
+	// liveTools resolves the live upstream client used as the tool-export
+	// fallback for quarantined servers (see GetServerTools). nil in production —
+	// it defaults to the upstream manager's managed client; tests inject a stub.
+	liveTools func(serverName string) (scanToolLister, bool)
 }
+
+// scanToolLister is the minimal live-client capability the security-scan tool
+// export needs: ask a CONNECTED upstream server for its current tool
+// definitions. *managed.Client satisfies it. Kept as a narrow interface so the
+// export path is unit-testable without a real upstream process.
+type scanToolLister interface {
+	IsConnected() bool
+	ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
+}
+
+// liveToolExportTimeout bounds the inspection-only tools/list call made when a
+// quarantined server's tool definitions are exported for a security scan. Same
+// order of magnitude as the quarantine-inspection surface's own 10s budget,
+// with headroom for slow stdio servers.
+const liveToolExportTimeout = 15 * time.Second
 
 // currentConfig returns the live config when an accessor is wired, otherwise the
 // boot-time snapshot.
@@ -3141,11 +3389,157 @@ func (p *configServerInfoProvider) GetServerInfo(serverName string) (*scanner.Se
 	return nil, fmt.Errorf("server %q not found in config", serverName)
 }
 
+// GetServerTools returns a server's tool definitions for security scanning.
+//
+// Fast path: the StateView tool cache (Server.GetServerTools).
+//
+// Fallback (spec 086 FR-011): a LIVE tools/list against the managed upstream
+// client. This is required, not an optimization — quarantined servers are
+// deliberately excluded from tool discovery and indexing (issue #873:
+// "Skipping quarantined client for tool discovery"), so their StateView tool
+// cache is empty BY CONSTRUCTION. A scan-mode server is quarantined on
+// admission, which is precisely when the admission baseline scan runs, so the
+// export always returned 0 tools and StartScan aborted with "tool export failed
+// (server is connected but returned 0 tools)": the server could never be
+// scanned, never auto-admitted on a green verdict, and never surfaced a TPA
+// finding on a red one.
+//
+// The fallback uses the same direct-client seam the quarantine inspection
+// surface already uses (quarantine_security/inspect_quarantined →
+// managed.Client.ListTools) and is scoped to scanning/inspection: the retrieved
+// definitions are written only into the scan's tools.json, never into StateView
+// or the Bleve index, so quarantined tools stay un-indexed and un-callable.
+// Only this scanner-facing provider has the fallback; general tool discovery is
+// untouched.
 func (p *configServerInfoProvider) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	var (
+		cached    []map[string]interface{}
+		cachedErr error
+	)
 	if p.server != nil {
-		return p.server.GetServerTools(serverName)
+		cached, cachedErr = p.server.GetServerTools(serverName)
+		if cachedErr == nil && len(cached) > 0 {
+			return cached, nil
+		}
+	} else {
+		cachedErr = fmt.Errorf("server tools not available")
 	}
-	return nil, fmt.Errorf("server tools not available")
+
+	live, liveErr := p.liveServerTools(serverName)
+	if liveErr == nil && len(live) > 0 {
+		return live, nil
+	}
+	if liveErr != nil && p.server != nil {
+		// Diagnosability: without this the only trace of a failed admission scan
+		// is the scanner's generic "returned 0 tools" warning.
+		p.server.logger.Debug("Live tool export fallback unavailable for scan",
+			zap.String("server", serverName), zap.Error(liveErr))
+	}
+
+	if cachedErr != nil {
+		return nil, cachedErr
+	}
+	return cached, nil
+}
+
+// liveServerTools performs the inspection-only tools/list against the live
+// upstream client and maps the result into the same wire shape the cached path
+// returns (what exportToolDefinitions writes to tools.json).
+func (p *configServerInfoProvider) liveServerTools(serverName string) ([]map[string]interface{}, error) {
+	lister, ok := p.resolveToolLister(serverName)
+	if !ok || lister == nil {
+		return nil, fmt.Errorf("no live client for server %q", serverName)
+	}
+	// Never poke a disconnected client: ListTools would fail anyway, and the
+	// caller's "server is disconnected" error is the more useful message.
+	if !lister.IsConnected() {
+		return nil, fmt.Errorf("server %q is not connected", serverName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), liveToolExportTimeout)
+	defer cancel()
+	tools, err := lister.ListTools(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]interface{}, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		result = append(result, toolMetadataToScanMap(serverName, tool))
+	}
+	if p.server != nil {
+		p.server.logger.Info("Exported tool definitions for scanning via live client (quarantine-safe path)",
+			zap.String("server", serverName),
+			zap.Int("tools", len(result)))
+	}
+	return result, nil
+}
+
+// resolveToolLister returns the live upstream client for serverName. Tests
+// override it via the liveTools hook.
+func (p *configServerInfoProvider) resolveToolLister(serverName string) (scanToolLister, bool) {
+	if p.liveTools != nil {
+		return p.liveTools(serverName)
+	}
+	if p.server == nil || p.server.runtime == nil {
+		return nil, false
+	}
+	mgr := p.server.runtime.UpstreamManager()
+	if mgr == nil {
+		return nil, false
+	}
+	client, exists := mgr.GetClient(serverName)
+	if !exists || client == nil {
+		return nil, false
+	}
+	return client, true
+}
+
+// toolMetadataToScanMap converts a live tool definition into the tools.json
+// shape the scanners parse (name / description / inputSchema), mirroring
+// Server.GetServerTools' output.
+func toolMetadataToScanMap(serverName string, tool *config.ToolMetadata) map[string]interface{} {
+	inputSchema := map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}
+	if tool.ParamsJSON != "" {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(tool.ParamsJSON), &parsed); err == nil {
+			inputSchema = parsed
+		}
+	}
+	toolMap := map[string]interface{}{
+		"name":        tool.Name,
+		"description": tool.Description,
+		"inputSchema": inputSchema,
+		"server_name": serverName,
+	}
+	if tool.Annotations != nil {
+		annotations := map[string]interface{}{}
+		if tool.Annotations.Title != "" {
+			annotations["title"] = tool.Annotations.Title
+		}
+		if tool.Annotations.ReadOnlyHint != nil {
+			annotations["readOnlyHint"] = *tool.Annotations.ReadOnlyHint
+		}
+		if tool.Annotations.DestructiveHint != nil {
+			annotations["destructiveHint"] = *tool.Annotations.DestructiveHint
+		}
+		if tool.Annotations.IdempotentHint != nil {
+			annotations["idempotentHint"] = *tool.Annotations.IdempotentHint
+		}
+		if tool.Annotations.OpenWorldHint != nil {
+			annotations["openWorldHint"] = *tool.Annotations.OpenWorldHint
+		}
+		if len(annotations) > 0 {
+			toolMap["annotations"] = annotations
+		}
+	}
+	return toolMap
 }
 
 // GetAllServerTools implements scanner's optional allServerToolsProvider: it

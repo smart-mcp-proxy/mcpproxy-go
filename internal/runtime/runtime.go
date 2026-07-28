@@ -2140,6 +2140,17 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["auto_approve_tool_changes"] = *serverStatus.Config.AutoApproveToolChanges
 		}
 
+		// Spec 086: surface the per-server trust tier so the REST GET payload
+		// (and SSE servers.changed embed) can read back the persisted mode, in
+		// parity with its deprecated predecessor auto_approve_tool_changes.
+		// The RAW configured value is emitted — resolution of empty/unknown
+		// values stays with config.EffectiveTrustMode() so the wire contract
+		// keeps distinguishing "never configured" (omitted) from an explicit
+		// mode. Omitted when empty.
+		if serverStatus.Config != nil && serverStatus.Config.TrustMode != "" {
+			serverMap["trust_mode"] = serverStatus.Config.TrustMode
+		}
+
 		// MCP-3322: surface the per-server init_timeout override so the REST GET
 		// payload (and SSE servers.changed embed) can read it back. Emitted as a
 		// duration string (e.g. "2m0s"); omitted when unset so the projection
@@ -2318,6 +2329,12 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// StateView path. Tri-state *bool — only emit when set.
 		if srv.AutoApproveToolChanges != nil {
 			serverInfo["auto_approve_tool_changes"] = *srv.AutoApproveToolChanges
+		}
+
+		// Spec 086: per-server trust tier in parity with the StateView path.
+		// Raw configured value; omitted when never configured.
+		if srv.TrustMode != "" {
+			serverInfo["trust_mode"] = srv.TrustMode
 		}
 
 		// Try to get connection status

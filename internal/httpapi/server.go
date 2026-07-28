@@ -1443,6 +1443,13 @@ type AddServerRequest struct {
 	// semantics — do NOT collapse to a plain bool, or an omitted field would
 	// silently reset a previously-set value.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// TrustMode is the per-server trust tier (spec 086): "auto", "scan", or
+	// "manual". Empty means "leave unchanged" on PATCH (and inherit the migrated
+	// default on create). A non-empty value is applied to ServerConfig.TrustMode
+	// and resolved by EffectiveTrustMode (an unrecognized value fails closed to
+	// manual). This is the REST seam for changing the trust tier via
+	// POST/PATCH /api/v1/servers.
+	TrustMode string `json:"trust_mode,omitempty"`
 	// InitTimeout is the per-server MCP `initialize` handshake deadline override
 	// (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
 	// pointer means "leave unchanged" on PATCH; a present value is applied.
@@ -1546,10 +1553,25 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	// Spec 086 stage 3 (FR-011): the add-time quarantine default is per-server,
+	// derived from the server's trust_mode — auto is admitted unquarantined,
+	// scan|manual are quarantined on add. req.TrustMode is the only add-request
+	// field consulted (CN-002 reads the mode from config/registry defaults, not a
+	// separate admission override); the request Quarantined boolean (#370) still
+	// wins after, as a distinct pre-existing escape hatch.
 	quarantined := true
 	if cfgIface := s.controller.GetCurrentConfig(); cfgIface != nil {
 		if cfg, ok := cfgIface.(*config.Config); ok && cfg != nil {
-			quarantined = cfg.DefaultQuarantineForNewServer()
+			// Carry BOTH the explicit trust_mode AND the legacy
+			// auto_approve_tool_changes so EffectiveTrustMode() resolves the same
+			// admission decision it will resolve on the persisted server: a client
+			// that sets auto_approve_tool_changes:true but omits trust_mode must be
+			// admitted as auto (not left quarantined while the saved server reads
+			// auto — a contradictory state). (codex review, spec 086.)
+			quarantined = cfg.QuarantineDefaultForServer(&config.ServerConfig{
+				TrustMode:              req.TrustMode,
+				AutoApproveToolChanges: req.AutoApproveToolChanges,
+			})
 		}
 	}
 	if req.Quarantined != nil {
@@ -1577,6 +1599,12 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// *bool nil-preserve semantics: only set when the caller provided it.
 	if req.AutoApproveToolChanges != nil {
 		serverConfig.AutoApproveToolChanges = req.AutoApproveToolChanges
+	}
+	// Spec 086: carry the per-server trust_mode through on create. Empty means
+	// "not specified" — leave it for the loader's legacy-flag migration to
+	// populate; a present value wins.
+	if req.TrustMode != "" {
+		serverConfig.TrustMode = req.TrustMode
 	}
 	// MCP-3322: carry the per-server init_timeout override through on create.
 	if req.InitTimeout != nil {
@@ -1814,6 +1842,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.AutoApproveToolChanges = existingSrv.AutoApproveToolChanges
+	}
+	// Spec 086: trust_mode is a plain string — empty means "leave unchanged", so
+	// preserve the existing value when the request omits it (a bare PATCH of an
+	// unrelated field must not reset the trust tier).
+	if req.TrustMode != "" {
+		updates.TrustMode = req.TrustMode
+		hasUpdates = true
+	} else if existingSrv != nil {
+		updates.TrustMode = existingSrv.TrustMode
 	}
 	// MCP-3322: init_timeout is a tri-state *Duration — preserve the existing
 	// pointer when the request omits it so an unrelated PATCH doesn't wipe a
@@ -2830,6 +2867,11 @@ func (s *Server) enrichServerTools(serverID string, tools []map[string]interface
 		if err == nil && record != nil {
 			typedTools[i].ApprovalStatus = record.Status
 			typedTools[i].Disabled = record.Disabled
+			// Scan-gate hold evidence (spec 086 FR-018) — empty for tools that
+			// are not held by trust_mode: scan and for pre-existing records.
+			typedTools[i].HeldReason = record.HeldReason
+			typedTools[i].HeldVerdict = record.HeldVerdict
+			typedTools[i].HeldSignals = record.HeldSignals
 			enrichedCount++
 		} else if i == 0 {
 			firstErr = err
@@ -5193,6 +5235,11 @@ func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 		"current_schema":         record.CurrentSchema,
 		"previous_output_schema": record.PreviousOutputSchema,
 		"current_output_schema":  record.CurrentOutputSchema,
+		// Why the change is held, when trust_mode: scan produced the hold
+		// (spec 086 FR-018). Absent for holds with no scan evidence.
+		"held_reason":  record.HeldReason,
+		"held_verdict": record.HeldVerdict,
+		"held_signals": record.HeldSignals,
 	})
 }
 

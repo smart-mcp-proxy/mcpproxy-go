@@ -486,6 +486,14 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.AutoApproveToolChanges = &v
 		}
 
+		// Spec 086: project the per-server trust tier (auto|scan|manual) so the
+		// GET payload, `mcpproxy upstream list` and the SSE servers.changed
+		// embed can read back the persisted mode. Plain string — an absent key
+		// leaves it empty, which contracts.Server omits from the wire.
+		if trustMode, ok := srvRaw["trust_mode"].(string); ok {
+			srv.TrustMode = trustMode
+		}
+
 		// MCP-3322: project the per-server init_timeout override. The runtime
 		// emits it as a duration string; accept a typed *config.Duration too in
 		// case the map was delivered without a JSON round-trip.
@@ -966,6 +974,14 @@ func (s *service) GetServerTools(ctx context.Context, name string) ([]map[string
 		}
 		if record, err := s.runtime.GetToolApproval(name, toolName); err == nil && record != nil {
 			tools[i]["approval_status"] = string(record.Status)
+			// Scan-gate hold evidence (spec 086 FR-018): why the tool is held,
+			// including the matched TPA signature / check ids. Omitted entirely
+			// when there is no scan hold, so pre-existing records are unchanged.
+			if record.HeldReason != "" {
+				tools[i]["held_reason"] = record.HeldReason
+				tools[i]["held_verdict"] = record.HeldVerdict
+				tools[i]["held_signals"] = record.HeldSignals
+			}
 		}
 	}
 
