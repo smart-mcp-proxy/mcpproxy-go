@@ -9,7 +9,9 @@ This feature adds **zero** backend endpoints/fields. It consumes the spec-086 su
 | `GET /api/v1/servers` | per-server `trust_mode` (omitempty), `quarantined`, `health{admin_state}`, `security_scan{status,risk_score,finding_counts,last_scan_at,deep_scan}`, `quarantine stats` | Server list badge + banner inputs |
 | `PATCH /api/v1/servers/{id}` | body `{"trust_mode":"auto\|scan\|manual"}`; empty = unchanged; resp `restart_required` | Selector save path; UI never sends legacy fields |
 | `POST /api/v1/servers` | body `trust_mode`; **omit** `quarantined` (backend derives via trust mode; request quarantined would override) | Add-server form |
-| `GET /api/v1/servers/{id}/tools` | `Tool.approval_status`, `held_reason`, `held_verdict`, `held_signals`, `disabled`, `config_denied` | REPLACES `/tools/export` as approvals-panel source — export JSON lacks `held_*` (`internal/httpapi/server.go:5284-5294`) |
+| `GET /api/v1/servers/{id}/tools` | `Tool.name`, `approval_status`, `held_reason`, `held_verdict`, `held_signals` | Held-evidence ENRICHMENT source, joined by tool name onto export records (inventory-based — may miss tools on disconnected servers, so it never replaces export as the record source) |
+| `GET /api/v1/servers/{id}/tools/export` | durable approval records (`tool_name`, `status`, descriptions/hashes — no `held_*`, `server.go:5284-5294`) | REMAINS the approvals-panel record source (pending/blocked survive disconnects) |
+| `GET /api/v1/tools` (global) | per-tool `held_*` fields | Global Tools page evidence (hand-written `GlobalTool` type must gain the fields) |
 | `GET /api/v1/servers/{id}/tools/{tool}/diff` | `previous/current_description|schema|output_schema`, `held_reason`, `held_verdict`, `held_signals`, `status` | Diff dialog evidence; 404 unless status==changed |
 | `POST /api/v1/servers/{id}/tools/approve` / `/tools/block` | `{tools:[...]}\|{approve_all\|block_all:true}` | Unchanged actions |
 | `POST /api/v1/servers/{id}/security/approve` / `reject` | `{force:bool}` | Unchanged actions |

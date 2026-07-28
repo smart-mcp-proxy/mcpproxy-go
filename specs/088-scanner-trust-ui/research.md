@@ -4,10 +4,9 @@ Sources: 4-agent codebase-mapping workflow (2026-07-28, post-#919 merge) + 4-rou
 
 ## D1. Data source for held-tool evidence
 
-- **Decision**: Switch the ServerDetail approvals panel from `GET /api/v1/servers/{id}/tools/export` to `GET /api/v1/servers/{id}/tools`; the diff dialog keeps `GET .../tools/{tool}/diff`.
-- **Rationale**: The export handler's JSON struct (`internal/httpapi/server.go:5284-5294`) deliberately omits `held_reason`/`held_verdict`/`held_signals`; the tools endpoint enriches them (`server.go:2871-2875`), as does the diff endpoint (`server.go:5238-5244`). Extending export would be a backend change for no benefit.
-- **Alternatives considered**: (a) extend export payload — rejected: violates zero-backend-change goal and duplicates an existing surface; (b) join export + tools client-side — rejected: two fetches for one list.
-- **Consequence**: `types/api.ts` `ToolApproval` is replaced/augmented by the generated `contracts.Tool` shape (which already carries `held_*` at `contracts.ts:129-135`); the panel's field mapping updates accordingly (status field name parity checked in tests).
+- **Decision** (revised after Codex plan-review F1): The approvals panel KEEPS `GET /api/v1/servers/{id}/tools/export` as its record source (durable approval records — pending/blocked tools survive server disconnects and index gaps) and ADDITIONALLY fetches `GET /api/v1/servers/{id}/tools` in parallel, joining `held_*` evidence onto matching records by tool name (bridging the `tool_name` ↔ `name` field-name difference). Records with no join partner render without evidence. The diff dialog keeps `GET .../tools/{tool}/diff` (its own type — list and diff contracts stay distinct).
+- **Rationale**: The export handler's JSON (`internal/httpapi/server.go:5284-5294`) deliberately omits `held_*`; the tools endpoint enriches them (`server.go:2871-2875`) but is inventory-based (StateView/index, `server.go:2809`, `runtime.go:2377`) — a naive switch would silently drop approvals for disconnected servers. `types/api.ts` `ToolApproval` gains optional `held_*` fields; Dashboard's counting path is untouched.
+- **Alternatives considered**: (a) extend export payload — rejected: backend change for no benefit; (b) full switch to /tools — rejected: loses durable records when the inventory is empty (Codex F1).
 
 ## D2. Quarantine banner state derivation (client-visible facts only)
 
@@ -16,7 +15,7 @@ Sources: 4-agent codebase-mapping workflow (2026-07-28, post-#919 merge) + 4-rou
   2. `scan-blocked`: `trust_mode==scan && quarantined && verdict non-clean (status dangerous|warnings)` → "scan verdict blocked automatic approval" + verdict/risk/counts + report path.
   3. `scan-failed`: `quarantined && security_scan.status=="failed"` → "scan could not complete" + retry action; never presented as a threat verdict.
   4. `manual-review`: all other quarantined cases → "awaiting manual review" (+ latest summary if present; no summary → offer scan CTA).
-- **Rationale**: `HasApprovalBaseline` (admission-window eligibility, `internal/server/server.go:531-539`) is server-internal — the page cannot distinguish admission scans from re-scans nor promise auto-approval (Codex R1-1/R2-1). `security_scan.status` includes `scanning|failed|clean|warnings|dangerous|not_scanned` so all four states are payload-derivable.
+- **Rationale**: `HasApprovalBaseline` (admission-window eligibility, `internal/server/server.go:531-539`) is server-internal — the page cannot distinguish admission scans from re-scans nor promise auto-approval (Codex R1-1/R2-1). `security_scan.status` emits `scanning|failed|clean|warnings|dangerous`; the field is ABSENT when no scan has ever run (GetScanSummary returns nil) — absence is the no-scan signal. All four states are payload-derivable.
 - **Alternatives considered**: additive `admission_eligible` field on the server payload — deferred (allowed by spec assumption but not needed for honest copy).
 
 ## D3. Held-signal display scope
@@ -27,7 +26,7 @@ Sources: 4-agent codebase-mapping workflow (2026-07-28, post-#919 merge) + 4-rou
 
 ## D4. Evidence → scan report linking
 
-- **Decision**: Best-effort link to the server's most recent scan report (existing `scanReportPath(job_id)` route `/security/scans/:jobId`); pass matched signal ids via query (`?signal=`) so `ScanReport.vue` can highlight findings whose `signals[]` intersect. No report → show signals + "Run scan" CTA, no dead link.
+- **Decision**: Best-effort link to the server's most recent scan report (existing `scanReportPath(job_id)` route `/security/scans/:jobId`); pass matched signals via repeatable `?signal=` query params carrying the FULL raw signal strings (e.g. `tpa.TPA-2026-0001.hidden_instruction`) so `ScanReport.vue` can intersect them exactly with `findings[].signals` — display labels may shorten to the TPA id, the query never does (Codex plan-review F5). No report → show signals + "Run scan" CTA, no dead link.
 - **Rationale**: Hold evidence carries no job/report/finding id (`internal/storage/models.go:237-253`); tool-change holds come from a synchronous in-process scan (`scanner.ScanToolMetadataVerdict`) that persists no report (Codex R1-4). The latest per-server report is reachable via existing `GET /servers/{id}/scan/report` (job_id inside) — already used by ServerDetail.
 - **Alternatives considered**: exact finding anchoring via new evidence fields — additive backend work, deferred.
 
@@ -60,4 +59,4 @@ Sources: 4-agent codebase-mapping workflow (2026-07-28, post-#919 merge) + 4-rou
 ## D10. Testing strategy
 
 - **Decision**: Pure-function utils (`trustMode.ts`, `holdEvidence.ts`, banner derivation) carry the logic and get exhaustive table-driven vitest specs; component specs mount the two new leaf components + targeted ServerDetail behaviors (existing `server-detail-auto-approve.spec.ts` pattern). Fixtures cover: unset/invalid/legacy/explicit trust modes, both hold reasons, clean-verdict+coverage hold, 16-signal cap, missing report, SSE loss, special-character server names (`encodeURIComponent` route convention). Playwright sweep per `docs/development/web-ui-verification.md` is the E2E gate; results land in `specs/088-scanner-trust-ui/verification/`.
-- **Rationale**: SC-007's dual gate (existing suite + new behavior specs); vitest include path constraint (`frontend/tests/unit/*.spec.ts` only).
+- **Rationale**: SC-007's dual gate (existing suite + new behavior specs); vitest includes `tests/**/*.spec.ts` — new specs go under `frontend/tests/unit/` by convention (`src/**/__tests__` files are never picked up).

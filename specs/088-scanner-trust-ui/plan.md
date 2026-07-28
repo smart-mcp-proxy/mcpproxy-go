@@ -12,7 +12,7 @@ Frontend-only feature closing the spec-086 Web UI debt: a tri-mode trust selecto
 **Language/Version**: TypeScript 5.9, Vue 3.5 (Composition API, `<script setup>`), Tailwind v4
 **Primary Dependencies**: Existing only — hand-written `ApiClient` singleton (`frontend/src/services/api.ts`), Pinia stores (`stores/servers.ts`, `stores/system.ts`), generated `types/contracts.ts` (via `cmd/generate-types`), hand-written `types/api.ts`. **No new npm dependency.**
 **Storage**: N/A (all state server-side; UI consumes REST + SSE)
-**Testing**: vitest + jsdom, specs in `frontend/tests/unit/*.spec.ts` ONLY (vitest include path; `src/**/__tests__` files never run). Playwright verification sweep per `docs/development/web-ui-verification.md` (port 18081 + throwaway data-dir, `[data-test=...]` locators, `domcontentloaded`).
+**Testing**: vitest + jsdom; include glob is `tests/**/*.spec.ts` — new specs go in `frontend/tests/unit/` by convention; files under `src/**/__tests__` are NOT picked up. Playwright verification sweep per `docs/development/web-ui-verification.md` (port 18081 + throwaway data-dir, `[data-test=...]` locators, `domcontentloaded`).
 **Target Platform**: Embedded Web UI (`make build` embeds `frontend/dist` into the Go binary)
 **Project Type**: Web frontend within existing Go monorepo
 **Performance Goals**: No new polling loops; reuse the single EventSource; SSE-driven refresh ≤1 fetch per event per surface
@@ -66,8 +66,8 @@ frontend/src/
 │   ├── Servers.vue                  # trust-mode column/badge in server table
 │   ├── ScanReport.vue               # accept ?signal= query to highlight matching finding (best-effort)
 │   └── settings/fields.ts           # + security.deep_scan.enabled toggle in securityFields
-├── services/api.ts                  # getToolApprovals → GET /servers/{id}/tools (export lacks held_*);
-│                                    # patchServer already generic — add trust_mode typing
+├── services/api.ts                  # getToolApprovals: export (record source) + /servers/{id}/tools
+│                                    # (held_* enrichment) joined client-side; trust_mode PATCH typing
 ├── stores/servers.ts                # expose per-server trust_mode (already in payload via contracts)
 ├── types/api.ts                     # ToolApproval + held_* fields (hand-written type catches up to payload)
 └── utils/
@@ -89,7 +89,7 @@ frontend/tests/unit/
 
 ## Phase 0 → research.md (complete)
 
-All unknowns were resolved before planning via a 4-agent codebase-mapping workflow and a 4-round Codex cross-review of the spec; `research.md` records the decisions (data-source switch off `/tools/export`, banner-state derivation limits, capped-evidence display scope, best-effort report linking, SSE event coverage, add-form control replacement).
+All unknowns were resolved before planning via a 4-agent codebase-mapping workflow and a 4-round Codex cross-review of the spec; `research.md` records the decisions (export-as-record-source + held-evidence join from `/servers/{id}/tools`, banner-state derivation limits, capped-evidence display scope, best-effort report linking, SSE event coverage, add-form control replacement).
 
 ## Phase 1 → data-model.md, contracts/consumed-api.md, quickstart.md (complete)
 

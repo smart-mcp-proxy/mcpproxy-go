@@ -38,13 +38,15 @@ Inputs: `trust_mode` (effective), `quarantined`, `security_scan.status`, `securi
 | 1 | `scan-running` | `quarantined && effective==scan && status=='scanning'` | Scan in progress; result determines next step (no auto-approval promise) | none required |
 | 2 | `scan-failed` | `quarantined && status=='failed'` | Scan could not complete — held as a precaution, NOT a threat verdict | Retry scan · manual review |
 | 3 | `scan-blocked` | `quarantined && effective==scan && (status=='dangerous' \|\| status=='warnings')` | Latest scan verdict blocked automatic approval | View report · review/approve |
-| 4 | `manual-review` | `quarantined` (all remaining) | Awaiting manual review (+ latest summary if `status` not `not_scanned`) | Approve · (no summary → Run scan CTA) |
+| 4 | `manual-review` | `quarantined` (all remaining) | Awaiting manual review (+ latest summary when a scan exists) | Approve · (no scan → Run scan CTA) |
+
+**"No scan" detection**: `security_scan` is **omitted from the payload entirely** when no scan has ever run (`GetScanSummary` returns nil server-side) — model absence of the field as the no-scan state; treat a literal `status=='not_scanned'` as equivalent if it ever appears. Never gate the Run-scan CTA on a status value that is normally absent.
 
 Copy constraints: never claim admission-window provenance; never promise automatic approval (both facts are server-internal).
 
 ## ScanOutcomeSummary
 
-Direct mapping of `Server.security_scan` (`contracts.SecurityScanSummary`): `status` (`clean|warnings|dangerous|failed|not_scanned|scanning`), `risk_score`, `finding_counts {dangerous,warning,info,total}`, `last_scan_at`, `deep_scan` descriptor (`skipped_scanners[]` renders "skipped", not error). Read-only; refreshed on `mcpproxy:scan-settled` / `mcpproxy:servers-changed`.
+Direct mapping of `Server.security_scan` (`contracts.SecurityScanSummary`): `status` (`clean|warnings|dangerous|failed|scanning` — the field is **absent** when no scan has run), `risk_score`, `finding_counts {dangerous,warning,info,total}`, `last_scan_at`, `deep_scan` descriptor (`skipped_scanners[]` renders "skipped", not error). Read-only; refreshed on `mcpproxy:scan-settled` / `mcpproxy:servers-changed`.
 
 ## Consumed events
 
