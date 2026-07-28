@@ -49,7 +49,7 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 	if serverName == "" {
 		serverName = defaultServerName
 	}
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
@@ -68,8 +68,30 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 		if base != backupName {
 			return nil, fmt.Errorf("invalid backup name %q: must be a bare filename, not a path", backupName)
 		}
-		if !strings.HasPrefix(base, filepath.Base(cfgPath)+".bak.") {
+		// The allowlist of restorable basenames stays registry-derived. OpenCode
+		// has two candidate config files (#922): a backup made when connect
+		// targeted opencode.json must stay restorable to THAT file even if an
+		// opencode.jsonc has appeared since and the resolver now prefers it —
+		// so the restore target follows the backup's own basename.
+		allowed := []string{filepath.Base(cfgPath)}
+		if clientID == "opencode" {
+			allowed = nil
+			for _, p := range opencodeConfigCandidates(s.homeDir) {
+				allowed = append(allowed, filepath.Base(p))
+			}
+		}
+		matched := ""
+		for _, b := range allowed {
+			if strings.HasPrefix(base, b+".bak.") {
+				matched = b
+				break
+			}
+		}
+		if matched == "" {
 			return nil, fmt.Errorf("invalid backup name %q: not a backup of %s", backupName, filepath.Base(cfgPath))
+		}
+		if matched != filepath.Base(cfgPath) {
+			cfgPath = filepath.Join(filepath.Dir(cfgPath), matched)
 		}
 		backupPath = filepath.Join(filepath.Dir(cfgPath), base)
 	}

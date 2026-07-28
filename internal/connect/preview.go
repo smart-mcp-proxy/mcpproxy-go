@@ -54,7 +54,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		serverName = defaultServerName
 	}
 
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}

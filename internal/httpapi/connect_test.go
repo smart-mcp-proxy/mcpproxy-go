@@ -84,7 +84,7 @@ func TestHandleConnectClient_OpenCodeMissingConfigReturns400(t *testing.T) {
 	}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	assert.False(t, resp.Success)
-	assert.Contains(t, resp.Error, "does not exist")
+	assert.Contains(t, resp.Error, "no OpenCode config found")
 }
 
 // TestHandleGetConnectStatus_IncludesAccessStateUnknown asserts the overall
