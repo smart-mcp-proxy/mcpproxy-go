@@ -753,4 +753,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [085-compact-router](./specs/085-compact-router/) | `shipped` | 44/46 (96%) |
 | [086-tpa-scanner-approval](./specs/086-tpa-scanner-approval/) | — | — |
 | [087-tpa-daily-refresh](./specs/087-tpa-daily-refresh/) | — | — |
-| [088-scanner-trust-ui](./specs/088-scanner-trust-ui/) | `drafted` | 0/29 (0%) |
+| [088-scanner-trust-ui](./specs/088-scanner-trust-ui/) | `shipped` | 28/29 (97%) |
