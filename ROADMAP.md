@@ -62,7 +62,6 @@ graph LR
 
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
 
-- 🔵 **Upgrade awareness & guided update** — In progress · P0
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🟡 **Windows native tray app** — In review · P2
 - 🔴 **MCP protocol upgrade to 2026-07-28 revision** — Blocked · P3
@@ -74,6 +73,7 @@ graph LR
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
 - ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
+- 🟢 **Upgrade awareness & guided update** — Done · P0
 - 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
@@ -81,39 +81,6 @@ graph LR
 ## Epic details
 
 Each epic's child tasks, their internal dependency graph, and tracker/PR links — **collapsed by default**, expand the ones you care about. Full metadata (priority, spec progress) is in the [Epics](#epics) table below.
-
-<details>
-<summary>🔵 Upgrade awareness &amp; guided update — In progress · P0</summary>
-
-> Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI.
-
-Spec: [079-upgrade-nudge](./specs/079-upgrade-nudge/)
-
-```mermaid
-graph LR
-  upgrade_nudge_status_log["US1 slice: update availability in mcpproxy st…"]
-  upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + up…"]
-  upgrade_nudge_channel["US2: channel-aware guided update command (bre…"]
-  upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no…"]
-
-  upgrade_nudge_status_log --> upgrade_nudge_surfacing
-  upgrade_nudge_surfacing --> upgrade_nudge_channel
-  upgrade_nudge_surfacing --> upgrade_nudge_quiet
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel done;
-  class upgrade_nudge_quiet in_review;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
-| US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
-| US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
-| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | 🟡 In review | #911 |
-
-</details>
 
 <details>
 <summary>🔵 Release qualification gate (auto-QA matrix blocks the tag) — In progress · P0</summary>
@@ -446,6 +413,37 @@ Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 </details>
 
 <details>
+<summary>🟢 Upgrade awareness &amp; guided update — Done · P0</summary>
+
+> Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI.
+
+Spec: [079-upgrade-nudge](./specs/079-upgrade-nudge/)
+
+```mermaid
+graph LR
+  upgrade_nudge_status_log["US1 slice: update availability in mcpproxy st…"]
+  upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + up…"]
+  upgrade_nudge_channel["US2: channel-aware guided update command (bre…"]
+  upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no…"]
+
+  upgrade_nudge_status_log --> upgrade_nudge_surfacing
+  upgrade_nudge_surfacing --> upgrade_nudge_channel
+  upgrade_nudge_surfacing --> upgrade_nudge_quiet
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
+| US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
+| US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
+| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | 🟢 Done | #911 |
+
+</details>
+
+<details>
 <summary>🟢 Connect step trust: preview, visible backup, one-click undo — Done · P0</summary>
 
 > Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
@@ -629,7 +627,6 @@ graph LR
 
 | Epic | Status | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- |
-| Upgrade awareness & guided update | In progress | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
@@ -647,6 +644,7 @@ graph LR
 | Paid-tier MVP (billing / seats / license) `MCP-40` | Todo (parked) | P3 | — |  |  |
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | SSO (server edition) | Todo (parked) | P3 | — |  |  |
+| Upgrade awareness & guided update | Done | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
@@ -755,3 +753,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [085-compact-router](./specs/085-compact-router/) | `shipped` | 44/46 (96%) |
 | [086-tpa-scanner-approval](./specs/086-tpa-scanner-approval/) | — | — |
 | [087-tpa-daily-refresh](./specs/087-tpa-daily-refresh/) | — | — |
+| [088-scanner-trust-ui](./specs/088-scanner-trust-ui/) | `shipped` | 29/29 (100%) |

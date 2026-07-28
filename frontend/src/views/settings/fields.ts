@@ -171,6 +171,16 @@ export const SECURITY_FIELDS: SettingField[] = [
     },
   },
   {
+    // Spec 088 US4 / FR-018 — the deep-scan layer used to be reachable only by
+    // hand-editing this key. It is hot-reloadable (the `security` block is
+    // deep-compared in DetectConfigChanges), so no restart flag.
+    key: 'security.deep_scan.enabled',
+    docs: '/features/security-scanner-plugins',
+    label: 'Deep scan (Docker scanners)',
+    help: 'The deterministic offline baseline scan is always on and needs no setup. Turning this on adds the opt-in Docker-based deep scanners (source-level analysis of the server’s published package) on top of it. Requires Docker; a deep-scan failure is informational and never changes the baseline verdict.',
+    control: 'toggle',
+  },
+  {
     key: 'docker_isolation.enabled',
     docs: '/features/docker-isolation',
     label: 'Run stdio servers in Docker',

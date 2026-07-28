@@ -202,18 +202,90 @@
           </div>
         </div>
 
-        <div v-if="server.quarantined" data-test="security-quarantine-banner" class="alert alert-warning">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <!-- Security Quarantine banner (Spec 088 US3). A quarantined server can
+             be in four very different situations; the copy, tone and offered
+             actions come from deriveQuarantineBannerState, which reads ONLY
+             facts the payload carries (trust mode, quarantine flag, scan
+             summary). A failed scan is a precaution, never a threat verdict. -->
+        <div
+          v-if="quarantineBanner"
+          data-test="security-quarantine-banner"
+          class="alert"
+          :class="quarantineBannerAlertClass"
+        >
+          <svg class="w-6 h-6 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.732-.833-2.5 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
           </svg>
-          <div>
-            <h3 class="font-bold">Security Quarantine</h3>
-            <div class="text-sm">This server is quarantined and requires manual approval before tools can be executed.</div>
+          <div
+            data-test="quarantine-banner-state"
+            :data-state="quarantineBanner.state"
+            class="flex-1 min-w-0"
+          >
+            <h3 data-test="quarantine-banner-headline" class="font-bold">{{ quarantineBanner.headline }}</h3>
+            <div data-test="quarantine-banner-detail" class="text-sm">{{ quarantineBanner.detail }}</div>
+            <!-- Latest scan outcome, when one exists (FR-014). Read-only mirror
+                 of `security_scan`; absent entirely until a scan has run. A
+                 legacy `not_scanned` status is equivalent to absence
+                 (data-model.md) — never render it as an outcome. -->
+            <div
+              v-if="server.security_scan && server.security_scan.status !== 'not_scanned'"
+              data-test="quarantine-scan-summary"
+              class="text-sm mt-1 flex flex-wrap items-center gap-x-3 gap-y-1"
+            >
+              <span class="badge badge-sm badge-outline">{{ server.security_scan.status }}</span>
+              <span>Risk score {{ server.security_scan.risk_score ?? 0 }}/100</span>
+              <span v-if="server.security_scan.finding_counts">
+                {{ server.security_scan.finding_counts.dangerous ?? 0 }} dangerous &bull;
+                {{ server.security_scan.finding_counts.warning ?? 0 }} warning &bull;
+                {{ server.security_scan.finding_counts.info ?? 0 }} info
+              </span>
+              <span v-if="server.security_scan.last_scan_at" class="opacity-70">
+                {{ formatRelativeTime(server.security_scan.last_scan_at) }}
+              </span>
+            </div>
           </div>
-          <button @click="handleApproveClick" :disabled="actionLoading" class="btn btn-sm btn-warning">
-            <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-            Approve
-          </button>
+          <div class="flex items-center gap-2 flex-wrap">
+            <router-link
+              v-if="quarantineBannerHas('view-report') && latestScanReportPath"
+              :to="latestScanReportPath"
+              data-test="quarantine-action-view-report"
+              class="btn btn-sm btn-outline"
+            >View report</router-link>
+            <button
+              v-else-if="quarantineBannerHas('view-report')"
+              type="button"
+              data-test="quarantine-action-view-report"
+              class="btn btn-sm btn-outline"
+              @click="openSecurityTab"
+            >View report</button>
+            <button
+              v-if="quarantineBannerHas('retry-scan')"
+              type="button"
+              data-test="quarantine-action-retry-scan"
+              class="btn btn-sm btn-outline"
+              :disabled="scanLoading"
+              @click="runScanFromBanner"
+            >Retry scan</button>
+            <button
+              v-if="quarantineBannerHas('run-scan')"
+              type="button"
+              data-test="quarantine-action-run-scan"
+              class="btn btn-sm btn-outline"
+              :disabled="scanLoading"
+              @click="runScanFromBanner"
+            >Run scan</button>
+            <button
+              v-if="quarantineBannerHas('approve')"
+              type="button"
+              data-test="quarantine-action-approve"
+              @click="handleApproveClick"
+              :disabled="actionLoading"
+              class="btn btn-sm btn-warning"
+            >
+              <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
+              Approve
+            </button>
+          </div>
         </div>
       </div>
 
@@ -282,8 +354,12 @@
         >
           Configuration
         </button>
+        <!-- Spec 088 US4 (FR-016): the deterministic offline baseline scanner
+             always runs, so the Security tab is always present. It used to be
+             hidden unless an OPTIONAL Docker deep scanner was enabled, which
+             made a real capability unreachable on every default install. -->
         <button
-          v-if="hasEnabledScanners()"
+          data-test="security-tab"
           :class="['tab tab-lg', activeTab === 'security' ? 'tab-active' : '']"
           @click="activeTab = 'security'; loadScannerNames(); loadScanReport()"
         >
@@ -294,6 +370,7 @@
             ></span>
             <span
               v-else
+              data-test="security-tab-dot"
               class="inline-block w-2.5 h-2.5 rounded-full"
               :class="securityDotClass"
             ></span>
@@ -341,16 +418,26 @@
                   {{ quarantinedTools.length }} tool(s) require approval before they can be used by AI agents.
                 </div>
                 <!-- MCP-2917: subtle, dismissible hint explaining where pending
-                     tools come from and how to opt out of tool-level approval. -->
+                     tools come from and how to opt out of tool-level approval.
+                     Spec 088 FR-021: the deprecated `skip_quarantine` advice is
+                     gone — trust mode is the supported control, so the hint
+                     routes to the selector on the Configuration tab. -->
                 <div
                   v-if="!quarantineHintDismissed"
                   data-test="quarantine-hint"
                   class="text-xs opacity-70 mt-1 flex items-start gap-1"
                 >
                   <span>
-                    Pending tools come from tool-level quarantine. To approve them automatically, set
-                    <code class="text-[11px]">skip_quarantine: true</code> for this server or
-                    <code class="text-[11px]">quarantine_enabled: false</code> globally.
+                    Pending tools come from tool-level quarantine. How this server's tool changes
+                    get approved is governed by its trust mode —
+                    <button
+                      type="button"
+                      data-test="quarantine-hint-trust-mode"
+                      class="link link-hover font-medium"
+                      @click="activeTab = 'config'"
+                    >set it on the Configuration tab</button>.
+                    <strong>Scan</strong> approves changes automatically only on a clean security
+                    scan; <strong>Auto</strong> trusts them without scanning.
                   </span>
                   <button
                     type="button"
@@ -362,6 +449,20 @@
                 </div>
               </div>
               <div class="flex items-center gap-2">
+                <!-- Spec 088 FR-011: hold evidence points at the server's latest
+                     scan report, but this server has never been scanned (the
+                     `security_scan` field is omitted entirely until it has), so
+                     offer the scan instead of a dead link. -->
+                <button
+                  v-if="heldEvidenceNeedsScan"
+                  type="button"
+                  data-test="hold-evidence-run-scan"
+                  @click="runScanFromBanner"
+                  :disabled="scanLoading"
+                  class="btn btn-sm btn-outline"
+                >
+                  Run security scan
+                </button>
                 <button
                   data-test="quarantine-approve-all"
                   @click="approveAllTools"
@@ -404,6 +505,18 @@
                           {{ tool.status }}
                         </span>
                       </div>
+                      <!-- Spec 088 US2: WHY this change is held — reason, verdict
+                           and matched signature ids (TPA ids first, never
+                           collapsed). Sits directly above the description /
+                           before-after diff so the evidence reads alongside the
+                           change itself (FR-008/FR-010). Renders nothing at all
+                           for records that carry no evidence (FR-012). -->
+                      <HoldEvidenceBadge
+                        :evidence="toolHoldEvidence(tool.tool_name)"
+                        :report-path="latestScanReportPath"
+                        :data-tool="tool.tool_name"
+                        class="mt-1.5"
+                      />
                       <p
                         v-if="tool.status !== 'changed' || computeToolDiffSections(tool).length === 0"
                         class="text-sm text-base-content/70 mt-1"
@@ -705,57 +818,39 @@
               </div>
             </div>
 
-            <!-- Tool-change approval (rug-pull protection) — MCP-2932.
-                 Bound to the per-server `auto_approve_tool_changes` config flag
-                 (MCP-2930). OFF by default = protected: a tool whose
-                 description/schema changes, or a newly-added tool, is held for
-                 review before AI agents can use it. ON trusts those changes
-                 automatically, disabling rug-pull protection for this server. -->
-            <div class="card bg-base-100 shadow-sm" data-test="auto-approve-card">
+            <!-- Trust mode (Spec 088 US1 — FR-001..FR-005) replaces the legacy
+                 binary "Auto-approve tool changes" toggle (MCP-2932). The three
+                 modes govern BOTH tool-change approval (rug-pull protection) and
+                 new-server admission; the rug-pull warning now lives in the
+                 selector's own confirmation step for the least-safe mode. Saving
+                 writes `trust_mode` ONLY — never the legacy flags. -->
+            <div class="card bg-base-100 shadow-sm" data-test="trust-mode-card">
               <div class="card-body py-4">
-                <h3 class="card-title text-base">Tool-change approval</h3>
-                <label class="flex items-center gap-3 mt-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    data-test="auto-approve-tool-changes"
-                    :checked="autoApproveToolChanges"
-                    @change="toggleAutoApproveToolChanges"
-                    class="toggle toggle-sm toggle-warning"
-                    :disabled="kvPatchInFlight"
-                  />
-                  <span class="text-sm font-medium">Auto-approve tool changes</span>
-                </label>
-                <!-- Rug-pull warning sits directly beneath the toggle. Always
-                     visible so the trade-off is clear before enabling; it
-                     escalates to an alert once the protection is actually off. -->
+                <h3 class="card-title text-base">Trust mode</h3>
+                <p class="text-sm text-base-content/60">
+                  How much autonomy the proxy has when this server's tools change.
+                </p>
+                <TrustModeSelector
+                  class="mt-2"
+                  :model-value="server.trust_mode"
+                  @update:model-value="saveTrustMode"
+                />
+                <!-- FR-004: the PATCH response tells us whether the new mode is
+                     fully active yet — surface it instead of implying it is. -->
                 <div
-                  v-if="autoApproveToolChanges"
-                  data-test="auto-approve-warning"
-                  role="alert"
-                  class="alert alert-warning mt-2 py-2 text-sm"
+                  v-if="trustModeRestartRequired"
+                  data-test="trust-mode-restart-notice"
+                  role="status"
+                  class="alert alert-info mt-3 py-2 text-sm"
                 >
                   <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <span>
-                    Rug-pull protection is <strong>disabled</strong> for this server.
-                    Future changes to a tool's description or schema — and newly
-                    added tools — are trusted automatically instead of held for review.
+                    Trust mode saved. Restart the server (or mcpproxy) for the new mode to take
+                    full effect.
                   </span>
                 </div>
-                <p
-                  v-else
-                  data-test="auto-approve-warning"
-                  class="text-xs text-base-content/60 mt-2 flex items-start gap-1.5"
-                >
-                  <span aria-hidden="true">⚠️</span>
-                  <span>
-                    Enabling this <strong>disables rug-pull protection</strong>: changed
-                    tool descriptions/schemas and newly added tools will be trusted
-                    automatically instead of held for review. Protected (default) is
-                    recommended.
-                  </span>
-                </p>
               </div>
             </div>
 
@@ -1034,11 +1129,14 @@
           <div class="space-y-6">
             <!-- Header: Scan button + Risk Score -->
             <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
-              <div class="tooltip tooltip-bottom" :data-tip="!dockerAvailable ? 'Docker is required to run security scanners' : (!hasEnabledScanners() ? 'No scanners enabled — install one from Security Scanners' : '')">
+              <!-- Spec 088 FR-016: Scan Now runs the always-on offline baseline
+                   scan in-process, so neither Docker nor an enabled deep scanner
+                   gates it any more. Docker absence only means the optional deep
+                   scanners are skipped — the tooltip says so. -->
+              <div class="tooltip tooltip-bottom" :data-tip="scanButtonTooltip">
                 <button
-                  v-if="hasEnabledScanners()"
                   @click="startSecurityScan"
-                  :disabled="scanLoading || !dockerAvailable"
+                  :disabled="scanLoading"
                   class="btn btn-primary"
                   data-test="scan-button"
                 >
@@ -1193,6 +1291,25 @@
               </div>
             </div>
 
+            <!-- Skipped optional deep scanners (Spec 088 FR-017). Deep scan is
+                 an opt-in layer on top of the always-on offline baseline: a
+                 scanner that was skipped because deep scan is off (or Docker is
+                 unavailable) is NOT a failure and must never read as one. -->
+            <div
+              v-if="skippedDeepScanners.length > 0"
+              data-test="deep-scan-skipped"
+              class="alert alert-info text-sm"
+            >
+              <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              <span>
+                {{ skippedDeepScanners.length }} optional deep scanner{{ skippedDeepScanners.length === 1 ? '' : 's' }}
+                skipped ({{ skippedDeepScanners.join(', ') }}) — deep scan is off. The offline baseline scan below is complete;
+                enable deep scan in Settings to include them.
+              </span>
+            </div>
+
             <!-- Scan error -->
             <div v-if="scanError" class="alert alert-error">
               <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1318,6 +1435,8 @@ import AnnotationBadges from '@/components/AnnotationBadges.vue'
 import ErrorPanel from '@/components/diagnostics/ErrorPanel.vue'
 import SignInPanel from '@/components/diagnostics/SignInPanel.vue'
 import KVValueCell from '@/components/KVValueCell.vue'
+import TrustModeSelector from '@/components/TrustModeSelector.vue'
+import HoldEvidenceBadge from '@/components/HoldEvidenceBadge.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport } from '@/types'
 import api from '@/services/api'
@@ -1327,6 +1446,12 @@ import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState } from '@/utils/health'
 import { computeToolDiffSections } from '@/utils/toolDiff'
+import { TRUST_MODES, type TrustMode } from '@/utils/trustMode'
+import { parseHoldEvidence } from '@/utils/holdEvidence'
+import {
+  deriveQuarantineBannerState,
+  type QuarantineBannerAction,
+} from '@/utils/quarantineBanner'
 
 interface Props {
   // MCP-1112: vue-router decodes the percent-encoded ':serverName' param, so
@@ -1555,6 +1680,95 @@ const riskScoreClass = computed(() => {
   return 'text-success'
 })
 
+// Spec 088 (FR-011/FR-014, research D4) — route of the server's MOST RECENT scan
+// report, reused by the quarantine banner and by every hold-evidence badge.
+// `security_scan` is omitted from the payload until a scan has run, so its
+// absence (not a status value) is what says "nothing to link to"; the job id
+// itself comes from the report endpoint, loaded on mount whenever a scan exists.
+const latestScanReportPath = computed<string | null>(() => {
+  if (!server.value?.security_scan) return null
+  const jobId = scanReport.value?.job_id
+  return jobId ? scanReportPath(jobId) : null
+})
+
+// Optional deep scanners the backend reported as SKIPPED (deep scan off /
+// Docker unavailable). Informational — never an error (Spec 088 FR-017). The
+// freshly loaded report wins; the server summary is the fallback so the note
+// shows before (or without) a report fetch.
+const skippedDeepScanners = computed<string[]>(() => {
+  const fromReport = scanReport.value?.deep_scan?.skipped_scanners
+  if (fromReport?.length) return fromReport
+  return server.value?.security_scan?.deep_scan?.skipped_scanners ?? []
+})
+
+// Scan Now is never gated any more (FR-016) — the tooltip only explains what a
+// missing Docker / deep-scan layer costs.
+const scanButtonTooltip = computed(() => {
+  if (!dockerAvailable.value) {
+    return 'Docker is unavailable — optional deep scanners are skipped; the offline baseline scan still runs'
+  }
+  if (!hasEnabledScanners()) {
+    return 'Runs the always-on offline baseline scan (enable deep scan in Settings for Docker-based scanners)'
+  }
+  return ''
+})
+
+// Spec 088 US3 — the quarantine banner's situation, copy and offered actions,
+// derived from payload facts only (null when the server is not quarantined).
+const quarantineBanner = computed(() => deriveQuarantineBannerState(server.value))
+
+function quarantineBannerHas(action: QuarantineBannerAction): boolean {
+  return quarantineBanner.value?.actions.includes(action) ?? false
+}
+
+const quarantineBannerAlertClass = computed(() => {
+  switch (quarantineBanner.value?.tone) {
+    case 'info': return 'alert-info'
+    case 'threat': return 'alert-error'
+    // A failed scan is a precaution, not a verdict: warning tone, never error.
+    case 'precaution':
+    case 'warning':
+    default: return 'alert-warning'
+  }
+})
+
+// Parsed hold evidence per held tool (Spec 088 US2). Computed once per approval
+// refresh so each badge keeps a stable prop identity across unrelated re-renders;
+// tools with no evidence are simply absent from the map (no empty chrome).
+const holdEvidenceByTool = computed(() => {
+  const map = new Map<string, ReturnType<typeof parseHoldEvidence>>()
+  for (const tool of quarantinedTools.value) {
+    const evidence = parseHoldEvidence(tool)
+    if (evidence) map.set(tool.tool_name, evidence)
+  }
+  return map
+})
+
+function toolHoldEvidence(toolName: string) {
+  return holdEvidenceByTool.value.get(toolName) ?? null
+}
+
+// FR-011 degradation: held tools carry evidence but the server has never been
+// scanned, so there is no report to link to — offer running one instead.
+const heldEvidenceNeedsScan = computed(() => {
+  if (server.value?.security_scan) return false
+  return holdEvidenceByTool.value.size > 0
+})
+
+function openSecurityTab() {
+  activeTab.value = 'security'
+  void loadScannerNames()
+  void loadScanReport()
+}
+
+// Both the banner's Retry/Run-scan actions and the hold-evidence CTA go through
+// the existing scan path, with the Security tab opened so progress is visible.
+function runScanFromBanner() {
+  activeTab.value = 'security'
+  void loadScannerNames()
+  void startSecurityScan()
+}
+
 const filteredTools = computed(() => {
   if (!toolSearch.value) return serverTools.value
 
@@ -1653,7 +1867,14 @@ watch(
     activeScanJobId.value = null
     scanFiles.value = []
     scanFilesLoaded.value = false
-    void loadServerDetails()
+    // Per-server UI state must not leak onto the next server's page.
+    trustModeRestartRequired.value = false
+    void loadServerDetails().then(() => {
+      // Same reasons as onMounted: banner (US3) + hold-evidence report links
+      // (US2) need the latest report's job id on every tab — onMounted does
+      // not rerun on a route-param change within the same component.
+      void loadScanReport()
+    })
   }
 )
 
@@ -1891,6 +2112,13 @@ async function _loadToolApprovalsWithGen(gen: number) {
               tool.current_schema = diffResp.data.current_schema
               tool.previous_output_schema = diffResp.data.previous_output_schema
               tool.current_output_schema = diffResp.data.current_output_schema
+              // Spec 088 FR-010: the diff endpoint carries the hold evidence
+              // directly, so a changed tool shows why it is held even when the
+              // inventory-based enrichment missed it (disconnected server,
+              // index gap). Only overwrite with what the payload actually has.
+              if (diffResp.data.held_reason) tool.held_reason = diffResp.data.held_reason
+              if (diffResp.data.held_verdict) tool.held_verdict = diffResp.data.held_verdict
+              if (diffResp.data.held_signals?.length) tool.held_signals = [...diffResp.data.held_signals]
             }
           } catch {
             // Diff fetch failed, continue without it
@@ -2697,24 +2925,55 @@ function scopeKey(scope: 'header' | 'env'): 'headers' | 'env' {
   return scope === 'header' ? 'headers' : 'env'
 }
 
-// MCP-2932: per-server "Auto-approve tool changes" toggle. Absent/undefined on
-// the status payload is treated as OFF (protected) — see the Server type note.
-const autoApproveToolChanges = computed(() => server.value?.auto_approve_tool_changes ?? false)
+// Spec 088 US1 (FR-004/FR-005): the tri-mode trust selector supersedes the
+// MCP-2932 binary "Auto-approve tool changes" toggle. Persistence goes through
+// the same PATCH /api/v1/servers/{id} path, but the body carries `trust_mode`
+// ONLY — `auto_approve_tool_changes` / `skip_quarantine` are legacy compatibility
+// fields the UI must never write again (writing both could contradict).
+//
+// This does not reuse patchServerDiff() because we need the response envelope:
+// the backend reports `restart_required`, which FR-004 requires us to surface
+// rather than silently imply the new mode is already fully active.
+const trustModeSaving = ref(false)
+const trustModeRestartRequired = ref(false)
 
-async function toggleAutoApproveToolChanges(event: Event) {
-  const checked = (event.target as HTMLInputElement).checked
-  // Persist through the existing PATCH /api/v1/servers/{id} path. The backend
-  // auto-approves changed/added tools on the next discovery pass for this
-  // server (MCP-2931); patchServerDiff surfaces the success toast.
-  const ok = await patchServerDiff(
-    { auto_approve_tool_changes: checked },
-    checked ? 'Auto-approve tool changes enabled' : 'Auto-approve tool changes disabled'
-  )
-  // On failure, snap the checkbox back to the persisted value: patchServerDiff
-  // refetches servers on success, so the bound computed already reflects truth;
-  // an explicit no-op here keeps the control consistent with `server`.
-  if (!ok && event.target) {
-    ;(event.target as HTMLInputElement).checked = autoApproveToolChanges.value
+async function saveTrustMode(mode: TrustMode) {
+  if (!server.value || trustModeSaving.value) return
+  const label = TRUST_MODES.find(m => m.mode === mode)?.label ?? mode
+  trustModeSaving.value = true
+  // Clear any notice from a previous save so it can never outlive its change.
+  trustModeRestartRequired.value = false
+  try {
+    const resp = await api.patchServer(server.value.name, { trust_mode: mode })
+    if (!resp.success) {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Trust mode change failed',
+        message: resp.error || 'Unknown error',
+      })
+      return
+    }
+    trustModeRestartRequired.value = Boolean(
+      (resp.data as { restart_required?: boolean } | undefined)?.restart_required
+    )
+    systemStore.addToast({
+      type: 'success',
+      title: `Trust mode set to ${label}`,
+      message: trustModeRestartRequired.value
+        ? 'Restart the server for the new mode to take full effect.'
+        : '',
+    })
+    // Re-project from the store so the selector binds to the persisted value
+    // (including any backend normalization of it), not to an optimistic guess.
+    await serversStore.fetchServers(true)
+  } catch (e: any) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Trust mode change failed',
+      message: e?.message || String(e),
+    })
+  } finally {
+    trustModeSaving.value = false
   }
 }
 
@@ -2880,6 +3139,10 @@ async function loadScanReport(force = false, skipPolling = false) {
   // Only load if we have a previous scan (skip check when force-loading after scan completion)
   if (!force && !server.value.security_scan?.last_scan_at && !scanReport.value) return
 
+  // Same gen-check as the tools/approvals/log loaders: a route change bumps
+  // loadGeneration, so a report still in flight for the previous server must
+  // not overwrite the new server's refs when it finally resolves.
+  const myGen = loadGeneration
   scanReportLoading.value = true
   scanError.value = null
   try {
@@ -2894,6 +3157,7 @@ async function loadScanReport(force = false, skipPolling = false) {
       api.getScanReport(server.value.name),
       api.getScanStatus(server.value.name),
     ])
+    if (myGen !== loadGeneration) return
     if (reportRes.success && reportRes.data) {
       scanReport.value = reportRes.data as SecurityScanReport
     }
@@ -2922,7 +3186,8 @@ async function loadScanReport(force = false, skipPolling = false) {
   } catch (err) {
     // Silently fail - report may not exist yet
   } finally {
-    scanReportLoading.value = false
+    // A stale generation must not clear the CURRENT server's loading state.
+    if (myGen === loadGeneration) scanReportLoading.value = false
   }
 }
 
@@ -3054,6 +3319,61 @@ watch(() => scanStatus.value?.status, (status) => {
   }
 })
 
+// ---------------------------------------------------------------------------
+// Live updates (Spec 088 US5, FR-019/FR-020 — research D5)
+//
+// Two window events, re-dispatched by stores/system.ts from the SSE stream,
+// keep this page current without a reload:
+//
+//   `mcpproxy:scan-settled`    one debounced event per server per scan. Its
+//                              payload carries only server_name/status — no
+//                              verdict, risk score or finding counts — so we
+//                              REFETCH the projection instead of trusting it.
+//   `mcpproxy:servers-changed` broadcast that accompanies approvals made from
+//                              the CLI/MCP, which never emit scan-settled.
+//
+// These are additive: the manual Refresh button and the scan-status polling
+// stay exactly as they were, so losing the event stream regresses nothing
+// (FR-020). Each event triggers at most one refetch batch — no chained
+// reloads, and scan-settled is already debounced upstream (750ms).
+// ---------------------------------------------------------------------------
+
+/**
+ * A scan settled for this server: its summary, the quarantine banner and the
+ * held-tool evidence can all have changed, and the freshest report backs both
+ * the "View report" action and the per-tool evidence links.
+ */
+async function refreshAfterScanSettled() {
+  // Silent fetch: no loading skeleton flash on a background event.
+  await serversStore.fetchServers(true)
+  if (!server.value) return
+  await Promise.all([loadToolApprovals(), loadScanReport(true)])
+}
+
+/**
+ * Server state changed (typically a CLI/MCP tool approval). The servers store
+ * registers its own listener for this event and refreshes the projection
+ * itself — either from the event payload or with a silent refetch — so the
+ * only thing missing here is this server's approval list.
+ */
+async function refreshAfterServersChanged() {
+  if (!server.value) return
+  await loadToolApprovals()
+}
+
+function handleScanSettledEvent(event: Event) {
+  const detail = (event as CustomEvent).detail as { server_name?: unknown } | null | undefined
+  const eventServer = typeof detail?.server_name === 'string' ? detail.server_name : ''
+  // Scoped to the displayed server. A payload without a server name is treated
+  // as "unknown scope" and refreshed defensively — it can only cost one refetch.
+  if (eventServer && eventServer !== props.serverName) return
+  void refreshAfterScanSettled()
+}
+
+function handleServersChangedEvent() {
+  void refreshAfterServersChanged()
+}
+
 
 // Server detail hints
 const serverDetailHints = computed<Hint[]>(() => {
@@ -3143,16 +3463,26 @@ onMounted(() => {
     activeTab.value = tabParam as typeof activeTab.value
   }
   loadServerDetails().then(() => {
-    // Pre-load scanner names and report if opening security tab
+    // Pre-load scanner names if opening security tab
     if (activeTab.value === 'security') {
       loadScannerNames()
-      loadScanReport()
     }
+    // Spec 088: the quarantine banner (US3) and every hold-evidence report link
+    // (US2) need the latest report's job id on EVERY tab, not just Security.
+    // loadScanReport() self-skips when the server has never been scanned, so
+    // this costs nothing on unscanned servers.
+    loadScanReport()
   })
+
+  // Spec 088 US5: live refresh listeners, scoped to this mounted view.
+  window.addEventListener('mcpproxy:scan-settled', handleScanSettledEvent)
+  window.addEventListener('mcpproxy:servers-changed', handleServersChangedEvent)
 })
 
 // Cleanup polling on unmount
 onUnmounted(() => {
   stopScanPolling()
+  window.removeEventListener('mcpproxy:scan-settled', handleScanSettledEvent)
+  window.removeEventListener('mcpproxy:servers-changed', handleServersChangedEvent)
 })
 </script>
