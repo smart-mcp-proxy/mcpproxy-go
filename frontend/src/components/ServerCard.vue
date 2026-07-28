@@ -10,18 +10,33 @@
           </p>
         </div>
 
-        <!-- Status indicator using unified health status -->
-        <!-- M-004: Add tooltip showing health.detail if present -->
-        <div
-          :class="[
-            'badge badge-sm shrink-0',
-            statusBadgeClass,
-            statusTooltip ? 'tooltip tooltip-left' : ''
-          ]"
-          :data-tip="statusTooltip"
-          data-test="server-status-chip"
-        >
-          {{ statusText }}
+        <div class="flex items-center gap-1.5 shrink-0">
+          <!-- Trust mode at a glance (spec 088 FR-007). Always the EFFECTIVE
+               mode; an unrecognized configured value renders the fail-closed
+               mode with a subtle marker and the raw value in the tooltip
+               (US1 scenario 4) instead of being hidden or rewritten. -->
+          <div
+            :class="['badge badge-sm badge-outline shrink-0', trustBadgeClass]"
+            :title="trustBadgeTitle"
+            :data-trust-invalid="trustModeState.isInvalid ? 'true' : undefined"
+            data-test="server-trust-mode"
+          >
+            {{ trustBadgeLabel }}<span v-if="trustModeState.isInvalid" class="ml-0.5 opacity-70" aria-hidden="true">*</span>
+          </div>
+
+          <!-- Status indicator using unified health status -->
+          <!-- M-004: Add tooltip showing health.detail if present -->
+          <div
+            :class="[
+              'badge badge-sm shrink-0',
+              statusBadgeClass,
+              statusTooltip ? 'tooltip tooltip-left' : ''
+            ]"
+            :data-tip="statusTooltip"
+            data-test="server-status-chip"
+          >
+            {{ statusText }}
+          </div>
         </div>
       </div>
 
@@ -346,6 +361,7 @@ import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName } from '@/utils/serverRoute'
 import { oauthSignInState } from '@/utils/health'
+import { deriveTrustModeState, TRUST_MODES } from '@/utils/trustMode'
 
 interface Props {
   server: Server
@@ -374,6 +390,41 @@ const isHttpProtocol = computed(() => {
 // "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA. The
 // existing health.action==='login' Login button (below) drives the action.
 const signInState = computed(() => oauthSignInState(props.server))
+
+// Trust-mode badge (spec 088 FR-007 / FR-001). Display only — the mode is
+// changed from the server detail Configuration tab.
+const trustModeState = computed(() => deriveTrustModeState(props.server.trust_mode))
+
+const trustModeMeta = computed(
+  () => TRUST_MODES.find(m => m.mode === trustModeState.value.effective) ?? TRUST_MODES[TRUST_MODES.length - 1]
+)
+
+const trustBadgeLabel = computed(() => trustModeMeta.value.label)
+
+// Auto is the least-safe mode (unscanned tool changes) and reads amber; scan
+// reads informational; manual — the secure default — stays neutral.
+const trustBadgeClass = computed(() => {
+  if (trustModeState.value.isInvalid) return 'badge-warning'
+  switch (trustModeState.value.effective) {
+    case 'auto':
+      return 'badge-warning'
+    case 'scan':
+      return 'badge-info'
+    default:
+      return 'badge-ghost'
+  }
+})
+
+const trustBadgeTitle = computed(() => {
+  const meta = trustModeMeta.value
+  if (trustModeState.value.isInvalid) {
+    return `Trust mode: configured value "${trustModeState.value.raw}" is not recognized — using ${meta.label} (fail closed). ${meta.description}`
+  }
+  const prefix = trustModeState.value.isDefault
+    ? `Trust mode: ${meta.label} (default)`
+    : `Trust mode: ${meta.label}`
+  return `${prefix} — ${meta.description}`
+})
 
 // Unified health status computed properties
 const statusBadgeClass = computed(() => {

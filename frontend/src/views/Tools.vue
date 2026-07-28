@@ -340,6 +340,37 @@
                     {{ tool.approval_status }}
                   </span>
                   <span v-else class="text-base-content/30 text-xs">—</span>
+                  <!-- Compact hold evidence: reason icon + TPA ids + overflow. -->
+                  <div
+                    v-if="holdEvidenceFor(tool)"
+                    class="flex items-center gap-1 mt-1 text-xs whitespace-nowrap"
+                    :class="holdEvidenceFor(tool)!.toneClass"
+                    :title="holdEvidenceFor(tool)!.description"
+                    data-test="tool-hold-evidence"
+                  >
+                    <span aria-hidden="true">{{ holdEvidenceFor(tool)!.icon }}</span>
+                    <!-- The reason reads inline when no signal chips crowd it out;
+                         otherwise it stays available to screen readers. -->
+                    <span :class="holdEvidenceFor(tool)!.signals.length ? 'sr-only' : ''">
+                      {{ holdEvidenceFor(tool)!.label }}
+                    </span>
+                    <span
+                      v-for="signal in holdEvidenceFor(tool)!.signals"
+                      :key="signal.raw"
+                      class="badge badge-xs"
+                      :class="holdEvidenceFor(tool)!.chipClass"
+                      :title="signal.raw"
+                      data-test="tool-hold-signal"
+                    >
+                      {{ signal.label }}
+                    </span>
+                    <span
+                      v-if="holdEvidenceFor(tool)!.collapsedCount > 0"
+                      class="opacity-70"
+                      :title="`${holdEvidenceFor(tool)!.collapsedCount} more matched signal(s)`"
+                      data-test="tool-hold-signal-more"
+                    >+{{ holdEvidenceFor(tool)!.collapsedCount }}</span>
+                  </div>
                 </td>
                 <td>
                   <span v-if="tool.config_denied" class="badge badge-sm badge-error">config-denied</span>
@@ -467,6 +498,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import CollapsibleHintsPanel from '@/components/CollapsibleHintsPanel.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { GlobalTool, GlobalToolsStats } from '@/types/api'
+import { parseHoldEvidence, displaySignals, reasonPresentation } from '@/utils/holdEvidence'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
 
@@ -721,6 +753,74 @@ function getApprovalBadgeClass(status: string): string {
   if (status === 'pending') return 'badge-warning'
   if (status === 'changed') return 'badge-error'
   return 'badge-ghost'
+}
+
+// ---- Hold evidence (Spec 088 FR-008/FR-009/FR-012) ----
+// This page is a cross-server list, so its evidence stays COMPACT: the reason
+// icon carries the threat-vs-precaution distinction, plus the TPA signature ids
+// and an overflow count. The full badge — descriptions, verdict, scan-report
+// links — belongs to the server detail page, which is one click away.
+
+/** Compact cap: TPA ids are never collapsed by it (utils/holdEvidence). */
+const COMPACT_SIGNAL_CAP = 1
+
+interface CompactHoldEvidence {
+  icon: string
+  /** Plain-language reason; shown inline when there are no signal chips. */
+  label: string
+  description: string
+  toneClass: string
+  chipClass: string
+  signals: { label: string; raw: string }[]
+  /** Delivered-but-collapsed signals only — never a claim beyond the list. */
+  collapsedCount: number
+}
+
+function buildHoldEvidence(tool: GlobalTool): CompactHoldEvidence | null {
+  // FR-012: only a tool still awaiting a decision may show hold evidence, so an
+  // approved/released record never renders stale findings.
+  if (!isApprovable(tool)) return null
+
+  const evidence = parseHoldEvidence(tool)
+  if (!evidence) return null
+  const reason = reasonPresentation(evidence)
+  if (!reason) return null
+
+  const { visible, collapsedCount } = displaySignals(evidence, COMPACT_SIGNAL_CAP)
+
+  return {
+    icon: reason.tone === 'threat' ? '⚠️' : reason.tone === 'precaution' ? '🛡️' : 'ℹ️',
+    label: reason.label,
+    description: reason.description,
+    toneClass:
+      reason.tone === 'threat'
+        ? 'text-error'
+        : reason.tone === 'precaution'
+          ? 'text-warning'
+          : 'text-base-content/70',
+    chipClass:
+      reason.tone === 'threat'
+        ? 'badge-error'
+        : reason.tone === 'precaution'
+          ? 'badge-warning'
+          : 'badge-ghost',
+    signals: visible.map(s => ({ label: s.label, raw: s.raw })),
+    collapsedCount,
+  }
+}
+
+// Parsed once per visible page rather than on every template access.
+const holdEvidenceByKey = computed(() => {
+  const map = new Map<string, CompactHoldEvidence>()
+  for (const tool of paginatedTools.value) {
+    const evidence = buildHoldEvidence(tool)
+    if (evidence) map.set(toolKey(tool), evidence)
+  }
+  return map
+})
+
+function holdEvidenceFor(tool: GlobalTool): CompactHoldEvidence | undefined {
+  return holdEvidenceByKey.value.get(toolKey(tool))
 }
 
 // ---- Computed: filtering ----

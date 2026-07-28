@@ -1,5 +1,5 @@
 <template>
-  <div class="space-y-6">
+  <div ref="rootEl" class="space-y-6">
     <!-- Header -->
     <div class="flex items-center gap-4">
       <router-link to="/security" class="btn btn-ghost btn-sm gap-1">
@@ -180,6 +180,24 @@
       <div v-else class="space-y-4">
         <h3 class="text-lg font-semibold">Findings</h3>
 
+        <!-- Spec 088 FR-011: rendered ONLY when a passed ?signal= actually
+             matched a finding. With no match we say nothing at all — the link
+             is best effort (hold evidence carries no report/finding id), so a
+             "nothing matched" notice would claim knowledge we don't have. -->
+        <div
+          v-if="highlightedFindingCount > 0"
+          data-test="signal-highlight-note"
+          class="alert alert-info py-2"
+        >
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span class="text-xs">
+            {{ highlightedFindingCount }} finding(s) highlighted below match the signature(s)
+            from the held tool change.
+          </span>
+        </div>
+
         <div v-for="group in groupedFindings" :key="group.type"
           class="collapse collapse-arrow bg-base-100 shadow-md"
           :class="{ 'collapse-open': group.defaultOpen }"
@@ -193,8 +211,10 @@
             <div class="space-y-2">
               <div v-for="(finding, idx) in group.findings" :key="idx"
                 class="collapse collapse-arrow bg-base-200 rounded-lg"
+                :class="isFindingHighlighted(finding) ? 'ring-2 ring-primary ring-offset-2 ring-offset-base-100' : ''"
+                :data-test="isFindingHighlighted(finding) ? 'finding-highlighted' : undefined"
               >
-                <input type="checkbox" />
+                <input type="checkbox" :checked="isFindingHighlighted(finding)" />
                 <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
                   <span
                     class="badge badge-sm shrink-0"
@@ -211,6 +231,13 @@
                   </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="isFindingHighlighted(finding)"
+                    class="badge badge-xs badge-primary shrink-0"
+                    title="Matches a signature from the held tool change"
+                  >
+                    matched
                   </span>
                   <span
                     v-if="findingHasConsensus(finding)"
@@ -622,7 +649,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import api from '@/services/api'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -630,11 +658,13 @@ import type { SecurityScanFinding, ThreatType } from '@/types/api'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const route = useRoute()
 
 const props = defineProps<{
   jobId: string
 }>()
 
+const rootEl = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const error = ref('')
 const report = ref<any>(null)
@@ -729,6 +759,53 @@ const riskScoreClass = computed(() => {
   return 'badge-success'
 })
 
+// --- Hold-evidence → finding highlighting (spec 088 T018 / FR-011) ---
+// A held tool change links here with repeatable `?signal=` params carrying the
+// FULL raw deterministic check ids (e.g. "tpa.TPA-2026-0001.hidden_instruction").
+// Display surfaces may shorten a TPA signal to its signature id; the query never
+// does, so the intersection with `findings[].signals` is exact — a shortened
+// label or a prefix must NOT match.
+//
+// The link is best effort by construction: hold evidence carries no report or
+// finding identifier (internal/storage/models.go), and a tool-change hold comes
+// from a synchronous in-process scan that persists no report at all. Zero
+// matches therefore renders the report exactly as it would render without the
+// params — no highlight, no banner, no claim.
+const highlightSignals = computed<Set<string>>(() => {
+  const raw = route.query.signal
+  const values = Array.isArray(raw) ? raw : raw == null ? [] : [raw]
+  const out = new Set<string>()
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const signal = value.trim()
+    if (signal) out.add(signal)
+  }
+  return out
+})
+
+function isFindingHighlighted(finding: SecurityScanFinding): boolean {
+  if (highlightSignals.value.size === 0) return false
+  const signals = finding.signals
+  if (!signals || signals.length === 0) return false
+  return signals.some((s) => typeof s === 'string' && highlightSignals.value.has(s.trim()))
+}
+
+const highlightedFindingCount = computed(() => {
+  if (highlightSignals.value.size === 0) return 0
+  const findings: SecurityScanFinding[] = report.value?.findings ?? []
+  return findings.filter((f) => isFindingHighlighted(f)).length
+})
+
+// Bring the first matching finding into view once the report has rendered.
+// Scoped to this component's subtree (never document-wide) and optional-called
+// so environments without scrollIntoView (jsdom) are a no-op.
+async function scrollToFirstHighlight() {
+  if (highlightSignals.value.size === 0) return
+  await nextTick()
+  const target = rootEl.value?.querySelector<HTMLElement>('[data-test="finding-highlighted"]')
+  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
+
 // Threat type grouping. Real CVE/package findings are routed to the dedicated
 // Supply Chain Audit section via the `supply_chain_audit` flag instead of the
 // `supply_chain` threat type, so they are filtered out of `groupedFindings`.
@@ -785,7 +862,9 @@ const groupedFindings = computed<FindingGroup[]>(() => {
       type,
       label: threatTypeLabels[type] || type,
       findings,
-      defaultOpen: dangerousTypes.includes(type),
+      // A highlighted finding must not be hidden inside a collapsed group —
+      // scrolling to something invisible helps nobody (spec 088 FR-011).
+      defaultOpen: dangerousTypes.includes(type) || findings.some((f) => isFindingHighlighted(f)),
       badgeClass: hasDangerous ? 'badge-error' : findings.some(f => f.threat_level === 'warning') ? 'badge-warning' : 'badge-info',
     })
   }
@@ -1049,6 +1128,7 @@ function formatFileSize(bytes: number): string {
 
 onMounted(async () => {
   await loadReport()
+  await scrollToFirstHighlight()
   await loadServerStatus()
 })
 </script>

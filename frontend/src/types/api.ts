@@ -203,6 +203,12 @@ export interface Server {
   // Optional because the REST status payload only includes it once the
   // backend exposes the flag; absent/undefined is treated as OFF (protected).
   auto_approve_tool_changes?: boolean
+  // Per-server approval trust mode (spec 086: 'auto' | 'scan' | 'manual').
+  // Raw configured value exactly as delivered — absent when unset, possibly a
+  // value migrated from the legacy flags above, possibly an unrecognized
+  // hand-edited string. Resolve with utils/trustMode.ts (fail-closed to
+  // 'manual') before making any UI decision (spec 088 FR-001).
+  trust_mode?: string
   connected: boolean
   connecting: boolean
   authenticated?: boolean
@@ -272,6 +278,13 @@ export interface GlobalTool {
   usage: number
   last_used?: string       // ISO 8601; omitted if never used in window
   annotations?: ToolAnnotation
+  // Hold evidence (Spec 086 FR-018, surfaced by Spec 088 FR-008): present only
+  // on tools the trust gate refused to auto-approve. GET /api/v1/tools emits
+  // these alongside the approval status (internal/httpapi/server.go); records
+  // predating Spec 086 omit them entirely, which must render unchanged.
+  held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution)
+  held_verdict?: string    // "dangerous" | "warnings" | "clean"
+  held_signals?: string[]  // matched deterministic check ids, producer order, ≤16
   // derived locally: enabled = !disabled && !config_denied
 }
 
