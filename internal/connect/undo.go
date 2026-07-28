@@ -49,7 +49,7 @@ func (s *Service) Undo(clientID, serverName, backupName string) (*ConnectResult,
 	if serverName == "" {
 		serverName = defaultServerName
 	}
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}

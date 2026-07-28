@@ -116,7 +116,7 @@ func TestConnect_OpenCode_RequiresExistingConfigFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing-config error for OpenCode")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+	if !strings.Contains(strings.ToLower(err.Error()), "no opencode config found") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

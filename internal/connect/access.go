@@ -127,7 +127,7 @@ func (s *Service) DetectAppDataDenial() (denied bool, remediation string) {
 		if !c.Supported {
 			continue
 		}
-		cfgPath := ConfigPath(c.ID, s.homeDir)
+		cfgPath := s.configPath(c.ID)
 		if cfgPath == "" {
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -267,7 +268,7 @@ func (s *Service) GetAllStatus() []ClientStatus {
 	statuses := make([]ClientStatus, 0, len(clients))
 
 	for _, c := range clients {
-		cfgPath := ConfigPath(c.ID, s.homeDir)
+		cfgPath := s.configPath(c.ID)
 		status := ClientStatus{
 			ID:          c.ID,
 			Name:        c.Name,
@@ -301,7 +302,7 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		return ClientStatus{}, fmt.Errorf("unknown client: %s", clientID)
 	}
 
-	cfgPath := ConfigPath(c.ID, s.homeDir)
+	cfgPath := s.configPath(c.ID)
 	status := ClientStatus{
 		ID:          c.ID,
 		Name:        c.Name,
@@ -372,13 +373,17 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 		serverName = defaultServerName
 	}
 
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 	if client.ID == "opencode" {
+		// configPath already prefers whichever candidate exists; reaching a
+		// nonexistent path here means NO OpenCode global config was found.
 		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-			return nil, fmt.Errorf("OpenCode config file %s does not exist", cfgPath)
+			return nil, fmt.Errorf(
+				"no OpenCode config found (looked for opencode.jsonc and opencode.json in %s) — is OpenCode installed?",
+				filepath.Dir(cfgPath))
 		}
 	}
 
@@ -409,7 +414,7 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 		serverName = defaultServerName
 	}
 
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
@@ -427,7 +432,30 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 // ---------- JSON helpers ----------
 
 // connectJSON adds or updates the mcpproxy entry in a JSON config file.
+// guardJsoncComments refuses to rewrite a .jsonc file that actually uses
+// comments: mcpproxy re-serializes plain JSON, which would silently strip them
+// (#922). Comment-free .jsonc (OpenCode's bootstrap stub) rewrites safely.
+// Absent or unreadable files pass — the normal read/write path handles those.
+func (s *Service) guardJsoncComments(cfgPath string) error {
+	if !strings.HasSuffix(cfgPath, ".jsonc") {
+		return nil
+	}
+	raw, err := s.read(cfgPath)
+	if err != nil {
+		return nil
+	}
+	if jsonHasComments(raw) {
+		return fmt.Errorf(
+			"%s contains comments, which mcpproxy would strip on rewrite — edit the \"mcp\" section manually or remove the comments and retry",
+			cfgPath)
+	}
+	return nil
+}
+
 func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool) (*ConnectResult, error) {
+	if err := s.guardJsoncComments(cfgPath); err != nil {
+		return nil, err
+	}
 	// Read existing config or start fresh
 	data, perm, err := s.readOrCreateJSON(cfgPath)
 	if err != nil {
@@ -513,6 +541,9 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, for
 
 // disconnectJSON removes the mcpproxy entry from a JSON config file.
 func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) (*ConnectResult, error) {
+	if err := s.guardJsoncComments(cfgPath); err != nil {
+		return nil, err
+	}
 	raw, err := s.read(cfgPath)
 	if os.IsNotExist(err) {
 		return &ConnectResult{
@@ -943,8 +974,65 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
 		return nil
 	}
-	cleaned := trailingCommaPattern.ReplaceAll(raw, []byte(`$1`))
+	// JSONC tolerance (#922): OpenCode bootstraps opencode.jsonc, which may
+	// carry // and /* */ comments plus trailing commas. Strip comments first —
+	// comment removal can expose new trailing commas — then clean commas.
+	cleaned := stripJSONComments(raw)
+	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
 	return json.Unmarshal(cleaned, out)
+}
+
+// stripJSONComments removes // line and /* */ block comments from JSONC input,
+// string-aware so slashes inside JSON strings survive. Comment bytes are
+// replaced with spaces (newlines kept) to preserve offsets for error messages.
+func stripJSONComments(raw []byte) []byte {
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	inString := false
+	escaped := false
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inString = true
+		case c == '/' && i+1 < len(out) && out[i+1] == '/':
+			for i < len(out) && out[i] != '\n' {
+				out[i] = ' '
+				i++
+			}
+		case c == '/' && i+1 < len(out) && out[i+1] == '*':
+			out[i], out[i+1] = ' ', ' '
+			i += 2
+			for i < len(out) {
+				if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
+					out[i], out[i+1] = ' ', ' '
+					i++
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+		}
+	}
+	return out
+}
+
+// jsonHasComments reports whether stripping comments would change the content —
+// i.e. the file actually uses JSONC comments (not just slashes inside strings).
+func jsonHasComments(raw []byte) bool {
+	return !bytes.Equal(stripJSONComments(raw), raw)
 }
 
 // findEntryTOMLBytes parses TOML config bytes and looks for an entry that points
