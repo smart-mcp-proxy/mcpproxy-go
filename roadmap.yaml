@@ -316,7 +316,7 @@ epics:
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
-    status: in_progress
+    status: done
     priority: P0
     spec: specs/079-upgrade-nudge
     depends_on: []
@@ -340,7 +340,7 @@ epics:
         depends_on: [upgrade-nudge-surfacing]
       - id: upgrade-nudge-quiet
         title: "US3: operator control + CI/offline quiet + no prerelease downgrade nudges"
-        status: in_review
+        status: done
         pr: "#911"
         depends_on: [upgrade-nudge-surfacing]
 
