@@ -3139,6 +3139,10 @@ async function loadScanReport(force = false, skipPolling = false) {
   // Only load if we have a previous scan (skip check when force-loading after scan completion)
   if (!force && !server.value.security_scan?.last_scan_at && !scanReport.value) return
 
+  // Same gen-check as the tools/approvals/log loaders: a route change bumps
+  // loadGeneration, so a report still in flight for the previous server must
+  // not overwrite the new server's refs when it finally resolves.
+  const myGen = loadGeneration
   scanReportLoading.value = true
   scanError.value = null
   try {
@@ -3153,6 +3157,7 @@ async function loadScanReport(force = false, skipPolling = false) {
       api.getScanReport(server.value.name),
       api.getScanStatus(server.value.name),
     ])
+    if (myGen !== loadGeneration) return
     if (reportRes.success && reportRes.data) {
       scanReport.value = reportRes.data as SecurityScanReport
     }
