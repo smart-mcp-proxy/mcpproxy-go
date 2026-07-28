@@ -3186,7 +3186,8 @@ async function loadScanReport(force = false, skipPolling = false) {
   } catch (err) {
     // Silently fail - report may not exist yet
   } finally {
-    scanReportLoading.value = false
+    // A stale generation must not clear the CURRENT server's loading state.
+    if (myGen === loadGeneration) scanReportLoading.value = false
   }
 }
 
