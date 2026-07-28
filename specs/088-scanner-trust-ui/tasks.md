@@ -84,7 +84,7 @@
 
 - [x] T026 [P] Add trust-mode UI + hold-evidence + banner-states section to `docs/features/security-quarantine.md` (086 shipped no docs; constitution VI)
 - [x] T027 Full gates: `cd frontend && npm test` (all suites incl. updated fixtures green), `make build` (embed refresh — stale-embed gotcha), `./scripts/test-api-e2e.sh`, `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...` (expected no-op)
-- [ ] T028 Playwright verification sweep per `docs/development/web-ui-verification.md` over quickstart scenarios 1-5 (port 18081, throwaway data-dir, `[data-test=...]` locators, domcontentloaded); HTML report → `specs/088-scanner-trust-ui/verification/` (required — frontend touched)
+- [x] T028 Verification sweep — performed as a live Chrome-extension session per operator instruction (report: verification/chrome-verification-2026-07-28.md; US2 visual pass deferred to the TPA-harness QA gate). Original text: Playwright verification sweep per `docs/development/web-ui-verification.md` over quickstart scenarios 1-5 (port 18081, throwaway data-dir, `[data-test=...]` locators, domcontentloaded); HTML report → `specs/088-scanner-trust-ui/verification/` (required — frontend touched)
 
 ## Dependencies & Execution Order
 
