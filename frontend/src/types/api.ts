@@ -357,6 +357,17 @@ export interface ToolApproval {
   current_output_schema?: string
   enabled?: boolean
   disabled?: boolean
+  // Scan-gate hold evidence (spec 086 FR-018, surfaced by spec 088). The
+  // durable export payload does NOT carry these — api.getToolApprovals joins
+  // them on from GET /api/v1/servers/{id}/tools; the diff endpoint returns them
+  // directly. Absent on records that are not currently held by the scan gate
+  // and on every record written before spec 086, which must render unchanged.
+  //   held_reason:  'scan_findings' | 'scan_coverage'
+  //   held_verdict: 'dangerous' | 'warnings' | 'clean'
+  //   held_signals: matched check ids, e.g. 'tpa.TPA-2026-0001.hidden_instruction'
+  held_reason?: string
+  held_verdict?: string
+  held_signals?: string[]
 }
 
 // Search result types
