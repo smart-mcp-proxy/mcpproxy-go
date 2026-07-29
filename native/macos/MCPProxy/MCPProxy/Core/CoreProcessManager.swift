@@ -44,7 +44,7 @@ actor CoreProcessManager {
         // Safe because APIClient is an actor — all its methods are isolated
         get async { await apiClient }
     }
-    private var sseClient: SSEClient?
+    private var sseClient: (any SSEStreaming)?
     private var sseTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     /// Poll for an external core while core autostart is off (GH #410).
@@ -599,8 +599,20 @@ actor CoreProcessManager {
 
     // MARK: - Private: SSE Streaming
 
+    /// Install the stream source. Production sets this in `connectToCore`; the
+    /// only other caller is the test that drives `startSSEStream` end to end,
+    /// which is what pins the generation capture to the real wiring rather than
+    /// to `SSEStreamSession` alone.
+    func installSSEClient(_ client: any SSEStreaming) {
+        sseClient = client
+    }
+
     /// Start consuming the SSE event stream.
-    private func startSSEStream() {
+    ///
+    /// Internal rather than private so that test can exist. Everything it does
+    /// is one call to `SSEStreamSession`; the reason that matters is in the
+    /// comment inside.
+    func startSSEStream() {
         guard let sseClient else { return }
 
         sseTask?.cancel()

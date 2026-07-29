@@ -95,7 +95,15 @@ actor NotificationService {
     private var settleGate = ConnectionSettleGate()
 
     /// The shared notification center.
-    private let center = UNUserNotificationCenter.current()
+    ///
+    /// Resolved on first use, not at init. `UNUserNotificationCenter.current()`
+    /// traps with "bundleProxyForCurrentProcess is nil" in an unbundled process,
+    /// which is what an XCTest runner is — so an eager `let` made this actor,
+    /// and everything that holds one (notably `CoreProcessManager`),
+    /// unconstructible from a test. `lazy` is safe here precisely because this
+    /// is an actor: the initialisation is isolated, so it cannot race. In the
+    /// bundled app the only difference is which line resolves the center.
+    private lazy var center = UNUserNotificationCenter.current()
 
     // MARK: - Setup
 
