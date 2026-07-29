@@ -405,9 +405,17 @@ actor APIClient {
     /// admin calls and leave the menu claiming there are no tool calls. The
     /// endpoint clamps `limit` to 100; see `AppState.glanceActivityPageSize`
     /// for why the tray takes one deep page rather than paging.
+    ///
+    /// `exclude_payloads=true` is what makes that page affordable. A full record
+    /// carries `arguments`, `response` and `metadata`, none of which the glance
+    /// renders and only one of which is truncated (at 64KB); measured against a
+    /// real activity log, the newest 100 matching records are ~848KB whole and
+    /// ~30KB projected — a 28x saving on a request the tray repeats every 30
+    /// seconds. `recentActivity(limit:)` deliberately does NOT set it: the
+    /// Dashboard renders exactly those fields.
     func glanceActivity(limit: Int = AppState.glanceActivityPageSize) async throws -> [ActivityEntry] {
         let response: ActivityListResponse = try await fetchWrapped(
-            path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)"
+            path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)&exclude_payloads=true"
         )
         return response.activities
     }

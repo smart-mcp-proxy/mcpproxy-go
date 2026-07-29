@@ -204,7 +204,7 @@ func TestActivityList_SensitiveDataFilter(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var resp struct {
-			Success bool                         `json:"success"`
+			Success bool                           `json:"success"`
 			Data    contracts.ActivityListResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -231,7 +231,7 @@ func TestActivityList_SensitiveDataFilter(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var resp struct {
-			Success bool                         `json:"success"`
+			Success bool                           `json:"success"`
 			Data    contracts.ActivityListResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -246,6 +246,92 @@ func TestActivityList_SensitiveDataFilter(t *testing.T) {
 			assert.False(t, activity.HasSensitiveData,
 				"Activity %s should have HasSensitiveData=false", activity.ID)
 		}
+	})
+}
+
+// TestActivityList_ExcludePayloads covers the projection the tray glance asks
+// for. The glance renders summary fields only, but a full record carries
+// arguments, response and metadata — measured against a real activity log, the
+// newest 100 matching records are ~848 KB whole and ~30 KB in summary form, and
+// the tray refetches every 30 seconds.
+func TestActivityList_ExcludePayloads(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	activities := []*storage.ActivityRecord{
+		{
+			ID:           "activity-with-payload",
+			Type:         storage.ActivityTypeToolCall,
+			ServerName:   "github",
+			ToolName:     "create_issue",
+			Status:       "error",
+			ErrorMessage: "auth failed",
+			DurationMs:   42,
+			RequestID:    "req-1",
+			SessionID:    "sess-1",
+			Timestamp:    time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Arguments:    map[string]interface{}{"title": "a very large argument blob"},
+			Response:     "a very large response body",
+			Metadata: map[string]interface{}{
+				"sensitive_data_detection": map[string]interface{}{
+					"detected": true,
+					"detections": []interface{}{
+						map[string]interface{}{"type": "github_token", "severity": "high"},
+					},
+				},
+			},
+		},
+	}
+	mockCtrl := &mockActivityController{apiKey: "test-key", activities: activities}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	get := func(t *testing.T, path string) contracts.ActivityRecord {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Success bool                           `json:"success"`
+			Data    contracts.ActivityListResponse `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+		require.Len(t, resp.Data.Activities, 1)
+		return resp.Data.Activities[0]
+	}
+
+	t.Run("exclude_payloads=true drops the three heavy fields", func(t *testing.T) {
+		got := get(t, "/api/v1/activity?exclude_payloads=true")
+
+		assert.Nil(t, got.Arguments, "arguments must not be serialised")
+		assert.Empty(t, got.Response, "response must not be serialised")
+		assert.Nil(t, got.Metadata, "metadata must not be serialised")
+	})
+
+	t.Run("exclude_payloads=true keeps every field the glance renders", func(t *testing.T) {
+		got := get(t, "/api/v1/activity?exclude_payloads=true")
+
+		assert.Equal(t, "activity-with-payload", got.ID)
+		assert.Equal(t, contracts.ActivityType("tool_call"), got.Type)
+		assert.Equal(t, "github", got.ServerName)
+		assert.Equal(t, "create_issue", got.ToolName)
+		assert.Equal(t, "error", got.Status)
+		assert.Equal(t, "auth failed", got.ErrorMessage)
+		assert.Equal(t, int64(42), got.DurationMs)
+		assert.Equal(t, "req-1", got.RequestID)
+		assert.Equal(t, "sess-1", got.SessionID)
+		assert.False(t, got.Timestamp.IsZero())
+		// Derived from metadata BEFORE it is dropped: the tray's row icon and
+		// the poll's late correction both key off this flag.
+		assert.True(t, got.HasSensitiveData, "the flag survives its source being dropped")
+	})
+
+	t.Run("the default response is unchanged", func(t *testing.T) {
+		got := get(t, "/api/v1/activity")
+
+		assert.NotNil(t, got.Arguments, "omitting the parameter must not change what other clients get")
+		assert.Equal(t, "a very large response body", got.Response)
+		assert.NotNil(t, got.Metadata)
 	})
 }
 
@@ -268,7 +354,7 @@ func TestActivityList_DetectionTypeFilter(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var resp struct {
-			Success bool                         `json:"success"`
+			Success bool                           `json:"success"`
 			Data    contracts.ActivityListResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -342,7 +428,7 @@ func TestActivityList_SeverityFilter(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var resp struct {
-			Success bool                         `json:"success"`
+			Success bool                           `json:"success"`
 			Data    contracts.ActivityListResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -618,7 +704,7 @@ func TestActivityResponse_SensitiveDataFields(t *testing.T) {
 			"activity-2-credit-card": "high",
 			"activity-3-multiple":    "critical", // Has both critical and high, critical is max
 			"activity-4-medium":      "medium",
-			"activity-5-clean":       "",         // No sensitive data
+			"activity-5-clean":       "", // No sensitive data
 		}
 
 		for _, activity := range resp.Data.Activities {
@@ -680,7 +766,7 @@ func TestActivityDetail_SensitiveDataFields(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var resp struct {
-			Success bool                          `json:"success"`
+			Success bool                             `json:"success"`
 			Data    contracts.ActivityDetailResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)
@@ -703,7 +789,7 @@ func TestActivityDetail_SensitiveDataFields(t *testing.T) {
 		assert.Equal(t, http.StatusOK, w.Code)
 
 		var resp struct {
-			Success bool                          `json:"success"`
+			Success bool                             `json:"success"`
 			Data    contracts.ActivityDetailResponse `json:"data"`
 		}
 		err := json.NewDecoder(w.Body).Decode(&resp)

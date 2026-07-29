@@ -144,6 +144,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"
 // @Param offset query int false "Pagination offset (default 0)"
+// @Param exclude_payloads query bool false "Omit arguments, response and metadata (default: false). For clients that render summary fields only; has_sensitive_data is still derived before metadata is dropped."
 // @Success 200 {object} contracts.APIResponse{data=contracts.ActivityListResponse}
 // @Failure 400 {object} contracts.APIResponse
 // @Failure 401 {object} contracts.APIResponse
@@ -161,10 +162,26 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert storage records to contract records
+	// Convert storage records to contract records.
+	//
+	// `exclude_payloads` is a projection, not a filter: it changes what is
+	// serialised, never which records match, so it is applied here rather than
+	// in the storage filter. Arguments, Response and Metadata are unbounded in
+	// practice (only Response is truncated, at 64KB), and a client that renders
+	// summary fields alone pays for them on every poll — measured against a real
+	// log, the newest 100 tool-call records are ~848KB whole and ~30KB projected.
+	// HasSensitiveData is derived by storageToContractActivity from Metadata
+	// BEFORE it is dropped, so the flag survives its source.
+	excludePayloads := r.URL.Query().Get("exclude_payloads") == "true"
 	contractActivities := make([]contracts.ActivityRecord, len(activities))
 	for i, a := range activities {
 		contractActivities[i] = storageToContractActivity(a)
+		if excludePayloads {
+			contractActivities[i].Arguments = nil
+			contractActivities[i].Response = ""
+			contractActivities[i].ResponseTruncated = false
+			contractActivities[i].Metadata = nil
+		}
 	}
 
 	response := contracts.ActivityListResponse{

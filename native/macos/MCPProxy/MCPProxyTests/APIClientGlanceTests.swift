@@ -81,7 +81,27 @@ final class APIClientGlanceTests: XCTestCase {
 
         XCTAssertEqual(
             GlanceStubURLProtocol.requestedURLs,
-            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call&limit=100"]
+            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call"
+             + "&limit=100&exclude_payloads=true"]
+        )
+    }
+
+    /// The projection is what makes the 100-record page affordable: a full
+    /// record carries arguments, response and metadata, which the glance never
+    /// renders and which measure ~848KB per 100 records against a real log,
+    /// versus ~30KB projected. The Dashboard's feed must NOT ask for it — it
+    /// renders exactly those fields.
+    func testOnlyTheGlanceFeedAsksForTheProjection() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"activities":[],"total":0,"limit":10,"offset":0}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        _ = try await client.recentActivity(limit: 10)
+
+        XCTAssertEqual(
+            GlanceStubURLProtocol.requestedURLs,
+            ["http://127.0.0.1:8080/api/v1/activity?limit=10"]
         )
     }
 
