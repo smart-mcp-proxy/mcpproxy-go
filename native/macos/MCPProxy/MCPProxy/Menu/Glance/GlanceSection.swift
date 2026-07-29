@@ -31,9 +31,15 @@ final class GlanceSection {
     private weak var clickTarget: AnyObject?
     private let clickAction: Selector
 
+    // MARK: Configuration
+
+    /// Character budget for a row label before middle truncation kicks in.
+    private static let labelBudget = 34
+
     // MARK: Owned items (kept so rows can be rewritten in place)
 
     private var summaryItem: NSMenuItem?
+    private var activityRows: [NSMenuItem] = []
 
     init(target: AnyObject?, action: Selector) {
         self.clickTarget = target
@@ -54,14 +60,79 @@ final class GlanceSection {
     /// array when the block is hidden.
     func items(for state: AppState, now: Date = Date()) -> [NSMenuItem] {
         summaryItem = nil
+        activityRows = []
         guard isVisible(for: state) else { return [] }
 
         var items: [NSMenuItem] = []
+
         let summary = disabledItem(titled: summaryTitle(for: state))
         summaryItem = summary
         items.append(summary)
         items.append(.separator())
+
+        items.append(disabledItem(titled: "Recent"))
+        let entries = GlanceSelection.activityRows(from: state.glanceActivity)
+        if entries.isEmpty {
+            items.append(disabledItem(titled: "No tool calls yet"))
+        } else {
+            for entry in entries {
+                let row = actionableItem()
+                apply(entry, to: row, now: now)
+                activityRows.append(row)
+                items.append(row)
+            }
+        }
+
+        let openActivity = actionableItem()
+        openActivity.title = "Open Activity…"
+        openActivity.image = NSImage(systemSymbolName: "list.bullet.rectangle",
+                                     accessibilityDescription: "activity log")
+        items.append(openActivity)
+
         return items
+    }
+
+    // MARK: Row rendering
+
+    /// Rewrite an activity row so its title, icon, tooltip, accessibility label
+    /// and click payload all describe `entry`.
+    private func apply(_ entry: ActivityEntry, to item: NSMenuItem, now: Date) {
+        let fullLabel = GlanceFormatting.rowLabel(for: entry)
+        let label = GlanceFormatting.middleTruncated(fullLabel, limit: Self.labelBudget)
+        let age = GlanceFormatting.relativeTime(entry.timestamp, now: now)
+        let failed = entry.status != "success"
+        let detail = failed ? Self.firstClause(of: entry.errorMessage) : nil
+
+        if let detail {
+            item.title = "\(label) · \(detail) — \(age)"
+            item.setAccessibilityLabel("\(fullLabel), failed: \(detail), \(age) ago")
+        } else {
+            item.title = "\(label) — \(age)"
+            item.setAccessibilityLabel("\(fullLabel), \(failed ? "failed" : "succeeded"), \(age) ago")
+        }
+
+        item.image = NSImage(systemSymbolName: GlanceFormatting.statusSymbolName(for: entry),
+                             accessibilityDescription: failed ? "failed" : "succeeded")
+
+        if let message = entry.errorMessage, !message.isEmpty {
+            item.toolTip = "\(fullLabel)\n\(message)"
+        } else {
+            item.toolTip = fullLabel
+        }
+
+        item.representedObject = entry.sessionId
+    }
+
+    /// First clause of an error message — everything up to the first newline,
+    /// period or colon — so a multi-sentence backend error still fits one row.
+    /// The full message stays in the tooltip.
+    static func firstClause(of message: String?) -> String? {
+        guard let message else { return nil }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let head = trimmed.components(separatedBy: CharacterSet(charactersIn: ".:\n")).first ?? trimmed
+        let clause = head.trimmingCharacters(in: .whitespaces)
+        return clause.isEmpty ? trimmed : clause
     }
 
     // MARK: Header
@@ -81,6 +152,12 @@ final class GlanceSection {
     private func disabledItem(titled title: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
+        return item
+    }
+
+    private func actionableItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: clickAction, keyEquivalent: "")
+        item.target = clickTarget
         return item
     }
 }

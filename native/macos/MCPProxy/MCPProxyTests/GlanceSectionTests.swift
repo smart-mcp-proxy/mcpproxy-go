@@ -40,6 +40,59 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(section.items(for: state, now: Self.now).first?.title, "1 client")
     }
 
+    // MARK: - Recent section
+
+    func testRecentSectionRendersQualifyingRows() {
+        let section = Self.makeSection()
+        let titles = section.items(for: Self.busyState(), now: Self.now).map {
+            $0.isSeparatorItem ? "—" : $0.title
+        }
+        XCTAssertEqual(Array(titles.prefix(6)), [
+            "12 calls this hour · 1 client",
+            "—",
+            "Recent",
+            "github:create_issue — 30s",
+            "jira:get_issue · auth failed — 2m",
+            "Open Activity…"
+        ])
+    }
+
+    func testActivityRowCarriesFullIdentity() {
+        let section = Self.makeSection()
+        let failed = section.items(for: Self.busyState(), now: Self.now)[4]
+        XCTAssertEqual(failed.title, "jira:get_issue · auth failed — 2m")
+        XCTAssertEqual(failed.representedObject as? String, "sess-b")
+        XCTAssertEqual(failed.image?.accessibilityDescription, "failed")
+        XCTAssertEqual(failed.toolTip, "jira:get_issue\nauth failed: token expired. retry after refresh")
+        XCTAssertEqual(failed.accessibilityLabel(), "jira:get_issue, failed: auth failed, 2m ago")
+        XCTAssertNotNil(failed.action)
+    }
+
+    func testOpenActivityRowHasNoSessionPayload() {
+        let section = Self.makeSection()
+        let items = section.items(for: Self.busyState(), now: Self.now)
+        XCTAssertEqual(items[5].title, "Open Activity…")
+        XCTAssertNil(items[5].representedObject)
+        XCTAssertNotNil(items[5].action)
+    }
+
+    func testNoActivityShowsOneMutedRow() {
+        let state = Self.busyState()
+        state.glanceActivity = []
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+        XCTAssertEqual(row.title, "No tool calls yet")
+        XCTAssertFalse(row.isEnabled)
+    }
+
+    func testFirstClauseKeepsOnlyTheLeadingClause() {
+        XCTAssertEqual(GlanceSection.firstClause(of: "auth failed: token expired"), "auth failed")
+        XCTAssertEqual(GlanceSection.firstClause(of: "dial tcp 127.0.0.1"), "dial tcp 127")
+        XCTAssertEqual(GlanceSection.firstClause(of: "  boom  "), "boom")
+        XCTAssertNil(GlanceSection.firstClause(of: "   "))
+        XCTAssertNil(GlanceSection.firstClause(of: nil))
+    }
+
     // MARK: - Helpers
 
     private final class ClickStub: NSObject {
