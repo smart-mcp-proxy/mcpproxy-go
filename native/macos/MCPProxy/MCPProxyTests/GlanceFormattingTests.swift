@@ -28,6 +28,14 @@ final class GlanceFormattingTests: XCTestCase {
         XCTAssertEqual(GlanceFormatting.rowLabel(for: entry), "github:create_issue")
     }
 
+    func testBuiltInWithAServerNameStillLabelsAsTheBareBuiltIn() {
+        // A failed call_tool_* wrapper is persisted carrying BOTH a tool_name
+        // and the server_name it was dispatched at. Only `type == "tool_call"`
+        // composes `server:tool`, so this must stay the bare built-in name.
+        let entry = Self.entry(type: "internal_tool_call", server: "fixture", tool: "call_tool_read", status: "error")
+        XCTAssertEqual(GlanceFormatting.rowLabel(for: entry), "call_tool_read")
+    }
+
     func testLabelFallsBackToTypeWhenNothingIsNamed() {
         let entry = Self.entry(type: "oauth_event")
         XCTAssertEqual(GlanceFormatting.rowLabel(for: entry), "oauth_event")
@@ -45,6 +53,15 @@ final class GlanceFormattingTests: XCTestCase {
         XCTAssertTrue(result.hasPrefix("github"), "kept the server prefix, got \(result)")
         XCTAssertTrue(result.hasSuffix("late"), "kept the tool tail, got \(result)")
         XCTAssertTrue(result.contains("\u{2026}"))
+    }
+
+    func testTextExactlyAtTheLimitIsNotTruncated() {
+        // Pins `>` rather than `>=`: equal length must pass through untouched.
+        XCTAssertEqual(GlanceFormatting.middleTruncated("abcdef", limit: 6), "abcdef")
+    }
+
+    func testTruncationToZeroIsEmpty() {
+        XCTAssertEqual(GlanceFormatting.middleTruncated("abcdef", limit: 0), "")
     }
 
     func testTruncationToOneCharacterIsJustTheEllipsis() {

@@ -46,7 +46,25 @@ enum GlanceSelection {
     ///
     /// The surviving record is emitted at the position of the first record of
     /// its group so recency ordering is preserved. Records with no request id
-    /// are never collapsed.
+    /// are never collapsed. When a group holds several `tool_call` records the
+    /// first one encountered wins — later ones are dropped, not merged.
+    ///
+    /// Why this is safe today: the core mints a request id per dispatch
+    /// (`internal/server/mcp.go`, both `requestID := fmt.Sprintf("%d-%s-%s", …)`
+    /// sites under "Generate requestID for activity tracking"), so two distinct
+    /// upstream calls carry distinct ids structurally. A group is therefore a
+    /// wrapper plus its upstream partner, never a fan-out.
+    ///
+    /// What would invalidate that: `internal/server/mcp_code_execution.go` sets
+    /// `RequestID: u.executionID` ("Use execution ID as request ID to link
+    /// nested calls") on every nested call a `code_execution` script makes, so
+    /// all of them share ONE id. Those records are currently invisible here —
+    /// the nested caller only writes to the legacy history via
+    /// `storage.RecordToolCall` and emits no activity event. If nested calls
+    /// are ever wired into the activity stream, this function would collapse an
+    /// entire multi-tool script down to a single row. At that point rule 4 must
+    /// narrow to "collapse a wrapper with its upstream partner" rather than
+    /// deduplicating a whole request id.
     static func collapseByRequestID(_ entries: [ActivityEntry]) -> [ActivityEntry] {
         var winners: [String: ActivityEntry] = [:]
         for entry in entries {
