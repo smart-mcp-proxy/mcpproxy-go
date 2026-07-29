@@ -155,12 +155,15 @@ final class GlanceSection {
     /// loaded-ness) — the caller must then defer a full rebuild until the menu
     /// closes rather than growing or shrinking a menu the user is reading.
     ///
-    /// A row's *entire identity* is rewritten, not just its title: with a fixed
-    /// number of rows every new event shifts which record each row represents,
-    /// so refreshing only the text would leave a row whose click still opened
-    /// the previous record's session. The histogram submenu is deliberately not
-    /// touched — re-creating it would disturb an open submenu — so a change in
-    /// its loaded-ness reports structural instead.
+    /// When a row comes to stand for a different record its *entire identity* is
+    /// rewritten, not just its title: with a fixed number of rows every new
+    /// event shifts which record each row represents, so refreshing only the
+    /// text would leave a row whose click still opened the previous record's
+    /// session. See `apply(_:to:now:)` for how "different record" is decided.
+    ///
+    /// The histogram submenu is deliberately not touched — re-creating it would
+    /// disturb an open submenu — so a change in its loaded-ness reports
+    /// structural instead.
     @discardableResult
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
