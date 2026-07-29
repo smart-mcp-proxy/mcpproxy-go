@@ -1850,19 +1850,29 @@ func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int)
 // an in-memory node cached in the bucket and retained until the transaction
 // spills at commit. A trim touching P pages therefore holds O(P) — in practice
 // O(n) — however the victim keys are batched. Measured on a 100k-record bucket:
-// ~90 MB held inside the transaction, of which the batched victim slice is
-// ~27 KB. Batching bounds a real term, but not the dominant one.
+// ~90 MB held inside the transaction. The victim slice is ~27 KB by
+// construction (retentionDeleteBatch keys) — computed, not measured. Batching
+// bounds a real term, but not the dominant one.
 //
 // This is accepted rather than fixed. Bounding it means committing between
 // batches, which would trade away the property that migration and retention
 // apply atomically under bbolt's exclusive file lock. The trade is not worth
-// making, because the oversized bucket it protects against has no known way to
-// occur: retention has run on every CreateSession since session tracking was
-// introduced and now runs on every open, so the bucket has never been
-// uncapped. The realistic "oversized" case is the off-by-one that let it settle
-// at 101 — not 10^5. If a path is ever found that can put a genuinely large
-// number of records in this bucket, this is the comment that has to change with
-// it.
+// making, because no supported, IN-PROCESS write path produces the oversized
+// bucket it would defend. Only two writers add keys to this bucket:
+// CreateSession, where retention runs immediately after every insert, and the
+// legacy migration, where it runs immediately after at open. Every other writer
+// Puts on a key it already located by scanning, so it cannot grow the bucket.
+// The realistic "oversized" case is the off-by-one that let it settle at 101 —
+// not 10^5.
+//
+// Out-of-band writes are deliberately EXCLUDED from that claim. Direct bbolt
+// manipulation, a database import or merge, or any other process writing this
+// file can produce an arbitrarily large bucket — which is precisely why
+// enforceSessionRetentionOnOpen repairs an oversized bucket whatever the
+// reason, and why this function must stay correct (if not thrifty) at any size.
+// If such a database turns up in practice, or a supported in-process path is
+// ever added that inserts many records at once, this is the comment that has to
+// change with it.
 func trimSessionsToLimit(bucket *bbolt.Bucket, maxSessions int, logger *zap.SugaredLogger) error {
 	if maxSessions <= 0 {
 		return nil
