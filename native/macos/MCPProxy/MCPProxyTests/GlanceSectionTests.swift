@@ -283,6 +283,53 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(items[3].toolTip, "github:create_issue\nrate limited: try later")
     }
 
+    // MARK: - Client rows are not rewritten when nothing changed
+
+    /// `updateInPlace` fires on nearly every 30s poll for a busy proxy — and
+    /// under an open menu, where each write is a re-layout. A poll that returns
+    /// the same session byte for byte must therefore write nothing at all, and
+    /// in particular must not allocate a fresh tinted icon: the connected dot is
+    /// a constant.
+    func testIdenticalClientPollWritesNothing() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[8]
+        let dotBefore = row.image
+
+        var titleWrites = 0
+        let observation = row.observe(\.title, options: [.new]) { _, _ in titleWrites += 1 }
+        state.glanceSessions = [
+            Self.session(id: "sess-a", name: "Claude Code", version: "2.1.0",
+                         calls: 8, lastActivity: "2027-01-15T07:59:00Z")
+        ]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        observation.invalidate()
+
+        XCTAssertTrue(row.image === dotBefore,
+                      "the connected dot is a constant — an identical poll must not allocate a new one")
+        XCTAssertEqual(titleWrites, 0,
+                       "an identical poll must not rewrite the title of a row in an open menu")
+        XCTAssertEqual(row.title, "Claude Code — 8 calls · 1m")
+    }
+
+    /// …and the guards must not freeze the row: the live call count is the whole
+    /// reason `MCPSession` became `Equatable`.
+    func testChangedClientCallCountStillRewritesTheRow() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[8]
+
+        state.glanceSessions = [
+            Self.session(id: "sess-a", name: "Claude Code", version: "2.1.0",
+                         calls: 40, lastActivity: "2027-01-15T07:59:00Z")
+        ]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(row.title, "Claude Code — 40 calls · 1m")
+        XCTAssertEqual(row.accessibilityLabel(), "Claude Code, 40 calls, last active 1m ago")
+    }
+
     // MARK: - Status is carried by shape AND colour
 
     func testStatusIsEncodedByShapeAndColourNotColourAlone() {

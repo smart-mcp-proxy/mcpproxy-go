@@ -326,30 +326,49 @@ final class GlanceSection {
         return tinted
     }
 
+    /// The client-row bullet. Every client row is an *active* session, so this
+    /// glyph is a constant — built once rather than re-tinted per row per poll.
+    private static let connectedDot = symbolImage(named: "circle.fill",
+                                                  tint: .systemGreen,
+                                                  description: "connected")
+
     /// Rewrite a client row so it fully describes `session`.
+    ///
+    /// Unlike an activity row this needs no `recordKey`: a session id does not
+    /// churn, so a row never comes to stand for a different client without the
+    /// row count changing (which `updateInPlace` already reports as structural).
+    /// The write guards are still needed, and for a different reason — cost.
+    /// `updateInPlace` runs on nearly every 30s poll for a busy proxy, under a
+    /// menu the user may have open, where every write is a re-layout; so only
+    /// what actually differs is written.
     private func apply(_ session: APIClient.MCPSession, to item: NSMenuItem, now: Date) {
         let name = session.clientName.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown client"
         let calls = session.toolCallCount ?? 0
         let callText = calls == 1 ? "1 call" : "\(calls) calls"
         let age = session.lastActivity.map { GlanceFormatting.relativeTime($0, now: now) }
 
+        let title: String
+        let accessibility: String
         if let age {
-            item.title = "\(name) — \(callText) · \(age)"
-            item.setAccessibilityLabel("\(name), \(callText), last active \(age) ago")
+            title = "\(name) — \(callText) · \(age)"
+            accessibility = "\(name), \(callText), last active \(age) ago"
         } else {
-            item.title = "\(name) — \(callText)"
-            item.setAccessibilityLabel("\(name), \(callText)")
+            title = "\(name) — \(callText)"
+            accessibility = "\(name), \(callText)"
         }
 
-        item.image = Self.symbolImage(named: "circle.fill", tint: .systemGreen, description: "connected")
-
+        let toolTip: String
         if let version = session.clientVersion, !version.isEmpty {
-            item.toolTip = "\(name) \(version)"
+            toolTip = "\(name) \(version)"
         } else {
-            item.toolTip = name
+            toolTip = name
         }
 
-        item.representedObject = session.id
+        if item.title != title { item.title = title }
+        if item.accessibilityLabel() != accessibility { item.setAccessibilityLabel(accessibility) }
+        if item.toolTip != toolTip { item.toolTip = toolTip }
+        if item.image !== Self.connectedDot { item.image = Self.connectedDot }
+        if (item.representedObject as? String) != session.id { item.representedObject = session.id }
     }
 
     // MARK: Histogram
