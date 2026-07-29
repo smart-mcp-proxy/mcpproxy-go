@@ -370,6 +370,47 @@ func TestEnforceSessionRetention_EvictsUnreadableRecordsBeforeUsableOnes(t *test
 		"a usable record must not be deleted while an unreadable one survives")
 }
 
+// Records arrive in key order, which is start-time order — but rank is not
+// start-time order. When a record that sorts LATE by key is WORSE by rank, the
+// bounded selection has to recognise it as a victim outright rather than
+// displacing a better record that it already decided to keep.
+//
+// This is the case where key order and rank point in opposite directions: a
+// fleet of long-lived active sessions, then a burst of closed sessions with
+// newer start times. Every closed record is worse than every active one despite
+// having a higher key, so all of them must lose.
+func TestEnforceSessionRetention_EvictsLateKeyedRecordsThatRankWorse(t *testing.T) {
+	m := newRetentionTestManager(t)
+	base := time.Now().Add(-24 * time.Hour)
+
+	// Long-lived active sessions occupying the whole budget, at LOW keys.
+	for i := 0; i < sessionRetentionLimit; i++ {
+		s := makeSession(fmt.Sprintf("active-%04d", i), base,
+			time.Duration(i)*time.Minute, time.Duration(i)*time.Minute, "active")
+		require.NoError(t, m.CreateSession(s))
+	}
+
+	// A burst of finished sessions with NEWER start times, at HIGH keys.
+	const closedBurst = 50
+	for i := 0; i < closedBurst; i++ {
+		s := makeSession(fmt.Sprintf("closed-%04d", i), base,
+			time.Duration(200+i)*time.Minute, time.Duration(200+i)*time.Minute, "closed")
+		require.NoError(t, m.CreateSession(s))
+	}
+
+	assert.Equal(t, sessionRetentionLimit, countSessions(t, m))
+
+	// Every active session survives; every closed one is gone, newer keys and all.
+	for i := 0; i < sessionRetentionLimit; i++ {
+		_, err := m.GetSessionByID(fmt.Sprintf("active-%04d", i))
+		assert.NoError(t, err, "active-%04d must survive a burst of newer closed sessions", i)
+	}
+	for i := 0; i < closedBurst; i++ {
+		_, err := m.GetSessionByID(fmt.Sprintf("closed-%04d", i))
+		assert.Error(t, err, "closed-%04d ranks below every active session and must be evicted", i)
+	}
+}
+
 // The bounded selection must pick the same victims a full sort would, including
 // when the bucket starts far above the limit (the migration case).
 func TestEnforceSessionRetention_TrimsFromFarAboveTheLimitInOneGo(t *testing.T) {
