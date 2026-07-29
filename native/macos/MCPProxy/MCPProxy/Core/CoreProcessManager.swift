@@ -81,20 +81,34 @@ actor CoreProcessManager {
     /// Socket path for the core process.
     private let socketPath: String
 
+    /// How often the periodic refresh tick runs. Injectable so tests can drive
+    /// the tick — and the liveness probe on it — without waiting 30 seconds.
+    private let refreshInterval: TimeInterval
+
     // MARK: - Initialization
 
+    /// - Parameters:
+    ///   - socketPath: Path of the core's Unix socket. Defaults to
+    ///     `~/.mcpproxy/mcpproxy.sock`. Injectable so a test (or a second app
+    ///     instance) can be pointed at an isolated core instead of contending
+    ///     with the user's live one — without it, nothing about attach mode is
+    ///     testable, because attaching IS "probe this socket" (GH #926).
+    ///   - refreshInterval: Period of the background refresh/liveness tick.
     init(
         appState: AppState,
         notificationService: NotificationService,
-        reconnectionPolicy: ReconnectionPolicy = .default
+        reconnectionPolicy: ReconnectionPolicy = .default,
+        socketPath: String? = nil,
+        refreshInterval: TimeInterval = 30.0
     ) {
         self.appState = appState
         self.notificationService = notificationService
         self.reconnectionPolicy = reconnectionPolicy
+        self.refreshInterval = refreshInterval
 
         // Compute socket path: ~/.mcpproxy/mcpproxy.sock
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        self.socketPath = "\(home)/.mcpproxy/mcpproxy.sock"
+        self.socketPath = socketPath ?? "\(home)/.mcpproxy/mcpproxy.sock"
     }
 
     // MARK: - Public API
@@ -732,14 +746,15 @@ actor CoreProcessManager {
 
     // MARK: - Private: State Refresh
 
-    /// Start a periodic refresh task that polls servers every 30 seconds.
+    /// Start a periodic refresh task that polls the core every `refreshInterval`.
     private func startPeriodicRefresh() {
         refreshTask?.cancel()
+        let interval = refreshInterval
         refreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30s
-                guard !Task.isCancelled else { break }
-                await self?.refreshState()
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard !Task.isCancelled, let self else { break }
+                await self.refreshState()
             }
         }
     }

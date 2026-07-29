@@ -95,7 +95,14 @@ actor NotificationService {
     private var settleGate = ConnectionSettleGate()
 
     /// The shared notification center.
-    private let center = UNUserNotificationCenter.current()
+    ///
+    /// Resolved lazily on first use rather than at init: `current()` requires a
+    /// real application bundle and raises `NSInternalInconsistencyException`
+    /// otherwise, which made merely CONSTRUCTING this service — and therefore
+    /// anything that depends on it, such as `CoreProcessManager` — impossible to
+    /// unit-test. Delivery paths are unchanged; nothing in the app touches the
+    /// center before `setup()`.
+    private lazy var center = UNUserNotificationCenter.current()
 
     // MARK: - Setup
 
