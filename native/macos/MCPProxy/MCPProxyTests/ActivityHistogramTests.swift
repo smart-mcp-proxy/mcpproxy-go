@@ -554,12 +554,37 @@ final class UsageRefreshWiringTests: XCTestCase {
 
 /// The chart's visual encoding. `GlanceSection.statusTint` states the rule these
 /// pin: colour is never the only channel separating two outcomes.
+///
+/// Rasterised with SwiftUI's `ImageRenderer`, NOT `NSHostingView.cacheDisplay`.
+/// The hosting-view path needs a display context the GitHub macOS runner does
+/// not provide: there it painted 13 sample points where a developer machine
+/// paints hundreds, so the tests either failed or — worse, had they skipped —
+/// asserted nothing in the one environment nobody watches. `ImageRenderer` draws
+/// offscreen through Core Graphics with no window server involved, and its
+/// output matches the on-screen raster where it counts (identical red and
+/// chroma counts, measured both ways before this was changed).
+///
+/// `scale` is pinned so the pixel grid is a property of the test and not of
+/// whatever display the machine has. That was the second half of the CI failure:
+/// the old sampler strode `rep.size`, which equals the POINT size at 2x and the
+/// PIXEL size at 1x, so it silently covered a quarter of the image on a Retina
+/// machine and all of it on the runner — which is exactly why the legend's red
+/// swatch was invisible locally and fatal in CI.
 @MainActor
 final class ActivityHistogramEncodingTests: XCTestCase {
 
-    /// What a rasterised chart actually painted.
+    /// The chart is 132 pt tall and the bottom 24 pt of that is the legend —
+    /// the band the frame grew to pay for. Everything above it is the plot.
+    private static let legendBandHeight = 24.0
+
+    /// What a rasterised region actually painted.
     private struct Pixels {
         /// Sample points with meaningful alpha — i.e. how much was drawn at all.
+        ///
+        /// The threshold is deliberately low: `Color.secondary` resolves to an
+        /// alpha of ~0.5, so the success bars are semi-transparent against the
+        /// renderer's transparent backing. A 0.5 cut-off drops the entire
+        /// success series and leaves a "blank chart" reading that is not true.
         var drawn = 0
         /// Sample points reading as saturated red.
         var red = 0
@@ -568,24 +593,43 @@ final class ActivityHistogramEncodingTests: XCTestCase {
         var chromatic = 0
     }
 
-    /// Rasterise the chart and count pixels.
+    /// Which part of the chart to count.
+    private enum Region {
+        /// Everything above the legend — the plot area proper.
+        case plot
+        /// The bottom 24 pt, where the legend sits.
+        case legend
+        case whole
+    }
+
+    /// Rasterise the chart offscreen and count pixels in one region.
     ///
-    /// Returns nil ONLY when there is genuinely no bitmap to inspect. It
+    /// Returns nil ONLY when there is genuinely no image to inspect. It
     /// deliberately does NOT fold a low pixel count into nil: a test that turns
     /// its own failed precondition into a skip reports green while asserting
     /// nothing, and does so exactly where nobody is watching. Callers assert on
     /// `drawn` instead.
-    private func pixels(of bars: [HistogramBar]) -> Pixels? {
-        let host = NSHostingView(rootView: ActivityHistogramView(bars: bars, accessibilitySummary: ""))
-        host.frame = NSRect(origin: .zero, size: ActivityHistogram.chartItemSize)
-        host.layoutSubtreeIfNeeded()
-        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
-        host.cacheDisplay(in: host.bounds, to: rep)
+    private func pixels(of bars: [HistogramBar], in region: Region) -> Pixels? {
+        let renderer = ImageRenderer(content: ActivityHistogramView(bars: bars,
+                                                                    accessibilitySummary: ""))
+        renderer.scale = 2
+        guard let cgImage = renderer.cgImage else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+
+        // y grows downward in the rendered image, so the legend is the last rows.
+        let bandStart = rep.pixelsHigh - Int((Self.legendBandHeight / ActivityHistogram.chartItemSize.height)
+                                             * Double(rep.pixelsHigh))
+        let rows: Range<Int>
+        switch region {
+        case .plot: rows = 0..<bandStart
+        case .legend: rows = bandStart..<rep.pixelsHigh
+        case .whole: rows = 0..<rep.pixelsHigh
+        }
 
         var counts = Pixels()
-        for x in stride(from: 0, to: Int(rep.size.width), by: 2) {
-            for y in stride(from: 0, to: Int(rep.size.height), by: 2) {
-                guard let colour = rep.colorAt(x: x, y: y), colour.alphaComponent > 0.5 else { continue }
+        for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+            for y in stride(from: rows.lowerBound, to: rows.upperBound, by: 2) {
+                guard let colour = rep.colorAt(x: x, y: y), colour.alphaComponent > 0.1 else { continue }
                 counts.drawn += 1
 
                 let r = colour.redComponent, g = colour.greenComponent, b = colour.blueComponent
@@ -596,12 +640,10 @@ final class ActivityHistogramEncodingTests: XCTestCase {
         return counts
     }
 
-    private func measure(_ bars: [HistogramBar]) throws -> Pixels {
-        guard let counts = pixels(of: bars) else {
+    private func measure(_ bars: [HistogramBar], in region: Region = .whole) throws -> Pixels {
+        guard let counts = pixels(of: bars, in: region) else {
             throw XCTSkip("this machine cannot rasterise the chart at all")
         }
-        // Asserted, never skipped: a blank render must fail loudly.
-        XCTAssertGreaterThan(counts.drawn, 100, "the chart rendered blank; the counts below mean nothing")
         return counts
     }
 
@@ -609,11 +651,20 @@ final class ActivityHistogramEncodingTests: XCTestCase {
     /// driven by the DATA — an axis or legend that is red regardless would pass
     /// a "chart contains red" assertion while showing failures in the same
     /// colour as successes.
+    ///
+    /// Measured over the plot area alone. The legend is red in BOTH renders by
+    /// design, and while comparing shares cancels any data-independent red, not
+    /// including it says what is meant.
     func testErrorSegmentsAreDrawnDistinctlyFromSuccesses() throws {
         let hour = Fixture.currentHour
 
-        let withErrors = try measure([HistogramBar(hourStart: hour, succeeded: 7, errors: 3)])
-        let withoutErrors = try measure([HistogramBar(hourStart: hour, succeeded: 10, errors: 0)])
+        let withErrors = try measure([HistogramBar(hourStart: hour, succeeded: 7, errors: 3)], in: .plot)
+        let withoutErrors = try measure([HistogramBar(hourStart: hour, succeeded: 10, errors: 0)], in: .plot)
+
+        // Asserted, never skipped: a blank render must fail loudly, or the
+        // shares below are 0/0.
+        XCTAssertGreaterThan(withErrors.drawn, 500, "the chart rendered blank; the counts mean nothing")
+        XCTAssertGreaterThan(withoutErrors.drawn, 500, "the chart rendered blank; the counts mean nothing")
 
         let withShare = Double(withErrors.red) / Double(withErrors.drawn)
         let withoutShare = Double(withoutErrors.red) / Double(withoutErrors.drawn)
@@ -623,32 +674,29 @@ final class ActivityHistogramEncodingTests: XCTestCase {
         )
     }
 
-    /// Count red pixels above and below the legend band.
+    /// The success fill must not follow `Color.accentColor`, or a user whose
+    /// system accent is red sees two near-identical segments.
     ///
-    /// Deliberately its own sampler rather than a parameter on `pixels(of:)`:
-    /// this one walks the rep's PIXEL extent (`pixelsWide`/`pixelsHigh`), which
-    /// is what makes "the bottom 24 points" mean the same thing at 1x and 2x.
-    private func redAboveAndBelowTheLegendBand(_ bars: [HistogramBar]) -> (above: Int, below: Int, drawn: Int)? {
-        let host = NSHostingView(rootView: ActivityHistogramView(bars: bars, accessibilitySummary: ""))
-        host.frame = NSRect(origin: .zero, size: ActivityHistogram.chartItemSize)
-        host.layoutSubtreeIfNeeded()
-        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
-        host.cacheDisplay(in: host.bounds, to: rep)
+    /// The accent cannot be set from a test process, so this measures the
+    /// property from the other side: `Color.secondary` is achromatic, an accent
+    /// is not. A success-only PLOT must therefore paint no chroma. The failure
+    /// direction is safe — a machine whose accent is Graphite renders a grey
+    /// accent and gives a false pass, never a false fail.
+    ///
+    /// Scoped to the plot for a reason CI had to teach us: the legend carries a
+    /// red "Errors" swatch in every render, success-only included, so asserting
+    /// no chroma over the whole image asserts something false. It passed locally
+    /// only because the old sampler happened to miss the legend band, and failed
+    /// on the runner — 13 chromatic samples — where the same code covered it.
+    func testSuccessFillCarriesNoChromaAndSoCannotBeTheAccentColour() throws {
+        let counts = try measure([HistogramBar(hourStart: Fixture.currentHour,
+                                               succeeded: 10, errors: 0)], in: .plot)
 
-        // y grows downward in a cached rep, so the legend band is the last rows.
-        let bandStart = rep.pixelsHigh - Int((24.0 / ActivityHistogram.chartItemSize.height)
-                                             * Double(rep.pixelsHigh))
-        var above = 0, below = 0, drawn = 0
-        for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
-            for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
-                guard let colour = rep.colorAt(x: x, y: y), colour.alphaComponent > 0.5 else { continue }
-                drawn += 1
-                let r = colour.redComponent, g = colour.greenComponent, b = colour.blueComponent
-                guard r > 0.5, g < 0.45, b < 0.45 else { continue }
-                if y >= bandStart { below += 1 } else { above += 1 }
-            }
-        }
-        return (above, below, drawn)
+        XCTAssertGreaterThan(counts.drawn, 500, "the chart rendered blank; the count below means nothing")
+        XCTAssertEqual(
+            counts.chromatic, 0,
+            "a plot with no errors must paint nothing coloured; \(counts.chromatic) of \(counts.drawn) sampled pixels carried chroma"
+        )
     }
 
     /// The legend must actually render, and inside the frame that was grown to
@@ -656,45 +704,27 @@ final class ActivityHistogramEncodingTests: XCTestCase {
     ///
     /// `.chartLegend(.visible)` was the one user-visible thing on this view that
     /// no test asserted the presence of: flipping it to `.hidden` left the suite
-    /// green while silently reclaiming the 20pt the frame grew to fit it —
-    /// and `testRealChartItemIsSizedAndLabelled` would then have failed on the
-    /// size, inviting whoever reclaimed the space to "fix" that test instead.
+    /// green while silently reclaiming the 20pt the frame grew to fit it — and
+    /// `testRealChartItemIsSizedAndLabelled` would then have failed on the size,
+    /// inviting whoever reclaimed the space to "fix" that test instead.
     ///
     /// Measured, not asserted from the outside: on an all-zero axis the chart
     /// draws no error segments, so the ONLY red the view can contain is the
-    /// legend's "Errors" swatch. Hiding the legend takes it to zero.
+    /// legend's "Errors" swatch. Hiding the legend takes it to zero. Both halves
+    /// are positive assertions, so a blank raster fails them rather than passing.
     func testTheLegendRendersInsideTheFrameThatPaysForIt() throws {
         let bars = ActivityHistogram.bars(from: [], now: Fixture.now)
 
-        guard let counts = redAboveAndBelowTheLegendBand(bars) else {
-            throw XCTSkip("this machine cannot rasterise the chart at all")
-        }
-        XCTAssertGreaterThan(counts.drawn, 50, "the chart rendered blank; the counts below mean nothing")
+        let legend = try measure(bars, in: .legend)
+        let plot = try measure(bars, in: .plot)
+
         XCTAssertGreaterThan(
-            counts.below, 0,
+            legend.red, 0,
             "no legend swatch in the bottom band — the 20pt of frame height buys nothing"
         )
         XCTAssertEqual(
-            counts.above, 0,
-            "an all-zero axis must paint no red above the legend, or this measures chart data"
-        )
-    }
-
-    /// The success fill must not follow `Color.accentColor`, or a user whose
-    /// system accent is red sees two near-identical segments.
-    ///
-    /// The accent cannot be set from a test process, so this measures the
-    /// property from the other side: `Color.secondary` is achromatic, an accent
-    /// is not. A success-only chart must therefore paint NO chroma. The failure
-    /// direction is safe — a machine whose accent is Graphite renders a grey
-    /// accent and gives a false pass, never a false fail.
-    func testSuccessFillCarriesNoChromaAndSoCannotBeTheAccentColour() throws {
-        let counts = try measure([HistogramBar(hourStart: Fixture.currentHour,
-                                               succeeded: 10, errors: 0)])
-
-        XCTAssertEqual(
-            counts.chromatic, 0,
-            "a chart with no errors must paint nothing coloured; \(counts.chromatic) of \(counts.drawn) sampled pixels carried chroma"
+            plot.red, 0,
+            "an all-zero axis must paint no red in the plot, or this measures chart data"
         )
     }
 }
