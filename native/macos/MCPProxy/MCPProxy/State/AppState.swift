@@ -72,6 +72,26 @@ final class AppState: ObservableObject {
     /// Monotonic counter bumped on SSE servers.changed / config.reloaded for live updates.
     @Published var serversVersion: Int = 0
 
+    // MARK: Tray Glance feeds (separate from the shared recentActivity/recentSessions)
+
+    /// Tool-call activity for the tray glance section, fetched with a `type`
+    /// filter. Deliberately NOT the same feed as `recentActivity`: the native
+    /// Dashboard renders the full activity log (security scans, quarantine
+    /// changes, OAuth events) from that one, so narrowing it would gut the view.
+    @Published var glanceActivity: [ActivityEntry] = []
+
+    /// Active-only MCP sessions for the tray glance "Clients" rows. Separate from
+    /// `recentSessions`, which ActivityView and DashboardView use to resolve
+    /// session ids to client names and therefore must keep closed sessions.
+    @Published var glanceSessions: [APIClient.MCPSession] = []
+
+    /// Hourly call timeline for the last 24h. `nil` means "not loaded yet";
+    /// an empty array means "loaded, and the proxy was idle".
+    @Published var usageTimeline: [UsageBucket]?
+
+    /// Calls recorded in the CURRENT UTC hour. `nil` means "not loaded yet".
+    @Published var callsThisHour: Int?
+
     // MARK: Token metrics (from status response)
 
     @Published var tokenMetrics: TokenMetrics?
@@ -256,5 +276,42 @@ final class AppState: ObservableObject {
     @MainActor
     func transition(to newState: CoreState) {
         coreState = newState
+    }
+
+    // MARK: Tray Glance helpers
+
+    /// Truncate a date to the start of its UTC hour. Unix time is UTC by
+    /// definition, so flooring the epoch seconds needs no Calendar or TimeZone.
+    static func floorToHour(_ date: Date) -> Date {
+        let seconds = date.timeIntervalSince1970
+        return Date(timeIntervalSince1970: (seconds / 3600).rounded(.down) * 3600)
+    }
+
+    /// Calls recorded in the UTC hour containing `now`.
+    ///
+    /// Buckets are UTC-hour aligned and SPARSE — the endpoint omits hours with no
+    /// activity. Picking "the newest bucket" would therefore show a count from
+    /// hours ago as if it were current, so this matches on the bucket start and
+    /// returns 0 when the current hour has no bucket.
+    static func callsInCurrentHour(_ timeline: [UsageBucket], now: Date = Date()) -> Int {
+        let currentHour = floorToHour(now)
+        for bucket in timeline where floorToHour(bucket.start) == currentHour {
+            return bucket.calls
+        }
+        return 0
+    }
+
+    /// Store the 24h timeline and derive the current-hour headline count.
+    ///
+    /// Both assignments are guarded. This file's rule (see `updateServers`) is
+    /// "only publish when the data actually differs", because every `@Published`
+    /// write feeds the debounced `objectWillChange → rebuildMenu()` sink in
+    /// MCPProxyApp — an unguarded write here would rebuild the menu every 30s on
+    /// a completely idle proxy. `UsageBucket` is `Equatable`, so the guard is free.
+    @MainActor
+    func updateUsage(timeline: [UsageBucket], now: Date = Date()) {
+        if usageTimeline != timeline { usageTimeline = timeline }
+        let calls = AppState.callsInCurrentHour(timeline, now: now)
+        if callsThisHour != calls { callsThisHour = calls }
     }
 }
