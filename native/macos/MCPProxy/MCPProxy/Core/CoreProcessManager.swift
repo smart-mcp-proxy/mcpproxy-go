@@ -76,7 +76,9 @@ actor CoreProcessManager {
     /// followed by a set guards nothing: another invocation runs during the
     /// suspension and passes the same check.
     private var connectionWorkInFlight: Bool = false
-    private var retryCount: Int = 0
+    /// Rungs of the relaunch ladder used so far. Readable for tests, which need
+    /// to see that a successful relaunch clears it.
+    private(set) var retryCount: Int = 0
     private let maxRetries: Int = 3
     private let notificationService: NotificationService
     private let reconnectionPolicy: ReconnectionPolicy
@@ -175,12 +177,34 @@ actor CoreProcessManager {
     ///   goes idle and watches for one to appear, so a core the user starts
     ///   later (CLI, launchd, brew services) is picked up without a restart.
     func start(maySpawn: Bool = true) async {
-        switch await attachIfCoreIsRunning() {
+        // The gate covers the WHOLE of start, spawn included. `retry()` kills the
+        // managed process and then calls this; that process's termination
+        // handler is on its way to starting a reconnection at the same time.
+        // Without the gate around the spawn, both launch — two cores on one data
+        // directory.
+        guard beginConnectionWork() else {
+            NSLog("[MCPProxy] start: another connection attempt is already running")
+            return
+        }
+        defer { endConnectionWork() }
+
+        switch await attachIfCoreIsRunningLocked() {
         case .attached:
             return
         case .inFlight:
-            // Someone else is attaching to the same core. Leave them to it —
-            // spawning or going idle here would fight that attach.
+            // Cannot happen while we hold the gate, but treat it as "someone
+            // else owns this" rather than as an invitation to spawn.
+            return
+        case .unresponsive:
+            // A core IS listening; it just did not answer in time. Do NOT unlink
+            // its socket and do NOT start a competing core against the same data
+            // directory — that is two writers on one BBolt database. Wait for it
+            // instead; the attach watch re-probes every couple of seconds and
+            // attaches the moment it answers.
+            NSLog("[MCPProxy] A core is listening on %@ but did not answer — waiting for it", socketPath)
+            await MainActor.run { appState.isStopped = false }
+            await transitionState(to: .waitingForCore)
+            startAttachWatch()
             return
         case .noCore:
             break
@@ -191,8 +215,12 @@ actor CoreProcessManager {
             return
         }
 
-        // Stale socket — remove it so our new core can create a fresh one.
-        if SocketTransport.isSocketAvailable(path: socketPath) {
+        // Nothing is listening. If a socket FILE is still lying around it is
+        // stale — left by a killed process — so remove it and let our core
+        // create a fresh one. Note the predicate: a socket that is still
+        // CONNECTABLE is not stale, and never reaches here (see .unresponsive).
+        if FileManager.default.fileExists(atPath: socketPath) {
+            NSLog("[MCPProxy] Removing stale socket at %@", socketPath)
             try? FileManager.default.removeItem(atPath: socketPath)
         }
 
@@ -201,7 +229,7 @@ actor CoreProcessManager {
             appState.isStopped = false
             appState.ownership = .trayManaged
         }
-        await launchAndConnect()
+        await launchWithRetries()
     }
 
     /// Retire this manager: stop watching and never touch AppState again. Called
@@ -228,28 +256,43 @@ actor CoreProcessManager {
 
     /// What happened when we looked for a core to attach to.
     ///
-    /// `inFlight` is NOT `noCore`: another task is already attaching, and the
-    /// caller must not react by spawning a core or declaring itself idle — that
-    /// would fight the attach that is under way.
+    /// Three of these are emphatically NOT `noCore`, and conflating them is how
+    /// a tray ends up destroying a running core:
+    /// - `inFlight`: another task is already attaching. Spawning or going idle
+    ///   would fight the attach under way.
+    /// - `unresponsive`: something IS listening on the socket, it just did not
+    ///   answer. Never unlink that socket and never spawn against it — that is
+    ///   a second writer on one BBolt database.
     enum AttachOutcome {
         case attached
         case inFlight
+        case unresponsive
         case noCore
     }
 
-    /// Attach to a core that is already up.
-    private func attachIfCoreIsRunning() async -> AttachOutcome {
-        guard !superseded else { return .noCore }
-        // Everything up to the acquisition is synchronous, so the claim below is
-        // atomic with respect to the checks above it.
-        guard SocketTransport.isSocketAvailable(path: socketPath) else { return .noCore }
+    /// Attach to a core that is already up, taking the connection gate.
+    /// Used by the attach watcher, which is not already holding it.
+    private func attachIfCoreIsRunningGated() async -> AttachOutcome {
         guard beginConnectionWork() else { return .inFlight }
         defer { endConnectionWork() }
+        return await attachIfCoreIsRunningLocked()
+    }
 
-        guard await probeExternalCore() else { return .noCore }
-        guard !superseded else { return .noCore } // a replacement took over while we probed
-        await attachToExternalCore()
-        return .attached
+    /// Attach to a core that is already up. Caller MUST hold the connection gate.
+    private func attachIfCoreIsRunningLocked() async -> AttachOutcome {
+        guard !superseded else { return .noCore }
+        guard SocketTransport.isSocketAvailable(path: socketPath) else { return .noCore }
+
+        if await probeExternalCore() {
+            guard !superseded else { return .noCore } // a replacement took over while we probed
+            await attachToExternalCore()
+            return .attached
+        }
+
+        // The probe failed. Is that because the core went away while we asked,
+        // or because it is up and did not answer in time? The difference decides
+        // whether the caller may treat the socket as rubbish.
+        return SocketTransport.isSocketAvailable(path: socketPath) ? .unresponsive : .noCore
     }
 
     /// Idle mode (#410): no core, and we are not allowed to start one. Sit in the
@@ -272,7 +315,7 @@ actor CoreProcessManager {
                 guard !Task.isCancelled, let self else { return }
                 // Keep polling while another task is mid-attach: if that attach
                 // fails, this watch is what picks the core up next time round.
-                if case .attached = await self.attachIfCoreIsRunning() { return }
+                if case .attached = await self.attachIfCoreIsRunningGated() { return }
             }
         }
     }
@@ -421,36 +464,72 @@ actor CoreProcessManager {
 
     // MARK: - Private: Launch and Connect
 
-    /// Full launch sequence: resolve binary, start process, wait for socket, connect.
-    private func launchAndConnect() async {
-        do {
-            await transitionState(to: .launching)
+    /// One launch attempt. THROWS on failure instead of publishing a terminal
+    /// error, so a caller running the retry ladder can decide whether there is
+    /// another rung. On success the ladder is cleared: a core that came back and
+    /// is running normally must not carry old strikes into its next crash.
+    private func launchAndConnectOnce() async throws {
+        await transitionState(to: .launching)
 
-            // Resolve the core binary
-            let binaryPath = try resolveBinary()
-            coreBinaryPath = binaryPath
+        // Resolve the core binary
+        let binaryPath = try resolveBinary()
+        coreBinaryPath = binaryPath
 
-            // Launch the process (core uses its own config API key)
-            try await launchCore(binaryPath: binaryPath)
+        // Launch the process (core uses its own config API key)
+        try await launchCore(binaryPath: binaryPath)
 
-            // Wait for the socket to become available
-            await transitionState(to: .waitingForCore)
-            try await waitForSocket(timeout: 60.0)
+        // Wait for the socket to become available
+        await transitionState(to: .waitingForCore)
+        try await waitForSocket(timeout: 60.0)
 
-            // Connect API and SSE clients
-            try await connectToCore()
+        // Connect API and SSE clients
+        try await connectToCore()
 
-            await transitionState(to: .connected)
-            await refreshState()
-            startSSEStream()
-            startPeriodicRefresh()
+        await transitionState(to: .connected)
+        retryCount = 0
+        await refreshState()
+        startSSEStream()
+        startPeriodicRefresh()
+    }
 
-        } catch let error as CoreError {
-            NSLog("[MCPProxy] launchAndConnect FAILED (CoreError): %@", error.userMessage)
-            await handleCoreError(error)
-        } catch {
-            NSLog("[MCPProxy] launchAndConnect FAILED: %@", error.localizedDescription)
-            await handleCoreError(.general(error.localizedDescription))
+    /// Launch the core, climbing the retry ladder until it comes up or the
+    /// rungs run out. Caller MUST hold the connection gate.
+    ///
+    /// The ladder lives with the gate holder, not in the process-termination
+    /// callback. A core that dies during `launchAndConnectOnce()` fires that
+    /// callback while this task still holds the gate, so the callback stands
+    /// down — as it must, or it would launch a second core. If the ladder lived
+    /// there, `maxRetries` would silently collapse to a single attempt.
+    private func launchWithRetries() async {
+        while true {
+            do {
+                try await launchAndConnectOnce()
+                return // success; launchAndConnectOnce cleared the ladder
+            } catch {
+                let coreError = (error as? CoreError) ?? .general(error.localizedDescription)
+
+                guard coreError.isRetryable else {
+                    // A config error or a port conflict will not fix itself.
+                    await handleCoreError(coreError)
+                    return
+                }
+                guard retryCount < maxRetries else {
+                    await handleCoreError(.maxRetriesExceeded)
+                    return
+                }
+
+                retryCount += 1
+                NSLog("[MCPProxy] Core launch failed (%@) — retry %d/%d",
+                      coreError.userMessage, retryCount, maxRetries)
+                await transitionState(to: .reconnecting(attempt: retryCount))
+
+                let delay = reconnectionPolicy.delay(forAttempt: retryCount)
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                } catch {
+                    return // cancelled
+                }
+            }
         }
     }
 
@@ -886,34 +965,57 @@ actor CoreProcessManager {
         // already being driven by launch/reconnect/shutdown logic.
         guard case .connected = await MainActor.run(body: { appState.coreState }) else { return true }
 
-        // The socket is the unambiguous signal: a process that exited cannot
-        // hold one open, and a stale file left by `kill -9` fails the connect
-        // probe. No tolerance needed — that core is gone.
-        guard SocketTransport.isSocketAvailable(path: socketPath) else {
+        switch SocketTransport.probeSocket(path: socketPath) {
+        case .absent:
+            // No socket FILE. A running core always owns its socket file, so
+            // this one is unambiguous — act on it immediately. This is the
+            // reporter's case (`kill -9` plus a cleaned-up socket).
             NSLog("[MCPProxy] Core socket %@ is gone — reconnecting", socketPath)
             consecutiveProbeFailures = 0
             await handleCoreLoss()
             return false
-        }
 
-        // The socket is up, so the core is running. Whether it is HEALTHY is a
-        // softer question: a saturated core can miss a readiness check and be
-        // perfectly fine a second later. Condemning it on one sample would put
-        // "reconnecting" in the menu bar every time the core got busy.
-        if await probeIsReady() {
-            consecutiveProbeFailures = 0
+        case .localFailure(let code):
+            // Descriptor exhaustion, out of memory, permissions. Our problem,
+            // not the core's — it is not evidence either way, so it must not
+            // even count as a strike.
+            NSLog("[MCPProxy] Liveness probe could not run (errno %d) — not treating as core loss", code)
             return true
-        }
 
+        case .refused:
+            // AMBIGUOUS: a dead process leaves a stale socket file that refuses
+            // connections, and so does a live core whose listen backlog is
+            // momentarily full. Same evidence, opposite conclusions — so it gets
+            // the same tolerance as a missed readiness check rather than an
+            // immediate verdict.
+            return await recordProbeFailure(reason: "socket refused connections")
+
+        case .connectable:
+            // Something is listening. Whether it is HEALTHY is a softer
+            // question: a saturated core can miss a readiness check and be
+            // perfectly fine a second later. Condemning it on one sample would
+            // put "reconnecting" in the menu bar every time the core got busy.
+            if await probeIsReady() {
+                consecutiveProbeFailures = 0
+                return true
+            }
+            return await recordProbeFailure(reason: "no answer from /ready")
+        }
+    }
+
+    /// Count one inconclusive probe. Returns true while the budget holds (treat
+    /// the core as alive), false once it is spent — having handed off to
+    /// reconnection.
+    private func recordProbeFailure(reason: String) async -> Bool {
         consecutiveProbeFailures += 1
         guard consecutiveProbeFailures >= probeFailureBudget else {
-            NSLog("[MCPProxy] Core missed a readiness check (%d/%d)",
-                  consecutiveProbeFailures, probeFailureBudget)
+            NSLog("[MCPProxy] Core liveness check missed (%d/%d): %@",
+                  consecutiveProbeFailures, probeFailureBudget, reason)
             return true
         }
 
-        NSLog("[MCPProxy] Core stopped answering on %@ after %d consecutive checks — reconnecting",
-              socketPath, consecutiveProbeFailures)
+        NSLog("[MCPProxy] Core failed %d consecutive liveness checks (%@) — reconnecting",
+              consecutiveProbeFailures, reason)
         consecutiveProbeFailures = 0
         await handleCoreLoss()
         return false
@@ -1101,15 +1203,14 @@ actor CoreProcessManager {
 
         if error.isRetryable && retryCount < maxRetries {
             // Honour the same gate as every other reconnection entry point. If
-            // one is already running it is ALREADY relaunching this core;
-            // starting a second would race it into two live cores.
+            // one is already running it is ALREADY relaunching this core, and it
+            // owns the whole retry ladder — standing down here loses nothing.
             guard beginConnectionWork() else {
                 NSLog("[MCPProxy] handleProcessExit: a reconnection is already in flight")
                 return
             }
             defer { endConnectionWork() }
-            retryCount += 1
-            await transitionState(to: .reconnecting(attempt: retryCount))
+            await transitionState(to: .reconnecting(attempt: retryCount + 1))
             await attemptReconnection()
         } else {
             await transitionState(to: .error(error))
@@ -1119,47 +1220,55 @@ actor CoreProcessManager {
     // MARK: - Private: Reconnection
 
     /// Attempt to reconnect after a failure.
+    /// Run the retry ladder to completion. Caller MUST hold the connection gate.
+    ///
+    /// The ladder lives HERE, in the task that holds the gate, rather than in
+    /// the process-termination callback. It used to depend on each relaunched
+    /// core's exit callback starting the next attempt — but that callback now
+    /// (correctly) stands down when a reconnection is already running, which
+    /// silently reduced `maxRetries` to a single relaunch for a core that
+    /// crashes instantly. Owning the loop here keeps both properties: exactly
+    /// one launch at a time, AND every rung of the ladder.
     private func attemptReconnection() async {
-        let delay = reconnectionPolicy.delay(forAttempt: retryCount)
-        let delayNs = UInt64(delay * 1_000_000_000)
-
-        do {
-            try await Task.sleep(nanoseconds: delayNs)
-        } catch {
-            return // Cancelled
-        }
-
-        // If an external core came up, attach to it
-        if SocketTransport.isSocketAvailable(path: socketPath) {
+        while true {
+            let delay = reconnectionPolicy.delay(forAttempt: max(retryCount, 1))
             do {
-                try await connectToCore()
-                await transitionState(to: .connected)
-                retryCount = 0
-                await refreshState()
-                startSSEStream()
-                startPeriodicRefresh()
-                return
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             } catch {
-                // Fall through to relaunch
+                return // Cancelled
             }
-        }
 
-        // If we own the core, relaunch it
-        let ownership = await MainActor.run { appState.ownership }
-        if ownership == .trayManaged {
-            if retryCount < maxRetries {
-                await launchAndConnect()
-            } else {
-                await transitionState(to: .error(.maxRetriesExceeded))
-                await notificationService.sendCoreError(error: .maxRetriesExceeded)
+            // If a core is up on the socket — ours or someone else's — attach to
+            // it rather than starting another.
+            if SocketTransport.isSocketAvailable(path: socketPath) {
+                do {
+                    try await connectToCore()
+                    await transitionState(to: .connected)
+                    retryCount = 0
+                    await refreshState()
+                    startSSEStream()
+                    startPeriodicRefresh()
+                    return
+                } catch {
+                    // Fall through to relaunch
+                }
             }
-        } else {
-            // External core is gone and we don't own it. Say so — and keep
-            // watching the socket, so a core that comes back (launchd, brew
-            // services, the user re-running `mcpproxy serve`) is picked up
-            // without needing a menu click. Same cheap poll idle mode uses.
-            await transitionState(to: .error(.general("External core process is no longer available")))
-            startAttachWatch()
+
+            let ownership = await MainActor.run { appState.ownership }
+            guard ownership == .trayManaged else {
+                // External core is gone and we don't own it. Say so — and keep
+                // watching the socket, so a core that comes back (launchd, brew
+                // services, the user re-running `mcpproxy serve`) is picked up
+                // without needing a menu click. Same cheap poll idle mode uses.
+                await transitionState(
+                    to: .error(.general("External core process is no longer available"))
+                )
+                startAttachWatch()
+                return
+            }
+
+            await launchWithRetries()
+            return
         }
     }
 

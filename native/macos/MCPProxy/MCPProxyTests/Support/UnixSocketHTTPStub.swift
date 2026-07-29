@@ -59,6 +59,7 @@ final class UnixSocketHTTPStub {
     private var stopped = true
     private var threadRunning = false
     private var requestCounts: [String: Int] = [:]
+    private var lastHead: String?
     private let exited = DispatchSemaphore(value: 0)
 
     /// - Parameter path: socket path to bind, or `nil` for a fresh temporary one.
@@ -137,7 +138,16 @@ final class UnixSocketHTTPStub {
     ///
     /// After this returns, `SocketTransport.isSocketAvailable(path:)` is false
     /// and the accept thread has exited.
-    func stop() {
+    ///
+    /// - Parameter unlinkSocket: pass `false` to leave the socket FILE behind
+    ///   with nothing listening — what `kill -9` leaves on disk. Connections to
+    ///   it are refused, which is indistinguishable from a live core whose
+    ///   listen queue is full.
+    func stop(unlinkSocket: Bool = true) {
+        stopServing(unlinkSocket: unlinkSocket)
+    }
+
+    private func stopServing(unlinkSocket: Bool) {
         stateLock.lock()
         let alreadyStopped = stopped
         stopped = true
@@ -154,7 +164,7 @@ final class UnixSocketHTTPStub {
         // Closing both descriptors unblocks accept() and any pending read().
         if listen >= 0 { Darwin.close(listen) }
         if client >= 0 { Darwin.close(client) }
-        unlink(path)
+        if unlinkSocket { unlink(path) }
 
         if wasRunning {
             // Bounded: a wedged handler polls `stopped` on a 20ms cadence.
@@ -178,6 +188,21 @@ final class UnixSocketHTTPStub {
     private func recordRequest(path: String) {
         stateLock.lock()
         requestCounts[path, default: 0] += 1
+        stateLock.unlock()
+    }
+
+    /// Raw request headers of the most recent request, exactly as they arrived
+    /// on the wire. Used to assert that transport-routing headers never leave
+    /// the process.
+    func lastRequestHead() -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return lastHead
+    }
+
+    private func recordHead(_ head: String) {
+        stateLock.lock()
+        lastHead = head
         stateLock.unlock()
     }
 
@@ -231,6 +256,7 @@ final class UnixSocketHTTPStub {
         let rawPath = parts.count > 1 ? String(parts[1]) : "/"
         let pathOnly = rawPath.components(separatedBy: "?").first ?? rawPath
         recordRequest(path: pathOnly)
+        recordHead(head)
 
         switch responder(method, pathOnly) {
         case .hang(let seconds):

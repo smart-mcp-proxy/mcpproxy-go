@@ -125,7 +125,6 @@ final class CoreLivenessTests: XCTestCase {
             refreshInterval: 60
         )
         await secondManager.start(maySpawn: false)
-        defer { Task { await secondManager.shutdown() } }
 
         let connected = await coreState(secondState)
         XCTAssertEqual(connected, .connected)
@@ -141,6 +140,8 @@ final class CoreLivenessTests: XCTestCase {
                        "the first manager's probe must still land on the first socket")
         let firstStillConnected = await coreState(firstState)
         XCTAssertEqual(firstStillConnected, .connected)
+
+        await secondManager.shutdown()
     }
 
     // MARK: - GH #926: the core disappears
@@ -315,6 +316,238 @@ final class CoreLivenessTests: XCTestCase {
 
         XCTAssertEqual(stub.requestCount(path: "/api/v1/info"), connectsAfterAttach + 1,
                        "a process exit during an in-flight reconnection must not start a second one")
+    }
+
+    // MARK: - Never destroy or duplicate a live core
+
+    /// The most dangerous failure available here: a core that is UP but slow to
+    /// answer `/ready` must not have its socket unlinked and a second core
+    /// started against the same data directory. That is two writers on one
+    /// BBolt database, not a UI glitch.
+    ///
+    /// Hysteresis does not help at startup — there is no established connection
+    /// to be tolerant about — so the startup path has to reason from the socket
+    /// itself: something is listening, therefore hands off.
+    func testAnUnresponsiveCoreIsNeverUnlinkedOrReplaced() async throws {
+        // If the code under test does try to spawn, spawn something harmless.
+        let fakeCore = try FakeCoreBinary(behaviour: "exit 1")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let ready = ReadyBehaviour()
+        ready.current = .json(#"{"success":false,"error":"still starting"}"#, status: 503)
+        let stub = UnixSocketHTTPStub.healthyCore(ready: ready)
+        try stub.start()
+        self.stub = stub
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: stub.path,
+            refreshInterval: 0.2,
+            probeTimeout: 0.3
+        )
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stub.path),
+                      "a socket a live core is listening on must never be unlinked")
+        XCTAssertTrue(SocketTransport.isSocketAvailable(path: stub.path),
+                      "the live core's socket must still be connectable")
+        XCTAssertEqual(fakeCore.launchCount(), 0,
+                       "a competing core must not be started against the same data directory")
+        XCTAssertNil(manager.managedProcess,
+                     "no process may be launched while another core holds the socket")
+
+        // And when it finishes starting up, we attach — no user action needed.
+        ready.current = .json(#"{"success":true}"#)
+        let state = await waitForState(appState, timeout: 10.0) { $0 == .connected }
+        XCTAssertEqual(state, .connected,
+                       "once the core answers, the tray must attach to it")
+    }
+
+    /// `retry()` kills the managed core and immediately calls `start()`, while
+    /// that core's termination handler is on its way to starting a reconnection.
+    /// The gate has to cover the SPAWN path, not just attach and reconnect, or
+    /// both launch.
+    func testStartStandsDownWhileAReconnectionIsAlreadyRunning() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            // 2s base delay: the reconnection is provably still in its backoff
+            // when start() runs below.
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 2.0, maxDelay: 2.0, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock",
+            refreshInterval: 60
+        )
+        self.manager = manager
+
+        let reconnecting = Task { await manager.handleProcessExit(status: 1) }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        await manager.start(maySpawn: true)
+        XCTAssertEqual(fakeCore.launchCount(), 0,
+                       "start() must not launch a core while a reconnection is already running")
+
+        reconnecting.cancel()
+        _ = await reconnecting.value
+    }
+
+    /// Standing down on process exit must not eat the retry ladder. The ladder
+    /// belongs to whoever holds the gate: it relaunches, sees its replacement
+    /// fail, and climbs to the next rung itself instead of waiting for a
+    /// termination callback that is (correctly) refusing to start a second
+    /// reconnection.
+    func testTheRelaunchLadderRunsEveryRung() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "exit 1")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.02, maxDelay: 0.05, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock",
+            refreshInterval: 60
+        )
+        self.manager = manager
+
+        // One launch from start(), then the ladder: maxRetries relaunches.
+        await manager.start(maySpawn: true)
+
+        let deadline = Date().addingTimeInterval(20)
+        while fakeCore.launchCount() < 4 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+
+        XCTAssertEqual(fakeCore.launchCount(), 4,
+                       "one initial launch plus three ladder rungs — no more, no fewer")
+        let state = await waitForState(appState, timeout: 5.0) {
+            $0 == .error(.maxRetriesExceeded)
+        }
+        XCTAssertEqual(state, .error(.maxRetriesExceeded),
+                       "the ladder must run out honestly rather than stopping after one try")
+    }
+
+    /// A core that crashes, is relaunched, and then runs normally must not carry
+    /// its old strikes: the next crash gets the full ladder again.
+    func testASuccessfulRelaunchClearsTheLadder() async throws {
+        let fakeCore = try FakeCoreBinary.failingThenHealthy(failures: 1)
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let socketPath = "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.02, maxDelay: 0.05, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: socketPath,
+            refreshInterval: 60
+        )
+        self.manager = manager
+
+        // Rung 1 fails; rung 2 launches a core that stays up.
+        let reconnecting = Task { await manager.handleProcessExit(status: 1) }
+
+        // The second launch is the one that survives — give it its socket, as a
+        // real core would create.
+        let deadline = Date().addingTimeInterval(20)
+        while fakeCore.launchCount() < 2 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(fakeCore.launchCount(), 2, "precondition: rung 1 failed, rung 2 launched")
+
+        let stub = UnixSocketHTTPStub.healthyCore(at: socketPath)
+        try stub.start()
+        self.stub = stub
+
+        _ = await reconnecting.value
+
+        let state = await coreState(appState)
+        XCTAssertEqual(state, .connected, "the relaunched core came up and we connected to it")
+        let remainingStrikes = await manager.retryCount
+        XCTAssertEqual(remainingStrikes, 0,
+                       "a successful relaunch must clear the ladder, or a later crash gets no retries")
+    }
+
+    /// The routing hint rides on `httpAdditionalHeaders`, which Foundation
+    /// attaches to EVERY request the session makes — including ones this
+    /// protocol declines to intercept, and ones following a redirect. So it must
+    /// carry an opaque token rather than the socket path (which contains the
+    /// user's home directory), and it must never reach the wire.
+    func testTheRouteHintNeverLeaksThePathOrTheHeader() async throws {
+        let (_, _, stub) = try await attachToStubCore()
+
+        let head = stub.lastRequestHead() ?? ""
+        XCTAssertFalse(head.isEmpty, "precondition: the stub saw a request")
+        XCTAssertFalse(head.lowercased().contains(SocketURLProtocol.routeHeader.lowercased()),
+                       "the transport routing header must be stripped before the wire")
+        XCTAssertFalse(head.contains(stub.path),
+                       "the socket path must never appear in an outgoing request")
+
+        let token = SocketURLProtocol.makeRoute(to: stub.path)
+        XCTAssertNotEqual(token, stub.path,
+                          "the header value must be an opaque token, not the path itself")
+        XCTAssertEqual(SocketURLProtocol.routes(for: token), stub.path,
+                       "and it must resolve back to the socket it was minted for")
+    }
+
+    // MARK: - What a failed socket connect does and does not prove
+
+    /// `isSocketAvailable` says false for three different situations, and only
+    /// one of them means "the core is gone".
+    func testSocketProbeDistinguishesAbsentFromRefused() throws {
+        let missing = "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
+        XCTAssertEqual(SocketTransport.probeSocket(path: missing), .absent,
+                       "no socket file at all: a running core always owns its socket")
+
+        let stub = UnixSocketHTTPStub.healthyCore()
+        try stub.start()
+        self.stub = stub
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .connectable)
+
+        // Leave the file behind with nothing listening — what `kill -9` leaves,
+        // and also what a full listen queue looks like from out here.
+        stub.stop(unlinkSocket: false)
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .refused)
+        unlink(stub.path)
+    }
+
+    /// A refused connection is ambiguous — a stale socket from a killed process
+    /// and a live core with a full listen backlog are indistinguishable — so it
+    /// gets the same tolerance as a missed readiness check, not an instant
+    /// verdict.
+    func testARefusedSocketIsToleratedOnceLikeAReadinessMiss() async throws {
+        let (manager, appState, stub) = try await attachToStubCore()
+
+        stub.stop(unlinkSocket: false)
+        defer { unlink(stub.path) }
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .refused,
+                       "precondition: the socket file is still there, refusing connections")
+
+        let afterFirst = await manager.coreIsAlive()
+        XCTAssertTrue(afterFirst,
+                      "one refused connection could be a full listen queue on a healthy core")
+        let stillConnected = await coreState(appState)
+        XCTAssertEqual(stillConnected, .connected)
+
+        let afterSecond = await manager.coreIsAlive()
+        XCTAssertFalse(afterSecond, "two in a row is enough")
     }
 
     /// The attach path is the third entry point. A manual retry racing the idle

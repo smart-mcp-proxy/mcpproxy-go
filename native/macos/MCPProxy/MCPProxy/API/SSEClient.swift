@@ -330,7 +330,9 @@ actor SSEClient {
             config.protocolClasses = [SocketURLProtocol.self]
             if let socketPath {
                 // Per-session, not a process-global (see SocketURLProtocol).
-                config.httpAdditionalHeaders = [SocketURLProtocol.socketPathHeader: socketPath]
+                config.httpAdditionalHeaders = [
+                    SocketURLProtocol.routeHeader: SocketURLProtocol.makeRoute(to: socketPath)
+                ]
             }
         }
 
