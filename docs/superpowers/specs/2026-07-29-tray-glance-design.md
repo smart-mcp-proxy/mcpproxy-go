@@ -80,7 +80,9 @@ Row anatomy: status icon (shape *and* colour, never colour alone), `server:tool`
 
 ### Activity
 
-Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_tool_call.completed`, the tray builds an entry from the event payload and prepends it — no GET per event. A dedicated poll every 30 seconds reconciles that optimistic list with the server's canonical records (storage-assigned ids and the asynchronously-computed sensitive-data flags): `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=50`. This is a fourth call on the existing refresh cycle rather than a reuse of the Dashboard's feed, for the reason given above.
+Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_tool_call.completed`, the tray builds an entry from the event payload and prepends it — no GET per event.
+
+**The payload is not an `ActivityEntry` and must be adapted explicitly.** The wire format is an envelope, `{payload, timestamp}`, whose timestamp is Unix seconds (`internal/httpapi/server.go:3205`), while `ActivityEntry` expects an id, a type, and an ISO-8601 string. More subtly, the two event kinds use different keys: upstream calls send `server_name` / `tool_name` (`event_bus.go:444`), whereas internal calls send `internal_tool_name`, plus `target_server` / `target_tool` only when non-empty (`event_bus.go:552`). A `GlanceEvent` adapter therefore maps: event name → `type`; `internal_tool_name` → `toolName` for internal events; `target_server` → `serverName` when present; envelope timestamp → `Date`; and synthesises a provisional id from `request_id`, which the reconciling poll then replaces with the storage-assigned one. Feeding the raw payload into the selection rules would silently drop every internal row, since its `toolName` would be empty. A dedicated poll every 30 seconds reconciles that optimistic list with the server's canonical records (storage-assigned ids and the asynchronously-computed sensitive-data flags): `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=50`. This is a fourth call on the existing refresh cycle rather than a reuse of the Dashboard's feed, for the reason given above.
 
 **Which records qualify** — evaluated in this order, in `GlanceSelection`, identically for polled records and SSE payloads:
 
@@ -108,11 +110,11 @@ Chart semantics: a bucket's `calls` **includes** its `errors`, so the stacked ba
 
 ### Clients
 
-`GET /api/v1/sessions?limit=100` (the API maximum) on the existing poll, filtered client-side to `status == "active"`, showing up to five.
+This part needs a small backend change, and the reason is worth stating plainly. Storage walks sessions newest-first **by start time** and truncates to `limit` (`internal/storage/manager.go:1355`); only that already-truncated subset is then sorted by last activity (`internal/runtime/runtime.go:1340`), and the handler parses `offset` without passing it down (`internal/httpapi/server.go:4844`), so pagination cannot recover what the truncation dropped. A session that started long ago but is calling tools right now therefore falls outside *any* client-side-filtered page once enough newer sessions exist. An earlier draft answered this by fetching the 100-record maximum and calling it "acceptable for correctness" — but that is still a page, so the section could show "No connected clients" while a client is actively working. That is the kind of quiet lie this design's second constraint forbids.
 
-The page size is deliberately the maximum rather than a tidy 25. Storage walks sessions newest-first **by start time** and truncates to `limit` (`internal/storage/manager.go:1355`); only that already-truncated subset is then sorted by last activity (`internal/runtime/runtime.go:1340`). A long-lived session that started days ago but is active right now therefore falls outside any small page — the tray would show "no connected clients" while a client is actively calling tools. Session records are compact scalars, so a 100-record page every 30 seconds is an acceptable cost for correctness. If that payload ever becomes a concern, the right fix is a server-side `status` filter on `/api/v1/sessions`, recorded here as a follow-up rather than smuggled into this work.
+So: add a `status` query parameter to `GET /api/v1/sessions`, applied during the storage cursor walk (before truncation), and have the tray request `?status=active&limit=25`. This is roughly twenty lines in the handler and storage filter, plus the usual `make swagger` regeneration and a handler test. It is in scope precisely because the alternative is a section that under-reports without saying so.
 
-Documented caveat: per spec 082, handshake-only sessions are not persisted, so an idle background agent does not appear until its first call.
+Documented caveat that the parameter does not fix: per spec 082, handshake-only sessions are not persisted, so an idle background agent does not appear until its first call. This is stated in the UI copy's favour — "clients" means clients that have done something.
 
 ### Clicks
 
@@ -124,7 +126,9 @@ An activity row and a client row both open the Web UI activity log filtered by t
 
 Live rows create a problem the current menu does not have. Every `AppState` change feeds a debounced sink that calls `rebuildMenu()`, which calls `removeAllItems()` (`MCPProxyApp.swift:114`, `:523`) — and the menu is not dismissed when that happens. Today the only sources of change are server state and a 30-second poll, so this is rare. With SSE rows, a busy agent changes state every few hundred milliseconds, potentially while the user is reading the menu or navigating it with the keyboard, and re-creating the item that owns the histogram submenu would disturb an open submenu.
 
-So `rebuildMenu()` gains a tracking guard: while the menu is open it does **not** restructure. Glance rows update in place — setting `attributedTitle` on an existing `NSMenuItem` is exactly how live menus are meant to work — and any structural change (a new row appearing, the section becoming empty) is deferred, flagged dirty, and applied on `menuDidClose`. A menu that grows or shrinks under the cursor is precisely the "irritating" behaviour this design set out to avoid, so this guard is a requirement, not an optimisation.
+So `rebuildMenu()` gains a tracking guard: while the menu is open it does **not** restructure. Glance rows update in place — mutating an existing `NSMenuItem` is exactly how live menus are meant to work — and any structural change (a new row appearing, the section becoming empty) is deferred, flagged dirty, and applied on `menuDidClose`. A menu that grows or shrinks under the cursor is precisely the "irritating" behaviour this design set out to avoid, so this guard is a requirement, not an optimisation.
+
+"In place" means the row's **entire identity**, not just its text. Once five rows exist, each new event shifts which record every row represents, so an update must rewrite the title, the status image, the tooltip, the accessibility label, and the `representedObject` that carries the session id — the same mechanism today's server rows already use to pass identity to their action (`MCPProxyApp.swift:606`). Refreshing only the title would leave a row reading like the new record while its click still opened the previous record's session: a wrong destination is worse than a stale one, because the user cannot tell it happened.
 
 ## States
 
@@ -144,10 +148,12 @@ Swift unit tests in the existing `swift-test` CI job. `GlanceSelection` and `Gla
 - **Regression, SSE naming**: `activity.tool_call.completed` reaches the activity handler (fails today).
 - **Regression, no amplification**: handling one completed event issues zero REST requests.
 - **Regression, session decoding**: `last_activity` decodes into the model (nil today).
-- **Selection**: upstream `tool_call` always included; the three discovery/execution built-ins included; **a failed `call_tool_write` record is included** (the finding above, pinned by a test); **a failed `upstream_servers` record is still excluded** (rule 1 beats rule 3); five qualifying records selected from a 25-record page containing noise.
+- **Selection**: upstream `tool_call` always included; the three discovery/execution built-ins included; **a failed `call_tool_write` record is included** (the finding above, pinned by a test); **a failed `upstream_servers` record is still excluded** (rule 1 beats rule 3); five qualifying records selected from a 50-record page containing noise (the page size the production feed requests).
 - **Header bucket**: with a sparse timeline whose newest bucket is three hours old, the header shows zero — not that bucket's count.
 - **Dashboard non-regression**: `AppState.recentActivity` still carries non-tool-call types after the glance feed is added.
-- **Open-menu stability**: with the menu tracking, a burst of SSE events updates row titles and performs no structural rebuild; the deferred rebuild runs once on close.
+- **Open-menu stability**: with the menu tracking, a burst of SSE events updates rows in place and performs no structural rebuild; the deferred rebuild runs once on close.
+- **Row identity after in-place update**: after an update, a row's `representedObject`, image, tooltip, and accessibility label all describe the record its title now shows — pinned by asserting the click payload changes with the title.
+- **SSE adapter**: an `activity.internal_tool_call.completed` payload (`internal_tool_name`, optional `target_server`, Unix-seconds envelope) becomes an entry that passes selection and renders a correct relative time.
 - **Reconnect hygiene**: after a disconnect, glance state is cleared, so a menu built between `.connected` and the first successful refresh shows the empty/loading states rather than the previous core's data.
 - **Optimistic rows**: a row built from an SSE payload carries the failure text from `error_message` (a payload read keyed on `error` would render a failed call as if it had no detail).
 - **Chart data**: `calls - errors` and `errors` segments never double-count; missing hours synthesised as zero across a 24-hour axis.
@@ -159,7 +165,7 @@ Visual verification by screenshotting the menu with `mcpproxy-ui-test` per `docs
 
 ## Scope note
 
-This is not "rendering plus two one-line fixes". The honest inventory: a new menu component (four files), a rewritten SSE activity path that consumes payloads instead of refetching, two field-level bug fixes, two new API client methods plus response models (usage aggregate, filtered glance activity), three new `AppState` fields, a data-source protocol extraction for testability, deletion of a dead 511-line file, and the test suite above.
+This is not "rendering plus two one-line fixes". The honest inventory: a new menu component (four files), a rewritten SSE activity path that consumes payloads through an explicit adapter instead of refetching, a tracking guard in `rebuildMenu()`, two field-level bug fixes, two new API client methods plus response models (usage aggregate, filtered glance activity), three new `AppState` fields, a data-source protocol extraction for testability, deletion of a dead 511-line file, one small Go change (a `status` filter on `/api/v1/sessions` plus `make swagger`), and the test suite above.
 
 ## Non-goals
 
@@ -167,8 +173,8 @@ Real token histogram (separate roadmap item: accumulate `TokenMetrics` into hour
 
 ## Follow-ups
 
-- Server-side `status` filter on `/api/v1/sessions`, which would let the tray stop fetching a 100-session page to find the active ones.
 - Real token histogram (see Non-goals).
+- `offset` is parsed but never applied in the sessions handler (`internal/httpapi/server.go:4844`) — a latent paging bug this design works around rather than fixes.
 
 ## Follow-ups this unblocks
 
