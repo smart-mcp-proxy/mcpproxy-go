@@ -92,6 +92,22 @@ enum GlanceSelection {
         return result
     }
 
+    // MARK: - Record identity
+
+    /// Identity of one call: its `requestId`, never its `id`.
+    ///
+    /// A row rendered from a live SSE event carries a provisional id of the
+    /// form `"<request_id>:<type>"`, which the reconciling poll replaces with
+    /// the storage-assigned ULID for the very same call — so `id` reports a
+    /// wholesale turnover on every poll while `requestId` is identical on both
+    /// sides. It is what rule 4 collapses on, what `AppState`'s merge keys on,
+    /// and what `GlanceSection` diffs rows by. Records with no request id are
+    /// never collapsed, so their `id` is a safe fallback.
+    static func recordKey(for entry: ActivityEntry) -> String {
+        if let requestId = entry.requestId, !requestId.isEmpty { return requestId }
+        return entry.id
+    }
+
     // MARK: - Public entry points
 
     /// Rules 1-4 applied in order, then the first `limit` survivors.

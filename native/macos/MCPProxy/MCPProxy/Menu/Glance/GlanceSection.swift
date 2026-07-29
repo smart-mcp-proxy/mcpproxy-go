@@ -220,9 +220,12 @@ final class GlanceSection {
     /// `requestId` is identical on both sides, and is already what rule 4
     /// (`GlanceSelection.collapseByRequestID`) groups on. Records with no
     /// request id are never collapsed, so their `id` is a safe fallback key.
+    /// Delegates to `GlanceSelection.recordKey` rather than restating the rule:
+    /// the row diff, rule 4's collapse and `AppState`'s poll/SSE merge must all
+    /// agree on what "the same call" means, and three copies would be free to
+    /// drift.
     private static func recordKey(for entry: ActivityEntry) -> String {
-        if let requestId = entry.requestId, !requestId.isEmpty { return requestId }
-        return entry.id
+        GlanceSelection.recordKey(for: entry)
     }
 
     /// Rewrite an activity row so its title, icon, tooltip, accessibility label

@@ -512,12 +512,49 @@ final class AppState: ObservableObject {
     @MainActor
     func updateGlanceActivity(_ entries: [ActivityEntry]) {
         guard coreState == .connected else { return }
+        let merged = AppState.mergeGlanceActivity(polled: entries, into: glanceActivity)
         func fingerprint(_ list: [ActivityEntry]) -> [String] {
             list.map { "\($0.id)|\($0.status)|\($0.hasSensitiveData == true)" }
         }
-        if fingerprint(entries) != fingerprint(glanceActivity) {
-            glanceActivity = entries
+        if fingerprint(merged) != fingerprint(glanceActivity) {
+            glanceActivity = merged
         }
+    }
+
+    /// Reconcile a polled page with the rows already on screen.
+    ///
+    /// MERGE, not replace, and the choice is load-bearing. `AppState` is
+    /// reached through `await`, so `prependGlanceActivity` can insert an SSE row
+    /// at index 0 while the GET that produced `polled` is still suspended. A
+    /// wholesale replace then erases a row the response could not have known
+    /// about, and the call is missing from the menu until the next poll — the
+    /// user watches a call appear and vanish for up to 30 seconds.
+    ///
+    /// Keyed on `GlanceSelection.recordKey` (the `requestId`), which is already
+    /// the identity function for rule 4's collapse and for the row diff: the
+    /// storage id and the SSE row's provisional `<request_id>:<type>` differ for
+    /// one and the same call, so id-keying would keep both.
+    ///
+    /// A row is retained only when it is BOTH absent from the page and newer
+    /// than everything the page carries. The second half is what stops the feed
+    /// becoming append-only: a row the poll omits from within its own window —
+    /// collapsed, retention-pruned, filtered out — is the poll's business and is
+    /// dropped. A page whose timestamps cannot be parsed retains nothing, since
+    /// "newer than" is then unanswerable and the server's list is the better
+    /// answer.
+    static func mergeGlanceActivity(polled: [ActivityEntry], into existing: [ActivityEntry]) -> [ActivityEntry] {
+        // Deliberately max(), not `polled.first`: the merge does not depend on
+        // the page arriving newest-first.
+        let newestPolled = polled.compactMap { GlanceFormatting.parseTimestamp($0.timestamp) }.max()
+        guard let newestPolled else { return Array(polled.prefix(glanceActivityCap)) }
+
+        let polledKeys = Set(polled.map(GlanceSelection.recordKey))
+        let retained = existing.filter { entry in
+            guard !polledKeys.contains(GlanceSelection.recordKey(for: entry)) else { return false }
+            guard let stamp = GlanceFormatting.parseTimestamp(entry.timestamp) else { return false }
+            return stamp > newestPolled
+        }
+        return Array((retained + polled).prefix(glanceActivityCap))
     }
 
     /// Upper bound on rows kept in `glanceActivity`. Matches the page size the

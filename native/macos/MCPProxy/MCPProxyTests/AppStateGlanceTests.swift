@@ -163,6 +163,95 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.glanceActivity.first?.status, "error")
     }
 
+    // MARK: - Reconcile vs live SSE rows
+
+    /// `AppState` is reached through `await`, and the poll suspends on the
+    /// network for tens of milliseconds. An SSE event that lands inside that
+    /// window prepends a row the in-flight response cannot know about, and a
+    /// wholesale replace erases it — the user watches a call appear and then
+    /// vanish for up to 30 seconds. The merge keeps it.
+    func testAPollDoesNotEraseARowThatArrivedWhileItWasInFlight() throws {
+        let state = AppState()
+        state.coreState = .connected
+        let page = [try Self.activity(id: "a1", type: "tool_call", request: "r-1",
+                                      timestamp: "2026-07-29T11:00:00Z")]
+        state.updateGlanceActivity(page)
+
+        // An SSE event lands while the next poll is suspended…
+        state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
+                                                      request: "r-9",
+                                                      timestamp: "2026-07-29T11:00:30Z"))
+        // …and the poll's response, which predates it, resolves now.
+        state.updateGlanceActivity(page)
+
+        XCTAssertEqual(state.glanceActivity.map(\.requestId), ["r-9", "r-1"])
+    }
+
+    /// Once the poll DOES carry the call, its canonical record replaces the
+    /// optimistic row rather than joining it: both describe one call, and
+    /// `requestId` is what says so — the storage id differs from the SSE row's
+    /// provisional `<request_id>:<type>`.
+    ///
+    /// The SSE row is stamped a shade LATER than the record, which is the case
+    /// that separates the two keys: an id-keyed merge finds no match, sees a row
+    /// newer than the page, retains it, and the one call occupies two rows.
+    func testThePolledRecordSupersedesTheLiveRowForTheSameCall() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
+                                                      request: "r-9",
+                                                      timestamp: "2026-07-29T11:00:30.500Z"))
+
+        state.updateGlanceActivity([
+            try Self.activity(id: "01JQ-STORAGE-ULID", type: "tool_call", request: "r-9",
+                              timestamp: "2026-07-29T11:00:30Z")
+        ])
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["01JQ-STORAGE-ULID"],
+                       "one call, one row — keyed on requestId, not on the churning id")
+    }
+
+    /// The merge must not turn the feed into an append-only log. A row the poll
+    /// omits from WITHIN its own window — collapsed, pruned, filtered — is the
+    /// poll's business, and only rows newer than everything the page carries
+    /// are retained.
+    func testTheMergeDropsAStaleRowInsideThePollsOwnWindow() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceActivity([
+            try Self.activity(id: "gone", type: "tool_call", request: "r-old",
+                              timestamp: "2026-07-29T10:59:00Z")
+        ])
+
+        state.updateGlanceActivity([
+            try Self.activity(id: "a1", type: "tool_call", request: "r-1",
+                              timestamp: "2026-07-29T11:00:00Z")
+        ])
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["a1"])
+    }
+
+    /// Retention is bounded: a burst of SSE rows plus a full page cannot grow
+    /// the feed past the cap.
+    func testTheMergedFeedStaysCapped() throws {
+        let state = AppState()
+        state.coreState = .connected
+        for i in 0..<10 {
+            state.prependGlanceActivity(try Self.activity(id: "live-\(i)", type: "tool_call",
+                                                          request: "live-\(i)",
+                                                          timestamp: "2026-07-29T12:00:00Z"))
+        }
+        let page = try (0..<AppState.glanceActivityCap).map {
+            try Self.activity(id: "p\($0)", type: "tool_call", request: "p\($0)",
+                              timestamp: "2026-07-29T11:00:00Z")
+        }
+
+        state.updateGlanceActivity(page)
+
+        XCTAssertEqual(state.glanceActivity.count, AppState.glanceActivityCap)
+        XCTAssertEqual(state.glanceActivity.first?.id, "live-9", "newest first is preserved")
+    }
+
     // MARK: - Shared feeds are not narrowed
 
     /// Dashboard non-regression: `recentActivity` still carries non-tool-call
@@ -235,9 +324,14 @@ final class AppStateGlanceTests: XCTestCase {
         UsageBucket(start: date(iso), calls: calls, errors: errors, totalRespBytes: 0)
     }
 
-    private static func activity(id: String, type: String, status: String = "success") throws -> ActivityEntry {
+    static func activity(id: String,
+                         type: String,
+                         status: String = "success",
+                         request: String? = nil,
+                         timestamp: String = "2026-07-29T11:00:00Z") throws -> ActivityEntry {
+        let requestField = request.map { ",\"request_id\":\"\($0)\"" } ?? ""
         let json = """
-        {"id":"\(id)","type":"\(type)","status":"\(status)","timestamp":"2026-07-29T11:00:00Z"}
+        {"id":"\(id)","type":"\(type)","status":"\(status)","timestamp":"\(timestamp)"\(requestField)}
         """
         // swiftlint:disable:next force_unwrapping
         return try JSONDecoder().decode(ActivityEntry.self, from: json.data(using: .utf8)!)
