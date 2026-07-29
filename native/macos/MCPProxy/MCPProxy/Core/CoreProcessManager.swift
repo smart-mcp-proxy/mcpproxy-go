@@ -751,6 +751,9 @@ actor CoreProcessManager {
     private func refreshState() async {
         await refreshActivity()
         await refreshSessions()
+        await refreshGlanceActivity()
+        await refreshGlanceSessions()
+        await refreshUsage()
         await refreshTokenMetrics()
         await refreshSecurityStatus()
         await refreshProfiles()
@@ -860,6 +863,44 @@ actor CoreProcessManager {
             await MainActor.run { appState.recentSessions = sessions }
         } catch {
             // Non-fatal; we'll retry on the next refresh
+        }
+    }
+
+    /// Tray Glance: fetch the type-filtered tool-call feed for the menu's
+    /// "Recent" rows. Separate from `refreshActivity()` on purpose — that feed
+    /// stays broad because the native Dashboard renders the full activity log.
+    private func refreshGlanceActivity() async {
+        guard let apiClient else { return }
+        do {
+            let entries = try await apiClient.glanceActivity(limit: 50)
+            await appState.updateGlanceActivity(entries)
+        } catch {
+            // Non-fatal; we'll retry on the next refresh
+        }
+    }
+
+    /// Tray Glance: fetch active-only sessions for the menu's "Clients" rows.
+    /// Separate from `refreshSessions()`, which must keep closed sessions so
+    /// ActivityView can resolve session ids to client names.
+    private func refreshGlanceSessions() async {
+        guard let apiClient else { return }
+        do {
+            let sessions = try await apiClient.activeSessions(limit: 25)
+            await appState.updateGlanceSessions(sessions)
+        } catch {
+            // Non-fatal; we'll retry on the next refresh
+        }
+    }
+
+    /// Tray Glance: fetch the 24h usage aggregate that backs both the header
+    /// count and the histogram submenu.
+    private func refreshUsage() async {
+        guard let apiClient else { return }
+        do {
+            let usage = try await apiClient.usageAggregate(window: "24h", top: 1)
+            await appState.updateUsage(timeline: usage.timeline)
+        } catch {
+            // Non-fatal; the header and histogram stay in their loading state
         }
     }
 
