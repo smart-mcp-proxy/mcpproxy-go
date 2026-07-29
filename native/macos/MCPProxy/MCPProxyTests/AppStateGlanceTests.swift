@@ -43,6 +43,113 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.callsThisHour, 12)
     }
 
+    /// "Loaded, and the proxy was idle" must be expressible: an empty timeline
+    /// yields 0, which is deliberately distinct from the nil loading state.
+    func testEmptyTimelineYieldsZeroNotNil() {
+        let state = AppState()
+        XCTAssertNil(state.callsThisHour, "callsThisHour starts nil = not loaded yet")
+
+        state.updateUsage(timeline: [], now: Self.date("2026-07-29T11:42:00Z"))
+
+        XCTAssertEqual(state.callsThisHour, 0)
+        XCTAssertEqual(state.usageTimeline, [])
+    }
+
+    // MARK: - Disconnect reset
+
+    /// The connect path flips to `.connected` before the first refresh
+    /// completes, so glance state from a previous core must be cleared the
+    /// moment the core state leaves `.connected`.
+    func testGlanceStateClearedOnDisconnect() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active")])
+        state.updateUsage(
+            timeline: [Self.bucket("2026-07-29T11:00:00Z", calls: 12)],
+            now: Self.date("2026-07-29T11:10:00Z")
+        )
+
+        state.coreState = .idle
+
+        XCTAssertTrue(state.glanceActivity.isEmpty)
+        XCTAssertTrue(state.glanceSessions.isEmpty)
+        XCTAssertNil(state.usageTimeline)
+        XCTAssertNil(state.callsThisHour)
+    }
+
+    /// Every non-connected state clears, not just `.idle` — a reconnecting or
+    /// errored core must not keep showing the old numbers either.
+    func testGlanceStateClearedOnReconnectingAndError() throws {
+        for target in [CoreState.reconnecting(attempt: 1), .error(.general("boom")), .shuttingDown] {
+            let state = AppState()
+            state.coreState = .connected
+            state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
+            state.callsThisHour = 9
+
+            state.coreState = target
+
+            XCTAssertTrue(state.glanceActivity.isEmpty, "\(target) should clear glanceActivity")
+            XCTAssertNil(state.callsThisHour, "\(target) should clear callsThisHour")
+        }
+    }
+
+    /// Staying connected must not wipe the feeds the refresh loop just filled.
+    func testConnectedStateDoesNotClearGlanceState() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
+        state.callsThisHour = 4
+
+        state.coreState = .connected
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["a1"])
+        XCTAssertEqual(state.callsThisHour, 4)
+    }
+
+    // MARK: - Reconciling poll
+
+    /// The 30s poll exists to reconcile the SSE-fed optimistic list with the
+    /// server's canonical records — including the asynchronously-computed
+    /// sensitive-data flag and the final status, which arrive on a record whose
+    /// id has NOT changed. `ActivityEntry`'s Equatable is id-only
+    /// (API/Models.swift:570), so an id-only guard would drop those corrections
+    /// forever and the row would lie until it scrolled off.
+    func testGlanceActivityUpdatesWhenOnlyStatusChanges() throws {
+        let state = AppState()
+        state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
+        state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call", status: "error")])
+
+        XCTAssertEqual(state.glanceActivity.first?.status, "error")
+    }
+
+    // MARK: - Shared feeds are not narrowed
+
+    /// Dashboard non-regression: `recentActivity` still carries non-tool-call
+    /// records (security scans, OAuth events) and `recentSessions` still carries
+    /// closed sessions after the glance feeds are populated alongside them.
+    func testGlanceFeedsDoNotNarrowSharedFeeds() throws {
+        let state = AppState()
+        state.coreState = .connected
+
+        state.updateActivity([
+            try Self.activity(id: "a1", type: "tool_call"),
+            try Self.activity(id: "a2", type: "security_scan"),
+        ])
+        state.recentSessions = [
+            try Self.session(id: "s1", status: "active"),
+            try Self.session(id: "s2", status: "closed"),
+        ]
+
+        state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active")])
+
+        XCTAssertEqual(state.recentActivity.map(\.type), ["tool_call", "security_scan"])
+        XCTAssertEqual(state.recentSessions.map(\.status), ["active", "closed"])
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["a1"])
+        XCTAssertEqual(state.glanceSessions.map(\.id), ["s1"])
+    }
+
     // MARK: - Helpers
 
     private static func date(_ iso: String) -> Date {

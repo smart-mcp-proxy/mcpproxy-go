@@ -34,7 +34,19 @@ final class AppState: ObservableObject {
     // MARK: Core lifecycle
 
     /// Current core process state (uses CoreState from CoreState.swift).
-    @Published var coreState: CoreState = .idle
+    ///
+    /// Tray Glance: any state other than `.connected` clears the glance feeds.
+    /// The connect path flips to `.connected` BEFORE the first refresh completes
+    /// (CoreProcessManager.launchAndConnect), so without this reset the menu
+    /// would briefly present the previous core's numbers as live. The reset lives
+    /// in `didSet` rather than in `transition(to:)` because two call sites assign
+    /// `coreState` directly (CoreProcessManager.awaitExternalCore,
+    /// MCPProxyApp.stopCore) and would otherwise bypass it.
+    @Published var coreState: CoreState = .idle {
+        didSet {
+            if coreState != .connected { clearGlanceState() }
+        }
+    }
 
     /// Who owns the core process.
     @Published var ownership: CoreOwnership = .trayManaged
@@ -313,5 +325,47 @@ final class AppState: ObservableObject {
         if usageTimeline != timeline { usageTimeline = timeline }
         let calls = AppState.callsInCurrentHour(timeline, now: now)
         if callsThisHour != calls { callsThisHour = calls }
+    }
+
+    /// Replace the glance activity feed. Leaves `recentActivity` untouched.
+    ///
+    /// `ActivityEntry`'s Equatable is id-only (API/Models.swift:570), so guarding
+    /// on ids alone would drop the reconciling poll's late corrections: the
+    /// sensitive-data flag is computed asynchronously and the final status
+    /// arrives on a record whose id has not changed. Fingerprint the fields the
+    /// glance rows actually render instead — still cheap, still churn-free.
+    @MainActor
+    func updateGlanceActivity(_ entries: [ActivityEntry]) {
+        func fingerprint(_ list: [ActivityEntry]) -> [String] {
+            list.map { "\($0.id)|\($0.status)|\($0.hasSensitiveData == true)" }
+        }
+        if fingerprint(entries) != fingerprint(glanceActivity) {
+            glanceActivity = entries
+        }
+    }
+
+    /// Replace the glance (active-only) session feed. Leaves `recentSessions` untouched.
+    @MainActor
+    func updateGlanceSessions(_ sessions: [APIClient.MCPSession]) {
+        if sessions.map(\.id) != glanceSessions.map(\.id) {
+            glanceSessions = sessions
+        }
+    }
+
+    /// Drop every glance feed. Called from `coreState.didSet` on any state other
+    /// than `.connected` so a stopped or reconnecting core never shows the
+    /// previous core's numbers as live.
+    ///
+    /// Deliberately NOT `@MainActor`: a property observer is a nonisolated
+    /// context, so an isolated method could not be called from it without
+    /// `await`. `AppState` itself is not `@MainActor` either, so a plain method
+    /// is already nonisolated. Every real assignment to `coreState` happens on
+    /// the main actor anyway — `transition(to:)`, plus the two `MainActor.run`
+    /// blocks in CoreProcessManager.awaitExternalCore and MCPProxyApp.stopCore.
+    func clearGlanceState() {
+        if !glanceActivity.isEmpty { glanceActivity = [] }
+        if !glanceSessions.isEmpty { glanceSessions = [] }
+        if usageTimeline != nil { usageTimeline = nil }
+        if callsThisHour != nil { callsThisHour = nil }
     }
 }
