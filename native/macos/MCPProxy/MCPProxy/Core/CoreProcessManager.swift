@@ -90,6 +90,10 @@ actor CoreProcessManager {
     /// the tick — and the liveness probe on it — without waiting 30 seconds.
     private let refreshInterval: TimeInterval
 
+    /// Per-probe timeout. A liveness probe must fail fast: it runs on the
+    /// refresh tick and everything behind it waits.
+    private let probeTimeout: TimeInterval
+
     // MARK: - Initialization
 
     /// - Parameters:
@@ -99,17 +103,21 @@ actor CoreProcessManager {
     ///     with the user's live one — without it, nothing about attach mode is
     ///     testable, because attaching IS "probe this socket" (GH #926).
     ///   - refreshInterval: Period of the background refresh/liveness tick.
+    ///   - probeTimeout: How long a single liveness probe may take before it
+    ///     counts as a miss. See `probeTimeout` above.
     init(
         appState: AppState,
         notificationService: NotificationService,
         reconnectionPolicy: ReconnectionPolicy = .default,
         socketPath: String? = nil,
-        refreshInterval: TimeInterval = 30.0
+        refreshInterval: TimeInterval = 30.0,
+        probeTimeout: TimeInterval = 5.0
     ) {
         self.appState = appState
         self.notificationService = notificationService
         self.reconnectionPolicy = reconnectionPolicy
         self.refreshInterval = refreshInterval
+        self.probeTimeout = probeTimeout
 
         // Compute socket path: ~/.mcpproxy/mcpproxy.sock
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -785,7 +793,7 @@ actor CoreProcessManager {
     /// connect. Returns true when the core answered (or when we are not in a
     /// state where the question applies); returns false after handing off to
     /// reconnection.
-    private func coreIsAlive() async -> Bool {
+    func coreIsAlive() async -> Bool {
         // Only meaningful while we believe we are connected. Any other state is
         // already being driven by launch/reconnect/shutdown logic.
         guard case .connected = await MainActor.run(body: { appState.coreState }) else { return true }
@@ -804,7 +812,7 @@ actor CoreProcessManager {
     /// The core we were connected to is gone. Reuse the reconnection path, which
     /// re-attaches to a core that comes back and refuses to spawn a replacement
     /// for one we never owned.
-    private func handleCoreLoss() async {
+    func handleCoreLoss() async {
         // Stand down if the process-exit handler is already reconnecting: for a
         // core we spawned, both detectors can see the same death, and
         // attemptReconnection() suspends — two overlapping runs could each
@@ -953,7 +961,7 @@ actor CoreProcessManager {
     // MARK: - Private: Process Exit Handling
 
     /// Handle the core process exiting.
-    private func handleProcessExit(status: Int32) async {
+    func handleProcessExit(status: Int32) async {
         let stderr = stderrBuffer
 
         // If stopped by user, don't retry — this is intentional

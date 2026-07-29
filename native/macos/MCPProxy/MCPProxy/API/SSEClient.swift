@@ -329,7 +329,8 @@ actor SSEClient {
         if useSocket {
             config.protocolClasses = [SocketURLProtocol.self]
             if let socketPath {
-                SocketURLProtocol.overrideSocketPath = socketPath
+                // Per-session, not a process-global (see SocketURLProtocol).
+                config.httpAdditionalHeaders = [SocketURLProtocol.socketPathHeader: socketPath]
             }
         }
 

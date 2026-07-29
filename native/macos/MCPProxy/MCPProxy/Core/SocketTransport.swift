@@ -20,11 +20,23 @@ final class SocketURLProtocol: URLProtocol {
         NSHomeDirectory() + "/.mcpproxy/mcpproxy.sock"
     }()
 
-    /// Allow override for testing.
-    static var overrideSocketPath: String?
+    /// Header carrying the socket path a particular session must use.
+    ///
+    /// The path travels PER REQUEST, not in a global. It used to live in a
+    /// mutable static, which meant creating any second client — another
+    /// `CoreProcessManager`, a probe, a concurrent test — silently redirected
+    /// every existing client to the newest path. That is a liveness-detector
+    /// hazard, not just a test smell: a client could report a different core's
+    /// health as its own.
+    ///
+    /// Set from `URLSessionConfiguration.httpAdditionalHeaders`, so it is
+    /// present on every request the session issues. Stripped again before the
+    /// request goes on the wire.
+    static let socketPathHeader = "X-MCPProxy-Socket-Path"
 
-    private static var effectiveSocketPath: String {
-        overrideSocketPath ?? socketPath
+    /// Socket path this request must be routed over.
+    static func effectiveSocketPath(for request: URLRequest) -> String {
+        request.value(forHTTPHeaderField: socketPathHeader) ?? socketPath
     }
 
     /// Active read task, retained for cancellation.
@@ -44,7 +56,7 @@ final class SocketURLProtocol: URLProtocol {
             return false
         }
         // Only intercept if the socket exists.
-        return FileManager.default.fileExists(atPath: effectiveSocketPath)
+        return FileManager.default.fileExists(atPath: effectiveSocketPath(for: request))
     }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -64,7 +76,7 @@ final class SocketURLProtocol: URLProtocol {
         // Build sockaddr_un
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        let path = Self.effectiveSocketPath
+        let path = Self.effectiveSocketPath(for: request)
         let pathBytes = path.utf8CString
         guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
             Darwin.close(fd)
@@ -183,6 +195,8 @@ final class SocketURLProtocol: URLProtocol {
             for (key, value) in allHeaders {
                 let lowerKey = key.lowercased()
                 if lowerKey == "host" { continue } // already added
+                // Transport routing hint — never goes on the wire.
+                if lowerKey == Self.socketPathHeader.lowercased() { continue }
                 if lowerKey == "content-length" { hasContentLength = true }
                 lines.append("\(key): \(value)")
             }
@@ -480,14 +494,20 @@ enum SocketTransport {
 
     /// Create a `URLSession` configured to route traffic through the mcpproxy Unix socket.
     /// Falls back to standard networking if the socket is not available.
-    static func makeURLSession(socketPath: String? = nil) -> URLSession {
-        if let path = socketPath {
-            SocketURLProtocol.overrideSocketPath = path
-        }
-
+    ///
+    /// - Parameters:
+    ///   - socketPath: socket this session must use. Carried per-request in a
+    ///     header rather than a process-global, so two clients can talk to two
+    ///     different cores without redirecting each other.
+    ///   - timeout: per-request timeout. The default is generous because the
+    ///     core can be slow under load; liveness probes pass something short.
+    static func makeURLSession(socketPath: String? = nil, timeout: TimeInterval = 30) -> URLSession {
         let config = URLSessionConfiguration.default
         config.protocolClasses = [SocketURLProtocol.self]
-        config.timeoutIntervalForRequest = 30
+        if let socketPath {
+            config.httpAdditionalHeaders = [SocketURLProtocol.socketPathHeader: socketPath]
+        }
+        config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = 300
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
@@ -495,10 +515,10 @@ enum SocketTransport {
         return URLSession(configuration: config)
     }
 
-    /// Create a standard TCP-based `URLSession` (no socket override).
-    static func makeTCPSession() -> URLSession {
+    /// Create a standard TCP-based `URLSession` (never routed over the socket).
+    static func makeTCPSession(timeout: TimeInterval = 30) -> URLSession {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = 300
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never

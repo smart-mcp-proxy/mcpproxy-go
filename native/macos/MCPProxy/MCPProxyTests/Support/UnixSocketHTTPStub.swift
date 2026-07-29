@@ -7,9 +7,9 @@
 // Why this exists: `CoreProcessManager` discovers a running core purely by
 // probing a Unix socket (`SocketTransport.isSocketAvailable` + `GET /ready`).
 // To exercise the attach path — and, crucially, what happens when that core
-// DISAPPEARS (GH #926) — a test needs a socket it can create and destroy at
-// will. Nothing else in the app can fake that: the transport is a real
-// `URLProtocol` speaking real HTTP over a real fd.
+// DISAPPEARS or goes UNRESPONSIVE (GH #926) — a test needs a socket it can
+// create, wedge, and destroy at will. Nothing else in the app can fake that:
+// the transport is a real `URLProtocol` speaking real HTTP over a real fd.
 //
 // Deliberately tiny: one request per connection, `Connection: close`, no
 // keep-alive, no chunking. That is all `SocketURLProtocol` ever asks for.
@@ -19,22 +19,30 @@ import Foundation
 import Darwin
 #endif
 
-/// A canned HTTP response.
-struct StubResponse {
-    let status: Int
-    let body: String
+/// What the stub does with a request.
+enum StubResponse {
+    /// Answer with this status and body.
+    case reply(status: Int, body: String)
+    /// Accept the request and never answer, for `seconds` — a core that is up
+    /// and listening but not responding. The client must time out on its own.
+    case hang(seconds: TimeInterval)
 
     static func json(_ body: String, status: Int = 200) -> StubResponse {
-        StubResponse(status: status, body: body)
+        .reply(status: status, body: body)
     }
 
-    static let notFound = StubResponse(status: 404, body: #"{"success":false,"error":"not found"}"#)
+    static let notFound = StubResponse.reply(
+        status: 404, body: #"{"success":false,"error":"not found"}"#
+    )
 }
 
-/// A single-threaded HTTP server on a Unix domain socket.
+/// An HTTP server on a Unix domain socket.
 ///
-/// Not thread-safe by design beyond what the tests need: `start()`/`stop()` are
-/// called from the test thread, and the accept loop runs on its own thread.
+/// `start()`/`stop()` are called from the test thread; the accept loop runs on
+/// its own thread. `stop()` closes the listening socket AND any accepted
+/// connection (a stub wedged in `.hang` is blocked on one), then waits for the
+/// thread to actually exit, so a stopped stub leaves no descriptor or thread
+/// behind to race the next test.
 final class UnixSocketHTTPStub {
 
     /// Path of the socket file. Kept short: `sun_path` is 104 bytes.
@@ -45,10 +53,13 @@ final class UnixSocketHTTPStub {
     /// against a real core that lacks an endpoint.
     private let responder: @Sendable (_ method: String, _ path: String) -> StubResponse
 
-    private var listenFD: Int32 = -1
-    private var thread: Thread?
     private let stateLock = NSLock()
-    private var stopped = false
+    private var listenFD: Int32 = -1
+    private var clientFD: Int32 = -1
+    private var stopped = true
+    private var threadRunning = false
+    private var requestCounts: [String: Int] = [:]
+    private let exited = DispatchSemaphore(value: 0)
 
     /// - Parameter path: socket path to bind, or `nil` for a fresh temporary one.
     ///   Pass an existing stub's path to simulate the same core coming back up.
@@ -61,6 +72,12 @@ final class UnixSocketHTTPStub {
         self.path = path ?? "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
         self.responder = responder
     }
+
+    deinit {
+        stop()
+    }
+
+    // MARK: - Lifecycle
 
     /// Bind, listen, and start accepting. Throws if the socket cannot be created.
     func start() throws {
@@ -101,29 +118,67 @@ final class UnixSocketHTTPStub {
             throw StubError.listenFailed(err)
         }
 
+        stateLock.lock()
         listenFD = fd
-        let thread = Thread { [weak self] in self?.acceptLoop(fd: fd) }
+        stopped = false
+        threadRunning = true
+        stateLock.unlock()
+
+        let thread = Thread { [weak self] in
+            self?.acceptLoop(fd: fd)
+            self?.exited.signal()
+        }
         thread.name = "UnixSocketHTTPStub"
         thread.qualityOfService = .userInitiated
-        self.thread = thread
         thread.start()
     }
 
     /// Stop serving and remove the socket file — i.e. "the core died".
     ///
-    /// After this returns, `SocketTransport.isSocketAvailable(path:)` is false,
-    /// which is what the tray must notice.
+    /// After this returns, `SocketTransport.isSocketAvailable(path:)` is false
+    /// and the accept thread has exited.
     func stop() {
         stateLock.lock()
         let alreadyStopped = stopped
         stopped = true
-        let fd = listenFD
+        let listen = listenFD
+        let client = clientFD
         listenFD = -1
+        clientFD = -1
+        let wasRunning = threadRunning
+        threadRunning = false
         stateLock.unlock()
 
         guard !alreadyStopped else { return }
-        if fd >= 0 { Darwin.close(fd) }
+
+        // Closing both descriptors unblocks accept() and any pending read().
+        if listen >= 0 { Darwin.close(listen) }
+        if client >= 0 { Darwin.close(client) }
         unlink(path)
+
+        if wasRunning {
+            // Bounded: a wedged handler polls `stopped` on a 20ms cadence.
+            _ = exited.wait(timeout: .now() + 2.0)
+        }
+    }
+
+    // MARK: - Observability
+
+    /// How many requests this stub has received for `path`.
+    ///
+    /// Used to count connect attempts: `connectToCore()` fetches
+    /// `/api/v1/info` exactly once, so that count IS the number of
+    /// (re)connections — the observable form of "did we attach twice?".
+    func requestCount(path: String) -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return requestCounts[path] ?? 0
+    }
+
+    private func recordRequest(path: String) {
+        stateLock.lock()
+        requestCounts[path, default: 0] += 1
+        stateLock.unlock()
     }
 
     private var isStopped: Bool {
@@ -144,9 +199,28 @@ final class UnixSocketHTTPStub {
             }
             var on: Int32 = 1
             setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+
+            stateLock.lock()
+            let stoppedNow = stopped
+            if !stoppedNow { clientFD = client }
+            stateLock.unlock()
+            if stoppedNow {
+                Darwin.close(client)
+                return
+            }
+
             handle(client: client)
-            Darwin.close(client)
+            closeClient(client)
         }
+    }
+
+    /// Close the accepted connection unless `stop()` already claimed it.
+    private func closeClient(_ fd: Int32) {
+        stateLock.lock()
+        let owned = clientFD == fd
+        if owned { clientFD = -1 }
+        stateLock.unlock()
+        if owned { Darwin.close(fd) }
     }
 
     private func handle(client: Int32) {
@@ -156,17 +230,26 @@ final class UnixSocketHTTPStub {
         let method = parts.count > 0 ? String(parts[0]) : "GET"
         let rawPath = parts.count > 1 ? String(parts[1]) : "/"
         let pathOnly = rawPath.components(separatedBy: "?").first ?? rawPath
+        recordRequest(path: pathOnly)
 
-        let response = responder(method, pathOnly)
-        let bodyData = Data(response.body.utf8)
-        var headers = "HTTP/1.1 \(response.status) \(Self.reason(response.status))\r\n"
-        headers += "Content-Type: application/json\r\n"
-        headers += "Content-Length: \(bodyData.count)\r\n"
-        headers += "Connection: close\r\n\r\n"
-
-        var out = Data(headers.utf8)
-        out.append(bodyData)
-        write(fd: client, data: out)
+        switch responder(method, pathOnly) {
+        case .hang(let seconds):
+            // Hold the connection open without answering. Poll `stopped` so
+            // teardown is never blocked for the full duration.
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline && !isStopped {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+        case .reply(let status, let body):
+            let bodyData = Data(body.utf8)
+            var headers = "HTTP/1.1 \(status) \(Self.reason(status))\r\n"
+            headers += "Content-Type: application/json\r\n"
+            headers += "Content-Length: \(bodyData.count)\r\n"
+            headers += "Connection: close\r\n\r\n"
+            var out = Data(headers.utf8)
+            out.append(bodyData)
+            write(fd: client, data: out)
+        }
     }
 
     /// Read until the end of the request headers. Bodies are ignored — the tray
@@ -204,6 +287,7 @@ final class UnixSocketHTTPStub {
         case 200: return "OK"
         case 404: return "Not Found"
         case 500: return "Internal Server Error"
+        case 503: return "Service Unavailable"
         default: return "Status"
         }
     }
@@ -216,7 +300,19 @@ final class UnixSocketHTTPStub {
     }
 }
 
-// MARK: - A stand-in for a healthy core
+// MARK: - A stand-in for a core
+
+/// Lets a test change how `/ready` behaves while the stub keeps running — a
+/// core that is still listening but has stopped answering.
+final class ReadyBehaviour: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: StubResponse = .json(#"{"success":true}"#)
+
+    var current: StubResponse {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
+}
 
 extension UnixSocketHTTPStub {
 
@@ -226,11 +322,14 @@ extension UnixSocketHTTPStub {
     /// `web_ui_url` points at 127.0.0.1:1, a port nothing can be listening on,
     /// so the SSE client (which is deliberately TCP-only) fails fast and retries
     /// in the background instead of reaching a real core on :8080.
-    static func healthyCore(at socketPath: String? = nil) -> UnixSocketHTTPStub {
+    static func healthyCore(
+        at socketPath: String? = nil,
+        ready: ReadyBehaviour = ReadyBehaviour()
+    ) -> UnixSocketHTTPStub {
         UnixSocketHTTPStub(at: socketPath) { _, path in
             switch path {
             case "/ready":
-                return .json(#"{"success":true}"#)
+                return ready.current
             case "/api/v1/info":
                 return .json("""
                 {"success":true,"data":{
