@@ -32,12 +32,20 @@ final class MenuRebuildGuardTests: XCTestCase {
         XCTAssertFalse(guardState.menuDidClose(), "The deferred rebuild runs exactly once")
     }
 
+    /// The stale flag can only come from a `menuDidClose` that never arrived —
+    /// after a close that did arrive the flag is already clear, so reopening
+    /// through the normal path proves nothing. Model the dropped close.
     func testReopeningClearsAStaleDirtyFlag() {
         var guardState = MenuRebuildGuard()
         guardState.menuWillOpen()
         _ = guardState.decide(structureChanged: true)
-        _ = guardState.menuDidClose()
+        XCTAssertTrue(guardState.isDirty)
+
+        // No menuDidClose in between.
         guardState.menuWillOpen()
-        XCTAssertFalse(guardState.isDirty)
+        XCTAssertFalse(guardState.isDirty,
+                       "a dirty flag carried into a fresh open would defer a rebuild that is no longer owed")
+        XCTAssertFalse(guardState.menuDidClose(),
+                       "and would then fire that stale rebuild on the next close")
     }
 }

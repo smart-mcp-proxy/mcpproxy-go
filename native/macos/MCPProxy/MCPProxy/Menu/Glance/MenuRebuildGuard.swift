@@ -25,6 +25,17 @@ enum MenuRebuildDecision: Equatable {
 /// menu. `removeAllItems()` under the cursor — a menu that grows or shrinks
 /// mid-read, or an open submenu that collapses — is exactly the irritation the
 /// glance design forbids, so structural churn waits for `menuDidClose`.
+///
+/// **The invariant that makes this safe: `menuWillOpen` rebuilds the menu
+/// unconditionally before every single display.** So the guard governs only what
+/// happens *between* an open and a close, and anything it suppresses is
+/// re-applied before the user can next see the menu. Nothing this guard drops
+/// can survive into a display — which is why suppressing non-glance sections
+/// too (they are not consulted at all while open) is a freeze rather than a
+/// staleness bug, and why the deferred rebuild on `menuDidClose` is a belt to
+/// that brace rather than the only thing standing between the user and stale
+/// rows. `updateStatusIcon()` deliberately sits outside the guard, so the tray
+/// icon remains a live alert channel even while the menu is frozen.
 struct MenuRebuildGuard {
     /// True between `menuWillOpen()` and `menuDidClose()`.
     private(set) var isMenuOpen = false

@@ -61,10 +61,17 @@ final class GlanceMenuPolicyTests: XCTestCase {
         let section = makeSection()
         let rows = section.items(for: state, now: GlanceFixtures.now)
 
+        let summaryBefore = rows[0].title
+        XCTAssertEqual(summaryBefore, "12 calls this hour · 1 client")
+
         var guardState = MenuRebuildGuard()
         guardState.menuWillOpen()
 
-        // A third call arrives: the Recent list grows by a row.
+        // A third call arrives: the Recent list grows by a row, and the header
+        // count moves with it. The header is set deliberately: refusing an
+        // update has to change *nothing*, and a header that alone kept moving
+        // would describe a set of rows that is not the one below it.
+        state.callsThisHour = 99
         state.glanceActivity.insert(
             GlanceFixtures.entry(id: "c", server: "slack", tool: "post_message",
                                  timestamp: "2027-01-15T07:59:50Z", session: "sess-a"),
@@ -75,6 +82,8 @@ final class GlanceMenuPolicyTests: XCTestCase {
                        .deferUntilClose)
         XCTAssertEqual(rows[3].title, "github:create_issue — 30s",
                        "a deferred rebuild must leave the on-screen rows exactly as they were")
+        XCTAssertEqual(rows[0].title, summaryBefore,
+                       "'99 calls' over the old three rows is the half-update the defer exists to prevent")
         XCTAssertTrue(guardState.menuDidClose(), "the suppressed rebuild is owed on close")
     }
 
