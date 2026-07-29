@@ -43,8 +43,20 @@ final class GlanceSection {
 
     // MARK: Owned items (kept so rows can be rewritten in place)
 
+    /// A built activity row together with the identity of the record it is
+    /// currently showing, so an update can tell "same record, later clock" from
+    /// "this row now represents a different call".
+    private struct ActivityRow {
+        let item: NSMenuItem
+        /// The record's key — see `recordKey(for:)`. Nil until first rendered.
+        var recordKey: String?
+        /// The SF Symbol currently installed, so the icon is rebuilt only when
+        /// the glyph really changes.
+        var symbolName: String?
+    }
+
     private var summaryItem: NSMenuItem?
-    private var activityRows: [NSMenuItem] = []
+    private var activityRows: [ActivityRow] = []
     private var clientRows: [NSMenuItem] = []
 
     /// Snapshot of the structure the current items were built from, so an
@@ -98,10 +110,10 @@ final class GlanceSection {
             items.append(disabledItem(titled: "No tool calls yet"))
         } else {
             for entry in entries {
-                let row = actionableItem()
-                apply(entry, to: row, now: now)
+                var row = ActivityRow(item: actionableItem())
+                apply(entry, to: &row, now: now)
                 activityRows.append(row)
-                items.append(row)
+                items.append(row.item)
             }
         }
 
@@ -161,40 +173,85 @@ final class GlanceSection {
         guard entries.count == activityRows.count,
               clients.count == clientRows.count else { return false }
 
-        summaryItem?.title = summaryTitle(for: state)
-        for (row, entry) in zip(activityRows, entries) { apply(entry, to: row, now: now) }
+        let summary = summaryTitle(for: state)
+        if summaryItem?.title != summary { summaryItem?.title = summary }
+        for index in activityRows.indices { apply(entries[index], to: &activityRows[index], now: now) }
         for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
         return true
     }
 
     // MARK: Row rendering
 
+    /// Identity of the record a row is showing: its `requestId`, never its `id`.
+    ///
+    /// A row rendered from a live SSE event carries a *provisional* id of the
+    /// form `"<request_id>:<type>"`, which the 30-second reconciling poll
+    /// replaces with the storage-assigned ULID for the very same call. Keying on
+    /// `id` would therefore report a wholesale turnover of every row on every
+    /// poll, needlessly rewriting five rows' icons and click payloads each time.
+    /// `requestId` is identical on both sides, and is already what rule 4
+    /// (`GlanceSelection.collapseByRequestID`) groups on. Records with no
+    /// request id are never collapsed, so their `id` is a safe fallback key.
+    private static func recordKey(for entry: ActivityEntry) -> String {
+        if let requestId = entry.requestId, !requestId.isEmpty { return requestId }
+        return entry.id
+    }
+
     /// Rewrite an activity row so its title, icon, tooltip, accessibility label
     /// and click payload all describe `entry`.
-    private func apply(_ entry: ActivityEntry, to item: NSMenuItem, now: Date) {
+    ///
+    /// When the row has changed record every one of those is written back
+    /// unconditionally: with a fixed set of rows each new event shifts which
+    /// record a row stands for, and a row that kept the previous record's click
+    /// payload or icon would mislead silently. When it is still the same record
+    /// — the common case, since the reconcile only re-ids it — only what
+    /// actually differs is written, so a menu the user is reading is not
+    /// re-laid-out on every tick. Either way the row ends up fully describing
+    /// `entry`; the distinction is only how much is written to get there.
+    private func apply(_ entry: ActivityEntry, to row: inout ActivityRow, now: Date) {
+        let key = Self.recordKey(for: entry)
+        let sameRecord = row.recordKey == key
+        let item = row.item
+
         let fullLabel = GlanceFormatting.rowLabel(for: entry)
         let label = GlanceFormatting.middleTruncated(fullLabel, limit: Self.labelBudget)
         let age = GlanceFormatting.relativeTime(entry.timestamp, now: now)
         let failed = entry.status != "success"
         let detail = failed ? Self.firstClause(of: entry.errorMessage) : nil
 
+        let title: String
+        let accessibility: String
         if let detail {
-            item.title = "\(label) · \(detail) — \(age)"
-            item.setAccessibilityLabel("\(fullLabel), failed: \(detail), \(age) ago")
+            title = "\(label) · \(detail) — \(age)"
+            accessibility = "\(fullLabel), failed: \(detail), \(age) ago"
         } else {
-            item.title = "\(label) — \(age)"
-            item.setAccessibilityLabel("\(fullLabel), \(Self.outcomeDescription(for: entry)), \(age) ago")
+            title = "\(label) — \(age)"
+            accessibility = "\(fullLabel), \(Self.outcomeDescription(for: entry)), \(age) ago"
         }
 
-        item.image = Self.statusImage(for: entry)
-
+        let toolTip: String
         if let message = entry.errorMessage, !message.isEmpty {
-            item.toolTip = "\(fullLabel)\n\(message)"
+            toolTip = "\(fullLabel)\n\(message)"
         } else {
-            item.toolTip = fullLabel
+            toolTip = fullLabel
         }
 
-        item.representedObject = entry.sessionId
+        let symbol = GlanceFormatting.statusSymbolName(for: entry)
+
+        if !sameRecord || item.title != title { item.title = title }
+        if !sameRecord || item.accessibilityLabel() != accessibility {
+            item.setAccessibilityLabel(accessibility)
+        }
+        if !sameRecord || item.toolTip != toolTip { item.toolTip = toolTip }
+        if !sameRecord || row.symbolName != symbol {
+            item.image = Self.statusImage(for: entry)
+            row.symbolName = symbol
+        }
+        if !sameRecord || (item.representedObject as? String) != entry.sessionId {
+            item.representedObject = entry.sessionId
+        }
+
+        row.recordKey = key
     }
 
     /// First clause of an error message — everything up to the first newline,

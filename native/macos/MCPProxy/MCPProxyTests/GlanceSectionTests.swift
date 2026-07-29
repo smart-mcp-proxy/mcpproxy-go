@@ -215,6 +215,74 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertFalse(Self.makeSection().updateInPlace(for: Self.busyState(), now: Self.now))
     }
 
+    // MARK: - Rows are keyed on request id, not id
+
+    /// A row rendered from a live SSE event carries a provisional id
+    /// (`"<request_id>:<type>"`); the 30-second reconciling poll replaces it
+    /// with the storage-assigned ULID for the very same call. Keyed on `id`,
+    /// every poll would look like a wholesale turnover of all five rows.
+    func testReconcileIdTurnoverIsNotARecordTurnover() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        let iconBefore = items[3].image
+
+        state.glanceActivity = [
+            Self.entry(id: "01JQ8Z0000000000000000001", server: "github", tool: "create_issue",
+                       timestamp: "2027-01-15T07:59:30Z", session: "sess-a", request: "req-a"),
+            Self.entry(id: "01JQ8Z0000000000000000002", server: "jira", tool: "get_issue", status: "error",
+                       error: "auth failed: token expired. retry after refresh",
+                       timestamp: "2027-01-15T07:58:00Z", session: "sess-b", request: "req-b")
+        ]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertTrue(items[3].image === iconBefore,
+                      "same request id means the same record, so the row's icon must be left alone")
+        XCTAssertEqual(items[3].title, "github:create_issue — 30s")
+        XCTAssertEqual(items[3].representedObject as? String, "sess-a")
+    }
+
+    func testDifferentRecordInTheSameSlotRewritesTheIcon() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        let iconBefore = items[3].image
+        let previousFailure = state.glanceActivity[1]
+
+        state.glanceActivity = [
+            Self.entry(id: "c", server: "obsidian", tool: "search_notes",
+                       timestamp: "2027-01-15T07:59:55Z", session: "sess-c"),
+            previousFailure
+        ]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertFalse(items[3].image === iconBefore,
+                       "a different record must rewrite the row's entire identity, icon included")
+        XCTAssertEqual(items[3].representedObject as? String, "sess-c")
+    }
+
+    /// "Same record" must not mean "skip the update": the final status arrives
+    /// on a record whose request id has not changed — the reason
+    /// `AppState.updateGlanceActivity` fingerprints status rather than ids.
+    func testSameRecordStillPicksUpALateStatusCorrection() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        let previousFailure = state.glanceActivity[1]
+
+        state.glanceActivity = [
+            Self.entry(id: "a", server: "github", tool: "create_issue", status: "error",
+                       error: "rate limited: try later",
+                       timestamp: "2027-01-15T07:59:30Z", session: "sess-a"),
+            previousFailure
+        ]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[3].title, "github:create_issue · rate limited — 30s")
+        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed")
+        XCTAssertEqual(items[3].toolTip, "github:create_issue\nrate limited: try later")
+    }
+
     // MARK: - Status is carried by shape AND colour
 
     func testStatusIsEncodedByShapeAndColourNotColourAlone() {
@@ -282,14 +350,17 @@ final class GlanceSectionTests: XCTestCase {
         status: String = "success",
         error: String? = nil,
         timestamp: String,
-        session: String? = nil
+        session: String? = nil,
+        request: String? = nil
     ) -> ActivityEntry {
         var json: [String: Any] = [
             "id": id,
             "type": type,
             "status": status,
             "timestamp": timestamp,
-            "request_id": "req-\(id)"
+            // Defaults to a request id derived from `id`; pass `request:`
+            // explicitly to model the reconcile, which re-ids the same record.
+            "request_id": request ?? "req-\(id)"
         ]
         if let server { json["server_name"] = server }
         if let tool { json["tool_name"] = tool }
