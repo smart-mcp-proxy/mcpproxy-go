@@ -68,6 +68,33 @@ func putRawSession(m *Manager, key string, value []byte) error {
 	})
 }
 
+// seedClosedSessions writes count closed session records in a SINGLE
+// transaction, bypassing CreateSession (and therefore retention). Used to build
+// an oversized bucket cheaply — one Update per record makes 1000+ record
+// fixtures unbearably slow.
+func seedClosedSessions(t *testing.T, m *Manager, count int, base time.Time) {
+	t.Helper()
+	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(SessionsBucket))
+		if err != nil {
+			return err
+		}
+		for i := 0; i < count; i++ {
+			rec := makeSession(fmt.Sprintf("bulk-%05d", i), base,
+				time.Duration(i)*time.Second, time.Duration(i)*time.Second, "closed")
+			data, err := json.Marshal(rec)
+			if err != nil {
+				return err
+			}
+			key := fmt.Sprintf("%d_%s", rec.StartTime.UnixNano(), rec.ID)
+			if err := b.Put([]byte(key), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+}
+
 func countSessions(t *testing.T, m *Manager) int {
 	t.Helper()
 	var n int
@@ -412,22 +439,17 @@ func TestEnforceSessionRetention_EvictsLateKeyedRecordsThatRankWorse(t *testing.
 }
 
 // The bounded selection must pick the same victims a full sort would, including
-// when the bucket starts far above the limit (the migration case).
-func TestEnforceSessionRetention_TrimsFromFarAboveTheLimitInOneGo(t *testing.T) {
+// when the bucket starts far above the limit — and the delete pass must survive
+// being split across several batches, resuming the scan in the right place each
+// time. 1200 records is comfortably more than one batch.
+func TestEnforceSessionRetention_TrimsFromFarAboveTheLimitAcrossBatches(t *testing.T) {
 	m := newRetentionTestManager(t)
 	base := time.Now().Add(-72 * time.Hour)
 
-	const total = 500
-	// Seed far above the cap without going through CreateSession, so retention
-	// has to do the whole trim in a single call.
-	for i := 0; i < total; i++ {
-		rec := makeSession(fmt.Sprintf("bulk-%04d", i), base,
-			time.Duration(i)*time.Minute, time.Duration(i)*time.Minute, "closed")
-		data, err := json.Marshal(rec)
-		require.NoError(t, err)
-		require.NoError(t, putRawSession(m,
-			fmt.Sprintf("%d_%s", rec.StartTime.UnixNano(), rec.ID), data))
-	}
+	const total = 1200
+	require.Greater(t, total-sessionRetentionLimit, retentionDeleteBatch,
+		"the fixture must force more than one delete batch, or the resume path is untested")
+	seedClosedSessions(t, m, total, base)
 	require.Equal(t, total, countSessions(t, m))
 
 	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
@@ -436,13 +458,47 @@ func TestEnforceSessionRetention_TrimsFromFarAboveTheLimitInOneGo(t *testing.T) 
 
 	assert.Equal(t, sessionRetentionLimit, countSessions(t, m))
 
-	// The survivors must be the newest 100, exactly as a full sort would choose.
+	// The survivors must be exactly the newest 100 — every one of them, with no
+	// gaps, which is what a mis-resumed batch scan would produce.
 	for i := total - sessionRetentionLimit; i < total; i++ {
-		_, err := m.GetSessionByID(fmt.Sprintf("bulk-%04d", i))
-		assert.NoError(t, err, "bulk-%04d is among the newest 100 and must survive", i)
+		_, err := m.GetSessionByID(fmt.Sprintf("bulk-%05d", i))
+		assert.NoError(t, err, "bulk-%05d is among the newest 100 and must survive", i)
 	}
-	for i := 0; i < 5; i++ {
-		_, err := m.GetSessionByID(fmt.Sprintf("bulk-%04d", i))
-		assert.Error(t, err, "bulk-%04d is among the oldest and must be evicted", i)
+	for i := 0; i < total-sessionRetentionLimit; i++ {
+		_, err := m.GetSessionByID(fmt.Sprintf("bulk-%05d", i))
+		assert.Error(t, err, "bulk-%05d is outside the newest 100 and must be evicted", i)
 	}
+}
+
+// "Retention runs on every open" is the claim; "retention runs as part of the
+// legacy migration" is a strictly weaker behaviour that satisfies the migration
+// test alone. This pins the difference: an already-oversized NAMESPACED bucket,
+// no legacy bucket anywhere in the picture, must be trimmed when the database is
+// reopened.
+func TestEnforceSessionRetention_TrimsAnOversizedBucketOnReopen(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Now().Add(-48 * time.Hour)
+
+	m, err := NewManager(dir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+
+	const total = 400
+	seedClosedSessions(t, m, total, base)
+	require.Equal(t, total, countSessions(t, m))
+	require.NoError(t, m.Close())
+
+	// Reopen. Nothing here involves the legacy bucket — the records are already
+	// in the namespaced one.
+	reopened, err := NewManager(dir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	assert.Equal(t, sessionRetentionLimit, countSessions(t, reopened),
+		"opening a database must bring an oversized sessions bucket within the cap, "+
+			"however the records got there")
+
+	_, err = reopened.GetSessionByID(fmt.Sprintf("bulk-%05d", total-1))
+	assert.NoError(t, err, "the newest record must survive the open-time trim")
+	_, err = reopened.GetSessionByID("bulk-00000")
+	assert.Error(t, err, "the oldest record must be trimmed on open")
 }

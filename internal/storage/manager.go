@@ -1224,6 +1224,12 @@ type SessionRecord struct {
 // enforceSessionRetention).
 const sessionRetentionLimit = 100
 
+// retentionDeleteBatch bounds how many victim keys retention holds at once.
+// Deleting cannot happen while a cursor is traversing the bucket, so victims
+// are collected in batches; this is what keeps peak memory independent of how
+// oversized the bucket is.
+const retentionDeleteBatch = 512
+
 // CreateSession creates a new session record
 func (m *Manager) CreateSession(session *SessionRecord) error {
 	m.mu.Lock()
@@ -1824,57 +1830,103 @@ func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int)
 // path that can put the bucket over the cap — CreateSession is not the only
 // one (see enforceSessionRetentionOnOpen).
 //
-// Selection is bounded: rather than collecting and sorting every record, it
-// keeps a heap of the best maxSessions seen so far and streams everything else
-// straight into the victim list. That makes ranking O(n log maxSessions) with
-// O(maxSessions) ranking state, instead of O(n log n) with O(n) state, which
-// matters on the one pass that can see a bucket far above the cap: the
-// migration/open-time trim.
+// Memory is bounded in BOTH directions, which takes two passes:
+//
+//	Pass 1 ranks, keeping only a heap of the best maxSessions records seen so
+//	far. Victims are counted but not collected — remembering them is what would
+//	make state O(n).
+//	Pass 2 deletes everything that is not a survivor, in bounded batches, and
+//	reads keys only. The expensive JSON decode therefore still happens exactly
+//	once per record across both passes.
+//
+// Peak state is O(maxSessions + retentionDeleteBatch) regardless of how
+// oversized the bucket is, which is the point: the pass that can see a bucket
+// far above the cap is the open-time repair of an old database, and that is
+// exactly when a spike proportional to the bucket would hurt.
 func trimSessionsToLimit(bucket *bbolt.Bucket, maxSessions int, logger *zap.SugaredLogger) error {
 	if maxSessions <= 0 {
 		return nil
 	}
 
-	// bucket.Stats() is deliberately not used to size this: inside a write
-	// transaction it does not account for records Put earlier in the same
+	// Pass 1 — rank. bucket.Stats() is deliberately not used to count: inside a
+	// write transaction it does not account for records Put earlier in the same
 	// transaction, which let the bucket settle one record above the cap forever.
 	survivors := make(survivorHeap, 0, maxSessions)
-	var victims []sessionEvictionCandidate
+	total := 0
+	activeEvicted := 0
 
 	c := bucket.Cursor()
 	for k, v := c.First(); k != nil; k, v = c.Next() {
+		total++
 		cand := classifySessionForRetention(k, v, logger)
 		switch {
 		case len(survivors) < maxSessions:
 			heap.Push(&survivors, cand)
 		case cand.worseThan(survivors[0]):
-			// Weaker than every record currently being kept.
-			victims = append(victims, cand)
+			// Weaker than every record currently being kept, so it is a victim.
+			// Its key is not retained; pass 2 rediscovers it as "not a survivor".
+			if cand.tier == sessionTierActive {
+				activeEvicted++
+			}
 		default:
-			displaced, ok := heap.Pop(&survivors).(sessionEvictionCandidate)
-			if ok {
-				victims = append(victims, displaced)
+			if displaced, ok := heap.Pop(&survivors).(sessionEvictionCandidate); ok &&
+				displaced.tier == sessionTierActive {
+				activeEvicted++
 			}
 			heap.Push(&survivors, cand)
 		}
 	}
 
-	if len(victims) == 0 {
+	if total <= maxSessions {
 		return nil
 	}
 
-	// Delete only after the scan has finished. bbolt documents mutation during
-	// traversal as unsafe ("Changing data while traversing with a cursor may
-	// cause it to be invalidated and return unexpected keys and/or values"),
-	// which is what the previous delete-inside-the-cursor-loop did.
-	// PruneExcessActivities already collects keys first for the same reason.
-	activeEvicted := 0
-	for _, victim := range victims {
-		if err := bucket.Delete(victim.key); err != nil {
-			return fmt.Errorf("failed to delete old session: %w", err)
+	// The survivor set, by key: exactly maxSessions entries.
+	keep := make(map[string]struct{}, len(survivors))
+	for _, s := range survivors {
+		keep[string(s.key)] = struct{}{}
+	}
+
+	// Pass 2 — delete. Deleting cannot happen while a cursor is traversing the
+	// bucket: bbolt documents mutation during traversal as unsafe ("Changing
+	// data while traversing with a cursor may cause it to be invalidated and
+	// return unexpected keys and/or values"). So each batch is collected, the
+	// traversal abandoned, the batch deleted, and the scan resumed from the
+	// first key the batch did not reach.
+	deleted := 0
+	var resume []byte
+	for {
+		batch := make([][]byte, 0, retentionDeleteBatch)
+
+		cur := bucket.Cursor()
+		var k []byte
+		if resume == nil {
+			k, _ = cur.First()
+		} else {
+			k, _ = cur.Seek(resume)
 		}
-		if victim.tier == sessionTierActive {
-			activeEvicted++
+		for ; k != nil && len(batch) < retentionDeleteBatch; k, _ = cur.Next() {
+			if _, survives := keep[string(k)]; survives {
+				continue
+			}
+			batch = append(batch, append([]byte(nil), k...))
+		}
+
+		// k is the first key this batch did not examine. It is never one of the
+		// keys about to be deleted, so it is still there to seek back to.
+		if k != nil {
+			resume = append([]byte(nil), k...)
+		}
+
+		for _, key := range batch {
+			if err := bucket.Delete(key); err != nil {
+				return fmt.Errorf("failed to delete old session: %w", err)
+			}
+			deleted++
+		}
+
+		if k == nil {
+			break
 		}
 	}
 
@@ -1884,7 +1936,7 @@ func trimSessionsToLimit(bucket *bbolt.Bucket, maxSessions int, logger *zap.Suga
 		logger.Warnw("Session retention had to evict active sessions",
 			"active_evicted", activeEvicted, "limit", maxSessions)
 	}
-	logger.Debugw("Enforced session retention", "deleted", len(victims), "remaining", maxSessions)
+	logger.Debugw("Enforced session retention", "deleted", deleted, "remaining", maxSessions)
 	return nil
 }
 
