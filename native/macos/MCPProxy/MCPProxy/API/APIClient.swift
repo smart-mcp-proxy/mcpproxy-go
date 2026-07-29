@@ -640,6 +640,11 @@ actor APIClient {
 
     // MARK: - Private Helpers
 
+    /// Detects the standard response envelope without caring about its payload.
+    private struct EnvelopeProbe: Decodable {
+        let success: Bool
+    }
+
     /// Fetch a resource wrapped in the standard `APIResponse` envelope.
     private func fetchWrapped<T: Decodable>(path: String) async throws -> T {
         let (data, _) = try await performRequest(path: path, method: "GET")
@@ -652,12 +657,20 @@ actor APIClient {
             throw APIClientError.httpError(statusCode: 200, message: wrapper.error ?? "Unknown error")
         } catch let error as APIClientError {
             throw error
-        } catch {
+        } catch let envelopeError {
             // Try decoding directly without the wrapper (some endpoints don't wrap)
             do {
                 return try decoder.decode(T.self, from: data)
-            } catch {
-                throw APIClientError.decodingError(underlying: error)
+            } catch let bareError {
+                // Both decodes failed, so one of the two errors is noise. For an
+                // enveloped body the envelope error describes the real problem
+                // inside `data` (a model's own throwing decoder, say), and the
+                // fallback only re-fails because T's keys are one level down —
+                // reporting that would mask the cause. For a genuinely unwrapped
+                // body it is the other way round, which is the pre-existing
+                // behaviour and stays untouched.
+                let isEnveloped = (try? decoder.decode(EnvelopeProbe.self, from: data)) != nil
+                throw APIClientError.decodingError(underlying: isEnveloped ? envelopeError : bareError)
             }
         }
     }

@@ -197,6 +197,84 @@ final class APIClientGlanceTests: XCTestCase {
         XCTAssertEqual(failure?.message, HTTPURLResponse.localizedString(forStatusCode: 503))
     }
 
+    // MARK: - Decoding-error fidelity
+
+    /// Unwrap an APIClientError.decodingError, failing the test on any other outcome.
+    private func expectDecodingError(
+        _ body: @autoclosure () async throws -> Any,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> String? {
+        do {
+            _ = try await body()
+            XCTFail("expected the call to throw, but it returned normally", file: file, line: line)
+            return nil
+        } catch let error as APIClientError {
+            guard case .decodingError(let underlying) = error else {
+                XCTFail("expected .decodingError, got \(error)", file: file, line: line)
+                return nil
+            }
+            return "\(underlying)"
+        } catch {
+            XCTFail("expected APIClientError, got \(error)", file: file, line: line)
+            return nil
+        }
+    }
+
+    /// A malformed field inside an enveloped `data` must surface the error that
+    /// describes it. fetchWrapped's bare-decode fallback re-fails on the top-level
+    /// shape, and reporting *that* second error hides the real cause entirely.
+    func testEnvelopedBodyPreservesTheInnerDecodingError() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"window":"24h","token_source":"bytes","tokens_saved":0,
+         "tokens_saved_percentage":0,"tools":[],"timeline":[
+           {"start":"29/07/2026 13:00","calls":1,"errors":0,"total_resp_bytes":0}
+         ]}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let description = await expectDecodingError(try await client.usageAggregate())
+
+        XCTAssertEqual(
+            description?.contains("Not an RFC 3339 timestamp: 29/07/2026 13:00"), true,
+            "the timestamp error was masked; got: \(description ?? "nil")"
+        )
+    }
+
+    /// No-regression guard for the other side of the fallback: when the body is
+    /// genuinely NOT enveloped, the bare decode's error is the informative one and
+    /// must still be what surfaces.
+    func testUnwrappedBodyPreservesTheBareDecodingError() async throws {
+        GlanceStubURLProtocol.responseBody = Data("""
+        {"activities":"not-an-array","total":0,"limit":50,"offset":0}
+        """.utf8)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let description = await expectDecodingError(try await client.glanceActivity())
+
+        XCTAssertEqual(
+            description?.contains("activities"), true,
+            "the bare-decode error was masked; got: \(description ?? "nil")"
+        )
+    }
+
+    /// The fallback itself must keep working: an unwrapped body that decodes
+    /// cleanly is still accepted.
+    func testUnwrappedBodyStillDecodesSuccessfully() async throws {
+        GlanceStubURLProtocol.responseBody = Data("""
+        {"activities":[
+          {"id":"01K","type":"tool_call","status":"ok","timestamp":"2026-07-29T13:04:05Z",
+           "server_name":"gh","tool_name":"list_prs"}
+        ],"total":1,"limit":50,"offset":0}
+        """.utf8)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let entries = try await client.glanceActivity()
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.serverName, "gh")
+    }
+
     // MARK: - Data-source seam
 
     func testAPIClientConformsToGlanceDataSource() async throws {
