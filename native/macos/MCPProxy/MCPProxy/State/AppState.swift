@@ -386,10 +386,16 @@ final class AppState: ObservableObject {
     /// Replace the glance (active-only) session feed. Leaves `recentSessions` untouched.
     ///
     /// Ignored unless the core is `.connected` — see `updateGlanceActivity`.
+    ///
+    /// Guarded on the whole value, not on ids: the tray's Clients rows render a
+    /// live per-session call count and last-activity age, so a session whose
+    /// `toolCallCount` moved between polls must republish. An id-only guard
+    /// froze both numbers at the first poll's values for as long as the session
+    /// list's membership held. `MCPSession` is `Equatable` for exactly this.
     @MainActor
     func updateGlanceSessions(_ sessions: [APIClient.MCPSession]) {
         guard coreState == .connected else { return }
-        if sessions.map(\.id) != glanceSessions.map(\.id) {
+        if sessions != glanceSessions {
             glanceSessions = sessions
         }
     }

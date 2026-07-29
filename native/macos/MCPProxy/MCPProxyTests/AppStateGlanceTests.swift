@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import MCPProxy
 
 /// Tray Glance: the four `AppState` glance fields, the current-UTC-hour
@@ -189,6 +190,38 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.glanceSessions.map(\.id), ["s1"])
     }
 
+    // MARK: - Session republish guard
+
+    /// The tray's Clients rows render a live per-session call count
+    /// ("Claude Code — 8 calls · 1m"), so a session whose count moved has to
+    /// reach the menu. Guarding on ids alone froze that number at whatever the
+    /// first poll returned for as long as the session list's membership held.
+    func testUpdateGlanceSessionsRepublishesWhenACallCountMoves() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active", calls: 3)])
+
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active", calls: 40)])
+
+        XCTAssertEqual(state.glanceSessions.first?.toolCallCount, 40)
+    }
+
+    /// …but the guard must still exist: an identical poll every 30s must not
+    /// publish, or the debounced `objectWillChange → rebuildMenu()` sink rebuilds
+    /// the menu forever on an idle proxy.
+    func testUpdateGlanceSessionsIgnoresAnIdenticalPoll() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active", calls: 3)])
+
+        var published = 0
+        let sink = state.objectWillChange.sink { _ in published += 1 }
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active", calls: 3)])
+        sink.cancel()
+
+        XCTAssertEqual(published, 0)
+    }
+
     // MARK: - Helpers
 
     private static func date(_ iso: String) -> Date {
@@ -210,9 +243,9 @@ final class AppStateGlanceTests: XCTestCase {
         return try JSONDecoder().decode(ActivityEntry.self, from: json.data(using: .utf8)!)
     }
 
-    private static func session(id: String, status: String) throws -> APIClient.MCPSession {
+    private static func session(id: String, status: String, calls: Int = 3) throws -> APIClient.MCPSession {
         let json = """
-        {"id":"\(id)","client_name":"Claude Code","status":"\(status)","tool_call_count":3}
+        {"id":"\(id)","client_name":"Claude Code","status":"\(status)","tool_call_count":\(calls)}
         """
         // swiftlint:disable:next force_unwrapping
         return try JSONDecoder().decode(APIClient.MCPSession.self, from: json.data(using: .utf8)!)

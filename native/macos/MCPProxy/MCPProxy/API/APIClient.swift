@@ -328,7 +328,12 @@ actor APIClient {
     // MARK: - Sessions
 
     /// MCP session model from `GET /api/v1/sessions`.
-    struct MCPSession: Codable, Identifiable {
+    ///
+    /// `Equatable` (synthesised — all ten stored properties are Equatable value
+    /// types) so `AppState.updateGlanceSessions` can guard on the whole value.
+    /// The tray's Clients rows render a live `toolCallCount` and `lastActivity`,
+    /// which an id-only guard would freeze at the first poll's numbers.
+    struct MCPSession: Codable, Identifiable, Equatable {
         var id: String
         let clientName: String?
         let clientVersion: String?
