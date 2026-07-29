@@ -104,6 +104,13 @@ final class AppState: ObservableObject {
     /// Calls recorded in the CURRENT UTC hour. `nil` means "not loaded yet".
     @Published var callsThisHour: Int?
 
+    /// Last usage-refresh failure, surfaced as a muted row in the histogram
+    /// submenu. `nil` means "no failure recorded"; the next successful refresh
+    /// clears it. Without this the submenu could not tell "still loading" from
+    /// "the fetch failed" — both leave `usageTimeline` nil, and a permanently
+    /// failing refresh would sit on "Loading…" forever.
+    @Published var usageError: String?
+
     // MARK: Token metrics (from status response)
 
     @Published var tokenMetrics: TokenMetrics?
@@ -329,6 +336,23 @@ final class AppState: ObservableObject {
         if usageTimeline != timeline { usageTimeline = timeline }
         let calls = AppState.callsInCurrentHour(timeline, now: now)
         if callsThisHour != calls { callsThisHour = calls }
+        if usageError != nil { usageError = nil }
+    }
+
+    /// Record a failed usage refresh so the histogram submenu can say so
+    /// instead of showing "Loading…" forever. Called from the usage refresh's
+    /// catch block.
+    ///
+    /// Guarded on `.connected` for the same reason `updateUsage` and
+    /// `updateGlanceActivity` are: a fetch already past its `guard let
+    /// apiClient` when the core goes away resolves after `clearGlanceState()`,
+    /// and its catch block would write the dead core's failure back over the
+    /// state that was just emptied. The submenu would then say "Usage
+    /// unavailable" about a core that is merely still starting.
+    @MainActor
+    func recordUsageFailure(_ message: String) {
+        guard coreState == .connected else { return }
+        if usageError != message { usageError = message }
     }
 
     /// Replace the glance activity feed. Leaves `recentActivity` untouched.
@@ -415,5 +439,6 @@ final class AppState: ObservableObject {
         if !glanceSessions.isEmpty { glanceSessions = [] }
         if usageTimeline != nil { usageTimeline = nil }
         if callsThisHour != nil { callsThisHour = nil }
+        if usageError != nil { usageError = nil }
     }
 }

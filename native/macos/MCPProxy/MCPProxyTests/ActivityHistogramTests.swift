@@ -112,3 +112,62 @@ final class ActivityHistogramAccessibilityTests: XCTestCase {
         )
     }
 }
+
+@MainActor
+final class AppStateUsageErrorTests: XCTestCase {
+
+    /// A connected core. Every glance updater on `AppState` — this one included
+    /// — ignores writes unless `coreState == .connected`, so a test that skips
+    /// this asserts on a no-op.
+    private func connectedState() -> AppState {
+        let state = AppState()
+        state.coreState = .connected
+        return state
+    }
+
+    func testRecordUsageFailureStoresTheMessage() {
+        let state = connectedState()
+
+        XCTAssertNil(state.usageError)
+        state.recordUsageFailure("connection refused")
+        XCTAssertEqual(state.usageError, "connection refused")
+    }
+
+    /// The same reconnect hazard `updateGlanceActivity` guards against, on the
+    /// failure path: a usage fetch already past its `guard let apiClient` when
+    /// the core dies resolves into its catch block AFTER `clearGlanceState()`.
+    /// Without the guard the dead core's failure would outlive it and the
+    /// submenu would say "Usage unavailable" where "Loading…" is the truth.
+    func testRecordUsageFailureIsIgnoredWhileDisconnected() {
+        let state = AppState()
+
+        state.recordUsageFailure("connection refused")
+
+        XCTAssertNil(state.usageError)
+    }
+
+    /// A successful refresh must clear a stale failure, otherwise the submenu
+    /// would show the error row forever once a single fetch had failed.
+    func testUpdateUsageClearsAPreviousFailure() {
+        let state = connectedState()
+        state.recordUsageFailure("connection refused")
+
+        state.updateUsage(
+            timeline: [Fixture.bucket(start: Fixture.currentHour, calls: 1, errors: 0)],
+            now: Fixture.now
+        )
+
+        XCTAssertNil(state.usageError)
+        XCTAssertEqual(state.callsThisHour, 1)
+    }
+
+    /// Disconnecting must not leave the previous core's failure on screen.
+    func testClearGlanceStateClearsTheFailure() {
+        let state = connectedState()
+        state.recordUsageFailure("connection refused")
+
+        state.clearGlanceState()
+
+        XCTAssertNil(state.usageError)
+    }
+}
