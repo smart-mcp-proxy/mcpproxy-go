@@ -555,21 +555,23 @@ final class UsageRefreshWiringTests: XCTestCase {
 /// The chart's visual encoding. `GlanceSection.statusTint` states the rule these
 /// pin: colour is never the only channel separating two outcomes.
 ///
-/// Rasterised with SwiftUI's `ImageRenderer`, NOT `NSHostingView.cacheDisplay`.
-/// The hosting-view path needs a display context the GitHub macOS runner does
-/// not provide: there it painted 13 sample points where a developer machine
-/// paints hundreds, so the tests either failed or — worse, had they skipped —
-/// asserted nothing in the one environment nobody watches. `ImageRenderer` draws
-/// offscreen through Core Graphics with no window server involved, and its
-/// output matches the on-screen raster where it counts (identical red and
-/// chroma counts, measured both ways before this was changed).
+/// Rasterised with SwiftUI's `ImageRenderer`, NOT `NSHostingView.cacheDisplay`,
+/// and at a pinned scale. Both halves come from a CI failure worth recording,
+/// because the raster on the GitHub macOS runner is not what "it renders blank"
+/// would suggest.
 ///
-/// `scale` is pinned so the pixel grid is a property of the test and not of
-/// whatever display the machine has. That was the second half of the CI failure:
-/// the old sampler strode `rep.size`, which equals the POINT size at 2x and the
-/// PIXEL size at 1x, so it silently covered a quarter of the image on a Retina
-/// machine and all of it on the runner — which is exactly why the legend's red
-/// swatch was invisible locally and fatal in CI.
+/// What the runner actually produced: solid shapes yes — the legend's red
+/// swatch came through — axis text apparently not, and all of it at 1x where
+/// this machine is 2x. `cacheDisplay`'s output therefore varies with the host in
+/// both content and pixel grid. `ImageRenderer` draws offscreen through Core
+/// Graphics, takes an explicit `scale`, and matched the on-screen raster here
+/// where it counts: identical red and chroma counts, measured both ways before
+/// this was changed. Nothing below depends on text rendering.
+///
+/// The scale mattered independently. The old sampler strode `rep.size`, which is
+/// the POINT size at 2x and the PIXEL size at 1x, so one line of code covered a
+/// quarter of the image on a Retina machine and all of it on the runner — which
+/// is precisely why the legend's red swatch was invisible here and fatal there.
 @MainActor
 final class ActivityHistogramEncodingTests: XCTestCase {
 
