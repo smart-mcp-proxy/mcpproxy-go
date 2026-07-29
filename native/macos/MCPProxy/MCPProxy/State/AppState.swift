@@ -357,6 +357,32 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Upper bound on rows kept in `glanceActivity`. Matches the page size the
+    /// reconciling poll requests (`apiClient.glanceActivity(limit: 50)`), so SSE
+    /// rows and polled rows agree on depth.
+    static let glanceActivityCap = 50
+
+    /// Prepend one optimistic row adapted from an SSE payload (newest first).
+    /// Bounded so a busy agent cannot grow the feed without limit; the 30s
+    /// reconciling poll replaces the list wholesale with canonical records.
+    ///
+    /// Guarded on `coreState == .connected` for the same reason as the three
+    /// `update*` helpers: SSE teardown is asynchronous, so an event already in
+    /// flight when the core goes away would otherwise write a dead core's row
+    /// back over state `clearGlanceState()` had just emptied.
+    ///
+    /// Deliberately without the id-list equality guard `updateGlanceSessions(_:)`
+    /// carries — a prepend is by definition a change, and that guard exists only
+    /// to stop redundant `@Published` churn on identical poll results.
+    @MainActor
+    func prependGlanceActivity(_ entry: ActivityEntry) {
+        guard coreState == .connected else { return }
+        glanceActivity.insert(entry, at: 0)
+        if glanceActivity.count > AppState.glanceActivityCap {
+            glanceActivity.removeLast(glanceActivity.count - AppState.glanceActivityCap)
+        }
+    }
+
     /// Replace the glance (active-only) session feed. Leaves `recentSessions` untouched.
     ///
     /// Ignored unless the core is `.connected` — see `updateGlanceActivity`.

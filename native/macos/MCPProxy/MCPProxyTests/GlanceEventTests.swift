@@ -155,4 +155,52 @@ final class GlanceEventTests: XCTestCase {
         let parsed = try XCTUnwrap(GlanceFormatting.parseTimestamp(entry.timestamp))
         XCTAssertEqual(parsed.timeIntervalSince1970, 1_753_800_000, accuracy: 0.001)
     }
+
+    /// SSE rows go in newest-first and the feed is bounded, so a busy agent
+    /// cannot grow `glanceActivity` without limit between reconciling polls.
+    func testPrependPutsNewestFirstAndCapsTheFeed() throws {
+        let state = AppState()
+        state.coreState = .connected
+
+        for index in 0..<(AppState.glanceActivityCap + 5) {
+            let json = """
+            {"payload":{"server_name":"github","tool_name":"create_issue",
+            "request_id":"req-\(index)","status":"success"},"timestamp":1753800000}
+            """
+            let entry = try XCTUnwrap(GlanceEvent.adapt(
+                eventName: "activity.tool_call.completed",
+                data: Data(json.utf8)
+            ))
+            state.prependGlanceActivity(entry)
+        }
+
+        XCTAssertEqual(state.glanceActivity.count, AppState.glanceActivityCap)
+        XCTAssertEqual(state.glanceActivity.first?.requestId, "req-\(AppState.glanceActivityCap + 4)")
+        XCTAssertTrue(state.recentActivity.isEmpty, "the shared Dashboard feed must not be touched")
+    }
+
+    /// The three Task-3 `update*` helpers all ignore writes unless the core is
+    /// connected, because a late-resolving write would put a dead core's data
+    /// back over just-cleared state. SSE teardown is asynchronous, so an event
+    /// already in flight when the core drops reaches this path the same way.
+    func testPrependIsIgnoredWhenCoreIsNotConnected() throws {
+        let state = AppState()
+        state.coreState = .connected
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "request_id":"req-late","status":"success"},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        // `CoreProcessManager.shutdown()` transitions here before it cancels
+        // `refreshTask`, so this is the state a late event actually lands in.
+        state.coreState = .shuttingDown
+        state.prependGlanceActivity(entry)
+
+        XCTAssertTrue(state.glanceActivity.isEmpty,
+                      "a row arriving after the core dropped must not repopulate the cleared feed")
+    }
 }
