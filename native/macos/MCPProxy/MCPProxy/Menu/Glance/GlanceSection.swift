@@ -49,10 +49,11 @@ final class GlanceSection {
     private weak var clickTarget: AnyObject?
     private let clickAction: Selector
 
-    /// Builds the view for the histogram submenu's single custom item. While
-    /// this is nil the submenu falls back to a plain text line, which keeps the
-    /// component usable and testable without SwiftUI Charts.
-    var histogramViewBuilder: (([UsageBucket]) -> NSView)?
+    /// Builds the histogram submenu's single custom item from a shaped 24-hour
+    /// axis. Injected so submenu-structure tests are independent of how the
+    /// chart renders; it defaults to the real chart, so no wiring step can
+    /// forget to set it.
+    var histogramChartItemFactory: ([HistogramBar]) -> NSMenuItem = ActivityHistogram.chartMenuItem
 
     // MARK: Configuration
 
@@ -87,6 +88,12 @@ final class GlanceSection {
     /// deliberately never touches it (re-creating it would disturb an open
     /// submenu), so nothing reads this back.
     private var histogramItem: NSMenuItem?
+
+    /// The submenu's delegate, which fills the submenu in when it opens.
+    /// `NSMenu.delegate` is a WEAK reference, so without this the delegate
+    /// would deallocate the moment `items(for:)` returned and the submenu would
+    /// silently open empty forever.
+    private var histogramDelegate: HistogramSubmenuDelegate?
 
     init(target: AnyObject?, action: Selector) {
         self.clickTarget = target
@@ -391,25 +398,31 @@ final class GlanceSection {
 
     // MARK: Histogram
 
+    /// The "Activity (24h)" item and its (initially empty) submenu.
+    ///
+    /// The submenu's single row is built by its delegate when it opens, not
+    /// here: `items(for:)` runs on every `rebuildMenu()` — which itself runs on
+    /// every debounced `objectWillChange`, menu open or closed — and building
+    /// eagerly would render a SwiftUI Chart on every state change, including
+    /// for a menu nobody has opened.
+    ///
+    /// The submenu carries its OWN delegate rather than the tray menu's. That
+    /// is what keeps opening it off `AppController.menuWillOpen`, which
+    /// rebuilds the whole menu; a submenu opening under the cursor must not
+    /// restructure the menu it hangs from.
     private func makeHistogramItem(for state: AppState) -> NSMenuItem {
         let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
+        let submenu = NSMenu(title: "Activity (24h)")
+        // Nothing in here is actionable, and AppKit's automatic enabling runs
+        // its own validation at display time. Turning it off makes the row's
+        // disabled state ours — and makes what the tests assert the same thing
+        // the user sees.
+        submenu.autoenablesItems = false
 
-        if let timeline = state.usageTimeline {
-            if let builder = histogramViewBuilder {
-                let chart = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-                chart.view = builder(timeline)
-                submenu.addItem(chart)
-            } else {
-                let calls = timeline.reduce(0) { $0 + $1.calls }
-                let errors = timeline.reduce(0) { $0 + $1.errors }
-                let callText = calls == 1 ? "1 call" : "\(calls) calls"
-                let errorText = errors == 1 ? "1 error" : "\(errors) errors"
-                submenu.addItem(disabledItem(titled: "\(callText) · \(errorText) (24h)"))
-            }
-        } else {
-            submenu.addItem(disabledItem(titled: "Loading…"))
-        }
+        let delegate = HistogramSubmenuDelegate(appState: state,
+                                                chartItemFactory: histogramChartItemFactory)
+        histogramDelegate = delegate
+        submenu.delegate = delegate
 
         item.submenu = submenu
         return item

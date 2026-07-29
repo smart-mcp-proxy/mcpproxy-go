@@ -211,44 +211,112 @@ final class AppStateUsageErrorTests: XCTestCase {
     }
 }
 
-@MainActor
-final class ActivityHistogramSubmenuTests: XCTestCase {
 
-    /// A connected core — every glance field on `AppState` is ignored otherwise.
+/// The histogram submenu belongs to `GlanceSection` — there is exactly one, and
+/// it builds its single row when it opens rather than on every `rebuildMenu()`.
+/// These tests drive it through the delegate the section installs, which is the
+/// same path AppKit uses.
+@MainActor
+final class GlanceHistogramSubmenuTests: XCTestCase {
+
+    private final class ClickStub: NSObject {
+        @objc func openGlanceRow(_ sender: NSMenuItem) {}
+    }
+
+    private static let clickStub = ClickStub()
+
+    /// Every section built during a test, kept alive for its whole duration.
+    /// The section is the only strong reference to the submenu delegate — the
+    /// menu's own is weak — so letting one die mid-test empties the submenu.
+    private var sections: [GlanceSection] = []
+
+    override func tearDown() {
+        sections = []
+        super.tearDown()
+    }
+
+    /// A connected core — the block is hidden otherwise.
     private func connectedState() -> AppState {
         let state = AppState()
         state.coreState = .connected
         return state
     }
 
-    /// The chart item is stubbed so these tests assert on submenu structure
-    /// alone, independent of how the chart itself renders.
-    private func makeSubmenu(_ state: AppState) -> ActivityHistogramSubmenu {
-        ActivityHistogramSubmenu(
-            appState: state,
-            now: { Fixture.now },
-            chartItemFactory: { bars in
-                NSMenuItem(title: "CHART:\(bars.count)", action: nil, keyEquivalent: "")
-            }
-        )
+    /// A section whose chart row is stubbed, so these tests assert on submenu
+    /// structure alone, independent of how the chart itself renders.
+    private func makeSection() -> GlanceSection {
+        let section = makeBareSection()
+        section.histogramChartItemFactory = { bars in
+            NSMenuItem(title: "CHART:\(bars.count)", action: nil, keyEquivalent: "")
+        }
+        return section
     }
 
-    /// Nothing is built until the submenu opens — that is the whole point of
-    /// hanging the chart off the submenu delegate. `rebuildMenu()` runs on every
+    /// A section with nothing injected, so the production defaults apply.
+    private func makeBareSection() -> GlanceSection {
+        let section = GlanceSection(target: Self.clickStub,
+                                    action: #selector(ClickStub.openGlanceRow(_:)))
+        sections.append(section)
+        return section
+    }
+
+    /// The "Activity (24h)" item, wherever it sits in the block.
+    private func histogramItem(_ section: GlanceSection, _ state: AppState) -> NSMenuItem {
+        let items = section.items(for: state, now: Fixture.now)
+        guard let item = items.first(where: { $0.title == "Activity (24h)" }) else {
+            XCTFail("no Activity (24h) item in the block")
+            return NSMenuItem()
+        }
+        return item
+    }
+
+    /// Fire the delegate the way AppKit does, through the menu's own reference,
+    /// so a delegate that was never installed fails the test.
+    private func open(_ menu: NSMenu) {
+        guard let delegate = menu.delegate else {
+            return XCTFail("the submenu has no delegate, so opening it would build nothing")
+        }
+        delegate.menuNeedsUpdate?(menu)
+    }
+
+    /// Nothing is built until the submenu opens. `rebuildMenu()` runs on every
     /// debounced state change, menu open or closed, so building the chart there
     /// would render a SwiftUI Chart nobody is looking at.
     func testSubmenuIsEmptyUntilItOpens() {
-        let submenu = makeSubmenu(connectedState())
+        let item = histogramItem(makeSection(), connectedState())
 
-        XCTAssertEqual(submenu.menuItem.title, "Activity (24h)")
-        XCTAssertEqual(submenu.menuItem.submenu?.numberOfItems, 0)
+        XCTAssertEqual(item.submenu?.numberOfItems, 0)
+    }
+
+    /// `NSMenu.delegate` is a WEAK reference: if the section does not retain the
+    /// delegate it deallocates the moment `items(for:)` returns, and the submenu
+    /// silently opens empty forever. Nothing but a test catches that.
+    func testTheDelegateOutlivesTheBuildCall() {
+        let section = makeSection()
+        let item = histogramItem(section, connectedState())
+
+        XCTAssertNotNil(item.submenu?.delegate,
+                        "the section must retain the submenu delegate")
+    }
+
+    /// The submenu delegate must be its own object, not the section's owner:
+    /// `AppController.menuWillOpen` rebuilds the whole tray menu, and having it
+    /// fire for a submenu opening under the cursor is exactly the
+    /// restructuring-while-open the design forbids.
+    func testTheSubmenuHasItsOwnDelegateNotTheTrayMenusOwner() {
+        let section = makeSection()
+        let item = histogramItem(section, connectedState())
+
+        let delegate = item.submenu?.delegate
+        XCTAssertNotNil(delegate)
+        XCTAssertFalse(delegate === Self.clickStub)
+        XCTAssertFalse(delegate === section as AnyObject)
     }
 
     func testLoadingRowWhileTheTimelineIsNil() {
-        let submenu = makeSubmenu(connectedState())
-        let menu = submenu.menuItem.submenu!
+        let menu = histogramItem(makeSection(), connectedState()).submenu!
 
-        submenu.menuNeedsUpdate(menu)
+        open(menu)
 
         XCTAssertEqual(menu.numberOfItems, 1)
         XCTAssertEqual(menu.items[0].title, "Loading…")
@@ -260,10 +328,9 @@ final class ActivityHistogramSubmenuTests: XCTestCase {
     func testErrorRowWhenTheFetchFailedBeforeAnyTimelineArrived() {
         let state = connectedState()
         state.recordUsageFailure("connection refused")
-        let submenu = makeSubmenu(state)
-        let menu = submenu.menuItem.submenu!
+        let menu = histogramItem(makeSection(), state).submenu!
 
-        submenu.menuNeedsUpdate(menu)
+        open(menu)
 
         XCTAssertEqual(menu.numberOfItems, 1)
         XCTAssertEqual(menu.items[0].title, "Usage unavailable")
@@ -278,28 +345,52 @@ final class ActivityHistogramSubmenuTests: XCTestCase {
         let state = connectedState()
         state.recordUsageFailure("connection refused")
         state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
-        let submenu = makeSubmenu(state)
-        let menu = submenu.menuItem.submenu!
+        let menu = histogramItem(makeSection(), state).submenu!
 
-        submenu.menuNeedsUpdate(menu)
+        open(menu)
 
         XCTAssertEqual(menu.numberOfItems, 1)
         XCTAssertEqual(menu.items[0].title, "CHART:24")
     }
 
-    /// "Loaded but idle" is a flat 24-hour axis, deliberately distinct from the
-    /// loading row — and reopening replaces the row instead of appending.
-    func testReopeningReplacesTheRowAndAnIdleTimelineStillCharts() {
+    /// The row is read from AppState at OPEN time, not at build time — so a
+    /// timeline that arrives while the menu sits closed is shown on the next
+    /// open, and reopening replaces the row instead of appending to it.
+    func testReopeningRereadsStateAndReplacesTheRow() {
         let state = connectedState()
-        let submenu = makeSubmenu(state)
-        let menu = submenu.menuItem.submenu!
+        let menu = histogramItem(makeSection(), state).submenu!
 
-        submenu.menuNeedsUpdate(menu)
+        open(menu)
+        XCTAssertEqual(menu.items[0].title, "Loading…")
+
         state.usageTimeline = []
-        submenu.menuNeedsUpdate(menu)
+        open(menu)
 
-        XCTAssertEqual(menu.numberOfItems, 1)
-        XCTAssertEqual(menu.items[0].title, "CHART:24")
+        XCTAssertEqual(menu.numberOfItems, 1, "reopening replaces the row, never appends")
+        XCTAssertEqual(menu.items[0].title, "CHART:24", "an idle timeline is a flat axis, not a loading row")
+    }
+
+    /// Opening the submenu must not restructure the menu it hangs from. The
+    /// whole point of the lazy build is that it touches the submenu and nothing
+    /// else — a parent that grew, shrank or re-created its rows while the user
+    /// had it open is the irritation `MenuRebuildGuard` exists to prevent.
+    func testOpeningTheSubmenuDoesNotRestructureTheParentMenu() {
+        let section = makeSection()
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+
+        let parent = NSMenu()
+        for item in section.items(for: state, now: Fixture.now) { parent.addItem(item) }
+        let countBefore = parent.numberOfItems
+        let itemsBefore = parent.items
+
+        open(parent.items.first { $0.title == "Activity (24h)" }!.submenu!)
+
+        XCTAssertEqual(parent.numberOfItems, countBefore)
+        XCTAssertTrue(zip(parent.items, itemsBefore).allSatisfy { $0 === $1 },
+                      "opening the submenu must not replace any row of the parent")
+        XCTAssertTrue(section.updateInPlace(for: state, now: Fixture.now),
+                      "and must not make the block look structurally different afterwards")
     }
 
     /// The real chart item, not the stub: `chartItemSize` is otherwise an
@@ -316,5 +407,21 @@ final class ActivityHistogramSubmenuTests: XCTestCase {
         XCTAssertEqual(item.view?.accessibilityLabel(),
                        "Activity over the last 24 hours: no tool calls.")
         XCTAssertFalse(item.isEnabled)
+    }
+
+    /// With no factory injected the submenu must still show a REAL chart. The
+    /// seam this replaced was optional and nothing in production ever set it,
+    /// so the shipped tray showed a text fallback and never a chart; a default
+    /// that already works cannot fail that way.
+    func testTheDefaultFactoryProducesTheRealChart() {
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+        let menu = histogramItem(makeBareSection(), state).submenu!
+
+        open(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].view?.frame.size, ActivityHistogram.chartItemSize)
+        XCTAssertNotNil(menu.items[0].view?.accessibilityLabel())
     }
 }

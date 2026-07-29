@@ -217,54 +217,43 @@ extension ActivityHistogram {
     }
 }
 
-// MARK: - Submenu
+// MARK: - Submenu delegate
 
-/// Owns the tray's "Activity (24h)" item and rebuilds its single row when the
-/// submenu opens.
+/// Builds the single row of `GlanceSection`'s "Activity (24h)" submenu when
+/// that submenu opens.
 ///
-/// Building on open — rather than on every `rebuildMenu()` — keeps the chart
-/// off the main menu's hot path, and means an `NSHostingView` is only ever
-/// created when the user actually looks at it. The controller reads `AppState`
-/// and nothing else: opening the submenu performs no network request.
+/// This is NOT a second submenu — `GlanceSection` owns the item and the menu,
+/// and this object only fills it in on demand. It is a separate `NSObject`
+/// purely because `NSMenuDelegate` requires `NSObjectProtocol`, which
+/// `GlanceSection` (a plain `@MainActor final class`) does not conform to.
 ///
-/// This is a separate `NSObject` rather than a method on `GlanceSection`
-/// because `NSMenuDelegate` requires `NSObjectProtocol`, which `GlanceSection`
-/// (a plain `@MainActor final class`) does not conform to.
+/// Building on open — rather than inside `items(for:)` — keeps the chart off
+/// the menu's hot path: `rebuildMenu()` runs on every debounced
+/// `objectWillChange`, menu open or closed, so building eagerly would construct
+/// an `NSHostingView` and render a SwiftUI Chart on every state change,
+/// including for a menu nobody has opened. Reading `AppState` at open time also
+/// means a timeline that arrives while the menu sits closed is shown on the
+/// next open, with no rebuild of the parent menu.
 ///
-/// `NSMenu.delegate` is a weak reference, so whoever inserts `menuItem` into
-/// the tray menu must also hold on to this object.
-final class ActivityHistogramSubmenu: NSObject, NSMenuDelegate {
-
-    /// The item to insert into the tray menu.
-    let menuItem: NSMenuItem
+/// It reads `AppState` and nothing else: opening the submenu performs no
+/// network request (spec 048 invariant).
+///
+/// `NSMenu.delegate` is a WEAK reference, so `GlanceSection` must retain this.
+final class HistogramSubmenuDelegate: NSObject, NSMenuDelegate {
 
     private let appState: AppState
-    private let now: () -> Date
     private let chartItemFactory: ([HistogramBar]) -> NSMenuItem
 
-    /// - Parameters:
-    ///   - now: injected clock, so the 24-hour axis is deterministic in tests.
-    ///   - chartItemFactory: injected so submenu-structure tests are independent
-    ///     of how the chart itself renders.
+    /// - Parameter chartItemFactory: injected so submenu-structure tests are
+    ///   independent of how the chart itself renders. It defaults to the real
+    ///   chart: the seam this replaced was optional, nothing in production ever
+    ///   set it, and the tray consequently shipped a text row instead of a
+    ///   chart. A default that already works cannot fail that way.
     init(appState: AppState,
-         now: @escaping () -> Date = Date.init,
          chartItemFactory: @escaping ([HistogramBar]) -> NSMenuItem = ActivityHistogram.chartMenuItem) {
         self.appState = appState
-        self.now = now
         self.chartItemFactory = chartItemFactory
-
-        let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
-        let submenu = NSMenu(title: "Activity (24h)")
-        // Nothing in here is actionable, and AppKit's automatic enabling runs
-        // its own validation at display time. Turning it off makes the rows'
-        // disabled state ours — and makes what the tests assert the same thing
-        // the user sees.
-        submenu.autoenablesItems = false
-        item.submenu = submenu
-        self.menuItem = item
-
         super.init()
-        submenu.delegate = self
     }
 
     // MARK: NSMenuDelegate
@@ -277,11 +266,16 @@ final class ActivityHistogramSubmenu: NSObject, NSMenuDelegate {
     // MARK: Rows
 
     /// The single row the submenu shows for the current `AppState`.
+    ///
+    /// The clock is read here, at open time, rather than injected: every
+    /// assertion about this row is structural (which row, how many), and the
+    /// axis contents `now` decides are covered exhaustively by the pure
+    /// `ActivityHistogram.bars` tests.
     func currentItem() -> NSMenuItem {
         switch ActivityHistogram.state(
             timeline: appState.usageTimeline,
             errorMessage: appState.usageError,
-            now: now()
+            now: Date()
         ) {
         case .loading:
             return Self.mutedItem("Loading…")

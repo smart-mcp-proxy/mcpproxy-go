@@ -113,10 +113,21 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertFalse(row.isEnabled)
     }
 
+    /// The submenu's row is built by its delegate when it opens, so these two
+    /// tests fire `menuNeedsUpdate` where they previously read the row straight
+    /// out of `items(for:)`. What they assert is unchanged.
+    private func open(_ menu: NSMenu?) {
+        guard let menu, let delegate = menu.delegate else {
+            return XCTFail("the histogram submenu has no delegate, so opening it builds nothing")
+        }
+        delegate.menuNeedsUpdate?(menu)
+    }
+
     func testHistogramSubmenuShowsLoadingUntilUsageArrives() {
         let section = Self.makeSection()
         let histogram = section.items(for: Self.busyState(), now: Self.now)[10]
         XCTAssertEqual(histogram.title, "Activity (24h)")
+        open(histogram.submenu)
         XCTAssertEqual(histogram.submenu?.item(at: 0)?.title, "Loading…")
     }
 
@@ -124,23 +135,31 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.busyState()
         state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
         let section = Self.makeSection()
-        section.histogramViewBuilder = { buckets in
+        // The seam now takes the shaped 24-hour axis and returns the whole item,
+        // rather than taking raw buckets and returning a view — so the count
+        // below is the axis width, not the timeline length.
+        section.histogramChartItemFactory = { bars in
+            let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
             let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 90))
-            view.setAccessibilityLabel("\(buckets.count) buckets")
-            return view
+            view.setAccessibilityLabel("\(bars.count) bars")
+            item.view = view
+            return item
         }
-        let chart = section.items(for: state, now: Self.now)[10].submenu?.item(at: 0)
+        let submenu = section.items(for: state, now: Self.now)[10].submenu
+        open(submenu)
+        let chart = submenu?.item(at: 0)
         XCTAssertNotNil(chart?.view)
-        XCTAssertEqual(chart?.view?.accessibilityLabel(), "1 buckets")
+        XCTAssertEqual(chart?.view?.accessibilityLabel(), "24 bars")
     }
 
-    func testHistogramSubmenuFallsBackToTextWithoutABuilder() {
-        let state = Self.busyState()
-        state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
-        let section = Self.makeSection()
-        let items = section.items(for: state, now: Self.now)
-        XCTAssertEqual(items[10].submenu?.item(at: 0)?.title, "12 calls · 1 error (24h)")
-    }
+    // `testHistogramSubmenuFallsBackToTextWithoutABuilder` was REMOVED here, not
+    // ported: it asserted the text row shown when no view builder was injected,
+    // and there is no longer a builder-less mode to assert. The seam is
+    // non-optional and defaults to the real chart, precisely because the old
+    // optional seam was never set in production and the tray therefore shipped
+    // that text fallback and never a chart. Its successor —
+    // "with nothing injected, the submenu shows a real chart" — is
+    // `GlanceHistogramSubmenuTests.testTheDefaultFactoryProducesTheRealChart`.
 
     func testBlockLayoutOrder() {
         let section = Self.makeSection()

@@ -210,12 +210,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func menuWillOpen(_ menu: NSMenu) {
         // Only the status-bar menu drives the rebuild guard. NSMenuDelegate
-        // callbacks are delivered for whichever menu holds the delegate, and the
-        // glance histogram submenu builds its chart lazily on open — so it needs
-        // a delegate too. Without this check, opening that submenu would run a
-        // full rebuild (removeAllItems) on a menu that is on screen, and would
-        // re-arm/disarm the guard under the parent menu: exactly the
+        // callbacks are delivered per menu, and this object is the delegate of
+        // more than one: any submenu that ends up sharing it would otherwise run
+        // a full rebuild (removeAllItems) on a menu already on screen and
+        // re-arm/disarm the guard under the parent — exactly the
         // restructuring-while-open the design forbids.
+        //
+        // The glance histogram submenu does build its single row lazily on open,
+        // but it does NOT reach this method: GlanceSection installs its own
+        // HistogramSubmenuDelegate on that submenu, precisely so opening it
+        // cannot rebuild the tray menu underneath the cursor.
         guard menu === statusItem.menu else { return }
 
         // Spec 048: dropped the per-click `client.servers()` fetch. appState
