@@ -93,4 +93,60 @@ final class CoreLivenessTests: XCTestCase {
         XCTAssertFalse(isStopped)
     }
 
+    // MARK: - GH #926
+
+    /// The regression under test: kill an externally-attached core and the tray
+    /// must stop reporting `.connected`. Before the fix this assertion failed —
+    /// the state stayed `.connected` for as long as anyone cared to watch
+    /// (the reporter measured 5.5 minutes).
+    func testDeadExternalCoreLeavesConnectedState() async throws {
+        let (manager, appState, stub) = try await attachToStubCore(refreshInterval: 0.2)
+        defer { Task { await manager.shutdown() } }
+        let attached = await coreState(appState)
+        XCTAssertEqual(attached, .connected, "precondition: attached")
+
+        // The core dies: socket closed and removed, as after `kill -9`.
+        stub.stop()
+
+        let state = await waitForState(appState, timeout: 5.0) { $0 != .connected }
+        XCTAssertNotEqual(state, .connected,
+                          "the tray must notice an externally-managed core that stopped")
+
+        // And it must land somewhere the tray icon can render as "not fine" —
+        // never silently back in `.connected`.
+        let settled = await waitForState(appState, timeout: 5.0) {
+            if case .error = $0 { return true }
+            return false
+        }
+        XCTAssertEqual(settled, .error(.general("External core process is no longer available")),
+                       "a core we do not own and cannot find must surface as an error")
+    }
+
+    /// The tray must not spawn a replacement for a core it never owned, and must
+    /// pick the core back up by itself when it returns (launchd/brew restart).
+    func testReattachesWhenTheExternalCoreComesBack() async throws {
+        let (manager, appState, stub) = try await attachToStubCore(refreshInterval: 0.2)
+        defer { Task { await manager.shutdown() } }
+
+        stub.stop()
+        let lost = await waitForState(appState, timeout: 5.0) {
+            if case .error = $0 { return true }
+            return false
+        }
+        guard case .error = lost else {
+            return XCTFail("precondition: the tray must first notice the core is gone, got \(lost)")
+        }
+
+        let ownership = await MainActor.run { appState.ownership }
+        XCTAssertEqual(ownership, .externalAttached,
+                       "losing an external core must not make the tray claim ownership")
+
+        // The core comes back on the same socket.
+        let revived = UnixSocketHTTPStub.healthyCore(at: stub.path)
+        try revived.start()
+        self.stub = revived
+
+        let state = await waitForState(appState, timeout: 10.0) { $0 == .connected }
+        XCTAssertEqual(state, .connected, "the tray must re-attach when the core returns")
+    }
 }
