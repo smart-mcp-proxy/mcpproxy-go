@@ -46,6 +46,13 @@ final class GlanceSection {
     private var summaryItem: NSMenuItem?
     private var activityRows: [NSMenuItem] = []
     private var clientRows: [NSMenuItem] = []
+
+    /// Snapshot of the structure the current items were built from, so an
+    /// in-place update can detect that a full rebuild is required instead.
+    private var hasBuilt = false
+    private var builtVisible = false
+    private var builtWithTimeline = false
+
     /// Held only so ownership of the submenu is explicit; `updateInPlace`
     /// deliberately never touches it (re-creating it would disturb an open
     /// submenu), so nothing reads this back.
@@ -73,7 +80,10 @@ final class GlanceSection {
         activityRows = []
         clientRows = []
         histogramItem = nil
-        guard isVisible(for: state) else { return [] }
+        hasBuilt = true
+        builtVisible = isVisible(for: state)
+        builtWithTimeline = state.usageTimeline != nil
+        guard builtVisible else { return [] }
 
         var items: [NSMenuItem] = []
 
@@ -122,6 +132,39 @@ final class GlanceSection {
         items.append(.separator())
 
         return items
+    }
+
+    // MARK: In-place updates
+
+    /// Rewrite the existing rows from `state` without restructuring the menu.
+    ///
+    /// Returns `true` when every row was updated in place, and `false` when the
+    /// block's structure changed (visibility, row count, or histogram
+    /// loaded-ness) — the caller must then defer a full rebuild until the menu
+    /// closes rather than growing or shrinking a menu the user is reading.
+    ///
+    /// A row's *entire identity* is rewritten, not just its title: with a fixed
+    /// number of rows every new event shifts which record each row represents,
+    /// so refreshing only the text would leave a row whose click still opened
+    /// the previous record's session. The histogram submenu is deliberately not
+    /// touched — re-creating it would disturb an open submenu — so a change in
+    /// its loaded-ness reports structural instead.
+    @discardableResult
+    func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
+        guard hasBuilt else { return false }
+        guard isVisible(for: state) == builtVisible else { return false }
+        guard builtVisible else { return true }
+        guard (state.usageTimeline != nil) == builtWithTimeline else { return false }
+
+        let entries = GlanceSelection.activityRows(from: state.glanceActivity)
+        let clients = GlanceSelection.activeClients(from: state.glanceSessions)
+        guard entries.count == activityRows.count,
+              clients.count == clientRows.count else { return false }
+
+        summaryItem?.title = summaryTitle(for: state)
+        for (row, entry) in zip(activityRows, entries) { apply(entry, to: row, now: now) }
+        for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
+        return true
     }
 
     // MARK: Row rendering

@@ -162,6 +162,59 @@ final class GlanceSectionTests: XCTestCase {
         ])
     }
 
+    // MARK: - In-place updates
+
+    func testUpdateInPlaceRewritesTheEntireRowIdentity() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        let row = items[3]
+
+        state.glanceActivity = [
+            Self.entry(id: "c", server: "obsidian", tool: "search_notes",
+                       timestamp: "2027-01-15T07:59:55Z", session: "sess-c"),
+            Self.entry(id: "b", server: "jira", tool: "get_issue", status: "error",
+                       error: "auth failed: token expired. retry after refresh",
+                       timestamp: "2027-01-15T07:58:00Z", session: "sess-b")
+        ]
+        state.callsThisHour = 13
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[0].title, "13 calls this hour · 1 client")
+        XCTAssertEqual(row.title, "obsidian:search_notes — 5s")
+        XCTAssertEqual(row.representedObject as? String, "sess-c",
+                       "the click payload must follow the title, or the row opens the previous record's session")
+        XCTAssertEqual(row.image?.accessibilityDescription, "succeeded")
+        XCTAssertEqual(row.toolTip, "obsidian:search_notes")
+        XCTAssertEqual(row.accessibilityLabel(), "obsidian:search_notes, succeeded, 5s ago")
+    }
+
+    func testUpdateInPlaceRefusesStructuralChange() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+
+        state.glanceActivity = [state.glanceActivity[0]]
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Self.now),
+                       "a row-count change must defer a rebuild, not mutate an open menu")
+        XCTAssertEqual(items[3].title, "github:create_issue — 30s", "rows must be left untouched")
+    }
+
+    func testUpdateInPlaceRefusesWhenHistogramLoadednessFlips() {
+        let state = Self.busyState()
+        let section = Self.makeSection()
+        _ = section.items(for: state, now: Self.now)
+
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Self.now))
+    }
+
+    func testUpdateInPlaceBeforeFirstBuildReportsStructural() {
+        XCTAssertFalse(Self.makeSection().updateInPlace(for: Self.busyState(), now: Self.now))
+    }
+
     // MARK: - Helpers
 
     private final class ClickStub: NSObject {
