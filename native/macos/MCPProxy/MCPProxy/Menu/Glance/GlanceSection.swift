@@ -202,7 +202,12 @@ final class GlanceSection {
 
         let summary = summaryTitle(for: state)
         if summaryItem?.title != summary { summaryItem?.title = summary }
-        for index in activityRows.indices { apply(entries[index], to: &activityRows[index], now: now) }
+        // `zip`, like the sibling loop below: indexing `entries` by
+        // `activityRows.indices` reads out of bounds if the count guard above is
+        // ever weakened, and zip cannot.
+        for (index, entry) in zip(activityRows.indices, entries) {
+            apply(entry, to: &activityRows[index], now: now)
+        }
         for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
         return true
     }

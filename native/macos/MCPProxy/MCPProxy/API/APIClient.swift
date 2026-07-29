@@ -649,6 +649,12 @@ actor APIClient {
     // MARK: - Private Helpers
 
     /// Detects the standard response envelope without caring about its payload.
+    ///
+    /// It answers "does this body carry a `success` field", not "is this body an
+    /// envelope": a bare payload that happens to have its own `success` field
+    /// probes as enveloped. That misclassification is reachable and harmless —
+    /// it only chooses which of two decoding errors is reported in a diagnostic
+    /// string, on a path where the body has already failed to decode both ways.
     private struct EnvelopeProbe: Decodable {
         let success: Bool
     }

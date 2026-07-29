@@ -618,9 +618,11 @@ final class AppState: ObservableObject {
     /// flight when the core goes away would otherwise write a dead core's row
     /// back over state `clearGlanceState()` had just emptied.
     ///
-    /// Deliberately without the id-list equality guard `updateGlanceSessions(_:)`
+    /// Deliberately without the equality guard `updateGlanceSessions(_:)`
     /// carries — a prepend is by definition a change, and that guard exists only
-    /// to stop redundant `@Published` churn on identical poll results.
+    /// to stop redundant `@Published` churn on identical poll results. (That
+    /// guard compares whole `MCPSession` values, not ids: the Clients rows
+    /// render a live per-session call count, which an id-only comparison froze.)
     @MainActor
     func prependGlanceActivity(_ entry: ActivityEntry) {
         guard coreState == .connected else { return }
