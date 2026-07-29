@@ -681,6 +681,12 @@ final class AppState: ObservableObject {
         glanceActivity.insert(entry, at: 0)
         if glanceActivity.count > AppState.glanceActivityCap {
             glanceActivity.removeLast(glanceActivity.count - AppState.glanceActivityCap)
+            // The cap and the key set must not be able to disagree: a key whose
+            // row has just been capped away describes nothing, and the poll is
+            // the only other thing that prunes the set — so while polls fail and
+            // SSE keeps arriving, which is exactly when the staleness marker is
+            // showing, the set would otherwise grow for as long as the core is up.
+            unconfirmedLiveKeys.formIntersection(glanceActivity.map(GlanceSelection.recordKey))
         }
     }
 

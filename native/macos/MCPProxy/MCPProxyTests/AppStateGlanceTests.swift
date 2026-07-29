@@ -309,6 +309,29 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertTrue(state.glanceActivity.isEmpty)
     }
 
+    /// The unconfirmed-key set must not outlive the rows it describes. The feed
+    /// is capped; the set was not, so a healthy SSE stream with a failing poll —
+    /// the exact scenario the staleness marker exists for — grew it without
+    /// bound for as long as the core stayed up.
+    func testTheUnconfirmedKeySetCannotOutgrowTheCappedFeed() throws {
+        let state = AppState()
+        state.coreState = .connected
+
+        for i in 0..<(AppState.glanceActivityCap + 25) {
+            state.prependGlanceActivity(try Self.activity(id: "live-\(i)", type: "tool_call",
+                                                          request: "live-\(i)",
+                                                          timestamp: "2026-07-29T12:00:00Z"),
+                                        generation: state.connectionGeneration)
+        }
+
+        XCTAssertEqual(state.glanceActivity.count, AppState.glanceActivityCap)
+        XCTAssertEqual(state.unconfirmedLiveKeys.count, AppState.glanceActivityCap,
+                       "a key whose row has been capped away describes nothing")
+        XCTAssertEqual(state.unconfirmedLiveKeys,
+                       Set(state.glanceActivity.compactMap(\.requestId)),
+                       "the set must name exactly the rows still in the feed")
+    }
+
     /// …but a page that HAS records and no usable timestamps still replaces.
     /// "Newer than everything the page carries" is unanswerable there, and a
     /// page full of records is the server's own account of the feed; only the
