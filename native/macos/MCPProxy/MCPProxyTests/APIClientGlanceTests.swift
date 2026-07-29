@@ -101,6 +101,13 @@ final class APIClientGlanceTests: XCTestCase {
         XCTAssertEqual(entries.first?.serverName, "jira")
         XCTAssertEqual(entries.first?.toolName, "get_issue")
         XCTAssertEqual(entries.first?.errorMessage, "auth failed")
+        // The two fields the whole feature branches on, and the two this test
+        // used not to assert: `type` drives rules 1-3 and rowLabel's
+        // `server:tool` decision, `status` drives the symbol, the tint, the
+        // VoiceOver phrasing and the error clause. Decoded wrong, every one of
+        // them is wrong, and no other test sees the wire format.
+        XCTAssertEqual(entries.first?.type, "tool_call")
+        XCTAssertEqual(entries.first?.status, "error")
     }
 
     // MARK: - Active sessions

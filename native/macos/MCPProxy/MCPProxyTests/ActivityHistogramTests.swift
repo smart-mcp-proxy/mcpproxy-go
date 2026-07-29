@@ -623,6 +623,63 @@ final class ActivityHistogramEncodingTests: XCTestCase {
         )
     }
 
+    /// Count red pixels above and below the legend band.
+    ///
+    /// Deliberately its own sampler rather than a parameter on `pixels(of:)`:
+    /// this one walks the rep's PIXEL extent (`pixelsWide`/`pixelsHigh`), which
+    /// is what makes "the bottom 24 points" mean the same thing at 1x and 2x.
+    private func redAboveAndBelowTheLegendBand(_ bars: [HistogramBar]) -> (above: Int, below: Int, drawn: Int)? {
+        let host = NSHostingView(rootView: ActivityHistogramView(bars: bars, accessibilitySummary: ""))
+        host.frame = NSRect(origin: .zero, size: ActivityHistogram.chartItemSize)
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+        host.cacheDisplay(in: host.bounds, to: rep)
+
+        // y grows downward in a cached rep, so the legend band is the last rows.
+        let bandStart = rep.pixelsHigh - Int((24.0 / ActivityHistogram.chartItemSize.height)
+                                             * Double(rep.pixelsHigh))
+        var above = 0, below = 0, drawn = 0
+        for x in stride(from: 0, to: rep.pixelsWide, by: 2) {
+            for y in stride(from: 0, to: rep.pixelsHigh, by: 2) {
+                guard let colour = rep.colorAt(x: x, y: y), colour.alphaComponent > 0.5 else { continue }
+                drawn += 1
+                let r = colour.redComponent, g = colour.greenComponent, b = colour.blueComponent
+                guard r > 0.5, g < 0.45, b < 0.45 else { continue }
+                if y >= bandStart { below += 1 } else { above += 1 }
+            }
+        }
+        return (above, below, drawn)
+    }
+
+    /// The legend must actually render, and inside the frame that was grown to
+    /// pay for it.
+    ///
+    /// `.chartLegend(.visible)` was the one user-visible thing on this view that
+    /// no test asserted the presence of: flipping it to `.hidden` left the suite
+    /// green while silently reclaiming the 20pt the frame grew to fit it —
+    /// and `testRealChartItemIsSizedAndLabelled` would then have failed on the
+    /// size, inviting whoever reclaimed the space to "fix" that test instead.
+    ///
+    /// Measured, not asserted from the outside: on an all-zero axis the chart
+    /// draws no error segments, so the ONLY red the view can contain is the
+    /// legend's "Errors" swatch. Hiding the legend takes it to zero.
+    func testTheLegendRendersInsideTheFrameThatPaysForIt() throws {
+        let bars = ActivityHistogram.bars(from: [], now: Fixture.now)
+
+        guard let counts = redAboveAndBelowTheLegendBand(bars) else {
+            throw XCTSkip("this machine cannot rasterise the chart at all")
+        }
+        XCTAssertGreaterThan(counts.drawn, 50, "the chart rendered blank; the counts below mean nothing")
+        XCTAssertGreaterThan(
+            counts.below, 0,
+            "no legend swatch in the bottom band — the 20pt of frame height buys nothing"
+        )
+        XCTAssertEqual(
+            counts.above, 0,
+            "an all-zero axis must paint no red above the legend, or this measures chart data"
+        )
+    }
+
     /// The success fill must not follow `Color.accentColor`, or a user whose
     /// system accent is red sees two near-identical segments.
     ///
