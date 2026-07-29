@@ -114,6 +114,14 @@ func (b *BoltDB) initBuckets() error {
 			return fmt.Errorf("failed to migrate legacy sessions bucket: %w", err)
 		}
 
+		// Migration is a write path into the sessions bucket like any other, and
+		// it can move in an arbitrary number of records. Enforce the retention
+		// cap here so it is an invariant of an open database rather than
+		// something only CreateSession happens to maintain.
+		if err := enforceSessionRetentionOnOpen(tx, b.logger); err != nil {
+			return fmt.Errorf("failed to enforce session retention: %w", err)
+		}
+
 		// Backfill the scan-job index for databases created before MCP-2205.
 		// Idempotent: only runs when the index is empty but jobs exist.
 		if err := backfillScanJobIndex(tx); err != nil {

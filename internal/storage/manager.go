@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"container/heap"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -1704,12 +1705,93 @@ func (m *Manager) GetToolCallsBySession(sessionID string, limit, offset int) ([]
 	return toolCalls, total, err
 }
 
-// sessionEvictionCandidate is one stored session, reduced to the two properties
-// retention actually cares about.
+// Eviction tiers, worst first. The tier is the primary ranking key; activity
+// only breaks ties inside a tier.
+const (
+	// sessionTierUnreadable is a record that cannot be unmarshalled. Nothing can
+	// display, close, or update it, so it is worth strictly less than any record
+	// that parses. This has to be its own tier rather than a derived property:
+	// an unmarshal failure leaves the zero value, which is indistinguishable
+	// from a VALID record whose status is not "active" and whose timestamps are
+	// unset. Sharing a tier with those meant key order decided between them, and
+	// the usable record could lose.
+	sessionTierUnreadable = iota
+	// sessionTierClosed is finished work — nothing will ever write to it again.
+	sessionTierClosed
+	// sessionTierActive is a session the proxy still believes is live.
+	sessionTierActive
+)
+
+// sessionEvictionCandidate is one stored session, reduced to the properties
+// retention ranks by.
 type sessionEvictionCandidate struct {
 	key      []byte
-	active   bool
+	tier     int
 	activity time.Time // LastActivity, falling back to StartTime when unset
+}
+
+// worseThan reports whether a should be evicted before b.
+func (a sessionEvictionCandidate) worseThan(b sessionEvictionCandidate) bool {
+	if a.tier != b.tier {
+		return a.tier < b.tier
+	}
+	if !a.activity.Equal(b.activity) {
+		return a.activity.Before(b.activity) // stalest first
+	}
+	return bytes.Compare(a.key, b.key) < 0 // deterministic tiebreak
+}
+
+// survivorHeap is a min-heap under worseThan, so its root is the weakest record
+// currently being kept — i.e. the next one to be displaced.
+type survivorHeap []sessionEvictionCandidate
+
+func (h survivorHeap) Len() int           { return len(h) }
+func (h survivorHeap) Less(i, j int) bool { return h[i].worseThan(h[j]) }
+func (h survivorHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *survivorHeap) Push(x any) {
+	c, ok := x.(sessionEvictionCandidate)
+	if !ok {
+		return
+	}
+	*h = append(*h, c)
+}
+
+func (h *survivorHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
+}
+
+// classifySessionForRetention reduces a stored record to its ranking properties.
+func classifySessionForRetention(key, value []byte, logger *zap.SugaredLogger) sessionEvictionCandidate {
+	cand := sessionEvictionCandidate{
+		key:  append([]byte(nil), key...),
+		tier: sessionTierUnreadable,
+	}
+
+	var session SessionRecord
+	if err := json.Unmarshal(value, &session); err != nil {
+		logger.Warnw("Unreadable session record during retention", "key", string(key), "error", err)
+		return cand
+	}
+
+	if session.Status == "active" {
+		cand.tier = sessionTierActive
+	} else {
+		cand.tier = sessionTierClosed
+	}
+
+	cand.activity = session.LastActivity
+	if cand.activity.IsZero() {
+		// Records written before LastActivity existed. StartTime is the only
+		// evidence available, and it cuts both ways: an ancient legacy record
+		// must rank as stale, not as freshly active.
+		cand.activity = session.StartTime
+	}
+	return cand
 }
 
 // enforceSessionRetention trims the sessions bucket down to maxSessions records.
@@ -1735,74 +1817,95 @@ type sessionEvictionCandidate struct {
 // never closes cleanly) grow without bound, which is a worse bug than the one
 // this fixes.
 func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int) error {
+	return trimSessionsToLimit(bucket, maxSessions, m.logger)
+}
+
+// trimSessionsToLimit is the retention pass itself, callable from any write
+// path that can put the bucket over the cap — CreateSession is not the only
+// one (see enforceSessionRetentionOnOpen).
+//
+// Selection is bounded: rather than collecting and sorting every record, it
+// keeps a heap of the best maxSessions seen so far and streams everything else
+// straight into the victim list. That makes ranking O(n log maxSessions) with
+// O(maxSessions) ranking state, instead of O(n log n) with O(n) state, which
+// matters on the one pass that can see a bucket far above the cap: the
+// migration/open-time trim.
+func trimSessionsToLimit(bucket *bbolt.Bucket, maxSessions int, logger *zap.SugaredLogger) error {
 	if maxSessions <= 0 {
 		return nil
 	}
 
-	// Classify every record in one pass. bucket.Stats() is deliberately not used
-	// for the count: inside a write transaction it does not account for records
-	// Put earlier in the same transaction, which let the bucket settle one record
-	// above the cap forever.
-	var candidates []sessionEvictionCandidate
+	// bucket.Stats() is deliberately not used to size this: inside a write
+	// transaction it does not account for records Put earlier in the same
+	// transaction, which let the bucket settle one record above the cap forever.
+	survivors := make(survivorHeap, 0, maxSessions)
+	var victims []sessionEvictionCandidate
+
 	c := bucket.Cursor()
 	for k, v := c.First(); k != nil; k, v = c.Next() {
-		cand := sessionEvictionCandidate{key: append([]byte(nil), k...)}
-		var session SessionRecord
-		if err := json.Unmarshal(v, &session); err != nil {
-			// Unreadable record: nothing can use it, so it evicts first.
-			m.logger.Warnw("Unreadable session record during retention", "key", string(k), "error", err)
-		} else {
-			cand.active = session.Status == "active"
-			cand.activity = session.LastActivity
-			if cand.activity.IsZero() {
-				// Records written before LastActivity existed; StartTime is the
-				// best evidence available. Without this they would all sort as
-				// year 1 and be evicted ahead of genuinely stale sessions.
-				cand.activity = session.StartTime
+		cand := classifySessionForRetention(k, v, logger)
+		switch {
+		case len(survivors) < maxSessions:
+			heap.Push(&survivors, cand)
+		case cand.worseThan(survivors[0]):
+			// Weaker than every record currently being kept.
+			victims = append(victims, cand)
+		default:
+			displaced, ok := heap.Pop(&survivors).(sessionEvictionCandidate)
+			if ok {
+				victims = append(victims, displaced)
 			}
+			heap.Push(&survivors, cand)
 		}
-		candidates = append(candidates, cand)
 	}
 
-	toDelete := len(candidates) - maxSessions
-	if toDelete <= 0 {
+	if len(victims) == 0 {
 		return nil
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		a, b := candidates[i], candidates[j]
-		if a.active != b.active {
-			return !a.active // closed sessions are evicted before active ones
-		}
-		if !a.activity.Equal(b.activity) {
-			return a.activity.Before(b.activity) // stalest first
-		}
-		return bytes.Compare(a.key, b.key) < 0 // deterministic tiebreak
-	})
-
-	// Delete only after the scan has finished. Sorting requires it anyway, and
-	// bbolt documents mutation during traversal as unsafe ("Changing data while
-	// traversing with a cursor may cause it to be invalidated and return
-	// unexpected keys and/or values"), which is what the previous
-	// delete-inside-the-cursor-loop did. PruneExcessActivities already collects
-	// keys first for the same reason.
+	// Delete only after the scan has finished. bbolt documents mutation during
+	// traversal as unsafe ("Changing data while traversing with a cursor may
+	// cause it to be invalidated and return unexpected keys and/or values"),
+	// which is what the previous delete-inside-the-cursor-loop did.
+	// PruneExcessActivities already collects keys first for the same reason.
 	activeEvicted := 0
-	for i := 0; i < toDelete; i++ {
-		if err := bucket.Delete(candidates[i].key); err != nil {
+	for _, victim := range victims {
+		if err := bucket.Delete(victim.key); err != nil {
 			return fmt.Errorf("failed to delete old session: %w", err)
 		}
-		if candidates[i].active {
+		if victim.tier == sessionTierActive {
 			activeEvicted++
 		}
 	}
 
 	if activeEvicted > 0 {
-		// Only reachable when there was no closed session left to sacrifice.
-		m.logger.Warnw("Session retention had to evict active sessions",
+		// Only reachable when there was no closed or unreadable record left to
+		// sacrifice.
+		logger.Warnw("Session retention had to evict active sessions",
 			"active_evicted", activeEvicted, "limit", maxSessions)
 	}
-	m.logger.Debugw("Enforced session retention", "deleted", toDelete, "remaining", maxSessions)
+	logger.Debugw("Enforced session retention", "deleted", len(victims), "remaining", maxSessions)
 	return nil
+}
+
+// enforceSessionRetentionOnOpen brings the sessions bucket within the cap at
+// database-open time.
+//
+// The cap is only an invariant if EVERY write path enforces it, and
+// CreateSession is not the only one. The legacy-bucket migration moves an
+// arbitrary number of records into this bucket, and a process that then only
+// updates or closes existing sessions — never creating a new ID — would never
+// call retention again and would sit above the cap indefinitely. Running here
+// also repairs a bucket left oversized by any older version, whatever the
+// reason.
+//
+// Cost is one scan of an already-capped bucket in the common case.
+func enforceSessionRetentionOnOpen(tx *bbolt.Tx, logger *zap.SugaredLogger) error {
+	bucket := tx.Bucket([]byte(SessionsBucket))
+	if bucket == nil {
+		return nil
+	}
+	return trimSessionsToLimit(bucket, sessionRetentionLimit, logger)
 }
 
 // GetOAuthToken retrieves an OAuth token for a server from storage
