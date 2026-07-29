@@ -113,6 +113,45 @@ final class ActivityHistogramAccessibilityTests: XCTestCase {
     }
 }
 
+final class ActivityHistogramStateTests: XCTestCase {
+
+    /// `usageTimeline == nil` alone means both "not loaded yet" and "the fetch
+    /// failed", so the two are resolved against `usageError` — and a loaded
+    /// timeline beats a recorded failure, because real (if slightly stale) data
+    /// is worth more than an error row.
+    func testStateResolution() {
+        XCTAssertEqual(
+            ActivityHistogram.state(timeline: nil, errorMessage: nil, now: Fixture.now),
+            .loading
+        )
+        XCTAssertEqual(
+            ActivityHistogram.state(timeline: nil, errorMessage: "", now: Fixture.now),
+            .loading,
+            "an empty message is not a failure"
+        )
+        XCTAssertEqual(
+            ActivityHistogram.state(timeline: nil, errorMessage: "boom", now: Fixture.now),
+            .failed("boom")
+        )
+        XCTAssertEqual(
+            ActivityHistogram.state(timeline: [], errorMessage: nil, now: Fixture.now),
+            .loaded(ActivityHistogram.bars(from: [], now: Fixture.now))
+        )
+    }
+
+    /// A loaded-but-idle timeline is a flat 24-hour axis, deliberately distinct
+    /// from the loading state rather than collapsed into it.
+    func testAnIdleTimelineIsLoadedNotLoading() {
+        guard case .loaded(let bars) = ActivityHistogram.state(
+            timeline: [], errorMessage: "boom", now: Fixture.now
+        ) else {
+            return XCTFail("an empty timeline is loaded, and beats a stale failure")
+        }
+        XCTAssertEqual(bars.count, 24)
+        XCTAssertEqual(bars.reduce(0) { $0 + $1.total }, 0)
+    }
+}
+
 @MainActor
 final class AppStateUsageErrorTests: XCTestCase {
 

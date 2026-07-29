@@ -33,6 +33,23 @@ struct HistogramBar: Identifiable, Equatable {
     var total: Int { succeeded + errors }
 }
 
+// MARK: - What the submenu shows
+
+/// What the histogram submenu renders right now.
+///
+/// `loading` and `failed` are deliberately distinct: both leave the timeline
+/// nil, and telling the user "Loading…" forever after a failed fetch is the
+/// kind of quiet lie this menu must not tell.
+enum HistogramState: Equatable {
+    /// No timeline yet, and no failure recorded.
+    case loading
+    /// The usage refresh failed before any timeline arrived; payload is the message.
+    case failed(String)
+    /// A full 24-hour axis, oldest hour first. An all-zero axis is a valid
+    /// loaded state — the proxy was simply idle.
+    case loaded([HistogramBar])
+}
+
 // MARK: - Pure helpers
 
 /// Bucket shaping and accessibility copy for the 24-hour histogram.
@@ -104,6 +121,19 @@ enum ActivityHistogram {
 
         return "Activity over the last 24 hours: \(totalCalls) calls, \(totalErrors) errors. "
             + "Busiest hour \(formatter.string(from: peak.hourStart)) with \(peak.total) calls."
+    }
+
+    /// Decide what the submenu shows. A timeline that has loaded wins over a
+    /// recorded failure: showing real (if slightly stale) data beats showing an
+    /// error row.
+    static func state(timeline: [UsageBucket]?, errorMessage: String?, now: Date) -> HistogramState {
+        if let timeline {
+            return .loaded(bars(from: timeline, now: now))
+        }
+        if let errorMessage, !errorMessage.isEmpty {
+            return .failed(errorMessage)
+        }
+        return .loading
     }
 }
 
