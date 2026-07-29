@@ -26,10 +26,10 @@ Single Go module project. All Go source under `internal/` and `cmd/`. New tests 
 
 **Purpose**: Verify baseline and identify exact integration points before touching any code.
 
-- [ ] T001 Read `internal/telemetry/telemetry.go` end-to-end and confirm the v1 `Service`, `HeartbeatPayload`, `Start()`, `send()`, and config fields match what `data-model.md` and `research.md` describe. Note any drift.
-- [ ] T002 Read `internal/httpapi/middleware.go` and `internal/httpapi/server.go` to identify the existing middleware chain and confirm the Chi router is `chi.Router`. Note the file/line where new middleware should be wired.
-- [ ] T003 Read `internal/server/mcp.go` to find the entry point of every built-in MCP tool handler (`handleRetrieveTools`, the call_tool variants, `upstream_servers`, `quarantine_security`, `code_execution`). List file:line for each.
-- [ ] T004 Read `internal/cliclient/client.go` (or wherever the CLI HTTP client is defined) to find the HTTP request construction site. Locate where to inject the `X-MCPProxy-Client` header.
+- [x] T001 Read `internal/telemetry/telemetry.go` end-to-end and confirm the v1 `Service`, `HeartbeatPayload`, `Start()`, `send()`, and config fields match what `data-model.md` and `research.md` describe. Note any drift.
+- [x] T002 Read `internal/httpapi/middleware.go` and `internal/httpapi/server.go` to identify the existing middleware chain and confirm the Chi router is `chi.Router`. Note the file/line where new middleware should be wired.
+- [x] T003 Read `internal/server/mcp.go` to find the entry point of every built-in MCP tool handler (`handleRetrieveTools`, the call_tool variants, `upstream_servers`, `quarantine_security`, `code_execution`). List file:line for each.
+- [x] T004 Read `internal/cliclient/client.go` (or wherever the CLI HTTP client is defined) to find the HTTP request construction site. Locate where to inject the `X-MCPProxy-Client` header.
 - [ ] T005 Locate the macOS tray's Swift HTTP request builder under `native/macos/MCPProxy/` (grep for `URLRequest` and `URLSession.shared`). Record the file path.
 - [ ] T006 Locate the web UI fetch wrapper under `frontend/src/api/` (grep for `fetch(` and existing `X-API-Key` injection). Record the file path.
 - [ ] T007 Confirm baseline: run `go test ./internal/telemetry/... -race` and `go build ./cmd/mcpproxy` from the worktree root. Both must pass before any code change.
@@ -298,7 +298,7 @@ Single Go module project. All Go source under `internal/` and `cmd/`. New tests 
 - [ ] T088 Run `go build ./cmd/mcpproxy` (personal edition) and `go build -tags server ./cmd/mcpproxy` (server edition). Both must compile clean.
 - [ ] T089 Run `./scripts/test-api-e2e.sh` and confirm no regressions.
 - [ ] T090 Manually verify the quickstart in `quickstart.md` end-to-end on the worktree binary: build, run `mcpproxy telemetry show-payload`, assert output contains `schema_version: 2` and all required fields.
-- [ ] T091 Update `cmd/mcpproxy/edition.go` or wherever the version constant lives if needed (no change expected, but verify version string is plumbed into the headers in T032/T033/T034).
+- [x] T091 Update `cmd/mcpproxy/edition.go` or wherever the version constant lives if needed (no change expected, but verify version string is plumbed into the headers in T032/T033/T034).
 
 **Final Checkpoint**: All tests pass, both editions build, e2e smoke is green, docs updated.
 
