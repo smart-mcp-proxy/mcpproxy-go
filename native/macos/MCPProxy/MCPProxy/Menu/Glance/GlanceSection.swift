@@ -17,10 +17,16 @@
 // representedObject holding the record's session id, and the app delegate opens
 // the authenticated URL through the same path as every other menu action.
 //
-// Deliberately NOT @MainActor: AppController (the NSApplicationDelegate that
-// will call this, MCPProxyApp.swift:15) is not actor-isolated, and this SDK does
-// not infer MainActor from NSApplicationDelegate conformance, so annotating it
-// would make rebuildMenu() fail to compile.
+// Deliberately NOT @MainActor as a *type*: AppController (the
+// NSApplicationDelegate that calls this, MCPProxyApp.swift:15) is not
+// actor-isolated, and this SDK does not infer MainActor from
+// NSApplicationDelegate conformance. Isolating the type makes even the
+// initializer main-actor-only, which its `private lazy var glance = ...` stored
+// property cannot satisfy ("call to main actor-isolated initializer
+// 'init(target:action:)' in a synchronous nonisolated context") — so it would
+// force AppController itself to be isolated, far beyond the glance code.
+// Instead the isolation is pinned to `updateInPlace`, the one member that
+// mutates menu items already on screen.
 
 import AppKit
 
@@ -164,7 +170,13 @@ final class GlanceSection {
     /// The histogram submenu is deliberately not touched — re-creating it would
     /// disturb an open submenu — so a change in its loaded-ness reports
     /// structural instead.
+    ///
+    /// `@MainActor` on the member rather than the type: this is the one call
+    /// that mutates menu items already on screen, and isolating the whole type
+    /// would force `AppController` — which is not actor-isolated — to change
+    /// well beyond the glance code (see the file header).
     @discardableResult
+    @MainActor
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
         guard isVisible(for: state) == builtVisible else { return false }

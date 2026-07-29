@@ -560,17 +560,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Rebuild the entire NSMenu from current appState.
     /// Clears and rebuilds in-place to avoid replacing the menu object
     /// (which would close an already-open menu and lose the delegate).
+    ///
+    /// `@MainActor` because Tray Glance rewrites menu items that are already on
+    /// screen, which is only safe on the thread AppKit draws them on. Every
+    /// caller was already main-thread — the NSMenuDelegate/NSApplicationDelegate
+    /// callbacks are isolated by the SDK and the objectWillChange sink debounces
+    /// on RunLoop.main — so this costs nothing today and rejects a future
+    /// off-main caller at compile time (see the note on
+    /// `MenuRebuildGuard.decide(refreshing:from:now:)` for how far that reaches
+    /// under this package's concurrency checking).
+    @MainActor
     private func rebuildMenu() {
-        // Tray Glance owns live NSMenuItems and rewrites them in place, which is
-        // only safe on the thread AppKit draws them on. GlanceSection is
-        // deliberately not @MainActor (AppController is not actor-isolated, so
-        // annotating it would make this method fail to compile), so nothing at
-        // the type level enforces that — this does. Every caller is already on
-        // the main thread: the objectWillChange sink debounces on RunLoop.main
-        // and the rest are AppKit callbacks, so this is a regression tripwire,
-        // not a live constraint.
-        dispatchPrecondition(condition: .onQueue(.main))
-
         // Tray Glance: while the menu is on screen its structure must not move
         // under the cursor. The rows are rewritten in place; a structural change
         // is suppressed here and re-run from menuDidClose. Non-glance sections
@@ -1094,6 +1094,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
     }
 
+    @MainActor
     @objc private func toggleAutoStart(_ sender: NSMenuItem) {
         do {
             if appState.autoStartEnabled {

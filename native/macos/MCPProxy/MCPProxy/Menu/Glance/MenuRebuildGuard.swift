@@ -73,6 +73,21 @@ extension MenuRebuildGuard {
     ///
     /// This lives here, rather than inline in `rebuildMenu()`, so the policy can
     /// be tested without an `NSStatusItem`.
+    ///
+    /// `@MainActor` because this is the one call that mutates menu items already
+    /// on screen. `GlanceSection` is deliberately not actor-isolated as a type —
+    /// annotating it would force `AppController`, which is not isolated either,
+    /// to change well beyond the glance code — so the isolation is pinned to the
+    /// two members that actually touch live AppKit state: this seam and
+    /// `GlanceSection.updateInPlace`.
+    ///
+    /// Scope of that guarantee at swift-tools-version 5.9 (minimal concurrency
+    /// checking): a direct synchronous call from a nonisolated context is a hard
+    /// error, but the same call inside a `@Sendable` closure dispatched to
+    /// another queue is only a warning (an error under the Swift 6 language
+    /// mode). So this makes the common mistake unrepresentable and the async one
+    /// loud, rather than catching every shape of it.
+    @MainActor
     mutating func decide(refreshing section: GlanceSection,
                          from state: AppState,
                          now: Date = Date()) -> MenuRebuildDecision {
