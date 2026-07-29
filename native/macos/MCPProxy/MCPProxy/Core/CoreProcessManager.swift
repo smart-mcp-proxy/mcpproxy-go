@@ -59,10 +59,23 @@ actor CoreProcessManager {
     /// tray would refuse to stop it and leak it on quit.
     private var superseded: Bool = false
 
-    /// True while a reconnection attempt is running. Set by the process-exit
-    /// handler as well, so the liveness tick (GH #926) can tell that a
-    /// reconnection is already under way and stay out of its path.
-    private var reconnectInFlight: Bool = false
+    /// True while an operation that establishes a connection to a core is
+    /// running: an attach, or a reconnection.
+    ///
+    /// Every such operation SUSPENDS (probe, backoff sleep, connect, relaunch),
+    /// and there are four things that can start one — the liveness tick, the SSE
+    /// disconnect handler, the process-exit handler, and the attach watcher
+    /// racing a manual retry. Without a gate, two can run at once: two
+    /// `connectToCore()` calls replacing each other's clients and tasks, a late
+    /// failure from one overwriting the other's `.connected` with `.error`, or —
+    /// for a core we own — two `launchAndConnect()` calls that each spawn a core
+    /// and orphan one holding the BBolt lock.
+    ///
+    /// Acquire it ONLY through `beginConnectionWork()`, which is synchronous and
+    /// therefore atomic under actor isolation. A check followed by an `await`
+    /// followed by a set guards nothing: another invocation runs during the
+    /// suspension and passes the same check.
+    private var connectionWorkInFlight: Bool = false
     private var retryCount: Int = 0
     private let maxRetries: Int = 3
     private let notificationService: NotificationService
@@ -91,8 +104,32 @@ actor CoreProcessManager {
     private let refreshInterval: TimeInterval
 
     /// Per-probe timeout. A liveness probe must fail fast: it runs on the
-    /// refresh tick and everything behind it waits.
+    /// refresh tick and everything behind it waits. The API client's own 30s
+    /// request timeout is right for a real call and far too long here — it
+    /// would let one slow sample stall the detector for a whole tick.
+    ///
+    /// 5s: three orders of magnitude above a healthy socket round-trip
+    /// (sub-millisecond) and the same order as the core's own advertised SSE
+    /// retry interval, so a core that is merely busy still gets to answer.
     private let probeTimeout: TimeInterval
+
+    /// Consecutive missed readiness checks required before the tray concludes a
+    /// still-listening core is lost.
+    ///
+    /// 2, not 1: readiness is a sample, and one miss is not evidence — a
+    /// saturated core, a GC pause, or a laptop resuming from sleep can all eat
+    /// one. It is not higher because each strike costs a full refresh interval,
+    /// and 2 already bounds worst-case detection at ~1 minute for this case.
+    /// The unambiguous case (socket gone) is not subject to the budget at all.
+    private let probeFailureBudget: Int = 2
+
+    /// Missed readiness checks since the last successful one. Reset on any
+    /// success, so the budget counts CONSECUTIVE misses — otherwise a healthy
+    /// core that blips once an hour would eventually be declared dead.
+    private var consecutiveProbeFailures: Int = 0
+
+    /// Short-timeout client used only for liveness probes.
+    private var probeClient: APIClient?
 
     // MARK: - Initialization
 
@@ -138,7 +175,16 @@ actor CoreProcessManager {
     ///   goes idle and watches for one to appear, so a core the user starts
     ///   later (CLI, launchd, brew services) is picked up without a restart.
     func start(maySpawn: Bool = true) async {
-        if await attachIfCoreIsRunning() { return }
+        switch await attachIfCoreIsRunning() {
+        case .attached:
+            return
+        case .inFlight:
+            // Someone else is attaching to the same core. Leave them to it —
+            // spawning or going idle here would fight that attach.
+            return
+        case .noCore:
+            break
+        }
 
         guard maySpawn else {
             await awaitExternalCore()
@@ -165,14 +211,45 @@ actor CoreProcessManager {
         cancelAttachWatch()
     }
 
-    /// Attach to a core that is already up. Returns false when none is.
-    private func attachIfCoreIsRunning() async -> Bool {
-        guard !superseded else { return false }
-        guard SocketTransport.isSocketAvailable(path: socketPath) else { return false }
-        guard await probeExternalCore() else { return false }
-        guard !superseded else { return false } // a replacement took over while we probed
-        await attachToExternalCore()
+    // MARK: - Private: Connection-work gate
+
+    /// Claim the right to establish a connection. Synchronous on purpose: under
+    /// actor isolation a check-and-set with no `await` between them cannot be
+    /// interleaved, which is exactly what makes this a guard rather than a hint.
+    private func beginConnectionWork() -> Bool {
+        guard !connectionWorkInFlight else { return false }
+        connectionWorkInFlight = true
         return true
+    }
+
+    private func endConnectionWork() {
+        connectionWorkInFlight = false
+    }
+
+    /// What happened when we looked for a core to attach to.
+    ///
+    /// `inFlight` is NOT `noCore`: another task is already attaching, and the
+    /// caller must not react by spawning a core or declaring itself idle — that
+    /// would fight the attach that is under way.
+    enum AttachOutcome {
+        case attached
+        case inFlight
+        case noCore
+    }
+
+    /// Attach to a core that is already up.
+    private func attachIfCoreIsRunning() async -> AttachOutcome {
+        guard !superseded else { return .noCore }
+        // Everything up to the acquisition is synchronous, so the claim below is
+        // atomic with respect to the checks above it.
+        guard SocketTransport.isSocketAvailable(path: socketPath) else { return .noCore }
+        guard beginConnectionWork() else { return .inFlight }
+        defer { endConnectionWork() }
+
+        guard await probeExternalCore() else { return .noCore }
+        guard !superseded else { return .noCore } // a replacement took over while we probed
+        await attachToExternalCore()
+        return .attached
     }
 
     /// Idle mode (#410): no core, and we are not allowed to start one. Sit in the
@@ -193,7 +270,9 @@ actor CoreProcessManager {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(attachWatchInterval * 1_000_000_000))
                 guard !Task.isCancelled, let self else { return }
-                if await self.attachIfCoreIsRunning() { return }
+                // Keep polling while another task is mid-attach: if that attach
+                // fails, this watch is what picks the core up next time round.
+                if case .attached = await self.attachIfCoreIsRunning() { return }
             }
         }
     }
@@ -213,9 +292,11 @@ actor CoreProcessManager {
     /// Probe an existing socket to see if a live core is behind it.
     /// Returns true only if the core responds to an API call.
     private func probeExternalCore() async -> Bool {
-        let probeClient = APIClient(socketPath: socketPath)
+        // Same short timeout as the liveness probe: this is the same question,
+        // asked before we are attached rather than after.
+        let client = APIClient(socketPath: socketPath, requestTimeout: probeTimeout)
         do {
-            let ready = try await probeClient.ready()
+            let ready = try await client.ready()
             return ready
         } catch {
             return false
@@ -242,6 +323,8 @@ actor CoreProcessManager {
         }
         sseClient = nil
         apiClient = nil
+        probeClient = nil
+        consecutiveProbeFailures = 0
         await MainActor.run { appState.apiClient = nil }
 
         let ownsCore = await MainActor.run { appState.ownership.shouldTerminateOnShutdown }
@@ -612,6 +695,11 @@ actor CoreProcessManager {
         }
 
         apiClient = client
+        // Separate client for liveness probes: same socket, much shorter
+        // timeout, and never shared with the UI so a probe can never be queued
+        // behind a slow user-facing request.
+        probeClient = APIClient(socketPath: socketPath, requestTimeout: probeTimeout)
+        consecutiveProbeFailures = 0
         await MainActor.run { appState.apiClient = client }
 
         // Create SSE client — uses TCP (not socket) so needs the API key
@@ -798,32 +886,59 @@ actor CoreProcessManager {
         // already being driven by launch/reconnect/shutdown logic.
         guard case .connected = await MainActor.run(body: { appState.coreState }) else { return true }
 
-        if SocketTransport.isSocketAvailable(path: socketPath), let apiClient {
-            // A stale socket file left by `kill -9` fails the connect probe
-            // above; a wedged core fails this call.
-            if (try? await apiClient.ready()) == true { return true }
+        // The socket is the unambiguous signal: a process that exited cannot
+        // hold one open, and a stale file left by `kill -9` fails the connect
+        // probe. No tolerance needed — that core is gone.
+        guard SocketTransport.isSocketAvailable(path: socketPath) else {
+            NSLog("[MCPProxy] Core socket %@ is gone — reconnecting", socketPath)
+            consecutiveProbeFailures = 0
+            await handleCoreLoss()
+            return false
         }
 
-        NSLog("[MCPProxy] Core stopped responding on %@ — reconnecting", socketPath)
+        // The socket is up, so the core is running. Whether it is HEALTHY is a
+        // softer question: a saturated core can miss a readiness check and be
+        // perfectly fine a second later. Condemning it on one sample would put
+        // "reconnecting" in the menu bar every time the core got busy.
+        if await probeIsReady() {
+            consecutiveProbeFailures = 0
+            return true
+        }
+
+        consecutiveProbeFailures += 1
+        guard consecutiveProbeFailures >= probeFailureBudget else {
+            NSLog("[MCPProxy] Core missed a readiness check (%d/%d)",
+                  consecutiveProbeFailures, probeFailureBudget)
+            return true
+        }
+
+        NSLog("[MCPProxy] Core stopped answering on %@ after %d consecutive checks — reconnecting",
+              socketPath, consecutiveProbeFailures)
+        consecutiveProbeFailures = 0
         await handleCoreLoss()
         return false
+    }
+
+    /// One readiness call, bounded by `probeTimeout` rather than the API
+    /// client's generous request timeout.
+    private func probeIsReady() async -> Bool {
+        guard let probeClient else { return false }
+        return (try? await probeClient.ready()) == true
     }
 
     /// The core we were connected to is gone. Reuse the reconnection path, which
     /// re-attaches to a core that comes back and refuses to spawn a replacement
     /// for one we never owned.
     func handleCoreLoss() async {
-        // Stand down if the process-exit handler is already reconnecting: for a
-        // core we spawned, both detectors can see the same death, and
-        // attemptReconnection() suspends — two overlapping runs could each
-        // relaunch and orphan a core.
-        guard !reconnectInFlight else { return }
+        // Read state first (this suspends), THEN claim the gate — the claim must
+        // be the last thing before the work, with no suspension between claim
+        // and use.
         guard case .connected = await MainActor.run(body: { appState.coreState }) else { return }
+        guard beginConnectionWork() else { return }
+        defer { endConnectionWork() }
 
-        reconnectInFlight = true
         await transitionState(to: .reconnecting(attempt: 1))
         await attemptReconnection()
-        reconnectInFlight = false
     }
 
     /// Fetch full state from the core and update appState.
@@ -985,13 +1100,17 @@ actor CoreProcessManager {
         await notificationService.sendCoreError(error: error)
 
         if error.isRetryable && retryCount < maxRetries {
+            // Honour the same gate as every other reconnection entry point. If
+            // one is already running it is ALREADY relaunching this core;
+            // starting a second would race it into two live cores.
+            guard beginConnectionWork() else {
+                NSLog("[MCPProxy] handleProcessExit: a reconnection is already in flight")
+                return
+            }
+            defer { endConnectionWork() }
             retryCount += 1
             await transitionState(to: .reconnecting(attempt: retryCount))
-            // Publish that a reconnection is in flight (see reconnectInFlight).
-            // This path's own behaviour is unchanged — it never stands down.
-            reconnectInFlight = true
             await attemptReconnection()
-            reconnectInFlight = false
         } else {
             await transitionState(to: .error(error))
         }
