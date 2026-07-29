@@ -25,8 +25,8 @@ Constraints, in priority order: never irritate (the menu stays a menu — fast, 
 | Presentation | Plain `NSMenuItem`s for all text rows; a hosted SwiftUI view **only** for the histogram, inside its submenu | Apple documents that custom menu-item views receive mouse events but **not** keyboard events — rows built as SwiftUI buttons would not be keyboard-selectable and would need hand-rolled accessibility. The rows are text plus an icon; native items give keyboard navigation, highlighting, and VoiceOver for free. Only the chart genuinely needs custom drawing. |
 | What is visible on open | Activity + clients; histogram in a submenu | Keeps the menu short. The histogram is a visualisation, not a glance signal. |
 | Histogram metric | Calls per hour, errors as a distinct stacked segment | No hourly token series exists: `UsageTimeBucket` carries `calls`, `errors`, `total_resp_bytes`, and the endpoint reports `token_source: "bytes"` — a size proxy. Real tokenisation (`cl100k_base`) accumulates only per session (`MCPSession.total_tokens`), never per activity record. Plotting calls is exact and needs no storage change. A real token histogram is a separate roadmap item. |
-| Liveness | Consume `activity.*` SSE payloads directly; keep the 30s poll as reconciliation | `CoreProcessManager.swift:683` matches `case "activity"`, which the core never emits, so activity is 30s-polled today. Merely fixing the name is not enough: that branch calls `refreshActivity()`, so prefix-matching would fire a REST GET per event — network amplification, not push. The `activity.tool_call.completed` payload already carries `server_name`, `tool_name`, `session_id`, `request_id`, `status`, `error`, `duration_ms` (`internal/runtime/event_bus.go:430`) — everything a row renders. |
-| Integration | Extract a `Menu/Glance/` component; no view caching needed | With plain items, `rebuildMenu()`'s `removeAllItems()` is as cheap for glance rows as for today's items — the caching scheme an earlier draft proposed is unnecessary, and it would not have prevented churn anyway (items are still removed and re-inserted during menu tracking). The histogram view lives in a submenu that main-menu rebuilds do not touch. |
+| Liveness | Consume `activity.*` SSE payloads directly; keep the 30s poll as reconciliation | `CoreProcessManager.swift:683` matches `case "activity"`, which the core never emits, so activity is 30s-polled today. Merely fixing the name is not enough: that branch calls `refreshActivity()`, so prefix-matching would fire a REST GET per event — network amplification, not push. The `activity.tool_call.completed` payload already carries `server_name`, `tool_name`, `session_id`, `request_id`, `status`, `error_message`, `duration_ms` (`internal/runtime/event_bus.go:444`) — everything a row renders. Note the field is `error_message`, matching `ActivityEntry`; a row built from a payload key named `error` would silently lose the failure detail until the next poll. |
+| Integration | Extract a `Menu/Glance/` component; no view caching, but suppress structural rebuilds while the menu is open | With plain items, `rebuildMenu()`'s `removeAllItems()` is as cheap for glance rows as for today's items — the caching scheme an earlier draft proposed is unnecessary and would not have prevented churn anyway. But live SSE rows make the existing debounced `objectWillChange → rebuildMenu()` sink (`MCPProxyApp.swift:114`) fire during active traffic, i.e. potentially while the user is reading the menu. See "Rebuilds while the menu is open" below. |
 
 ## Architecture
 
@@ -51,7 +51,7 @@ Changes to existing files:
 
 ```
 MCPProxy v0.52.0                    ●
-12 calls in the last hour · 2 clients
+12 calls this hour · 2 clients
 ─────────────────────────────────────
 Recent
   ✓ github:create_issue          12s
@@ -80,7 +80,7 @@ Row anatomy: status icon (shape *and* colour, never colour alone), `server:tool`
 
 ### Activity
 
-Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_tool_call.completed`, the tray builds an entry from the event payload and prepends it — no GET per event. A dedicated poll every 30 seconds reconciles that optimistic list with the server's canonical records (storage-assigned ids and the asynchronously-computed sensitive-data flags): `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=25`. This is a fourth call on the existing refresh cycle rather than a reuse of the Dashboard's feed, for the reason given above.
+Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_tool_call.completed`, the tray builds an entry from the event payload and prepends it — no GET per event. A dedicated poll every 30 seconds reconciles that optimistic list with the server's canonical records (storage-assigned ids and the asynchronously-computed sensitive-data flags): `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=50`. This is a fourth call on the existing refresh cycle rather than a reuse of the Dashboard's feed, for the reason given above.
 
 **Which records qualify** — evaluated in this order, in `GlanceSelection`, identically for polled records and SSE payloads:
 
@@ -90,7 +90,7 @@ Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_
 
 Rule 3's second clause matters more than it looks. The backend deliberately keeps *failed* `call_tool_*` wrapper records while suppressing successful ones, precisely because a failed wrapper has no corresponding upstream `tool_call` record (`internal/storage/activity_models.go:255`). A plain built-in allowlist would discard the only trace of a call that never reached its server — hiding exactly the failures this section exists to surface. Rule 1 is stated first because management built-ins fail like any other internal call, and their failures are still administration noise.
 
-The poll fetches 25 records and the section shows the first five that qualify, so unrelated records cannot starve the list the way a 10-record page could. If fewer than five qualify, it shows what it has.
+The poll fetches 50 records and the section shows the first five that qualify. The page is deliberately oversized because rule 1 runs on the client: the server-side `type` filter admits management built-ins (they *are* `internal_tool_call` records), and storage applies its filter before truncating to the limit (`internal/storage/activity.go:147`), so a burst of `upstream_servers` calls would otherwise fill a small page and push real tool calls out of view. Fifty is not a guarantee — an agent that makes fifty consecutive management calls will legitimately see the empty state — but it moves the failure mode from "routine" to "pathological". If fewer than five qualify, the section shows what it has.
 
 This selection is presentation policy, not tray-held state, so it stays within the "tray holds no state" rule (CLAUDE.md).
 
@@ -120,11 +120,17 @@ An activity row and a client row both open the Web UI activity log filtered by t
 
 `GlanceSection` does not build these URLs itself. It cannot: it is handed only `AppState`, whose `webUIBaseURL` is scheme/host/port by design, and a first-time browser session needs the API key appended — the existing `openWebUI()` action fetches `currentAPIKey` from the core manager for exactly this reason (`MCPProxyApp.swift:985`). Glance rows therefore carry a target/action pair pointing back at the app delegate, which opens the authenticated URL through the same path as today's menu items. Reusing that path also keeps the key handling in one place rather than duplicating it in a new component.
 
+### Rebuilds while the menu is open
+
+Live rows create a problem the current menu does not have. Every `AppState` change feeds a debounced sink that calls `rebuildMenu()`, which calls `removeAllItems()` (`MCPProxyApp.swift:114`, `:523`) — and the menu is not dismissed when that happens. Today the only sources of change are server state and a 30-second poll, so this is rare. With SSE rows, a busy agent changes state every few hundred milliseconds, potentially while the user is reading the menu or navigating it with the keyboard, and re-creating the item that owns the histogram submenu would disturb an open submenu.
+
+So `rebuildMenu()` gains a tracking guard: while the menu is open it does **not** restructure. Glance rows update in place — setting `attributedTitle` on an existing `NSMenuItem` is exactly how live menus are meant to work — and any structural change (a new row appearing, the section becoming empty) is deferred, flagged dirty, and applied on `menuDidClose`. A menu that grows or shrinks under the cursor is precisely the "irritating" behaviour this design set out to avoid, so this guard is a requirement, not an optimisation.
+
 ## States
 
 | Situation | Behaviour |
 |---|---|
-| Core stopped or disconnected | The whole glance block is hidden. Stale numbers presented as current are worse than nothing; the menu already shows the error and a Retry item. |
+| Core stopped or disconnected | The whole glance block is hidden **and its state is cleared** — `glanceActivity` emptied, `usageTimeline` and `callsThisHour` set back to `nil`. Clearing is not redundant with hiding: the connection path flips to `.connected` before the first refresh completes (`CoreProcessManager.swift:330`), so without a reset the menu would briefly present the previous core's numbers as live. Optional fields alone do not prevent this; they only make the cleared state expressible. |
 | No activity yet | One muted row, "No tool calls yet" — not an empty section with a header. |
 | No active clients | One muted row, "No connected clients". |
 | Usage data not loaded yet (`callsThisHour == nil`) | The header omits the call count (clients only); the histogram submenu shows a muted "Loading…" row. |
@@ -141,6 +147,9 @@ Swift unit tests in the existing `swift-test` CI job. `GlanceSelection` and `Gla
 - **Selection**: upstream `tool_call` always included; the three discovery/execution built-ins included; **a failed `call_tool_write` record is included** (the finding above, pinned by a test); **a failed `upstream_servers` record is still excluded** (rule 1 beats rule 3); five qualifying records selected from a 25-record page containing noise.
 - **Header bucket**: with a sparse timeline whose newest bucket is three hours old, the header shows zero — not that bucket's count.
 - **Dashboard non-regression**: `AppState.recentActivity` still carries non-tool-call types after the glance feed is added.
+- **Open-menu stability**: with the menu tracking, a burst of SSE events updates row titles and performs no structural rebuild; the deferred rebuild runs once on close.
+- **Reconnect hygiene**: after a disconnect, glance state is cleared, so a menu built between `.connected` and the first successful refresh shows the empty/loading states rather than the previous core's data.
+- **Optimistic rows**: a row built from an SSE payload carries the failure text from `error_message` (a payload read keyed on `error` would render a failed call as if it had no detail).
 - **Chart data**: `calls - errors` and `errors` segments never double-count; missing hours synthesised as zero across a 24-hour axis.
 - Formatting: relative time, label composition, middle truncation.
 - Visibility: block hidden when the core is stopped; empty-state rows.
