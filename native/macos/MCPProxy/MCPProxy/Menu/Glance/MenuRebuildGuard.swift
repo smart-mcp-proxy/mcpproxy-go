@@ -85,12 +85,11 @@ extension MenuRebuildGuard {
     /// This lives here, rather than inline in `rebuildMenu()`, so the policy can
     /// be tested without an `NSStatusItem`.
     ///
-    /// `@MainActor` because this is the one call that mutates menu items already
-    /// on screen. `GlanceSection` is deliberately not actor-isolated as a type —
-    /// annotating it would force `AppController`, which is not isolated either,
-    /// to change well beyond the glance code — so the isolation is pinned to the
-    /// two members that actually touch live AppKit state: this seam and
-    /// `GlanceSection.updateInPlace`.
+    /// `@MainActor` because this call reaches into `GlanceSection`, which is
+    /// itself `@MainActor` — it mutates menu items already on screen.
+    /// `MenuRebuildGuard` stays un-isolated as a type: its other members are
+    /// pure state transitions with no AppKit in them, and isolating those would
+    /// buy nothing.
     ///
     /// Scope of that guarantee at swift-tools-version 5.9 (minimal concurrency
     /// checking): a direct synchronous call from a nonisolated context is a hard

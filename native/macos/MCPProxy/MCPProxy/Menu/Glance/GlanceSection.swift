@@ -17,19 +17,31 @@
 // representedObject holding the record's session id, and the app delegate opens
 // the authenticated URL through the same path as every other menu action.
 //
-// Deliberately NOT @MainActor as a *type*: AppController (the
-// NSApplicationDelegate that calls this, MCPProxyApp.swift:15) is not
-// actor-isolated, and this SDK does not infer MainActor from
-// NSApplicationDelegate conformance. Isolating the type makes even the
-// initializer main-actor-only, which its `private lazy var glance = ...` stored
-// property cannot satisfy ("call to main actor-isolated initializer
-// 'init(target:action:)' in a synchronous nonisolated context") — so it would
-// force AppController itself to be isolated, far beyond the glance code.
-// Instead the isolation is pinned to `updateInPlace`, the one member that
-// mutates menu items already on screen.
+// @MainActor as a type: every member here either builds live NSMenuItems or
+// reads AppState, so main-thread-only is the truth about this component, and
+// stating it structurally beats relying on rebuildMenu() happening to be the
+// sole route in.
+//
+// That does mean the initializer is main-actor-only too, and AppController (the
+// NSApplicationDelegate that owns this, MCPProxyApp.swift:15) is NOT
+// actor-isolated — this SDK does not infer MainActor from NSApplicationDelegate
+// conformance — so its `private lazy var glance = ...` stored property would
+// otherwise fail with "call to main actor-isolated initializer
+// 'init(target:action:)' in a synchronous nonisolated context". The fix is one
+// @MainActor on that stored property, at the construction site.
+//
+// Do NOT "simplify" this by marking the initializer `nonisolated` instead. It
+// compiles and passes, but assigning the isolated `clickTarget` from a
+// nonisolated init warns "main actor-isolated property 'clickTarget' can not be
+// mutated from a nonisolated context; this is an error in the Swift 6 language
+// mode" — i.e. it buys a glance-local diff today at the cost of a blocker when
+// this package moves to Swift 6. clickTarget cannot be a `let` either: it is
+// deliberately `weak` (AppController owns the section strongly), and `weak`
+// requires `var`.
 
 import AppKit
 
+@MainActor
 final class GlanceSection {
 
     // MARK: Click routing
@@ -170,13 +182,7 @@ final class GlanceSection {
     /// The histogram submenu is deliberately not touched — re-creating it would
     /// disturb an open submenu — so a change in its loaded-ness reports
     /// structural instead.
-    ///
-    /// `@MainActor` on the member rather than the type: this is the one call
-    /// that mutates menu items already on screen, and isolating the whole type
-    /// would force `AppController` — which is not actor-isolated — to change
-    /// well beyond the glance code (see the file header).
     @discardableResult
-    @MainActor
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
         guard isVisible(for: state) == builtVisible else { return false }

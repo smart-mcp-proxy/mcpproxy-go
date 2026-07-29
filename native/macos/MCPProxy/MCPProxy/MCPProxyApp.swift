@@ -29,6 +29,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// rewrite them in place instead of restructuring the menu. Rows call back
     /// into this delegate (see `openActivityForSession`) so Web UI key handling
     /// stays in one place — the section is handed only AppState, which has no key.
+    ///
+    /// `@MainActor` because `GlanceSection` is an isolated type and this class is
+    /// not, so constructing it from a plain stored-property initializer would not
+    /// compile. See that type's header for why the alternative — a `nonisolated`
+    /// initializer over there — is the wrong trade.
+    @MainActor
     private lazy var glance = GlanceSection(
         target: self,
         action: #selector(openActivityForSession(_:))
