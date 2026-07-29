@@ -642,11 +642,44 @@ final class ActivityHistogramEncodingTests: XCTestCase {
         return counts
     }
 
+    /// Rasterise, or FAIL.
+    ///
+    /// Deliberately not a skip, and this is the third narrowing of the same
+    /// hole: first a failed threshold turned into a skip, then a blank raster
+    /// did, and both times the shape that survived was "the environment where
+    /// these tests assert nothing reports success". There is no environment in
+    /// which a macOS build can legitimately fail to produce a CGImage from
+    /// `ImageRenderer` and the suite should still pass: the tray draws this
+    /// chart with the same machinery, so a host that cannot rasterise it cannot
+    /// run the feature either. If that ever becomes false, the honest change is
+    /// a named, asserted condition — not a skip that swallows every cause.
     private func measure(_ bars: [HistogramBar], in region: Region = .whole) throws -> Pixels {
-        guard let counts = pixels(of: bars, in: region) else {
-            throw XCTSkip("this machine cannot rasterise the chart at all")
-        }
-        return counts
+        try XCTUnwrap(pixels(of: bars, in: region),
+                      "ImageRenderer produced no image; the chart cannot be rasterised here at all")
+    }
+
+    /// The success series must actually be painted.
+    ///
+    /// Nothing else here proves it. `drawn` counts axes, grid lines and tick
+    /// labels too, so every other assertion in this file is satisfied by a chart
+    /// whose success bars are invisible — setting the success fill to
+    /// `Color.clear` left all three of them green. The no-chroma test is the
+    /// worst of them: with no bars at all it passes more easily, since the thing
+    /// it measures is the absence of colour.
+    ///
+    /// Measured like for like: the same single-hour axis, one hour with ten
+    /// successes and one with none. The axes are identical, so the difference is
+    /// the bar.
+    func testSuccessSegmentsAreActuallyPainted() throws {
+        let hour = Fixture.currentHour
+
+        let withSuccesses = try measure([HistogramBar(hourStart: hour, succeeded: 10, errors: 0)], in: .plot)
+        let empty = try measure([HistogramBar(hourStart: hour, succeeded: 0, errors: 0)], in: .plot)
+
+        XCTAssertGreaterThan(
+            withSuccesses.drawn, empty.drawn + 1000,
+            "ten successes must paint a bar: \(withSuccesses.drawn) samples against \(empty.drawn) for an empty hour"
+        )
     }
 
     /// Errors must be drawn in a visually distinct fill, and that fill must be
