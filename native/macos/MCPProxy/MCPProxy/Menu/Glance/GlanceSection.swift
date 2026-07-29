@@ -183,11 +183,10 @@ final class GlanceSection {
             item.setAccessibilityLabel("\(fullLabel), failed: \(detail), \(age) ago")
         } else {
             item.title = "\(label) — \(age)"
-            item.setAccessibilityLabel("\(fullLabel), \(failed ? "failed" : "succeeded"), \(age) ago")
+            item.setAccessibilityLabel("\(fullLabel), \(Self.outcomeDescription(for: entry)), \(age) ago")
         }
 
-        item.image = NSImage(systemSymbolName: GlanceFormatting.statusSymbolName(for: entry),
-                             accessibilityDescription: failed ? "failed" : "succeeded")
+        item.image = Self.statusImage(for: entry)
 
         if let message = entry.errorMessage, !message.isEmpty {
             item.toolTip = "\(fullLabel)\n\(message)"
@@ -210,6 +209,63 @@ final class GlanceSection {
         return clause.isEmpty ? trimmed : clause
     }
 
+    // MARK: Status iconography
+
+    /// Tint for an activity record's outcome.
+    ///
+    /// Colour is the *second* channel, never the only one: `GlanceFormatting`
+    /// already gives the three outcomes three distinct glyphs, and
+    /// `outcomeDescription` gives VoiceOver a third. A red/green pair alone
+    /// would be invisible to the ~8% of men with a red-green deficiency, and to
+    /// anyone running the display in greyscale.
+    ///
+    /// This lives here rather than in `GlanceFormatting` because that file is
+    /// deliberately AppKit-free (`import Foundation` only) and `NSColor` is not.
+    static func statusTint(for entry: ActivityEntry) -> NSColor {
+        switch entry.status {
+        case "success":
+            return .systemGreen
+        case "error":
+            return .systemRed
+        default:
+            return .systemOrange
+        }
+    }
+
+    /// Spoken outcome for VoiceOver. Three-valued so a call that is still
+    /// running is not announced as a failure.
+    static func outcomeDescription(for entry: ActivityEntry) -> String {
+        switch entry.status {
+        case "success":
+            return "succeeded"
+        case "error":
+            return "failed"
+        default:
+            return "in progress"
+        }
+    }
+
+    /// The row icon: an SF Symbol whose shape carries the outcome, tinted to
+    /// carry it a second time.
+    ///
+    /// The image must be non-template — AppKit recolours a template menu image
+    /// to the menu's own text colour, which would silently discard the tint.
+    private static func statusImage(for entry: ActivityEntry) -> NSImage? {
+        symbolImage(named: GlanceFormatting.statusSymbolName(for: entry),
+                    tint: statusTint(for: entry),
+                    description: outcomeDescription(for: entry))
+    }
+
+    private static func symbolImage(named name: String, tint: NSColor, description: String) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: description) else {
+            return nil
+        }
+        let tinted = base.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [tint])) ?? base
+        tinted.isTemplate = false
+        tinted.accessibilityDescription = description
+        return tinted
+    }
+
     /// Rewrite a client row so it fully describes `session`.
     private func apply(_ session: APIClient.MCPSession, to item: NSMenuItem, now: Date) {
         let name = session.clientName.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown client"
@@ -225,7 +281,7 @@ final class GlanceSection {
             item.setAccessibilityLabel("\(name), \(callText)")
         }
 
-        item.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "connected")
+        item.image = Self.symbolImage(named: "circle.fill", tint: .systemGreen, description: "connected")
 
         if let version = session.clientVersion, !version.isEmpty {
             item.toolTip = "\(name) \(version)"

@@ -215,6 +215,33 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertFalse(Self.makeSection().updateInPlace(for: Self.busyState(), now: Self.now))
     }
 
+    // MARK: - Status is carried by shape AND colour
+
+    func testStatusIsEncodedByShapeAndColourNotColourAlone() {
+        let stamp = "2027-01-15T07:59:30Z"
+        let succeeded = Self.entry(id: "s", server: "a", tool: "t", timestamp: stamp)
+        let failed = Self.entry(id: "f", server: "a", tool: "t", status: "error", timestamp: stamp)
+        let pending = Self.entry(id: "p", server: "a", tool: "t", status: "running", timestamp: stamp)
+
+        let shapes = [succeeded, failed, pending].map(GlanceFormatting.statusSymbolName(for:))
+        XCTAssertEqual(Set(shapes).count, 3, "shape alone must separate the three outcomes")
+
+        XCTAssertNotEqual(GlanceSection.statusTint(for: succeeded), GlanceSection.statusTint(for: failed))
+        XCTAssertNotEqual(GlanceSection.statusTint(for: failed), GlanceSection.statusTint(for: pending))
+        XCTAssertNotEqual(GlanceSection.statusTint(for: succeeded), GlanceSection.statusTint(for: pending))
+
+        XCTAssertEqual(GlanceSection.outcomeDescription(for: pending), "in progress",
+                       "a call still running must not be announced as failed")
+    }
+
+    func testStatusIconKeepsItsTintInTheMenu() {
+        let section = Self.makeSection()
+        let items = section.items(for: Self.busyState(), now: Self.now)
+        XCTAssertEqual(items[3].image?.isTemplate, false,
+                       "a template image is recoloured by the menu, which would drop the status tint")
+        XCTAssertEqual(items[4].image?.isTemplate, false)
+    }
+
     // MARK: - Helpers
 
     private final class ClickStub: NSObject {
