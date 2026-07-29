@@ -131,6 +131,72 @@ final class APIClientGlanceTests: XCTestCase {
         XCTAssertEqual(session.toolCallCount, 8)
     }
 
+    // MARK: - Non-2xx error path
+
+    /// Unwrap an APIClientError.httpError, failing the test on any other outcome.
+    private func expectHTTPError(
+        _ body: @autoclosure () async throws -> Any,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> (statusCode: Int, message: String)? {
+        do {
+            _ = try await body()
+            XCTFail("expected the call to throw, but it returned normally", file: file, line: line)
+            return nil
+        } catch let error as APIClientError {
+            guard case .httpError(let statusCode, let message) = error else {
+                XCTFail("expected .httpError, got \(error)", file: file, line: line)
+                return nil
+            }
+            return (statusCode, message)
+        } catch {
+            XCTFail("expected APIClientError, got \(error)", file: file, line: line)
+            return nil
+        }
+    }
+
+    /// The live core returns 400 for `?status=bogus`. The failure must surface as
+    /// an httpError keyed off the status code — note the error body also carries
+    /// `request_id`, which must not disturb the message extraction.
+    func testActiveSessionsSurfaces400AsHTTPError() async throws {
+        GlanceStubURLProtocol.statusCode = 400
+        GlanceStubURLProtocol.responseBody = Data("""
+        {"success":false,"error":"invalid status filter: bogus","request_id":"req-7"}
+        """.utf8)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let failure = await expectHTTPError(try await client.activeSessions())
+
+        XCTAssertEqual(failure?.statusCode, 400)
+        XCTAssertEqual(failure?.message, "invalid status filter: bogus")
+    }
+
+    func testUsageAggregateSurfaces500AsHTTPError() async throws {
+        GlanceStubURLProtocol.statusCode = 500
+        GlanceStubURLProtocol.responseBody = Data("""
+        {"success":false,"error":"usage snapshot unavailable","request_id":"req-8"}
+        """.utf8)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let failure = await expectHTTPError(try await client.usageAggregate())
+
+        XCTAssertEqual(failure?.statusCode, 500)
+        XCTAssertEqual(failure?.message, "usage snapshot unavailable")
+    }
+
+    /// A non-2xx with a body that is not the JSON error envelope must still fail
+    /// as an httpError, not as a decoding error.
+    func testGlanceActivitySurfacesNonJSONErrorBodyAsHTTPError() async throws {
+        GlanceStubURLProtocol.statusCode = 503
+        GlanceStubURLProtocol.responseBody = Data("upstream unavailable".utf8)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let failure = await expectHTTPError(try await client.glanceActivity())
+
+        XCTAssertEqual(failure?.statusCode, 503)
+        XCTAssertEqual(failure?.message, HTTPURLResponse.localizedString(forStatusCode: 503))
+    }
+
     // MARK: - Data-source seam
 
     func testAPIClientConformsToGlanceDataSource() async throws {
