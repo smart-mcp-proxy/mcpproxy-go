@@ -58,6 +58,11 @@ actor CoreProcessManager {
     /// mislabel that tray-spawned core as `.externalAttached` — after which the
     /// tray would refuse to stop it and leak it on quit.
     private var superseded: Bool = false
+
+    /// True while a reconnection attempt is running. Set by the process-exit
+    /// handler as well, so the liveness tick (GH #926) can tell that a
+    /// reconnection is already under way and stay out of its path.
+    private var reconnectInFlight: Bool = false
     private var retryCount: Int = 0
     private let maxRetries: Int = 3
     private let notificationService: NotificationService
@@ -739,14 +744,16 @@ actor CoreProcessManager {
             startSSEStream()
         } else {
             // Socket gone; core likely crashed
-            await transitionState(to: .reconnecting(attempt: 1))
-            await attemptReconnection()
+            await handleCoreLoss()
         }
     }
 
     // MARK: - Private: State Refresh
 
     /// Start a periodic refresh task that polls the core every `refreshInterval`.
+    ///
+    /// The tick is also the tray's liveness detector for a core it does not own
+    /// (GH #926). See `coreIsAlive()`.
     private func startPeriodicRefresh() {
         refreshTask?.cancel()
         let interval = refreshInterval
@@ -754,9 +761,61 @@ actor CoreProcessManager {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled, let self else { break }
+                // Stop refreshing the moment the core is gone: handleCoreLoss()
+                // takes over (and restarts this task if it reconnects).
+                guard await self.coreIsAlive() else { break }
                 await self.refreshState()
             }
         }
+    }
+
+    /// Liveness probe for the periodic tick — the ONLY thing that notices a
+    /// dead core we did not spawn (GH #926).
+    ///
+    /// A core the tray launched is watched by `Process.terminationHandler`. An
+    /// ATTACHED core has no Process and no PID, and the other two candidate
+    /// detectors are inert: `SSEClient` retries forever without ever finishing
+    /// its stream (so `handleSSEDisconnect()` never runs), and every refresh
+    /// helper swallows its errors by design. The result was a tray that showed
+    /// a healthy icon indefinitely after the core died.
+    ///
+    /// The probe is the same one `attachIfCoreIsRunning()` uses to decide a core
+    /// is there in the first place — socket, then a real API call — so "we think
+    /// we are connected" is checked against exactly the evidence that made us
+    /// connect. Returns true when the core answered (or when we are not in a
+    /// state where the question applies); returns false after handing off to
+    /// reconnection.
+    private func coreIsAlive() async -> Bool {
+        // Only meaningful while we believe we are connected. Any other state is
+        // already being driven by launch/reconnect/shutdown logic.
+        guard case .connected = await MainActor.run(body: { appState.coreState }) else { return true }
+
+        if SocketTransport.isSocketAvailable(path: socketPath), let apiClient {
+            // A stale socket file left by `kill -9` fails the connect probe
+            // above; a wedged core fails this call.
+            if (try? await apiClient.ready()) == true { return true }
+        }
+
+        NSLog("[MCPProxy] Core stopped responding on %@ — reconnecting", socketPath)
+        await handleCoreLoss()
+        return false
+    }
+
+    /// The core we were connected to is gone. Reuse the reconnection path, which
+    /// re-attaches to a core that comes back and refuses to spawn a replacement
+    /// for one we never owned.
+    private func handleCoreLoss() async {
+        // Stand down if the process-exit handler is already reconnecting: for a
+        // core we spawned, both detectors can see the same death, and
+        // attemptReconnection() suspends — two overlapping runs could each
+        // relaunch and orphan a core.
+        guard !reconnectInFlight else { return }
+        guard case .connected = await MainActor.run(body: { appState.coreState }) else { return }
+
+        reconnectInFlight = true
+        await transitionState(to: .reconnecting(attempt: 1))
+        await attemptReconnection()
+        reconnectInFlight = false
     }
 
     /// Fetch full state from the core and update appState.
@@ -920,7 +979,11 @@ actor CoreProcessManager {
         if error.isRetryable && retryCount < maxRetries {
             retryCount += 1
             await transitionState(to: .reconnecting(attempt: retryCount))
+            // Publish that a reconnection is in flight (see reconnectInFlight).
+            // This path's own behaviour is unchanged — it never stands down.
+            reconnectInFlight = true
             await attemptReconnection()
+            reconnectInFlight = false
         } else {
             await transitionState(to: .error(error))
         }
@@ -964,8 +1027,12 @@ actor CoreProcessManager {
                 await notificationService.sendCoreError(error: .maxRetriesExceeded)
             }
         } else {
-            // External core is gone and we don't own it
+            // External core is gone and we don't own it. Say so — and keep
+            // watching the socket, so a core that comes back (launchd, brew
+            // services, the user re-running `mcpproxy serve`) is picked up
+            // without needing a menu click. Same cheap poll idle mode uses.
             await transitionState(to: .error(.general("External core process is no longer available")))
+            startAttachWatch()
         }
     }
 
