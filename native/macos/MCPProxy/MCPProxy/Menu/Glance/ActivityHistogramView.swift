@@ -216,3 +216,94 @@ extension ActivityHistogram {
         return item
     }
 }
+
+// MARK: - Submenu
+
+/// Owns the tray's "Activity (24h)" item and rebuilds its single row when the
+/// submenu opens.
+///
+/// Building on open — rather than on every `rebuildMenu()` — keeps the chart
+/// off the main menu's hot path, and means an `NSHostingView` is only ever
+/// created when the user actually looks at it. The controller reads `AppState`
+/// and nothing else: opening the submenu performs no network request.
+///
+/// This is a separate `NSObject` rather than a method on `GlanceSection`
+/// because `NSMenuDelegate` requires `NSObjectProtocol`, which `GlanceSection`
+/// (a plain `@MainActor final class`) does not conform to.
+///
+/// `NSMenu.delegate` is a weak reference, so whoever inserts `menuItem` into
+/// the tray menu must also hold on to this object.
+final class ActivityHistogramSubmenu: NSObject, NSMenuDelegate {
+
+    /// The item to insert into the tray menu.
+    let menuItem: NSMenuItem
+
+    private let appState: AppState
+    private let now: () -> Date
+    private let chartItemFactory: ([HistogramBar]) -> NSMenuItem
+
+    /// - Parameters:
+    ///   - now: injected clock, so the 24-hour axis is deterministic in tests.
+    ///   - chartItemFactory: injected so submenu-structure tests are independent
+    ///     of how the chart itself renders.
+    init(appState: AppState,
+         now: @escaping () -> Date = Date.init,
+         chartItemFactory: @escaping ([HistogramBar]) -> NSMenuItem = ActivityHistogram.chartMenuItem) {
+        self.appState = appState
+        self.now = now
+        self.chartItemFactory = chartItemFactory
+
+        let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Activity (24h)")
+        // Nothing in here is actionable, and AppKit's automatic enabling runs
+        // its own validation at display time. Turning it off makes the rows'
+        // disabled state ours — and makes what the tests assert the same thing
+        // the user sees.
+        submenu.autoenablesItems = false
+        item.submenu = submenu
+        self.menuItem = item
+
+        super.init()
+        submenu.delegate = self
+    }
+
+    // MARK: NSMenuDelegate
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        menu.addItem(currentItem())
+    }
+
+    // MARK: Rows
+
+    /// The single row the submenu shows for the current `AppState`.
+    func currentItem() -> NSMenuItem {
+        switch ActivityHistogram.state(
+            timeline: appState.usageTimeline,
+            errorMessage: appState.usageError,
+            now: now()
+        ) {
+        case .loading:
+            return Self.mutedItem("Loading…")
+        case .failed(let message):
+            let item = Self.mutedItem("Usage unavailable")
+            item.toolTip = message
+            return item
+        case .loaded(let bars):
+            return chartItemFactory(bars)
+        }
+    }
+
+    /// A disabled, secondary-coloured text row. Setting `attributedTitle`
+    /// leaves `title` intact, so the plain string stays available to tests and
+    /// to accessibility.
+    static func mutedItem(_ title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = NSAttributedString(string: title, attributes: [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ])
+        return item
+    }
+}

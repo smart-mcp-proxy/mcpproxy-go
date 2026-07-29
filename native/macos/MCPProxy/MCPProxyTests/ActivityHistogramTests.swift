@@ -210,3 +210,111 @@ final class AppStateUsageErrorTests: XCTestCase {
         XCTAssertNil(state.usageError)
     }
 }
+
+@MainActor
+final class ActivityHistogramSubmenuTests: XCTestCase {
+
+    /// A connected core — every glance field on `AppState` is ignored otherwise.
+    private func connectedState() -> AppState {
+        let state = AppState()
+        state.coreState = .connected
+        return state
+    }
+
+    /// The chart item is stubbed so these tests assert on submenu structure
+    /// alone, independent of how the chart itself renders.
+    private func makeSubmenu(_ state: AppState) -> ActivityHistogramSubmenu {
+        ActivityHistogramSubmenu(
+            appState: state,
+            now: { Fixture.now },
+            chartItemFactory: { bars in
+                NSMenuItem(title: "CHART:\(bars.count)", action: nil, keyEquivalent: "")
+            }
+        )
+    }
+
+    /// Nothing is built until the submenu opens — that is the whole point of
+    /// hanging the chart off the submenu delegate. `rebuildMenu()` runs on every
+    /// debounced state change, menu open or closed, so building the chart there
+    /// would render a SwiftUI Chart nobody is looking at.
+    func testSubmenuIsEmptyUntilItOpens() {
+        let submenu = makeSubmenu(connectedState())
+
+        XCTAssertEqual(submenu.menuItem.title, "Activity (24h)")
+        XCTAssertEqual(submenu.menuItem.submenu?.numberOfItems, 0)
+    }
+
+    func testLoadingRowWhileTheTimelineIsNil() {
+        let submenu = makeSubmenu(connectedState())
+        let menu = submenu.menuItem.submenu!
+
+        submenu.menuNeedsUpdate(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].title, "Loading…")
+        XCTAssertFalse(menu.items[0].isEnabled)
+        let attributes = menu.items[0].attributedTitle!.attributes(at: 0, effectiveRange: nil)
+        XCTAssertEqual(attributes[.foregroundColor] as? NSColor, NSColor.secondaryLabelColor)
+    }
+
+    func testErrorRowWhenTheFetchFailedBeforeAnyTimelineArrived() {
+        let state = connectedState()
+        state.recordUsageFailure("connection refused")
+        let submenu = makeSubmenu(state)
+        let menu = submenu.menuItem.submenu!
+
+        submenu.menuNeedsUpdate(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].title, "Usage unavailable")
+        XCTAssertEqual(menu.items[0].toolTip, "connection refused")
+        XCTAssertFalse(menu.items[0].isEnabled)
+        let attributes = menu.items[0].attributedTitle!.attributes(at: 0, effectiveRange: nil)
+        XCTAssertEqual(attributes[.foregroundColor] as? NSColor, NSColor.secondaryLabelColor)
+    }
+
+    /// Real data beats a stale failure.
+    func testChartRowWinsOverAStaleFailure() {
+        let state = connectedState()
+        state.recordUsageFailure("connection refused")
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+        let submenu = makeSubmenu(state)
+        let menu = submenu.menuItem.submenu!
+
+        submenu.menuNeedsUpdate(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].title, "CHART:24")
+    }
+
+    /// "Loaded but idle" is a flat 24-hour axis, deliberately distinct from the
+    /// loading row — and reopening replaces the row instead of appending.
+    func testReopeningReplacesTheRowAndAnIdleTimelineStillCharts() {
+        let state = connectedState()
+        let submenu = makeSubmenu(state)
+        let menu = submenu.menuItem.submenu!
+
+        submenu.menuNeedsUpdate(menu)
+        state.usageTimeline = []
+        submenu.menuNeedsUpdate(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].title, "CHART:24")
+    }
+
+    /// The real chart item, not the stub: `chartItemSize` is otherwise an
+    /// unverified constant, and a mismatch with the view's own size shows up as
+    /// a band of dead space under the chart.
+    func testRealChartItemIsSizedAndLabelled() {
+        let bars = ActivityHistogram.bars(from: [], now: Fixture.now)
+
+        let item = ActivityHistogram.chartMenuItem(bars: bars)
+
+        XCTAssertEqual(item.view?.frame.size, ActivityHistogram.chartItemSize)
+        XCTAssertEqual(item.view?.fittingSize, ActivityHistogram.chartItemSize,
+                       "the hosting view must fit its frame exactly, or the row grows dead space")
+        XCTAssertEqual(item.view?.accessibilityLabel(),
+                       "Activity over the last 24 hours: no tool calls.")
+        XCTAssertFalse(item.isEnabled)
+    }
+}
