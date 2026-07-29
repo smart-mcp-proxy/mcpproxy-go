@@ -1226,8 +1226,10 @@ const sessionRetentionLimit = 100
 
 // retentionDeleteBatch bounds how many victim keys retention holds at once.
 // Deleting cannot happen while a cursor is traversing the bucket, so victims
-// are collected in batches; this is what keeps peak memory independent of how
-// oversized the bucket is.
+// are collected in batches.
+//
+// This bounds the victim slice only. It does NOT bound peak memory for the
+// trim — bbolt's own transaction state dominates that. See trimSessionsToLimit.
 const retentionDeleteBatch = 512
 
 // CreateSession creates a new session record
@@ -1830,19 +1832,37 @@ func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int)
 // path that can put the bucket over the cap — CreateSession is not the only
 // one (see enforceSessionRetentionOnOpen).
 //
-// Memory is bounded in BOTH directions, which takes two passes:
+// It runs in two passes:
 //
 //	Pass 1 ranks, keeping only a heap of the best maxSessions records seen so
-//	far. Victims are counted but not collected — remembering them is what would
-//	make state O(n).
-//	Pass 2 deletes everything that is not a survivor, in bounded batches, and
-//	reads keys only. The expensive JSON decode therefore still happens exactly
-//	once per record across both passes.
+//	far. Victims are counted but not collected.
+//	Pass 2 deletes everything that is not a survivor, in batches of
+//	retentionDeleteBatch, and reads keys only. The expensive JSON decode
+//	therefore still happens exactly once per record across both passes.
 //
-// Peak state is O(maxSessions + retentionDeleteBatch) regardless of how
-// oversized the bucket is, which is the point: the pass that can see a bucket
-// far above the cap is the open-time repair of an old database, and that is
-// exactly when a spike proportional to the bucket would hurt.
+// What that bounds, and what it does NOT:
+//
+// Bounded — the ranking state (a heap of maxSessions, not the whole bucket)
+// and the explicit victim-key slice (one batch at a time, not every victim).
+//
+// NOT bounded — bbolt's transaction state. Every Bucket.Delete seeks to the
+// key and calls Cursor.node(), which materialises the containing leaf page as
+// an in-memory node cached in the bucket and retained until the transaction
+// spills at commit. A trim touching P pages therefore holds O(P) — in practice
+// O(n) — however the victim keys are batched. Measured on a 100k-record bucket:
+// ~90 MB held inside the transaction, of which the batched victim slice is
+// ~27 KB. Batching bounds a real term, but not the dominant one.
+//
+// This is accepted rather than fixed. Bounding it means committing between
+// batches, which would trade away the property that migration and retention
+// apply atomically under bbolt's exclusive file lock. The trade is not worth
+// making, because the oversized bucket it protects against has no known way to
+// occur: retention has run on every CreateSession since session tracking was
+// introduced and now runs on every open, so the bucket has never been
+// uncapped. The realistic "oversized" case is the off-by-one that let it settle
+// at 101 — not 10^5. If a path is ever found that can put a genuinely large
+// number of records in this bucket, this is the comment that has to change with
+// it.
 func trimSessionsToLimit(bucket *bbolt.Bucket, maxSessions int, logger *zap.SugaredLogger) error {
 	if maxSessions <= 0 {
 		return nil
