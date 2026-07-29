@@ -99,6 +99,29 @@ final class GlanceSelectionCollapseTests: XCTestCase {
         XCTAssertEqual(rows.map(\.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
     }
 
+    /// Five qualifying RECORDS are not five rows. A failed call emits a wrapper
+    /// and an upstream record under one request id, and rule 4 collapses the
+    /// pair — so the depth the rows need is measured in request groups, which is
+    /// what the guarantee has to be stated in. The depth tests above use unique
+    /// request ids and would never notice.
+    func testFiveQualifyingRecordsSharingRequestIDsProduceFewerRows() {
+        var page: [ActivityEntry] = []
+        for i in 0..<3 {
+            page.append(GlanceSelectionTests.entry(
+                id: "wrapper-\(i)", type: "internal_tool_call", tool: "call_tool_read",
+                status: "error", requestId: "req-\(i)"))
+            page.append(GlanceSelectionTests.entry(
+                id: "upstream-\(i)", type: "tool_call", server: "srv", tool: "tool\(i)",
+                status: "error", requestId: "req-\(i)"))
+        }
+
+        let rows = GlanceSelection.activityRows(from: page)
+
+        XCTAssertEqual(page.count, 6, "six qualifying records…")
+        XCTAssertEqual(rows.map(\.id), ["upstream-0", "upstream-1", "upstream-2"],
+                       "…but three request groups, so three rows")
+    }
+
     /// The honest residual, pinned so nobody has to rediscover it: the feed is
     /// exactly one page deep. Noise deeper than the page hides real calls, and
     /// the endpoint clamps `limit` at 100, so this is the floor of what a single

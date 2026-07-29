@@ -534,9 +534,14 @@ final class AppState: ObservableObject {
     /// 100k-record walk every 30 seconds. One deeper page buys most of the
     /// headroom for a fraction of the cost.
     ///
-    /// The residual is real and deliberately not papered over: five rows are
-    /// guaranteed only when five qualify within the newest 100 records matching
-    /// the type filter. `testRowsGoNoDeeperThanOnePage` pins that boundary.
+    /// The residual is real and deliberately not papered over. Stated exactly:
+    /// five rows are guaranteed only when five distinct REQUEST GROUPS survive
+    /// all four selection rules within the newest 100 records matching the type
+    /// filter. Groups, not records, because rule 4 collapses every record
+    /// sharing a `request_id` into one row — a failed call contributes a wrapper
+    /// and an upstream record, so five qualifying records can be as few as three
+    /// rows. `testRowsGoNoDeeperThanOnePage` pins the depth boundary and
+    /// `testFiveQualifyingRecordsSharingRequestIDsProduceFewerRows` the group one.
     static let glanceActivityPageSize = 100
 
     /// Active sessions requested per poll.
