@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import MCPProxy
 
 /// Shared anchors. All times are UTC: the backend aligns buckets with
@@ -499,4 +500,62 @@ final class UsageRefreshWiringTests: XCTestCase {
             XCTFail("the submenu must keep charting data it already has")
         }
     }
+}
+
+/// The chart's visual encoding. `GlanceSection.statusTint` states the rule these
+/// pin: colour is never the only channel separating two outcomes.
+@MainActor
+final class ActivityHistogramEncodingTests: XCTestCase {
+
+    /// Fraction of drawn pixels that read as saturated red, plus how much was
+    /// drawn at all. Returns nil where nothing can be rasterised, so a machine
+    /// that cannot draw skips instead of failing.
+    private func redShare(of bars: [HistogramBar]) -> Double? {
+        let host = NSHostingView(rootView: ActivityHistogramView(bars: bars, accessibilitySummary: ""))
+        host.frame = NSRect(origin: .zero, size: ActivityHistogram.chartItemSize)
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+        host.cacheDisplay(in: host.bounds, to: rep)
+
+        var drawn = 0
+        var red = 0
+        for x in stride(from: 0, to: Int(rep.size.width), by: 2) {
+            for y in stride(from: 0, to: Int(rep.size.height), by: 2) {
+                guard let colour = rep.colorAt(x: x, y: y), colour.alphaComponent > 0.5 else { continue }
+                drawn += 1
+                if colour.redComponent > 0.5,
+                   colour.greenComponent < 0.45,
+                   colour.blueComponent < 0.45 {
+                    red += 1
+                }
+            }
+        }
+        guard drawn > 100 else { return nil }
+        return Double(red) / Double(drawn)
+    }
+
+    /// Errors must be drawn in a visually distinct fill, and that fill must be
+    /// driven by the DATA — an axis or legend that is red regardless would pass
+    /// a "chart contains red" assertion while showing failures in the same
+    /// colour as successes.
+    func testErrorSegmentsAreDrawnDistinctlyFromSuccesses() throws {
+        let hour = Fixture.currentHour
+        guard let withErrors = redShare(of: [HistogramBar(hourStart: hour, succeeded: 7, errors: 3)]),
+              let withoutErrors = redShare(of: [HistogramBar(hourStart: hour, succeeded: 10, errors: 0)])
+        else {
+            throw XCTSkip("this machine cannot rasterise the chart")
+        }
+
+        XCTAssertGreaterThan(
+            withErrors, withoutErrors + 0.05,
+            "an hour with errors must paint materially more of the error colour than one without"
+        )
+    }
+
+    // A companion test — "the success fill does not follow the system accent"
+    // — was attempted and DROPPED: `NSColor.currentControlTint` is get-only and
+    // the accent is not settable from a test process, so there is no honest way
+    // to render under a red accent. The guarantee is instead structural: the
+    // view no longer references `Color.accentColor` at all. Verified by
+    // inspection, not by the suite.
 }

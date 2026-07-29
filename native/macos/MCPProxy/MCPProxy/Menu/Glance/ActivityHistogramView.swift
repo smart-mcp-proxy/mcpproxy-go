@@ -163,13 +163,27 @@ struct ActivityHistogramView: View {
                 .foregroundStyle(by: .value("Outcome", "Errors"))
             }
         }
+        // Colour is deliberately NOT the only thing separating the two series,
+        // matching the rule `GlanceSection.statusTint` states for the rows above.
+        //
+        // Three channels, so no single perceptual failure hides an error bar:
+        //   1. LIGHTNESS — a muted neutral against a saturated red survives
+        //      greyscale and every form of colour-vision deficiency; two hues of
+        //      similar luminance (the old accent-vs-red pair) do not.
+        //   2. HUE — neutral vs red, unambiguous for protan and deutan alike.
+        //   3. The visible LEGEND below, which names which series is which.
+        //
+        // `Color.accentColor` is gone on purpose: it follows the user's system
+        // accent, so anyone who had set theirs to red saw two near-identical
+        // segments. A fixed pair cannot be broken from System Settings.
+        //
+        // Neutral bars with red picked out also puts the visual emphasis on
+        // failures, which is the right emphasis for a monitoring chart.
         .chartForegroundStyleScale([
-            "Succeeded": Color.accentColor,
-            "Errors": Color.red
+            "Succeeded": Color.secondary,
+            "Errors": Color(nsColor: .systemRed)
         ])
-        // The legend would double the item's height for two self-evident
-        // colours; the accessibility label names both series instead.
-        .chartLegend(.hidden)
+        .chartLegend(.visible)
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 3))
         }
@@ -179,7 +193,10 @@ struct ActivityHistogramView: View {
                 AxisValueLabel(format: .dateTime.hour())
             }
         }
-        .frame(width: 260, height: 96)
+        // Height covers the plot AND the legend below it. Sized so the legend
+        // is additive: it must not buy its place by shrinking 24 bars that are
+        // already only ~10 pt wide apiece.
+        .frame(width: 260, height: 116)
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         // One label for the whole chart: VoiceOver reading 48 unlabelled bar
@@ -194,8 +211,9 @@ extension ActivityHistogram {
     /// Size of the hosted chart item, in points. Menu items do not auto-size a
     /// hosting view, so the frame is explicit — and it must match the view's
     /// own size, or the row grows a band of dead space. 260 + 2*14 = 288 wide,
-    /// 96 + 2*8 = 112 tall; measured `NSHostingView.fittingSize` agrees.
-    static let chartItemSize = NSSize(width: 288, height: 112)
+    /// 116 + 2*8 = 132 tall; measured `NSHostingView.fittingSize` agrees, and
+    /// `testRealChartItemIsSizedAndLabelled` keeps the two in step.
+    static let chartItemSize = NSSize(width: 288, height: 132)
 
     /// The submenu's single custom item: an `NSHostingView` wrapping the chart.
     ///
