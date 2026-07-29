@@ -146,6 +146,20 @@ final class AppState: ObservableObject {
     /// The most recent glance refresh failure, whichever feed produced it.
     private(set) var glanceError: String?
 
+    /// Consecutive failures of one feed before the block admits it is not
+    /// updating. At the 30-second poll cadence this is a minute and a half of
+    /// silence — long enough that a core restart passes unremarked, short
+    /// enough that a dead core is not presented as live for long.
+    static let glanceStaleFailureThreshold = 3
+
+    /// Whether any feed has been failing long enough to say so on screen.
+    ///
+    /// Published (and only flipped, never rewritten) because it changes what
+    /// the menu renders: every write here feeds the debounced
+    /// `objectWillChange → rebuildMenu()` sink, and a core that has been gone
+    /// for an hour must not rebuild the menu twice a minute forever.
+    @Published private(set) var glanceStale: Bool = false
+
     // MARK: Token metrics (from status response)
 
     @Published var tokenMetrics: TokenMetrics?
@@ -475,6 +489,7 @@ final class AppState: ObservableObject {
         guard coreState == .connected else { return }
         glanceFailureStreak[feed, default: 0] += 1
         if glanceError != message { glanceError = message }
+        refreshStaleMarker()
     }
 
     /// Clear one feed's failure record after a successful refresh. Only that
@@ -486,6 +501,14 @@ final class AppState: ObservableObject {
         if glanceFailureStreak.values.allSatisfy({ $0 == 0 }), glanceError != nil {
             glanceError = nil
         }
+        refreshStaleMarker()
+    }
+
+    /// Recompute `glanceStale` from the streaks.
+    @MainActor
+    private func refreshStaleMarker() {
+        let stale = glanceFailureStreak.values.contains { $0 >= AppState.glanceStaleFailureThreshold }
+        if glanceStale != stale { glanceStale = stale }
     }
 
     /// Records requested per glance activity poll — the server's maximum.
@@ -642,5 +665,6 @@ final class AppState: ObservableObject {
         if usageError != nil { usageError = nil }
         if !glanceFailureStreak.isEmpty { glanceFailureStreak = [:] }
         if glanceError != nil { glanceError = nil }
+        if glanceStale { glanceStale = false }
     }
 }

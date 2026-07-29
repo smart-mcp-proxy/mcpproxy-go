@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import MCPProxy
 
 /// The activity and sessions refreshes, on the failure path.
@@ -156,6 +157,90 @@ final class GlanceRefreshFailureTests: XCTestCase {
 
         XCTAssertNil(state.glanceError)
         XCTAssertTrue(state.glanceFailureStreak.isEmpty)
+    }
+
+    // MARK: - Persistent failure becomes visible
+
+    /// One blip must not accuse the core of being dead — the refresh retries in
+    /// 30 seconds and a single failed fetch is normal during a restart. Only a
+    /// failure that keeps happening earns the marker.
+    func testASingleFailureDoesNotMarkTheBlockStale() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.activityError = APIClientError.noData
+
+        await state.refreshGlanceActivity(from: source)
+
+        XCTAssertFalse(state.glanceStale)
+    }
+
+    /// …but a failure that keeps happening does. Without this the block renders
+    /// a dead core's last five calls as a live, ticking display: `refreshState`
+    /// bumps `activityVersion` unconditionally, so the menu keeps rebuilding
+    /// with a fresh clock even when every fetch in the cycle failed.
+    func testThePersistentFailureMarksTheBlockStale() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.activityError = APIClientError.noData
+
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            await state.refreshGlanceActivity(from: source)
+        }
+
+        XCTAssertTrue(state.glanceStale)
+        XCTAssertNotNil(state.glanceError)
+    }
+
+    /// A recovered feed clears the marker: the block must stop claiming to be
+    /// stale the moment it is not.
+    func testARecoveredFeedClearsTheStaleMarker() async throws {
+        let state = connectedState()
+        let source = StubSource()
+        source.activityError = APIClientError.noData
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            await state.refreshGlanceActivity(from: source)
+        }
+        XCTAssertTrue(state.glanceStale)
+
+        source.activityError = nil
+        source.entries = [try Self.entry(id: "a1")]
+        await state.refreshGlanceActivity(from: source)
+
+        XCTAssertFalse(state.glanceStale)
+    }
+
+    /// The marker is one @Published flip, not a write per failed cycle: every
+    /// write here feeds the debounced objectWillChange → rebuildMenu() sink, and
+    /// a core that has been gone for an hour must not rebuild the menu twice a
+    /// minute forever.
+    func testTheStaleMarkerPublishesOnceNotEveryCycle() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.activityError = APIClientError.noData
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            await state.refreshGlanceActivity(from: source)
+        }
+
+        var published = 0
+        let sink = state.$glanceStale.dropFirst().sink { _ in published += 1 }
+        await state.refreshGlanceActivity(from: source)
+        await state.refreshGlanceActivity(from: source)
+        sink.cancel()
+
+        XCTAssertEqual(published, 0)
+    }
+
+    func testDisconnectingClearsTheStaleMarker() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.activityError = APIClientError.noData
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            await state.refreshGlanceActivity(from: source)
+        }
+
+        state.coreState = .idle
+
+        XCTAssertFalse(state.glanceStale)
     }
 
     // MARK: - The success path still publishes

@@ -341,6 +341,56 @@ final class GlanceHistogramSubmenuTests: XCTestCase {
         XCTAssertEqual(attributes[.foregroundColor] as? NSColor, NSColor.secondaryLabelColor)
     }
 
+    /// The case that made the block confidently wrong: a timeline is loaded, so
+    /// `ActivityHistogram.state()` charts it and the recorded failure is never
+    /// rendered — every 30 seconds, forever. Real data still wins the chart row,
+    /// but a failure that keeps happening now gets a row of its own above it.
+    func testAPersistentFailureIsShownEvenWithALoadedTimeline() {
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            state.recordGlanceFailure(.activity, "connection refused")
+        }
+        let menu = histogramItem(makeSection(), state).submenu!
+
+        open(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 2)
+        XCTAssertEqual(menu.items[0].title, "Not updating")
+        XCTAssertEqual(menu.items[0].toolTip, "connection refused")
+        XCTAssertFalse(menu.items[0].isEnabled)
+        XCTAssertEqual(menu.items[1].title, "CHART:24", "the data it does have is still charted")
+    }
+
+    /// A failure that has not persisted stays invisible — one blip during a
+    /// core restart is not worth a row.
+    func testASingleFailureAddsNoRow() {
+        let state = connectedState()
+        state.usageTimeline = [Fixture.bucket(start: Fixture.currentHour, calls: 3, errors: 1)]
+        state.recordGlanceFailure(.activity, "connection refused")
+        let menu = histogramItem(makeSection(), state).submenu!
+
+        open(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].title, "CHART:24")
+    }
+
+    /// The usage feed's own failure row already says it; a second row saying
+    /// the same thing would just be noise.
+    func testTheUnavailableRowIsNotDoubledByTheStaleMarker() {
+        let state = connectedState()
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            state.recordUsageFailure("connection refused")
+        }
+        let menu = histogramItem(makeSection(), state).submenu!
+
+        open(menu)
+
+        XCTAssertEqual(menu.numberOfItems, 1)
+        XCTAssertEqual(menu.items[0].title, "Usage unavailable")
+    }
+
     /// Real data beats a stale failure.
     func testChartRowWinsOverAStaleFailure() {
         let state = connectedState()

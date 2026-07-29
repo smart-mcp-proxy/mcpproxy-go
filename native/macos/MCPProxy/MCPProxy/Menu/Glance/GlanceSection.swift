@@ -432,6 +432,15 @@ final class GlanceSection {
 
     // MARK: Header
 
+    /// The header line, plus an admission when the numbers in it have stopped
+    /// arriving.
+    ///
+    /// Without the marker a dead core is indistinguishable from a healthy idle
+    /// one, and worse than frozen: the refresh loop bumps `activityVersion`
+    /// whether or not any fetch succeeded, so the rows re-render with a fresh
+    /// clock every 30 seconds and the block ticks along presenting a previous
+    /// core's numbers as live. A frozen menu is a hint that something is wrong;
+    /// a ticking one is not.
     private func summaryTitle(for state: AppState) -> String {
         var parts: [String] = []
         if let calls = state.callsThisHour {
@@ -439,6 +448,7 @@ final class GlanceSection {
         }
         let clients = GlanceSelection.activeClients(from: state.glanceSessions, limit: Int.max).count
         parts.append(clients == 1 ? "1 client" : "\(clients) clients")
+        if state.glanceStale { parts.append("not updating") }
         return parts.joined(separator: " · ")
     }
 

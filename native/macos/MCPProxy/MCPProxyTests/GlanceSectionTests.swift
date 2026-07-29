@@ -40,6 +40,37 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(section.items(for: state, now: Self.now).first?.title, "1 client")
     }
 
+    /// When the feeds stop arriving the header says so. The block is otherwise
+    /// indistinguishable from a healthy one: the rows keep re-rendering with a
+    /// fresh clock every 30 seconds, so a dead core presents as a live, ticking
+    /// display of numbers that stopped being true minutes ago.
+    func testHeaderAdmitsWhenTheFeedsHaveStoppedArriving() {
+        let state = Self.busyState()
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            state.recordGlanceFailure(.activity, "connection refused")
+        }
+        let section = Self.makeSection()
+
+        XCTAssertEqual(section.items(for: state, now: Self.now).first?.title,
+                       "12 calls this hour · 1 client · not updating")
+    }
+
+    /// …and stops saying so once the feeds recover, without a rebuild: the
+    /// header is one of the rows `updateInPlace` rewrites.
+    func testTheHeaderDropsTheMarkerInPlaceWhenTheFeedsRecover() {
+        let state = Self.busyState()
+        for _ in 0..<AppState.glanceStaleFailureThreshold {
+            state.recordGlanceFailure(.activity, "connection refused")
+        }
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+
+        state.clearGlanceFailure(.activity)
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[0].title, "12 calls this hour · 1 client")
+    }
+
     // MARK: - Recent section
 
     func testRecentSectionRendersQualifyingRows() {

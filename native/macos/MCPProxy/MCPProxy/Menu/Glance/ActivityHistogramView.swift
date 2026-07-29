@@ -278,10 +278,33 @@ final class HistogramSubmenuDelegate: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        menu.addItem(currentItem())
+        for item in currentItems() { menu.addItem(item) }
     }
 
     // MARK: Rows
+
+    /// The rows the submenu shows for the current `AppState`: the data row,
+    /// preceded by a stale marker when the feeds have stopped arriving.
+    ///
+    /// `ActivityHistogram.state()` charts a loaded timeline in preference to a
+    /// recorded failure, which is right for a blip and wrong for a core that is
+    /// never coming back — the failure is then recorded every 30 seconds and
+    /// rendered never. The marker is what makes it visible without taking the
+    /// real (if stale) data off the screen.
+    ///
+    /// It is suppressed when the data row is itself the failure row, which
+    /// already says the same thing.
+    func currentItems() -> [NSMenuItem] {
+        let item = currentItem()
+        guard appState.glanceStale, item.title != Self.unavailableTitle else { return [item] }
+
+        let marker = Self.mutedItem("Not updating")
+        marker.toolTip = appState.glanceError
+        return [marker, item]
+    }
+
+    /// Title of the row shown when the usage fetch failed with nothing loaded.
+    private static let unavailableTitle = "Usage unavailable"
 
     /// The single row the submenu shows for the current `AppState`.
     ///
@@ -298,7 +321,7 @@ final class HistogramSubmenuDelegate: NSObject, NSMenuDelegate {
         case .loading:
             return Self.mutedItem("Loading…")
         case .failed(let message):
-            let item = Self.mutedItem("Usage unavailable")
+            let item = Self.mutedItem(Self.unavailableTitle)
             item.toolTip = message
             return item
         case .loaded(let bars):
