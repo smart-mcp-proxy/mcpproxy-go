@@ -42,8 +42,10 @@ Changes to existing files:
 - `MCPProxyApp.swift` — `rebuildMenu()` inserts `glance.items(for: appState)` after the status header, before "Needs Attention", plus the histogram submenu item. Roughly five lines; no new layout code in an already 1120-line file.
 - `CoreProcessManager.swift:683` — replace the dead `case "activity"` with handlers for `activity.tool_call.completed` and `activity.internal_tool_call.completed` that build a row from the event payload and prepend it, with no REST call. `activity.tool_call.started` is deliberately ignored (the core does not persist started events either — `activity_service.go:418`).
 - `APIClient.swift:341,353` — decode `last_activity` (the field the API emits) instead of `last_active`.
-- `APIClient.swift` — add a usage-aggregate call and its response model; widen `recentActivity` to accept a type filter and a larger limit.
-- `AppState.swift` — add `@Published var usageTimeline: [UsageBucket]` and `lastHourCalls: Int` alongside the existing `recentActivity` / `recentSessions`.
+- `APIClient.swift` — add a usage-aggregate call and its response model, and a *separate* glance-activity call carrying the type filter.
+- `AppState.swift` — add `@Published var glanceActivity: [ActivityEntry]`, `usageTimeline: [UsageBucket]?` and `callsThisHour: Int?` alongside the existing `recentActivity` / `recentSessions`. The usage fields are optional so that "not loaded yet" is distinguishable from "loaded, and the proxy was idle" — a valid usage response can legitimately carry an empty timeline.
+
+`AppState.recentActivity` is **not** narrowed. The native Dashboard deliberately renders the full activity log from that property — security scans, quarantine changes, OAuth events — precisely so a quiet proxy still shows something (`Views/DashboardView.swift:572`). Filtering it for the tray's benefit would silently gut that view, so the glance section gets its own feed instead.
 
 ## Layout
 
@@ -78,16 +80,15 @@ Row anatomy: status icon (shape *and* colour, never colour alone), `server:tool`
 
 ### Activity
 
-Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_tool_call.completed`, the tray builds an entry from the event payload and prepends it — no GET per event. The existing 30-second poll reconciles that optimistic list with the server's canonical records (storage-assigned ids and the asynchronously-computed sensitive-data flags), narrowed to `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=25`.
+Live rows come from SSE. On `activity.tool_call.completed` / `activity.internal_tool_call.completed`, the tray builds an entry from the event payload and prepends it — no GET per event. A dedicated poll every 30 seconds reconciles that optimistic list with the server's canonical records (storage-assigned ids and the asynchronously-computed sensitive-data flags): `GET /api/v1/activity?type=tool_call,internal_tool_call&limit=25`. This is a fourth call on the existing refresh cycle rather than a reuse of the Dashboard's feed, for the reason given above.
 
-**Which records qualify** (implemented in `GlanceSelection`, applied identically to polled records and SSE payloads):
+**Which records qualify** — evaluated in this order, in `GlanceSelection`, identically for polled records and SSE payloads:
 
-- `type == "tool_call"` — always. These are the real upstream calls.
-- `type == "internal_tool_call"` — when the tool is `retrieve_tools`, `code_execution`, or `describe_tool`, **or when the record's status is not `success`**.
+1. **Exclude** any record whose tool is a management built-in (`upstream_servers`, `quarantine_security`), regardless of status. These are proxy administration — what "exclude internal mcpproxy events" asks for. This rule wins over everything below.
+2. **Include** every `type == "tool_call"` record. These are the real upstream calls.
+3. **Include** a remaining `type == "internal_tool_call"` record when its tool is `retrieve_tools`, `code_execution`, or `describe_tool`, **or** when its status is not `success`.
 
-The second half of that rule matters more than it looks. The backend deliberately keeps *failed* `call_tool_*` wrapper records while suppressing successful ones, precisely because a failed wrapper has no corresponding upstream `tool_call` record (`internal/storage/activity_models.go:255`). A naive built-in allowlist would therefore discard the only trace of a call that never reached its server — hiding exactly the failures this section exists to surface.
-
-Management built-ins (`upstream_servers`, `quarantine_security`) are excluded in both states: they are proxy administration, which is what "exclude internal mcpproxy events" asks for.
+Rule 3's second clause matters more than it looks. The backend deliberately keeps *failed* `call_tool_*` wrapper records while suppressing successful ones, precisely because a failed wrapper has no corresponding upstream `tool_call` record (`internal/storage/activity_models.go:255`). A plain built-in allowlist would discard the only trace of a call that never reached its server — hiding exactly the failures this section exists to surface. Rule 1 is stated first because management built-ins fail like any other internal call, and their failures are still administration noise.
 
 The poll fetches 25 records and the section shows the first five that qualify, so unrelated records cannot starve the list the way a 10-record page could. If fewer than five qualify, it shows what it has.
 
@@ -95,7 +96,9 @@ This selection is presentation policy, not tray-held state, so it stays within t
 
 ### Header summary and histogram
 
-Both come from one call on the existing 30-second background loop: `GET /api/v1/activity/usage?window=24h&top=1`. It is served from an in-memory snapshot behind a short TTL cache and never scans the log; `top=1` trims the per-tool payload the tray does not use. The header's "calls in the last hour" is the most recent bucket; the histogram is the same timeline.
+Both come from one call on the existing 30-second background loop: `GET /api/v1/activity/usage?window=24h&top=1`. It is served from an in-memory snapshot behind a short TTL cache and never scans the log; `top=1` trims the per-tool payload the tray does not use.
+
+The header reads **"calls this hour"**, not "in the last hour", and that wording is load-bearing. Buckets are aligned to the UTC hour (`rec.Timestamp.UTC().Truncate(time.Hour)`, `internal/runtime/usage_aggregate.go:229`), so they are neither a rolling 60-minute window nor guaranteed to be dense — the response omits hours with no activity. The header therefore selects the bucket whose start equals the current UTC hour and shows zero when that bucket is absent. Taking "the most recent bucket" instead would display a count from hours ago as if it were current.
 
 An earlier draft used `GET /api/v1/activity/summary?period=1h` here. That was wrong on both counts: the handler sets `Limit = 0` and loads every matching record (`internal/httpapi/activity.go:553`) — a log scan, not a pre-aggregate — and it counts *all* activity types, so labelling its total "calls" would be false.
 
@@ -105,11 +108,17 @@ Chart semantics: a bucket's `calls` **includes** its `errors`, so the stacked ba
 
 ### Clients
 
-`GET /api/v1/sessions?limit=25` on the existing poll, filtered client-side to `status == "active"` (the API has no status parameter), showing up to five. The larger page matters: sessions are returned most-recently-active first regardless of status, so a burst of closed sessions could otherwise crowd out an older but still-active client. Documented caveat: per spec 082, handshake-only sessions are not persisted, so an idle background agent does not appear until its first call.
+`GET /api/v1/sessions?limit=100` (the API maximum) on the existing poll, filtered client-side to `status == "active"`, showing up to five.
+
+The page size is deliberately the maximum rather than a tidy 25. Storage walks sessions newest-first **by start time** and truncates to `limit` (`internal/storage/manager.go:1355`); only that already-truncated subset is then sorted by last activity (`internal/runtime/runtime.go:1340`). A long-lived session that started days ago but is active right now therefore falls outside any small page — the tray would show "no connected clients" while a client is actively calling tools. Session records are compact scalars, so a 100-record page every 30 seconds is an acceptable cost for correctness. If that payload ever becomes a concern, the right fix is a server-side `status` filter on `/api/v1/sessions`, recorded here as a follow-up rather than smuggled into this work.
+
+Documented caveat: per spec 082, handshake-only sessions are not persisted, so an idle background agent does not appear until its first call.
 
 ### Clicks
 
-An activity row and a client row both open the Web UI activity log filtered by that record's **session** — `/activity?session=<id>`, the query parameter the Activity view already reads on mount (`frontend/src/views/Activity.vue:1333`). Filtering by `request_id` was considered and rejected: the REST API supports it but the Web UI does not read such a route parameter, so it would have required a frontend change that this design explicitly excludes.
+An activity row and a client row both open the Web UI activity log filtered by that record's **session** — `/ui/activity?session=<id>`, the query parameter the Activity view already reads on mount (`frontend/src/views/Activity.vue:1333`). Filtering by `request_id` was considered and rejected: the REST API supports it but the Web UI does not read such a route parameter, so it would have required a frontend change that this design excludes.
+
+`GlanceSection` does not build these URLs itself. It cannot: it is handed only `AppState`, whose `webUIBaseURL` is scheme/host/port by design, and a first-time browser session needs the API key appended — the existing `openWebUI()` action fetches `currentAPIKey` from the core manager for exactly this reason (`MCPProxyApp.swift:985`). Glance rows therefore carry a target/action pair pointing back at the app delegate, which opens the authenticated URL through the same path as today's menu items. Reusing that path also keeps the key handling in one place rather than duplicating it in a new component.
 
 ## States
 
@@ -118,7 +127,8 @@ An activity row and a client row both open the Web UI activity log filtered by t
 | Core stopped or disconnected | The whole glance block is hidden. Stale numbers presented as current are worse than nothing; the menu already shows the error and a Retry item. |
 | No activity yet | One muted row, "No tool calls yet" — not an empty section with a header. |
 | No active clients | One muted row, "No connected clients". |
-| Usage data not loaded yet | The header omits the call count (clients only); the histogram submenu shows a muted "Loading…" row. |
+| Usage data not loaded yet (`callsThisHour == nil`) | The header omits the call count (clients only); the histogram submenu shows a muted "Loading…" row. |
+| Usage loaded but the proxy was idle | The header shows "0 calls this hour" and the chart shows a flat 24-hour axis — deliberately distinct from the loading state above, which is why these fields are optional rather than defaulting to zero. |
 | Long tool names | Middle-truncated, keeping the server prefix and the tail of the tool name; full text in the tooltip. |
 
 ## Testing
@@ -128,7 +138,9 @@ Swift unit tests in the existing `swift-test` CI job. `GlanceSelection` and `Gla
 - **Regression, SSE naming**: `activity.tool_call.completed` reaches the activity handler (fails today).
 - **Regression, no amplification**: handling one completed event issues zero REST requests.
 - **Regression, session decoding**: `last_activity` decodes into the model (nil today).
-- **Selection**: upstream `tool_call` always included; the three discovery/execution built-ins included; management built-ins excluded; **a failed `call_tool_write` record is included** (the finding above, pinned by a test); five qualifying records selected from a 25-record page containing noise.
+- **Selection**: upstream `tool_call` always included; the three discovery/execution built-ins included; **a failed `call_tool_write` record is included** (the finding above, pinned by a test); **a failed `upstream_servers` record is still excluded** (rule 1 beats rule 3); five qualifying records selected from a 25-record page containing noise.
+- **Header bucket**: with a sparse timeline whose newest bucket is three hours old, the header shows zero — not that bucket's count.
+- **Dashboard non-regression**: `AppState.recentActivity` still carries non-tool-call types after the glance feed is added.
 - **Chart data**: `calls - errors` and `errors` segments never double-count; missing hours synthesised as zero across a 24-hour axis.
 - Formatting: relative time, label composition, middle truncation.
 - Visibility: block hidden when the core is stopped; empty-state rows.
@@ -138,11 +150,16 @@ Visual verification by screenshotting the menu with `mcpproxy-ui-test` per `docs
 
 ## Scope note
 
-This is not "rendering plus two one-line fixes". The honest inventory: a new menu component (four files), a rewritten SSE activity path that consumes payloads instead of refetching, two field-level bug fixes, a new API client method plus response model for the usage aggregate, two new `AppState` fields, a data-source protocol extraction for testability, deletion of a dead 511-line file, and the test suite above.
+This is not "rendering plus two one-line fixes". The honest inventory: a new menu component (four files), a rewritten SSE activity path that consumes payloads instead of refetching, two field-level bug fixes, two new API client methods plus response models (usage aggregate, filtered glance activity), three new `AppState` fields, a data-source protocol extraction for testability, deletion of a dead 511-line file, and the test suite above.
 
 ## Non-goals
 
 Real token histogram (separate roadmap item: accumulate `TokenMetrics` into hourly buckets in `internal/runtime/usage_aggregate.go`, extend the contract, regenerate OAS). Sensitive-data badges on activity rows. Go/systray parity. Any Web UI change. Rewriting the menu rebuild model into a diffing implementation — it fixes a problem nobody reported, at the cost of risk in the one UI every user sees.
+
+## Follow-ups
+
+- Server-side `status` filter on `/api/v1/sessions`, which would let the tray stop fetching a 100-session page to find the active ones.
+- Real token histogram (see Non-goals).
 
 ## Follow-ups this unblocks
 
