@@ -159,6 +159,43 @@ final class GlanceReconnectGenerationTests: XCTestCase {
         XCTAssertNil(state.usageError)
     }
 
+    // MARK: - The SSE path
+
+    /// An SSE row belongs to the stream that delivered it, and that stream
+    /// belongs to one connection. The publish happens a MainActor hop after the
+    /// event is read, and executors guarantee no ordering across that hop
+    /// against the reconnect work — so an event from the previous core can
+    /// resume after `.connected` has been restored and prepend a dead core's
+    /// call to the new core's feed.
+    ///
+    /// The disconnected case was already covered; this is the one that needs a
+    /// generation, because `.connected` is true again by the time it publishes.
+    func testAnSSERowFromThePreviousCoreDoesNotPublish() throws {
+        let state = connectedState()
+        let generation = state.connectionGeneration
+
+        // The core dies and comes back while the event is in flight.
+        state.coreState = .reconnecting(attempt: 1)
+        state.coreState = .connected
+
+        state.prependGlanceActivity(try Self.entry(id: "from-the-dead-core"),
+                                    generation: generation)
+
+        XCTAssertTrue(state.glanceActivity.isEmpty,
+                      "the previous core's SSE row published into the reconnected core")
+    }
+
+    /// Positive control for the same call: an event from the live connection
+    /// still reaches the feed.
+    func testAnSSERowFromTheLiveConnectionPublishes() throws {
+        let state = connectedState()
+
+        state.prependGlanceActivity(try Self.entry(id: "live"),
+                                    generation: state.connectionGeneration)
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["live"])
+    }
+
     /// Positive control: with no reconnection the very same fetches publish, so
     /// the tests above are pinning the reconnect, not a broken refresh path.
     func testTheSameFetchesPublishWhenTheConnectionHolds() async throws {

@@ -605,10 +605,16 @@ actor CoreProcessManager {
 
         sseTask?.cancel()
         sseTask = Task { [weak self] in
+            // Capture the connection generation HERE, where the stream opens: a
+            // stream belongs to exactly one connection, and every event it
+            // carries belongs to that one. Reading it at event arrival instead
+            // would capture whatever generation is current by then — which,
+            // after a reconnect, is the new one, and the guard would pass.
+            guard let generation = await self?.currentConnectionGeneration() else { return }
             let stream = await sseClient.connect()
             for await event in stream {
                 guard !Task.isCancelled else { break }
-                await self?.handleSSEEvent(event)
+                await self?.handleSSEEvent(event, generation: generation)
             }
             // Stream ended -- trigger reconnection if still connected
             guard !Task.isCancelled else { return }
@@ -622,7 +628,15 @@ actor CoreProcessManager {
     /// We must NOT re-fetch the full server list on each one — that would
     /// trigger @Published updates which cause MenuBarExtra to duplicate items.
     /// Instead, only update lightweight counters from the inline status data.
-    private func handleSSEEvent(_ event: SSEEvent) async {
+    /// The generation of the connection the tray is on right now.
+    private func currentConnectionGeneration() async -> Int {
+        await MainActor.run { appState.connectionGeneration }
+    }
+
+    /// - Parameter generation: the connection whose stream delivered this event,
+    ///   captured when that stream was opened. Glance publishes are rejected if
+    ///   the tray has since reconnected.
+    private func handleSSEEvent(_ event: SSEEvent, generation: Int) async {
         switch event.event {
         case "status":
             // Status events contain inline stats. Spec 048: any change that
@@ -696,7 +710,7 @@ actor CoreProcessManager {
                   let entry = GlanceEvent.adapt(eventName: event.event, data: data) else {
                 break
             }
-            await appState.prependGlanceActivity(entry)
+            await appState.prependGlanceActivity(entry, generation: generation)
 
         case "active_profile.changed":
             // Profiles v2 T5: the server-level default active profile was switched

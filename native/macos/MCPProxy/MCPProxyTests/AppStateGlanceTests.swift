@@ -180,7 +180,8 @@ final class AppStateGlanceTests: XCTestCase {
         // An SSE event lands while the next poll is suspended…
         state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
                                                       request: "r-9",
-                                                      timestamp: "2026-07-29T11:00:30Z"))
+                                                      timestamp: "2026-07-29T11:00:30Z"),
+                                    generation: state.connectionGeneration)
         // …and the poll's response, which predates it, resolves now.
         state.updateGlanceActivity(page)
 
@@ -200,7 +201,8 @@ final class AppStateGlanceTests: XCTestCase {
         state.coreState = .connected
         state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
                                                       request: "r-9",
-                                                      timestamp: "2026-07-29T11:00:30.500Z"))
+                                                      timestamp: "2026-07-29T11:00:30.500Z"),
+                                    generation: state.connectionGeneration)
 
         state.updateGlanceActivity([
             try Self.activity(id: "01JQ-STORAGE-ULID", type: "tool_call", request: "r-9",
@@ -241,7 +243,8 @@ final class AppStateGlanceTests: XCTestCase {
         state.coreState = .connected
         state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
                                                       request: "r-9",
-                                                      timestamp: "2026-07-29T11:00:30Z"))
+                                                      timestamp: "2026-07-29T11:00:30Z"),
+                                    generation: state.connectionGeneration)
 
         state.updateGlanceActivity([])
 
@@ -294,7 +297,8 @@ final class AppStateGlanceTests: XCTestCase {
         state.coreState = .connected
         state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
                                                       request: "r-9",
-                                                      timestamp: "2026-07-29T11:00:30Z"))
+                                                      timestamp: "2026-07-29T11:00:30Z"),
+                                    generation: state.connectionGeneration)
         state.updateGlanceActivity([
             try Self.activity(id: "01JQ-ULID", type: "tool_call", request: "r-9",
                               timestamp: "2026-07-29T11:00:30Z")
@@ -314,7 +318,8 @@ final class AppStateGlanceTests: XCTestCase {
         state.coreState = .connected
         state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
                                                       request: "r-9",
-                                                      timestamp: "2026-07-29T11:00:30Z"))
+                                                      timestamp: "2026-07-29T11:00:30Z"),
+                                    generation: state.connectionGeneration)
 
         state.updateGlanceActivity([
             try Self.activity(id: "a1", type: "tool_call", request: "r-1", timestamp: "not a date")
@@ -331,7 +336,8 @@ final class AppStateGlanceTests: XCTestCase {
         for i in 0..<10 {
             state.prependGlanceActivity(try Self.activity(id: "live-\(i)", type: "tool_call",
                                                           request: "live-\(i)",
-                                                          timestamp: "2026-07-29T12:00:00Z"))
+                                                          timestamp: "2026-07-29T12:00:00Z"),
+                                        generation: state.connectionGeneration)
         }
         let page = try (0..<AppState.glanceActivityCap).map {
             try Self.activity(id: "p\($0)", type: "tool_call", request: "p\($0)",

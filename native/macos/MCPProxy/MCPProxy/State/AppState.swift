@@ -653,10 +653,14 @@ final class AppState: ObservableObject {
     /// Bounded so a busy agent cannot grow the feed without limit; the 30s
     /// reconciling poll replaces the list wholesale with canonical records.
     ///
-    /// Guarded on `coreState == .connected` for the same reason as the three
-    /// `update*` helpers: SSE teardown is asynchronous, so an event already in
-    /// flight when the core goes away would otherwise write a dead core's row
-    /// back over state `clearGlanceState()` had just emptied.
+    /// Guarded on the connection GENERATION, not merely on `.connected`, for the
+    /// same reason the three fetches are: SSE teardown is asynchronous, the
+    /// publish happens a MainActor hop after the event is read, and executors
+    /// promise no ordering between that hop and the reconnect work. An event
+    /// from the previous core can therefore resume after `.connected` has been
+    /// restored — `.connected` alone would wave it through and prepend a dead
+    /// core's call to the new core's feed. The caller captures `generation`
+    /// where the stream is opened, since a stream belongs to one connection.
     ///
     /// Deliberately without the equality guard `updateGlanceSessions(_:)`
     /// carries — a prepend is by definition a change, and that guard exists only
@@ -664,8 +668,8 @@ final class AppState: ObservableObject {
     /// guard compares whole `MCPSession` values, not ids: the Clients rows
     /// render a live per-session call count, which an id-only comparison froze.)
     @MainActor
-    func prependGlanceActivity(_ entry: ActivityEntry) {
-        guard coreState == .connected else { return }
+    func prependGlanceActivity(_ entry: ActivityEntry, generation: Int) {
+        guard isCurrentConnection(generation) else { return }
         // Unconfirmed until a poll carries it back: this is the only row the
         // merge is allowed to keep against a page that omits it.
         unconfirmedLiveKeys.insert(GlanceSelection.recordKey(for: entry))

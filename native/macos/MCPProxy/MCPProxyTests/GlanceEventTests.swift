@@ -171,7 +171,7 @@ final class GlanceEventTests: XCTestCase {
                 eventName: "activity.tool_call.completed",
                 data: Data(json.utf8)
             ))
-            state.prependGlanceActivity(entry)
+            state.prependGlanceActivity(entry, generation: state.connectionGeneration)
         }
 
         XCTAssertEqual(state.glanceActivity.count, AppState.glanceActivityCap)
@@ -198,7 +198,7 @@ final class GlanceEventTests: XCTestCase {
         // `CoreProcessManager.shutdown()` transitions here before it cancels
         // `refreshTask`, so this is the state a late event actually lands in.
         state.coreState = .shuttingDown
-        state.prependGlanceActivity(entry)
+        state.prependGlanceActivity(entry, generation: state.connectionGeneration)
 
         XCTAssertTrue(state.glanceActivity.isEmpty,
                       "a row arriving after the core dropped must not repopulate the cleared feed")
