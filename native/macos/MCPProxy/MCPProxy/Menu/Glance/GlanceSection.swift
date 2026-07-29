@@ -31,6 +31,11 @@ final class GlanceSection {
     private weak var clickTarget: AnyObject?
     private let clickAction: Selector
 
+    /// Builds the view for the histogram submenu's single custom item. While
+    /// this is nil the submenu falls back to a plain text line, which keeps the
+    /// component usable and testable without SwiftUI Charts.
+    var histogramViewBuilder: (([UsageBucket]) -> NSView)?
+
     // MARK: Configuration
 
     /// Character budget for a row label before middle truncation kicks in.
@@ -40,6 +45,11 @@ final class GlanceSection {
 
     private var summaryItem: NSMenuItem?
     private var activityRows: [NSMenuItem] = []
+    private var clientRows: [NSMenuItem] = []
+    /// Held only so ownership of the submenu is explicit; `updateInPlace`
+    /// deliberately never touches it (re-creating it would disturb an open
+    /// submenu), so nothing reads this back.
+    private var histogramItem: NSMenuItem?
 
     init(target: AnyObject?, action: Selector) {
         self.clickTarget = target
@@ -61,6 +71,8 @@ final class GlanceSection {
     func items(for state: AppState, now: Date = Date()) -> [NSMenuItem] {
         summaryItem = nil
         activityRows = []
+        clientRows = []
+        histogramItem = nil
         guard isVisible(for: state) else { return [] }
 
         var items: [NSMenuItem] = []
@@ -88,6 +100,26 @@ final class GlanceSection {
         openActivity.image = NSImage(systemSymbolName: "list.bullet.rectangle",
                                      accessibilityDescription: "activity log")
         items.append(openActivity)
+        items.append(.separator())
+
+        items.append(disabledItem(titled: "Clients"))
+        let clients = GlanceSelection.activeClients(from: state.glanceSessions)
+        if clients.isEmpty {
+            items.append(disabledItem(titled: "No connected clients"))
+        } else {
+            for session in clients {
+                let row = actionableItem()
+                apply(session, to: row, now: now)
+                clientRows.append(row)
+                items.append(row)
+            }
+        }
+        items.append(.separator())
+
+        let histogram = makeHistogramItem(for: state)
+        histogramItem = histogram
+        items.append(histogram)
+        items.append(.separator())
 
         return items
     }
@@ -133,6 +165,58 @@ final class GlanceSection {
         let head = trimmed.components(separatedBy: CharacterSet(charactersIn: ".:\n")).first ?? trimmed
         let clause = head.trimmingCharacters(in: .whitespaces)
         return clause.isEmpty ? trimmed : clause
+    }
+
+    /// Rewrite a client row so it fully describes `session`.
+    private func apply(_ session: APIClient.MCPSession, to item: NSMenuItem, now: Date) {
+        let name = session.clientName.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown client"
+        let calls = session.toolCallCount ?? 0
+        let callText = calls == 1 ? "1 call" : "\(calls) calls"
+        let age = session.lastActivity.map { GlanceFormatting.relativeTime($0, now: now) }
+
+        if let age {
+            item.title = "\(name) — \(callText) · \(age)"
+            item.setAccessibilityLabel("\(name), \(callText), last active \(age) ago")
+        } else {
+            item.title = "\(name) — \(callText)"
+            item.setAccessibilityLabel("\(name), \(callText)")
+        }
+
+        item.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "connected")
+
+        if let version = session.clientVersion, !version.isEmpty {
+            item.toolTip = "\(name) \(version)"
+        } else {
+            item.toolTip = name
+        }
+
+        item.representedObject = session.id
+    }
+
+    // MARK: Histogram
+
+    private func makeHistogramItem(for state: AppState) -> NSMenuItem {
+        let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+
+        if let timeline = state.usageTimeline {
+            if let builder = histogramViewBuilder {
+                let chart = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                chart.view = builder(timeline)
+                submenu.addItem(chart)
+            } else {
+                let calls = timeline.reduce(0) { $0 + $1.calls }
+                let errors = timeline.reduce(0) { $0 + $1.errors }
+                let callText = calls == 1 ? "1 call" : "\(calls) calls"
+                let errorText = errors == 1 ? "1 error" : "\(errors) errors"
+                submenu.addItem(disabledItem(titled: "\(callText) · \(errorText) (24h)"))
+            }
+        } else {
+            submenu.addItem(disabledItem(titled: "Loading…"))
+        }
+
+        item.submenu = submenu
+        return item
     }
 
     // MARK: Header

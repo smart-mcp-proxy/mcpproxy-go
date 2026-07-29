@@ -93,6 +93,75 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertNil(GlanceSection.firstClause(of: nil))
     }
 
+    // MARK: - Clients section and histogram
+
+    func testClientRowCarriesSessionIdentity() {
+        let section = Self.makeSection()
+        let client = section.items(for: Self.busyState(), now: Self.now)[8]
+        XCTAssertEqual(client.title, "Claude Code — 8 calls · 1m")
+        XCTAssertEqual(client.representedObject as? String, "sess-a")
+        XCTAssertEqual(client.toolTip, "Claude Code 2.1.0")
+        XCTAssertEqual(client.accessibilityLabel(), "Claude Code, 8 calls, last active 1m ago")
+    }
+
+    func testNoClientsShowsOneMutedRow() {
+        let state = Self.busyState()
+        state.glanceSessions = []
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[8]
+        XCTAssertEqual(row.title, "No connected clients")
+        XCTAssertFalse(row.isEnabled)
+    }
+
+    func testHistogramSubmenuShowsLoadingUntilUsageArrives() {
+        let section = Self.makeSection()
+        let histogram = section.items(for: Self.busyState(), now: Self.now)[10]
+        XCTAssertEqual(histogram.title, "Activity (24h)")
+        XCTAssertEqual(histogram.submenu?.item(at: 0)?.title, "Loading…")
+    }
+
+    func testHistogramSubmenuUsesInjectedViewWhenAvailable() {
+        let state = Self.busyState()
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
+        let section = Self.makeSection()
+        section.histogramViewBuilder = { buckets in
+            let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 90))
+            view.setAccessibilityLabel("\(buckets.count) buckets")
+            return view
+        }
+        let chart = section.items(for: state, now: Self.now)[10].submenu?.item(at: 0)
+        XCTAssertNotNil(chart?.view)
+        XCTAssertEqual(chart?.view?.accessibilityLabel(), "1 buckets")
+    }
+
+    func testHistogramSubmenuFallsBackToTextWithoutABuilder() {
+        let state = Self.busyState()
+        state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        XCTAssertEqual(items[10].submenu?.item(at: 0)?.title, "12 calls · 1 error (24h)")
+    }
+
+    func testBlockLayoutOrder() {
+        let section = Self.makeSection()
+        let items = section.items(for: Self.busyState(), now: Self.now)
+        let titles = items.map { $0.isSeparatorItem ? "—" : $0.title }
+        XCTAssertEqual(titles, [
+            "12 calls this hour · 1 client",
+            "—",
+            "Recent",
+            "github:create_issue — 30s",
+            "jira:get_issue · auth failed — 2m",
+            "Open Activity…",
+            "—",
+            "Clients",
+            "Claude Code — 8 calls · 1m",
+            "—",
+            "Activity (24h)",
+            "—"
+        ])
+    }
+
     // MARK: - Helpers
 
     private final class ClickStub: NSObject {
