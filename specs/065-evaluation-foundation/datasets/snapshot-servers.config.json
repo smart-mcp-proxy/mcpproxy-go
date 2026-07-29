@@ -10,7 +10,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-filesystem",
+        "@modelcontextprotocol/server-filesystem@2026.7.10",
         "/tmp"
       ],
       "oauth": null,
@@ -25,7 +25,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-memory"
+        "@modelcontextprotocol/server-memory@2026.7.4"
       ],
       "oauth": null,
       "enabled": true,
@@ -39,7 +39,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@modelcontextprotocol/server-sequential-thinking"
+        "@modelcontextprotocol/server-sequential-thinking@2026.7.4"
       ],
       "oauth": null,
       "enabled": true,
@@ -52,7 +52,9 @@
       "protocol": "stdio",
       "command": "uvx",
       "args": [
-        "mcp-server-git"
+        "--with",
+        "mcp==1.29.0",
+        "mcp-server-git==2026.7.10"
       ],
       "oauth": null,
       "enabled": true,
@@ -65,7 +67,9 @@
       "protocol": "stdio",
       "command": "uvx",
       "args": [
-        "mcp-server-fetch"
+        "--with",
+        "mcp==1.29.0",
+        "mcp-server-fetch==2026.7.10"
       ],
       "oauth": null,
       "enabled": true,
@@ -78,7 +82,9 @@
       "protocol": "stdio",
       "command": "uvx",
       "args": [
-        "mcp-server-time"
+        "--with",
+        "mcp==1.29.0",
+        "mcp-server-time==2026.7.10"
       ],
       "oauth": null,
       "enabled": true,
@@ -91,7 +97,9 @@
       "protocol": "stdio",
       "command": "uvx",
       "args": [
-        "mcp-server-sqlite",
+        "--with",
+        "mcp==1.29.0",
+        "mcp-server-sqlite==2025.4.25",
         "--db-path",
         "/tmp/mcpproxy-corpus-snapshot/snapshot.db"
       ],

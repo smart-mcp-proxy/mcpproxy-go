@@ -51,6 +51,40 @@ PYTHONPATH=src uv run python -m mcp_eval.cli retrieval \
   --base-url http://127.0.0.1:8092 --api-key eval-corpus-snapshot
 ```
 
+### Upstream version pinning (why the config is fully pinned)
+
+Every server in `snapshot-servers.config.json` pins an **exact** upstream version,
+and each `uvx` server additionally pins the MCP Python SDK via
+`--with mcp==<version>`. This is load-bearing, not cosmetic: the corpus, golden
+set and baseline are frozen, so a floating upstream silently redefines the
+universe the gate scores against, and the gate flakes whenever anyone publishes.
+
+That is exactly how it broke on 2026-07-28: the `mcp` SDK cut **2.0.0**, which
+renamed `McpError` → `MCPError` and removed the low-level `Server.list_tools` /
+`Server.list_resources` decorators. All four `uvx` servers (`fetch`, `git`,
+`time`, `sqlite`) declare only a lower bound (`mcp>=1.x`), so they resolved 2.0.0
+and crashed on import. Only the three `npx` servers connected — 24 tools instead
+of 45 — and D1 failed the catalog-readiness check.
+
+Current pins reproduce the frozen 45-tool corpus exactly (verified tool-for-tool):
+
+| Server | Pin |
+|--------|-----|
+| filesystem | `@modelcontextprotocol/server-filesystem@2026.7.10` |
+| memory | `@modelcontextprotocol/server-memory@2026.7.4` |
+| sequential-thinking | `@modelcontextprotocol/server-sequential-thinking@2026.7.4` |
+| git | `mcp-server-git==2026.7.10` + `mcp==1.29.0` |
+| fetch | `mcp-server-fetch==2026.7.10` + `mcp==1.29.0` |
+| time | `mcp-server-time==2026.7.10` + `mcp==1.29.0` |
+| sqlite | `mcp-server-sqlite==2025.4.25` + `mcp==1.29.0` |
+
+**When bumping a pin**, treat it as a corpus change: re-run the snapshot, diff the
+tool set, and if it moved, cut `corpus_v2` rather than editing `corpus_v1`.
+
+> Note: `mcpproxy serve --config <this file>` **rewrites the file in place**
+> (normalised key order + defaults). Copy it to a scratch path before booting a
+> core against it locally, or `git checkout` it afterwards.
+
 The golden set was seeded by intent and **hand-curated** for graded relevance and
 cross-server hard-negatives (e.g. `filesystem:search_files` vs `memory:search_nodes`;
 `sqlite:read_query` vs `filesystem:read_text_file`; `fetch:fetch` vs
