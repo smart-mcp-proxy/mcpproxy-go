@@ -64,4 +64,38 @@ final class APIClientGlanceTests: XCTestCase {
         // passes even when the fractional-seconds branch is dropped.
         XCTAssertEqual(bucket.start.timeIntervalSince1970, 1785330000.123, accuracy: 0.001)
     }
+
+    // MARK: - Glance activity
+
+    func testGlanceActivityRequestsToolCallTypesWithOversizedPage() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"activities":[],"total":0,"limit":50,"offset":0}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        _ = try await client.glanceActivity()
+
+        XCTAssertEqual(
+            GlanceStubURLProtocol.requestedURLs,
+            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call&limit=50"]
+        )
+    }
+
+    func testGlanceActivityDecodesEntries() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"activities":[
+          {"id":"01J","type":"tool_call","status":"error","timestamp":"2026-07-29T13:04:05Z",
+           "server_name":"jira","tool_name":"get_issue","error_message":"auth failed",
+           "request_id":"req-1"}
+        ],"total":1,"limit":50,"offset":0}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let entries = try await client.glanceActivity()
+
+        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.first?.serverName, "jira")
+        XCTAssertEqual(entries.first?.toolName, "get_issue")
+        XCTAssertEqual(entries.first?.errorMessage, "auth failed")
+    }
 }

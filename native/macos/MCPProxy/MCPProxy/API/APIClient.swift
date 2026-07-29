@@ -375,6 +375,20 @@ actor APIClient {
         return response.activities
     }
 
+    /// Fetch the tray glance activity feed from `GET /api/v1/activity`.
+    ///
+    /// Separate from `recentActivity(limit:)` on purpose: this one carries the
+    /// tool-call `type` filter, while `recentActivity` feeds the native Dashboard,
+    /// which renders the FULL log (security scans, quarantine changes, OAuth).
+    /// The page is deliberately oversized — management built-ins are filtered
+    /// client-side, so a small page could be filled entirely by proxy admin calls.
+    func glanceActivity(limit: Int = 50) async throws -> [ActivityEntry] {
+        let response: ActivityListResponse = try await fetchWrapped(
+            path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)"
+        )
+        return response.activities
+    }
+
     /// Fetch the usage aggregate from `GET /api/v1/activity/usage`.
     ///
     /// Served from an in-memory snapshot behind a short TTL cache — never a log
