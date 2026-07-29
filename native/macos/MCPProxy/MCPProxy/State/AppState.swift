@@ -587,10 +587,21 @@ final class AppState: ObservableObject {
     /// than everything the page carries. The second half is what stops the feed
     /// becoming append-only: a row the poll omits from within its own window —
     /// collapsed, retention-pruned, filtered out — is the poll's business and is
-    /// dropped. A page whose timestamps cannot be parsed retains nothing, since
-    /// "newer than" is then unanswerable and the server's list is the better
-    /// answer.
+    /// dropped.
+    ///
+    /// Two pages carry no "newest record", and they mean opposite things:
+    ///
+    /// * An EMPTY page contradicts nothing. It says the server had recorded no
+    ///   matching calls when it answered, which is silence about a call it had
+    ///   not written yet — so the live rows stand. Replacing here would erase
+    ///   the row the SSE event just put on screen, which is the exact bug this
+    ///   function exists to fix.
+    /// * A page WITH records but no parsable timestamps is still the server's
+    ///   own account of the feed, and "newer than" is unanswerable against it,
+    ///   so the page wins.
     static func mergeGlanceActivity(polled: [ActivityEntry], into existing: [ActivityEntry]) -> [ActivityEntry] {
+        guard !polled.isEmpty else { return Array(existing.prefix(glanceActivityCap)) }
+
         // Deliberately max(), not `polled.first`: the merge does not depend on
         // the page arriving newest-first.
         let newestPolled = polled.compactMap { GlanceFormatting.parseTimestamp($0.timestamp) }.max()

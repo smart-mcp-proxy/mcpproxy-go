@@ -231,6 +231,41 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.glanceActivity.map(\.id), ["a1"])
     }
 
+    /// An empty page contradicts nothing. A poll that returns no records has
+    /// nothing to say about a call the server had not recorded when it answered,
+    /// so it must not erase the row the SSE event just put on screen — the same
+    /// bug shape the merge was written to fix, in the one branch that used to
+    /// fall through to a replace.
+    func testAnEmptyPollDoesNotEraseALiveRow() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
+                                                      request: "r-9",
+                                                      timestamp: "2026-07-29T11:00:30Z"))
+
+        state.updateGlanceActivity([])
+
+        XCTAssertEqual(state.glanceActivity.map(\.requestId), ["r-9"])
+    }
+
+    /// …but a page that HAS records and no usable timestamps still replaces.
+    /// "Newer than everything the page carries" is unanswerable there, and a
+    /// page full of records is the server's own account of the feed; only the
+    /// genuinely empty page is the non-statement.
+    func testAPageWithUnparsableTimestampsStillReplaces() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
+                                                      request: "r-9",
+                                                      timestamp: "2026-07-29T11:00:30Z"))
+
+        state.updateGlanceActivity([
+            try Self.activity(id: "a1", type: "tool_call", request: "r-1", timestamp: "not a date")
+        ])
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["a1"])
+    }
+
     /// Retention is bounded: a burst of SSE rows plus a full page cannot grow
     /// the feed past the cap.
     func testTheMergedFeedStaysCapped() throws {

@@ -757,10 +757,10 @@ actor CoreProcessManager {
         await refreshSecurityStatus()
         await refreshProfiles()
         // Bump activityVersion so ActivityView reloads. Still needed after the
-        // glance's SSE work: the bus emits `activity.upstream_completed` and
-        // `activity.internal_completed`, which feed the glance rows only —
-        // there is no bare "activity" event, and nothing else republishes the
-        // full log ActivityView renders.
+        // glance's SSE work: the bus emits `activity.tool_call.completed` and
+        // `activity.internal_tool_call.completed` (internal/runtime/events.go),
+        // which feed the glance rows only — there is no bare "activity" event,
+        // and nothing else republishes the full log ActivityView renders.
         await MainActor.run { appState.activityVersion += 1 }
     }
 
