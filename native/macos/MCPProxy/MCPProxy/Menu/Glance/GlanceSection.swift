@@ -82,7 +82,6 @@ final class GlanceSection {
     /// in-place update can detect that a full rebuild is required instead.
     private var hasBuilt = false
     private var builtVisible = false
-    private var builtWithTimeline = false
 
     /// Held only so ownership of the submenu is explicit; `updateInPlace`
     /// deliberately never touches it (re-creating it would disturb an open
@@ -119,7 +118,6 @@ final class GlanceSection {
         histogramItem = nil
         hasBuilt = true
         builtVisible = isVisible(for: state)
-        builtWithTimeline = state.usageTimeline != nil
         guard builtVisible else { return [] }
 
         var items: [NSMenuItem] = []
@@ -176,9 +174,9 @@ final class GlanceSection {
     /// Rewrite the existing rows from `state` without restructuring the menu.
     ///
     /// Returns `true` when every row was updated in place, and `false` when the
-    /// block's structure changed (visibility, row count, or histogram
-    /// loaded-ness) — the caller must then defer a full rebuild until the menu
-    /// closes rather than growing or shrinking a menu the user is reading.
+    /// block's structure changed (visibility or row count) — the caller must
+    /// then defer a full rebuild until the menu closes rather than growing or
+    /// shrinking a menu the user is reading.
     ///
     /// When a row comes to stand for a different record its *entire identity* is
     /// rewritten, not just its title: with a fixed number of rows every new
@@ -186,15 +184,16 @@ final class GlanceSection {
     /// text would leave a row whose click still opened the previous record's
     /// session. See `apply(_:to:now:)` for how "different record" is decided.
     ///
-    /// The histogram submenu is deliberately not touched — re-creating it would
-    /// disturb an open submenu — so a change in its loaded-ness reports
-    /// structural instead.
+    /// The histogram submenu is deliberately not touched, and does not need to
+    /// be: its single row is built by `HistogramSubmenuDelegate` when it opens,
+    /// reading `AppState` at that moment. Whether the timeline has loaded
+    /// therefore changes nothing about the structure built here, which is why
+    /// this no longer reports structural when it flips.
     @discardableResult
     func updateInPlace(for state: AppState, now: Date = Date()) -> Bool {
         guard hasBuilt else { return false }
         guard isVisible(for: state) == builtVisible else { return false }
         guard builtVisible else { return true }
-        guard (state.usageTimeline != nil) == builtWithTimeline else { return false }
 
         let entries = GlanceSelection.activityRows(from: state.glanceActivity)
         let clients = GlanceSelection.activeClients(from: state.glanceSessions)

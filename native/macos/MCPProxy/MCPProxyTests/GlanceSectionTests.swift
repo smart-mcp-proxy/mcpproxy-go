@@ -220,14 +220,29 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(items[3].title, "github:create_issue — 30s", "rows must be left untouched")
     }
 
-    func testUpdateInPlaceRefusesWhenHistogramLoadednessFlips() {
+    /// The first usage fetch landing while the menu is open must NOT report
+    /// structural. The submenu is filled in by its delegate when it opens, so a
+    /// timeline that arrives afterwards changes nothing about the built
+    /// structure — and reporting structural here cost the user live rows for
+    /// the whole menu session, because the deferral it triggered suppressed the
+    /// one call (`items(for:)`) that could clear it. Opening the menu shortly
+    /// after launch or reconnect hit exactly that.
+    func testTheTimelineArrivingWhileTheMenuIsOpenKeepsRowsUpdating() {
         let state = Self.busyState()
         let section = Self.makeSection()
-        _ = section.items(for: state, now: Self.now)
+        let items = section.items(for: state, now: Self.now)
 
         state.usageTimeline = [UsageBucket(start: Self.now, calls: 12, errors: 1, totalRespBytes: 0)]
+        state.callsThisHour = 13
 
-        XCTAssertFalse(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[0].title, "13 calls this hour · 1 client")
+
+        // And it is still updating a cycle later: the freeze was for the rest
+        // of the session, not for one tick.
+        state.callsThisHour = 14
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[0].title, "14 calls this hour · 1 client")
     }
 
     func testUpdateInPlaceBeforeFirstBuildReportsStructural() {
