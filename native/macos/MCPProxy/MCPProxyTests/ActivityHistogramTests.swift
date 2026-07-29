@@ -82,3 +82,33 @@ final class ActivityHistogramBarsTests: XCTestCase {
         XCTAssertEqual(bars.reduce(0) { $0 + $1.total }, 0)
     }
 }
+
+final class ActivityHistogramAccessibilityTests: XCTestCase {
+
+    /// A bar chart is opaque to VoiceOver, so the hosted item carries one
+    /// sentence describing the whole series.
+    func testSummaryReportsTotalsAndPeakHour() {
+        let timeline = [
+            Fixture.bucket(start: Fixture.currentHour, calls: 10, errors: 3),
+            Fixture.bucket(start: Fixture.fourHoursAgo, calls: 4, errors: 0)
+        ]
+        let bars = ActivityHistogram.bars(from: timeline, now: Fixture.now)
+
+        let summary = ActivityHistogram.accessibilitySummary(bars: bars, timeZone: Fixture.utc)
+
+        XCTAssertEqual(
+            summary,
+            "Activity over the last 24 hours: 14 calls, 3 errors. Busiest hour 08:00 with 10 calls."
+        )
+    }
+
+    /// "Loaded but idle" must read as idle, not as a broken chart.
+    func testSummaryForAnIdleTimelineSaysSo() {
+        let bars = ActivityHistogram.bars(from: [], now: Fixture.now)
+
+        XCTAssertEqual(
+            ActivityHistogram.accessibilitySummary(bars: bars, timeZone: Fixture.utc),
+            "Activity over the last 24 hours: no tool calls."
+        )
+    }
+}

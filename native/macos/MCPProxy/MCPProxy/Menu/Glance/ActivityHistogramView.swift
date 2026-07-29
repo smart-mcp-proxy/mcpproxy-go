@@ -79,4 +79,28 @@ enum ActivityHistogram {
             )
         }
     }
+
+    /// One sentence describing the whole series, because a bar chart is opaque
+    /// to VoiceOver. Ties on the peak resolve to the earliest hour.
+    ///
+    /// - Parameter timeZone: injected so the hour label is deterministic in
+    ///   tests; production uses the user's zone.
+    static func accessibilitySummary(bars: [HistogramBar], timeZone: TimeZone = .current) -> String {
+        let totalCalls = bars.reduce(0) { $0 + $1.total }
+        let totalErrors = bars.reduce(0) { $0 + $1.errors }
+        guard let first = bars.first, totalCalls > 0 else {
+            return "Activity over the last 24 hours: no tool calls."
+        }
+
+        var peak = first
+        for bar in bars where bar.total > peak.total { peak = bar }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm"
+
+        return "Activity over the last 24 hours: \(totalCalls) calls, \(totalErrors) errors. "
+            + "Busiest hour \(formatter.string(from: peak.hourStart)) with \(peak.total) calls."
+    }
 }
