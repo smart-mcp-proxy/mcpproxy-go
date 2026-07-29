@@ -58,3 +58,25 @@ struct MenuRebuildGuard {
         return owed
     }
 }
+
+extension MenuRebuildGuard {
+
+    /// The whole open-menu policy in one call: while the menu is on screen ask
+    /// `section` to rewrite its rows in place, and treat its refusal — which it
+    /// reports having mutated nothing — as the structural change that must wait
+    /// for `menuDidClose`.
+    ///
+    /// A closed menu never reaches the section at all: it is about to be rebuilt
+    /// from scratch, so updating rows that are on their way to `removeAllItems`
+    /// would be wasted work, and would leave the section's row references
+    /// pointing at items no longer in the menu.
+    ///
+    /// This lives here, rather than inline in `rebuildMenu()`, so the policy can
+    /// be tested without an `NSStatusItem`.
+    mutating func decide(refreshing section: GlanceSection,
+                         from state: AppState,
+                         now: Date = Date()) -> MenuRebuildDecision {
+        guard isMenuOpen else { return .rebuild }
+        return decide(structureChanged: !section.updateInPlace(for: state, now: now))
+    }
+}

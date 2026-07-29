@@ -572,20 +572,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         dispatchPrecondition(condition: .onQueue(.main))
 
         // Tray Glance: while the menu is on screen its structure must not move
-        // under the cursor. Ask the glance section to rewrite its rows in place;
-        // it reports false — having mutated nothing — when the block's structure
-        // changed, and that rebuild then waits for menuDidClose. Non-glance
-        // sections are frozen for the same reason; menuWillOpen rebuilds the
-        // whole menu before it is drawn, so the next open is never stale.
-        if rebuildGuard.isMenuOpen {
-            // decide() only answers .rebuild for a closed menu, which the check
-            // above has already excluded; both open-menu outcomes stop here.
-            switch rebuildGuard.decide(structureChanged: !glance.updateInPlace(for: appState)) {
-            case .updateInPlace, .deferUntilClose:
-                return
-            case .rebuild:
-                break
-            }
+        // under the cursor. The rows are rewritten in place; a structural change
+        // is suppressed here and re-run from menuDidClose. Non-glance sections
+        // are frozen for the same reason, and menuWillOpen rebuilds the whole
+        // menu before it is drawn, so the next open is never stale.
+        switch rebuildGuard.decide(refreshing: glance, from: appState) {
+        case .updateInPlace, .deferUntilClose:
+            return
+        case .rebuild:
+            break
         }
 
         let menu: NSMenu

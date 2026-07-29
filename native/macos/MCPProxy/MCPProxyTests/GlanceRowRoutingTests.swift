@@ -8,8 +8,6 @@ import AppKit
 @MainActor
 final class GlanceRowRoutingTests: XCTestCase {
 
-    static let now = GlanceFormatting.parseTimestamp("2027-01-15T08:00:00Z")!
-
     private final class ClickSpy: NSObject {
         /// One entry per click, holding the session id the row handed over.
         var clicks: [String?] = []
@@ -25,7 +23,7 @@ final class GlanceRowRoutingTests: XCTestCase {
     func testEveryClickableRowCarriesBothTargetAndAction() {
         let spy = ClickSpy()
         let section = GlanceSection(target: spy, action: #selector(ClickSpy.openGlanceRow(_:)))
-        let items = section.items(for: Self.busyState(), now: Self.now)
+        let items = section.items(for: GlanceFixtures.connectedState(), now: GlanceFixtures.now)
 
         // A submenu item is not a glance click row: assigning `submenu`
         // makes AppKit install its own `submenuAction:` and open the submenu
@@ -52,14 +50,14 @@ final class GlanceRowRoutingTests: XCTestCase {
     /// attributed to a session, and the "Open Activity…" row itself. Both mean
     /// the same thing downstream — open the unfiltered log.
     func testNilRepresentedObjectOpensTheUnfilteredLog() throws {
-        let state = Self.busyState()
+        let state = GlanceFixtures.connectedState()
         state.glanceActivity = [
-            Self.entry(id: "a", server: "github", tool: "create_issue",
-                       timestamp: "2027-01-15T07:59:30Z", session: nil)
+            GlanceFixtures.entry(id: "a", server: "github", tool: "create_issue",
+                                 timestamp: "2027-01-15T07:59:30Z", session: nil)
         ]
         let spy = ClickSpy()
         let section = GlanceSection(target: spy, action: #selector(ClickSpy.openGlanceRow(_:)))
-        let items = section.items(for: state, now: Self.now)
+        let items = section.items(for: state, now: GlanceFixtures.now)
 
         let unattributedRow = try XCTUnwrap(items.first { $0.title.hasPrefix("github:create_issue") })
         let openActivityRow = try XCTUnwrap(items.first { $0.title == "Open Activity…" })
@@ -77,64 +75,5 @@ final class GlanceRowRoutingTests: XCTestCase {
                 "http://127.0.0.1:8080/ui/activity"
             )
         }
-    }
-
-    // MARK: - Fixtures
-
-    private static func busyState() -> AppState {
-        let state = AppState()
-        state.coreState = .connected
-        state.callsThisHour = 12
-        state.glanceActivity = [
-            entry(id: "a", server: "github", tool: "create_issue",
-                  timestamp: "2027-01-15T07:59:30Z", session: "sess-a"),
-            entry(id: "b", server: "jira", tool: "get_issue",
-                  timestamp: "2027-01-15T07:58:00Z", session: nil)
-        ]
-        state.glanceSessions = [
-            session(id: "sess-a", name: "Claude Code", calls: 8,
-                    lastActivity: "2027-01-15T07:59:00Z")
-        ]
-        return state
-    }
-
-    private static func entry(
-        id: String,
-        server: String,
-        tool: String,
-        timestamp: String,
-        session: String?
-    ) -> ActivityEntry {
-        var json: [String: Any] = [
-            "id": id,
-            "type": "tool_call",
-            "status": "success",
-            "timestamp": timestamp,
-            "request_id": "req-\(id)",
-            "server_name": server,
-            "tool_name": tool
-        ]
-        if let session { json["session_id"] = session }
-        let data = try! JSONSerialization.data(withJSONObject: json)
-        // swiftlint:disable:next force_try
-        return try! JSONDecoder().decode(ActivityEntry.self, from: data)
-    }
-
-    private static func session(
-        id: String,
-        name: String,
-        calls: Int,
-        lastActivity: String
-    ) -> APIClient.MCPSession {
-        let json: [String: Any] = [
-            "id": id,
-            "status": "active",
-            "client_name": name,
-            "tool_call_count": calls,
-            "last_activity": lastActivity
-        ]
-        let data = try! JSONSerialization.data(withJSONObject: json)
-        // swiftlint:disable:next force_try
-        return try! JSONDecoder().decode(APIClient.MCPSession.self, from: data)
     }
 }
