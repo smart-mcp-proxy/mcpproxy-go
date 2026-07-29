@@ -560,14 +560,23 @@ final class AppState: ObservableObject {
     @MainActor
     func updateGlanceActivity(_ entries: [ActivityEntry]) {
         guard coreState == .connected else { return }
-        let merged = AppState.mergeGlanceActivity(polled: entries, into: glanceActivity)
+        let merged = AppState.mergeGlanceActivity(polled: entries,
+                                                  into: glanceActivity,
+                                                  unconfirmed: unconfirmedLiveKeys)
+        unconfirmedLiveKeys = merged.unconfirmed
         func fingerprint(_ list: [ActivityEntry]) -> [String] {
             list.map { "\($0.id)|\($0.status)|\($0.hasSensitiveData == true)" }
         }
-        if fingerprint(merged) != fingerprint(glanceActivity) {
-            glanceActivity = merged
+        if fingerprint(merged.rows) != fingerprint(glanceActivity) {
+            glanceActivity = merged.rows
         }
     }
+
+    /// Record keys of SSE rows no poll has confirmed yet — the only rows the
+    /// merge may keep against a page that omits them.
+    ///
+    /// Not `@Published`: it changes on every poll and nothing renders it.
+    private(set) var unconfirmedLiveKeys: Set<String> = []
 
     /// Reconcile a polled page with the rows already on screen.
     ///
@@ -583,37 +592,57 @@ final class AppState: ObservableObject {
     /// storage id and the SSE row's provisional `<request_id>:<type>` differ for
     /// one and the same call, so id-keying would keep both.
     ///
-    /// A row is retained only when it is BOTH absent from the page and newer
-    /// than everything the page carries. The second half is what stops the feed
-    /// becoming append-only: a row the poll omits from within its own window —
-    /// collapsed, retention-pruned, filtered out — is the poll's business and is
-    /// dropped.
+    /// Only an UNCONFIRMED row can be retained — one this tray prepended from an
+    /// SSE event that no poll has carried back yet. That is the whole population
+    /// the race can strand, and confining retention to it is what keeps the
+    /// merge from resurrecting the dead: a canonical row the server has dropped
+    /// (retention, an explicit delete) is absent from the page and may well be
+    /// newer than everything left in it, so an "absent and newer" rule alone
+    /// would keep showing it — permanently, on a core idle enough that no later
+    /// page ever reaches back past it, while the successful polls keep clearing
+    /// the staleness marker that would otherwise hint something is wrong.
     ///
-    /// Two pages carry no "newest record", and they mean opposite things:
+    /// An unconfirmed row is retained when it is BOTH absent from the page and
+    /// newer than everything the page carries; a page that has reached past it
+    /// has answered for it. Two pages carry no "newest record", and they mean
+    /// opposite things:
     ///
     /// * An EMPTY page contradicts nothing. It says the server had recorded no
     ///   matching calls when it answered, which is silence about a call it had
-    ///   not written yet — so the live rows stand. Replacing here would erase
-    ///   the row the SSE event just put on screen, which is the exact bug this
-    ///   function exists to fix.
+    ///   not written yet — so unconfirmed rows stand.
     /// * A page WITH records but no parsable timestamps is still the server's
     ///   own account of the feed, and "newer than" is unanswerable against it,
     ///   so the page wins.
-    static func mergeGlanceActivity(polled: [ActivityEntry], into existing: [ActivityEntry]) -> [ActivityEntry] {
-        guard !polled.isEmpty else { return Array(existing.prefix(glanceActivityCap)) }
-
+    ///
+    /// Returns the merged rows and the keys still unconfirmed: anything the page
+    /// carried is the server's record now, and a row that was dropped is nobody's.
+    static func mergeGlanceActivity(
+        polled: [ActivityEntry],
+        into existing: [ActivityEntry],
+        unconfirmed: Set<String>
+    ) -> (rows: [ActivityEntry], unconfirmed: Set<String>) {
         // Deliberately max(), not `polled.first`: the merge does not depend on
         // the page arriving newest-first.
         let newestPolled = polled.compactMap { GlanceFormatting.parseTimestamp($0.timestamp) }.max()
-        guard let newestPolled else { return Array(polled.prefix(glanceActivityCap)) }
-
         let polledKeys = Set(polled.map(GlanceSelection.recordKey))
-        let retained = existing.filter { entry in
-            guard !polledKeys.contains(GlanceSelection.recordKey(for: entry)) else { return false }
-            guard let stamp = GlanceFormatting.parseTimestamp(entry.timestamp) else { return false }
-            return stamp > newestPolled
+
+        let retained: [ActivityEntry]
+        if polled.isEmpty {
+            retained = existing.filter { unconfirmed.contains(GlanceSelection.recordKey(for: $0)) }
+        } else if let newestPolled {
+            retained = existing.filter { entry in
+                let key = GlanceSelection.recordKey(for: entry)
+                guard unconfirmed.contains(key), !polledKeys.contains(key) else { return false }
+                guard let stamp = GlanceFormatting.parseTimestamp(entry.timestamp) else { return false }
+                return stamp > newestPolled
+            }
+        } else {
+            retained = []
         }
-        return Array((retained + polled).prefix(glanceActivityCap))
+
+        let rows = Array((retained + polled).prefix(glanceActivityCap))
+        let survived = Set(rows.map(GlanceSelection.recordKey))
+        return (rows, Set(retained.map(GlanceSelection.recordKey)).intersection(survived))
     }
 
     /// Upper bound on rows kept in `glanceActivity`. Deliberately equal to
@@ -637,6 +666,9 @@ final class AppState: ObservableObject {
     @MainActor
     func prependGlanceActivity(_ entry: ActivityEntry) {
         guard coreState == .connected else { return }
+        // Unconfirmed until a poll carries it back: this is the only row the
+        // merge is allowed to keep against a page that omits it.
+        unconfirmedLiveKeys.insert(GlanceSelection.recordKey(for: entry))
         glanceActivity.insert(entry, at: 0)
         if glanceActivity.count > AppState.glanceActivityCap {
             glanceActivity.removeLast(glanceActivity.count - AppState.glanceActivityCap)
@@ -676,6 +708,7 @@ final class AppState: ObservableObject {
         if usageTimeline != nil { usageTimeline = nil }
         if callsThisHour != nil { callsThisHour = nil }
         if usageError != nil { usageError = nil }
+        if !unconfirmedLiveKeys.isEmpty { unconfirmedLiveKeys = [] }
         if !glanceFailureStreak.isEmpty { glanceFailureStreak = [:] }
         if glanceError != nil { glanceError = nil }
         if glanceStale { glanceStale = false }

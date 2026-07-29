@@ -248,6 +248,63 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.glanceActivity.map(\.requestId), ["r-9"])
     }
 
+    /// The empty-page retention must be NARROW: it exists for a row the server
+    /// has not written yet, not for one it has deliberately dropped. A canonical
+    /// row — one the poll itself delivered — that then disappears from the log
+    /// (retention, an explicit delete) must go when the server says it is gone,
+    /// and on an idle core "the next poll" never rescues it.
+    func testAnEmptyPollDropsACanonicalRowTheServerHasDeleted() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceActivity([
+            try Self.activity(id: "a1", type: "tool_call", request: "r-1",
+                              timestamp: "2026-07-29T11:00:00Z")
+        ])
+
+        state.updateGlanceActivity([])
+
+        XCTAssertTrue(state.glanceActivity.isEmpty,
+                      "a row the server delivered and then dropped must not outlive it")
+    }
+
+    /// Same rule with a non-empty page: a canonical row newer than everything
+    /// the page still carries is not thereby immune to deletion.
+    func testAPollDropsACanonicalRowNewerThanEverythingItStillCarries() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceActivity([
+            try Self.activity(id: "newest", type: "tool_call", request: "r-2",
+                              timestamp: "2026-07-29T11:05:00Z"),
+            try Self.activity(id: "older", type: "tool_call", request: "r-1",
+                              timestamp: "2026-07-29T11:00:00Z")
+        ])
+
+        state.updateGlanceActivity([
+            try Self.activity(id: "older", type: "tool_call", request: "r-1",
+                              timestamp: "2026-07-29T11:00:00Z")
+        ])
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["older"])
+    }
+
+    /// Once a poll has confirmed a live row, it stops being unconfirmed: it is
+    /// the server's record now, and a later deletion removes it like any other.
+    func testAConfirmedLiveRowIsNoLongerRetainedAsUnconfirmed() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.prependGlanceActivity(try Self.activity(id: "r-9:tool_call", type: "tool_call",
+                                                      request: "r-9",
+                                                      timestamp: "2026-07-29T11:00:30Z"))
+        state.updateGlanceActivity([
+            try Self.activity(id: "01JQ-ULID", type: "tool_call", request: "r-9",
+                              timestamp: "2026-07-29T11:00:30Z")
+        ])
+
+        state.updateGlanceActivity([])
+
+        XCTAssertTrue(state.glanceActivity.isEmpty)
+    }
+
     /// …but a page that HAS records and no usable timestamps still replaces.
     /// "Newer than everything the page carries" is unanswerable there, and a
     /// page full of records is the server's own account of the feed; only the
