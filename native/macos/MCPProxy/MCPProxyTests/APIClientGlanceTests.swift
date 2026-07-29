@@ -98,4 +98,36 @@ final class APIClientGlanceTests: XCTestCase {
         XCTAssertEqual(entries.first?.toolName, "get_issue")
         XCTAssertEqual(entries.first?.errorMessage, "auth failed")
     }
+
+    // MARK: - Active sessions
+
+    func testActiveSessionsRequestsStatusActive() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"sessions":[],"total":0,"limit":25}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        _ = try await client.activeSessions()
+
+        XCTAssertEqual(
+            GlanceStubURLProtocol.requestedURLs,
+            ["http://127.0.0.1:8080/api/v1/sessions?status=active&limit=25"]
+        )
+    }
+
+    /// Regression: the model decoded `last_active`, but the API emits
+    /// `last_activity`, so every session's timestamp silently arrived as nil.
+    func testMCPSessionDecodesLastActivity() throws {
+        let json = Data("""
+        {"id":"sess-1","client_name":"Claude Code","status":"active",
+         "tool_call_count":8,"start_time":"2026-07-29T12:00:00Z",
+         "last_activity":"2026-07-29T13:04:05Z"}
+        """.utf8)
+
+        let session = try JSONDecoder().decode(APIClient.MCPSession.self, from: json)
+
+        XCTAssertEqual(session.lastActivity, "2026-07-29T13:04:05Z")
+        XCTAssertEqual(session.clientName, "Claude Code")
+        XCTAssertEqual(session.toolCallCount, 8)
+    }
 }

@@ -338,7 +338,10 @@ actor APIClient {
         let toolCallCount: Int?
         let totalTokens: Int?
         let startTime: String?
-        let lastActive: String?
+        /// Timestamp of the session's most recent activity. The API field is
+        /// `last_activity` (Go `contracts.MCPSession.LastActivity`); decoding
+        /// `last_active` silently produced nil for every session.
+        let lastActivity: String?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -350,7 +353,7 @@ actor APIClient {
             case toolCallCount = "tool_call_count"
             case totalTokens = "total_tokens"
             case startTime = "start_time"
-            case lastActive = "last_active"
+            case lastActivity = "last_activity"
         }
     }
 
@@ -364,6 +367,18 @@ actor APIClient {
     /// Fetch recent MCP sessions from `GET /api/v1/sessions`.
     func sessions(limit: Int = 5) async throws -> [MCPSession] {
         let response: SessionsResponse = try await fetchWrapped(path: "/api/v1/sessions?limit=\(limit)")
+        return response.sessions
+    }
+
+    /// Fetch only currently-active MCP sessions, for the tray glance "Clients" rows.
+    ///
+    /// The `status` filter is applied server-side during the storage cursor walk,
+    /// before truncation — a client-side filter over a page would miss a session
+    /// that started long ago but is calling tools right now.
+    func activeSessions(limit: Int = 25) async throws -> [MCPSession] {
+        let response: SessionsResponse = try await fetchWrapped(
+            path: "/api/v1/sessions?status=active&limit=\(limit)"
+        )
         return response.sessions
     }
 
