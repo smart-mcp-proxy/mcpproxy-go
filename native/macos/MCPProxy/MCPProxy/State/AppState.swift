@@ -488,8 +488,33 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Records requested per glance activity poll.
-    static let glanceActivityPageSize = 50
+    /// Records requested per glance activity poll — the server's maximum.
+    ///
+    /// Rules 1-3 run client-side, AFTER the page arrives, so the five rows are
+    /// only ever as deep as one page: a burst of `upstream_servers` /
+    /// `quarantine_security` calls at the head of the log pushes real calls off
+    /// it and the menu says "No tool calls yet" while they sit below the fold.
+    /// At 50 that took 46 management calls; a real agent walking a server list
+    /// makes them in bursts.
+    ///
+    /// 100 is not a round number, it is the ceiling: `ActivityFilter.Validate`
+    /// (internal/storage/activity_models.go) clamps `limit` to 100, so a larger
+    /// request is silently served as 100.
+    ///
+    /// Deeper than that would need paging, and paging is the wrong trade here
+    /// even though `offset` does work end-to-end on this endpoint.
+    /// `Manager.ListActivities` walks and unmarshals the ENTIRE activity bucket
+    /// on every call — it never breaks early, because it counts `total` — and
+    /// that bucket holds up to `activity_max_records` (100,000) records. So the
+    /// cost of a request is set by the bucket, not by `limit`: doubling the page
+    /// costs 50 more struct copies, while a second page costs a whole extra
+    /// 100k-record walk every 30 seconds. One deeper page buys most of the
+    /// headroom for a fraction of the cost.
+    ///
+    /// The residual is real and deliberately not papered over: five rows are
+    /// guaranteed only when five qualify within the newest 100 records matching
+    /// the type filter. `testRowsGoNoDeeperThanOnePage` pins that boundary.
+    static let glanceActivityPageSize = 100
 
     /// Active sessions requested per poll.
     static let glanceSessionsPageSize = 25
@@ -557,10 +582,9 @@ final class AppState: ObservableObject {
         return Array((retained + polled).prefix(glanceActivityCap))
     }
 
-    /// Upper bound on rows kept in `glanceActivity`. Matches the page size the
-    /// reconciling poll requests (`apiClient.glanceActivity(limit: 50)`), so SSE
-    /// rows and polled rows agree on depth.
-    static let glanceActivityCap = 50
+    /// Upper bound on rows kept in `glanceActivity`. Deliberately equal to
+    /// `glanceActivityPageSize`, so SSE rows and polled rows agree on depth.
+    static let glanceActivityCap = glanceActivityPageSize
 
     /// Prepend one optimistic row adapted from an SSE payload (newest first).
     /// Bounded so a busy agent cannot grow the feed without limit; the 30s

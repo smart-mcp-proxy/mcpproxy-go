@@ -67,9 +67,13 @@ final class APIClientGlanceTests: XCTestCase {
 
     // MARK: - Glance activity
 
-    func testGlanceActivityRequestsToolCallTypesWithOversizedPage() async throws {
+    /// The page is the endpoint's maximum, spelled out here rather than
+    /// interpolated: `AppState.glanceActivityPageSize` is only meaningful
+    /// because the server clamps `limit` to 100, and a test that reads the
+    /// constant back would follow it silently wherever it went.
+    func testGlanceActivityRequestsToolCallTypesAtTheServersMaximumPage() async throws {
         GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
-        {"activities":[],"total":0,"limit":50,"offset":0}
+        {"activities":[],"total":0,"limit":100,"offset":0}
         """)
         let client = GlanceStubURLProtocol.makeClient()
 
@@ -77,7 +81,7 @@ final class APIClientGlanceTests: XCTestCase {
 
         XCTAssertEqual(
             GlanceStubURLProtocol.requestedURLs,
-            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call&limit=50"]
+            ["http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call&limit=100"]
         )
     }
 

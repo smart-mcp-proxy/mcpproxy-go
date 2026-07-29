@@ -72,6 +72,53 @@ final class GlanceSelectionCollapseTests: XCTestCase {
         XCTAssertEqual(rows.map(\.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
     }
 
+    /// Depth, not just filtering. The client requests ONE page and applies
+    /// rules 1-3 afterwards, so the rows the user sees are only as deep as that
+    /// page: a burst of proxy-management calls at the head of the log pushes
+    /// real calls off it, and the menu says "No tool calls yet" while the calls
+    /// sit just below the fold.
+    ///
+    /// 90 management calls is not a contrived number — `upstream_servers` and
+    /// `quarantine_security` are unconditionally dropped by rule 1, and an
+    /// agent walking a server list makes them in bursts.
+    func testFiveRowsSurviveABurstOfManagementCallsAtTheHeadOfTheLog() {
+        var log: [ActivityEntry] = []   // newest first, as the endpoint returns it
+        for i in 0..<90 {
+            log.append(GlanceSelectionTests.entry(
+                id: "mgmt-\(i)", type: "internal_tool_call",
+                tool: i.isMultiple(of: 2) ? "upstream_servers" : "quarantine_security"))
+        }
+        for i in 0..<6 {
+            log.append(GlanceSelectionTests.entry(
+                id: "call-\(i)", type: "tool_call", server: "srv", tool: "tool\(i)"))
+        }
+
+        let page = Array(log.prefix(AppState.glanceActivityPageSize))
+        let rows = GlanceSelection.activityRows(from: page)
+
+        XCTAssertEqual(rows.map(\.id), ["call-0", "call-1", "call-2", "call-3", "call-4"])
+    }
+
+    /// The honest residual, pinned so nobody has to rediscover it: the feed is
+    /// exactly one page deep. Noise deeper than the page hides real calls, and
+    /// the endpoint clamps `limit` at 100, so this is the floor of what a single
+    /// request can promise — paging past it is possible (`offset` works
+    /// end-to-end) but each request re-walks the whole activity bucket, which
+    /// is the expensive part.
+    func testRowsGoNoDeeperThanOnePage() {
+        var log: [ActivityEntry] = []
+        for i in 0..<(AppState.glanceActivityPageSize + 1) {
+            log.append(GlanceSelectionTests.entry(
+                id: "mgmt-\(i)", type: "internal_tool_call", tool: "upstream_servers"))
+        }
+        log.append(GlanceSelectionTests.entry(id: "call-0", type: "tool_call", server: "srv", tool: "t"))
+
+        let page = Array(log.prefix(AppState.glanceActivityPageSize))
+
+        XCTAssertTrue(GlanceSelection.activityRows(from: page).isEmpty,
+                      "a call below the page is not shown; that is the documented limit")
+    }
+
     func testFewerThanFiveQualifyingRecordsYieldsWhatThereIs() {
         let rows = GlanceSelection.activityRows(from: [
             GlanceSelectionTests.entry(id: "call-0", type: "tool_call", server: "srv", tool: "t")

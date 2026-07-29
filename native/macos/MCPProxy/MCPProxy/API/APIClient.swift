@@ -400,9 +400,12 @@ actor APIClient {
     /// Separate from `recentActivity(limit:)` on purpose: this one carries the
     /// tool-call `type` filter, while `recentActivity` feeds the native Dashboard,
     /// which renders the FULL log (security scans, quarantine changes, OAuth).
-    /// The page is deliberately oversized — management built-ins are filtered
-    /// client-side, so a small page could be filled entirely by proxy admin calls.
-    func glanceActivity(limit: Int = 50) async throws -> [ActivityEntry] {
+    /// The page is deliberately the server's maximum — management built-ins are
+    /// filtered client-side, so a smaller page can be filled entirely by proxy
+    /// admin calls and leave the menu claiming there are no tool calls. The
+    /// endpoint clamps `limit` to 100; see `AppState.glanceActivityPageSize`
+    /// for why the tray takes one deep page rather than paging.
+    func glanceActivity(limit: Int = AppState.glanceActivityPageSize) async throws -> [ActivityEntry] {
         let response: ActivityListResponse = try await fetchWrapped(
             path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)"
         )
