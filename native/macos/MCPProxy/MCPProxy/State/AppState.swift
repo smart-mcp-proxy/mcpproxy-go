@@ -44,8 +44,29 @@ final class AppState: ObservableObject {
     /// MCPProxyApp.stopCore) and would otherwise bypass it.
     @Published var coreState: CoreState = .idle {
         didSet {
+            if coreState != oldValue { connectionGeneration &+= 1 }
             if coreState != .connected { clearGlanceState() }
         }
+    }
+
+    /// Which connection the tray is on. Bumped on every real `coreState`
+    /// change, so a value captured before a fetch identifies the core that
+    /// fetch was issued to.
+    ///
+    /// `coreState == .connected` alone cannot tell a response from THIS
+    /// connection from one issued to a core that has since died and been
+    /// replaced: reconnection restores `.connected`, and the guard then admits
+    /// the dead core's data. Comparing generations does tell them apart.
+    /// Re-assigning an unchanged state is deliberately not a new generation —
+    /// discarding a good in-flight response over a redundant publish would cost
+    /// liveness for nothing.
+    @Published private(set) var connectionGeneration: Int = 0
+
+    /// Whether `generation` still identifies the live connection. The predicate
+    /// every glance publish must satisfy: connected, and connected to the same
+    /// core the fetch was issued to.
+    func isCurrentConnection(_ generation: Int) -> Bool {
+        coreState == .connected && generation == connectionGeneration
     }
 
     /// Who owns the core process.
@@ -384,10 +405,13 @@ final class AppState: ObservableObject {
     /// this state came to be unreachable in the first place.
     @MainActor
     func refreshUsage(from source: GlanceDataSource) async {
+        let generation = connectionGeneration
         do {
             let usage = try await source.usageAggregate(window: "24h", top: 1)
+            guard isCurrentConnection(generation) else { return }
             updateUsage(timeline: usage.timeline)
         } catch {
+            guard isCurrentConnection(generation) else { return }
             recordUsageFailure(AppState.usageFailureMessage(for: error))
         }
     }
@@ -411,11 +435,14 @@ final class AppState: ObservableObject {
     /// a genuinely idle proxy renders.
     @MainActor
     func refreshGlanceActivity(from source: GlanceDataSource) async {
+        let generation = connectionGeneration
         do {
             let entries = try await source.glanceActivity(limit: AppState.glanceActivityPageSize)
+            guard isCurrentConnection(generation) else { return }
             updateGlanceActivity(entries)
             clearGlanceFailure(.activity)
         } catch {
+            guard isCurrentConnection(generation) else { return }
             recordGlanceFailure(.activity, AppState.usageFailureMessage(for: error))
         }
     }
@@ -425,11 +452,14 @@ final class AppState: ObservableObject {
     /// here rendered "No connected clients".
     @MainActor
     func refreshGlanceSessions(from source: GlanceDataSource) async {
+        let generation = connectionGeneration
         do {
             let sessions = try await source.activeSessions(limit: AppState.glanceSessionsPageSize)
+            guard isCurrentConnection(generation) else { return }
             updateGlanceSessions(sessions)
             clearGlanceFailure(.sessions)
         } catch {
+            guard isCurrentConnection(generation) else { return }
             recordGlanceFailure(.sessions, AppState.usageFailureMessage(for: error))
         }
     }
