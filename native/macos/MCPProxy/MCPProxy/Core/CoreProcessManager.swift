@@ -680,24 +680,23 @@ actor CoreProcessManager {
                 appState.activityVersion += 1
             }
 
-        case "activity":
-            // New activity; refresh and check for sensitive data
-            let oldSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
-            await refreshActivity()
-            await MainActor.run { appState.activityVersion += 1 }
-            let newSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
-            // Notify on new sensitive data detections
-            if newSensitive > oldSensitive {
-                if let latest = await MainActor.run(body: {
-                    appState.recentActivity.first(where: { $0.hasSensitiveData == true })
-                }) {
-                    await notificationService.sendSensitiveDataAlert(
-                        server: latest.serverName ?? "unknown",
-                        tool: latest.toolName ?? "unknown",
-                        category: "sensitive data"
-                    )
-                }
+        case GlanceEvent.upstreamCompleted, GlanceEvent.internalCompleted:
+            // Tray Glance: adapt the payload into a row and prepend it.
+            // Deliberately NO refreshActivity() here — a REST GET per event is
+            // network amplification, not push. The 30s reconciling poll
+            // (refreshGlanceActivity) replaces these optimistic rows with the
+            // storage-assigned records. `activity.tool_call.started` is ignored:
+            // the core does not persist started events, so a row built from one
+            // would never be reconciled. `activityVersion` is deliberately NOT
+            // bumped either — ActivityView reloads on that counter
+            // (ActivityView.swift → loadSummary + loadActivities), so a
+            // per-event bump is the same amplification through a second door
+            // whenever the Activity window is open.
+            guard let data = event.data.data(using: .utf8),
+                  let entry = GlanceEvent.adapt(eventName: event.event, data: data) else {
+                break
             }
+            await appState.prependGlanceActivity(entry)
 
         case "active_profile.changed":
             // Profiles v2 T5: the server-level default active profile was switched
