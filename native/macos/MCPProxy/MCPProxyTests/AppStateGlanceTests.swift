@@ -38,6 +38,7 @@ final class AppStateGlanceTests: XCTestCase {
         ]
 
         let state = AppState()
+        state.coreState = .connected
         state.updateUsage(timeline: timeline, now: now)
 
         XCTAssertEqual(state.callsThisHour, 12)
@@ -49,6 +50,7 @@ final class AppStateGlanceTests: XCTestCase {
         let state = AppState()
         XCTAssertNil(state.callsThisHour, "callsThisHour starts nil = not loaded yet")
 
+        state.coreState = .connected
         state.updateUsage(timeline: [], now: Self.date("2026-07-29T11:42:00Z"))
 
         XCTAssertEqual(state.callsThisHour, 0)
@@ -107,6 +109,42 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(state.callsThisHour, 4)
     }
 
+    /// A glance fetch already past its `guard let apiClient` when the core leaves
+    /// `.connected` resolves AFTER the reset and would otherwise write the dead
+    /// core's data back over the cleared fields, silently undoing the one
+    /// guarantee these fields exist to provide.
+    ///
+    /// The window is real, not theoretical: `CoreProcessManager.shutdown()`
+    /// transitions to `.shuttingDown` (:204) before it cancels `refreshTask`
+    /// (:210), and cancellation would not help anyway — a suspended
+    /// `await apiClient.glanceActivity()` still resumes and still runs the
+    /// `await appState.update…` that follows it.
+    func testLateFetchDoesNotRepopulateAfterDisconnect() throws {
+        let state = AppState()
+        state.coreState = .connected
+        state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
+        state.updateGlanceSessions([try Self.session(id: "s1", status: "active")])
+        state.updateUsage(
+            timeline: [Self.bucket("2026-07-29T11:00:00Z", calls: 12)],
+            now: Self.date("2026-07-29T11:10:00Z")
+        )
+
+        state.coreState = .shuttingDown
+
+        // The three in-flight fetches resolve now, after the reset.
+        state.updateGlanceActivity([try Self.activity(id: "a2", type: "tool_call")])
+        state.updateGlanceSessions([try Self.session(id: "s2", status: "active")])
+        state.updateUsage(
+            timeline: [Self.bucket("2026-07-29T11:00:00Z", calls: 99)],
+            now: Self.date("2026-07-29T11:10:00Z")
+        )
+
+        XCTAssertTrue(state.glanceActivity.isEmpty, "a late activity fetch must not repopulate")
+        XCTAssertTrue(state.glanceSessions.isEmpty, "a late sessions fetch must not repopulate")
+        XCTAssertNil(state.usageTimeline, "a late usage fetch must not repopulate")
+        XCTAssertNil(state.callsThisHour, "a late usage fetch must not repopulate")
+    }
+
     // MARK: - Reconciling poll
 
     /// The 30s poll exists to reconcile the SSE-fed optimistic list with the
@@ -117,6 +155,7 @@ final class AppStateGlanceTests: XCTestCase {
     /// forever and the row would lie until it scrolled off.
     func testGlanceActivityUpdatesWhenOnlyStatusChanges() throws {
         let state = AppState()
+        state.coreState = .connected
         state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call")])
         state.updateGlanceActivity([try Self.activity(id: "a1", type: "tool_call", status: "error")])
 

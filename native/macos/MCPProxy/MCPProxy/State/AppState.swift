@@ -315,6 +315,9 @@ final class AppState: ObservableObject {
 
     /// Store the 24h timeline and derive the current-hour headline count.
     ///
+    /// Ignored unless the core is `.connected`, like the other two glance
+    /// updaters — see `updateGlanceActivity` for why.
+    ///
     /// Both assignments are guarded. This file's rule (see `updateServers`) is
     /// "only publish when the data actually differs", because every `@Published`
     /// write feeds the debounced `objectWillChange → rebuildMenu()` sink in
@@ -322,12 +325,21 @@ final class AppState: ObservableObject {
     /// a completely idle proxy. `UsageBucket` is `Equatable`, so the guard is free.
     @MainActor
     func updateUsage(timeline: [UsageBucket], now: Date = Date()) {
+        guard coreState == .connected else { return }
         if usageTimeline != timeline { usageTimeline = timeline }
         let calls = AppState.callsInCurrentHour(timeline, now: now)
         if callsThisHour != calls { callsThisHour = calls }
     }
 
     /// Replace the glance activity feed. Leaves `recentActivity` untouched.
+    ///
+    /// Ignored unless the core is `.connected`. `clearGlanceState()` alone is not
+    /// enough: a fetch already past its `guard let apiClient` when the core goes
+    /// away resolves after the reset and would write the dead core's data back
+    /// over the cleared fields. `CoreProcessManager.shutdown()` transitions to
+    /// `.shuttingDown` before it cancels `refreshTask`, and cancellation would not
+    /// close the window anyway — a suspended fetch still resumes and still runs
+    /// the update that follows it.
     ///
     /// `ActivityEntry`'s Equatable is id-only (API/Models.swift:570), so guarding
     /// on ids alone would drop the reconciling poll's late corrections: the
@@ -336,6 +348,7 @@ final class AppState: ObservableObject {
     /// glance rows actually render instead — still cheap, still churn-free.
     @MainActor
     func updateGlanceActivity(_ entries: [ActivityEntry]) {
+        guard coreState == .connected else { return }
         func fingerprint(_ list: [ActivityEntry]) -> [String] {
             list.map { "\($0.id)|\($0.status)|\($0.hasSensitiveData == true)" }
         }
@@ -345,8 +358,11 @@ final class AppState: ObservableObject {
     }
 
     /// Replace the glance (active-only) session feed. Leaves `recentSessions` untouched.
+    ///
+    /// Ignored unless the core is `.connected` — see `updateGlanceActivity`.
     @MainActor
     func updateGlanceSessions(_ sessions: [APIClient.MCPSession]) {
+        guard coreState == .connected else { return }
         if sessions.map(\.id) != glanceSessions.map(\.id) {
             glanceSessions = sessions
         }
