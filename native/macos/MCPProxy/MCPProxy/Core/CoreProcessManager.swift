@@ -868,14 +868,13 @@ actor CoreProcessManager {
     /// Tray Glance: fetch the type-filtered tool-call feed for the menu's
     /// "Recent" rows. Separate from `refreshActivity()` on purpose — that feed
     /// stays broad because the native Dashboard renders the full activity log.
+    ///
+    /// The body lives on `AppState` behind `GlanceDataSource`, like the other
+    /// two glance fetches: a catch block reachable only from here is a catch
+    /// block no test can see, which is how this one came to swallow its errors.
     private func refreshGlanceActivity() async {
         guard let apiClient else { return }
-        do {
-            let entries = try await apiClient.glanceActivity(limit: 50)
-            await appState.updateGlanceActivity(entries)
-        } catch {
-            // Non-fatal; we'll retry on the next refresh
-        }
+        await appState.refreshGlanceActivity(from: apiClient)
     }
 
     /// Tray Glance: fetch active-only sessions for the menu's "Clients" rows.
@@ -883,12 +882,7 @@ actor CoreProcessManager {
     /// ActivityView can resolve session ids to client names.
     private func refreshGlanceSessions() async {
         guard let apiClient else { return }
-        do {
-            let sessions = try await apiClient.activeSessions(limit: 25)
-            await appState.updateGlanceSessions(sessions)
-        } catch {
-            // Non-fatal; we'll retry on the next refresh
-        }
+        await appState.refreshGlanceSessions(from: apiClient)
     }
 
     /// Tray Glance: fetch the 24h usage aggregate that backs both the header

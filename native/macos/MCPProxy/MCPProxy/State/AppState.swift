@@ -111,6 +111,20 @@ final class AppState: ObservableObject {
     /// failing refresh would sit on "Loading…" forever.
     @Published var usageError: String?
 
+    /// Which glance feed a recorded failure came from.
+    enum GlanceFeed: String, CaseIterable {
+        case activity, sessions, usage
+    }
+
+    /// Consecutive failed refreshes per feed; a success resets that feed's
+    /// entry. Per-feed rather than one shared counter because the three fetch
+    /// independently — a single counter that any success reset would report a
+    /// permanently failing feed as healthy every 30 seconds.
+    private(set) var glanceFailureStreak: [GlanceFeed: Int] = [:]
+
+    /// The most recent glance refresh failure, whichever feed produced it.
+    private(set) var glanceError: String?
+
     // MARK: Token metrics (from status response)
 
     @Published var tokenMetrics: TokenMetrics?
@@ -337,6 +351,7 @@ final class AppState: ObservableObject {
         let calls = AppState.callsInCurrentHour(timeline, now: now)
         if callsThisHour != calls { callsThisHour = calls }
         if usageError != nil { usageError = nil }
+        clearGlanceFailure(.usage)
     }
 
     /// Record a failed usage refresh so the histogram submenu can say so
@@ -353,6 +368,7 @@ final class AppState: ObservableObject {
     func recordUsageFailure(_ message: String) {
         guard coreState == .connected else { return }
         if usageError != message { usageError = message }
+        recordGlanceFailure(.usage, message)
     }
 
     /// Fetch the 24h usage aggregate and publish the outcome — success or
@@ -383,6 +399,70 @@ final class AppState: ObservableObject {
         let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return text.isEmpty ? "Usage refresh failed" : text
     }
+
+    /// Fetch the glance activity feed and publish the outcome — success or
+    /// failure.
+    ///
+    /// Takes a `GlanceDataSource` rather than the concrete client for the same
+    /// reason `refreshUsage(from:)` does: this used to live in
+    /// `CoreProcessManager` where the catch block was unreachable from a test,
+    /// and an unreachable failure path is how the feed came to swallow errors.
+    /// A permanently failing fetch rendered "No tool calls yet" — the same thing
+    /// a genuinely idle proxy renders.
+    @MainActor
+    func refreshGlanceActivity(from source: GlanceDataSource) async {
+        do {
+            let entries = try await source.glanceActivity(limit: AppState.glanceActivityPageSize)
+            updateGlanceActivity(entries)
+            clearGlanceFailure(.activity)
+        } catch {
+            recordGlanceFailure(.activity, AppState.usageFailureMessage(for: error))
+        }
+    }
+
+    /// Fetch the active-only session feed and publish the outcome — success or
+    /// failure. See `refreshGlanceActivity(from:)`; a permanently failing fetch
+    /// here rendered "No connected clients".
+    @MainActor
+    func refreshGlanceSessions(from source: GlanceDataSource) async {
+        do {
+            let sessions = try await source.activeSessions(limit: AppState.glanceSessionsPageSize)
+            updateGlanceSessions(sessions)
+            clearGlanceFailure(.sessions)
+        } catch {
+            recordGlanceFailure(.sessions, AppState.usageFailureMessage(for: error))
+        }
+    }
+
+    /// Record a failed refresh of one glance feed.
+    ///
+    /// Guarded on `.connected` for the same reason every publish helper here is
+    /// (see `updateGlanceActivity`): a fetch already in flight when the core
+    /// goes away resolves into its catch block after `clearGlanceState()`, and
+    /// the dead core's failure must not outlive it.
+    @MainActor
+    func recordGlanceFailure(_ feed: GlanceFeed, _ message: String) {
+        guard coreState == .connected else { return }
+        glanceFailureStreak[feed, default: 0] += 1
+        if glanceError != message { glanceError = message }
+    }
+
+    /// Clear one feed's failure record after a successful refresh. Only that
+    /// feed's — the others may still be failing.
+    @MainActor
+    func clearGlanceFailure(_ feed: GlanceFeed) {
+        guard coreState == .connected else { return }
+        glanceFailureStreak[feed] = 0
+        if glanceFailureStreak.values.allSatisfy({ $0 == 0 }), glanceError != nil {
+            glanceError = nil
+        }
+    }
+
+    /// Records requested per glance activity poll.
+    static let glanceActivityPageSize = 50
+
+    /// Active sessions requested per poll.
+    static let glanceSessionsPageSize = 25
 
     /// Replace the glance activity feed. Leaves `recentActivity` untouched.
     ///
@@ -469,5 +549,7 @@ final class AppState: ObservableObject {
         if usageTimeline != nil { usageTimeline = nil }
         if callsThisHour != nil { callsThisHour = nil }
         if usageError != nil { usageError = nil }
+        if !glanceFailureStreak.isEmpty { glanceFailureStreak = [:] }
+        if glanceError != nil { glanceError = nil }
     }
 }
