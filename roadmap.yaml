@@ -313,6 +313,31 @@ epics:
         status: todo
         depends_on: [tpa-db-format]
 
+  - id: remote-access-tunnel
+    title: Remote access tunnel (feature-flagged MVP, spec 089)
+    status: todo
+    priority: P2
+    spec: specs/089-remote-access-tunnel
+    depends_on: [tpa-db, ux-audit, analytics-dashboard]
+    note: "One-button Web UI exposure of /mcp via external tunnel binary (cloudflared quick tunnel first) so Claude custom connectors (all tiers incl. Free, syncs to iOS/Android) can reach local MCP servers (e.g. Obsidian) — behind a feature flag, off by default, mandatory OAuth 2.1+PKCE+DCR gate, per-server exposure allowlist, remote-origin activity logging. Research: docs/research/remote-access-tunnel-research-2026-07-29.html (25/25 claims verified; niche unoccupied — Docker MCP Gateway lacks it). Sequenced after tpa-db (+ shipped scanner work 086-088), macOS tray redesign (ux-audit) and analytics-dashboard per owner decision 2026-07-29. No hosted relay/payments in MVP."
+    tasks:
+      - id: tunnel-oauth-gate
+        title: "OAuth 2.1 authorization-server gate for tunnel-origin traffic (PKCE, DCR, Anthropic callback allowlist, token lifecycle/revocation)"
+        status: todo
+        depends_on: []
+      - id: tunnel-orchestration
+        title: "cloudflared quick-tunnel orchestration (detect/launch/supervise/parse URL) + feature flag + never-auto-start"
+        status: todo
+        depends_on: []
+      - id: tunnel-exposure-allowlist
+        title: "Per-server exposure allowlist (default none; quarantined non-exposable; hot-reload)"
+        status: todo
+        depends_on: [tunnel-oauth-gate]
+      - id: tunnel-webui-tray
+        title: "Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker"
+        status: todo
+        depends_on: [tunnel-orchestration, tunnel-exposure-allowlist]
+
   # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
   - id: upgrade-nudge
     title: Upgrade awareness & guided update
