@@ -355,6 +355,35 @@ final class AppState: ObservableObject {
         if usageError != message { usageError = message }
     }
 
+    /// Fetch the 24h usage aggregate and publish the outcome — success or
+    /// failure.
+    ///
+    /// The catch is the whole reason `usageError` exists. A failure that only
+    /// logged would leave the header count and the histogram submenu sitting on
+    /// "Loading…" indefinitely, describing a fetch that is never coming back as
+    /// one still in flight.
+    ///
+    /// Takes a `GlanceDataSource` rather than the concrete client so the
+    /// failure path is reachable from a test; untested wiring is exactly how
+    /// this state came to be unreachable in the first place.
+    @MainActor
+    func refreshUsage(from source: GlanceDataSource) async {
+        do {
+            let usage = try await source.usageAggregate(window: "24h", top: 1)
+            updateUsage(timeline: usage.timeline)
+        } catch {
+            recordUsageFailure(AppState.usageFailureMessage(for: error))
+        }
+    }
+
+    /// The text shown in the failed row's tooltip. `APIClientError` is a
+    /// `LocalizedError`, so this is already "HTTP 503: …" or "Core is not
+    /// ready" rather than a Swift type dump.
+    static func usageFailureMessage(for error: Error) -> String {
+        let text = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? "Usage refresh failed" : text
+    }
+
     /// Replace the glance activity feed. Leaves `recentActivity` untouched.
     ///
     /// Ignored unless the core is `.connected`. `clearGlanceState()` alone is not

@@ -425,3 +425,78 @@ final class GlanceHistogramSubmenuTests: XCTestCase {
         XCTAssertNotNil(menu.items[0].view?.accessibilityLabel())
     }
 }
+
+/// The refresh path that makes `usageError` reachable. Without these, the
+/// failure state is code nobody can ever see: the submenu would sit on
+/// "Loading…" forever after a fetch that never recovers.
+@MainActor
+final class UsageRefreshWiringTests: XCTestCase {
+
+    /// A data source that fails on demand.
+    private final class StubSource: GlanceDataSource {
+        var error: Error?
+        var timeline: [UsageBucket] = []
+
+        func usageAggregate(window: String, top: Int) async throws -> UsageAggregateResponse {
+            if let error { throw error }
+            return UsageAggregateResponse(window: "24h", tokenSource: "bytes", tokensSaved: 0,
+                                          tokensSavedPercentage: 0, timeline: timeline)
+        }
+        func glanceActivity(limit: Int) async throws -> [ActivityEntry] { [] }
+        func activeSessions(limit: Int) async throws -> [APIClient.MCPSession] { [] }
+    }
+
+    private func connectedState() -> AppState {
+        let state = AppState()
+        state.coreState = .connected
+        return state
+    }
+
+    func testAFailedRefreshRecordsTheMessage() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.error = APIClientError.httpError(statusCode: 503, message: "core restarting")
+
+        await state.refreshUsage(from: source)
+
+        XCTAssertEqual(state.usageError, "HTTP 503: core restarting")
+        XCTAssertNil(state.usageTimeline, "a failed fetch must not fabricate a timeline")
+    }
+
+    func testASuccessfulRefreshClearsAPreviousFailure() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.error = APIClientError.notReady
+        await state.refreshUsage(from: source)
+        XCTAssertNotNil(state.usageError)
+
+        source.error = nil
+        source.timeline = [Fixture.bucket(start: Fixture.currentHour, calls: 5, errors: 1)]
+        await state.refreshUsage(from: source)
+
+        XCTAssertNil(state.usageError)
+        XCTAssertEqual(state.usageTimeline?.count, 1)
+    }
+
+    /// A later failure must not throw away data already on screen — the chart
+    /// keeps showing real, slightly stale numbers rather than flipping to an
+    /// error row.
+    func testAFailedRefreshLeavesAnAlreadyLoadedTimelineAlone() async {
+        let state = connectedState()
+        let source = StubSource()
+        source.timeline = [Fixture.bucket(start: Fixture.currentHour, calls: 5, errors: 1)]
+        await state.refreshUsage(from: source)
+
+        source.error = APIClientError.noData
+        await state.refreshUsage(from: source)
+
+        XCTAssertEqual(state.usageTimeline?.count, 1, "the loaded timeline survives a later failure")
+        if case .loaded = ActivityHistogram.state(timeline: state.usageTimeline,
+                                                  errorMessage: state.usageError,
+                                                  now: Fixture.now) {
+            // expected: real data still beats the recorded failure
+        } else {
+            XCTFail("the submenu must keep charting data it already has")
+        }
+    }
+}

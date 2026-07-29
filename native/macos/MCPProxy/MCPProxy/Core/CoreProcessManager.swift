@@ -893,14 +893,13 @@ actor CoreProcessManager {
 
     /// Tray Glance: fetch the 24h usage aggregate that backs both the header
     /// count and the histogram submenu.
+    /// Non-fatal, and retried on the next refresh — but a failure is RECORDED
+    /// rather than swallowed. Silently keeping the loading state would tell the
+    /// user a fetch that is never coming back is still in flight; `refreshUsage`
+    /// publishes the failure so the submenu can say so.
     private func refreshUsage() async {
         guard let apiClient else { return }
-        do {
-            let usage = try await apiClient.usageAggregate(window: "24h", top: 1)
-            await appState.updateUsage(timeline: usage.timeline)
-        } catch {
-            // Non-fatal; the header and histogram stay in their loading state
-        }
+        await appState.refreshUsage(from: apiClient)
     }
 
     /// Fetch token metrics from the status endpoint and update appState.
