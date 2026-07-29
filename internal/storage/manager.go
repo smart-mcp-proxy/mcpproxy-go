@@ -1218,6 +1218,11 @@ type SessionRecord struct {
 	WorkSessionID string `json:"work_session_id,omitempty"`
 }
 
+// sessionRetentionLimit is the hard cap on stored session records. The cap is
+// absolute: it holds even when every retained session is "active" (see
+// enforceSessionRetention).
+const sessionRetentionLimit = 100
+
 // CreateSession creates a new session record
 func (m *Manager) CreateSession(session *SessionRecord) error {
 	m.mu.Lock()
@@ -1279,9 +1284,9 @@ func (m *Manager) CreateSession(session *SessionRecord) error {
 			return fmt.Errorf("failed to store session: %w", err)
 		}
 
-		// Enforce retention limit (keep 100 most recent) only when creating new sessions
+		// Enforce retention limit only when creating new sessions
 		if existingKey == nil {
-			return m.enforceSessionRetention(bucket, 100)
+			return m.enforceSessionRetention(bucket, sessionRetentionLimit)
 		}
 		return nil
 	})
@@ -1699,26 +1704,104 @@ func (m *Manager) GetToolCallsBySession(sessionID string, limit, offset int) ([]
 	return toolCalls, total, err
 }
 
-// enforceSessionRetention deletes oldest sessions if count exceeds limit
+// sessionEvictionCandidate is one stored session, reduced to the two properties
+// retention actually cares about.
+type sessionEvictionCandidate struct {
+	key      []byte
+	active   bool
+	activity time.Time // LastActivity, falling back to StartTime when unset
+}
+
+// enforceSessionRetention trims the sessions bucket down to maxSessions records.
+//
+// Victims are chosen by usefulness, NOT by key order. Session keys are
+// {StartTime.UnixNano()}_{ID}, so deleting the lowest keys deletes the
+// longest-lived session first — which is precisely the session most likely to
+// still be connected and working. A client that stayed connected all day used to
+// disappear from storage as soon as 100 newer sessions had been created; after
+// that it was absent from the sessions API and its later close/stat updates had
+// no record to find.
+//
+// Eviction order is therefore two-tiered:
+//
+//  1. closed sessions, stalest first — finished work; nothing will ever write to
+//     these records again;
+//  2. only if tier 1 does not free enough room, active sessions ordered by last
+//     activity, stalest first — a client that died without closing goes before a
+//     client that is genuinely working.
+//
+// Tier 2 is what keeps the cap absolute. Refusing to evict active sessions at
+// all would let an all-active bucket (abandoned clients, a reconnect loop that
+// never closes cleanly) grow without bound, which is a worse bug than the one
+// this fixes.
 func (m *Manager) enforceSessionRetention(bucket *bbolt.Bucket, maxSessions int) error {
-	stats := bucket.Stats()
-	if stats.KeyN <= maxSessions {
+	if maxSessions <= 0 {
 		return nil
 	}
 
-	// Delete oldest sessions (first keys since they have oldest timestamps)
-	toDelete := stats.KeyN - maxSessions
-	deleted := 0
-
+	// Classify every record in one pass. bucket.Stats() is deliberately not used
+	// for the count: inside a write transaction it does not account for records
+	// Put earlier in the same transaction, which let the bucket settle one record
+	// above the cap forever.
+	var candidates []sessionEvictionCandidate
 	c := bucket.Cursor()
-	for k, _ := c.First(); k != nil && deleted < toDelete; k, _ = c.Next() {
-		if err := bucket.Delete(k); err != nil {
-			return fmt.Errorf("failed to delete old session: %w", err)
+	for k, v := c.First(); k != nil; k, v = c.Next() {
+		cand := sessionEvictionCandidate{key: append([]byte(nil), k...)}
+		var session SessionRecord
+		if err := json.Unmarshal(v, &session); err != nil {
+			// Unreadable record: nothing can use it, so it evicts first.
+			m.logger.Warnw("Unreadable session record during retention", "key", string(k), "error", err)
+		} else {
+			cand.active = session.Status == "active"
+			cand.activity = session.LastActivity
+			if cand.activity.IsZero() {
+				// Records written before LastActivity existed; StartTime is the
+				// best evidence available. Without this they would all sort as
+				// year 1 and be evicted ahead of genuinely stale sessions.
+				cand.activity = session.StartTime
+			}
 		}
-		deleted++
+		candidates = append(candidates, cand)
 	}
 
-	m.logger.Debugw("Enforced session retention", "deleted", deleted, "remaining", maxSessions)
+	toDelete := len(candidates) - maxSessions
+	if toDelete <= 0 {
+		return nil
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.active != b.active {
+			return !a.active // closed sessions are evicted before active ones
+		}
+		if !a.activity.Equal(b.activity) {
+			return a.activity.Before(b.activity) // stalest first
+		}
+		return bytes.Compare(a.key, b.key) < 0 // deterministic tiebreak
+	})
+
+	// Delete only after the scan has finished. Sorting requires it anyway, and
+	// bbolt documents mutation during traversal as unsafe ("Changing data while
+	// traversing with a cursor may cause it to be invalidated and return
+	// unexpected keys and/or values"), which is what the previous
+	// delete-inside-the-cursor-loop did. PruneExcessActivities already collects
+	// keys first for the same reason.
+	activeEvicted := 0
+	for i := 0; i < toDelete; i++ {
+		if err := bucket.Delete(candidates[i].key); err != nil {
+			return fmt.Errorf("failed to delete old session: %w", err)
+		}
+		if candidates[i].active {
+			activeEvicted++
+		}
+	}
+
+	if activeEvicted > 0 {
+		// Only reachable when there was no closed session left to sacrifice.
+		m.logger.Warnw("Session retention had to evict active sessions",
+			"active_evicted", activeEvicted, "limit", maxSessions)
+	}
+	m.logger.Debugw("Enforced session retention", "deleted", toDelete, "remaining", maxSessions)
 	return nil
 }
 
