@@ -72,6 +72,22 @@ final class CoreLivenessTests: XCTestCase {
         await MainActor.run { appState.coreState }
     }
 
+    /// Run a shell pipeline and read back an integer (process counting).
+    private func shellCount(_ command: String) throws -> Int {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+        proc.arguments = ["-c", command]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        try proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? "0"
+        return Int(text) ?? 0
+    }
+
     /// Poll until `predicate` holds or the deadline passes. Returns the last state.
     private func waitForState(
         _ appState: AppState,
@@ -356,7 +372,8 @@ final class CoreLivenessTests: XCTestCase {
                       "a socket a live core is listening on must never be unlinked")
         XCTAssertTrue(SocketTransport.isSocketAvailable(path: stub.path),
                       "the live core's socket must still be connectable")
-        XCTAssertEqual(fakeCore.launchCount(), 0,
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0,
                        "a competing core must not be started against the same data directory")
         XCTAssertNil(manager.managedProcess,
                      "no process may be launched while another core holds the socket")
@@ -428,11 +445,12 @@ final class CoreLivenessTests: XCTestCase {
         await manager.start(maySpawn: true)
 
         let deadline = Date().addingTimeInterval(20)
-        while fakeCore.launchCount() < 4 && Date() < deadline {
+        while await manager.coresLaunched < 4 && Date() < deadline {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
 
-        XCTAssertEqual(fakeCore.launchCount(), 4,
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 4,
                        "one initial launch plus three ladder rungs — no more, no fewer")
         let state = await waitForState(appState, timeout: 5.0) {
             $0 == .error(.maxRetriesExceeded)
@@ -505,6 +523,207 @@ final class CoreLivenessTests: XCTestCase {
                           "the header value must be an opaque token, not the path itself")
         XCTAssertEqual(SocketURLProtocol.routes(for: token), stub.path,
                        "and it must resolve back to the socket it was minted for")
+    }
+
+    // MARK: - The property: never two cores on one data directory
+
+    /// The errno classification must be honoured by STARTUP, not only by the
+    /// liveness tick. A socket that refuses connections — a full listen queue on
+    /// a live core looks exactly like this — must not lead to unlinking the
+    /// socket and spawning over whatever is behind it.
+    func testAnIndeterminateSocketAtStartupNeitherUnlinksNorSpawns() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "exit 1")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        // A socket file that refuses connections. From out here this is
+        // indistinguishable from a live core with a full backlog.
+        let stub = UnixSocketHTTPStub.healthyCore()
+        try stub.start()
+        stub.stop(unlinkSocket: false)
+        defer { unlink(stub.path) }
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .refused,
+                       "precondition: the socket refuses connections")
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: stub.path,
+            refreshInterval: 60,
+            probeTimeout: 0.3,
+            unresponsiveCoreTimeout: 0.5
+        )
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0,
+                       "a socket we cannot classify must not be spawned over")
+        XCTAssertNil(manager.managedProcess)
+
+        // ...and the user is told, rather than left staring at a healthy icon.
+        let state = await waitForState(appState, timeout: 5.0) {
+            if case .error = $0 { return true }
+            return false
+        }
+        guard case .error = state else {
+            return XCTFail("an unusable core must become an actionable error, got \(state)")
+        }
+    }
+
+    /// A rung that gives up on a launch must terminate and reap it. A core that
+    /// hung without ever becoming ready is still a core; leaving it running
+    /// while the next rung launches makes the ladder a core factory.
+    func testAbandonedLaunchAttemptsAreReapedBeforeTheNextRung() async throws {
+        // Stays alive but never creates a socket: waitForSocket gives up on it
+        // while the process is still running.
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.02, maxDelay: 0.05, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock",
+            refreshInterval: 60,
+            probeTimeout: 0.3,
+            unresponsiveCoreTimeout: 0.5,
+            // Give up on a socket that never appears after a second, so the
+            // ladder actually climbs during the test.
+            socketWaitTimeout: 1.0
+        )
+        self.manager = manager
+
+        let launching = Task { await manager.start(maySpawn: true) }
+
+        // Sample while the ladder is climbing: by now at least two rungs have
+        // been tried, and each abandoned attempt is still sleeping unless it was
+        // reaped.
+        var worstCase = 0
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            worstCase = max(worstCase, try shellCount("pgrep -f '\(fakeCore.path)' | wc -l"))
+            if await manager.coresLaunched >= 3 { break }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        let climbed = await manager.coresLaunched
+        XCTAssertGreaterThanOrEqual(climbed, 2,
+                                    "precondition: the ladder climbed past its first rung")
+        XCTAssertLessThanOrEqual(worstCase, 1,
+                                 "at most one launched core may be alive at any moment — "
+                                 + "an abandoned attempt must be terminated and reaped")
+
+        launching.cancel()
+        _ = await launching.value
+        let leftovers = try shellCount("pgrep -f '\(fakeCore.path)' | wc -l")
+        XCTAssertEqual(leftovers, 0, "no launched core may outlive the ladder")
+    }
+
+    /// Stop must be able to cancel work already in flight. A ladder asleep in
+    /// its backoff will otherwise wake up and launch a core after the user
+    /// pressed Stop, leaving the tray showing "Stopped" while owning a process.
+    func testShutdownCancelsAnInFlightLaunchLadder() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "exit 1")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            // 2s backoff: the ladder is provably asleep when we shut down.
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 2.0, maxDelay: 2.0, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock",
+            refreshInterval: 60
+        )
+        self.manager = manager
+
+        let launching = Task { await manager.start(maySpawn: true) }
+        // Wait for the first launch to happen and fail, putting the ladder to sleep.
+        let deadline = Date().addingTimeInterval(10)
+        while await manager.coresLaunched < 1 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let beforeShutdown = await manager.coresLaunched
+        XCTAssertEqual(beforeShutdown, 1, "precondition: one launch, ladder now in backoff")
+
+        await manager.shutdown()
+        let afterShutdown = await manager.coresLaunched
+
+        // Well past the 2s backoff the ladder was sleeping through.
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        let finalCount = await manager.coresLaunched
+        XCTAssertEqual(finalCount, afterShutdown,
+                       "a ladder must not wake up and launch a core after shutdown")
+
+        let state = await coreState(appState)
+        XCTAssertEqual(state, .idle)
+        XCTAssertNil(manager.managedProcess,
+                     "the tray must not say Stopped while owning a running process")
+
+        launching.cancel()
+        _ = await launching.value
+    }
+
+    /// The choke point: every path that wants a core goes through `launchCore`,
+    /// so the invariant is enforced there rather than depending on six callers
+    /// staying disciplined. With a core listening on the socket, no path may
+    /// produce a second one.
+    func testNoPathSpawnsWhileACoreIsListening() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        // A core that is UP but sick: it holds the socket and never answers
+        // /ready. This is the dangerous shape — connectToCore() fails, so every
+        // recovery path is tempted to launch a replacement on top of it.
+        let ready = ReadyBehaviour()
+        ready.current = .json(#"{"success":false,"error":"wedged"}"#, status: 503)
+        let stub = UnixSocketHTTPStub.healthyCore(ready: ready)
+        try stub.start()
+        self.stub = stub
+
+        let appState = await MainActor.run { AppState() }
+        // As if this core were one WE launched — the ownership under which the
+        // recovery paths are allowed to relaunch.
+        await MainActor.run { appState.ownership = .trayManaged }
+
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.02, maxDelay: 0.05, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: stub.path,
+            refreshInterval: 60,
+            probeTimeout: 0.3,
+            unresponsiveCoreTimeout: 0.5
+        )
+        self.manager = manager
+
+        // Every entry point that can reach a spawn.
+        await manager.start(maySpawn: true)
+        await manager.handleProcessExit(status: 1)
+        await manager.retry()
+        await manager.handleCoreLoss()
+
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0,
+                       "no entry point may spawn a core while one is listening on the socket")
+        XCTAssertNil(manager.managedProcess)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stub.path),
+                      "and none of them may unlink its socket")
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .connectable,
+                       "the core that was there must still be there")
     }
 
     // MARK: - What a failed socket connect does and does not prove
