@@ -1,0 +1,67 @@
+import XCTest
+@testable import MCPProxy
+
+/// Request-shape and decoding tests for the three tray-glance API calls.
+final class APIClientGlanceTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        GlanceStubURLProtocol.reset()
+    }
+
+    override func tearDown() {
+        GlanceStubURLProtocol.reset()
+        super.tearDown()
+    }
+
+    // MARK: - Usage aggregate
+
+    func testUsageAggregateRequestsWindowAndTop() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"window":"24h","token_source":"bytes","tokens_saved":184320,
+         "tokens_saved_percentage":92.4,"tools":[],"timeline":[]}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        _ = try await client.usageAggregate()
+
+        XCTAssertEqual(
+            GlanceStubURLProtocol.requestedURLs,
+            ["http://127.0.0.1:8080/api/v1/activity/usage?window=24h&top=1"]
+        )
+    }
+
+    func testUsageAggregateDecodesTimelineBuckets() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"window":"24h","token_source":"bytes","tokens_saved":0,
+         "tokens_saved_percentage":0,"tools":[],"timeline":[
+           {"start":"2026-07-29T13:00:00Z","calls":12,"errors":2,"total_resp_bytes":4096}
+         ]}
+        """)
+        let client = GlanceStubURLProtocol.makeClient()
+
+        let usage = try await client.usageAggregate()
+
+        XCTAssertEqual(usage.window, "24h")
+        XCTAssertEqual(usage.tokensSaved, 0)
+        XCTAssertEqual(usage.timeline.count, 1)
+        let bucket = try XCTUnwrap(usage.timeline.first)
+        XCTAssertEqual(bucket.calls, 12)
+        XCTAssertEqual(bucket.errors, 2)
+        XCTAssertEqual(bucket.totalRespBytes, 4096)
+        // 2026-07-29T13:00:00Z as seconds since the epoch.
+        XCTAssertEqual(bucket.start.timeIntervalSince1970, 1785330000, accuracy: 0.5)
+    }
+
+    func testUsageBucketDecodesFractionalSecondTimestamps() throws {
+        let json = Data("""
+        {"start":"2026-07-29T13:00:00.123Z","calls":1,"errors":0,"total_resp_bytes":0}
+        """.utf8)
+
+        let bucket = try JSONDecoder().decode(UsageBucket.self, from: json)
+
+        // Tolerance must stay well under the .123s being asserted, or the test
+        // passes even when the fractional-seconds branch is dropped.
+        XCTAssertEqual(bucket.start.timeIntervalSince1970, 1785330000.123, accuracy: 0.001)
+    }
+}

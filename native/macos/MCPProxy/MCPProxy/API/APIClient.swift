@@ -375,6 +375,15 @@ actor APIClient {
         return response.activities
     }
 
+    /// Fetch the usage aggregate from `GET /api/v1/activity/usage`.
+    ///
+    /// Served from an in-memory snapshot behind a short TTL cache — never a log
+    /// scan. `top` trims the per-tool rollup the tray does not render; the
+    /// timeline is global and unaffected by it.
+    func usageAggregate(window: String = "24h", top: Int = 1) async throws -> UsageAggregateResponse {
+        return try await fetchWrapped(path: "/api/v1/activity/usage?window=\(window)&top=\(top)")
+    }
+
     /// Fetch the activity summary from `GET /api/v1/activity/summary`.
     func activitySummary() async throws -> ActivitySummary {
         return try await fetchWrapped(path: "/api/v1/activity/summary")
