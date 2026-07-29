@@ -42,6 +42,7 @@ graph LR
   analytics_dashboard["Analytics dashboard as default page"]
   scanner_simplification["Scanner simplification (deterministic d…"]
   tpa_db["tpa-db: versioned TPA signature databas…"]
+  remote_access_tunnel["Remote access tunnel (feature-flagged M…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
 
@@ -50,6 +51,9 @@ graph LR
   ux_audit --> analytics_dashboard
   scanner_v2 --> scanner_simplification
   scanner_simplification --> tpa_db
+  tpa_db --> remote_access_tunnel
+  ux_audit --> remote_access_tunnel
+  analytics_dashboard --> remote_access_tunnel
   telemetry_identity --> telemetry_v7_churn
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
@@ -57,7 +61,7 @@ graph LR
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,scanner_simplification done;
   class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
-  class ux_audit,action_log_transparency,tpa_db todo;
+  class ux_audit,action_log_transparency,tpa_db,remote_access_tunnel todo;
 ```
 
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
@@ -321,6 +325,37 @@ graph LR
 | Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
 | Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>⚪ Remote access tunnel (feature-flagged MVP, spec 089) — Todo · P2</summary>
+
+> One-button Web UI exposure of /mcp via external tunnel binary (cloudflared quick tunnel first) so Claude custom connectors (all tiers incl. Free, syncs to iOS/Android) can reach local MCP servers (e.g. Obsidian) — behind a feature flag, off by default, mandatory OAuth 2.1+PKCE+DCR gate, per-server exposure allowlist, remote-origin activity logging. Research: docs/research/remote-access-tunnel-research-2026-07-29.html (25/25 claims verified; niche unoccupied — Docker MCP Gateway lacks it). Sequenced after tpa-db (+ shipped scanner work 086-088), macOS tray redesign (ux-audit) and analytics-dashboard per owner decision 2026-07-29. No hosted relay/payments in MVP.
+
+Spec: [089-remote-access-tunnel](./specs/089-remote-access-tunnel/)
+
+```mermaid
+graph LR
+  tunnel_oauth_gate["OAuth 2.1 authorization-server gate for tunne…"]
+  tunnel_orchestration["cloudflared quick-tunnel orchestration (detec…"]
+  tunnel_exposure_allowlist["Per-server exposure allowlist (default none;…"]
+  tunnel_webui_tray["Web UI open/close button + URL/QR/instruction…"]
+
+  tunnel_oauth_gate --> tunnel_exposure_allowlist
+  tunnel_orchestration --> tunnel_webui_tray
+  tunnel_exposure_allowlist --> tunnel_webui_tray
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tunnel_oauth_gate,tunnel_orchestration,tunnel_exposure_allowlist,tunnel_webui_tray todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| OAuth 2.1 authorization-server gate for tunnel-origin traffic (PKCE, DCR, Anthropic callback allowlist, token lifecycle/revocation) | ⚪ Todo | — |
+| cloudflared quick-tunnel orchestration (detect/launch/supervise/parse URL) + feature flag + never-auto-start | ⚪ Todo | — |
+| Per-server exposure allowlist (default none; quarantined non-exposable; hot-reload) | ⚪ Todo | — |
+| Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker | ⚪ Todo | — |
 
 </details>
 
@@ -636,6 +671,7 @@ graph LR
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — |  |  |
+| Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
@@ -754,3 +790,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [086-tpa-scanner-approval](./specs/086-tpa-scanner-approval/) | — | — |
 | [087-tpa-daily-refresh](./specs/087-tpa-daily-refresh/) | — | — |
 | [088-scanner-trust-ui](./specs/088-scanner-trust-ui/) | `shipped` | 29/29 (100%) |
+| [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) | — | — |
