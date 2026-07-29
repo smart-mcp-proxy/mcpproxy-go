@@ -57,6 +57,19 @@ func TestGetRecentSessions_StatusFilterAppliedBeforeTruncation(t *testing.T) {
 		assert.Equal(t, "session-old-active", sessions[0].ID)
 	})
 
+	// The filtered walk must still honour `limit`. With more matches than the
+	// page size, dropping the truncation guard would return all four — so this
+	// is the case that actually pins it. Keys are "{startUnixNano}_{id}" and the
+	// cursor runs Last()->Prev(), so the page is the two NEWEST closed sessions.
+	t.Run("limit truncates the filtered result while total counts every match", func(t *testing.T) {
+		sessions, total, err := manager.GetRecentSessions(2, "closed")
+		require.NoError(t, err)
+		assert.Equal(t, 4, total, "total counts every match, not just the returned page")
+		require.Len(t, sessions, 2, "limit must truncate the filtered walk")
+		assert.Equal(t, "session-closed-d", sessions[0].ID)
+		assert.Equal(t, "session-closed-c", sessions[1].ID)
+	})
+
 	t.Run("status=closed returns only closed sessions", func(t *testing.T) {
 		sessions, total, err := manager.GetRecentSessions(10, "closed")
 		require.NoError(t, err)
