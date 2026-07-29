@@ -605,17 +605,18 @@ actor CoreProcessManager {
 
         sseTask?.cancel()
         sseTask = Task { [weak self] in
-            // Capture the connection generation HERE, where the stream opens: a
-            // stream belongs to exactly one connection, and every event it
-            // carries belongs to that one. Reading it at event arrival instead
-            // would capture whatever generation is current by then — which,
-            // after a reconnect, is the new one, and the guard would pass.
-            guard let generation = await self?.currentConnectionGeneration() else { return }
-            let stream = await sseClient.connect()
-            for await event in stream {
-                guard !Task.isCancelled else { break }
-                await self?.handleSSEEvent(event, generation: generation)
-            }
+            // The generation is captured where the STREAM opens, not where an
+            // event arrives — a stream belongs to exactly one connection, and an
+            // arrival-time read after a reconnect returns the new generation and
+            // passes the guard it was meant to fail. That rule lives in
+            // SSEStreamSession so it is testable; keep this body a single call.
+            await SSEStreamSession.run(
+                captureGeneration: { await self?.currentConnectionGeneration() },
+                open: { await sseClient.connect() },
+                handle: { event, generation in
+                    await self?.handleSSEEvent(event, generation: generation)
+                }
+            )
             // Stream ended -- trigger reconnection if still connected
             guard !Task.isCancelled else { return }
             await self?.handleSSEDisconnect()

@@ -187,6 +187,12 @@ final class GlanceReconnectGenerationTests: XCTestCase {
 
     /// Positive control for the same call: an event from the live connection
     /// still reaches the feed.
+    ///
+    /// Note what this pair does NOT cover, which is why `SSEStreamSessionTests`
+    /// exists: both call the publish helper directly with a generation the test
+    /// chose, so they pin the guard and say nothing about where production reads
+    /// that generation. They pass unchanged against the version that reads it
+    /// when the event arrives — the regression the guard was written for.
     func testAnSSERowFromTheLiveConnectionPublishes() throws {
         let state = connectedState()
 
