@@ -8,7 +8,9 @@
 // The chart renders from `AppState.usageTimeline` only — opening the submenu
 // performs no network request (spec 048 invariant).
 
-import Foundation
+import SwiftUI
+import Charts
+import AppKit
 
 // MARK: - Bar model
 
@@ -102,5 +104,85 @@ enum ActivityHistogram {
 
         return "Activity over the last 24 hours: \(totalCalls) calls, \(totalErrors) errors. "
             + "Busiest hour \(formatter.string(from: peak.hourStart)) with \(peak.total) calls."
+    }
+}
+
+// MARK: - Chart
+
+/// The stacked bar chart itself. Rendering only — it fetches nothing.
+///
+/// Two `BarMark`s per hour sharing an x value stack automatically; the series
+/// are `calls - errors` and `errors`, never the raw fields.
+struct ActivityHistogramView: View {
+    let bars: [HistogramBar]
+    let accessibilitySummary: String
+
+    var body: some View {
+        Chart {
+            ForEach(bars) { bar in
+                BarMark(
+                    x: .value("Hour", bar.hourStart, unit: .hour),
+                    y: .value("Calls", bar.succeeded)
+                )
+                .foregroundStyle(by: .value("Outcome", "Succeeded"))
+
+                BarMark(
+                    x: .value("Hour", bar.hourStart, unit: .hour),
+                    y: .value("Calls", bar.errors)
+                )
+                .foregroundStyle(by: .value("Outcome", "Errors"))
+            }
+        }
+        .chartForegroundStyleScale([
+            "Succeeded": Color.accentColor,
+            "Errors": Color.red
+        ])
+        // The legend would double the item's height for two self-evident
+        // colours; the accessibility label names both series instead.
+        .chartLegend(.hidden)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 3))
+        }
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
+                AxisGridLine()
+                AxisValueLabel(format: .dateTime.hour())
+            }
+        }
+        .frame(width: 260, height: 96)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        // One label for the whole chart: VoiceOver reading 48 unlabelled bar
+        // marks would be worse than useless.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(accessibilitySummary))
+    }
+}
+
+extension ActivityHistogram {
+
+    /// Size of the hosted chart item, in points. Menu items do not auto-size a
+    /// hosting view, so the frame is explicit — and it must match the view's
+    /// own size, or the row grows a band of dead space. 260 + 2*14 = 288 wide,
+    /// 96 + 2*8 = 112 tall; measured `NSHostingView.fittingSize` agrees.
+    static let chartItemSize = NSSize(width: 288, height: 112)
+
+    /// The submenu's single custom item: an `NSHostingView` wrapping the chart.
+    ///
+    /// Custom menu-item views receive mouse events but not keyboard events, so
+    /// the item is disabled (nothing to activate) and carries the whole series
+    /// in one accessibility label on the host view.
+    static func chartMenuItem(bars: [HistogramBar]) -> NSMenuItem {
+        let summary = accessibilitySummary(bars: bars)
+        let item = NSMenuItem(title: "Activity (24h)", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+
+        let host = NSHostingView(
+            rootView: ActivityHistogramView(bars: bars, accessibilitySummary: summary)
+        )
+        host.frame = NSRect(origin: .zero, size: chartItemSize)
+        host.setAccessibilityLabel(summary)
+        item.view = host
+        return item
     }
 }
