@@ -130,4 +130,29 @@ final class APIClientGlanceTests: XCTestCase {
         XCTAssertEqual(session.clientName, "Claude Code")
         XCTAssertEqual(session.toolCallCount, 8)
     }
+
+    // MARK: - Data-source seam
+
+    func testAPIClientConformsToGlanceDataSource() async throws {
+        GlanceStubURLProtocol.responseBody = GlanceStubURLProtocol.envelope("""
+        {"sessions":[],"total":0,"limit":25}
+        """)
+        let source: any GlanceDataSource = GlanceStubURLProtocol.makeClient()
+
+        _ = try await source.activeSessions(limit: 25)
+
+        XCTAssertEqual(GlanceStubURLProtocol.requestedURLs.count, 1)
+    }
+
+    func testCountingStubSatisfiesTheProtocolAndIssuesNoRequests() async throws {
+        let stub = CountingGlanceDataSource()
+        let source: any GlanceDataSource = stub
+
+        _ = try await source.usageAggregate(window: "24h", top: 1)
+        _ = try await source.glanceActivity(limit: 50)
+        _ = try await source.activeSessions(limit: 25)
+
+        XCTAssertEqual(stub.totalCallCount, 3)
+        XCTAssertTrue(GlanceStubURLProtocol.requestedURLs.isEmpty)
+    }
 }
