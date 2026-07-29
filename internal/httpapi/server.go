@@ -105,8 +105,9 @@ type ServerController interface {
 	ReplayToolCall(id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error)
 	GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error)
 
-	// Session management
-	GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error)
+	// Session management. status filters on session status ("active" /
+	// "closed"); an empty string means no filter.
+	GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error)
 	GetSessionByID(sessionID string) (*contracts.MCPSession, error)
 
 	// Configuration management
@@ -4828,7 +4829,9 @@ func getBool(m map[string]interface{}, key string) bool {
 // @Produce      json
 // @Param        limit   query     int                               false  "Maximum number of sessions to return (1-100, default 10)"
 // @Param        offset  query     int                               false  "Number of sessions to skip for pagination (default 0)"
+// @Param        status  query     string                            false  "Filter by session status"  Enums(active, closed)
 // @Success      200     {object}  contracts.GetSessionsResponse     "Sessions retrieved successfully"
+// @Failure      400     {object}  contracts.ErrorResponse           "Invalid status filter"
 // @Failure      401     {object}  contracts.ErrorResponse           "Unauthorized - missing or invalid API key"
 // @Failure      405     {object}  contracts.ErrorResponse           "Method not allowed"
 // @Failure      500     {object}  contracts.ErrorResponse           "Failed to get sessions"
@@ -4859,8 +4862,17 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Status filter. The domain is closed ("active" / "closed"), so an unknown
+	// value is a client bug — rejecting it is honest, where silently ignoring it
+	// would return unfiltered sessions that the caller believes are filtered.
+	status := r.URL.Query().Get("status")
+	if status != "" && status != "active" && status != "closed" {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid status. Use 'active' or 'closed'")
+		return
+	}
+
 	// Get recent sessions from controller
-	sessions, total, err := s.controller.GetRecentSessions(limit)
+	sessions, total, err := s.controller.GetRecentSessions(limit, status)
 	if err != nil {
 		s.logger.Error("Failed to get sessions", "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, "Failed to get sessions")

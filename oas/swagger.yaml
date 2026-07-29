@@ -6027,6 +6027,14 @@ paths:
         name: offset
         schema:
           type: integer
+      - description: Filter by session status
+        in: query
+        name: status
+        schema:
+          enum:
+          - active
+          - closed
+          type: string
       responses:
         "200":
           content:
@@ -6034,6 +6042,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.GetSessionsResponse'
           description: Sessions retrieved successfully
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid status filter
         "401":
           content:
             application/json:
