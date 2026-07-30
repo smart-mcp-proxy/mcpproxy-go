@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -63,13 +64,27 @@ func Available() bool {
 	return err == nil && abi >= 1
 }
 
-// Apply confines the current process per spec. On success the calling process
-// — and every process it subsequently execs — can only touch the filesystem
-// subtrees in the allowlist, under the supplied rlimits. The restriction is
-// irreversible for the lifetime of the process, which is why the intended
-// caller is a short-lived re-exec wrapper that calls Apply and immediately
-// execs the untrusted command.
+// Apply confines the calling THREAD per spec (rlimits, being per-process, apply
+// process-wide). On success that thread — and every process it subsequently
+// execs — can only touch the filesystem subtrees in the allowlist. The
+// restriction is irreversible for the lifetime of the thread.
+//
+// Apply cannot confine a multithreaded Go process: landlock_restrict_self(2)
+// commits credentials on the calling thread alone, so every other thread stays
+// unrestricted. The only sound caller is a short-lived re-exec wrapper that
+// calls Apply and immediately execs the untrusted command from this same
+// thread — see RunChild, which re-checks the thread identity before execve.
 func Apply(spec Spec) (Report, error) {
+	// Landlock domains are per-THREAD (landlock_restrict_self(2) enforces on the
+	// calling thread). The Go runtime is free to move this goroutine to another
+	// OS thread at any preemption point, and an execve issued from a thread that
+	// never entered the domain would run the untrusted command completely
+	// unconfined — while the caller logs "Landlock enforced". Pin the goroutine
+	// to its thread for the rest of its life; deliberately never unlocked,
+	// because the intended caller execs immediately and the confinement is
+	// irreversible anyway.
+	runtime.LockOSThread()
+
 	var rep Report
 
 	// Resource limits first — cheap, and independent of Landlock availability.
@@ -136,6 +151,9 @@ func Apply(spec Spec) (Report, error) {
 	if err := landlockRestrictSelf(rulesetFD); err != nil {
 		return rep, fmt.Errorf("sandbox: landlock_restrict_self: %w", err)
 	}
+	// Record which thread now carries the domain so the caller can fail closed
+	// if it somehow finds itself elsewhere before execve.
+	rep.LandlockTID = currentTID()
 
 	rep.LandlockABI = abi
 	if len(missing) > 0 {
@@ -166,6 +184,10 @@ func addPathRule(rulesetFD int, path string, access uint64) (bool, error) {
 	}
 	return true, nil
 }
+
+// currentTID returns the caller's OS thread id — the identity a Landlock domain
+// is attached to, and therefore the thing a caller must re-check before execve.
+func currentTID() int { return unix.Gettid() }
 
 // --- raw syscall wrappers (x/sys/unix v0.46 ships the numbers/types but not
 // high-level helpers for these three syscalls) -----------------------------

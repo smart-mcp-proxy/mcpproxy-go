@@ -25,8 +25,15 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	if os.Getenv(envChild) == "1" {
+	// Landlock confinement is irreversible, so every child mode below must run
+	// in a throwaway re-exec of this binary rather than the test process.
+	switch {
+	case os.Getenv(envChild) == "1":
 		os.Exit(sandboxChild())
+	case os.Getenv(envEscapeChild) == "1":
+		os.Exit(escapeChild())
+	case os.Getenv(envTIDChild) == "1":
+		os.Exit(tidChild())
 	}
 	os.Exit(m.Run())
 }

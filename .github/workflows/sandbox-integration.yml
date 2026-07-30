@@ -80,6 +80,30 @@ jobs:
             ./internal/upstream/core/... \
             ./internal/security/scanner/...
 
+      # 4b. The escape this suite exists to catch is scheduler-dependent: the
+      #     Landlock domain is per-thread, so the bug only shows when the Go
+      #     runtime moves the goroutine off the confined thread between Apply and
+      #     execve. On an idle runner that never happens and every step above
+      #     passes even with the bug present. Saturate the CPUs first so the
+      #     enforcement tests are actually discriminating.
+      - name: Sandbox enforcement under scheduler load
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          set +m                      # no job-control messages for the load pack
+          pids=""
+          # shellcheck disable=SC2034
+          for _ in $(seq 1 "$(nproc)"); do
+            ( while :; do :; done ) &
+            pids="$pids $!"
+          done
+          # Kill the load pack however this step exits (pass, fail, or timeout)
+          # so a stuck busy loop can never outlive the step and hang the job.
+          # shellcheck disable=SC2064
+          trap "kill $pids 2>/dev/null || true" EXIT INT TERM
+          go test -race -count=30 -run 'TestSandboxWrapper_EndToEnd' ./internal/upstream/core/
+          go test -race -count=10 -run 'TestApplyPinsThreadAcrossReschedule|TestLandlockEnforcesFilesystemAllowlist' ./internal/sandbox/
+
       # 5. Build the binary (proves sandbox code compiles on linux/amd64).
       - name: Build mcpproxy binary
         run: go build -v -o mcpproxy ./cmd/mcpproxy
