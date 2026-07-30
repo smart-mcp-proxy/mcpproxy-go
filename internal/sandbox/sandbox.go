@@ -12,11 +12,19 @@
 // recommendation and the honest limits (no uid/gid separation without
 // privilege, filesystem-allowlist + rlimits only).
 //
-// This package is intentionally minimal: it confines the *current* process and,
-// because Landlock domains are inherited across execve, every child it then
-// execs (the npx/uvx server and its descendants). The intended integration is a
-// tiny re-exec wrapper that calls Apply and then execs the untrusted command;
-// the package test exercises exactly that shape.
+// This package is intentionally minimal: it confines the *current thread* and,
+// because a Landlock domain is inherited across execve, every process that
+// thread then execs (the npx/uvx server and its descendants).
+//
+// The per-thread scope is load-bearing, not a footnote: landlock_restrict_self(2)
+// commits the new credentials on the calling thread only. A multithreaded Go
+// process therefore CANNOT be confined by calling Apply in-process — the other
+// threads keep full filesystem access, and even the calling goroutine may be
+// rescheduled onto an unrestricted thread. The only sound shape is the one this
+// package implements: a tiny re-exec wrapper that calls Apply and immediately
+// execs the untrusted command from the very thread Apply restricted. Apply pins
+// that thread (runtime.LockOSThread) and RunChild verifies the thread identity
+// again just before execve; the package test exercises exactly that shape.
 package sandbox
 
 import "errors"
@@ -74,6 +82,11 @@ type Report struct {
 	// NoNewPrivs reports whether PR_SET_NO_NEW_PRIVS was set (always true when
 	// Landlock is enforced; Landlock requires it).
 	NoNewPrivs bool
+	// LandlockTID is the OS thread id (Linux tid) the Landlock domain was
+	// committed on, or 0 when no domain was enforced. A caller about to execve
+	// must confirm it is still running on this thread: an execve from any other
+	// thread runs the target unconfined.
+	LandlockTID int
 }
 
 // wantsLandlock reports whether the spec asks for any filesystem confinement.
