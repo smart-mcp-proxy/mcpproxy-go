@@ -267,12 +267,17 @@ actor CoreProcessManager {
         }
         guard !shutdownRequested else { return }
 
-        // Confirmed empty. A socket FILE left behind is stale — remove it so our
-        // core can create a fresh one.
-        if FileManager.default.fileExists(atPath: socketPath) {
-            NSLog("[MCPProxy] Removing stale socket at %@", socketPath)
-            try? FileManager.default.removeItem(atPath: socketPath)
-        }
+        // Confirmed empty — and the tray does NOT unlink the socket file here.
+        // A socket file left over from a dead core never reaches this line: it
+        // probes `.refused`, which `attachIfCoreIsRunningLocked()` reports as
+        // `.unusable` above, sending us down the wait path. So the only file
+        // that could be here is one that appeared AFTER the probes — i.e. one
+        // something just bound — and unlinking that strands a live core.
+        //
+        // Cleaning up a genuinely stale file is the core's job anyway: it
+        // removes one it can prove nobody is listening on (see
+        // `cleanupStaleSocket` in internal/server/listener_unix.go) and refuses
+        // to start when the socket really is in use.
 
         // Launch our own core as a subprocess
         await MainActor.run {
