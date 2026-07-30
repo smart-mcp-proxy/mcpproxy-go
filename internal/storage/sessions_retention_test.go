@@ -213,7 +213,7 @@ func TestEnforceSessionRetention_KeepsLiveSessionWhenClosedOnesCouldGo(t *testin
 		"a connected client's record must not be evicted while closed records remain")
 	assert.Equal(t, "active", got.Status)
 
-	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit)
+	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit, "")
 	require.NoError(t, err)
 	assert.LessOrEqual(t, total, sessionRetentionLimit, "the hard cap must still hold")
 	assert.True(t, containsSessionID(sessions, "live-session"),
@@ -249,7 +249,7 @@ func TestEnforceSessionRetention_KeepsIdleLiveSessionOverFresherClosedOnes(t *te
 		"however recently those closed sessions were active")
 	assert.Equal(t, "active", got.Status)
 
-	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit)
+	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit, "")
 	require.NoError(t, err)
 	assert.Equal(t, sessionRetentionLimit, total)
 	assert.True(t, containsSessionID(sessions, "idle-live-session"),
@@ -275,7 +275,7 @@ func TestEnforceSessionRetention_CapHoldsWhenEverySessionIsActive(t *testing.T) 
 		require.NoError(t, m.CreateSession(s))
 	}
 
-	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit + 100)
+	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit+100, "")
 	require.NoError(t, err)
 	assert.Equal(t, sessionRetentionLimit, total,
 		"an all-active bucket must still be capped — otherwise abandoned sessions grow without bound")
@@ -297,7 +297,7 @@ func TestEnforceSessionRetention_EvictsOldestClosedFirst(t *testing.T) {
 		require.NoError(t, m.CreateSession(s))
 	}
 
-	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit + 50)
+	sessions, total, err := m.GetRecentSessions(sessionRetentionLimit+50, "")
 	require.NoError(t, err)
 	assert.Equal(t, sessionRetentionLimit, total)
 
