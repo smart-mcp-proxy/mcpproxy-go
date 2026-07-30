@@ -58,7 +58,7 @@ func RunChild(argv []string, diag io.Writer) int {
 		target = resolved
 	}
 
-	rep, err := Apply(spec)
+	rep, err := applyConfinement(spec)
 	if err != nil {
 		// fail-closed: BestEffort was false and the primitive is unavailable.
 		fmt.Fprintf(diag, "sandbox: confinement unavailable and fail-closed: %v\n", err)
@@ -87,6 +87,15 @@ func RunChild(argv []string, diag io.Writer) int {
 	}
 	return 0 // unreachable: Exec replaced the image on success.
 }
+
+// applyConfinement indirects Apply for RunChild. Production never reassigns it;
+// it exists so the test suite can drive RunChild's fail-closed thread guard,
+// whose refusal path is otherwise untestable: Apply is irreversible for the
+// calling thread (so the test process cannot call it for real) and a genuine
+// thread migration is a race that cannot be provoked on demand. Without the
+// seam, deleting the guard from RunChild — or moving it after syscall.Exec —
+// would leave every test still green.
+var applyConfinement = Apply
 
 // threadLost reports whether the Landlock domain Apply committed lives on a
 // different thread than the one now about to execve — in which case the exec

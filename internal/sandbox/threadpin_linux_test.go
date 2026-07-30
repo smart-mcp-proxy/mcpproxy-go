@@ -64,17 +64,37 @@ func escapeChild() int {
 
 	// Exec directly rather than through RunChild: this test must exercise the
 	// thread pin itself, not the fail-closed tid guard that backstops it.
-	script := "echo escaped > " + shellQuoteTest(filepath.Join(outside, "escaped.txt"))
+	//
+	// The exec'd shell brackets the escape attempt with two markers written to
+	// rwDir, which IS inside the allowlist and so is writable whether or not the
+	// pin held. reachedMarker proves the shell actually started; doneMarker
+	// proves it got all the way past the outside-write attempt. Without them the
+	// parent could only observe the absence of escaped.txt, which any unrelated
+	// failure (exec error, missing shell, child killed) would also produce — a
+	// broken pin and a broken test environment would look identical.
+	script := "echo ran > " + shellQuoteTest(filepath.Join(rwDir, reachedMarker)) + "\n" +
+		"echo escaped > " + shellQuoteTest(filepath.Join(outside, "escaped.txt")) + "\n" +
+		"echo done > " + shellQuoteTest(filepath.Join(rwDir, doneMarker)) + "\n"
 	err = syscall.Exec("/bin/sh", []string{"/bin/sh", "-c", script}, os.Environ())
 	os.Stderr.WriteString("escape-child: exec failed: " + err.Error() + "\n")
 	return 126
 }
+
+// Markers the exec'd shell writes inside the read-write allowlist, so the parent
+// can tell "confined, as intended" apart from "never ran".
+const (
+	reachedMarker = "child-ran.txt"
+	doneMarker    = "child-done.txt"
+)
 
 // TestApplyPinsThreadAcrossReschedule is the regression guard for the per-thread
 // Landlock escape. Each iteration re-execs this test binary into escapeChild,
 // which confines itself, deliberately invites a thread migration, and then execs
 // a shell that writes OUTSIDE the allowlist. A single surviving write is a
 // security failure, so the tolerance is zero.
+//
+// Every iteration also demands the two in-allowlist markers the shell writes
+// around that attempt, so an iteration cannot pass by simply failing early.
 func TestApplyPinsThreadAcrossReschedule(t *testing.T) {
 	if !Available() {
 		t.Skip("Landlock unavailable on this kernel (needs 5.13+ with Landlock LSM enabled)")
@@ -101,6 +121,18 @@ func TestApplyPinsThreadAcrossReschedule(t *testing.T) {
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) && exitErr.ExitCode() == 12 {
 			t.Fatalf("iteration %d: child could not enforce Landlock:\n%s", i, errb.String())
+		}
+
+		// Positive proof first: the absence of escaped.txt below only means
+		// "Landlock denied the write" if the shell really ran and really tried.
+		// Both markers live inside the allowlist, so a working pin does not stop
+		// them; only a child that never got there does.
+		for _, marker := range []string{reachedMarker, doneMarker} {
+			if _, err := os.Stat(filepath.Join(rwDir, marker)); err != nil {
+				t.Fatalf("iteration %d: exec'd shell never wrote %s inside the allowlist (%v) — "+
+					"the child did not reach the escape attempt, so this iteration proves nothing; "+
+					"child exit: %v; child stderr:\n%s", i, marker, err, runErr, errb.String())
+			}
 		}
 
 		escaped := filepath.Join(outside, "escaped.txt")
