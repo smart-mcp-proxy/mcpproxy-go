@@ -175,11 +175,11 @@ jobs:
           # Wait for the FULL tool catalog before scoring: the retrieval index is
           # built from the connected servers' tools, and scoring a partially
           # indexed instance tanks recall (a ≥1-result check fires far too early).
-          # The 7 reference servers expose ~45 tools; require near-full + a short
+          # The 7 reference servers expose exactly 45 tools (pinned); require the full catalog + a short
           # settle for the index build. /api/v1/tools wraps as
           # {"success":true,"data":{"tools":[...]}}.
           ready=0
-          expected=44
+          expected=45
           for i in $(seq 1 60); do
             if ! kill -0 "$server_pid" 2>/dev/null; then
               echo "::error::mcpproxy process exited during startup"
@@ -196,6 +196,25 @@ jobs:
           if [ "$ready" != 1 ]; then
             echo "::error::mcpproxy catalog did not reach ${expected} tools in time"
             echo "----- mcpproxy.log (tail) -----"; tail -80 "$RUNNER_TEMP/mcpproxy.log" || true
+            exit 1
+          fi
+
+          # The count above only gates readiness; the corpus contract is the exact
+          # ID set. A same-count rename/substitution (or a 46th tool) must fail
+          # here, not silently skew recall against a frozen golden set.
+          curl -fsS -H "X-API-Key: $key" "$base/api/v1/tools" > "$RUNNER_TEMP/live-tools.json"
+          if ! python3 - "$DS/corpus_v1.tools.json" "$RUNNER_TEMP/live-tools.json" <<'PYEOF'
+          import json, sys
+          corpus = {t["tool_id"] for t in json.load(open(sys.argv[1]))["tools"]}
+          live_raw = (json.load(open(sys.argv[2])).get("data") or {}).get("tools", [])
+          live = {f"{t['server_name']}:{t['name']}" for t in live_raw}
+          missing, extra = sorted(corpus - live), sorted(live - corpus)
+          if missing or extra:
+              print(f"::error::live catalog does not match corpus_v1 exactly: missing={missing} extra={extra}")
+              sys.exit(1)
+          print(f"Catalog matches corpus_v1 exactly ({len(corpus)} canonical ids).")
+          PYEOF
+          then
             exit 1
           fi
 

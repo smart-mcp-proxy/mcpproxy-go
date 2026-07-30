@@ -1,7 +1,9 @@
 package storage_test
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
@@ -40,6 +42,84 @@ func TestManager_ClearOAuthState_RemovesHashedToken(t *testing.T) {
 
 	_, err = mgr.GetBoltDB().GetOAuthToken(serverKey)
 	require.Error(t, err)
+}
+
+// TestManager_ClearOAuthState_RemovesEveryPrefixedToken verifies that logout leaves
+// nothing behind when a server has accumulated many token records.
+//
+// A server accumulates one record per (name, URL) pair, because tokens are keyed by
+// oauth.GenerateServerKey(name, url). ClearOAuthState walks that prefix range with a
+// bbolt cursor; bbolt documents that mutating a bucket during iteration may invalidate
+// the cursor and skip keys (cursor.go). A skipped key here is not a cosmetic leak: the
+// records are plaintext JSON holding AccessToken, RefreshToken and the DCR ClientSecret,
+// and a survivor is still reachable by PersistentTokenStore/RefreshManager — the user
+// pressed "Logout" and stayed logged in.
+//
+// The record set is deliberately large enough to span many bbolt pages, and neighbouring
+// server names that sort either side of the target prefix must survive untouched.
+func TestManager_ClearOAuthState_RemovesEveryPrefixedToken(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "storage-clear-oauth-many-*")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+
+	mgr, err := storage.NewManager(tmpDir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Close() })
+
+	const target = "demo"
+	const nTokens = 300
+
+	save := func(key, filler string) {
+		require.NoError(t, mgr.GetBoltDB().SaveOAuthToken(&storage.OAuthTokenRecord{
+			ServerName:   key,
+			AccessToken:  "access-" + filler,
+			RefreshToken: "refresh-" + filler,
+			ClientSecret: "secret-" + filler,
+		}))
+	}
+
+	// Legacy exact-name record. Key ordering in the bucket is:
+	//   dem_* < demo < demo-other_* < demoX_* < demo_* < demq_*
+	// so the legacy record and the neighbours sit immediately before the target
+	// range and share its first leaf page.
+	save(target, "")
+
+	// Neighbours that must NOT be touched: they sort around the "demo_" range but
+	// do not carry that prefix. Kept small so they share a page with the range.
+	neighbours := []string{}
+	for i := 0; i < 3; i++ {
+		for _, other := range []string{"dem", "demo-other", "demoX", "demq"} {
+			key := oauth.GenerateServerKey(other, fmt.Sprintf("https://example.com/%04d", i))
+			neighbours = append(neighbours, key)
+			save(key, "")
+		}
+	}
+
+	// Many hashed serverKey records for the same server: a server accumulates one
+	// per URL it has been pointed at. Sized so the range spans many leaf pages.
+	filler := strings.Repeat("t", 300)
+	targetKeys := make([]string, 0, nTokens)
+	for i := 0; i < nTokens; i++ {
+		key := oauth.GenerateServerKey(target, fmt.Sprintf("https://example.com/%04d", i))
+		targetKeys = append(targetKeys, key)
+		save(key, filler)
+	}
+
+	require.NoError(t, mgr.ClearOAuthState(target))
+
+	// Every record for the target server must be gone.
+	_, err = mgr.GetBoltDB().GetOAuthToken(target)
+	require.Error(t, err, "legacy exact-name token survived logout")
+	for _, key := range targetKeys {
+		_, err := mgr.GetBoltDB().GetOAuthToken(key)
+		require.Errorf(t, err, "token %q survived logout (access + refresh token and DCR secret still on disk)", key)
+	}
+
+	// Neighbouring servers must be untouched.
+	for _, key := range neighbours {
+		_, err := mgr.GetBoltDB().GetOAuthToken(key)
+		require.NoErrorf(t, err, "unrelated server token %q was destroyed by logout", key)
+	}
 }
 
 // TestBoltDB_UpdateOAuthClientCredentials_WithCallbackPort verifies that UpdateOAuthClientCredentials
