@@ -175,11 +175,11 @@ jobs:
           # Wait for the FULL tool catalog before scoring: the retrieval index is
           # built from the connected servers' tools, and scoring a partially
           # indexed instance tanks recall (a ≥1-result check fires far too early).
-          # The 7 reference servers expose ~45 tools; require near-full + a short
+          # The 7 reference servers expose exactly 45 tools (pinned); require the full catalog + a short
           # settle for the index build. /api/v1/tools wraps as
           # {"success":true,"data":{"tools":[...]}}.
           ready=0
-          expected=44
+          expected=45
           for i in $(seq 1 60); do
             if ! kill -0 "$server_pid" 2>/dev/null; then
               echo "::error::mcpproxy process exited during startup"
