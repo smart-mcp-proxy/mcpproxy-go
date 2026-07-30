@@ -531,6 +531,13 @@ final class CoreLivenessTests: XCTestCase {
     /// liveness tick. A socket that refuses connections — a full listen queue on
     /// a live core looks exactly like this — must not lead to unlinking the
     /// socket and spawning over whatever is behind it.
+    ///
+    /// This is about the FIRST probe: one refusal is not evidence, so startup
+    /// waits. What the tray does when refusals are still all it has at the end of
+    /// the whole window is a different question, decided by the deadline —
+    /// see `testADeadlineWithNoAnswerEverEscalatesToALaunch`. The timeout here is
+    /// long on purpose so the two cannot be confused: nothing in this test is
+    /// allowed to depend on the deadline firing.
     func testAnIndeterminateSocketAtStartupNeitherUnlinksNorSpawns() async throws {
         let fakeCore = try FakeCoreBinary(behaviour: "exit 1")
         let restoreEnv = fakeCore.install()
@@ -552,25 +559,27 @@ final class CoreLivenessTests: XCTestCase {
             socketPath: stub.path,
             refreshInterval: 60,
             probeTimeout: 0.3,
-            unresponsiveCoreTimeout: 0.5
+            unresponsiveCoreTimeout: 30.0
         )
         self.manager = manager
 
         await manager.start(maySpawn: true)
 
+        // Several attach-watch probes' worth of patience: none of them may turn
+        // into a spawn either.
+        try await Task.sleep(nanoseconds: 2_500_000_000)
+
         let launched = await manager.coresLaunched
         XCTAssertEqual(launched, 0,
                        "a socket we cannot classify must not be spawned over")
         XCTAssertNil(manager.managedProcess)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stub.path),
+                      "and the file must still be there — the tray unlinks nothing")
 
-        // ...and the user is told, rather than left staring at a healthy icon.
-        let state = await waitForState(appState, timeout: 5.0) {
-            if case .error = $0 { return true }
-            return false
-        }
-        guard case .error = state else {
-            return XCTFail("an unusable core must become an actionable error, got \(state)")
-        }
+        // ...and the tray does not pretend to be connected while it waits.
+        let state = await coreState(appState)
+        XCTAssertEqual(state, .waitingForCore,
+                       "an unusable socket must leave the tray visibly waiting, not connected")
     }
 
     /// A rung that gives up on a launch must terminate and reap it. A core that
@@ -724,6 +733,179 @@ final class CoreLivenessTests: XCTestCase {
                       "and none of them may unlink its socket")
         XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .connectable,
                        "the core that was there must still be there")
+    }
+
+    // MARK: - A socket file nobody ever answered on
+
+    /// The common case, and the one the tray must recover from without help: a
+    /// core was `kill -9`ed and its socket FILE is still on disk. Every probe
+    /// refuses, so the tray correctly refuses to spawn on the spot — but if it
+    /// waited forever the user would be stuck, because nothing else in the system
+    /// removes that file. The Go core's own `cleanupStaleSocket` only runs once a
+    /// core is launched, and the tray no longer unlinks anything.
+    ///
+    /// So the deadline that used to end in an error ("quit that process") — about
+    /// a process that does not exist — ends in a launch when, and only when,
+    /// nothing has accepted a single connection in the whole window.
+    func testADeadlineWithNoAnswerEverEscalatesToALaunch() async throws {
+        // If the code under test does launch (it must), launch something
+        // harmless rather than the real core.
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        // Exactly what a killed core leaves behind: the file, and nothing on it.
+        let stub = UnixSocketHTTPStub.healthyCore()
+        try stub.start()
+        stub.stop(unlinkSocket: false)
+        defer { unlink(stub.path) }
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .refused,
+                       "precondition: the socket file is there and refuses every connection")
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.05, maxDelay: 0.1, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: stub.path,
+            refreshInterval: 60,
+            probeTimeout: 0.3,
+            unresponsiveCoreTimeout: 0.5,
+            socketWaitTimeout: 1.0
+        )
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+
+        let duringTheWait = await manager.coresLaunched
+        XCTAssertEqual(duringTheWait, 0,
+                       "one refused probe proves nothing — the tray must wait before it acts")
+        let waiting = await coreState(appState)
+        XCTAssertEqual(waiting, .waitingForCore,
+                       "precondition: the refused socket sent us down the wait path")
+
+        let deadline = Date().addingTimeInterval(10)
+        while await manager.coresLaunched < 1 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let launched = await manager.coresLaunched
+        XCTAssertGreaterThanOrEqual(launched, 1,
+                                    "a socket file nothing has EVER answered on must be recovered "
+                                    + "by launching a core, not by telling the user to quit a "
+                                    + "process that does not exist")
+    }
+
+    /// The invariant the whole change exists to protect, at the same deadline: a
+    /// core that IS there — it accepts connections, it just never answers
+    /// `/ready` — must never be launched over, however long it stays silent. Here
+    /// the error message ("quit that process") is true, so that is what happens.
+    func testADeadlineOnASilentButLiveCoreNeverEscalates() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let ready = ReadyBehaviour()
+        ready.current = .json(#"{"success":false,"error":"wedged"}"#, status: 503)
+        let stub = UnixSocketHTTPStub.healthyCore(ready: ready)
+        try stub.start()
+        self.stub = stub
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.05, maxDelay: 0.1, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: stub.path,
+            refreshInterval: 60,
+            probeTimeout: 0.3,
+            unresponsiveCoreTimeout: 0.5,
+            socketWaitTimeout: 1.0
+        )
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+
+        let state = await waitForState(appState, timeout: 5.0) {
+            if case .error = $0 { return true }
+            return false
+        }
+        guard case .error(let error) = state else {
+            return XCTFail("a core that holds the socket and never answers must become an "
+                           + "actionable error, got \(state)")
+        }
+        XCTAssertTrue(error.userMessage.contains("not responding"),
+                      "the message must still be the one about a process to quit, got: \(error.userMessage)")
+
+        // Well past the deadline, and past several attach-watch probes.
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0,
+                       "a listener that is genuinely there must never be spawned over")
+        XCTAssertNil(manager.managedProcess)
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .connectable,
+                       "and the core that was there must still be there, socket and all")
+    }
+
+    /// The case the accumulated evidence exists for, and the one a last-moment
+    /// probe cannot catch: a core that WAS accepting connections and then stops —
+    /// which is what a full listen backlog looks like from out here, and is
+    /// indistinguishable, sample by sample, from a file a dead process left
+    /// behind. Every probe from now until the deadline refuses, so the
+    /// confirmation window at the deadline is satisfied; only the memory of the
+    /// connection that was accepted earlier in the window stands between that
+    /// core and a second writer on its data directory.
+    func testACoreThatAcceptedEarlierInTheWindowIsNeverEscalatedOver() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        // Accepts connections, never answers /ready: the wait path, from a core
+        // that is demonstrably there.
+        let ready = ReadyBehaviour()
+        ready.current = .json(#"{"success":false,"error":"still starting"}"#, status: 503)
+        let stub = UnixSocketHTTPStub.healthyCore(ready: ready)
+        try stub.start()
+        defer { unlink(stub.path) }
+
+        let appState = await MainActor.run { AppState() }
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            reconnectionPolicy: ReconnectionPolicy(
+                baseDelay: 0.05, maxDelay: 0.1, maxAttempts: 3, jitterFactor: 0.0
+            ),
+            socketPath: stub.path,
+            refreshInterval: 60,
+            probeTimeout: 0.3,
+            unresponsiveCoreTimeout: 1.5,
+            socketWaitTimeout: 1.0
+        )
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+        let waiting = await coreState(appState)
+        XCTAssertEqual(waiting, .waitingForCore,
+                       "precondition: a probe was accepted, so the tray is waiting for that core")
+
+        // Now it stops accepting, keeping its socket file — a saturated backlog.
+        // Every probe from here on is a refusal, so nothing sampled AT the
+        // deadline can tell this apart from a stale file.
+        stub.stop(unlinkSocket: false)
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .refused,
+                       "precondition: from now on every probe refuses")
+
+        // Well past the deadline, and past the escalation's own confirmation.
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0,
+                       "a core that accepted a connection during the window must never be "
+                       + "launched over, however many refusals follow it")
+        XCTAssertNil(manager.managedProcess)
     }
 
     // MARK: - What a failed socket connect does and does not prove
@@ -942,6 +1124,14 @@ final class CoreLivenessTests: XCTestCase {
     /// The confirmation window exists for exactly this: a core that binds the
     /// socket while we are still deciding whether the socket is empty. One
     /// sample would have missed it and spawned a second writer.
+    ///
+    /// The ordering is established, not hoped for. An earlier version of this
+    /// test started an unsynchronised task and slept: if that task had begun
+    /// late its very FIRST probe would have seen the listener, and the test would
+    /// have passed without ever running the race it names. Here the probe seam
+    /// holds the confirmation at probe 0 — which has already returned "nothing
+    /// there" — until the listener is bound, so the only way to pass is to notice
+    /// a core that appeared BETWEEN two probes.
     func testConfirmationNoticesACoreThatAppearsBetweenProbes() async throws {
         let socketPath = "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
         let appState = await MainActor.run { AppState() }
@@ -949,17 +1139,64 @@ final class CoreLivenessTests: XCTestCase {
         XCTAssertEqual(SocketTransport.probeSocket(path: socketPath), .absent,
                        "precondition: the first probe sees nothing at all")
 
-        // Start the confirmation first, then bind the socket underneath it —
-        // the same order the race happens in.
-        let confirming = Task { await manager.confirmNothingIsListening(attempts: 6, interval: 0.1) }
-        try await Task.sleep(nanoseconds: 150_000_000)
+        let firstProbeDone = Latch()
+        let listenerIsUp = Latch()
+        let probesSeen = ProbeCounter()
+
+        let confirming = Task {
+            await manager.confirmNothingIsListening(attempts: 4, interval: 0.05) { index in
+                await probesSeen.count()
+                guard index == 0 else { return }
+                await firstProbeDone.open()
+                await listenerIsUp.wait()
+            }
+        }
+
+        await firstProbeDone.wait()
+        let beforeTheListener = await probesSeen.total
+        XCTAssertEqual(beforeTheListener, 1,
+                       "precondition: exactly one probe has run, and it found an empty socket")
+
         let stub = UnixSocketHTTPStub.healthyCore(at: socketPath)
         try stub.start()
         self.stub = stub
+        await listenerIsUp.open()
 
         let empty = await confirming.value
         XCTAssertFalse(empty,
                        "a core that binds mid-confirmation must be seen — the whole point "
                        + "of confirming over time rather than on one sample")
+        let afterTheListener = await probesSeen.total
+        XCTAssertGreaterThanOrEqual(afterTheListener, 2,
+                                    "and it must be seen by a LATER probe, not by the first one")
     }
+}
+
+// MARK: - Test-only synchronisation
+
+/// A one-shot gate: `wait()` suspends until someone calls `open()`, and returns
+/// immediately ever after. Enough to pin an ordering between the code under test
+/// and the test itself without a single sleep.
+private actor Latch {
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let resuming = waiting
+        waiting = []
+        resuming.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+}
+
+/// How many probes the confirmation window has actually run.
+private actor ProbeCounter {
+    private(set) var total = 0
+    func count() { total += 1 }
 }
