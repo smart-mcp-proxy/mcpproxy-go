@@ -799,4 +799,167 @@ final class CoreLivenessTests: XCTestCase {
         XCTAssertEqual(state, .connected,
                        "a concurrent attach must not leave the tray idle or errored")
     }
+
+    // MARK: - The choke point's preflight, tested directly
+
+    /// The four checks in front of `proc.run()` are what keeps two cores off one
+    /// data directory. The tests above reach them through whole entry points
+    /// (start/retry/handleProcessExit), which proves the paths but leaves the
+    /// checks themselves only indirectly covered — a reordering or a dropped
+    /// guard could still pass them. These call the preflight directly.
+    private func makeManager(
+        socketPath: String,
+        appState: AppState
+    ) -> CoreProcessManager {
+        let manager = CoreProcessManager(
+            appState: appState,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: socketPath,
+            refreshInterval: 60,
+            probeTimeout: 0.3
+        )
+        self.manager = manager
+        return manager
+    }
+
+    /// Run `body` with the connection gate held, exactly as every real caller of
+    /// `launchCore` does.
+    private func withConnectionGate(
+        _ manager: CoreProcessManager,
+        _ body: (CoreProcessManager) async -> Void
+    ) async {
+        let took = await manager.beginConnectionWork()
+        XCTAssertTrue(took, "precondition: the gate was free")
+        await body(manager)
+        await manager.endConnectionWork()
+    }
+
+    /// The check that matters most: something is listening, so there is nothing
+    /// to launch — whatever the caller believes about its own state.
+    func testPreflightRefusesToLaunchWhileSomethingIsListening() async throws {
+        let stub = UnixSocketHTTPStub.healthyCore()
+        try stub.start()
+        self.stub = stub
+
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(socketPath: stub.path, appState: appState)
+
+        await withConnectionGate(manager) { manager in
+            do {
+                try await manager.preflightLaunch()
+                XCTFail("a connectable socket must never be launched over")
+            } catch {
+                XCTAssertEqual(error as? CoreError,
+                               .general("A core is already running on \(stub.path)"))
+            }
+        }
+    }
+
+    /// A core we already own is still a core. The process check comes before the
+    /// socket check on purpose: a managed core that has not yet created its
+    /// socket would otherwise pass the preflight and get a sibling.
+    func testPreflightRefusesToLaunchWhileAManagedProcessIsRunning() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let socketPath = "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(socketPath: socketPath, appState: appState)
+
+        // Let the tray spawn its core, then give that core its socket — as a
+        // real one would — so the launch completes and the process survives.
+        let starting = Task { await manager.start(maySpawn: true) }
+        let deadline = Date().addingTimeInterval(10)
+        while fakeCore.launchCount() < 1 && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let stub = UnixSocketHTTPStub.healthyCore(at: socketPath)
+        try stub.start()
+        self.stub = stub
+        await starting.value
+
+        let running = try XCTUnwrap(manager.managedProcess, "precondition: the tray owns a core")
+        XCTAssertTrue(running.isRunning, "precondition: that core is still up")
+
+        await withConnectionGate(manager) { manager in
+            do {
+                try await manager.preflightLaunch()
+                XCTFail("a running managed core must never get a sibling")
+            } catch {
+                XCTAssertEqual(
+                    error as? CoreError,
+                    .general("internal error: tried to launch a core while "
+                             + "PID \(running.processIdentifier) is still running")
+                )
+            }
+        }
+    }
+
+    /// The other half of the same coin, and the reason the tray no longer
+    /// unlinks anything: a socket FILE that nothing accepts on must not block a
+    /// launch. The core we spawn cleans that file up itself.
+    func testPreflightAllowsALaunchOverASocketFileNobodyAnswers() async throws {
+        let stub = UnixSocketHTTPStub.healthyCore()
+        try stub.start()
+        stub.stop(unlinkSocket: false)
+        defer { unlink(stub.path) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stub.path),
+                      "precondition: the socket file is still on disk")
+        XCTAssertEqual(SocketTransport.probeSocket(path: stub.path), .refused,
+                       "precondition: nothing accepts on it")
+
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(socketPath: stub.path, appState: appState)
+
+        await withConnectionGate(manager) { manager in
+            do {
+                try await manager.preflightLaunch()
+            } catch {
+                XCTFail("a stale socket file must not be mistaken for a live core — threw \(error)")
+            }
+        }
+    }
+
+    /// Without the gate there is no serialisation, so the preflight's own
+    /// answer would be stale before `proc.run()`. It refuses instead.
+    func testPreflightRefusesToLaunchWithoutTheConnectionGate() async throws {
+        let socketPath = "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(socketPath: socketPath, appState: appState)
+
+        do {
+            try await manager.preflightLaunch()
+            XCTFail("a launch outside the connection gate must be refused")
+        } catch {
+            XCTAssertEqual(
+                error as? CoreError,
+                .general("internal error: tried to launch a core without the connection gate")
+            )
+        }
+    }
+
+    /// The confirmation window exists for exactly this: a core that binds the
+    /// socket while we are still deciding whether the socket is empty. One
+    /// sample would have missed it and spawned a second writer.
+    func testConfirmationNoticesACoreThatAppearsBetweenProbes() async throws {
+        let socketPath = "/tmp/mcpproxy-test-\(UUID().uuidString.prefix(8)).sock"
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(socketPath: socketPath, appState: appState)
+        XCTAssertEqual(SocketTransport.probeSocket(path: socketPath), .absent,
+                       "precondition: the first probe sees nothing at all")
+
+        // Start the confirmation first, then bind the socket underneath it —
+        // the same order the race happens in.
+        let confirming = Task { await manager.confirmNothingIsListening(attempts: 6, interval: 0.1) }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let stub = UnixSocketHTTPStub.healthyCore(at: socketPath)
+        try stub.start()
+        self.stub = stub
+
+        let empty = await confirming.value
+        XCTAssertFalse(empty,
+                       "a core that binds mid-confirmation must be seen — the whole point "
+                       + "of confirming over time rather than on one sample")
+    }
 }
