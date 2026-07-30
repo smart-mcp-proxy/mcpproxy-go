@@ -92,8 +92,10 @@ corpus itself cannot drift under these pins. What still floats are *transitive*
 dependencies resolved at install time (notably the npm servers' `@modelcontextprotocol/sdk`
 semver ranges; there is no lockfile in an `npx`/`uvx` invocation). A breaking
 transitive publish therefore cannot silently alter the corpus, but it can crash a
-server at startup — which fails **loudly** via the catalog-readiness check
-(`expected=45` in `eval.yml`), the same way the SDK 2.0.0 incident did. Full
+server at startup — and either way the gate fails **loudly**: `eval.yml` waits for
+the full 45-tool catalog and then requires the live canonical ID set to match
+`corpus_v1.tools.json` exactly before scoring, so a crash, a rename, a dropped
+tool, or an extra tool all fail the job rather than silently skewing recall. Full
 hermeticity would need a lockfile-based install or prebuilt images; not worth it
 until this actually bites.
 

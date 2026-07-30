@@ -199,6 +199,25 @@ jobs:
             exit 1
           fi
 
+          # The count above only gates readiness; the corpus contract is the exact
+          # ID set. A same-count rename/substitution (or a 46th tool) must fail
+          # here, not silently skew recall against a frozen golden set.
+          curl -fsS -H "X-API-Key: $key" "$base/api/v1/tools" > "$RUNNER_TEMP/live-tools.json"
+          if ! python3 - "$DS/corpus_v1.tools.json" "$RUNNER_TEMP/live-tools.json" <<'PYEOF'
+          import json, sys
+          corpus = {t["tool_id"] for t in json.load(open(sys.argv[1]))["tools"]}
+          live_raw = (json.load(open(sys.argv[2])).get("data") or {}).get("tools", [])
+          live = {f"{t['server_name']}:{t['name']}" for t in live_raw}
+          missing, extra = sorted(corpus - live), sorted(live - corpus)
+          if missing or extra:
+              print(f"::error::live catalog does not match corpus_v1 exactly: missing={missing} extra={extra}")
+              sys.exit(1)
+          print(f"Catalog matches corpus_v1 exactly ({len(corpus)} canonical ids).")
+          PYEOF
+          then
+            exit 1
+          fi
+
           ( cd "$GITHUB_WORKSPACE/mcp-eval" && PYTHONPATH=src uv run python -m mcp_eval.cli retrieval \
             --corpus "$DS/corpus_v1.tools.json" \
             --golden "$DS/retrieval_golden_v1.json" \
