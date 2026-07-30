@@ -156,6 +156,16 @@ actor NotificationService {
     // MARK: - Notification Senders
 
     /// Notify about sensitive data detected in a tool call.
+    ///
+    /// NO PRODUCTION CALLERS as of the tray glance work, and none before it
+    /// either: the only caller was a `case "activity"` SSE branch, and no Go
+    /// code emits a bare `"activity"` event, so this has never fired on any
+    /// build. The intended trigger is the `sensitive_data.detected` event the
+    /// core does emit (`internal/runtime/events.go`), which the tray's SSE
+    /// switch has no case for. Kept rather than deleted because wiring that
+    /// event is a scoped feature — copy, rate-limiter keying, whether it should
+    /// also drive the tray icon — and this is the reviewed, rate-limited
+    /// plumbing it will want. `NotificationRateLimitTests` covers it meanwhile.
     func sendSensitiveDataAlert(server: String, tool: String, category: String) async {
         // Suppress while the connection is unsettled: a re-init loop replays
         // the full activity list each cycle, which the count-delta heuristic

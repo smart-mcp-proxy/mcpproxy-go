@@ -1054,3 +1054,94 @@ struct SearchToolsResponse: Codable {
     let tools: [SearchTool]?
     let total: Int?
 }
+
+// MARK: - Usage Aggregate (Spec 069 A3)
+
+/// One hourly bar of the usage timeline.
+/// Matches Go `contracts.UsageTimeBucket`.
+///
+/// `calls` INCLUDES `errors` — a stacked chart must plot `calls - errors` and
+/// `errors`, never the two raw fields, or failures are counted twice.
+/// Buckets are UTC-hour aligned and sparse: hours with no activity are omitted.
+struct UsageBucket: Codable, Equatable {
+    /// Start of the UTC hour this bucket covers.
+    let start: Date
+    let calls: Int
+    let errors: Int
+    let totalRespBytes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case start, calls, errors
+        case totalRespBytes = "total_resp_bytes"
+    }
+}
+
+// The Codable conformance lives in an extension so the memberwise initialiser
+// is still synthesised (an `init` in the struct body would suppress it).
+extension UsageBucket {
+    /// The API emits Go's RFC 3339 rendering (`2026-07-29T13:00:00Z`), which the
+    /// shared `JSONDecoder` in `fetchWrapped` cannot parse with its default
+    /// `.deferredToDate` strategy. Parsing here keeps the model self-contained
+    /// instead of forcing a decoder-wide date strategy onto every other model.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decode(String.self, forKey: .start)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .start, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        let calls = try container.decode(Int.self, forKey: .calls)
+        let errors = try container.decode(Int.self, forKey: .errors)
+        let bytes = try container.decode(Int.self, forKey: .totalRespBytes)
+        self.init(start: parsed, calls: calls, errors: errors, totalRespBytes: bytes)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(UsageBucket.rfc3339String(from: start), forKey: .start)
+        try container.encode(calls, forKey: .calls)
+        try container.encode(errors, forKey: .errors)
+        try container.encode(totalRespBytes, forKey: .totalRespBytes)
+    }
+
+    /// Parse an RFC 3339 timestamp, with or without fractional seconds.
+    static func parseRFC3339(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: value)
+    }
+
+    /// Render a date the way the API renders bucket starts.
+    static func rfc3339String(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+}
+
+/// Response for `GET /api/v1/activity/usage`.
+/// Matches Go `contracts.UsageAggregateResponse`.
+///
+/// The per-tool rollup (`tools`, `other`) and `generated_at` are deliberately not
+/// decoded: the tray requests `top=1` and renders only the timeline plus the
+/// tokens-saved headline. Unknown keys are ignored by `JSONDecoder`.
+struct UsageAggregateResponse: Codable, Equatable {
+    let window: String
+    let tokenSource: String?
+    let tokensSaved: Int?
+    let tokensSavedPercentage: Double?
+    /// Global hourly buckets, trimmed to `window`. Never nil; empty when idle.
+    let timeline: [UsageBucket]
+
+    enum CodingKeys: String, CodingKey {
+        case window, timeline
+        case tokenSource = "token_source"
+        case tokensSaved = "tokens_saved"
+        case tokensSavedPercentage = "tokens_saved_percentage"
+    }
+}

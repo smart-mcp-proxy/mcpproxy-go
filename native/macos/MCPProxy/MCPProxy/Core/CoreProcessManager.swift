@@ -44,7 +44,7 @@ actor CoreProcessManager {
         // Safe because APIClient is an actor — all its methods are isolated
         get async { await apiClient }
     }
-    private var sseClient: SSEClient?
+    private var sseClient: (any SSEStreaming)?
     private var sseTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     /// Poll for an external core while core autostart is off (GH #410).
@@ -1238,17 +1238,36 @@ actor CoreProcessManager {
 
     // MARK: - Private: SSE Streaming
 
+    /// Install the stream source. Production sets this in `connectToCore`; the
+    /// only other caller is the test that drives `startSSEStream` end to end,
+    /// which is what pins the generation capture to the real wiring rather than
+    /// to `SSEStreamSession` alone.
+    func installSSEClient(_ client: any SSEStreaming) {
+        sseClient = client
+    }
+
     /// Start consuming the SSE event stream.
-    private func startSSEStream() {
+    ///
+    /// Internal rather than private so that test can exist. Everything it does
+    /// is one call to `SSEStreamSession`; the reason that matters is in the
+    /// comment inside.
+    func startSSEStream() {
         guard let sseClient else { return }
 
         sseTask?.cancel()
         sseTask = Task { [weak self] in
-            let stream = await sseClient.connect()
-            for await event in stream {
-                guard !Task.isCancelled else { break }
-                await self?.handleSSEEvent(event)
-            }
+            // The generation is captured where the STREAM opens, not where an
+            // event arrives — a stream belongs to exactly one connection, and an
+            // arrival-time read after a reconnect returns the new generation and
+            // passes the guard it was meant to fail. That rule lives in
+            // SSEStreamSession so it is testable; keep this body a single call.
+            await SSEStreamSession.run(
+                captureGeneration: { await self?.currentConnectionGeneration() },
+                open: { await sseClient.connect() },
+                handle: { event, generation in
+                    await self?.handleSSEEvent(event, generation: generation)
+                }
+            )
             // Stream ended -- trigger reconnection if still connected
             guard !Task.isCancelled else { return }
             await self?.handleSSEDisconnect()
@@ -1261,7 +1280,15 @@ actor CoreProcessManager {
     /// We must NOT re-fetch the full server list on each one — that would
     /// trigger @Published updates which cause MenuBarExtra to duplicate items.
     /// Instead, only update lightweight counters from the inline status data.
-    private func handleSSEEvent(_ event: SSEEvent) async {
+    /// The generation of the connection the tray is on right now.
+    private func currentConnectionGeneration() async -> Int {
+        await MainActor.run { appState.connectionGeneration }
+    }
+
+    /// - Parameter generation: the connection whose stream delivered this event,
+    ///   captured when that stream was opened. Glance publishes are rejected if
+    ///   the tray has since reconnected.
+    private func handleSSEEvent(_ event: SSEEvent, generation: Int) async {
         switch event.event {
         case "status":
             // Status events contain inline stats. Spec 048: any change that
@@ -1319,24 +1346,23 @@ actor CoreProcessManager {
                 appState.activityVersion += 1
             }
 
-        case "activity":
-            // New activity; refresh and check for sensitive data
-            let oldSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
-            await refreshActivity()
-            await MainActor.run { appState.activityVersion += 1 }
-            let newSensitive = await MainActor.run { appState.sensitiveDataAlertCount }
-            // Notify on new sensitive data detections
-            if newSensitive > oldSensitive {
-                if let latest = await MainActor.run(body: {
-                    appState.recentActivity.first(where: { $0.hasSensitiveData == true })
-                }) {
-                    await notificationService.sendSensitiveDataAlert(
-                        server: latest.serverName ?? "unknown",
-                        tool: latest.toolName ?? "unknown",
-                        category: "sensitive data"
-                    )
-                }
+        case GlanceEvent.upstreamCompleted, GlanceEvent.internalCompleted:
+            // Tray Glance: adapt the payload into a row and prepend it.
+            // Deliberately NO refreshActivity() here — a REST GET per event is
+            // network amplification, not push. The 30s reconciling poll
+            // (refreshGlanceActivity) replaces these optimistic rows with the
+            // storage-assigned records. `activity.tool_call.started` is ignored:
+            // the core does not persist started events, so a row built from one
+            // would never be reconciled. `activityVersion` is deliberately NOT
+            // bumped either — ActivityView reloads on that counter
+            // (ActivityView.swift → loadSummary + loadActivities), so a
+            // per-event bump is the same amplification through a second door
+            // whenever the Activity window is open.
+            guard let data = event.data.data(using: .utf8),
+                  let entry = GlanceEvent.adapt(eventName: event.event, data: data) else {
+                break
             }
+            await appState.prependGlanceActivity(entry, generation: generation)
 
         case "active_profile.changed":
             // Profiles v2 T5: the server-level default active profile was switched
@@ -1505,11 +1531,17 @@ actor CoreProcessManager {
     private func refreshState() async {
         await refreshActivity()
         await refreshSessions()
+        await refreshGlanceActivity()
+        await refreshGlanceSessions()
+        await refreshUsage()
         await refreshTokenMetrics()
         await refreshSecurityStatus()
         await refreshProfiles()
-        // Bump activityVersion so ActivityView reloads
-        // (SSE doesn't emit "activity" events, so periodic refresh is needed)
+        // Bump activityVersion so ActivityView reloads. Still needed after the
+        // glance's SSE work: the bus emits `activity.tool_call.completed` and
+        // `activity.internal_tool_call.completed` (internal/runtime/events.go),
+        // which feed the glance rows only — there is no bare "activity" event,
+        // and nothing else republishes the full log ActivityView renders.
         await MainActor.run { appState.activityVersion += 1 }
     }
 
@@ -1615,6 +1647,37 @@ actor CoreProcessManager {
         } catch {
             // Non-fatal; we'll retry on the next refresh
         }
+    }
+
+    /// Tray Glance: fetch the type-filtered tool-call feed for the menu's
+    /// "Recent" rows. Separate from `refreshActivity()` on purpose — that feed
+    /// stays broad because the native Dashboard renders the full activity log.
+    ///
+    /// The body lives on `AppState` behind `GlanceDataSource`, like the other
+    /// two glance fetches: a catch block reachable only from here is a catch
+    /// block no test can see, which is how this one came to swallow its errors.
+    private func refreshGlanceActivity() async {
+        guard let apiClient else { return }
+        await appState.refreshGlanceActivity(from: apiClient)
+    }
+
+    /// Tray Glance: fetch active-only sessions for the menu's "Clients" rows.
+    /// Separate from `refreshSessions()`, which must keep closed sessions so
+    /// ActivityView can resolve session ids to client names.
+    private func refreshGlanceSessions() async {
+        guard let apiClient else { return }
+        await appState.refreshGlanceSessions(from: apiClient)
+    }
+
+    /// Tray Glance: fetch the 24h usage aggregate that backs both the header
+    /// count and the histogram submenu.
+    /// Non-fatal, and retried on the next refresh — but a failure is RECORDED
+    /// rather than swallowed. Silently keeping the loading state would tell the
+    /// user a fetch that is never coming back is still in flight; `refreshUsage`
+    /// publishes the failure so the submenu can say so.
+    private func refreshUsage() async {
+        guard let apiClient else { return }
+        await appState.refreshUsage(from: apiClient)
     }
 
     /// Fetch token metrics from the status endpoint and update appState.

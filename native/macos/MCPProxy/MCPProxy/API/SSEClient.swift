@@ -131,7 +131,21 @@ struct SSEParser {
 ///     print(event.event, event.data)
 /// }
 /// ```
-actor SSEClient {
+/// The part of `SSEClient` that `CoreProcessManager` consumes.
+///
+/// Exists so the manager's stream wiring can be driven by a test. That wiring
+/// carries a correctness rule — the connection generation is captured when the
+/// stream OPENS, never when an event arrives — and a rule that only a comment
+/// protects is one a later edit can undo silently. Extracting
+/// `SSEStreamSession` made the rule itself testable but left the wiring that
+/// applies it unpinned: reinstating the arrival-time read inside
+/// `startSSEStream` kept every test green.
+protocol SSEStreaming: Sendable {
+    func connect() async -> AsyncStream<SSEEvent>
+    func disconnect() async
+}
+
+actor SSEClient: SSEStreaming {
     private var task: Task<Void, Never>?
     private let session: URLSession
     private let baseURL: String

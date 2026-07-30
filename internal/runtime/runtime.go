@@ -1306,12 +1306,16 @@ func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int) ([]
 	return records, total, nil
 }
 
-// GetRecentSessions returns recent MCP sessions
-func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
+// GetRecentSessions returns recent MCP sessions.
+//
+// status filters on the session status ("active" / "closed"); an empty string
+// means no filtering. The filter is pushed down into the storage cursor walk so
+// it is applied before truncation to limit.
+func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	storageRecords, total, err := r.storageManager.GetRecentSessions(limit)
+	storageRecords, total, err := r.storageManager.GetRecentSessions(limit, status)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get recent sessions: %w", err)
 	}

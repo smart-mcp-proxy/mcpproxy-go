@@ -3072,9 +3072,10 @@ func (s *Server) GetToolCallsBySession(sessionID string, limit, offset int) ([]*
 	return s.runtime.GetToolCallsBySession(sessionID, limit, offset)
 }
 
-// GetRecentSessions retrieves recent MCP sessions
-func (s *Server) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
-	return s.runtime.GetRecentSessions(limit)
+// GetRecentSessions retrieves recent MCP sessions, optionally filtered by
+// status ("active" / "closed"; empty means no filter).
+func (s *Server) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
+	return s.runtime.GetRecentSessions(limit, status)
 }
 
 // GetSessionByID retrieves a session by its ID

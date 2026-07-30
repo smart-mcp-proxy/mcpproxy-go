@@ -1335,8 +1335,15 @@ func (m *Manager) CloseSession(sessionID string) error {
 	})
 }
 
-// GetRecentSessions returns the most recent sessions
-func (m *Manager) GetRecentSessions(limit int) ([]*SessionRecord, int, error) {
+// GetRecentSessions returns the most recent sessions.
+//
+// status filters on SessionRecord.Status ("active" / "closed"); an empty string
+// means no filtering. The filter is applied DURING the cursor walk, before the
+// limit truncates the result, so a session that started long ago but is still
+// active is never dropped by a page full of newer sessions. Filtering after
+// truncation would let the tray report "no connected clients" while a client
+// is actively calling tools.
+func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1349,20 +1356,43 @@ func (m *Manager) GetRecentSessions(limit int) ([]*SessionRecord, int, error) {
 			return nil // No sessions yet
 		}
 
-		// Count total
-		total = bucket.Stats().KeyN
+		if status == "" {
+			// Unfiltered: total is the whole bucket and the walk can stop early.
+			total = bucket.Stats().KeyN
 
-		// Iterate in reverse (newest first due to timestamp key prefix)
+			// Iterate in reverse (newest first due to timestamp key prefix)
+			c := bucket.Cursor()
+			count := 0
+			for k, v := c.Last(); k != nil && count < limit; k, v = c.Prev() {
+				var session SessionRecord
+				if err := json.Unmarshal(v, &session); err != nil {
+					m.logger.Warnw("Failed to unmarshal session", "error", err)
+					continue
+				}
+				sessions = append(sessions, &session)
+				count++
+			}
+
+			return nil
+		}
+
+		// Filtered: walk the whole bucket so `total` honestly counts matching
+		// records. Session retention caps this bucket at 100 keys
+		// (enforceSessionRetention), so a full walk is bounded and cheap.
 		c := bucket.Cursor()
-		count := 0
-		for k, v := c.Last(); k != nil && count < limit; k, v = c.Prev() {
+		for k, v := c.Last(); k != nil; k, v = c.Prev() {
 			var session SessionRecord
 			if err := json.Unmarshal(v, &session); err != nil {
 				m.logger.Warnw("Failed to unmarshal session", "error", err)
 				continue
 			}
-			sessions = append(sessions, &session)
-			count++
+			if session.Status != status {
+				continue
+			}
+			total++
+			if len(sessions) < limit {
+				sessions = append(sessions, &session)
+			}
 		}
 
 		return nil

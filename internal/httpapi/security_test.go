@@ -313,7 +313,7 @@ func (m *baseController) CallTool(ctx context.Context, toolName string, args map
 func (m *baseController) GetRuntime() *runtime.Runtime                            { return nil }
 func (m *baseController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
 func (m *baseController) GetSessionByID(id string) (*contracts.MCPSession, error) { return nil, nil }
-func (m *baseController) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
+func (m *baseController) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
 	return nil, 0, nil
 }
 func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {

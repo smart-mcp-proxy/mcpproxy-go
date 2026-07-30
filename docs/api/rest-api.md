@@ -927,7 +927,23 @@ Get secret metadata (not the value).
 
 #### GET /api/v1/sessions
 
-List active MCP sessions.
+List recent MCP sessions.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `limit` | integer | Max sessions (1-100, default: 10) |
+| `offset` | integer | Pagination offset (default: 0) |
+| `status` | string | Filter by session status: `active`, `closed`. Any other value returns `400`. |
+
+The `status` filter is applied during the storage walk, **before** the `limit`
+truncation, so a long-running session that is still active is returned even when
+newer sessions would otherwise fill the page. When `status` is set, `total`
+counts the matching sessions rather than every stored session.
+
+Caveat (spec 082): handshake-only sessions are not persisted, so a connected but
+idle client does not appear until its first tool call.
 
 #### GET /api/v1/sessions/{id}
 
