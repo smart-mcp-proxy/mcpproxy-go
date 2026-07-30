@@ -57,7 +57,7 @@
           v{{ displayVersion }}
         </span>
         <span
-          v-if="systemStore.updateAvailable"
+          v-if="systemStore.updateAvailable && !systemStore.updateNudgesSuppressed"
           class="badge badge-xs badge-primary shrink-0"
           :title="latestVersionTitle"
         >

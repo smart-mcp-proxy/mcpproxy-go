@@ -36,10 +36,10 @@
         <div class="font-semibold">Deterministic baseline is always on</div>
         <span class="text-sm">
           Every server is scanned by the offline baseline engine with no Docker required.
-          The scanners below are an opt-in <span class="font-medium">deep scan</span> — enable
-          them (<code class="font-mono text-xs">security.deep_scan.enabled</code>) for extra
-          source-level analysis. Deep-scan failures are informational and never change the
-          baseline verdict.
+          The scanners below are an opt-in <span class="font-medium">deep scan</span> for extra
+          source-level analysis — turn it on with the “Deep scan (Docker scanners)” toggle in
+          <router-link to="/settings" class="link link-primary" data-test="deep-scan-settings-link">Settings → Security</router-link>.
+          Deep-scan failures are informational and never change the baseline verdict.
         </span>
       </div>
     </div>

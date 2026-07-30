@@ -450,6 +450,13 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 				"action":      healthStatus.Action,
 			},
 		}
+
+		// Spec 086: surface the per-server trust tier in the daemon-less path
+		// too, so `mcpproxy upstream list -o json` reads back the same field
+		// whether or not the daemon is up. Omitted when never configured.
+		if srv.TrustMode != "" {
+			servers[i]["trust_mode"] = srv.TrustMode
+		}
 	}
 
 	return outputServers(servers)

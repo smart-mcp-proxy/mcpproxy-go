@@ -24,6 +24,47 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
 
+    /// Tray Glance: builds the activity / clients / histogram rows, and keeps
+    /// references to them so a refresh landing while the menu is on screen can
+    /// rewrite them in place instead of restructuring the menu. Rows call back
+    /// into this delegate (see `openActivityForSession`) so Web UI key handling
+    /// stays in one place — the section is handed only AppState, which has no key.
+    ///
+    /// `@MainActor` because `GlanceSection` is an isolated type and this class is
+    /// not, so constructing it from a plain stored-property initializer would not
+    /// compile. See that type's header for why the alternative — a `nonisolated`
+    /// initializer over there — is the wrong trade.
+    @MainActor
+    private lazy var glance = GlanceSection(
+        target: self,
+        action: #selector(openActivityForSession(_:))
+    )
+
+    /// Suppresses structural rebuilds while the menu is on screen.
+    private var rebuildGuard = MenuRebuildGuard()
+
+    /// Scheduler for the debounced `objectWillChange -> rebuildMenu()` sink.
+    ///
+    /// **Must be a dispatch queue, not `RunLoop.main`.** While an `NSMenu` is
+    /// tracking, the main run loop runs in `NSEventTrackingRunLoopMode`, and
+    /// Combine's `RunLoop` scheduler installs its timers in `.default` mode
+    /// only — so a `RunLoop.main`-scheduled `debounce` is never serviced until
+    /// the menu closes. That silently disables the entire open-menu update
+    /// path: `GlanceSection.updateInPlace` and `MenuRebuildGuard`'s
+    /// update-in-place / defer-until-close branches can only run if something
+    /// calls `rebuildMenu()` while the menu is up, and this sink is the only
+    /// caller that does. The glance would then be a snapshot frozen at
+    /// menu-open time, which is precisely what it must not be.
+    ///
+    /// The main dispatch queue is drained in every run-loop mode, so this
+    /// delivers during tracking. It is the same reason the timers below are
+    /// published `in: .common` rather than in the default mode.
+    ///
+    /// Named (rather than written inline at the subscription) so the tests can
+    /// bind to the very scheduler production uses — see
+    /// `MenuRefreshSchedulerTests`.
+    static let menuRefreshScheduler = DispatchQueue.main
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
         NSApp.setActivationPolicy(.prohibited)
@@ -115,7 +156,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             appState.objectWillChange.map { _ in () },
             updateService.objectWillChange.map { _ in () }
         )
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .debounce(for: .milliseconds(500), scheduler: Self.menuRefreshScheduler)
             .sink { [weak self] _ in
                 self?.updateStatusIcon()
                 self?.rebuildMenu()
@@ -190,10 +231,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        // Only the status-bar menu drives the rebuild guard. NSMenuDelegate
+        // callbacks are delivered per menu, and this object is the delegate of
+        // more than one: any submenu that ends up sharing it would otherwise run
+        // a full rebuild (removeAllItems) on a menu already on screen and
+        // re-arm/disarm the guard under the parent — exactly the
+        // restructuring-while-open the design forbids.
+        //
+        // The glance histogram submenu does build its single row lazily on open,
+        // but it does NOT reach this method: GlanceSection installs its own
+        // HistogramSubmenuDelegate on that submenu, precisely so opening it
+        // cannot rebuild the tray menu underneath the cursor.
+        guard menu === statusItem.menu else { return }
+
         // Spec 048: dropped the per-click `client.servers()` fetch. appState
         // is fed by SSE (spec 047), so it's already current within ~50 ms of
         // the last upstream state change. Rebuild from in-memory state only.
+        //
+        // The guard is armed AFTER this rebuild: AppKit calls menuWillOpen
+        // before the menu is drawn, so restructuring here is safe and hands the
+        // user fresh rows. Every rebuild from this point on happens under the
+        // cursor and must not add or remove items.
         rebuildMenu()
+        rebuildGuard.menuWillOpen()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === statusItem.menu else { return }
+
+        // Run the structural rebuild that was suppressed while the menu was up.
+        // Deferred to the next run-loop turn: AppKit is still tearing the menu
+        // down inside this callback, and mutating it here is not safe.
+        guard rebuildGuard.menuDidClose() else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.rebuildMenu()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -520,7 +592,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Rebuild the entire NSMenu from current appState.
     /// Clears and rebuilds in-place to avoid replacing the menu object
     /// (which would close an already-open menu and lose the delegate).
+    ///
+    /// `@MainActor` because Tray Glance rewrites menu items that are already on
+    /// screen, which is only safe on the thread AppKit draws them on. Every
+    /// caller was already main-thread — the NSMenuDelegate/NSApplicationDelegate
+    /// callbacks are isolated by the SDK and the objectWillChange sink debounces
+    /// on `menuRefreshScheduler` (the main queue) — so this costs nothing today
+    /// and rejects a future off-main caller at compile time (see the note on
+    /// `MenuRebuildGuard.decide(refreshing:from:now:)` for how far that reaches
+    /// under this package's concurrency checking).
+    @MainActor
     private func rebuildMenu() {
+        // Tray Glance: while the menu is on screen its structure must not move
+        // under the cursor. The rows are rewritten in place; a structural change
+        // is suppressed here and re-run from menuDidClose. Non-glance sections
+        // are frozen for the same reason, and menuWillOpen rebuilds the whole
+        // menu before it is drawn, so the next open is never stale.
+        switch rebuildGuard.decide(refreshing: glance, from: appState) {
+        case .updateInPlace, .deferUntilClose:
+            return
+        case .rebuild:
+            break
+        }
+
         let menu: NSMenu
         if let existing = statusItem.menu {
             existing.removeAllItems()
@@ -589,6 +683,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
 
         menu.addItem(.separator())
+
+        // Tray Glance — recent tool calls, connected clients, 24h histogram.
+        // Hidden entirely when the core is not connected: `items(for:)` returns
+        // [] and this loop adds nothing. GlanceSection keeps references to the
+        // rows it hands back, so a later in-place update writes to these very
+        // items — which is why they are added, not copied.
+        for row in glance.items(for: appState) {
+            menu.addItem(row)
+        }
 
         // Needs Attention — only auth required, connection errors, quarantine (NOT disabled)
         let attentionServers = appState.serversNeedingAttention
@@ -995,6 +1098,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Open the Web UI activity log filtered by a glance row's session.
+    ///
+    /// Reuses `openWebUI()`'s key path: `webUIBaseURL` is scheme/host/port only
+    /// and a first-time browser session needs the API key appended, which only
+    /// the core manager holds. A row with no session id (an empty-state row, or
+    /// a record the core never attributed) opens the unfiltered log.
+    @objc private func openActivityForSession(_ sender: NSMenuItem) {
+        let sessionID = sender.representedObject as? String
+        Task {
+            let apiKey = await coreManager?.currentAPIKey ?? ""
+            let baseURL = await MainActor.run { appState.webUIBaseURL }
+            let urlString = activityURLString(baseURL: baseURL, apiKey: apiKey, sessionID: sessionID)
+            if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     @objc private func openConfigFile() {
         let home = FileManager.default.homeDirectoryForCurrentUser
         NSWorkspace.shared.open(home.appendingPathComponent(".mcpproxy/mcp_config.json"))
@@ -1005,6 +1126,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
     }
 
+    @MainActor
     @objc private func toggleAutoStart(_ sender: NSMenuItem) {
         do {
             if appState.autoStartEnabled {

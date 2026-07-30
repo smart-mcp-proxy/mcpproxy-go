@@ -1306,12 +1306,16 @@ func (r *Runtime) GetToolCallsBySession(sessionID string, limit, offset int) ([]
 	return records, total, nil
 }
 
-// GetRecentSessions returns recent MCP sessions
-func (r *Runtime) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
+// GetRecentSessions returns recent MCP sessions.
+//
+// status filters on the session status ("active" / "closed"); an empty string
+// means no filtering. The filter is pushed down into the storage cursor walk so
+// it is applied before truncation to limit.
+func (r *Runtime) GetRecentSessions(limit int, status string) ([]*contracts.MCPSession, int, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	storageRecords, total, err := r.storageManager.GetRecentSessions(limit)
+	storageRecords, total, err := r.storageManager.GetRecentSessions(limit, status)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get recent sessions: %w", err)
 	}
@@ -2140,6 +2144,17 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["auto_approve_tool_changes"] = *serverStatus.Config.AutoApproveToolChanges
 		}
 
+		// Spec 086: surface the per-server trust tier so the REST GET payload
+		// (and SSE servers.changed embed) can read back the persisted mode, in
+		// parity with its deprecated predecessor auto_approve_tool_changes.
+		// The RAW configured value is emitted — resolution of empty/unknown
+		// values stays with config.EffectiveTrustMode() so the wire contract
+		// keeps distinguishing "never configured" (omitted) from an explicit
+		// mode. Omitted when empty.
+		if serverStatus.Config != nil && serverStatus.Config.TrustMode != "" {
+			serverMap["trust_mode"] = serverStatus.Config.TrustMode
+		}
+
 		// MCP-3322: surface the per-server init_timeout override so the REST GET
 		// payload (and SSE servers.changed embed) can read it back. Emitted as a
 		// duration string (e.g. "2m0s"); omitted when unset so the projection
@@ -2318,6 +2333,12 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// StateView path. Tri-state *bool — only emit when set.
 		if srv.AutoApproveToolChanges != nil {
 			serverInfo["auto_approve_tool_changes"] = *srv.AutoApproveToolChanges
+		}
+
+		// Spec 086: per-server trust tier in parity with the StateView path.
+		// Raw configured value; omitted when never configured.
+		if srv.TrustMode != "" {
+			serverInfo["trust_mode"] = srv.TrustMode
 		}
 
 		// Try to get connection status

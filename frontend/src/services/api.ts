@@ -1,5 +1,7 @@
 import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, ListProfilesResponse, ActiveProfileResponse } from '@/types'
 
+import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
+
 // Event types for API service
 export interface APIAuthEvent {
   type: 'auth-error'
@@ -392,11 +394,24 @@ class APIService {
     return this.request<GlobalToolsResponse>('/api/v1/tools')
   }
 
-  // Tool-level quarantine (Spec 032)
+  // Tool-level quarantine (Spec 032) + scan-gate hold evidence (Spec 088).
+  //
+  // The record source stays `/tools/export`: those approval records are durable,
+  // so pending/blocked tools remain visible when a server is disconnected or the
+  // index is empty. That payload carries no held_* evidence, so the inventory
+  // endpoint `/tools` is fetched in parallel purely as ENRICHMENT and joined by
+  // tool name. The enrichment call is caught individually and degrades to null —
+  // a failed evidence fetch must never drop a durable approval record.
   async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number }>> {
-    const response = await this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/export`)
+    const encoded = encodeURIComponent(serverName)
+    const [response, enrichment] = await Promise.all([
+      this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encoded}/tools/export`),
+      this.request<{ tools: HoldEvidenceSource[] }>(`/api/v1/servers/${encoded}/tools`)
+        .catch(() => null),
+    ])
+
     if (response.success && response.data?.tools) {
-      response.data.tools = response.data.tools.map((tool) => {
+      const normalized = response.data.tools.map((tool) => {
         const disabled = typeof tool.disabled === 'boolean'
           ? tool.disabled
           : (typeof tool.enabled === 'boolean' ? !tool.enabled : false)
@@ -406,6 +421,8 @@ class APIService {
           enabled: !disabled,
         }
       })
+      const evidence = enrichment?.success ? enrichment.data?.tools ?? null : null
+      response.data.tools = joinHoldEvidence(normalized, evidence)
     }
     return response
   }

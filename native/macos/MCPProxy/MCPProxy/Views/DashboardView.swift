@@ -478,8 +478,8 @@ struct DashboardView: View {
                         } else if newCalls > existingCalls {
                             byClient[key] = s
                         } else if newCalls == existingCalls {
-                            let existingTime = existing.lastActive ?? existing.startTime ?? ""
-                            let newTime = s.lastActive ?? s.startTime ?? ""
+                            let existingTime = existing.lastActivity ?? existing.startTime ?? ""
+                            let newTime = s.lastActivity ?? s.startTime ?? ""
                             if newTime > existingTime { byClient[key] = s }
                         }
                     } else {
@@ -491,8 +491,8 @@ struct DashboardView: View {
                 // and call counts match. `.values` iteration is random, so an
                 // explicit sort key is required to keep the UI stable.
                 return byClient.values.sorted { lhs, rhs in
-                    let lTime = lhs.lastActive ?? lhs.startTime ?? ""
-                    let rTime = rhs.lastActive ?? rhs.startTime ?? ""
+                    let lTime = lhs.lastActivity ?? lhs.startTime ?? ""
+                    let rTime = rhs.lastActivity ?? rhs.startTime ?? ""
                     if lTime != rTime { return lTime > rTime }
                     let lCalls = lhs.toolCallCount ?? 0
                     let rCalls = rhs.toolCallCount ?? 0
@@ -550,7 +550,7 @@ struct DashboardView: View {
                                 .font(.scaledMonospacedDigit(.caption, scale: fontScale))
                                 .frame(width: 80, alignment: .trailing)
 
-                            Text(sessionRelativeTime(session.lastActive ?? session.startTime))
+                            Text(sessionRelativeTime(session.lastActivity ?? session.startTime))
                                 .font(.scaled(.caption, scale: fontScale))
                                 .foregroundStyle(.secondary)
                                 .frame(maxWidth: .infinity, alignment: .trailing)

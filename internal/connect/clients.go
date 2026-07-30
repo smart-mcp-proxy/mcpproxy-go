@@ -166,18 +166,50 @@ func ConfigPath(clientID, homeDir string) string {
 		return filepath.Join(homeDir, ".gemini", "settings.json")
 
 	case "opencode":
-		if runtime.GOOS == "windows" {
-			localAppData := os.Getenv("LOCALAPPDATA")
-			if localAppData == "" {
-				localAppData = filepath.Join(homeDir, "AppData", "Local")
-			}
-			return filepath.Join(localAppData, "opencode", "opencode.json")
-		}
-		return filepath.Join(homeDir, ".config", "opencode", "opencode.json")
+		return filepath.Join(opencodeConfigDir(homeDir), "opencode.json")
 
 	default:
 		return ""
 	}
+}
+
+// opencodeConfigDir returns OpenCode's global config directory.
+func opencodeConfigDir(homeDir string) string {
+	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			localAppData = filepath.Join(homeDir, "AppData", "Local")
+		}
+		return filepath.Join(localAppData, "opencode")
+	}
+	return filepath.Join(homeDir, ".config", "opencode")
+}
+
+// opencodeConfigCandidates lists the global config files OpenCode itself loads,
+// highest precedence first: opencode.jsonc shadows opencode.json for the same
+// keys, and recent OpenCode versions bootstrap the .jsonc variant (#922).
+func opencodeConfigCandidates(homeDir string) []string {
+	dir := opencodeConfigDir(homeDir)
+	return []string{
+		filepath.Join(dir, "opencode.jsonc"),
+		filepath.Join(dir, "opencode.json"),
+	}
+}
+
+// configPath resolves the config file a client operation should target. For
+// OpenCode it prefers the candidate that actually exists — writing next to an
+// existing .jsonc would be silently shadowed by it — falling back to the static
+// ConfigPath default (opencode.json) for the create-new case. Stat-only: no
+// config content is read (Spec 075 FR-001).
+func (s *Service) configPath(clientID string) string {
+	if clientID == "opencode" {
+		for _, p := range opencodeConfigCandidates(s.homeDir) {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return ConfigPath(clientID, s.homeDir)
 }
 
 // buildServerEntry returns the JSON/TOML-serializable map inserted into the

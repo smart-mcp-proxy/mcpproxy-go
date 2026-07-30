@@ -184,23 +184,6 @@
               </label>
             </div>
 
-            <!-- Quarantined -->
-            <div class="form-control">
-              <label class="flex items-center gap-3 cursor-pointer py-1">
-                <input
-                  type="checkbox"
-                  v-model="formData.quarantined"
-                  class="toggle toggle-warning"
-                />
-                <span class="label-text font-semibold">Quarantined</span>
-                <div class="tooltip tooltip-right before:whitespace-normal before:w-56 before:max-w-[14rem]" data-tip="Prevent tool execution until security review is complete. Recommended for new servers.">
-                  <svg class="w-4 h-4 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                </div>
-              </label>
-            </div>
-
             <!-- Isolated (Docker) -->
             <div class="form-control">
               <label class="flex items-center gap-3 cursor-pointer py-1">
@@ -236,6 +219,22 @@
                 </div>
               </label>
               <span class="text-xs opacity-50 ml-12">Coming soon</span>
+            </div>
+
+            <!--
+              Trust mode (spec 088 FR-006): replaces the old independent
+              "Quarantined" checkbox. The chosen mode decides admission —
+              auto is admitted straight away, scan|manual are quarantined on
+              add — so the request omits `quarantined` entirely and lets the
+              backend derive it. Shipping both controls would let the operator
+              contradict the mode.
+            -->
+            <div class="form-control pt-2" data-test="addserver-trust-mode">
+              <label class="label">
+                <span class="label-text font-semibold">Trust Mode</span>
+                <span class="label-text-alt">Decides quarantine on add and tool-change approval</span>
+              </label>
+              <TrustModeSelector v-model="formData.trustMode" name="addserver-trust-mode" />
             </div>
           </div>
 
@@ -558,6 +557,8 @@ import { ref, reactive, watch, computed, onMounted } from 'vue'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
 import api, { type CanonicalConfigPath } from '@/services/api'
+import TrustModeSelector from '@/components/TrustModeSelector.vue'
+import type { TrustMode } from '@/utils/trustMode'
 import type { ImportResponse, ImportedServer } from '@/types'
 
 interface Props {
@@ -589,7 +590,8 @@ const formData = reactive({
   envText: '',
   workingDir: '',
   enabled: true,
-  quarantined: true,
+  // Manual = the secure default (quarantined on add, every tool change held).
+  trustMode: 'manual' as TrustMode,
   isolated: false,
   idleOnInactivity: false
 })
@@ -799,12 +801,15 @@ async function handleSubmit() {
     const args = parseArgs()
     const env = parseEnv()
 
+    // FR-006: send the trust mode and OMIT `quarantined` — the backend derives
+    // admission from the mode (QuarantineDefaultForServer) and treats an
+    // explicit `quarantined` as an override applied after that derivation.
     const serverData: any = {
       operation: 'add',
       name: formData.name,
       protocol: formData.type,
       enabled: formData.enabled,
-      quarantined: formData.quarantined
+      trust_mode: formData.trustMode
     }
 
     if (formData.type === 'http') {
@@ -1079,7 +1084,7 @@ function handleClose() {
   formData.envText = ''
   formData.workingDir = ''
   formData.enabled = true
-  formData.quarantined = true
+  formData.trustMode = 'manual'
   formData.isolated = false
   formData.idleOnInactivity = false
   error.value = ''

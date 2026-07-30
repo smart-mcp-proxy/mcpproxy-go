@@ -42,6 +42,7 @@ graph LR
   analytics_dashboard["Analytics dashboard as default page"]
   scanner_simplification["Scanner simplification (deterministic d…"]
   tpa_db["tpa-db: versioned TPA signature databas…"]
+  remote_access_tunnel["Remote access tunnel (feature-flagged M…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
 
@@ -50,6 +51,9 @@ graph LR
   ux_audit --> analytics_dashboard
   scanner_v2 --> scanner_simplification
   scanner_simplification --> tpa_db
+  tpa_db --> remote_access_tunnel
+  ux_audit --> remote_access_tunnel
+  analytics_dashboard --> remote_access_tunnel
   telemetry_identity --> telemetry_v7_churn
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
@@ -57,13 +61,11 @@ graph LR
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,scanner_simplification done;
   class analytics_dashboard,telemetry_identity,telemetry_v7_churn in_progress;
-  class ux_audit,action_log_transparency,tpa_db todo;
+  class ux_audit,action_log_transparency,tpa_db,remote_access_tunnel todo;
 ```
 
 **Independent epics** (15) — no cross-epic prerequisites; each stands alone:
 
-- 🔵 **Upgrade awareness & guided update** — In progress · P0
-- 🔵 **Connect step trust: preview, visible backup, one-click undo** — In progress · P0
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🟡 **Windows native tray app** — In review · P2
 - 🔴 **MCP protocol upgrade to 2026-07-28 revision** — Blocked · P3
@@ -75,75 +77,14 @@ graph LR
 - ⚫ **SSO (server edition)** — Todo · P3 · parked
 - ⚪ **Security gateway Tracks C/D (per-arg least-privilege + signature provenance)** — Todo · P3
 - ⚪ **Discovery-quality eval harness (Spec 065 second half)** — Todo · P3
+- 🟢 **Upgrade awareness & guided update** — Done · P0
+- 🟢 **Connect step trust: preview, visible backup, one-click undo** — Done · P0
 - 🟢 **Registries — easier search + add-server** — Done · P1
 - 🟢 **Tray↔core decoupling: socket/REST API only, no config-file reads** — Done · P2
 
 ## Epic details
 
 Each epic's child tasks, their internal dependency graph, and tracker/PR links — **collapsed by default**, expand the ones you care about. Full metadata (priority, spec progress) is in the [Epics](#epics) table below.
-
-<details>
-<summary>🔵 Upgrade awareness &amp; guided update — In progress · P0</summary>
-
-> Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI.
-
-Spec: [079-upgrade-nudge](./specs/079-upgrade-nudge/)
-
-```mermaid
-graph LR
-  upgrade_nudge_status_log["US1 slice: update availability in mcpproxy st…"]
-  upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + up…"]
-  upgrade_nudge_channel["US2: channel-aware guided update command (bre…"]
-  upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no…"]
-
-  upgrade_nudge_status_log --> upgrade_nudge_surfacing
-  upgrade_nudge_surfacing --> upgrade_nudge_channel
-  upgrade_nudge_surfacing --> upgrade_nudge_quiet
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel done;
-  class upgrade_nudge_quiet todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
-| US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
-| US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
-| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | ⚪ Todo | — |
-
-</details>
-
-<details>
-<summary>🔵 Connect step trust: preview, visible backup, one-click undo — In progress · P0</summary>
-
-> Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
-
-Spec: [078-connect-trust-preview](./specs/078-connect-trust-preview/)
-
-```mermaid
-graph LR
-  connect_trust_preview["US1: preview API + wizard diff UI (exact entr…"]
-  connect_trust_backup_visibility["US1: surface backup_path in Web UI + retentio…"]
-  connect_trust_undo["US2: one-click undo/disconnect in wizard"]
-  connect_trust_tcc_copy["US2: pre-emptive macOS TCC explanation in wiz…"]
-
-
-  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class connect_trust_preview,connect_trust_backup_visibility,connect_trust_undo done;
-  class connect_trust_tcc_copy in_review;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| US1: preview API + wizard diff UI (exact entry, API-key masking) | 🟢 Done | #802 |
-| US1: surface backup_path in Web UI + retention policy | 🟢 Done | #799 |
-| US2: one-click undo/disconnect in wizard | 🟢 Done | #804 |
-| US2: pre-emptive macOS TCC explanation in wizard | 🟡 In review | #910 |
-
-</details>
 
 <details>
 <summary>🔵 Release qualification gate (auto-QA matrix blocks the tag) — In progress · P0</summary>
@@ -388,6 +329,37 @@ graph LR
 </details>
 
 <details>
+<summary>⚪ Remote access tunnel (feature-flagged MVP, spec 089) — Todo · P2</summary>
+
+> One-button Web UI exposure of /mcp via external tunnel binary (cloudflared quick tunnel first) so Claude custom connectors (all tiers incl. Free, syncs to iOS/Android) can reach local MCP servers (e.g. Obsidian) — behind a feature flag, off by default, mandatory OAuth 2.1+PKCE+DCR gate, per-server exposure allowlist, remote-origin activity logging. Research: docs/research/remote-access-tunnel-research-2026-07-29.html (25/25 claims verified; niche unoccupied — Docker MCP Gateway lacks it). Sequenced after tpa-db (+ shipped scanner work 086-088), macOS tray redesign (ux-audit) and analytics-dashboard per owner decision 2026-07-29. No hosted relay/payments in MVP.
+
+Spec: [089-remote-access-tunnel](./specs/089-remote-access-tunnel/)
+
+```mermaid
+graph LR
+  tunnel_oauth_gate["OAuth 2.1 authorization-server gate for tunne…"]
+  tunnel_orchestration["cloudflared quick-tunnel orchestration (detec…"]
+  tunnel_exposure_allowlist["Per-server exposure allowlist (default none;…"]
+  tunnel_webui_tray["Web UI open/close button + URL/QR/instruction…"]
+
+  tunnel_oauth_gate --> tunnel_exposure_allowlist
+  tunnel_orchestration --> tunnel_webui_tray
+  tunnel_exposure_allowlist --> tunnel_webui_tray
+
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tunnel_oauth_gate,tunnel_orchestration,tunnel_exposure_allowlist,tunnel_webui_tray todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| OAuth 2.1 authorization-server gate for tunnel-origin traffic (PKCE, DCR, Anthropic callback allowlist, token lifecycle/revocation) | ⚪ Todo | — |
+| cloudflared quick-tunnel orchestration (detect/launch/supervise/parse URL) + feature flag + never-auto-start | ⚪ Todo | — |
+| Per-server exposure allowlist (default none; quarantined non-exposable; hot-reload) | ⚪ Todo | — |
+| Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker | ⚪ Todo | — |
+
+</details>
+
+<details>
 <summary>⚪ Planning/docs truth automation — Todo · P2</summary>
 
 > Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests.
@@ -472,6 +444,65 @@ Spec: [065-evaluation-foundation](./specs/065-evaluation-foundation/)
 <summary>⚫ SSO (server edition) — Todo · parked · P3</summary>
 
 > PARKED. Single sign-on for the multi-user server edition.
+
+</details>
+
+<details>
+<summary>🟢 Upgrade awareness &amp; guided update — Done · P0</summary>
+
+> Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI.
+
+Spec: [079-upgrade-nudge](./specs/079-upgrade-nudge/)
+
+```mermaid
+graph LR
+  upgrade_nudge_status_log["US1 slice: update availability in mcpproxy st…"]
+  upgrade_nudge_surfacing["US1 remainder: dismissible Web UI banner + up…"]
+  upgrade_nudge_channel["US2: channel-aware guided update command (bre…"]
+  upgrade_nudge_quiet["US3: operator control + CI/offline quiet + no…"]
+
+  upgrade_nudge_status_log --> upgrade_nudge_surfacing
+  upgrade_nudge_surfacing --> upgrade_nudge_channel
+  upgrade_nudge_surfacing --> upgrade_nudge_quiet
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class upgrade_nudge_status_log,upgrade_nudge_surfacing,upgrade_nudge_channel,upgrade_nudge_quiet done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| US1 slice: update availability in mcpproxy status + deduped startup log | 🟢 Done | #798 |
+| US1 remainder: dismissible Web UI banner + update_check config block | 🟢 Done | #805 |
+| US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker) | 🟢 Done | #818 |
+| US3: operator control + CI/offline quiet + no prerelease downgrade nudges | 🟢 Done | #911 |
+
+</details>
+
+<details>
+<summary>🟢 Connect step trust: preview, visible backup, one-click undo — Done · P0</summary>
+
+> Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt.
+
+Spec: [078-connect-trust-preview](./specs/078-connect-trust-preview/)
+
+```mermaid
+graph LR
+  connect_trust_preview["US1: preview API + wizard diff UI (exact entr…"]
+  connect_trust_backup_visibility["US1: surface backup_path in Web UI + retentio…"]
+  connect_trust_undo["US2: one-click undo/disconnect in wizard"]
+  connect_trust_tcc_copy["US2: pre-emptive macOS TCC explanation in wiz…"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  class connect_trust_preview,connect_trust_backup_visibility,connect_trust_undo,connect_trust_tcc_copy done;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| US1: preview API + wizard diff UI (exact entry, API-key masking) | 🟢 Done | #802 |
+| US1: surface backup_path in Web UI + retention policy | 🟢 Done | #799 |
+| US2: one-click undo/disconnect in wizard | 🟢 Done | #804 |
+| US2: pre-emptive macOS TCC explanation in wizard | 🟢 Done | #910 |
 
 </details>
 
@@ -631,8 +662,6 @@ graph LR
 
 | Epic | Status | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- |
-| Upgrade awareness & guided update | In progress | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
-| Connect step trust: preview, visible backup, one-click undo | In progress | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Analytics dashboard as default page | In progress | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
@@ -642,6 +671,7 @@ graph LR
 | Web UI + macOS app UX audit | Todo | P0 | — |  |  |
 | Action log / transparency — info at a glance | Todo | P1 | — |  |  |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — |  |  |
+| Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
 | Planning/docs truth automation | Todo | P2 | — |  |  |
 | Security gateway Tracks C/D (per-arg least-privilege + signature provenance) | Todo | P3 | — | [054-mcp-security-gateway](./specs/054-mcp-security-gateway/) |  |
 | Discovery-quality eval harness (Spec 065 second half) | Todo | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
@@ -650,6 +680,8 @@ graph LR
 | Paid-tier MVP (billing / seats / license) `MCP-40` | Todo (parked) | P3 | — |  |  |
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | SSO (server edition) | Todo (parked) | P3 | — |  |  |
+| Upgrade awareness & guided update | Done | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
+| Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
 | Registries — easier search + add-server | Done | P1 | 21/24 (88%) | [070-registry-easy-upstream-add](./specs/070-registry-easy-upstream-add/) |  |
@@ -683,7 +715,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [006-oauth-extra-params](./specs/006-oauth-extra-params/) | `in-flight` | 43/65 (66%) |
 | [007-oauth-e2e-testing](./specs/007-oauth-e2e-testing/) | `in-flight` | 93/103 (90%) |
 | [008-oauth-token-refresh](./specs/008-oauth-token-refresh/) | `in-flight` | 57/64 (89%) |
-| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 43/87 (49%) |
+| [009-proactive-oauth-refresh](./specs/009-proactive-oauth-refresh/) | `in-flight` | 47/87 (54%) |
 | [010-release-notes-generator](./specs/010-release-notes-generator/) | `in-flight` | 24/36 (67%) |
 | [011-resource-auto-detect](./specs/011-resource-auto-detect/) | `shipped` | 38/39 (97%) |
 | [012-docusaurus-docs-site](./specs/012-docusaurus-docs-site/) | `in-flight` | 74/89 (83%) |
@@ -716,14 +748,14 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [039-security-scanner-plugins](./specs/039-security-scanner-plugins/) | — | — |
 | [040-server-ux](./specs/040-server-ux/) | `in-flight` | 28/35 (80%) |
 | [041-quarantine-invariants](./specs/041-quarantine-invariants/) | — | — |
-| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 60/91 (66%) |
+| [042-telemetry-tier2](./specs/042-telemetry-tier2/) | `in-flight` | 65/91 (71%) |
 | [043-linux-package-repos](./specs/043-linux-package-repos/) | `shipped` | 41/41 (100%) |
 | [044-diagnostics-taxonomy](./specs/044-diagnostics-taxonomy/) | `in-flight` | 59/106 (56%) |
-| [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 54/70 (77%) |
+| [044-retention-telemetry-v3](./specs/044-retention-telemetry-v3/) | `in-flight` | 55/70 (79%) |
 | [045-paperclip-cockpit](./specs/045-paperclip-cockpit/) | `in-flight` | 40/47 (85%) |
 | [046-local-first-onboarding](./specs/046-local-first-onboarding/) | — | — |
 | [046-local-launcher-for-http-sse](./specs/046-local-launcher-for-http-sse/) | — | — |
-| [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 25/46 (54%) |
+| [047-cpu-hotpath-fix](./specs/047-cpu-hotpath-fix/) | `in-flight` | 26/46 (57%) |
 | [048-tray-refetch-elimination](./specs/048-tray-refetch-elimination/) | `in-flight` | 18/31 (58%) |
 | [049-agent-discoverable-disabled-tools](./specs/049-agent-discoverable-disabled-tools/) | `shipped` | 18/18 (100%) |
 | [050-global-tools-page](./specs/050-global-tools-page/) | `in-flight` | 24/26 (92%) |
@@ -752,6 +784,10 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
 | [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
-| [083-discovery-profiler](./specs/083-discovery-profiler/) | `drafted` | 0/41 (0%) |
+| [083-discovery-profiler](./specs/083-discovery-profiler/) | `in-flight` | 4/41 (10%) |
 | [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |
 | [085-compact-router](./specs/085-compact-router/) | `shipped` | 44/46 (96%) |
+| [086-tpa-scanner-approval](./specs/086-tpa-scanner-approval/) | — | — |
+| [087-tpa-daily-refresh](./specs/087-tpa-daily-refresh/) | — | — |
+| [088-scanner-trust-ui](./specs/088-scanner-trust-ui/) | `shipped` | 29/29 (100%) |
+| [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) | — | — |

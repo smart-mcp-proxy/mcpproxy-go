@@ -198,6 +198,40 @@ See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 - Configuration: `quarantine_enabled` (global) and `auto_approve_tool_changes` (per-server; deprecates `skip_quarantine`)
 - REST API endpoints for tool approval management
 
+### Trust modes (auto | scan | manual)
+
+Since spec 086, each server carries a **trust mode** that governs both
+new-server admission and tool-change approval (superseding the binary
+`auto_approve_tool_changes` flag, which is migrated onto it automatically):
+
+| Mode | Add time | Tool changes |
+|------|----------|--------------|
+| `auto` | Admitted without quarantine or scanning | Trusted without scanning (rug-pull risk) |
+| `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | Auto-approved only when the offline scan verdict is clean; otherwise held for review |
+| `manual` (default) | Quarantined for human review | Every change held for review |
+
+Unrecognized values fail closed to `manual`. Config field: per-server
+`trust_mode`; REST: `trust_mode` on `POST/PATCH/GET /api/v1/servers`.
+
+**Web UI (spec 088)**: the server's Configuration tab has a tri-mode
+selector (choosing `auto` asks for confirmation and explains the risk); the
+add-server form chooses the mode instead of a raw quarantine checkbox
+(initial quarantine is derived from the mode); server tiles show a
+trust-mode badge.
+
+### Hold evidence in the Web UI (spec 088)
+
+When the `scan` gate holds a tool, the approval record carries evidence —
+`held_reason` (`scan_findings` = the scan found threats vs `scan_coverage`
+= the scan could not complete, held as a precaution), `held_verdict`, and
+`held_signals` (matched check ids, with known-attack `TPA-YYYY-NNNN`
+signature ids listed first). The Web UI renders this on the tool-quarantine
+panel, the change-diff dialog, and the global Tools page, with a best-effort
+link into the server's latest scan report highlighting matching findings.
+The quarantine banner distinguishes four states: scan running, scan verdict
+blocked automatic approval, scan could not complete (retry offered), and
+awaiting manual review.
+
 ### Block (approve + disable)
 
 When reviewing a pending or changed tool you may want to **acknowledge it but

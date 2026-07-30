@@ -36,6 +36,9 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		// MCP-2940: surface the per-server auto-approve intent (tri-state *bool)
 		// so the Web UI toggle reflects the persisted value.
 		AutoApproveToolChanges: cfg.AutoApproveToolChanges,
+		// Spec 086: surface the per-server trust_mode so callers can read back the
+		// persisted trust tier they set via PATCH/POST.
+		TrustMode: cfg.TrustMode,
 		// MCP-3322: surface the per-server init_timeout override so callers can
 		// read back a configured handshake deadline.
 		InitTimeout: cfg.InitTimeout,
@@ -189,6 +192,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if autoApprove, ok := generic["auto_approve_tool_changes"].(bool); ok {
 			v := autoApprove
 			server.AutoApproveToolChanges = &v
+		}
+		// Spec 086: per-server trust tier round-trips as a plain string.
+		if trustMode, ok := generic["trust_mode"].(string); ok {
+			server.TrustMode = trustMode
 		}
 		// MCP-3322: init_timeout serializes as a duration string (e.g. "120s").
 		// Parse it back into a *config.Duration so the GET payload round-trips.

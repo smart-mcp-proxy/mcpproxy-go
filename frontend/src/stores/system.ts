@@ -69,6 +69,12 @@ export const useSystemStore = defineStore('system', () => {
   // Version information
   const version = computed(() => info.value?.version ?? '')
   const updateAvailable = computed(() => info.value?.update?.available ?? false)
+  // Spec 079 US3 (FR-019): the core stamps nudges_suppressed in CI /
+  // non-interactive contexts — every UI nudge surface (banner, sidebar
+  // badge) must check this; machine-readable facts stay available.
+  const updateNudgesSuppressed = computed(
+    () => info.value?.update?.nudges_suppressed ?? false
+  )
   const latestVersion = computed(() => info.value?.update?.latest_version ?? '')
   // Spec 079 US2: detected install channel + channel-aware one-line update
   // command (empty when the channel has no safe command, FR-009).
@@ -428,7 +434,13 @@ export const useSystemStore = defineStore('system', () => {
         updateCheckedAt.value = response.data.update?.checked_at ?? new Date().toISOString()
         const checkErr = response.data.update?.check_error
         if (checkErr) {
-          addToast({ type: 'error', title: 'Update check failed', message: checkErr })
+          // Spec 079 FR-020: a failed check (offline, rate-limited) is
+          // "unknown", never an alarming error state — inform, don't alarm.
+          addToast({
+            type: 'info',
+            title: 'Could not check for updates',
+            message: 'The update service was unreachable (offline or rate-limited). Try again later.',
+          })
           return { ok: false, error: checkErr }
         }
         if (response.data.update?.available) {
@@ -488,6 +500,7 @@ export const useSystemStore = defineStore('system', () => {
     currentThemeConfig,
     version,
     updateAvailable,
+    updateNudgesSuppressed,
     latestVersion,
     installChannel,
     updateCommand,

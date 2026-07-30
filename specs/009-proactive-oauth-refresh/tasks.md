@@ -152,8 +152,8 @@
 ### Implementation for User Story 4
 
 - [ ] T054 [US4] Add oauthExpired computed property to ServerCard.vue in frontend/src/components/ServerCard.vue
-- [ ] T055 [US4] Update Login button v-if condition to include oauthExpired in frontend/src/components/ServerCard.vue
-- [ ] T056 [US4] Ensure Login button styling is consistent in frontend/src/components/ServerCard.vue
+- [x] T055 [US4] Update Login button v-if condition to include oauthExpired in frontend/src/components/ServerCard.vue
+- [x] T056 [US4] Ensure Login button styling is consistent in frontend/src/components/ServerCard.vue
 
 **Checkpoint**: Login button should now appear for connected servers with expired tokens
 
@@ -174,9 +174,9 @@
 ### Implementation for User Story 5
 
 - [ ] T060 [US5] Add isAuthenticated computed property to ServerCard.vue in frontend/src/components/ServerCard.vue
-- [ ] T061 [US5] Add Logout button with v-if="isAuthenticated" in frontend/src/components/ServerCard.vue
+- [x] T061 [US5] Add Logout button with v-if="isAuthenticated" in frontend/src/components/ServerCard.vue
 - [ ] T062 [US5] Implement handleLogout method with confirmation dialog in frontend/src/components/ServerCard.vue
-- [ ] T063 [US5] Connect handleLogout to serversStore.triggerOAuthLogout in frontend/src/components/ServerCard.vue
+- [x] T063 [US5] Connect handleLogout to serversStore.triggerOAuthLogout in frontend/src/components/ServerCard.vue
 
 **Checkpoint**: Logout button should work with confirmation dialog
 

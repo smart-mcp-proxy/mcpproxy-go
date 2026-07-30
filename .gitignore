@@ -162,3 +162,6 @@ scripts/demo/node_modules
 # Transient work artifacts (brainstorm logs, editor backups)
 *.bak
 **/execution_log.md
+
+# Subagent-driven-development scratch workspace (ledger, briefs, review packages)
+.superpowers/

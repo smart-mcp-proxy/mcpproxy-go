@@ -22,7 +22,7 @@ US1 alone delivers the core CPU win even before US2-5 ship. US2+US4+US5 together
 
 ## Phase 1 — Setup
 
-- [ ] T001 Confirm working tree clean except for the in-progress pprof endpoint at `internal/server/server.go` (already on branch); preserve those changes for the PR.
+- [x] T001 Confirm working tree clean except for the in-progress pprof endpoint at `internal/server/server.go` (already on branch); preserve those changes for the PR.
 
 ## Phase 2 — Foundational
 

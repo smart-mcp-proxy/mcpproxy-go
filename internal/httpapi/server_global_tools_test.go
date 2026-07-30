@@ -171,3 +171,46 @@ func TestGlobalTools_Empty(t *testing.T) {
 	assert.Len(t, data["tools"].([]interface{}), 0)
 	assert.Equal(t, float64(0), data["stats"].(map[string]interface{})["total"])
 }
+
+// TestGlobalTools_ScanHoldEvidenceSurfaced verifies the global tools payload —
+// the tool-approval view backing `mcpproxy tools list` — carries the scan-gate
+// hold evidence (spec 086 FR-018), and that records without it stay clean
+// (back-compat: no phantom held_* keys).
+func TestGlobalTools_ScanHoldEvidenceSurfaced(t *testing.T) {
+	ctrl := &globalToolsController{
+		allServers: []map[string]interface{}{{"name": "github"}},
+		serverTools: map[string][]map[string]interface{}{
+			"github": {
+				{"name": "create_issue", "description": "Create issue"},
+				{"name": "list_issues", "description": "List issues"},
+			},
+		},
+		approvals: map[string]*storage.ToolApprovalRecord{
+			"github\x00create_issue": {
+				Status:      storage.ToolApprovalStatusChanged,
+				HeldReason:  storage.ToolHeldReasonScanFindings,
+				HeldVerdict: "dangerous",
+				HeldSignals: []string{"tpa.TPA-2026-0001.hidden_instruction"},
+			},
+			// Legacy record: written before the held_* fields existed.
+			"github\x00list_issues": {Status: storage.ToolApprovalStatusApproved},
+		},
+	}
+
+	data := doGlobalTools(t, ctrl)
+
+	byName := map[string]map[string]interface{}{}
+	for _, x := range data["tools"].([]interface{}) {
+		tm := x.(map[string]interface{})
+		byName[tm["name"].(string)] = tm
+	}
+
+	held := byName["create_issue"]
+	assert.Equal(t, storage.ToolHeldReasonScanFindings, held["held_reason"])
+	assert.Equal(t, "dangerous", held["held_verdict"])
+	assert.Equal(t, []interface{}{"tpa.TPA-2026-0001.hidden_instruction"}, held["held_signals"])
+
+	legacy := byName["list_issues"]
+	assert.NotContains(t, legacy, "held_reason", "records without hold evidence must stay unchanged")
+	assert.NotContains(t, legacy, "held_signals")
+}

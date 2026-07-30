@@ -1,0 +1,295 @@
+{
+  "bundle_version": "0.1.0",
+  "generated_from": "signatures/",
+  "rules": [
+    {
+      "category": "rug-pull",
+      "confidence": 0.9,
+      "detector": "hidden_instruction",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0001",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cred",
+          "type": "string",
+          "value": ".aws/credentials"
+        },
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?(read|cat|exfiltrate|credentials|id_rsa).*?</important>",
+      "severity": "critical",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.95,
+      "detector": "manifest_desc_diff",
+      "engine": "structural_diff",
+      "id": "TPA-2026-0001",
+      "indicators": [],
+      "level": "critical",
+      "rule": {
+        "change": "modified",
+        "compare": "manifest_before/after",
+        "field": "description"
+      },
+      "runtime": "stateful",
+      "severity": "critical",
+      "target": "server_manifest",
+      "type": "behavioral"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "hidden_comment_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0002",
+      "indicators": [
+        {
+          "context": "resource_content",
+          "id": "$sys",
+          "type": "regex",
+          "value": "<!--\\s*SYSTEM"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.*?(system|assistant|instruction).*?(private|token|read|publish).*?-->",
+      "severity": "high",
+      "target": "resource_content",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "hidden_tag",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0003",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$rsa",
+          "type": "string",
+          "value": "id_rsa"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?(read|cat).*?(id_rsa|credentials|\\.ssh).*?</important>",
+      "severity": "critical",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.9,
+      "detector": "exfil_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0004",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$atk",
+          "type": "string",
+          "value": "attkr@pwnd.com"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tgt",
+          "type": "string",
+          "value": "send_email"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)send_email.*?attkr@pwnd\\.com",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.92,
+      "detector": "shadow_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0004",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tgt",
+          "type": "string",
+          "value": "send_email"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?send_email.*?</important>",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "cross_shadow",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0005",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tgt",
+          "type": "string",
+          "value": "send_email"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?send_email.*?</important>",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.88,
+      "detector": "policy_override",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0005",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$atk",
+          "type": "string",
+          "value": "attkr@pwnd.com"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)override .*?attkr@pwnd\\.com",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.9,
+      "detector": "hidden_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0006",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$num",
+          "type": "string",
+          "value": "+13241234123"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sm",
+          "type": "string",
+          "value": "send_message"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)send_message.*?(change the recipient|\\+13241234123)",
+      "severity": "critical",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.95,
+      "detector": "manifest_desc_diff",
+      "engine": "structural_diff",
+      "id": "TPA-2026-0006",
+      "indicators": [],
+      "level": "critical",
+      "rule": {
+        "change": "modified",
+        "compare": "manifest_before/after",
+        "field": "description"
+      },
+      "runtime": "stateful",
+      "severity": "critical",
+      "target": "server_manifest",
+      "type": "behavioral"
+    }
+  ],
+  "schema_version": "0.1.0",
+  "signature_count": 6,
+  "skipped": [
+    {
+      "detector": "exfil_intent_judge",
+      "id": "TPA-2026-0002",
+      "reason": "engine llm_judge not offline-capable"
+    },
+    {
+      "detector": "intent_judge",
+      "id": "TPA-2026-0003",
+      "reason": "engine llm_judge not offline-capable"
+    },
+    {
+      "detector": "unrelated_param",
+      "id": "TPA-2026-0003",
+      "reason": "engine jsonpath not offline-capable"
+    }
+  ]
+}

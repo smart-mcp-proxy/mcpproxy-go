@@ -222,8 +222,10 @@ OpenCode can be connected through MCPProxy's Connect Clients flow.
 
 - Client ID: `opencode`
 - Config section: `mcp`
-- macOS/Linux global config path: `~/.config/opencode/opencode.json`
-- Windows global config path: `%LOCALAPPDATA%\opencode\opencode.json`
+- macOS/Linux global config: `~/.config/opencode/opencode.jsonc` or `opencode.json`
+- Windows global config: `%LOCALAPPDATA%\opencode\opencode.jsonc` or `opencode.json`
+- MCPProxy targets whichever file exists, preferring `opencode.jsonc` (recent OpenCode versions bootstrap it, and it shadows `opencode.json` for the same keys).
+- A `.jsonc` file that contains comments is not rewritten (comments would be lost) — MCPProxy asks you to edit the `mcp` section manually in that case.
 - OpenCode config must already exist; MCPProxy does not create it for you.
 - On connect, MCPProxy writes or updates only the OpenCode `mcp` subtree and preserves unrelated root config.
 - MCPProxy treats endpoint-equivalent existing entries as already connected, even if they use a non-canonical server name.

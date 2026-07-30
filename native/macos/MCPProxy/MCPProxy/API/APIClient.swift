@@ -44,7 +44,15 @@ actor APIClient {
     ///     Pass an empty string to force TCP-only mode.
     ///   - baseURL: TCP base URL. Used as fallback or when socket is unavailable.
     ///   - apiKey: Optional API key for authentication.
-    init(socketPath: String? = nil, baseURL: String = "http://127.0.0.1:8080", apiKey: String? = nil) {
+    ///   - requestTimeout: Per-request timeout. The default is deliberately
+    ///     generous; a liveness probe wants something much shorter so one slow
+    ///     response cannot stall it (see `CoreProcessManager.probeTimeout`).
+    init(
+        socketPath: String? = nil,
+        baseURL: String = "http://127.0.0.1:8080",
+        apiKey: String? = nil,
+        requestTimeout: TimeInterval = 30
+    ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
 
@@ -54,11 +62,11 @@ actor APIClient {
         // so it's safe to register even before the socket file exists.
         if let path = socketPath, path.isEmpty {
             // Explicitly requested TCP-only
-            self.session = SocketTransport.makeTCPSession()
+            self.session = SocketTransport.makeTCPSession(timeout: requestTimeout)
         } else {
             // Always use socket-backed session — SocketURLProtocol falls through
             // to standard networking if the socket file doesn't exist yet.
-            self.session = SocketTransport.makeURLSession(socketPath: socketPath)
+            self.session = SocketTransport.makeURLSession(socketPath: socketPath, timeout: requestTimeout)
         }
     }
 
@@ -328,7 +336,12 @@ actor APIClient {
     // MARK: - Sessions
 
     /// MCP session model from `GET /api/v1/sessions`.
-    struct MCPSession: Codable, Identifiable {
+    ///
+    /// `Equatable` (synthesised — all ten stored properties are Equatable value
+    /// types) so `AppState.updateGlanceSessions` can guard on the whole value.
+    /// The tray's Clients rows render a live `toolCallCount` and `lastActivity`,
+    /// which an id-only guard would freeze at the first poll's numbers.
+    struct MCPSession: Codable, Identifiable, Equatable {
         var id: String
         let clientName: String?
         let clientVersion: String?
@@ -338,7 +351,10 @@ actor APIClient {
         let toolCallCount: Int?
         let totalTokens: Int?
         let startTime: String?
-        let lastActive: String?
+        /// Timestamp of the session's most recent activity. The API field is
+        /// `last_activity` (Go `contracts.MCPSession.LastActivity`); decoding
+        /// `last_active` silently produced nil for every session.
+        let lastActivity: String?
 
         enum CodingKeys: String, CodingKey {
             case id
@@ -350,7 +366,7 @@ actor APIClient {
             case toolCallCount = "tool_call_count"
             case totalTokens = "total_tokens"
             case startTime = "start_time"
-            case lastActive = "last_active"
+            case lastActivity = "last_activity"
         }
     }
 
@@ -367,12 +383,58 @@ actor APIClient {
         return response.sessions
     }
 
+    /// Fetch only currently-active MCP sessions, for the tray glance "Clients" rows.
+    ///
+    /// The `status` filter is applied server-side during the storage cursor walk,
+    /// before truncation — a client-side filter over a page would miss a session
+    /// that started long ago but is calling tools right now.
+    func activeSessions(limit: Int = 25) async throws -> [MCPSession] {
+        let response: SessionsResponse = try await fetchWrapped(
+            path: "/api/v1/sessions?status=active&limit=\(limit)"
+        )
+        return response.sessions
+    }
+
     // MARK: - Activity
 
     /// Fetch recent activity entries from `GET /api/v1/activity`.
     func recentActivity(limit: Int = 50) async throws -> [ActivityEntry] {
         let response: ActivityListResponse = try await fetchWrapped(path: "/api/v1/activity?limit=\(limit)")
         return response.activities
+    }
+
+    /// Fetch the tray glance activity feed from `GET /api/v1/activity`.
+    ///
+    /// Separate from `recentActivity(limit:)` on purpose: this one carries the
+    /// tool-call `type` filter, while `recentActivity` feeds the native Dashboard,
+    /// which renders the FULL log (security scans, quarantine changes, OAuth).
+    /// The page is deliberately the server's maximum — management built-ins are
+    /// filtered client-side, so a smaller page can be filled entirely by proxy
+    /// admin calls and leave the menu claiming there are no tool calls. The
+    /// endpoint clamps `limit` to 100; see `AppState.glanceActivityPageSize`
+    /// for why the tray takes one deep page rather than paging.
+    ///
+    /// `exclude_payloads=true` is what makes that page affordable. A full record
+    /// carries `arguments`, `response` and `metadata`, none of which the glance
+    /// renders and only one of which is truncated (at 64KB); measured against a
+    /// real activity log, the newest 100 matching records are ~848KB whole and
+    /// ~30KB projected — a 28x saving on a request the tray repeats every 30
+    /// seconds. `recentActivity(limit:)` deliberately does NOT set it: the
+    /// Dashboard renders exactly those fields.
+    func glanceActivity(limit: Int = AppState.glanceActivityPageSize) async throws -> [ActivityEntry] {
+        let response: ActivityListResponse = try await fetchWrapped(
+            path: "/api/v1/activity?type=tool_call,internal_tool_call&limit=\(limit)&exclude_payloads=true"
+        )
+        return response.activities
+    }
+
+    /// Fetch the usage aggregate from `GET /api/v1/activity/usage`.
+    ///
+    /// Served from an in-memory snapshot behind a short TTL cache — never a log
+    /// scan. `top` trims the per-tool rollup the tray does not render; the
+    /// timeline is global and unaffected by it.
+    func usageAggregate(window: String = "24h", top: Int = 1) async throws -> UsageAggregateResponse {
+        return try await fetchWrapped(path: "/api/v1/activity/usage?window=\(window)&top=\(top)")
     }
 
     /// Fetch the activity summary from `GET /api/v1/activity/summary`.
@@ -602,6 +664,17 @@ actor APIClient {
 
     // MARK: - Private Helpers
 
+    /// Detects the standard response envelope without caring about its payload.
+    ///
+    /// It answers "does this body carry a `success` field", not "is this body an
+    /// envelope": a bare payload that happens to have its own `success` field
+    /// probes as enveloped. That misclassification is reachable and harmless —
+    /// it only chooses which of two decoding errors is reported in a diagnostic
+    /// string, on a path where the body has already failed to decode both ways.
+    private struct EnvelopeProbe: Decodable {
+        let success: Bool
+    }
+
     /// Fetch a resource wrapped in the standard `APIResponse` envelope.
     private func fetchWrapped<T: Decodable>(path: String) async throws -> T {
         let (data, _) = try await performRequest(path: path, method: "GET")
@@ -614,12 +687,20 @@ actor APIClient {
             throw APIClientError.httpError(statusCode: 200, message: wrapper.error ?? "Unknown error")
         } catch let error as APIClientError {
             throw error
-        } catch {
+        } catch let envelopeError {
             // Try decoding directly without the wrapper (some endpoints don't wrap)
             do {
                 return try decoder.decode(T.self, from: data)
-            } catch {
-                throw APIClientError.decodingError(underlying: error)
+            } catch let bareError {
+                // Both decodes failed, so one of the two errors is noise. For an
+                // enveloped body the envelope error describes the real problem
+                // inside `data` (a model's own throwing decoder, say), and the
+                // fallback only re-fails because T's keys are one level down —
+                // reporting that would mask the cause. For a genuinely unwrapped
+                // body it is the other way round, which is the pre-existing
+                // behaviour and stays untouched.
+                let isEnveloped = (try? decoder.decode(EnvelopeProbe.self, from: data)) != nil
+                throw APIClientError.decodingError(underlying: isEnveloped ? envelopeError : bareError)
             }
         }
     }

@@ -41,6 +41,16 @@ func TestSandboxWrapper_EndToEnd(t *testing.T) {
 		BestEffort:     false, // fail-closed: this test requires real enforcement
 	}
 
+	// Assertion (3b) below is only meaningful if `outside` really is outside the
+	// write allowlist. t.TempDir() layouts are not contractual, so pin it here:
+	// a future change that put both dirs under one parent would silently turn
+	// the denial check into a vacuous pass.
+	for _, allowed := range spec.ReadWritePaths {
+		if isUnder(outside, allowed) {
+			t.Fatalf("test setup is vacuous: outside dir %q lies under the read-write allowlist entry %q", outside, allowed)
+		}
+	}
+
 	// Script: echo stdin back (passthrough), report the fd limit, write inside
 	// the allowlist, then try to write OUTSIDE it (must fail).
 	script := fmt.Sprintf(`
@@ -118,6 +128,27 @@ func TestSandboxWrapper_FailClosed(t *testing.T) {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// isUnder reports whether path is parent itself or lives beneath it, comparing
+// symlink-resolved forms — Landlock rules apply to the resolved subtree, so a
+// purely lexical comparison could miss an overlap (e.g. /tmp → /private/tmp).
+func isUnder(path, parent string) bool {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Clean(r)
+		}
+		return filepath.Clean(p)
+	}
+	path, parent = resolve(path), resolve(parent)
+	if path == parent {
+		return true
+	}
+	rel, err := filepath.Rel(parent, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
 
 func scrubEnv(env []string, key string) []string {
 	out := env[:0:0]

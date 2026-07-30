@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,8 +13,15 @@ import (
 )
 
 const (
-	// DefaultCheckInterval is the default interval between update checks (4 hours).
-	DefaultCheckInterval = 4 * time.Hour
+	// DefaultCheckInterval is the default interval between update checks.
+	// At most a daily check (Spec 079 FR-018): unauthenticated GitHub API
+	// calls are rate-limited and update awareness does not need to be fresher
+	// than a day.
+	DefaultCheckInterval = 24 * time.Hour
+
+	// maxBackoffFactor caps the failure backoff at 2^3 = 8x the check
+	// interval (FR-018: back off on failure, treat errors as "unknown").
+	maxBackoffFactor = 3
 
 	// EnvDisableAutoUpdate disables all update checks when set to "true".
 	EnvDisableAutoUpdate = "MCPPROXY_DISABLE_AUTO_UPDATE"
@@ -61,8 +69,34 @@ type Checker struct {
 	// be raced by a stale publish/announce (FR-013/FR-015).
 	cfgGen uint64
 
+	// consecutiveFailures / nextCheckAt implement the failure backoff (Spec
+	// 079 FR-018): each consecutive failed check doubles the wait before the
+	// periodic loop may hit the network again (capped at 2^maxBackoffFactor
+	// intervals). Zero nextCheckAt = no restriction (ticker cadence governs).
+	// CheckNow (user-initiated refresh) bypasses the window.
+	consecutiveFailures int
+	nextCheckAt         time.Time
+
+	// nudgesSuppressed is detected once at New() (Spec 079 FR-019): in CI /
+	// non-interactive contexts UI surfaces must stay quiet while
+	// machine-readable fields still report the facts. Stamped onto every
+	// VersionInfo.
+	nudgesSuppressed bool
+
+	// nowFn is the clock; overridden in tests.
+	nowFn func() time.Time
+
 	// For testing: allows injection of a custom check function
 	checkFunc func() (*GitHubRelease, error)
+}
+
+// isQuietEnvironment reports whether UI nudges should be suppressed (Spec 079
+// FR-019): CI pipelines set CI=true/1 (the same convention the telemetry
+// env-filter uses); such runs are non-interactive and a per-run availability
+// nag would only spam logs.
+func isQuietEnvironment() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("CI")))
+	return v == "true" || v == "1"
 }
 
 // New creates a new update checker.
@@ -75,16 +109,20 @@ func New(logger *zap.Logger, version string) *Checker {
 	// (see promoteGoInstallVersion).
 	version = promoteGoInstallVersion(version, installChannel, debug.ReadBuildInfo)
 
+	nudgesSuppressed := isQuietEnvironment()
 	c := &Checker{
-		logger:         logger,
-		version:        version,
-		checkInterval:  DefaultCheckInterval,
-		githubClient:   githubClient,
-		cfgEnabled:     true, // update_check.enabled defaults to true (Spec 079 FR-012)
-		installChannel: installChannel,
+		logger:           logger,
+		version:          version,
+		checkInterval:    DefaultCheckInterval,
+		githubClient:     githubClient,
+		cfgEnabled:       true, // update_check.enabled defaults to true (Spec 079 FR-012)
+		installChannel:   installChannel,
+		nudgesSuppressed: nudgesSuppressed,
+		nowFn:            time.Now,
 		versionInfo: &VersionInfo{
-			CurrentVersion: version,
-			InstallChannel: installChannel,
+			CurrentVersion:   version,
+			InstallChannel:   installChannel,
+			NudgesSuppressed: nudgesSuppressed,
 		},
 	}
 
@@ -124,7 +162,12 @@ func (c *Checker) SetConfig(enabled, includePrereleases bool) {
 		// Drop results cached under the previous config so a re-enable or a
 		// channel switch never briefly serves stale (possibly wrong-channel)
 		// info before the prompt re-check completes (FR-013).
-		c.versionInfo = &VersionInfo{CurrentVersion: c.version, InstallChannel: c.installChannel}
+		c.versionInfo = &VersionInfo{CurrentVersion: c.version, InstallChannel: c.installChannel, NudgesSuppressed: c.nudgesSuppressed}
+		// A pre-change failure must not impose its backoff window (FR-018) on
+		// the new configuration — the prompt re-enable/channel-switch check
+		// below must actually run.
+		c.consecutiveFailures = 0
+		c.nextCheckAt = time.Time{}
 	}
 	c.mu.Unlock()
 
@@ -253,13 +296,22 @@ func (c *Checker) GetVersionInfo() *VersionInfo {
 	return &info
 }
 
-// check performs a single update check against GitHub.
+// check performs a single periodic update check against GitHub, honoring the
+// failure backoff window (FR-018). User-initiated refreshes go through
+// CheckNow, which bypasses the window.
 func (c *Checker) check() {
+	c.runCheck(false)
+}
+
+// runCheck performs a single update check. force=true (CheckNow) bypasses the
+// failure-backoff window; the periodic loop passes false.
+func (c *Checker) runCheck(force bool) {
 	c.logger.Debug("Checking for updates")
 
 	c.mu.RLock()
 	gen := c.cfgGen
 	enabled := c.enabledLocked()
+	nextCheckAt := c.nextCheckAt
 	c.mu.RUnlock()
 
 	// Re-read enabled under the same lock as gen: a disable racing after the
@@ -272,13 +324,41 @@ func (c *Checker) check() {
 		return
 	}
 
+	// Failure backoff (FR-018): after a failed check the periodic loop stays
+	// off the network until the window expires; errors are "unknown", not a
+	// reason to retry aggressively against a rate-limited API.
+	if !force && !nextCheckAt.IsZero() && c.nowFn().Before(nextCheckAt) {
+		c.logger.Debug("Skipping update check: backing off after failure",
+			zap.Time("next_check_at", nextCheckAt))
+		return
+	}
+
 	release, err := c.checkFunc()
 	if err != nil {
+		c.mu.Lock()
+		// Generation guard (mirrors updateVersionInfo): a failure from a
+		// check that raced a SetConfig change must not impose backoff on the
+		// new configuration.
+		if gen == c.cfgGen {
+			c.consecutiveFailures++
+			factor := c.consecutiveFailures
+			if factor > maxBackoffFactor {
+				factor = maxBackoffFactor
+			}
+			c.nextCheckAt = c.nowFn().Add(c.checkInterval * (1 << factor))
+		}
+		c.mu.Unlock()
 		c.logger.Debug("Update check failed", zap.Error(err))
 		c.updateVersionInfo(nil, err.Error(), gen)
 		return
 	}
 
+	c.mu.Lock()
+	if gen == c.cfgGen {
+		c.consecutiveFailures = 0
+		c.nextCheckAt = time.Time{}
+	}
+	c.mu.Unlock()
 	c.updateVersionInfo(release, "", gen)
 }
 
@@ -326,18 +406,25 @@ func (c *Checker) updateVersionInfo(release *GitHubRelease, checkError string, g
 	}
 
 	c.versionInfo = &VersionInfo{
-		CurrentVersion:  c.version,
-		LatestVersion:   latestVersion,
-		UpdateAvailable: updateAvailable,
-		ReleaseURL:      release.HTMLURL,
-		CheckedAt:       &now,
-		IsPrerelease:    release.Prerelease,
-		CheckError:      "",
-		InstallChannel:  c.installChannel,
-		UpdateCommand:   updateCommand,
+		CurrentVersion:   c.version,
+		LatestVersion:    latestVersion,
+		UpdateAvailable:  updateAvailable,
+		ReleaseURL:       release.HTMLURL,
+		CheckedAt:        &now,
+		IsPrerelease:     release.Prerelease,
+		CheckError:       "",
+		InstallChannel:   c.installChannel,
+		UpdateCommand:    updateCommand,
+		NudgesSuppressed: c.nudgesSuppressed,
 	}
 
 	switch {
+	// FR-019: in CI / non-interactive contexts the per-run availability
+	// announcement is a log nag — keep the facts machine-readable only.
+	case updateAvailable && c.nudgesSuppressed:
+		c.logger.Debug("Update available (nudges suppressed: CI/non-interactive)",
+			zap.String("current", c.version),
+			zap.String("latest", latestVersion))
 	case updateAvailable && latestVersion != c.announcedVersion:
 		// Announce each newly detected version exactly once per process;
 		// subsequent ticks for the same version log at Debug only.
@@ -425,6 +512,8 @@ func (c *Checker) CheckNow() *VersionInfo {
 		return nil
 	}
 	c.logger.Debug("Performing immediate update check")
-	c.check()
+	// force=true: an explicit user refresh bypasses the failure-backoff
+	// window (FR-018 applies to the automated cadence, not manual intent).
+	c.runCheck(true)
 	return c.GetVersionInfo()
 }

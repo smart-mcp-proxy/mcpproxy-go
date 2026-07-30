@@ -1170,6 +1170,20 @@ The env vars only widen in one direction (disable checks / enable
 prereleases); they cannot force-enable checking that config disabled — with
 `update_check.enabled: false`, checks stay off regardless of environment.
 
+**Check cadence and quiet environments** (Spec 079 US3):
+
+- The background check runs **at most daily** and **backs off on failure**
+  (each consecutive failed check doubles the wait, capped at 8× the
+  interval) — offline or rate-limited environments are treated as
+  "unknown", never retried aggressively and never surfaced as an error.
+  A manual `/api/v1/info?refresh=true` bypasses the backoff.
+- With `CI=true` (or `CI=1`, the same convention the telemetry filter
+  uses) the process is treated as **non-interactive**: the startup
+  "Update available" log line is demoted to debug and the `update` payload
+  carries `nudges_suppressed: true`, which hides the Web UI banner. The
+  machine-readable facts (`mcpproxy status`, `doctor`, `/api/v1/info`)
+  are unaffected.
+
 See [Version Updates](features/version-updates.md) for where updates are
 surfaced.
 

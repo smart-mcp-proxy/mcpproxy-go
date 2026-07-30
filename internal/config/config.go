@@ -435,6 +435,25 @@ type LogConfig struct {
 	JSONFormat    bool   `json:"json_format" mapstructure:"json-format"`
 }
 
+// TrustMode is a per-server trust tier that governs how tool changes and
+// additions are approved (spec 086). It supersedes the legacy skip_quarantine
+// and auto_approve_tool_changes flags:
+//
+//   - TrustModeAuto   — auto-approve all changes/additions (today's
+//     skip_quarantine / auto_approve_tool_changes:true behavior).
+//   - TrustModeScan   — auto-approve a change ONLY when a synchronous, offline
+//     TPA scan of the changed tool returns a green (clean) verdict; otherwise
+//     the record is held for human review (fail closed).
+//   - TrustModeManual — never auto-approve; every change/addition is held
+//     (secure by default).
+type TrustMode string
+
+const (
+	TrustModeAuto   TrustMode = "auto"
+	TrustModeScan   TrustMode = "scan"
+	TrustModeManual TrustMode = "manual"
+)
+
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
 	Name        string            `json:"name,omitempty" mapstructure:"name"`
@@ -463,12 +482,19 @@ type ServerConfig struct {
 	// from legacy skip_quarantine), explicit true/false = honored as-is so an
 	// explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
 	// Read via IsAutoApproveToolChanges().
-	AutoApproveToolChanges *bool            `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Per-server intent to auto-approve tool changes/additions. Accepted/persisted by MCP-2930; runtime enforcement lands in MCP-2931 (until then SkipQuarantine governs behavior)
-	Shared                 bool             `json:"shared,omitempty" mapstructure:"shared"`                                       // Server edition: shared with all users
-	Created                time.Time        `json:"created" mapstructure:"created"`
-	Updated                time.Time        `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation              *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
-	ReconnectOnUse         bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Per-server intent to auto-approve tool changes/additions. Accepted/persisted by MCP-2930; runtime enforcement lands in MCP-2931 (until then SkipQuarantine governs behavior)
+	// TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
+	// auto_approve_tool_changes (spec 086). An empty value is derived from the
+	// legacy fields at load via normalizeServerQuarantineFlags; the single
+	// resolution point is EffectiveTrustMode(), which treats an empty or
+	// unrecognized value as manual (secure by default). Read via
+	// EffectiveTrustMode(), never the raw string.
+	TrustMode      string           `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
+	Shared         bool             `json:"shared,omitempty" mapstructure:"shared"`         // Server edition: shared with all users
+	Created        time.Time        `json:"created" mapstructure:"created"`
+	Updated        time.Time        `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation      *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
+	ReconnectOnUse bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
 
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
@@ -1018,9 +1044,26 @@ func normalizeServerQuarantineFlags(cfg *Config) {
 		if s == nil {
 			continue
 		}
+		// Pass 1 (MCP-2930): legacy skip_quarantine -> auto_approve_tool_changes,
+		// only when the successor field is unset so an explicit value wins.
 		if s.SkipQuarantine && s.AutoApproveToolChanges == nil {
 			migrated := true
 			s.AutoApproveToolChanges = &migrated
+		}
+		// Pass 2 (spec 086): map auto_approve_tool_changes onto trust_mode when
+		// trust_mode is unset. Layering skip->auto->trust means a legacy
+		// skip_quarantine:true converges to trust_mode auto, while an explicit
+		// auto_approve_tool_changes:false converges to manual. An explicit
+		// trust_mode is never touched (guard on empty). AutoApproveToolChanges is
+		// left UNTOUCHED here — only trust_mode is written — so the explicit-false
+		// invariant is preserved. A nil AutoApproveToolChanges leaves trust_mode
+		// empty; EffectiveTrustMode() resolves empty -> manual.
+		if s.TrustMode == "" && s.AutoApproveToolChanges != nil {
+			if *s.AutoApproveToolChanges {
+				s.TrustMode = string(TrustModeAuto)
+			} else {
+				s.TrustMode = string(TrustModeManual)
+			}
 		}
 	}
 }
@@ -1589,9 +1632,71 @@ func (c *Config) DefaultQuarantineForNewServer() bool {
 	return c.IsQuarantineEnabled()
 }
 
-// IsQuarantineSkipped returns whether this server should skip tool-level quarantine.
+// QuarantineDefaultForServer resolves the add-time Quarantined default for a
+// specific new server from its trust_mode (spec 086 stage 3, FR-011). Secure by
+// default: a server is admitted UNQUARANTINED only under trust_mode auto; scan
+// and manual are quarantined on add (scan is later auto-unquarantined once its
+// baseline scan settles green — see the EventTypeSecurityScanSettled handler).
+//
+// The global quarantine_enabled=false escape hatch (#370) still wins: when
+// quarantine is disabled globally, every new server is admitted unquarantined
+// regardless of its trust_mode, preserving DefaultQuarantineForNewServer's
+// semantics. A nil server config fails closed to quarantine.
+//
+// CN-002: the mode is read from the server's config/registry-derived trust_mode,
+// never from a request-driven admission override.
+func (c *Config) QuarantineDefaultForServer(sc *ServerConfig) bool {
+	if !c.IsQuarantineEnabled() {
+		return false
+	}
+	if sc == nil {
+		return true
+	}
+	return sc.EffectiveTrustMode() != TrustModeAuto
+}
+
+// EffectiveTrustMode is the single resolution point for a server's trust tier
+// (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
+// (secure by default) for empty OR unrecognized trust_mode values (FR-009 —
+// fail closed on a typo like "Scan" or "off").
+//
+// Because normalizeServerQuarantineFlags populates TrustMode at config load,
+// the legacy-field fallback here only matters for in-memory structs that
+// bypassed the loader (tests, REST-constructed configs): an explicit
+// auto_approve_tool_changes maps true->auto / false->manual, else a legacy
+// skip_quarantine:true maps to auto, else manual. This keeps the accessor
+// correct even when the migration has not run.
+func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
+	switch TrustMode(sc.TrustMode) {
+	case TrustModeAuto, TrustModeScan, TrustModeManual:
+		return TrustMode(sc.TrustMode)
+	}
+	// A NON-EMPTY but unrecognized trust_mode (e.g. the typo "Scan" or a bogus
+	// "off") must fail closed to manual and must NOT consult the legacy fields —
+	// otherwise a typo'd mode combined with a migrated auto_approve_tool_changes:true
+	// or skip_quarantine:true would silently resolve to auto and disable quarantine
+	// (FR-009, fail closed). Only a genuinely EMPTY mode falls through to the
+	// legacy-field compatibility path below.
+	if sc.TrustMode != "" {
+		return TrustModeManual
+	}
+	if sc.AutoApproveToolChanges != nil {
+		if *sc.AutoApproveToolChanges {
+			return TrustModeAuto
+		}
+		return TrustModeManual
+	}
+	if sc.SkipQuarantine {
+		return TrustModeAuto
+	}
+	return TrustModeManual
+}
+
+// IsQuarantineSkipped returns whether this server should skip tool-level
+// quarantine. Thin wrapper over EffectiveTrustMode(): only trust_mode auto
+// skips quarantine; scan and manual do not (spec 086).
 func (sc *ServerConfig) IsQuarantineSkipped() bool {
-	return sc.SkipQuarantine
+	return sc.EffectiveTrustMode() == TrustModeAuto
 }
 
 // IsAutoApproveToolChanges reports the configured per-server intent to auto-approve
@@ -1603,7 +1708,7 @@ func (sc *ServerConfig) IsQuarantineSkipped() bool {
 // (see normalizeServerQuarantineFlags) only when it is unset, so an explicit value
 // always wins. MCP-2930.
 func (sc *ServerConfig) IsAutoApproveToolChanges() bool {
-	return sc.AutoApproveToolChanges != nil && *sc.AutoApproveToolChanges
+	return sc.EffectiveTrustMode() == TrustModeAuto
 }
 
 // IsToolAllowedByConfig reports whether toolName passes the server's static

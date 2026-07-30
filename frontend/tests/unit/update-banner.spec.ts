@@ -15,6 +15,7 @@ function mountBanner(update?: {
   available: boolean
   latest_version?: string
   release_url?: string
+  nudges_suppressed?: boolean
 }) {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -58,6 +59,18 @@ describe('UpdateBanner (Spec 079 FR-005)', () => {
 
   it('does not render when the update object is absent (update_check disabled)', () => {
     const { wrapper } = mountBanner(undefined)
+    expect(wrapper.find('[data-test="update-banner"]').exists()).toBe(false)
+  })
+
+  // Spec 079 US3 (FR-019): in CI / non-interactive contexts the core stamps
+  // nudges_suppressed on the update payload — the facts stay machine-readable
+  // but UI surfaces must not nag.
+  it('does not render when the core says nudges are suppressed (CI / non-interactive)', () => {
+    const { wrapper } = mountBanner({
+      available: true,
+      latest_version: 'v1.3.0',
+      nudges_suppressed: true,
+    })
     expect(wrapper.find('[data-test="update-banner"]').exists()).toBe(false)
   })
 
