@@ -161,6 +161,22 @@ actor CoreProcessManager {
     /// long, turning an indefinite wait into something the user can act on.
     private var unresponsiveDeadlineTask: Task<Void, Never>?
 
+    /// What the socket probes of the CURRENT connection episode have shown.
+    ///
+    /// The wait path deliberately refuses to act on a single refused probe. That
+    /// leaves one question open at the deadline: is this a live core we must keep
+    /// our hands off, or a file a dead one left behind? Nobody else can answer
+    /// it — the tray no longer unlinks anything, and the core's own
+    /// `cleanupStaleSocket` (internal/server/listener_unix.go) does not run until
+    /// a core is launched — so a stale file would deadlock startup forever.
+    /// Accumulating the probes turns "one sample" into evidence.
+    private var socketEvidence = SocketEvidence()
+
+    /// Whether the wait we are currently in is allowed to end in a spawn. Carried
+    /// from `start(maySpawn:)` so the escalation below cannot become a back door
+    /// around the launch policy (#410) sixty seconds after it was applied.
+    private var waitMaySpawn: Bool = false
+
     /// How long to wait for a core that holds the socket but will not answer
     /// before saying so. Matches `waitForSocket`'s 60s budget for a core we
     /// launched ourselves: a real core can be slow to start (Docker pulls, a
@@ -233,6 +249,10 @@ actor CoreProcessManager {
         }
         defer { endConnectionWork() }
 
+        // A fresh attempt reasons from fresh probes: whatever the socket did
+        // during an earlier episode says nothing about this one.
+        beginSocketEvidence()
+
         switch await attachIfCoreIsRunningLocked() {
         case .attached:
             return
@@ -246,7 +266,7 @@ actor CoreProcessManager {
             // directory. Wait instead — the attach watch re-probes and attaches
             // the moment it answers, and a deadline turns "waiting" into
             // something the user can act on if it never does.
-            await waitForTheCoreThatIsAlreadyThere(reason: reason)
+            await waitForTheCoreThatIsAlreadyThere(reason: reason, maySpawn: maySpawn)
             return
         case .noCore:
             break
@@ -262,7 +282,9 @@ actor CoreProcessManager {
         // will accept at least one connection, a stale socket file will refuse
         // every one.
         guard await confirmNothingIsListening() else {
-            await waitForTheCoreThatIsAlreadyThere(reason: "something is listening on the socket")
+            await waitForTheCoreThatIsAlreadyThere(
+                reason: "something is listening on the socket", maySpawn: maySpawn
+            )
             return
         }
         guard !shutdownRequested else { return }
@@ -289,8 +311,12 @@ actor CoreProcessManager {
 
     /// A core we cannot use is holding the socket. Wait for it rather than
     /// fighting it — but not forever (see `unresponsiveCoreTimeout`).
-    private func waitForTheCoreThatIsAlreadyThere(reason: String) async {
+    ///
+    /// - Parameter maySpawn: whether this wait is allowed to end in a launch if
+    ///   the deadline expires having never seen anything accept a connection.
+    private func waitForTheCoreThatIsAlreadyThere(reason: String, maySpawn: Bool) async {
         NSLog("[MCPProxy] Not taking over %@: %@ — waiting", socketPath, reason)
+        waitMaySpawn = maySpawn
         await MainActor.run { appState.isStopped = false }
         await transitionState(to: .waitingForCore)
         startAttachWatch()
@@ -362,10 +388,64 @@ actor CoreProcessManager {
         }
     }
 
+    /// Everything the probes have said about this socket since the current
+    /// connection episode began. Deliberately conservative: it can only ever
+    /// conclude "nothing has EVER been there", never "something is there".
+    struct SocketEvidence: Equatable {
+        /// Probes that found a socket file and were refused by it.
+        private(set) var refusals: Int = 0
+
+        /// Whether any probe got a connection accepted. One is enough, and it is
+        /// never forgotten within the episode: a core that answered a minute ago
+        /// and refuses now (a full listen backlog looks exactly like a stale
+        /// file) is a core, and taking its socket is two writers on one database.
+        private(set) var somethingAccepted: Bool = false
+
+        mutating func record(_ probe: SocketTransport.SocketProbe) {
+            switch probe {
+            case .connectable:
+                somethingAccepted = true
+            case .refused:
+                refusals += 1
+            case .absent:
+                // No file to be wrong about. Not evidence of a live core, and
+                // not counted as a refusal either.
+                break
+            case .localFailure:
+                // Descriptor exhaustion, ENOMEM, EACCES: our problem, not the
+                // core's. It says nothing about the other end, so it can neither
+                // prove staleness nor disprove it.
+                break
+            }
+        }
+
+        /// A socket FILE exists and not one connection has ever been accepted on
+        /// it. The only reading of that which is consistent with everything we
+        /// have seen is: the process that created it is gone.
+        var onlyEverRefused: Bool { refusals > 0 && !somethingAccepted }
+    }
+
+    /// Fold one probe into the episode's evidence. Called from the two places
+    /// that probe on behalf of a decision — the liveness assessment and the
+    /// confirmation window — so the deadline reasons over every sample, not just
+    /// the last one.
+    private func record(probe: SocketTransport.SocketProbe) {
+        socketEvidence.record(probe)
+    }
+
+    /// Forget what earlier episodes saw. A core that was alive before it died
+    /// must not leave `somethingAccepted` behind to veto the recovery of the
+    /// socket file it left on disk.
+    private func beginSocketEvidence() {
+        socketEvidence = SocketEvidence()
+    }
+
     /// Probe the socket, then (only if something answered the connect) ask
     /// `/ready`. The single source of truth for core presence.
     private func assessCore() async -> CoreLiveness {
-        switch SocketTransport.probeSocket(path: socketPath) {
+        let probe = SocketTransport.probeSocket(path: socketPath)
+        record(probe: probe)
+        switch probe {
         case .absent:
             return .gone
         case .localFailure(let code):
@@ -389,9 +469,18 @@ actor CoreProcessManager {
     ///
     /// Internal rather than private so a test can start a listener between two
     /// of its probes and pin that it notices.
+    ///
+    /// - Parameter afterEachProbe: called with the index of each probe once its
+    ///   result is in. The seam exists for the test of the race this function is
+    ///   here to win: to exercise it the listener must bind strictly BETWEEN two
+    ///   probes, and a test that starts a task and sleeps cannot establish that
+    ///   ordering — if the task runs late its first probe already sees the
+    ///   listener and the race is never run. Awaiting here lets a test hold the
+    ///   confirmation at a known probe while it binds. Nil in production.
     func confirmNothingIsListening(
         attempts: Int = 3,
-        interval: TimeInterval = 0.3
+        interval: TimeInterval = 0.3,
+        afterEachProbe: (@Sendable (Int) async -> Void)? = nil
     ) async -> Bool {
         for attempt in 0..<attempts {
             if attempt > 0 {
@@ -402,7 +491,10 @@ actor CoreProcessManager {
                 }
             }
             if shutdownRequested { return false }
-            if SocketTransport.probeSocket(path: socketPath) == .connectable {
+            let probe = SocketTransport.probeSocket(path: socketPath)
+            record(probe: probe)
+            await afterEachProbe?(attempt)
+            if probe == .connectable {
                 NSLog("[MCPProxy] Something answered on %@ — not taking the socket over", socketPath)
                 return false
             }
@@ -686,16 +778,99 @@ actor CoreProcessManager {
         unresponsiveDeadlineTask = nil
     }
 
-    /// Still waiting when the deadline expired: say so, and keep watching.
+    /// Still waiting when the deadline expired. Either a core really is there and
+    /// silent — say so — or nothing ever was, and the wait is a deadlock we have
+    /// to break ourselves.
     private func reportUnresponsiveCore(reason: String) async {
         guard !superseded, !shutdownRequested else { return }
         guard case .waitingForCore = await MainActor.run(body: { appState.coreState }) else { return }
+
+        // This task IS the deadline; drop the handle before doing anything that
+        // might cancel it, or we would cancel ourselves mid-launch.
+        unresponsiveDeadlineTask = nil
+
+        if socketEvidence.onlyEverRefused, await escalateToLaunchOverAStaleSocket(reason: reason) {
+            return
+        }
 
         NSLog("[MCPProxy] Giving up waiting for the core on %@ (%@)", socketPath, reason)
         await transitionState(to: .error(.general(
             "A core is holding \(socketPath) but is not responding (\(reason)). "
             + "Quit that process, then use Retry."
         )))
+    }
+
+    /// The deadline expired and not one connection has been accepted on this
+    /// socket in the whole window: a file is on disk and the process that made it
+    /// is gone. Launch a core rather than telling the user to quit a process that
+    /// does not exist — the error we would otherwise show is unactionable, and
+    /// Retry would repeat this same wait forever, because nothing else in the
+    /// system removes that file.
+    ///
+    /// Why this cannot resurrect the double-spawn hazard the tray-side unlink
+    /// had. It never unlinks anything: the dangerous step is done by the core we
+    /// spawn, which dials the socket immediately before removing it (a far
+    /// tighter window than anything the tray can manage) and fails with "socket
+    /// is in use by another process" when that dial succeeds — see
+    /// `cleanupStaleSocket` in internal/server/listener_unix.go. Everything in
+    /// front of that is unchanged: the connection gate is taken here, the
+    /// confirmation window runs again as a last look, and the launch goes through
+    /// `launchWithRetries` into the one choke point (`preflightLaunch`), behind
+    /// which bbolt's exclusive lock on the data directory is the final backstop.
+    /// And if a core has accepted so much as one connection during the window we
+    /// are not here at all: `onlyEverRefused` is false, and stays false for the
+    /// rest of the episode.
+    ///
+    /// Returns true when it has taken the episode over (nothing further to
+    /// report), false when the caller should fall through to the error.
+    private func escalateToLaunchOverAStaleSocket(reason: String) async -> Bool {
+        guard waitMaySpawn else { return false }
+
+        // The attach watch takes the gate for each of its probes and holds it for
+        // microseconds. Wait for it rather than reporting an error we would have
+        // to retract — but do not wait indefinitely, or a wedged connection
+        // attempt would silence the deadline altogether.
+        guard await claimConnectionWork(waitingUpTo: 1.0) else {
+            NSLog("[MCPProxy] Deadline expired while a connection attempt is in flight — waiting again")
+            armUnresponsiveCoreDeadline(reason: reason)
+            return true
+        }
+        defer { endConnectionWork() }
+
+        // A last look, with the gate held so no probe of ours is in flight: a
+        // core that is merely slow accepts at least one of these, and that answer
+        // ends the escalation. Same window the spawn path uses.
+        guard await confirmNothingIsListening() else { return false }
+        guard !superseded, !shutdownRequested else { return false }
+
+        NSLog("[MCPProxy] Nothing has ever answered on %@ (%@) — treating it as a socket file "
+              + "left behind by a dead core and launching", socketPath, reason)
+
+        // Called from the deadline task, never from inside the watch itself, so
+        // cancelling here cannot cancel an attach in progress.
+        cancelAttachWatch()
+        await MainActor.run {
+            appState.isStopped = false
+            appState.ownership = .trayManaged
+        }
+        await launchWithRetries()
+        return true
+    }
+
+    /// Take the connection gate, waiting up to `seconds` for a short-lived holder
+    /// to finish. Polls rather than queues: the gate is a flag, not a lock, and
+    /// the only thing that ever holds it briefly is a probe.
+    private func claimConnectionWork(waitingUpTo seconds: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while true {
+            if beginConnectionWork() { return true }
+            guard Date() < deadline, !shutdownRequested else { return false }
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return false
+            }
+        }
     }
 
     /// Launch the core, climbing the retry ladder until it comes up or the
@@ -717,7 +892,11 @@ actor CoreProcessManager {
             // this one can do something useful about it: wait.
             if await assessCore().somethingIsListening {
                 await waitForTheCoreThatIsAlreadyThere(
-                    reason: "a core is already listening on the socket"
+                    reason: "a core is already listening on the socket",
+                    // We are inside the launch path, so spawning is permitted —
+                    // but this wait can never escalate anyway: a probe just
+                    // accepted, which is the one thing that rules it out.
+                    maySpawn: true
                 )
                 return
             }
@@ -1515,6 +1694,9 @@ actor CoreProcessManager {
     /// crashes instantly. Owning the loop here keeps both properties: exactly
     /// one launch at a time, AND every rung of the ladder.
     private func attemptReconnection() async {
+        // The core we were connected to answered plenty of probes; none of that
+        // is evidence about the socket we are about to reason over now.
+        beginSocketEvidence()
         while true {
             guard !shutdownRequested else { return }
             let delay = reconnectionPolicy.delay(forAttempt: max(retryCount, 1))
