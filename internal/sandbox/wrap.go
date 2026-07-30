@@ -8,10 +8,11 @@ import (
 
 // Re-exec wrapper protocol (MCP-34.3).
 //
-// Landlock confines the *current* process and every process it then execs, and
-// the confinement is irreversible — so it cannot be applied in-process before
-// mcp-go spawns an upstream stdio server. The integration is therefore a tiny
-// re-exec wrapper: mcpproxy launches itself as
+// Landlock confines the *calling thread* and every process that thread then
+// execs, and the confinement is irreversible — so it cannot be applied
+// in-process before mcp-go spawns an upstream stdio server (mcpproxy is
+// multithreaded; the other threads would stay unrestricted). The integration is
+// therefore a tiny re-exec wrapper: mcpproxy launches itself as
 //
 //	mcpproxy __sandbox_exec -- <command> [args...]
 //

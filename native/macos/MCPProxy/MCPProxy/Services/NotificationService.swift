@@ -96,20 +96,33 @@ actor NotificationService {
 
     /// The shared notification center.
     ///
-    /// Resolved on first use, not at init. `UNUserNotificationCenter.current()`
-    /// traps with "bundleProxyForCurrentProcess is nil" in an unbundled process,
-    /// which is what an XCTest runner is — so an eager `let` made this actor,
-    /// and everything that holds one (notably `CoreProcessManager`),
-    /// unconstructible from a test. `lazy` is safe here precisely because this
-    /// is an actor: the initialisation is isolated, so it cannot race. In the
-    /// bundled app the only difference is which line resolves the center.
+    /// Resolved lazily on first use rather than at init: `current()` requires a
+    /// real application bundle and raises `NSInternalInconsistencyException`
+    /// otherwise, which made merely CONSTRUCTING this service — and therefore
+    /// anything that depends on it, such as `CoreProcessManager` — impossible to
+    /// unit-test. Delivery paths are unchanged; nothing in the app touches the
+    /// center before `setup()`.
     private lazy var center = UNUserNotificationCenter.current()
+
+    /// Whether this service may actually talk to `UNUserNotificationCenter`.
+    ///
+    /// `current()` requires a real application bundle and raises
+    /// `NSInternalInconsistencyException` otherwise, which kills a unit-test
+    /// process outright. Tests construct the service with delivery off so that
+    /// code paths which happen to send a notification (a core-exit handler, say)
+    /// are exercisable. Always on in the app.
+    private let deliveryEnabled: Bool
+
+    init(deliveryEnabled: Bool = true) {
+        self.deliveryEnabled = deliveryEnabled
+    }
 
     // MARK: - Setup
 
     /// Request notification permission and register action categories.
     /// Call this once during app launch.
     func setup() async {
+        guard deliveryEnabled else { return }
         // Request authorization
         do {
             let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
@@ -291,6 +304,7 @@ actor NotificationService {
 
     /// Schedule a notification for immediate delivery.
     private func deliver(content: UNMutableNotificationContent, identifier: String) async {
+        guard deliveryEnabled else { return }
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
         let request = UNNotificationRequest(
             identifier: identifier,

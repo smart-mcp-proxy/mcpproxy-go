@@ -22,6 +22,9 @@ import (
 // On success it never returns (execve replaces the image). It returns a non-zero
 // exit code on any failure; diag receives human-readable confinement notes and
 // errors (os.Stderr in production, so they land in the per-server upstream log).
+// Exit codes: 2 bad invocation or missing spec, 3 confinement unavailable while
+// fail-closed, 4 the Landlock domain's thread was lost before execve, 126 execve
+// failed, 127 target not found on PATH.
 func RunChild(argv []string, diag io.Writer) int {
 	if diag == nil {
 		diag = io.Discard
@@ -55,7 +58,7 @@ func RunChild(argv []string, diag io.Writer) int {
 		target = resolved
 	}
 
-	rep, err := Apply(spec)
+	rep, err := applyConfinement(spec)
 	if err != nil {
 		// fail-closed: BestEffort was false and the primitive is unavailable.
 		fmt.Fprintf(diag, "sandbox: confinement unavailable and fail-closed: %v\n", err)
@@ -65,11 +68,43 @@ func RunChild(argv []string, diag io.Writer) int {
 
 	dropPrivilegesBestEffort(diag)
 
+	// Everything between Apply and here — the diag write above, the privilege
+	// drop, os.Environ() — can park this goroutine. Apply pins it to the thread
+	// that carries the Landlock domain, so a mismatch here means that pin failed
+	// and an execve now would run the untrusted command unconfined. Refuse
+	// instead: an MCP server that does not start is recoverable, one that starts
+	// outside its sandbox is not.
+	if now := currentTID(); threadLost(rep, now) {
+		fmt.Fprintf(diag, "sandbox: refusing to exec %q — thread changed after confinement "+
+			"(Landlock domain is on tid %d, now running on tid %d); the command would run UNCONFINED\n",
+			target, rep.LandlockTID, now)
+		return 4
+	}
+
 	if err := syscall.Exec(target, argv, os.Environ()); err != nil {
 		fmt.Fprintf(diag, "sandbox: exec %q: %v\n", target, err)
 		return 126
 	}
 	return 0 // unreachable: Exec replaced the image on success.
+}
+
+// applyConfinement indirects Apply for RunChild. Production never reassigns it;
+// it exists so the test suite can drive RunChild's fail-closed thread guard,
+// whose refusal path is otherwise untestable: Apply is irreversible for the
+// calling thread (so the test process cannot call it for real) and a genuine
+// thread migration is a race that cannot be provoked on demand. Without the
+// seam, deleting the guard from RunChild — or moving it after syscall.Exec —
+// would leave every test still green.
+var applyConfinement = Apply
+
+// threadLost reports whether the Landlock domain Apply committed lives on a
+// different thread than the one now about to execve — in which case the exec
+// would run the untrusted command outside the domain entirely. A zero
+// LandlockTID means no domain was enforced (rlimits-only, or Landlock
+// unavailable under BestEffort), so there is nothing to verify and nothing to
+// lose by exec'ing.
+func threadLost(rep Report, nowTID int) bool {
+	return rep.LandlockTID != 0 && nowTID != rep.LandlockTID
 }
 
 // describeReport renders a one-line honest summary of what Apply enforced.

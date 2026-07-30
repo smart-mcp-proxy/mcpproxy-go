@@ -343,7 +343,10 @@ actor SSEClient: SSEStreaming {
         if useSocket {
             config.protocolClasses = [SocketURLProtocol.self]
             if let socketPath {
-                SocketURLProtocol.overrideSocketPath = socketPath
+                // Per-session, not a process-global (see SocketURLProtocol).
+                config.httpAdditionalHeaders = [
+                    SocketURLProtocol.routeHeader: SocketURLProtocol.makeRoute(to: socketPath)
+                ]
             }
         }
 

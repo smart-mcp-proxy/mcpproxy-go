@@ -14,6 +14,10 @@ package sandbox
 // always false off Linux: Landlock is a Linux-only LSM.
 func Available() bool { return false }
 
+// currentTID has no meaningful answer off Linux, where no thread-scoped
+// confinement domain exists. RunChild treats 0 as "nothing to verify".
+func currentTID() int { return 0 }
+
 func Apply(spec Spec) (Report, error) {
 	// No filesystem allowlist requested → nothing to enforce, same as Linux.
 	if !spec.wantsLandlock() {

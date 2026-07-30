@@ -44,7 +44,15 @@ actor APIClient {
     ///     Pass an empty string to force TCP-only mode.
     ///   - baseURL: TCP base URL. Used as fallback or when socket is unavailable.
     ///   - apiKey: Optional API key for authentication.
-    init(socketPath: String? = nil, baseURL: String = "http://127.0.0.1:8080", apiKey: String? = nil) {
+    ///   - requestTimeout: Per-request timeout. The default is deliberately
+    ///     generous; a liveness probe wants something much shorter so one slow
+    ///     response cannot stall it (see `CoreProcessManager.probeTimeout`).
+    init(
+        socketPath: String? = nil,
+        baseURL: String = "http://127.0.0.1:8080",
+        apiKey: String? = nil,
+        requestTimeout: TimeInterval = 30
+    ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
 
@@ -54,11 +62,11 @@ actor APIClient {
         // so it's safe to register even before the socket file exists.
         if let path = socketPath, path.isEmpty {
             // Explicitly requested TCP-only
-            self.session = SocketTransport.makeTCPSession()
+            self.session = SocketTransport.makeTCPSession(timeout: requestTimeout)
         } else {
             // Always use socket-backed session — SocketURLProtocol falls through
             // to standard networking if the socket file doesn't exist yet.
-            self.session = SocketTransport.makeURLSession(socketPath: socketPath)
+            self.session = SocketTransport.makeURLSession(socketPath: socketPath, timeout: requestTimeout)
         }
     }
 
