@@ -173,9 +173,11 @@ func TestIsMCPSessionRecord(t *testing.T) {
 	assert.False(t, isMCPSessionRecord(both))
 }
 
-// Retention keeps the newest 100 by raw key order with no type check. That is
-// safe now only because the bucket is exclusively ours — this test pins the
-// behaviour the namespacing depends on.
+// Retention ranks every record it can decode and evicts the least useful, so
+// it no longer depends on raw key order — but it still only ever touches the
+// sessions bucket. That containment is what the namespacing relies on, and it
+// is what this test pins. Retention's actual eviction ORDER is covered by
+// sessions_retention_test.go, which drives the real CreateSession path.
 func TestEnforceSessionRetention_OnlyTouchesItsOwnBucket(t *testing.T) {
 	db := openTempDB(t)
 
