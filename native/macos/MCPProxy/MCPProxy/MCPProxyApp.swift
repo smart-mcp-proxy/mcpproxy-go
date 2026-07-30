@@ -43,6 +43,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Suppresses structural rebuilds while the menu is on screen.
     private var rebuildGuard = MenuRebuildGuard()
 
+    /// Scheduler for the debounced `objectWillChange -> rebuildMenu()` sink.
+    ///
+    /// **Must be a dispatch queue, not `RunLoop.main`.** While an `NSMenu` is
+    /// tracking, the main run loop runs in `NSEventTrackingRunLoopMode`, and
+    /// Combine's `RunLoop` scheduler installs its timers in `.default` mode
+    /// only — so a `RunLoop.main`-scheduled `debounce` is never serviced until
+    /// the menu closes. That silently disables the entire open-menu update
+    /// path: `GlanceSection.updateInPlace` and `MenuRebuildGuard`'s
+    /// update-in-place / defer-until-close branches can only run if something
+    /// calls `rebuildMenu()` while the menu is up, and this sink is the only
+    /// caller that does. The glance would then be a snapshot frozen at
+    /// menu-open time, which is precisely what it must not be.
+    ///
+    /// The main dispatch queue is drained in every run-loop mode, so this
+    /// delivers during tracking. It is the same reason the timers below are
+    /// published `in: .common` rather than in the default mode.
+    ///
+    /// Named (rather than written inline at the subscription) so the tests can
+    /// bind to the very scheduler production uses — see
+    /// `MenuRefreshSchedulerTests`.
+    static let menuRefreshScheduler = DispatchQueue.main
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
         NSApp.setActivationPolicy(.prohibited)
@@ -134,7 +156,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             appState.objectWillChange.map { _ in () },
             updateService.objectWillChange.map { _ in () }
         )
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .debounce(for: .milliseconds(500), scheduler: Self.menuRefreshScheduler)
             .sink { [weak self] _ in
                 self?.updateStatusIcon()
                 self?.rebuildMenu()
@@ -575,8 +597,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// screen, which is only safe on the thread AppKit draws them on. Every
     /// caller was already main-thread — the NSMenuDelegate/NSApplicationDelegate
     /// callbacks are isolated by the SDK and the objectWillChange sink debounces
-    /// on RunLoop.main — so this costs nothing today and rejects a future
-    /// off-main caller at compile time (see the note on
+    /// on `menuRefreshScheduler` (the main queue) — so this costs nothing today
+    /// and rejects a future off-main caller at compile time (see the note on
     /// `MenuRebuildGuard.decide(refreshing:from:now:)` for how far that reaches
     /// under this package's concurrency checking).
     @MainActor
