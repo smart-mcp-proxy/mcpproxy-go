@@ -51,6 +51,61 @@ PYTHONPATH=src uv run python -m mcp_eval.cli retrieval \
   --base-url http://127.0.0.1:8092 --api-key eval-corpus-snapshot
 ```
 
+### Upstream version pinning (why the config is fully pinned)
+
+Every server in `snapshot-servers.config.json` pins an **exact** upstream version,
+and each `uvx` server additionally pins the MCP Python SDK via
+`--with mcp==<version>`. This is load-bearing, not cosmetic: the corpus, golden
+set and baseline are frozen, so a floating upstream silently redefines the
+universe the gate scores against, and the gate flakes whenever anyone publishes.
+
+That is exactly how it broke on 2026-07-28: the `mcp` SDK cut **2.0.0**, which
+renamed `McpError` → `MCPError` and removed the low-level `Server.list_tools` /
+`Server.list_resources` decorators. All four `uvx` servers (`fetch`, `git`,
+`time`, `sqlite`) declare only a lower bound (`mcp>=1.x`), so they resolved 2.0.0
+and crashed on import. Only the three `npx` servers connected — 24 tools instead
+of 45 — and D1 failed the catalog-readiness check.
+
+The pins are the **freeze-era versions** — the releases that were current when the
+corpus was frozen (2026-05-31) — not "latest at pin time". Pinning a later version
+reproduces a *different* universe: e.g. `server-filesystem@2026.7.10` drops
+`read_file` (44-tool catalog) and `server-sequential-thinking@2026.7.4` renames
+`sequentialthinking` → `sequential_thinking`, so two golden queries can never
+score and the gate passes only on threshold slack.
+
+Current pins reproduce the frozen 45-tool corpus exactly (verified tool-for-tool
+against a live `GET /api/v1/tools` snapshot):
+
+| Server | Pin |
+|--------|-----|
+| filesystem | `@modelcontextprotocol/server-filesystem@2026.1.14` |
+| memory | `@modelcontextprotocol/server-memory@2026.1.26` |
+| sequential-thinking | `@modelcontextprotocol/server-sequential-thinking@2025.12.18` |
+| git | `mcp-server-git==2026.1.14` + `mcp==1.27.2` |
+| fetch | `mcp-server-fetch==2025.4.7` + `mcp==1.27.2` |
+| time | `mcp-server-time==2026.1.26` + `mcp==1.27.2` |
+| sqlite | `mcp-server-sqlite==2025.4.25` + `mcp==1.27.2` |
+
+**What the pins do and do not freeze.** Published package versions are immutable,
+and a server's tool list is defined by the server package's own code — so the
+corpus itself cannot drift under these pins. What still floats are *transitive*
+dependencies resolved at install time (notably the npm servers' `@modelcontextprotocol/sdk`
+semver ranges; there is no lockfile in an `npx`/`uvx` invocation). A breaking
+transitive publish therefore cannot silently alter the corpus, but it can crash a
+server at startup — and either way the gate fails **loudly**: `eval.yml` waits for
+the full 45-tool catalog and then requires the live canonical ID set to match
+`corpus_v1.tools.json` exactly before scoring, so a crash, a rename, a dropped
+tool, or an extra tool all fail the job rather than silently skewing recall. Full
+hermeticity would need a lockfile-based install or prebuilt images; not worth it
+until this actually bites.
+
+**When bumping a pin**, treat it as a corpus change: re-run the snapshot, diff the
+tool set, and if it moved, cut `corpus_v2` rather than editing `corpus_v1`.
+
+> Note: `mcpproxy serve --config <this file>` **rewrites the file in place**
+> (normalised key order + defaults). Copy it to a scratch path before booting a
+> core against it locally, or `git checkout` it afterwards.
+
 The golden set was seeded by intent and **hand-curated** for graded relevance and
 cross-server hard-negatives (e.g. `filesystem:search_files` vs `memory:search_nodes`;
 `sqlite:read_query` vs `filesystem:read_text_file`; `fetch:fetch` vs
