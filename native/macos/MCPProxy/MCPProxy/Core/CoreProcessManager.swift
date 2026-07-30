@@ -314,25 +314,32 @@ actor CoreProcessManager {
     /// Claim the right to establish a connection. Synchronous on purpose: under
     /// actor isolation a check-and-set with no `await` between them cannot be
     /// interleaved, which is exactly what makes this a guard rather than a hint.
-    private func beginConnectionWork() -> Bool {
+    ///
+    /// Internal rather than private only so tests can take the gate before
+    /// calling `preflightLaunch()` — its first check is that the gate is held.
+    func beginConnectionWork() -> Bool {
         guard !connectionWorkInFlight else { return false }
         connectionWorkInFlight = true
         return true
     }
 
-    private func endConnectionWork() {
+    func endConnectionWork() {
         connectionWorkInFlight = false
     }
 
     // MARK: - Is a core alive at this socket, and how sure are we?
 
-    /// THE answer to that question. One function produces it and every caller —
-    /// startup, the liveness tick, the attach watcher — consults the same one.
+    /// One classification of the socket probe, shared by everything that asks.
+    /// Startup and the attach watcher consult `assessCore()` itself; the
+    /// liveness tick switches on `probeSocket()` directly because it counts
+    /// strikes per case, but it applies the SAME mapping — absent = act now,
+    /// localFailure = not evidence either way, refused = a strike, connectable =
+    /// go ask `/ready`.
     ///
-    /// It existed twice before, with different semantics: the tick classified
-    /// errno carefully while startup flattened everything that was not
-    /// connectable into "no core", so a full listen backlog or `EMFILE` at
-    /// startup still led to unlinking a live core's socket and spawning over it.
+    /// That mapping used to differ between the two: the tick classified errno
+    /// carefully while startup flattened everything that was not connectable
+    /// into "no core", so a full listen backlog or `EMFILE` at startup still led
+    /// to unlinking a live core's socket and spawning over it.
     enum CoreLiveness: Equatable {
         /// Socket connectable AND `/ready` answered. A core is definitely there.
         case alive
@@ -379,7 +386,10 @@ actor CoreProcessManager {
     /// and a stale file will refuse every one. This is the only honest way to
     /// turn `.indeterminate` into a decision, and being wrong here means two
     /// writers on one database.
-    private func confirmNothingIsListening(
+    ///
+    /// Internal rather than private so a test can start a listener between two
+    /// of its probes and pin that it notices.
+    func confirmNothingIsListening(
         attempts: Int = 3,
         interval: TimeInterval = 0.3
     ) async -> Bool {
@@ -836,18 +846,24 @@ actor CoreProcessManager {
 
     // MARK: - Private: Process Launch
 
-    /// Launch the mcpproxy core process.
-    private func launchCore(binaryPath: String) async throws {
-        // THE choke point. Every path that wants a core arrives here — start(),
-        // each rung of the ladder, retry(), the process-exit handler — so the
-        // invariant "never two cores on one data directory" is enforced HERE,
-        // once, instead of being a property of six call paths all staying
-        // disciplined. Three rounds of review have shown that discipline is not
-        // a thing to rely on.
-        //
-        // Each check is synchronous and there is no suspension point between
-        // the last one and `proc.run()`, so under actor isolation nothing can
-        // change underneath them.
+    /// THE choke point's preflight. Every path that wants a core arrives at
+    /// `launchCore` — start(), each rung of the ladder, retry(), the
+    /// process-exit handler — so the invariant "never two cores on one data
+    /// directory" is enforced HERE, once, instead of being a property of six
+    /// call paths all staying disciplined. Three rounds of review have shown
+    /// that discipline is not a thing to rely on.
+    ///
+    /// Every check is synchronous, so no other task on this actor can interleave
+    /// between them and `proc.run()`. That is the whole of what actor isolation
+    /// buys, and it is worth being honest about the rest: an EXTERNAL process
+    /// can still bind the socket in the milliseconds after the last probe here.
+    /// The backstops for that race are core-side, not tray-side — bbolt takes an
+    /// exclusive lock on the data directory and the loser exits with code 3, and
+    /// a core whose socket is already in use refuses to start at all.
+    ///
+    /// Throws rather than returning a Bool so the reason reaches the caller's
+    /// error handling (and the user) unchanged.
+    func preflightLaunch() throws {
         guard connectionWorkInFlight else {
             throw CoreError.general("internal error: tried to launch a core without the connection gate")
         }
@@ -862,6 +878,11 @@ actor CoreProcessManager {
         if SocketTransport.probeSocket(path: socketPath) == .connectable {
             throw CoreError.general("A core is already running on \(socketPath)")
         }
+    }
+
+    /// Launch the mcpproxy core process.
+    private func launchCore(binaryPath: String) async throws {
+        try preflightLaunch()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binaryPath)
