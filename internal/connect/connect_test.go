@@ -1529,3 +1529,53 @@ func assertPreconditionRefusal(t *testing.T, res *ConnectResult, cfgPath, wantCo
 		t.Fatalf("a refused write must not create a backup, found %d", n)
 	}
 }
+
+// TestConnectWithPrecondition_OpenCodeFileVanished pins the drift contract for
+// the one client that also has a force-proof refusal. Spec 091 FR-005 lists
+// "the file disappearing after an add/replace preview" as a drift class for ALL
+// change kinds: the caller echoed a token that described an existing file, so it
+// must get the discriminated conflict and re-preview — not OpenCode's flat
+// "no config found" refusal, which reads as a permanent "not connectable" and
+// leaves the form in a dead-end failure state.
+func TestConnectWithPrecondition_OpenCodeFileVanished(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	writeFileT(t, cfgPath, `{"mcp":{}}`)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ConnectRefusal != "" {
+		t.Fatalf("a present OpenCode config is connectable, got refusal %q", preview.ConnectRefusal)
+	}
+	if preview.PreconditionToken == "" {
+		t.Fatal("expected a precondition token")
+	}
+
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", false, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("a drifted write must be reported as a conflict, not an error: %v", err)
+	}
+	if res == nil || res.Success || res.Action != "precondition_failed" {
+		t.Fatalf("expected action precondition_failed, got %+v", res)
+	}
+	if _, statErr := os.Stat(cfgPath); statErr == nil {
+		t.Fatal("a refused write must not create the config file")
+	}
+}
+
+// Without a token the refusal is the whole answer: nothing described a
+// pre-write state, so there is no drift to report.
+func TestConnect_OpenCodeAbsentConfigStillRefuses(t *testing.T) {
+	svc, _ := testService(t)
+	if _, err := svc.Connect("opencode", "mcpproxy", false); err == nil {
+		t.Fatal("expected the absent-config refusal for a tokenless connect")
+	} else if !strings.Contains(err.Error(), "no OpenCode config found") {
+		t.Fatalf("expected the OpenCode refusal, got %v", err)
+	}
+}

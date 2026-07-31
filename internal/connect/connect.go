@@ -405,10 +405,6 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
-	if err := connectRefusal(client, cfgPath); err != nil {
-		return nil, err
-	}
-
 	// Resolve the pre-write state ONCE for the whole operation. The token check
 	// and the write must cover the SAME entry — re-resolving per step is what
 	// let a token hash one entry while the write replaced or deleted another
@@ -424,6 +420,15 @@ func (s *Service) ConnectWithPrecondition(clientID, serverName string, force boo
 		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, fileExists, existing); stale != nil {
 			return stale, nil
 		}
+	}
+
+	// The refusal guard runs AFTER the drift check. Both orders refuse the
+	// write, but a caller that echoed a token describing a file which has since
+	// vanished is looking at drift, and FR-005 promises drift is reported as the
+	// discriminated conflict for every change kind — a flat refusal instead
+	// reads as a permanent "not connectable" and strands the form.
+	if err := connectRefusal(client, cfgPath); err != nil {
+		return nil, err
 	}
 
 	var res *ConnectResult
