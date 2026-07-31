@@ -46,4 +46,22 @@ the only SC-003 work remaining.
 
 ## Swift — `cd native/macos/MCPProxy && swift test`
 
-_Recorded by the Swift track of T001._
+Toolchain: `Apple Swift version 6.3.3 (swiftlang-6.3.3.1.3)`, target
+`arm64-apple-macosx26.0`, package tools-version 5.9. Baseline commit `075adaed3`
+(same tree as the Go baseline above — no spec-091 source change yet).
+
+```
+Test Suite 'MCPProxyPackageTests.xctest' passed at 2026-07-31 18:07:08.149.
+	 Executed 502 tests, with 0 failures (0 unexpected) in 34.630 (34.660) seconds
+Test Suite 'All tests' passed at 2026-07-31 18:07:08.149.
+	 Executed 502 tests, with 0 failures (0 unexpected) in 34.630 (34.666) seconds
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+```
+
+**Pre-existing failures: none.** All 502 XCTest cases pass (the swift-testing
+runner reports 0 suites — the package has no swift-testing tests). Any red seen
+in the Swift track from here is attributable to the spec-091 change under test.
+
+The Swift tasks (T012+) synthesize API JSON through a stub `URLProtocol` and an
+injected data-source seam, so none of them requires a running core; the Go track
+can land in parallel without affecting this baseline.

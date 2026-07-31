@@ -7,7 +7,7 @@ Swift paths relative to `native/macos/MCPProxy/` (sources `MCPProxy/`, tests `MC
 
 ## Phase 1: Setup
 
-- [ ] T001 Verify green baseline on branch 091-connect-client-form: `cd native/macos/MCPProxy && swift test` and `go test ./internal/connect/... ./internal/httpapi/... -count=1` pass before any change (record pre-existing failures in specs/091-connect-client-form/verification/baseline.md). Record in baseline.md that SC-003 (undo round-trip: byte-exact restore + created-file removal) is already covered by the unchanged internal/connect/undo_test.go suite (TestUndo_RestoresByteIdenticalPreConnectFile, TestUndo_NoPriorFile_RemovesCreatedFile) — confirm both green here; manual checks 9/9b re-verify live
+- [x] T001 Verify green baseline on branch 091-connect-client-form: `cd native/macos/MCPProxy && swift test` and `go test ./internal/connect/... ./internal/httpapi/... -count=1` pass before any change (record pre-existing failures in specs/091-connect-client-form/verification/baseline.md). Record in baseline.md that SC-003 (undo round-trip: byte-exact restore + created-file removal) is already covered by the unchanged internal/connect/undo_test.go suite (TestUndo_RestoresByteIdenticalPreConnectFile, TestUndo_NoPriorFile_RemovesCreatedFile) — confirm both green here; manual checks 9/9b re-verify live
 
 ## Phase 2: Foundational — Go contract deltas (blocking for live use; parallel to Swift model tasks)
 
