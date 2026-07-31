@@ -2462,13 +2462,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// Enable connection state tracking for better debugging
 		ConnState: s.logConnectionState,
 		// Tag connections with their source (TCP vs Tray)
-		ConnContext: func(ctx context.Context, c net.Conn) context.Context {
-			// Extract source from tagged connection
-			if tc, ok := c.(*taggedConn); ok {
-				return TagConnectionContext(ctx, tc.source)
-			}
-			return TagConnectionContext(ctx, ConnectionSourceTCP) // Default to TCP
-		},
+		ConnContext: taggedConnContext,
 	}
 	s.running = true
 	s.runtime.SetRunning(true)
