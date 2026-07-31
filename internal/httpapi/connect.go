@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -185,11 +186,9 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ConnectRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
 	}
 
 	result, err := svc.ConnectWithPrecondition(clientID, req.ServerName, req.Force, req.PreconditionToken)
@@ -258,9 +257,7 @@ func (s *Server) handleDisconnectClient(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var req ConnectRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		_ = json.NewDecoder(r.Body).Decode(&req) // best effort
-	}
+	_ = decodeOptionalJSONBody(r, &req) // best effort
 
 	result, err := svc.Disconnect(clientID, req.ServerName)
 	if err != nil {
@@ -336,11 +333,9 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req UndoConnectRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
 	}
 
 	result, err := svc.Undo(clientID, req.ServerName, req.BackupName)
@@ -374,6 +369,24 @@ func (s *Server) handleUndoConnectClient(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccess(w, result)
+}
+
+// decodeOptionalJSONBody decodes an optional JSON request body. An absent or
+// empty body leaves out untouched — that is what "no body" means for these
+// endpoints — and any other malformed input is returned as an error.
+//
+// Deliberately NOT gated on Content-Length: a chunked or otherwise streamed
+// request arrives with ContentLength == -1, and skipping the decode there
+// silently dropped the fields the caller relies on for safety (force and,
+// above all, precondition_token), running the write in unguarded legacy mode.
+func decodeOptionalJSONBody(r *http.Request, out interface{}) error {
+	if r.Body == nil {
+		return nil
+	}
+	if err := json.NewDecoder(r.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // writeIfAccessDenied maps a permission-denied client-config access to a 403

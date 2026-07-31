@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -802,4 +803,89 @@ func TestHandleConnectClient_LegacyConflictKeepsItsDiscriminator(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "already_exists", resp.Data.Action)
 	assert.Equal(t, "already_exists", resp.Action)
+}
+
+// chunkedBody hides the reader's Len method so net/http cannot compute a
+// Content-Length and streams the body with Transfer-Encoding: chunked — what
+// curl --header 'Transfer-Encoding: chunked' and any streaming HTTP client
+// produce. The handler sees ContentLength == -1.
+func chunkedBody(payload []byte) io.Reader {
+	return struct{ io.Reader }{bytes.NewReader(payload)}
+}
+
+// TestHandleConnectClient_ChunkedBodyIsDecoded pins that the request body is
+// read from the BODY, not from a Content-Length guess: force and, above all,
+// precondition_token are safety fields, and silently dropping them ran the
+// write in unguarded legacy mode.
+func TestHandleConnectClient_ChunkedBodyIsDecoded(t *testing.T) {
+	newFixture := func(t *testing.T) (*httptest.Server, *connect.Service, string) {
+		t.Helper()
+		logger := zap.NewNop().Sugar()
+		mockCtrl := &mockRoutingController{apiKey: "test-key", routingMode: "retrieve_tools"}
+		srv := NewServer(mockCtrl, logger, nil)
+		home := t.TempDir()
+		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+		svc := connect.NewServiceWithHome("127.0.0.1:8080", "", home)
+		srv.SetConnectService(svc)
+		ts := httptest.NewServer(srv)
+		t.Cleanup(ts.Close)
+		return ts, svc, home
+	}
+
+	post := func(t *testing.T, ts *httptest.Server, payload ConnectRequest) (int, map[string]interface{}) {
+		t.Helper()
+		body, err := json.Marshal(payload)
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/connect/claude-code", chunkedBody(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-Key", "test-key")
+		// Streamed, so the handler sees ContentLength == -1 (the transport also
+		// chunks an unknown-length body on its own; this makes it explicit).
+		req.TransferEncoding = []string{"chunked"}
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		var decoded map[string]interface{}
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&decoded))
+		return resp.StatusCode, decoded
+	}
+
+	t.Run("force is honored", func(t *testing.T) {
+		ts, svc, _ := newFixture(t)
+		_, err := svc.Connect("claude-code", "mcpproxy", false)
+		require.NoError(t, err)
+
+		status, decoded := post(t, ts, ConnectRequest{ServerName: "mcpproxy", Force: true})
+		assert.Equal(t, http.StatusOK, status, "force=true in a chunked body must overwrite, not 409: %v", decoded)
+		data, _ := decoded["data"].(map[string]interface{})
+		assert.Equal(t, "updated", data["action"])
+	})
+
+	t.Run("a stale precondition token still refuses", func(t *testing.T) {
+		ts, svc, home := newFixture(t)
+		cfgPath := connect.ConfigPath("claude-code", home)
+		require.NoError(t, os.WriteFile(cfgPath,
+			[]byte(`{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`), 0o644))
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		require.NoError(t, err)
+		require.NotEmpty(t, preview.PreconditionToken)
+
+		// Drift after the preview: the echoed token no longer describes reality.
+		const drifted = `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`
+		require.NoError(t, os.WriteFile(cfgPath, []byte(drifted), 0o644))
+
+		status, decoded := post(t, ts, ConnectRequest{
+			ServerName:        "mcpproxy",
+			Force:             true,
+			PreconditionToken: preview.PreconditionToken,
+		})
+		assert.Equal(t, http.StatusConflict, status, "a token sent in a chunked body must still be checked: %v", decoded)
+		assert.Equal(t, "precondition_failed", decoded["action"])
+
+		after, err := os.ReadFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, drifted, string(after), "a refused write must not touch the config")
+	})
 }
