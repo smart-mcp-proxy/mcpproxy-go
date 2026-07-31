@@ -53,7 +53,7 @@ Swift paths relative to `native/macos/MCPProxy/` (sources `MCPProxy/`, tests `MC
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [ ] T026 Gates + docs: run `./scripts/run-linter.sh`, `go test ./internal/...`, `cd native/macos/MCPProxy && swift test`, `make swagger-verify`; document the two connect-surface deltas in the connect feature docs (docs/features/, wherever connect is documented — create a short section if absent); validate specs/091-connect-client-form/quickstart.md commands; mark manual protocol status (NOT RUN unless actually run); verify all checkboxes T001–T025, then this one
+- [x] T026 Gates + docs: run `./scripts/run-linter.sh`, `go test ./internal/...`, `cd native/macos/MCPProxy && swift test`, `make swagger-verify`; document the two connect-surface deltas in the connect feature docs (docs/features/, wherever connect is documented — create a short section if absent); validate specs/091-connect-client-form/quickstart.md commands; mark manual protocol status (NOT RUN unless actually run); verify all checkboxes T001–T025, then this one
 
 ## Dependencies & Execution Order
 

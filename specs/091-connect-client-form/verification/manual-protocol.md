@@ -38,8 +38,23 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 
 ## Results
 
-- Date / macOS version / app build:
-- SC-001 time:
-- Checks passed:
-- Waived:
-- Notes:
+**Status: NOT RUN.**
+
+No live run has happened. The automated gates (T026) are green — linter,
+`go test ./internal/...`, `swift test` (585 XCTest cases), `make swagger-verify`
+— and the model-level guarantees they cover are asserted by unit tests against
+synthesized API JSON, but every check in the table above requires the built app
+driven by a human against a running core and none of them has been executed.
+`verification/shots/` does not exist.
+
+Automated coverage does NOT substitute for these checks. In particular, checks
+2b (no TCC prompt on list), 3 (SC-001 stopwatch), 9/9b (live undo round-trip —
+the live half of SC-003, see `baseline.md`), 9c (live conflict/re-preview) and
+14 (VoiceOver) have no unit-test equivalent.
+
+- Date / macOS version / app build: —
+- SC-001 time: —
+- Checks passed: 0 / 18 (none attempted)
+- Waived: none
+- Notes: run per the Setup section above before the feature is declared
+  verified; record results by replacing this block.
