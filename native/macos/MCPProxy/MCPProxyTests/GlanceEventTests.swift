@@ -250,6 +250,99 @@ final class GlanceEventTests: XCTestCase {
         XCTAssertNil(emptyIntent.metadata)
     }
 
+    // MARK: - Policy decisions (spec 090 US3, research D9)
+
+    /// `activity.policy_decision` (internal/runtime/events.go) is the only
+    /// notice a blocked call ever produces — it never dispatches, so no
+    /// tool_call event follows it. The adapted entry must land in the same
+    /// shape the poll will later bring: type `policy_decision`, the decision as
+    /// the status (activity_service.go writes `Status: decision`), and the
+    /// policy's own reason in the metadata slot the row reads.
+    func testPolicyDecisionEventBecomesABlockedEntry() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"transition_issue",
+        "session_id":"sess-p","request_id":"req-p1","decision":"blocked",
+        "reason":"Intent rejected: tool variant conflicts with server annotations"},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.type, "policy_decision")
+        XCTAssertEqual(entry.status, "blocked")
+        XCTAssertEqual(entry.serverName, "jira")
+        XCTAssertEqual(entry.toolName, "transition_issue")
+        XCTAssertEqual(entry.requestId, "req-p1")
+        XCTAssertEqual(entry.id, "req-p1:policy_decision",
+                       "the provisional id must be composite, as for the completion events")
+        XCTAssertEqual(entry.blockReason,
+                       "Intent rejected: tool variant conflicts with server annotations")
+        XCTAssertEqual(entry.reason, entry.blockReason,
+                       "a blocked row's reason is the policy's, not the caller's")
+        XCTAssertEqual(entry.outcomeClass, .blocked)
+        XCTAssertEqual(entry.sessionId, "sess-p")
+    }
+
+    /// A blocked record CAN carry the caller's intent too — the plan and the
+    /// refusal — and the row must show the refusal (data-model, FR-005).
+    func testABlockedEntryPrefersThePolicyReasonOverTheCallersIntent() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"delete_issue",
+        "request_id":"req-p2","decision":"blocked","reason":"Destructive operation blocked",
+        "intent":{"reason":"Clean up the duplicate ticket","operation_type":"destructive"}},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.reason, "Destructive operation blocked")
+        XCTAssertEqual(entry.intentReason, "Clean up the duplicate ticket",
+                       "the caller's plan is still carried — it is just not what the row shows")
+    }
+
+    /// Warnings and redactions let the call through, so they are not blocks.
+    /// The adapter still produces the entry; rejecting them is the row
+    /// pipeline's job, and it decides on `outcomeClass` (FR-012).
+    func testANonBlockingDecisionIsAdaptedButIsNotABlock() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue","request_id":"req-p3",
+        "decision":"warn","reason":"Response contained a credential-shaped string"},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.status, "warn")
+        XCTAssertEqual(entry.outcomeClass, .call)
+        XCTAssertFalse(GlanceSelection.qualifies(entry),
+                       "a warning is not a block and must not take one of the five rows")
+    }
+
+    /// Legacy cores emit the event without a request id (spec 090 FR-015 adds
+    /// it). The row must still render — it simply never collapses, because its
+    /// identity is its own.
+    func testAPolicyEventWithoutARequestIdStillAdapts() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue",
+        "decision":"blocked","reason":"Quarantined server"},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertNil(entry.requestId)
+        XCTAssertTrue(entry.id.hasSuffix(":policy_decision"))
+        XCTAssertEqual(GlanceSelection.recordKey(for: entry), entry.id,
+                       "with no request id the record's own id is its identity")
+    }
+
     /// SSE rows go in newest-first and the feed is bounded, so a busy agent
     /// cannot grow `glanceActivity` without limit between reconciling polls.
     func testPrependPutsNewestFirstAndCapsTheFeed() throws {

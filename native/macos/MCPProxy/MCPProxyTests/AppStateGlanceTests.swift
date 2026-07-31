@@ -432,6 +432,61 @@ final class AppStateGlanceTests: XCTestCase {
         XCTAssertEqual(published, 0)
     }
 
+    // MARK: - SSE routing (spec 090 US3, research D9)
+
+    /// Adapting a policy event is worth nothing if the dispatch never hands one
+    /// over. This drives the REAL `CoreProcessManager` SSE dispatch — the switch
+    /// that used to name only the two completion events — and asserts a blocked
+    /// row reaches the glance feed before any poll runs.
+    ///
+    /// A block is exactly the case that cannot wait for the poll: it is the only
+    /// outcome the user has no other way to notice.
+    func testAPolicyDecisionEventReachesTheGlanceFeed() async throws {
+        let state = AppState()
+        state.coreState = .connected
+        let manager = CoreProcessManager(
+            appState: state,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "glance-routing-\(UUID().uuidString).sock"
+        )
+
+        await manager.handleSSEEvent(
+            SSEEvent(
+                event: "activity.policy_decision",
+                data: """
+                {"payload":{"server_name":"jira","tool_name":"delete_issue",
+                "request_id":"req-blocked","decision":"blocked",
+                "reason":"Destructive operation blocked"},"timestamp":1753800000}
+                """,
+                retry: nil,
+                id: nil
+            ),
+            generation: state.connectionGeneration
+        )
+
+        XCTAssertEqual(state.glanceActivity.map(\.id), ["req-blocked:policy_decision"])
+        XCTAssertEqual(state.glanceActivity.first?.reason, "Destructive operation blocked")
+    }
+
+    /// The dispatch must stay narrow: an event the adapter does not know is not
+    /// a glance row, and must not enter the feed as an empty one.
+    func testAnUnrelatedEventDoesNotReachTheGlanceFeed() async throws {
+        let state = AppState()
+        state.coreState = .connected
+        let manager = CoreProcessManager(
+            appState: state,
+            notificationService: NotificationService(deliveryEnabled: false),
+            socketPath: NSTemporaryDirectory() + "glance-routing-\(UUID().uuidString).sock"
+        )
+
+        await manager.handleSSEEvent(
+            SSEEvent(event: "ping", data: "{}", retry: nil, id: nil),
+            generation: state.connectionGeneration
+        )
+
+        XCTAssertTrue(state.glanceActivity.isEmpty)
+    }
+
     // MARK: - Helpers
 
     private static func date(_ iso: String) -> Date {

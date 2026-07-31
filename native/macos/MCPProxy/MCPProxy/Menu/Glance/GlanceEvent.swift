@@ -15,6 +15,14 @@ enum GlanceEvent {
     /// SSE event name for a completed internal (built-in) tool call.
     static let internalCompleted = "activity.internal_tool_call.completed"
 
+    /// SSE event name for a policy decision (`internal/runtime/events.go`).
+    ///
+    /// The only notice a blocked call ever produces: it never dispatches, so no
+    /// completion event follows it. Without this the glance could not show a
+    /// block at all until the next poll — and a block is precisely the outcome
+    /// the user has no other way to notice (spec 090 US3).
+    static let policyDecision = "activity.policy_decision"
+
     /// Build an `ActivityEntry` from an SSE envelope.
     ///
     /// Returns nil for any other event name (notably
@@ -24,6 +32,7 @@ enum GlanceEvent {
         switch eventName {
         case upstreamCompleted: type = "tool_call"
         case internalCompleted: type = "internal_tool_call"
+        case policyDecision: type = ActivityEntry.policyDecisionType
         default: return nil
         }
 
@@ -32,12 +41,26 @@ enum GlanceEvent {
 
         let toolName: String?
         let serverName: String?
-        if type == "tool_call" {
-            toolName = nonEmptyString(payload["tool_name"])
-            serverName = nonEmptyString(payload["server_name"])
-        } else {
+        if type == "internal_tool_call" {
             toolName = nonEmptyString(payload["internal_tool_name"])
             serverName = nonEmptyString(payload["target_server"])
+        } else {
+            // Upstream calls and policy decisions name the same fields
+            // (event_bus.go `EmitActivityPolicyDecision`).
+            toolName = nonEmptyString(payload["tool_name"])
+            serverName = nonEmptyString(payload["server_name"])
+        }
+
+        // The persisted record's status IS the decision
+        // (`activity_service.go handlePolicyDecision`), so a live row and the
+        // polled one it reconciles with must agree on that, not on a
+        // convenience value: "warn" has to stay distinguishable from "blocked",
+        // or a warning would take one of the five rows.
+        let status: String
+        if type == ActivityEntry.policyDecisionType {
+            status = nonEmptyString(payload["decision"]) ?? "blocked"
+        } else {
+            status = nonEmptyString(payload["status"]) ?? "success"
         }
 
         let requestId = nonEmptyString(payload["request_id"])
@@ -60,7 +83,7 @@ enum GlanceEvent {
             arguments: nil,
             response: nil,
             responseTruncated: nil,
-            status: nonEmptyString(payload["status"]) ?? "success",
+            status: status,
             errorMessage: nonEmptyString(payload["error_message"]),
             durationMs: (payload["duration_ms"] as? NSNumber)?.int64Value,
             timestamp: timestamp,
@@ -85,18 +108,32 @@ enum GlanceEvent {
     /// carries `arguments` and `response`, the two fields the projection exists
     /// to strip, into the backing model of a menu row that renders neither.
     private static func contextMetadata(from payload: [String: Any]) -> [String: JSONValue]? {
-        guard let intent = payload["intent"] as? [String: Any] else { return nil }
+        var metadata: [String: JSONValue] = [:]
 
-        var kept: [String: JSONValue] = [:]
-        if let reason = nonEmptyString(intent["reason"]) { kept["reason"] = .string(reason) }
-        if let operation = nonEmptyString(intent["operation_type"]) {
-            kept["operation_type"] = .string(operation)
+        if let intent = payload["intent"] as? [String: Any] {
+            var kept: [String: JSONValue] = [:]
+            if let reason = nonEmptyString(intent["reason"]) { kept["reason"] = .string(reason) }
+            if let operation = nonEmptyString(intent["operation_type"]) {
+                kept["operation_type"] = .string(operation)
+            }
+            // An intent map that carried nothing we render is no context at
+            // all: `ActivityEntry.intent` would otherwise answer an empty
+            // object, which reads as "there is context here" downstream.
+            if !kept.isEmpty { metadata["intent"] = .object(kept) }
         }
-        // An intent map that carried nothing we render is no metadata at all:
-        // `ActivityEntry.intent` would otherwise answer an empty object, which
-        // reads as "there is context here" everywhere downstream.
-        guard !kept.isEmpty else { return nil }
-        return ["intent": .object(kept)]
+
+        // Read unconditionally rather than only for policy events: these two
+        // keys exist on no other activity payload, and a branch here would be a
+        // second place for "which event carries what" to drift from the switch
+        // above. `handlePolicyDecision` persists them in exactly this shape.
+        if let decision = nonEmptyString(payload["decision"]) {
+            metadata["decision"] = .string(decision)
+        }
+        if let reason = nonEmptyString(payload["reason"]) {
+            metadata["reason"] = .string(reason)
+        }
+
+        return metadata.isEmpty ? nil : metadata
     }
 
     private static func nonEmptyString(_ value: Any?) -> String? {
