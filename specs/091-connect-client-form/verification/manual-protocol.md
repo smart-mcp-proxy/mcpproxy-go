@@ -22,7 +22,7 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 | 2b | No content reads on open | run once against a REAL client location under App-Data TCC (e.g. actual Claude Desktop container): opening the list triggers no TCC prompt; alternatively verify via core logs that zero config-content reads occur on list | `02b-tcc.png` or log excerpt |
 | 3 | SC-001 stopwatch | menu → connected client < 30 s, no browser | note time below |
 | 4 | Preview (add) | entry text + path + timestamped-backup statement, before any Connect control | `03-preview-add.png` |
-| 5 | Preview (replace) | existing entry AND replacement both visible | `04-preview-replace.png` |
+| 5 | Preview (replace) | structural summary of the existing entry (name/type/query-stripped endpoint/header+env names — no secret values) AND the replacement both visible; for an adopted equivalent entry the summary names its actual key | `04-preview-replace.png` |
 | 6 | Preview (create) | "file will be created… Undo removes it" statement | `05-preview-create.png` |
 | 7 | Credential notice | shown when entry embeds the admin credential | `06-credential.png` |
 | 8 | Connect + refresh | row flips to connected without reopening | `07-connected.png` |

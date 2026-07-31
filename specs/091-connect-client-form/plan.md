@@ -47,14 +47,19 @@ specs/091-connect-client-form/
 
 ```text
 # Go core (additive deltas)
-internal/connect/preview.go             # existing sanitized entry + precondition token in ConnectPreview
-internal/connect/preview_test.go        # sanitization (no raw secrets) + token derivation tests
-internal/connect/connect.go             # Connect accepts optional precondition token → conflict on drift
-internal/connect/connect_test.go        # token validation: create/add/replace drift cases, absent-token back-compat
-internal/connect/token.go               # NEW: token derivation (hash over file existence + raw entry state)
-internal/connect/token_test.go          # determinism, non-reversibility shape, drift detection incl. masked-value drift
-internal/httpapi/connect.go             # request body gains precondition_token; 409 on mismatch; swagger annotations
-internal/httpapi/connect_test.go        # endpoint-level: preview fields present, conflict status code
+internal/connect/preview.go             # summary + precondition token + connect_refusal in ConnectPreview
+internal/connect/preview_test.go        # no-raw-secrets tests (rotated keys, bearer/env secrets, ?apikey=, user:pass@)
+internal/connect/summary.go             # NEW: EntrySummary built from non-secret projections (adoption-aware)
+internal/connect/summary_test.go        # projection whitelist, query+userinfo stripping, adopted-entry naming
+internal/connect/connect.go             # Connect accepts optional precondition token → discriminated 409 on drift
+internal/connect/connect_test.go        # token validation: create/add/replace/adopted drift, force+token, absent-token back-compat
+internal/connect/token.go               # NEW: HMAC-SHA256 token (per-instance key, length-prefixed canonical encoding,
+                                        #   resolved entry + pending entry in the preimage)
+internal/connect/token_test.go          # determinism per key, drift detection incl. masked-value + adopted-entry +
+                                        #   pending-entry (config rotation) drift, key rotation invalidates
+internal/httpapi/connect.go             # request body precondition_token; 409 action discriminator; swagger annotations
+internal/httpapi/connect_test.go        # endpoint-level: preview fields present, precondition_failed vs already_exists
+internal/server/connect_socket_e2e_test.go # NEW: SC-006 — real Unix socket → gated connect-write as admin; agent token rejected
 oas/swagger.yaml, oas/docs.go           # make swagger
 
 # Swift app (native/macos/MCPProxy/MCPProxy)
@@ -62,7 +67,9 @@ Views/ConnectClientView.swift           # NEW: the form (list → detail+preview
 Views/ConnectClientModel.swift          # NEW: @MainActor state model (pure-testable reducer around APIClient calls)
 Views/DashboardView.swift               # legacy connect sheet routed into the new form (FR-012)
 MCPProxyApp.swift                       # "Connect Client…" menu item next to "Add Server…"; window/sheet plumbing
-API/APIClient.swift                     # clientDetail, connectPreview, connect(with token/server_name), undo, disconnect
+API/APIClient.swift                     # clientDetail, connectPreview, connect(token+force), undo, disconnect;
+                                        #   transportKind identity + strict-socket mode for mutating requests
+Core/SocketTransport.swift              # strict-socket request option (no TCP fallback for writes)
 API/Models.swift (or ConnectModels)     # richer ClientStatus + ConnectPreview/ConnectResult models
 
 # Swift tests (native/macos/MCPProxy/MCPProxyTests)
