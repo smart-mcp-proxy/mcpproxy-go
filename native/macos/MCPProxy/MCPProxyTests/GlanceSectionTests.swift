@@ -124,6 +124,128 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertNil(GlanceSection.firstClause(of: nil))
     }
 
+    // MARK: - Grouped rows (spec 090 US1)
+
+    /// A burst of one tool is one row, and the rest of the page still gets rows.
+    func testARunOfIdenticalCallsRendersOneRowWithACountSuffix() {
+        let state = Self.burstState()
+        let section = Self.makeSection()
+        let titles = section.items(for: state, now: Self.now).map {
+            $0.isSeparatorItem ? "—" : $0.title
+        }
+        XCTAssertEqual(Array(titles.dropFirst(3).prefix(2)), [
+            "jira:get_issue ×3 — 30s",
+            "github:create_issue — 3m"
+        ])
+    }
+
+    func testTheRowsAgeComesFromTheNewestRecordOfTheRun() {
+        let section = Self.makeSection()
+        let row = section.items(for: Self.burstState(), now: Self.now)[3]
+        XCTAssertTrue(row.title.hasSuffix("— 30s"),
+                      "the run's clock is its newest record, not its oldest")
+    }
+
+    func testASingleCallRunCarriesNoCountSuffix() {
+        let section = Self.makeSection()
+        let row = section.items(for: Self.busyState(), now: Self.now)[3]
+        XCTAssertEqual(row.title, "github:create_issue — 30s")
+    }
+
+    /// FR-004: one failure marks the whole run, with the NEWEST failure's clause.
+    func testAFailureInsideARunMarksTheRowWithTheNewestErrorClause() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            Self.entry(id: "n1", server: "jira", tool: "get_issue",
+                       timestamp: "2027-01-15T07:59:30Z", session: "sess-n1"),
+            Self.entry(id: "n2", server: "jira", tool: "get_issue", status: "error",
+                       error: "auth failed: token expired",
+                       timestamp: "2027-01-15T07:59:00Z", session: "sess-n2"),
+            Self.entry(id: "n3", server: "jira", tool: "get_issue", status: "error",
+                       error: "older failure: ignore me",
+                       timestamp: "2027-01-15T07:58:00Z", session: "sess-n3")
+        ]
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertEqual(row.title, "jira:get_issue ×3 · auth failed — 30s")
+        XCTAssertEqual(row.image?.accessibilityDescription, "failed")
+        XCTAssertEqual(row.toolTip, "jira:get_issue\nauth failed: token expired")
+        XCTAssertEqual(row.accessibilityLabel(),
+                       "jira:get_issue, repeated 3 times, failed: auth failed, 30s ago")
+    }
+
+    func testTheRepeatCountIsSpokenNotJustDrawn() {
+        let section = Self.makeSection()
+        let row = section.items(for: Self.burstState(), now: Self.now)[3]
+        XCTAssertEqual(row.accessibilityLabel(),
+                       "jira:get_issue, repeated 3 times, succeeded, 30s ago")
+    }
+
+    /// The run's identity is its OLDEST record (FR-024), so a burst growing at
+    /// the head is the same row with a bigger count — not a turnover. A turnover
+    /// would rewrite the icon and click payload of a row under the user's cursor
+    /// on every single call of a 19-call burst.
+    func testARunGrowingAtTheHeadUpdatesInPlaceWithoutTurnover() {
+        let state = Self.burstState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        let iconBefore = items[3].image
+
+        state.glanceActivity.insert(
+            Self.entry(id: "j0", server: "jira", tool: "get_issue",
+                       timestamp: "2027-01-15T07:59:50Z", session: "sess-j0"),
+            at: 0)
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[3].title, "jira:get_issue ×4 — 10s")
+        XCTAssertTrue(items[3].image === iconBefore,
+                      "the same run must keep its icon; only the count and clock moved")
+        XCTAssertEqual(items[3].representedObject as? String, "sess-j0",
+                       "the click payload follows the run's newest record")
+    }
+
+    /// …and when the row really does come to stand for a different run — a new
+    /// run whose oldest record is not the previous one — the whole identity is
+    /// rewritten, icon and click payload included.
+    func testADifferentRunInTheSameSlotRewritesTheRowIdentity() {
+        let state = Self.burstState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+        let iconBefore = items[3].image
+
+        state.glanceActivity = [
+            Self.entry(id: "o1", server: "obsidian", tool: "search_notes",
+                       timestamp: "2027-01-15T07:59:55Z", session: "sess-o1"),
+            Self.entry(id: "o2", server: "obsidian", tool: "search_notes",
+                       timestamp: "2027-01-15T07:59:50Z", session: "sess-o2"),
+            state.glanceActivity[3]
+        ]
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[3].title, "obsidian:search_notes ×2 — 5s")
+        XCTAssertFalse(items[3].image === iconBefore,
+                       "a different run must rewrite the row's entire identity, icon included")
+        XCTAssertEqual(items[3].representedObject as? String, "sess-o1")
+    }
+
+    /// A late status correction on the run's newest record still lands: "same
+    /// run" must not mean "skip the update".
+    func testASameRunStillPicksUpALateFailure() {
+        let state = Self.burstState()
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+
+        state.glanceActivity[0] = Self.entry(
+            id: "j1", server: "jira", tool: "get_issue", status: "error",
+            error: "rate limited: try later",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-j1")
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
+        XCTAssertEqual(items[3].title, "jira:get_issue ×3 · rate limited — 30s")
+        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed")
+    }
+
     // MARK: - Clients section and histogram
 
     func testClientRowCarriesSessionIdentity() {
@@ -450,6 +572,23 @@ final class GlanceSectionTests: XCTestCase {
         state.glanceSessions = [
             session(id: "sess-a", name: "Claude Code", version: "2.1.0",
                     calls: 8, lastActivity: "2027-01-15T07:59:00Z")
+        ]
+        return state
+    }
+
+    /// A connected core whose feed holds a three-call burst of one tool
+    /// followed by a single call to another — two runs, so two rows.
+    private static func burstState() -> AppState {
+        let state = busyState()
+        state.glanceActivity = [
+            entry(id: "j1", server: "jira", tool: "get_issue",
+                  timestamp: "2027-01-15T07:59:30Z", session: "sess-j1"),
+            entry(id: "j2", server: "jira", tool: "get_issue",
+                  timestamp: "2027-01-15T07:59:00Z", session: "sess-j2"),
+            entry(id: "j3", server: "jira", tool: "get_issue",
+                  timestamp: "2027-01-15T07:58:30Z", session: "sess-j3"),
+            entry(id: "g1", server: "github", tool: "create_issue",
+                  timestamp: "2027-01-15T07:57:00Z", session: "sess-g1")
         ]
         return state
     }

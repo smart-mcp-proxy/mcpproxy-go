@@ -67,8 +67,9 @@ final class GlanceSection {
     /// "this row now represents a different call".
     private struct ActivityRow {
         let item: NSMenuItem
-        /// The record's key — see `recordKey(for:)`. Nil until first rendered.
-        var recordKey: String?
+        /// The run's identity — `GlanceRun.identity`, the key of its OLDEST
+        /// record. Nil until first rendered.
+        var runIdentity: String?
         /// The SF Symbol currently installed, so the icon is rebuilt only when
         /// the glyph really changes.
         var symbolName: String?
@@ -134,7 +135,7 @@ final class GlanceSection {
         } else {
             for run in runs {
                 var row = ActivityRow(item: actionableItem())
-                apply(run.newest, to: &row, now: now)
+                apply(run, to: &row, now: now)
                 activityRows.append(row)
                 items.append(row.item)
             }
@@ -206,7 +207,7 @@ final class GlanceSection {
         // `activityRows.indices` reads out of bounds if the count guard above is
         // ever weakened, and zip cannot.
         for (index, run) in zip(activityRows.indices, runs) {
-            apply(run.newest, to: &activityRows[index], now: now)
+            apply(run, to: &activityRows[index], now: now)
         }
         for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
         return true
@@ -214,79 +215,90 @@ final class GlanceSection {
 
     // MARK: Row rendering
 
-    /// Identity of the record a row is showing: its `requestId`, never its `id`.
+    /// Identity of the run a row is showing: `GlanceRun.identity`, which is the
+    /// `recordKey` (request id, never storage id) of the run's OLDEST record.
     ///
-    /// A row rendered from a live SSE event carries a *provisional* id of the
-    /// form `"<request_id>:<type>"`, which the 30-second reconciling poll
-    /// replaces with the storage-assigned ULID for the very same call. Keying on
-    /// `id` would therefore report a wholesale turnover of every row on every
-    /// poll, needlessly rewriting five rows' icons and click payloads each time.
-    /// `requestId` is identical on both sides, and is already what rule 4
-    /// (`GlanceSelection.collapseByRequestID`) groups on. Records with no
-    /// request id are never collapsed, so their `id` is a safe fallback key.
-    /// Delegates to `GlanceSelection.recordKey` rather than restating the rule:
-    /// the row diff, rule 4's collapse and `AppState`'s poll/SSE merge must all
-    /// agree on what "the same call" means, and three copies would be free to
-    /// drift.
-    private static func recordKey(for entry: ActivityEntry) -> String {
-        GlanceSelection.recordKey(for: entry)
-    }
+    /// Two reasons it is neither the row's index nor its newest record. First, a
+    /// row rendered from a live SSE event carries a *provisional* id of the form
+    /// `"<request_id>:<type>"`, which the 30-second reconciling poll replaces
+    /// with the storage-assigned ULID for the very same call — keying on `id`
+    /// would report a wholesale turnover of every row on every poll. Second, a
+    /// run grows at the head, so keying on its newest record would make every
+    /// additional call of a burst look like a different row.
+    ///
+    /// The rule itself lives in `GlanceSelection.recordKey`: the row diff, rule
+    /// 4's collapse and `AppState`'s poll/SSE merge must all agree on what "the
+    /// same call" means, and copies would be free to drift.
 
     /// Rewrite an activity row so its title, icon, tooltip, accessibility label
-    /// and click payload all describe `entry`.
+    /// and click payload all describe `run`.
     ///
-    /// When the row has changed record every one of those is written back
-    /// unconditionally: with a fixed set of rows each new event shifts which
-    /// record a row stands for, and a row that kept the previous record's click
-    /// payload or icon would mislead silently. When it is still the same record
-    /// — the common case, since the reconcile only re-ids it — only what
-    /// actually differs is written, so a menu the user is reading is not
-    /// re-laid-out on every tick. Either way the row ends up fully describing
-    /// `entry`; the distinction is only how much is written to get there.
-    private func apply(_ entry: ActivityEntry, to row: inout ActivityRow, now: Date) {
-        let key = Self.recordKey(for: entry)
-        let sameRecord = row.recordKey == key
+    /// A row shows a *run* — one or more consecutive records of the same
+    /// (server, tool, outcome class) — so what it says is assembled from the
+    /// run, not from one record: the clock and the click payload come from the
+    /// newest record, the mark and the error clause from the worst/newest
+    /// failing one, and the `×N` suffix from how many there are.
+    ///
+    /// When the row has changed run every one of those is written back
+    /// unconditionally: with a fixed set of rows each new event shifts which run
+    /// a row stands for, and a row that kept the previous run's click payload or
+    /// icon would mislead silently. When it is still the same run — the common
+    /// case, since a burst extends at the head and the reconcile only re-ids
+    /// records — only what actually differs is written, so a menu the user is
+    /// reading is not re-laid-out on every tick. Either way the row ends up
+    /// fully describing `run`; the distinction is only how much is written.
+    private func apply(_ run: GlanceRun, to row: inout ActivityRow, now: Date) {
+        let identity = run.identity
+        let sameRun = row.runIdentity == identity
         let item = row.item
+        let newest = run.newest
 
-        let fullLabel = GlanceFormatting.rowLabel(for: entry)
+        let fullLabel = GlanceFormatting.rowLabel(for: newest)
         let label = GlanceFormatting.middleTruncated(fullLabel, limit: Self.labelBudget)
-        let age = GlanceFormatting.relativeTime(entry.timestamp, now: now)
-        let failed = entry.status != "success"
-        let detail = failed ? Self.firstClause(of: entry.errorMessage) : nil
+        // Suffix and spoken count are the same fact twice: "×3" is compact
+        // enough for a menu row but reads as a multiplication sign to VoiceOver,
+        // so the label spells it out (FR-025).
+        let countSuffix = run.count > 1 ? " ×\(run.count)" : ""
+        let spokenCount = run.count > 1 ? ", repeated \(run.count) times" : ""
+        let age = GlanceFormatting.relativeTime(run.timestamp, now: now)
+        let status = run.worstStatus
+        let failed = status != "success"
+        let detail = failed ? Self.firstClause(of: run.errorMessage) : nil
 
         let title: String
         let accessibility: String
         if let detail {
-            title = "\(label) · \(detail) — \(age)"
-            accessibility = "\(fullLabel), failed: \(detail), \(age) ago"
+            title = "\(label)\(countSuffix) · \(detail) — \(age)"
+            accessibility = "\(fullLabel)\(spokenCount), failed: \(detail), \(age) ago"
         } else {
-            title = "\(label) — \(age)"
-            accessibility = "\(fullLabel), \(Self.outcomeDescription(for: entry)), \(age) ago"
+            title = "\(label)\(countSuffix) — \(age)"
+            accessibility = "\(fullLabel)\(spokenCount), "
+                + "\(Self.outcomeDescription(forStatus: status)), \(age) ago"
         }
 
         let toolTip: String
-        if let message = entry.errorMessage, !message.isEmpty {
+        if let message = run.errorMessage, !message.isEmpty {
             toolTip = "\(fullLabel)\n\(message)"
         } else {
             toolTip = fullLabel
         }
 
-        let symbol = GlanceFormatting.statusSymbolName(for: entry)
+        let symbol = GlanceFormatting.statusSymbolName(forStatus: status)
 
-        if !sameRecord || item.title != title { item.title = title }
-        if !sameRecord || item.accessibilityLabel() != accessibility {
+        if !sameRun || item.title != title { item.title = title }
+        if !sameRun || item.accessibilityLabel() != accessibility {
             item.setAccessibilityLabel(accessibility)
         }
-        if !sameRecord || item.toolTip != toolTip { item.toolTip = toolTip }
-        if !sameRecord || row.symbolName != symbol {
-            item.image = Self.statusImage(for: entry)
+        if !sameRun || item.toolTip != toolTip { item.toolTip = toolTip }
+        if !sameRun || row.symbolName != symbol {
+            item.image = Self.statusImage(forStatus: status)
             row.symbolName = symbol
         }
-        if !sameRecord || (item.representedObject as? String) != entry.sessionId {
-            item.representedObject = entry.sessionId
+        if !sameRun || (item.representedObject as? String) != newest.sessionId {
+            item.representedObject = newest.sessionId
         }
 
-        row.recordKey = key
+        row.runIdentity = identity
     }
 
     /// First clause of an error message — everything up to the first newline,
@@ -313,8 +325,10 @@ final class GlanceSection {
     ///
     /// This lives here rather than in `GlanceFormatting` because that file is
     /// deliberately AppKit-free (`import Foundation` only) and `NSColor` is not.
-    static func statusTint(for entry: ActivityEntry) -> NSColor {
-        switch entry.status {
+    /// Keyed on the status string, not a record: a row stands for a run, and the
+    /// outcome it shows is the run's worst (`GlanceRun.worstStatus`).
+    static func statusTint(forStatus status: String) -> NSColor {
+        switch status {
         case "success":
             return .systemGreen
         case "error":
@@ -324,10 +338,14 @@ final class GlanceSection {
         }
     }
 
+    static func statusTint(for entry: ActivityEntry) -> NSColor {
+        statusTint(forStatus: entry.status)
+    }
+
     /// Spoken outcome for VoiceOver. Three-valued so a call that is still
     /// running is not announced as a failure.
-    static func outcomeDescription(for entry: ActivityEntry) -> String {
-        switch entry.status {
+    static func outcomeDescription(forStatus status: String) -> String {
+        switch status {
         case "success":
             return "succeeded"
         case "error":
@@ -337,15 +355,19 @@ final class GlanceSection {
         }
     }
 
+    static func outcomeDescription(for entry: ActivityEntry) -> String {
+        outcomeDescription(forStatus: entry.status)
+    }
+
     /// The row icon: an SF Symbol whose shape carries the outcome, tinted to
     /// carry it a second time.
     ///
     /// The image must be non-template — AppKit recolours a template menu image
     /// to the menu's own text colour, which would silently discard the tint.
-    private static func statusImage(for entry: ActivityEntry) -> NSImage? {
-        symbolImage(named: GlanceFormatting.statusSymbolName(for: entry),
-                    tint: statusTint(for: entry),
-                    description: outcomeDescription(for: entry))
+    private static func statusImage(forStatus status: String) -> NSImage? {
+        symbolImage(named: GlanceFormatting.statusSymbolName(forStatus: status),
+                    tint: statusTint(forStatus: status),
+                    description: outcomeDescription(forStatus: status))
     }
 
     private static func symbolImage(named name: String, tint: NSColor, description: String) -> NSImage? {

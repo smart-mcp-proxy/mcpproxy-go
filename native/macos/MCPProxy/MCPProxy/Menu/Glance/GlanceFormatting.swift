@@ -12,12 +12,17 @@ enum GlanceFormatting {
 
     // MARK: - Status symbol
 
-    /// SF Symbol name for an activity record's outcome.
+    /// SF Symbol name for an outcome.
     ///
     /// Shape carries the meaning (never colour alone), so a checkmark, a
     /// cross and an exclamation mark are three distinct glyphs.
-    static func statusSymbolName(for entry: ActivityEntry) -> String {
-        switch entry.status {
+    ///
+    /// Keyed on the status *string* rather than a record, because a glance row
+    /// is a run of records and the outcome it shows is the run's worst
+    /// (`GlanceRun.worstStatus`), which may belong to none of the run's other
+    /// records.
+    static func statusSymbolName(forStatus status: String) -> String {
+        switch status {
         case "success":
             return "checkmark.circle"
         case "error":
@@ -25,6 +30,11 @@ enum GlanceFormatting {
         default:
             return "exclamationmark.circle"
         }
+    }
+
+    /// Convenience for a single record.
+    static func statusSymbolName(for entry: ActivityEntry) -> String {
+        statusSymbolName(forStatus: entry.status)
     }
 
     // MARK: - Row label

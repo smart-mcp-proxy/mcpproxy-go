@@ -22,8 +22,8 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 - [x] T004 [US1] Write failing tests in MCPProxyTests/GlanceGroupingTests.swift: maximal consecutive runs by (server, tool, outcomeClass); A-B-A stays 3 rows; dropped records (management built-ins, collapsed wrappers) don't split runs (US1 scenario 6); worst outcome error > success with error clause from newest erroring record; ×N only when N > 1; run identity = recordKey(oldest) stable under head-extension; window-capped counts (FR-001–004, FR-024)
 - [x] T005 [US1] Implement `GlanceRun` and `groupConsecutive` as pure additions to MCPProxy/Menu/Glance/GlanceSelection.swift; re-shape `activityRows(from:)` into the 4-step pipeline returning `[GlanceRun]`; T004 green
-- [ ] T006 [US1] Write failing rendering tests: MCPProxyTests/GlanceSectionTests.swift asserts a run renders one row with "×N" title suffix, age from newest, and in-place `apply` keyed by run identity (same-run count bump ≠ different-run turnover); update MCPProxyTests/GlanceSelectionTests.swift, GlanceSelectionCollapseTests.swift, AppStateGlanceTests.swift expectations to the `[GlanceRun]` pipeline (red)
-- [ ] T007 [US1] Implement run rendering in MCPProxy/Menu/Glance/GlanceSection.swift and adapt MCPProxy/State/AppState.swift call sites; T006 and full `swift test` green
+- [x] T006 [US1] Write failing rendering tests: MCPProxyTests/GlanceSectionTests.swift asserts a run renders one row with "×N" title suffix, age from newest, and in-place `apply` keyed by run identity (same-run count bump ≠ different-run turnover); update MCPProxyTests/GlanceSelectionTests.swift, GlanceSelectionCollapseTests.swift, AppStateGlanceTests.swift expectations to the `[GlanceRun]` pipeline (red)
+- [x] T007 [US1] Implement run rendering in MCPProxy/Menu/Glance/GlanceSection.swift and adapt MCPProxy/State/AppState.swift call sites; T006 and full `swift test` green
 
 **Checkpoint**: MVP — grouped rows visible; all other stories independent from here.
 
