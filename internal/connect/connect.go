@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 )
@@ -82,6 +83,13 @@ type Service struct {
 	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
 	// tests inject a permission-denied error or a call counter through it.
 	readFile func(string) ([]byte, error)
+
+	// tokenKey is the per-core-instance HMAC key for connect-preview
+	// precondition tokens (Spec 091 FR-005). Generated lazily by
+	// preconditionKey(), never persisted, never exposed: it keeps a token
+	// unforgeable and non-oracular, and scopes it to this process.
+	tokenKeyOnce sync.Once
+	tokenKey     []byte
 }
 
 // WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,

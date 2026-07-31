@@ -42,6 +42,14 @@ type ConnectPreview struct {
 	// arbitrary value from the user's config can ride out in a preview. It is
 	// display-only: drift detection uses PreconditionToken, never this.
 	ExistingEntrySummary *EntrySummary `json:"existing_entry_summary,omitempty"`
+
+	// PreconditionToken is the opaque, keyed digest of the raw pre-write state
+	// this preview describes plus the exact entry that would be written (Spec
+	// 091 FR-005). A caller echoes it on the subsequent write; the core
+	// recomputes and refuses with a discriminated conflict when anything has
+	// drifted — externally (the file or the target entry changed) or
+	// proxy-side (credential rotation, auth toggle, address change).
+	PreconditionToken string `json:"precondition_token"`
 }
 
 // Preview computes the exact entry a Connect would write for the given client,
@@ -69,34 +77,16 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	// Determine create-vs-overwrite via an on-demand read. This is the same
 	// scoped, explicit-action read semantics as GetStatus: only touched when the
 	// file exists, so an absent config raises no macOS App-Data prompt.
-	accessState := accessAbsent
-	entryExists := false
+	fileExists, existing, accessState, err := s.preWriteState(client, cfgPath, serverName)
+	if err != nil {
+		// A denial must surface the actionable remediation, never a misleading
+		// "no changes" preview (Spec 078 FR-012).
+		return nil, err
+	}
 	var existingSummary *EntrySummary
-	if _, statErr := os.Stat(cfgPath); statErr == nil {
-		raw, rerr := s.read(cfgPath)
-		if rerr != nil {
-			if classifyAccess(rerr) == accessDenied {
-				// A denial must surface the actionable remediation, never a
-				// misleading "no changes" preview (Spec 078 FR-012).
-				return nil, s.newAccessError(client, cfgPath, rerr)
-			}
-			accessState = classifyAccess(rerr)
-		} else {
-			existing, parsedOK := s.resolveExistingEntry(*client, raw, serverName)
-			if parsedOK {
-				accessState = accessAccessible
-				entryExists = existing != nil
-				if existing != nil {
-					// Sanitized projections only — never the entry itself
-					// (Spec 091 FR-003).
-					existingSummary = buildEntrySummary(existing.name, existing.entry)
-				}
-			} else {
-				// Unparseable config: the preview cannot claim "create" or
-				// "overwrite" honestly; report malformed and let the UI degrade.
-				accessState = accessMalformed
-			}
-		}
+	if existing != nil {
+		// Sanitized projections only — never the entry itself (Spec 091 FR-003).
+		existingSummary = buildEntrySummary(existing.name, existing.entry)
 	}
 
 	// Build the entry from the SAME constructor the write uses, with the
@@ -118,12 +108,47 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		ServerName:           serverName,
 		Entry:                maskedEntry,
 		EntryText:            entryText,
-		EntryExists:          entryExists,
+		EntryExists:          existing != nil,
 		ContainsAPIKey:       s.containsCredential(),
 		Bridge:               client.Bridge,
 		AccessState:          accessState,
 		ExistingEntrySummary: existingSummary,
+		// The token binds THIS preview to the state it just described, over the
+		// unmasked pending entry the write would produce (Spec 091 FR-005).
+		PreconditionToken: s.preconditionToken(cfgPath, fileExists, existing,
+			buildServerEntry(clientID, s.entryParams(false))),
 	}, nil
+}
+
+// preWriteState resolves the raw pre-write state shared by the preview and the
+// write's precondition check: whether the config file exists, which entry the
+// write would actually replace (adoption-aware, nil when none), and the Spec 075
+// access classification. Both callers must derive the token from the SAME
+// resolution — that is the whole point of the guarantee — so the lookup lives
+// here rather than being duplicated.
+//
+// A permission denial is returned as the typed *AccessError (403 + remediation);
+// an unreadable-but-not-denied or unparseable config yields the corresponding
+// access state with no resolved entry.
+func (s *Service) preWriteState(client *ClientDef, cfgPath, serverName string) (fileExists bool, existing *existingEntry, accessState string, err error) {
+	if _, statErr := os.Stat(cfgPath); statErr != nil {
+		return false, nil, accessAbsent, nil
+	}
+	raw, rerr := s.read(cfgPath)
+	if rerr != nil {
+		state := classifyAccess(rerr)
+		if state == accessDenied {
+			return true, nil, state, s.newAccessError(client, cfgPath, rerr)
+		}
+		return true, nil, state, nil
+	}
+	resolved, parsedOK := s.resolveExistingEntry(*client, raw, serverName)
+	if !parsedOK {
+		// Unparseable config: the preview cannot claim "create" or "overwrite"
+		// honestly; report malformed and let the UI degrade.
+		return true, nil, accessMalformed, nil
+	}
+	return true, resolved, accessAccessible, nil
 }
 
 // existingEntry is the entry a write would actually replace: the key it lives
