@@ -8,8 +8,9 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 
 1. Seed client configs in a scratch HOME (or point the core's client registry
    paths at scratch copies): one client with an mcpproxy entry (connected),
-   one with a config but no entry, one with no config file, one with a
-   deliberately malformed config (invalid JSON).
+   one with a config but no entry, one CREATE-CAPABLE client with no config
+   file (e.g. Cursor), one non-create-capable client with no config file
+   (OpenCode), and one with a deliberately malformed config (invalid JSON).
 2. Start the core; start the app connected over the local socket.
 
 ## Checks
@@ -26,8 +27,9 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 | 7 | Credential notice | shown when entry embeds the admin credential | `06-credential.png` |
 | 8 | Connect + refresh | row flips to connected without reopening | `07-connected.png` |
 | 9 | Undo (session) | Undo visible after connect; restores config byte-exact (diff the file); gone after form reopen | `08-undo.png` |
-| 9b | Undo (created file) | for the no-config client: connect creates the file, Undo removes it (verify file absent afterwards) | `08b-undo-create.png` |
-| 9c | Conflict precondition | edit the entry externally between preview and Connect: core rejects with conflict, form re-previews | `08c-conflict.png` |
+| 9b | Undo (created file) | for the create-capable no-config client: connect creates the file, Undo removes it (verify file absent afterwards) | `08b-undo-create.png` |
+| 9c | Conflict precondition | between preview and Connect, externally change ONLY a masked credential value inside the existing entry: core rejects with conflict (token detects what sanitization hides), form re-previews | `08c-conflict.png` |
+| 9d | Non-create-capable absent | OpenCode with no config: Connect unavailable, core refusal shown verbatim | `08d-opencode.png` |
 | 10 | Disconnect | confirmation names file + entry; entry removed after | `09-disconnect.png` |
 | 11 | Malformed config | "config unreadable" state, Connect disabled | `10-malformed.png` |
 | 12 | Core down | waiting state; auto-populates when core starts (≤ 2 s poll) | `11-waiting.png` |
