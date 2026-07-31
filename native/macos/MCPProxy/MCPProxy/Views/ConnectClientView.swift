@@ -171,6 +171,7 @@ struct ConnectClientView: View {
             List(model.rows, selection: $selectedID) { row in
                 rowView(row)
                     .tag(row.clientId)
+                    .modifier(RowSelectability(isSelectable: row.isSelectable))
                     .accessibilityIdentifier(ConnectClientAccessibility.row(row.clientId))
             }
             .accessibilityIdentifier(ConnectClientAccessibility.list)
@@ -190,6 +191,26 @@ struct ConnectClientView: View {
                 }
                 guard let newValue, newValue != model.selection else { return }
                 Task { await model.select(newValue) }
+            }
+        }
+    }
+
+    /// Tells the List which rows are not selectable, so keyboard navigation
+    /// SKIPS them instead of landing on one and being bounced back by the
+    /// snap-back guard — which, on an arrow-key walk, makes every supported row
+    /// below an unsupported one unreachable (the mouse can jump past it; the
+    /// arrows cannot).
+    ///
+    /// `selectionDisabled` is macOS 14+. On macOS 13 the model-side guard stays
+    /// the only backstop: a click still moves the highlight and snaps back.
+    private struct RowSelectability: ViewModifier {
+        let isSelectable: Bool
+
+        func body(content: Content) -> some View {
+            if #available(macOS 14.0, *) {
+                content.selectionDisabled(!isSelectable)
+            } else {
+                content
             }
         }
     }
