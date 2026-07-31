@@ -544,7 +544,8 @@ final class ConnectClientModelTests: XCTestCase {
         await model.select("claude-code")
         XCTAssertEqual(model.rows.first?.stateLabel, "Connected as \"mcpproxy\"")
 
-        await model.performDisconnect()
+        model.requestDisconnect()
+        await model.confirmDisconnect()
 
         XCTAssertEqual(source.disconnectCalls, ["claude-code"])
         XCTAssertEqual(source.clientsCallCount, 1)
@@ -568,6 +569,230 @@ final class ConnectClientModelTests: XCTestCase {
         XCTAssertEqual(recorder.rowSnapshots.first?.isEmpty, true,
                        "an unreachable core renders no rows")
         XCTAssertEqual(model.rows.count, 1)
+    }
+
+    // MARK: - US3: session-scoped undo (T022)
+
+    /// FR-006: undo exists for a connect performed in THIS open form, and for
+    /// nothing else — not for a freshly opened form over an already connected
+    /// client, whose backup identity this session never saw.
+    func testUndoIsNotOfferedBeforeAConnect() async {
+        let source = FakeConnectSource()
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-code", connected: true, serverName: "mcpproxy"))]
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+
+        XCTAssertFalse(model.undoControlExists,
+                       "a connect this session did not perform has no undo")
+        await model.undo()
+        XCTAssertTrue(source.undoCalls.isEmpty)
+    }
+
+    /// The undo carries the backup identity of exactly that connect — and the
+    /// core wants the BARE FILENAME, so a full path must not be sent (it is a
+    /// 400 by contract).
+    func testUndoCarriesTheBackupIdentityOfThatConnectAsABareFilename() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.success(FakeConnectSource.result(
+            action: "updated",
+            backupPath: "/Users/x/.claude.json.20260731-120000.bak"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+        XCTAssertTrue(model.undoControlExists)
+        await model.undo()
+
+        XCTAssertEqual(source.undoCalls.count, 1)
+        XCTAssertEqual(source.undoCalls.first?.clientId, "claude-code")
+        XCTAssertEqual(source.undoCalls.first?.backupName,
+                       ".claude.json.20260731-120000.bak",
+                       "the core rejects a path; only the bare backup filename is valid")
+    }
+
+    /// The created-file case: no backup exists, so no identity is sent and the
+    /// core removes the file the connect created.
+    func testUndoAfterACreateSendsNoBackupIdentity() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.success(FakeConnectSource.result(action: "created"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+        await model.undo()
+
+        XCTAssertEqual(source.undoCalls.count, 1)
+        XCTAssertNil(source.undoCalls.first?.backupName,
+                     "an empty identity must be absent, not an empty string")
+    }
+
+    func testUndoDisappearsOnceUsed() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+        await model.select("claude-code")
+        await model.connect()
+        XCTAssertTrue(model.undoControlExists)
+
+        await model.undo()
+
+        XCTAssertFalse(model.undoControlExists)
+        await model.undo()
+        XCTAssertEqual(source.undoCalls.count, 1, "a used undo cannot be replayed")
+    }
+
+    /// FR-006: closing the form ends the undo's scope; the core keeps no
+    /// cross-session undo state, so offering it after a reopen would lie.
+    func testUndoDisappearsWhenTheFormCloses() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+        await model.select("claude-code")
+        await model.connect()
+        XCTAssertTrue(model.undoControlExists)
+
+        model.formWillClose()
+
+        XCTAssertFalse(model.undoControlExists)
+        await model.undo()
+        XCTAssertTrue(source.undoCalls.isEmpty)
+    }
+
+    func testAFailedConnectOffersNoUndo() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.failure(
+            APIClientError.httpError(statusCode: 400, message: "config is not writable"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        XCTAssertFalse(model.undoControlExists, "nothing was written, nothing to undo")
+    }
+
+    /// The undo belongs to the client it was performed on: browsing to another
+    /// client hides it, and coming back shows it again.
+    func testUndoIsScopedToTheClientItWasPerformedOn() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+        await model.select("claude-code")
+        await model.connect()
+        XCTAssertTrue(model.undoControlExists)
+
+        await model.select("cursor")
+        XCTAssertFalse(model.undoControlExists)
+
+        await model.select("claude-code")
+        XCTAssertTrue(model.undoControlExists)
+    }
+
+    /// Off-socket the undo is visible but disabled, like every mutating control.
+    func testOffSocketUndoSendsNothing() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+        await model.select("claude-code")
+        await model.connect()
+        source.transportKind = .tcp
+
+        await model.undo()
+
+        XCTAssertTrue(source.undoCalls.isEmpty)
+        XCTAssertFalse(model.isUndoEnabled)
+    }
+
+    // MARK: - US3: disconnect confirmation (T022)
+
+    /// US3 scenario 3 / FR-006: the confirmation names the config file and the
+    /// entry, and NOTHING is sent until it is confirmed.
+    func testDisconnectAsksForAConfirmationNamingTheFileAndEntryBeforeSendingAnything() async {
+        let source = FakeConnectSource()
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-code", connected: true, serverName: "my-proxy"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        model.requestDisconnect()
+
+        let confirmation = try? XCTUnwrap(model.pendingDisconnect)
+        XCTAssertEqual(confirmation?.clientId, "claude-code")
+        XCTAssertEqual(confirmation?.entryName, "my-proxy")
+        XCTAssertEqual(confirmation?.configPath, "/Users/x/.claude-code/config.json")
+        XCTAssertTrue(confirmation?.message.contains("my-proxy") ?? false,
+                      "the confirmation must name the entry: \(confirmation?.message ?? "")")
+        XCTAssertTrue(confirmation?.message.contains("/Users/x/.claude-code/config.json") ?? false,
+                      "the confirmation must name the file: \(confirmation?.message ?? "")")
+        XCTAssertTrue(source.disconnectCalls.isEmpty, "asking must not remove anything")
+
+        await model.confirmDisconnect()
+
+        XCTAssertEqual(source.disconnectCalls, ["claude-code"])
+        XCTAssertNil(model.pendingDisconnect)
+    }
+
+    func testCancellingTheDisconnectConfirmationSendsNothing() async {
+        let source = FakeConnectSource()
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-code", connected: true, serverName: "mcpproxy"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        model.requestDisconnect()
+        model.cancelDisconnect()
+        await model.confirmDisconnect()
+
+        XCTAssertNil(model.pendingDisconnect)
+        XCTAssertTrue(source.disconnectCalls.isEmpty)
+    }
+
+    /// A client that is not connected has no entry to remove, so the control is
+    /// absent and asking for it does nothing.
+    func testDisconnectIsNotOfferedForAClientThatIsNotConnected() async {
+        let source = FakeConnectSource()
+        source.detailResults = [.success(
+            FakeConnectSource.client(id: "cursor", connected: false))]
+        let model = makeModel(source)
+        await model.select("cursor")
+
+        XCTAssertFalse(model.disconnectControlExists)
+        model.requestDisconnect()
+
+        XCTAssertNil(model.pendingDisconnect)
+    }
+
+    /// Selecting another client abandons a confirmation the user left open, so a
+    /// later confirm cannot remove an entry from the wrong client's config.
+    func testChangingTheSelectionAbandonsAPendingDisconnectConfirmation() async {
+        let source = FakeConnectSource()
+        source.detailResults = [
+            .success(FakeConnectSource.client(id: "claude-code", connected: true,
+                                              serverName: "mcpproxy")),
+            .success(FakeConnectSource.client(id: "cursor", connected: false))
+        ]
+        let model = makeModel(source)
+        await model.select("claude-code")
+        model.requestDisconnect()
+        XCTAssertNotNil(model.pendingDisconnect)
+
+        await model.select("cursor")
+
+        XCTAssertNil(model.pendingDisconnect)
+        await model.confirmDisconnect()
+        XCTAssertTrue(source.disconnectCalls.isEmpty)
+    }
+
+    func testOffSocketDisconnectSendsNothing() async {
+        let source = FakeConnectSource()
+        source.transportKind = .tcp
+        source.detailResults = [.success(FakeConnectSource.client(
+            id: "claude-code", connected: true, serverName: "mcpproxy"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        model.requestDisconnect()
+        await model.confirmDisconnect()
+
+        XCTAssertTrue(source.disconnectCalls.isEmpty)
+        XCTAssertFalse(model.isDisconnectEnabled)
     }
 }
 

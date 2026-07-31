@@ -46,8 +46,8 @@ Swift paths relative to `native/macos/MCPProxy/` (sources `MCPProxy/`, tests `MC
 
 ## Phase 5: User Story 3 — Undo and disconnect safely (P2)
 
-- [ ] T022 [US3] Write failing tests in MCPProxyTests/ConnectClientModelTests.swift: undo appears ONLY after a `.succeeded` connect in this form instance (carrying that connect's backup identity; created-file case = removal), disappears on use and on form close; disconnect requires a confirmation naming config file + entry before the request fires (US3 scenarios)
-- [ ] T023 [US3] Implement session-scoped undo + disconnect confirmation in MCPProxy/Views/ConnectClientModel.swift and ConnectClientView.swift; T022 green
+- [x] T022 [US3] Write failing tests in MCPProxyTests/ConnectClientModelTests.swift: undo appears ONLY after a `.succeeded` connect in this form instance (carrying that connect's backup identity; created-file case = removal), disappears on use and on form close; disconnect requires a confirmation naming config file + entry before the request fires (US3 scenarios)
+- [x] T023 [US3] Implement session-scoped undo + disconnect confirmation in MCPProxy/Views/ConnectClientModel.swift and ConnectClientView.swift; T022 green
 - [ ] T024 [US3] Write failing test: the dashboard's connect action routes into the shared Connect Client presentation path and the legacy preview-less sheet is gone (red: assert against the new routing symbol) in MCPProxyTests/ConnectClientModelTests.swift or a small MCPProxyTests/DashboardRoutingTests.swift
 - [ ] T025 [US3] Route MCPProxy/Views/DashboardView.swift (~line 1275 legacy connect sheet) into the new form's presentation path, deleting the preview-less flow (FR-012); T024 and full `swift test` green
 

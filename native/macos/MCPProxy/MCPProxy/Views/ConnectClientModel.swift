@@ -163,6 +163,34 @@ final class ConnectClientModel: ObservableObject {
         case failed(String)
     }
 
+    /// The reversibility of the connect performed in THIS form instance.
+    ///
+    /// The core keeps no cross-session undo state — undo depends on the backup
+    /// identity a connect returned — so this is deliberately session-scoped
+    /// (FR-006).
+    enum UndoState: Equatable {
+        case unavailable
+        /// `backupName` nil means the connect CREATED the file, and undo removes
+        /// it; otherwise it is the bare filename of the backup to restore.
+        case available(clientId: String, entryName: String, backupName: String?)
+    }
+
+    /// A disconnect the user asked for and has not yet confirmed. Nothing is
+    /// sent while this is pending: the confirmation names the file and the entry
+    /// first (FR-006, US3 scenario 3).
+    struct DisconnectConfirmation: Equatable {
+        let clientId: String
+        let configPath: String
+        let entryName: String
+
+        /// The disclosure itself: there is no diff endpoint for a disconnect, so
+        /// naming the file and the entry is the defined and sufficient warning.
+        var message: String {
+            "Remove the \"\(entryName)\" entry from \(configPath)? "
+                + "The client stops seeing MCPProxy until you connect it again."
+        }
+    }
+
     /// One rendered client row (US2).
     ///
     /// Its label is the cheap truth from the existence-only aggregate until the
@@ -190,6 +218,9 @@ final class ConnectClientModel: ObservableObject {
     @Published private(set) var detail: DetailState = .idle
     @Published private(set) var preview: PreviewState = .idle
     @Published private(set) var action: ActionState = .idle
+
+    @Published private(set) var undoState: UndoState = .unavailable
+    @Published private(set) var pendingDisconnect: DisconnectConfirmation?
 
     /// Authoritative per-client state, keyed by client id, as resolved by the
     /// explicit detail reads. Only clients the user actually selected appear
@@ -255,6 +286,9 @@ final class ConnectClientModel: ObservableObject {
         selection = clientId
         entryName = ConnectPreviewModel.defaultServerName
         invalidatePreview()
+        // A confirmation the user walked away from must never survive into
+        // another client's config.
+        pendingDisconnect = nil
         detail = .idle
         await refreshDetail()
         await refreshPreview()
@@ -429,6 +463,12 @@ final class ConnectClientModel: ObservableObject {
                 preconditionToken: preview.preconditionToken
             )
             action = .succeeded(result)
+            // FR-006: undo becomes available for exactly this connect, carrying
+            // the identity it returned — no identity means it created the file.
+            undoState = .available(
+                clientId: clientId,
+                entryName: entryName,
+                backupName: Self.backupIdentity(from: result.backupPath))
             // The form shows the refreshed state without being reopened.
             await refreshAffectedClient()
         } catch let error as APIClientError {
@@ -455,6 +495,56 @@ final class ConnectClientModel: ObservableObject {
     /// The core's discriminator for "the state you previewed has changed".
     static let preconditionFailedAction = "precondition_failed"
 
+    // MARK: - Undo (session-scoped)
+
+    /// FR-006: the undo affordance exists only for a connect performed in this
+    /// open form, and only while its client is the one on screen.
+    var undoControlExists: Bool {
+        guard case .available(let clientId, _, _) = undoState else { return false }
+        return clientId == selection
+    }
+
+    var isUndoEnabled: Bool {
+        undoControlExists && mutatingDisabledReason == nil && !isBusy
+    }
+
+    /// Reverse the connect performed in this form: restore its backup, or — when
+    /// it created the file — remove that file. The affordance disappears once
+    /// used; there is no second undo to give.
+    func undo() async {
+        guard case .available(let clientId, let entry, let backupName) = undoState,
+              isUndoEnabled
+        else { return }
+
+        action = .inFlight
+        do {
+            let result = try await source.undoConnect(
+                clientId, serverName: entry, backupName: backupName)
+            undoState = .unavailable
+            action = .succeeded(result)
+            await refreshAffectedClient()
+        } catch {
+            // The connect stands, so the affordance stands: the user can retry.
+            action = .failed(Self.message(for: error))
+        }
+    }
+
+    /// The core takes the BARE FILENAME of the backup (a path is a 400), while
+    /// the connect result reports the full path — so the identity is reduced
+    /// here, once, rather than at each call site.
+    private static func backupIdentity(from backupPath: String?) -> String? {
+        guard let backupPath, !backupPath.isEmpty else { return nil }
+        let name = (backupPath as NSString).lastPathComponent
+        return name.isEmpty ? nil : name
+    }
+
+    /// Called when the form closes: the undo's scope ends with it, and an
+    /// unanswered confirmation is abandoned rather than remembered.
+    func formWillClose() {
+        undoState = .unavailable
+        pendingDisconnect = nil
+    }
+
     // MARK: - Disconnect
 
     /// The entry this client is currently registered under, when it is
@@ -474,23 +564,49 @@ final class ConnectClientModel: ObservableObject {
         disconnectControlExists && mutatingDisabledReason == nil && !isBusy
     }
 
-    /// Send the disconnect for the selected client and refresh only that client
-    /// (US2 scenario 3). The confirmation that must precede it lives in T023's
-    /// `requestDisconnect` / `confirmDisconnect` pair.
-    func performDisconnect() async {
+    /// Ask for the disconnect. This only raises the confirmation — the request
+    /// is sent by `confirmDisconnect`, so there is no code path from the button
+    /// to the write that skips the disclosure (FR-006).
+    func requestDisconnect() {
         guard let clientId = selection,
               let entry = connectedEntryName,
               isDisconnectEnabled
         else { return }
 
+        pendingDisconnect = DisconnectConfirmation(
+            clientId: clientId,
+            configPath: disconnectConfigPath(for: clientId),
+            entryName: entry)
+    }
+
+    func cancelDisconnect() {
+        pendingDisconnect = nil
+    }
+
+    /// Send the confirmed disconnect and refresh only that client (US2 sc. 3).
+    func confirmDisconnect() async {
+        guard let confirmation = pendingDisconnect else { return }
+        pendingDisconnect = nil
+        guard selection == confirmation.clientId, isDisconnectEnabled else { return }
+
         action = .inFlight
         do {
-            let result = try await source.disconnect(clientId, serverName: entry)
+            let result = try await source.disconnect(
+                confirmation.clientId, serverName: confirmation.entryName)
             action = .succeeded(result)
             await refreshAffectedClient()
         } catch {
             action = .failed(Self.message(for: error))
         }
+    }
+
+    /// The file the confirmation names: the core's own path for this client,
+    /// never one the tray composed itself.
+    private func disconnectConfigPath(for clientId: String) -> String {
+        if let resolved = resolvedDetails[clientId], !resolved.configPath.isEmpty {
+            return resolved.configPath
+        }
+        return currentPreview?.configPath ?? ""
     }
 
     /// After a completed action, re-read ONLY the affected client and re-run its

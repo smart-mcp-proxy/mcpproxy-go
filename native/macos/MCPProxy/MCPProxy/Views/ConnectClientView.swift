@@ -58,6 +58,9 @@ enum ConnectClientAccessibility {
     static let entryNameField = "connect-client-entry-name"
     static let advancedDisclosure = "connect-client-advanced"
     static let connectButton = "connect-client-connect"
+    static let undoButton = "connect-client-undo"
+    static let disconnectButton = "connect-client-disconnect"
+    static let disconnectConfirm = "connect-client-disconnect-confirm"
     static let closeButton = "connect-client-close"
     static let status = "connect-client-status"
     static let waiting = "connect-client-waiting"
@@ -70,7 +73,8 @@ enum ConnectClientAccessibility {
     static let allIdentifiers: [String] = [
         list, preview, entryText, configPath, existingSummary, safetyNet,
         credentialNotice, refusal, entryNameField, advancedDisclosure,
-        connectButton, closeButton, status, waiting, transportNotice
+        connectButton, undoButton, disconnectButton, disconnectConfirm,
+        closeButton, status, waiting, transportNotice
     ]
 }
 
@@ -105,6 +109,23 @@ struct ConnectClientView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .task { await model.loadList() }
+        .alert("Disconnect this client?", isPresented: disconnectConfirmationIsPresented,
+               presenting: model.pendingDisconnect) { _ in
+            Button("Cancel", role: .cancel) { model.cancelDisconnect() }
+            Button("Disconnect", role: .destructive) {
+                Task { await model.confirmDisconnect() }
+            }
+            .accessibilityIdentifier(ConnectClientAccessibility.disconnectConfirm)
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
+    }
+
+    /// Presentation is driven by the model's pending confirmation. The setter is
+    /// deliberately inert: both buttons resolve the state themselves, and having
+    /// dismissal clear it would race the confirm action into a no-op.
+    private var disconnectConfirmationIsPresented: Binding<Bool> {
+        Binding(get: { model.pendingDisconnect != nil }, set: { _ in })
     }
 
     // MARK: Header
@@ -374,7 +395,25 @@ struct ConnectClientView: View {
                     .accessibilityIdentifier(ConnectClientAccessibility.transportNotice)
             }
             Spacer()
-            Button("Close") { onClose() }
+            if model.undoControlExists {
+                Button("Undo") {
+                    Task { await model.undo() }
+                }
+                .disabled(!model.isUndoEnabled)
+                .accessibilityIdentifier(ConnectClientAccessibility.undoButton)
+            }
+            if model.disconnectControlExists {
+                Button("Disconnect…") {
+                    model.requestDisconnect()
+                }
+                .disabled(!model.isDisconnectEnabled)
+                .accessibilityIdentifier(ConnectClientAccessibility.disconnectButton)
+            }
+            Button("Close") {
+                // The undo's scope ends with the form (FR-006).
+                model.formWillClose()
+                onClose()
+            }
                 .keyboardShortcut(.cancelAction)
                 .accessibilityIdentifier(ConnectClientAccessibility.closeButton)
             if model.connectControlExists {
