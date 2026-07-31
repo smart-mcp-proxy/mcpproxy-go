@@ -27,6 +27,21 @@ type ConnectRequest struct {
 	PreconditionToken string `json:"precondition_token,omitempty"`
 }
 
+// ConnectConflictResponse is the 409 body of POST /api/v1/connect/{client}.
+//
+// It is a typed response rather than the generic error shape because Action is
+// the machine-readable discriminator the contract depends on: "already_exists"
+// means "an entry is there, pass force", "precondition_failed" means "your
+// preview is stale, re-preview". A client that cannot tell them apart either
+// loops forever or forces a write over state the user never saw (research D9),
+// so the field must be visible in the OpenAPI document, not only in prose.
+type ConnectConflictResponse struct {
+	Success bool                  `json:"success"` // Always false
+	Data    connect.ConnectResult `json:"data"`    // The full result; its action mirrors the top-level one
+	Error   string                `json:"error"`   // Human-readable message
+	Action  string                `json:"action"`  // already_exists | precondition_failed
+}
+
 // handleGetConnectStatus godoc
 // @Summary     List client connection status
 // @Description Returns the connection status for all known MCP client applications.
@@ -169,7 +184,7 @@ func (s *Server) handleConnectClientPreview(w http.ResponseWriter, r *http.Reque
 // @Failure     400    {object} contracts.ErrorResponse "Bad request"
 // @Failure     403    {object} contracts.ErrorResponse "Permission denied (macOS App-Data block)"
 // @Failure     404    {object} contracts.ErrorResponse "Unknown client"
-// @Failure     409    {object} contracts.ErrorResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview)"
+// @Failure     409    {object} ConnectConflictResponse "Conflict: action=already_exists (use force=true) or action=precondition_failed (preview is stale; re-preview)"
 // @Failure     503    {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/connect/{client} [post]
 func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
@@ -214,11 +229,11 @@ func (s *Server) handleConnectClient(w http.ResponseWriter, r *http.Request) {
 	// preview is stale, re-preview" (contracts §2). Conflating them would make a
 	// replace flow either loop or force a write over unseen state.
 	if !result.Success && (result.Action == "already_exists" || result.Action == "precondition_failed") {
-		s.writeJSON(w, http.StatusConflict, map[string]interface{}{
-			"success": false,
-			"data":    result,
-			"error":   result.Message,
-			"action":  result.Action,
+		s.writeJSON(w, http.StatusConflict, ConnectConflictResponse{
+			Success: false,
+			Data:    *result,
+			Error:   result.Message,
+			Action:  result.Action,
 		})
 		return
 	}

@@ -1068,6 +1068,25 @@ components:
           description: '"already_exists", "filtered_out", "invalid_name"'
           type: string
       type: object
+    connect.ConnectResult:
+      description: The full result; its action mirrors the top-level one
+      properties:
+        action:
+          description: '"created", "updated", "already_exists", "removed", "not_found"'
+          type: string
+        backup_path:
+          type: string
+        client:
+          type: string
+        config_path:
+          type: string
+        message:
+          type: string
+        server_name:
+          type: string
+        success:
+          type: boolean
+      type: object
     contracts.APIResponse:
       allOf:
       - $ref: '#/components/schemas/data'
@@ -2660,6 +2679,20 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.ConnectConflictResponse:
+      properties:
+        action:
+          description: already_exists | precondition_failed
+          type: string
+        data:
+          $ref: '#/components/schemas/connect.ConnectResult'
+        error:
+          description: Human-readable message
+          type: string
+        success:
+          description: Always false
+          type: boolean
+      type: object
     httpapi.ConnectRequest:
       properties:
         force:
@@ -3891,7 +3924,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.ErrorResponse'
+                $ref: '#/components/schemas/httpapi.ConnectConflictResponse'
           description: 'Conflict: action=already_exists (use force=true) or action=precondition_failed
             (preview is stale; re-preview)'
         "503":
