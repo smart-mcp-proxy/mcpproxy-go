@@ -230,6 +230,21 @@ final class GlanceSection {
         guard runs.count == activityRows.count,
               clients.count == clientRows.count else { return false }
 
+        // Preflight, before a single write: a row that gains or loses its
+        // reason gains or loses a LINE, which resizes the menu just as surely as
+        // adding a row does — so it is structural and waits for close (FR-023).
+        //
+        // It is a separate pass on purpose. Deciding per row inside the write
+        // loop would refuse only after having already rewritten the summary and
+        // every earlier row, which is a half-updated menu on screen: the exact
+        // outcome deferring exists to avoid. Presence is what matters, not text
+        // — a reason whose wording changed still occupies one line and is an
+        // ordinary in-place rewrite.
+        for (index, run) in zip(activityRows.indices, runs)
+        where (subtitleText(for: run.displayReason) == nil) != (activityRows[index].subtitleText == nil) {
+            return false
+        }
+
         let summary = summaryTitle(for: state)
         if summaryItem?.title != summary { summaryItem?.title = summary }
         // `zip`, like the sibling loop below: indexing `entries` by

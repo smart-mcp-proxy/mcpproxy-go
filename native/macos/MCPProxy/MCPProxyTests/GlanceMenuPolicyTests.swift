@@ -87,6 +87,86 @@ final class GlanceMenuPolicyTests: XCTestCase {
         XCTAssertTrue(guardState.menuDidClose(), "the suppressed rebuild is owed on close")
     }
 
+    // MARK: - Line counts are structural, and the check is atomic (spec 090 FR-023)
+
+    /// A reason appearing on a row that had none turns a one-line row into a
+    /// two-line one. That resizes the menu under the cursor, so it is structural
+    /// and must wait for close, exactly like a row-count change.
+    ///
+    /// The row that changes is deliberately the LAST one: the check has to be a
+    /// preflight over every row, not a per-row bail-out. A loop that refused
+    /// mid-way would already have rewritten the summary and the earlier rows,
+    /// leaving a half-updated menu on screen — the very thing deferring exists
+    /// to prevent.
+    func testALaterRowsLineCountChangeIsRefusedWithoutTouchingEarlierRows() {
+        let state = GlanceFixtures.connectedState()
+        let section = makeSection()
+        section.supportsRowSubtitles = true
+        let rows = section.items(for: state, now: GlanceFixtures.now)
+
+        let summaryBefore = rows[0].title
+        let firstRowBefore = rows[3].title
+        XCTAssertEqual(firstRowBefore, "github:create_issue — 30s")
+
+        // Only the SECOND row changes shape; the first row's own text would
+        // still move, because `later` is five minutes on.
+        state.callsThisHour = 99
+        state.glanceActivity[1] = GlanceFixtures.entry(
+            id: "b", server: "jira", tool: "get_issue",
+            timestamp: "2027-01-15T07:58:00Z", session: nil,
+            reason: "Verify the failed transition did not change the ticket")
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Self.later),
+                       "a row gaining a second line resizes the menu — that waits for close")
+        XCTAssertEqual(rows[0].title, summaryBefore,
+                       "the summary is written before the rows; a refusal must not leave it ahead of them")
+        XCTAssertEqual(rows[3].title, firstRowBefore,
+                       "an earlier row must not be rewritten by an update that then refuses")
+        XCTAssertEqual(rows[4].title, "jira:get_issue — 2m")
+    }
+
+    /// The mirror case: a reason disappearing shrinks the row, and is refused
+    /// the same way.
+    func testARowLosingItsReasonIsAlsoStructural() {
+        let state = GlanceFixtures.connectedState()
+        state.glanceActivity[0] = GlanceFixtures.entry(
+            id: "a", server: "github", tool: "create_issue",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-a",
+            reason: "Open the follow-up ticket")
+        let section = makeSection()
+        section.supportsRowSubtitles = true
+        let rows = section.items(for: state, now: GlanceFixtures.now)
+
+        state.glanceActivity[0] = GlanceFixtures.entry(
+            id: "a", server: "github", tool: "create_issue",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-a")
+
+        XCTAssertFalse(section.updateInPlace(for: state, now: Self.later))
+        XCTAssertEqual(rows[3].title, "github:create_issue — 30s",
+                       "the refused update must leave the row exactly as it was")
+    }
+
+    /// …and the guard must not freeze the menu: a reason whose TEXT changes
+    /// keeps the same line count, so it is an ordinary in-place rewrite.
+    func testAChangedReasonOnATwoLineRowStillUpdatesInPlace() {
+        let state = GlanceFixtures.connectedState()
+        state.glanceActivity[0] = GlanceFixtures.entry(
+            id: "a", server: "github", tool: "create_issue",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-a",
+            reason: "Open the follow-up ticket")
+        let section = makeSection()
+        section.supportsRowSubtitles = true
+        let rows = section.items(for: state, now: GlanceFixtures.now)
+
+        state.glanceActivity[0] = GlanceFixtures.entry(
+            id: "a", server: "github", tool: "create_issue",
+            timestamp: "2027-01-15T07:59:30Z", session: "sess-a",
+            reason: "Open the follow-up ticket for the reporter")
+
+        XCTAssertTrue(section.updateInPlace(for: state, now: Self.later))
+        XCTAssertEqual(rows[3].title, "github:create_issue — 5m")
+    }
+
     /// The core going away is structural too — the whole block disappears — so
     /// it must not happen under the cursor either.
     func testCoreDisconnectWhileOpenIsDeferred() {

@@ -39,8 +39,8 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 - [x] T011 [US2] Implement intent extraction in MCPProxy/Menu/Glance/GlanceEvent.swift (research D9, intent part); T010 green
 - [x] T012 [P] [US2] Write failing tests in MCPProxyTests/GlanceSectionTests.swift + GlanceFormattingTests.swift: subtitle set only on macOS 14.4+ (availability injected as a testable flag), 60-char tail truncation, single-line when no reason, FR-011a failed-row template and truncation precedence (error clause 40 tail-truncated before the label's 34 middle-truncation tightens; age never truncated), tooltip carries full label+reason+error, VoiceOver label includes reason
 - [x] T013 [US2] Implement subtitle rendering + budgets + failed-row template in MCPProxy/Menu/Glance/GlanceSection.swift and GlanceFormatting.swift (FR-005–007, FR-011a); T012 green
-- [ ] T014 [P] [US2] Write failing test in MCPProxyTests/GlanceMenuPolicyTests.swift: `updateInPlace` precomputes ALL rows' line counts before mutating; when a LATER row's line count changes, it returns false with ZERO mutations to earlier rows
-- [ ] T015 [US2] Implement the atomic line-count preflight in MCPProxy/Menu/Glance/GlanceSection.swift `updateInPlace` (FR-023, data-model "Atomic preflight"); T014 green
+- [x] T014 [P] [US2] Write failing test in MCPProxyTests/GlanceMenuPolicyTests.swift: `updateInPlace` precomputes ALL rows' line counts before mutating; when a LATER row's line count changes, it returns false with ZERO mutations to earlier rows
+- [x] T015 [US2] Implement the atomic line-count preflight in MCPProxy/Menu/Glance/GlanceSection.swift `updateInPlace` (FR-023, data-model "Atomic preflight"); T014 green
 
 ## Phase 5: User Story 3 — Only failures are marked, and blocked calls appear (P2)
 
