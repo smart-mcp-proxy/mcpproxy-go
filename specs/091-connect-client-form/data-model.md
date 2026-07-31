@@ -83,8 +83,8 @@ Invariants (unit-tested):
   loss fails the request rather than silently riding TCP.
 - `coreUnreachable` polls every 2 s until loaded.
 - Unsupported client rows are disabled with reason; unreadable/denied rows
-  disable Connect with the mapped label ("config unreadable" / "access not
-  granted" + remediation).
+  show the mapped label ("config unreadable" / "access not granted" +
+  remediation); the Connect control is absent.
 
 ### ConnectResult
 

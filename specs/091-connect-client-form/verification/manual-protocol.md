@@ -22,7 +22,7 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 | 2b | No content reads on open | run once against a REAL client location under App-Data TCC (e.g. actual Claude Desktop container): opening the list triggers no TCC prompt; alternatively verify via core logs that zero config-content reads occur on list | `02b-tcc.png` or log excerpt |
 | 3 | SC-001 stopwatch | menu → connected client < 30 s, no browser | note time below |
 | 4 | Preview (add) | entry text + path + timestamped-backup statement, before any Connect control | `03-preview-add.png` |
-| 5 | Preview (replace) | structural summary of the existing entry (name/type/query-stripped endpoint/header+env names — no secret values) AND the replacement both visible; for an adopted equivalent entry the summary names its actual key | `04-preview-replace.png` |
+| 5 | Preview (replace) | structural summary of the existing entry (name/type/query+userinfo-stripped endpoint/header+env names — no secret values) AND the replacement both visible; for an adopted equivalent entry the summary names its actual key | `04-preview-replace.png` |
 | 6 | Preview (create) | "file will be created… Undo removes it" statement | `05-preview-create.png` |
 | 7 | Credential notice | shown when entry embeds the admin credential | `06-credential.png` |
 | 8 | Connect + refresh | row flips to connected without reopening | `07-connected.png` |
@@ -31,7 +31,7 @@ Run on the built app (`scripts/build-swift-app.sh`) against a dev core
 | 9c | Conflict precondition | between preview and Connect, externally change ONLY a masked credential value inside the existing entry: core rejects with conflict (token detects what sanitization hides), form re-previews | `08c-conflict.png` |
 | 9d | Non-create-capable absent | OpenCode with no config: Connect unavailable, core refusal shown verbatim | `08d-opencode.png` |
 | 10 | Disconnect | confirmation names file + entry; entry removed after | `09-disconnect.png` |
-| 11 | Malformed config | "config unreadable" state, Connect disabled | `10-malformed.png` |
+| 11 | Malformed config | "config unreadable" state, Connect control absent | `10-malformed.png` |
 | 12 | Core down | waiting state; auto-populates when core starts (≤ 2 s poll) | `11-waiting.png` |
 | 13 | Legacy path | dashboard connect control routes into this form (no preview-less native connect remains) | `12-dashboard.png` |
 | 14 | VoiceOver | ⌘F5: list rows, preview text, and buttons announced; identifiers stable | note below |
