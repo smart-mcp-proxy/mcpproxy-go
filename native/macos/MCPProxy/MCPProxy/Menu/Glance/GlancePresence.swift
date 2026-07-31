@@ -22,7 +22,7 @@ import Foundation
 /// Three states, not a boolean: "used it a minute ago", "quiet but recent" and
 /// "was here earlier today" are different enough to act on, and collapsing them
 /// is what made the old section misleading.
-enum ClientPresence: String, Equatable {
+enum ClientPresence: String, Equatable, CaseIterable {
     /// Last activity under 5 minutes ago — working right now.
     case active
     /// 5 to 30 minutes, inclusive at both ends. The upper bound is the session

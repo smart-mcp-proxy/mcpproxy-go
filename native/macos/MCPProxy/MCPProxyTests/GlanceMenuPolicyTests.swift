@@ -62,7 +62,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
         let rows = section.items(for: state, now: GlanceFixtures.now)
 
         let summaryBefore = rows[0].title
-        XCTAssertEqual(summaryBefore, "12 calls this hour · 1 client")
+        XCTAssertEqual(summaryBefore, "12 calls this hour · 1 active")
 
         var guardState = MenuRebuildGuard()
         guardState.menuWillOpen()

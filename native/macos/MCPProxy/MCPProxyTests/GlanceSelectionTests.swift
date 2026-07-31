@@ -146,15 +146,4 @@ final class GlanceSelectionTests: XCTestCase {
         return try! JSONDecoder().decode(ActivityEntry.self, from: data)
     }
 
-    static func session(id: String, status: String, clientName: String = "Claude Code") -> APIClient.MCPSession {
-        let json: [String: Any] = [
-            "id": id,
-            "status": status,
-            "client_name": clientName,
-            "tool_call_count": 3
-        ]
-        let data = try! JSONSerialization.data(withJSONObject: json)
-        // swiftlint:disable:next force_try
-        return try! JSONDecoder().decode(APIClient.MCPSession.self, from: data)
-    }
 }

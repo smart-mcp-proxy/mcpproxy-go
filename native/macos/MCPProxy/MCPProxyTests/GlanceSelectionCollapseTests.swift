@@ -161,23 +161,14 @@ final class GlanceSelectionCollapseTests: XCTestCase {
     }
 
     // MARK: - Clients
-
-    func testActiveClientsFiltersClosedSessionsAndCapsAtFive() {
-        var sessions = [GlanceSelectionTests.session(id: "closed-1", status: "closed")]
-        for i in 0..<7 {
-            sessions.append(GlanceSelectionTests.session(id: "active-\(i)", status: "active"))
-        }
-        sessions.append(GlanceSelectionTests.session(id: "closed-2", status: "closed"))
-
-        let clients = GlanceSelection.activeClients(from: sessions)
-        XCTAssertEqual(clients.map(\.id), ["active-0", "active-1", "active-2", "active-3", "active-4"])
-    }
-
-    func testActiveClientsIsEmptyWhenEverySessionIsClosed() {
-        let sessions = [
-            GlanceSelectionTests.session(id: "a", status: "closed"),
-            GlanceSelectionTests.session(id: "b", status: "closed")
-        ]
-        XCTAssertTrue(GlanceSelection.activeClients(from: sessions).isEmpty)
-    }
+    //
+    // `GlanceSelection.activeClients` — "keep the sessions whose status is
+    // active, cap at five" — is gone, and with it the two tests that pinned it.
+    // Its replacement is not a narrower filter but a different question: a
+    // stateless transport closes a session after 30 minutes of silence, so
+    // "which sessions are open" was never the same as "who is using the proxy",
+    // and filtering on it emptied the section for most of the day. The rules
+    // that answer the new question — presence states, dedupe, ordering, the
+    // 24-hour lookback — live in `GlancePresence` and are pinned by
+    // `GlancePresenceTests`.
 }

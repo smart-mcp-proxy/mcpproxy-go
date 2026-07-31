@@ -152,7 +152,7 @@ final class GlanceSection {
 
         var items: [NSMenuItem] = []
 
-        let summary = disabledItem(titled: summaryTitle(for: state))
+        let summary = disabledItem(titled: summaryTitle(for: state, now: now))
         summaryItem = summary
         items.append(summary)
         items.append(.separator())
@@ -178,13 +178,13 @@ final class GlanceSection {
         items.append(.separator())
 
         items.append(disabledItem(titled: "Clients"))
-        let clients = GlanceSelection.activeClients(from: state.glanceSessions)
+        let clients = GlancePresence.clients(from: state.glanceSessions, now: now)
         if clients.isEmpty {
-            items.append(disabledItem(titled: "No connected clients"))
+            items.append(disabledItem(titled: Self.noClientsTitle))
         } else {
-            for session in clients {
+            for client in clients {
                 let row = actionableItem()
-                apply(session, to: row, now: now)
+                apply(client, to: row, now: now)
                 clientRows.append(row)
                 items.append(row)
             }
@@ -226,7 +226,7 @@ final class GlanceSection {
         guard builtVisible else { return true }
 
         let runs = GlanceSelection.activityRows(from: state.glanceActivity)
-        let clients = GlanceSelection.activeClients(from: state.glanceSessions)
+        let clients = GlancePresence.clients(from: state.glanceSessions, now: now)
         guard runs.count == activityRows.count,
               clients.count == clientRows.count else { return false }
 
@@ -245,7 +245,7 @@ final class GlanceSection {
             return false
         }
 
-        let summary = summaryTitle(for: state)
+        let summary = summaryTitle(for: state, now: now)
         if summaryItem?.title != summary { summaryItem?.title = summary }
         // `zip`, like the sibling loop below: indexing `entries` by
         // `activityRows.indices` reads out of bounds if the count guard above is
@@ -253,7 +253,7 @@ final class GlanceSection {
         for (index, run) in zip(activityRows.indices, runs) {
             apply(run, to: &activityRows[index], now: now)
         }
-        for (row, session) in zip(clientRows, clients) { apply(session, to: row, now: now) }
+        for (row, client) in zip(clientRows, clients) { apply(client, to: row, now: now) }
         return true
     }
 
@@ -471,49 +471,96 @@ final class GlanceSection {
         return tinted
     }
 
-    /// The client-row bullet. Every client row is an *active* session, so this
-    /// glyph is a constant — built once rather than re-tinted per row per poll.
-    private static let connectedDot = symbolImage(named: "circle.fill",
-                                                  tint: .systemGreen,
-                                                  description: "connected")
+    // MARK: Presence iconography
 
-    /// Rewrite a client row so it fully describes `session`.
+    /// Text shown when nothing at all falls inside the presence lookback
+    /// (FR-020). It says *recent*, not *connected*, because that is the claim
+    /// the section can actually stand behind: with a stateless transport there
+    /// is no such thing as a currently-connected client, and the old wording
+    /// announced "nothing is connected" every time the last session timed out.
+    static let noClientsTitle = "No recent clients"
+
+    /// The presence indicator's glyph.
     ///
-    /// Unlike an activity row this needs no `recordKey`: a session id does not
-    /// churn, so a row never comes to stand for a different client without the
-    /// row count changing (which `updateInPlace` already reports as structural).
+    /// Three distinct SHAPES, not one shape in three colours (FR-018): a filled
+    /// dot for a client working now, a half-filled one for a client gone quiet,
+    /// a hollow ring for one last heard from hours ago. Colour repeats the
+    /// distinction rather than carrying it, so the states survive greyscale and
+    /// a red-green deficiency. (data-model.md sketches idle as a *filled grey*
+    /// dot; that separates active from idle by colour alone, which FR-018
+    /// forbids, so the fill differs too.)
+    static func presenceSymbolName(for presence: ClientPresence) -> String {
+        switch presence {
+        case .active: return "circle.fill"
+        case .idle: return "circle.lefthalf.filled"
+        case .seen: return "circle"
+        }
+    }
+
+    static func presenceTint(for presence: ClientPresence) -> NSColor {
+        switch presence {
+        case .active: return .systemGreen
+        case .idle: return .systemGray
+        case .seen: return .tertiaryLabelColor
+        }
+    }
+
+    /// One image per state, built once.
+    ///
+    /// `updateInPlace` runs on nearly every 30s poll, under a menu the user may
+    /// have open; re-tinting a symbol per row per poll would allocate a fresh
+    /// image every time and force a re-layout for a glyph that never changed.
+    private static let presenceDots: [ClientPresence: NSImage] = {
+        var dots: [ClientPresence: NSImage] = [:]
+        for presence in ClientPresence.allCases {
+            dots[presence] = symbolImage(named: presenceSymbolName(for: presence),
+                                         tint: presenceTint(for: presence),
+                                         description: presence.rawValue)
+        }
+        return dots
+    }()
+
+    /// Rewrite a client row so it fully describes `client`.
+    ///
+    /// Unlike an activity row this needs no `recordKey`: rows are ordered by
+    /// activity and a row only comes to stand for a different client when the
+    /// row count changes, which `updateInPlace` already reports as structural.
     /// The write guards are still needed, and for a different reason — cost.
     /// `updateInPlace` runs on nearly every 30s poll for a busy proxy, under a
     /// menu the user may have open, where every write is a re-layout; so only
     /// what actually differs is written.
-    private func apply(_ session: APIClient.MCPSession, to item: NSMenuItem, now: Date) {
-        let name = session.clientName.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown client"
-        let calls = session.toolCallCount ?? 0
+    ///
+    /// The age is shown only once the client has gone quiet (FR-018). On an
+    /// active row it would be noise — "active" already means "within the last
+    /// few minutes" — while on an idle or seen row it is the whole point: "idle
+    /// 20m" is what turns a vanished client into a legible one.
+    private func apply(_ client: ClientPresenceRow, to item: NSMenuItem, now: Date) {
+        let calls = client.session.toolCallCount ?? 0
         let callText = calls == 1 ? "1 call" : "\(calls) calls"
-        let age = session.lastActivity.map { GlanceFormatting.relativeTime($0, now: now) }
+        let age = GlanceFormatting.compactAge(client.age)
 
         let title: String
-        let accessibility: String
-        if let age {
-            title = "\(name) — \(callText) · \(age)"
-            accessibility = "\(name), \(callText), last active \(age) ago"
-        } else {
-            title = "\(name) — \(callText)"
-            accessibility = "\(name), \(callText)"
+        switch client.state {
+        case .active:
+            title = "\(client.name) — \(callText)"
+        case .idle, .seen:
+            title = "\(client.name) — \(callText) · \(client.state.rawValue) \(age)"
         }
+        // Spoken with the state named and the age always included: VoiceOver has
+        // no indicator to read, so what the glyph carries has to be said.
+        let accessibility = "\(client.name), \(callText), \(client.state.rawValue), "
+            + "last active \(age) ago"
 
-        let toolTip: String
-        if let version = session.clientVersion, !version.isEmpty {
-            toolTip = "\(name) \(version)"
-        } else {
-            toolTip = name
-        }
+        let toolTip = client.version.map { "\(client.name) \($0)" } ?? client.name
+        let dot = Self.presenceDots[client.state] ?? nil
 
         if item.title != title { item.title = title }
         if item.accessibilityLabel() != accessibility { item.setAccessibilityLabel(accessibility) }
         if item.toolTip != toolTip { item.toolTip = toolTip }
-        if item.image !== Self.connectedDot { item.image = Self.connectedDot }
-        if (item.representedObject as? String) != session.id { item.representedObject = session.id }
+        if item.image !== dot { item.image = dot }
+        if (item.representedObject as? String) != client.session.id {
+            item.representedObject = client.session.id
+        }
     }
 
     // MARK: Histogram
@@ -559,13 +606,18 @@ final class GlanceSection {
     /// clock every 30 seconds and the block ticks along presenting a previous
     /// core's numbers as live. A frozen menu is a hint that something is wrong;
     /// a ticking one is not.
-    private func summaryTitle(for state: AppState) -> String {
+    ///
+    /// The client segment reports states rather than a total ("2 active · 1
+    /// idle"), and disappears entirely when nobody is either (FR-019). A bare
+    /// count could not distinguish a proxy three agents are hammering from one
+    /// three agents used before lunch, and "0 clients" was the misleading
+    /// headline over a section that had rows in it.
+    private func summaryTitle(for state: AppState, now: Date = Date()) -> String {
         var parts: [String] = []
         if let calls = state.callsThisHour {
             parts.append(calls == 1 ? "1 call this hour" : "\(calls) calls this hour")
         }
-        let clients = GlanceSelection.activeClients(from: state.glanceSessions, limit: Int.max).count
-        parts.append(clients == 1 ? "1 client" : "\(clients) clients")
+        if let clients = state.glanceClientSummary(now: now) { parts.append(clients) }
         if state.glanceStale { parts.append("not updating") }
         return parts.joined(separator: " · ")
     }

@@ -248,12 +248,4 @@ enum GlanceSelection {
         let collapsed = collapseByRequestID(qualified)
         return Array(groupConsecutive(collapsed).prefix(limit))
     }
-
-    /// Sessions currently connected, capped at `limit`, input order preserved.
-    static func activeClients(
-        from sessions: [APIClient.MCPSession],
-        limit: Int = rowLimit
-    ) -> [APIClient.MCPSession] {
-        Array(sessions.filter { $0.status == "active" }.prefix(limit))
-    }
 }

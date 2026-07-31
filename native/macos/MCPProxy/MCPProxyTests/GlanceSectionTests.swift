@@ -29,7 +29,7 @@ final class GlanceSectionTests: XCTestCase {
     func testHeaderShowsCallsThisHourAndClientCount() {
         let section = Self.makeSection()
         let items = section.items(for: Self.busyState(), now: Self.now)
-        XCTAssertEqual(items.first?.title, "12 calls this hour · 1 client")
+        XCTAssertEqual(items.first?.title, "12 calls this hour · 1 active")
         XCTAssertFalse(items[0].isEnabled, "the header is a muted, non-clickable line")
     }
 
@@ -37,7 +37,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.busyState()
         state.callsThisHour = nil
         let section = Self.makeSection()
-        XCTAssertEqual(section.items(for: state, now: Self.now).first?.title, "1 client")
+        XCTAssertEqual(section.items(for: state, now: Self.now).first?.title, "1 active")
     }
 
     /// When the feeds stop arriving the header says so. The block is otherwise
@@ -52,7 +52,7 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
 
         XCTAssertEqual(section.items(for: state, now: Self.now).first?.title,
-                       "12 calls this hour · 1 client · not updating")
+                       "12 calls this hour · 1 active · not updating")
     }
 
     /// …and stops saying so once the feeds recover, without a rebuild: the
@@ -68,7 +68,7 @@ final class GlanceSectionTests: XCTestCase {
         state.clearGlanceFailure(.activity)
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "12 calls this hour · 1 client")
+        XCTAssertEqual(items[0].title, "12 calls this hour · 1 active")
     }
 
     // MARK: - Recent section
@@ -79,7 +79,7 @@ final class GlanceSectionTests: XCTestCase {
             $0.isSeparatorItem ? "—" : $0.title
         }
         XCTAssertEqual(Array(titles.prefix(6)), [
-            "12 calls this hour · 1 client",
+            "12 calls this hour · 1 active",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -382,19 +382,112 @@ final class GlanceSectionTests: XCTestCase {
     func testClientRowCarriesSessionIdentity() {
         let section = Self.makeSection()
         let client = section.items(for: Self.busyState(), now: Self.now)[8]
-        XCTAssertEqual(client.title, "Claude Code — 8 calls · 1m")
+        XCTAssertEqual(client.title, "Claude Code — 8 calls")
         XCTAssertEqual(client.representedObject as? String, "sess-a")
         XCTAssertEqual(client.toolTip, "Claude Code 2.1.0")
-        XCTAssertEqual(client.accessibilityLabel(), "Claude Code, 8 calls, last active 1m ago")
+        XCTAssertEqual(client.accessibilityLabel(),
+                       "Claude Code, 8 calls, active, last active 1m ago")
     }
 
-    func testNoClientsShowsOneMutedRow() {
+    /// FR-020: the placeholder is a statement about the last 24 hours, not about
+    /// this instant — which is the whole fix. It appeared every time the last
+    /// session timed out, saying "nothing is connected" about a proxy three
+    /// clients had used that morning.
+    func testThePlaceholderAppearsOnlyWhenNothingIsInsideTheLookback() {
+        let state = Self.busyState()
+        state.glanceSessions = [
+            Self.session(id: "sess-old", name: "Claude Code", version: "2.1.0",
+                         calls: 8, lastActivity: "2027-01-13T08:00:00Z")
+        ]
+        let section = Self.makeSection()
+
+        let row = section.items(for: state, now: Self.now)[8]
+        XCTAssertEqual(row.title, "No recent clients")
+        XCTAssertFalse(row.isEnabled)
+
+        state.glanceSessions = [
+            Self.session(id: "sess-yesterday", name: "Claude Code", version: "2.1.0",
+                         calls: 8, lastActivity: "2027-01-15T05:00:00Z")
+        ]
+        XCTAssertEqual(section.items(for: state, now: Self.now)[8].title,
+                       "Claude Code — 8 calls · seen 3h",
+                       "a client from three hours ago is a row, not an empty state")
+    }
+
+    func testNoSessionsAtAllShowsThePlaceholder() {
         let state = Self.busyState()
         state.glanceSessions = []
         let section = Self.makeSection()
         let row = section.items(for: state, now: Self.now)[8]
-        XCTAssertEqual(row.title, "No connected clients")
+        XCTAssertEqual(row.title, "No recent clients")
         XCTAssertFalse(row.isEnabled)
+    }
+
+    /// FR-018: each presence state carries its own indicator and, once the
+    /// client has gone quiet, the time since it was last heard from. The
+    /// indicators differ in SHAPE, not only in colour — a greyscale display or a
+    /// red-green deficiency must not collapse three states into one.
+    func testEachPresenceStateGetsItsOwnIndicatorAndAge() {
+        let state = Self.busyState()
+        state.glanceSessions = [
+            Self.session(id: "s-active", name: "Claude Code", version: "2.1.0",
+                         calls: 8, lastActivity: "2027-01-15T07:59:00Z"),
+            Self.session(id: "s-idle", name: "Cursor", version: "1.0.0",
+                         calls: 3, lastActivity: "2027-01-15T07:40:00Z"),
+            Self.session(id: "s-seen", name: "Codex", version: "0.9.0",
+                         calls: 1, lastActivity: "2027-01-15T05:00:00Z")
+        ]
+        let section = Self.makeSection()
+        let rows = Array(section.items(for: state, now: Self.now)[8...10])
+
+        XCTAssertEqual(rows.map(\.title), [
+            "Claude Code — 8 calls",
+            "Cursor — 3 calls · idle 20m",
+            "Codex — 1 call · seen 3h"
+        ])
+        XCTAssertEqual(rows.map { $0.image?.accessibilityDescription },
+                       ["active", "idle", "seen"])
+        XCTAssertEqual(rows.map { $0.accessibilityLabel() }, [
+            "Claude Code, 8 calls, active, last active 1m ago",
+            "Cursor, 3 calls, idle, last active 20m ago",
+            "Codex, 1 call, seen, last active 3h ago"
+        ])
+        XCTAssertEqual(Set(ClientPresence.allCases.map(GlanceSection.presenceSymbolName)).count, 3,
+                       "shape alone must separate the three presence states")
+    }
+
+    /// The rows are ordered by activity, and a client that reconnected several
+    /// times is one row — the section describes clients, not sockets.
+    func testClientRowsAreDedupedAndOrderedByRecency() {
+        let state = Self.busyState()
+        state.glanceSessions = [
+            Self.session(id: "old", name: "Claude Code", version: "2.1.0",
+                         calls: 2, lastActivity: "2027-01-15T07:30:00Z"),
+            Self.session(id: "new", name: "Claude Code", version: "2.1.0",
+                         calls: 9, lastActivity: "2027-01-15T07:59:30Z"),
+            Self.session(id: "cursor", name: "Cursor", version: "1.0.0",
+                         calls: 4, lastActivity: "2027-01-15T07:59:00Z")
+        ]
+        let section = Self.makeSection()
+        let rows = Array(section.items(for: state, now: Self.now)[8...9])
+
+        XCTAssertEqual(rows.map { $0.representedObject as? String }, ["new", "cursor"])
+        XCTAssertEqual(rows.map(\.title), ["Claude Code — 9 calls", "Cursor — 4 calls"])
+    }
+
+    /// FR-019: "seen" clients keep their rows but stay out of the headline, so
+    /// this summary has no client segment at all.
+    func testASeenOnlyFeedLeavesTheSummaryWithoutAClientSegment() {
+        let state = Self.busyState()
+        state.glanceSessions = [
+            Self.session(id: "s-seen", name: "Codex", version: "0.9.0",
+                         calls: 1, lastActivity: "2027-01-15T05:00:00Z")
+        ]
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+
+        XCTAssertEqual(items[0].title, "12 calls this hour")
+        XCTAssertEqual(items[8].title, "Codex — 1 call · seen 3h")
     }
 
     /// The submenu's row is built by its delegate when it opens, so these two
@@ -450,7 +543,7 @@ final class GlanceSectionTests: XCTestCase {
         let items = section.items(for: Self.busyState(), now: Self.now)
         let titles = items.map { $0.isSeparatorItem ? "—" : $0.title }
         XCTAssertEqual(titles, [
-            "12 calls this hour · 1 client",
+            "12 calls this hour · 1 active",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -458,7 +551,7 @@ final class GlanceSectionTests: XCTestCase {
             "Open Activity…",
             "—",
             "Clients",
-            "Claude Code — 8 calls · 1m",
+            "Claude Code — 8 calls",
             "—",
             "Activity (24h)",
             "—"
@@ -483,7 +576,7 @@ final class GlanceSectionTests: XCTestCase {
         state.callsThisHour = 13
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "13 calls this hour · 1 client")
+        XCTAssertEqual(items[0].title, "13 calls this hour · 1 active")
         XCTAssertEqual(row.title, "obsidian:search_notes — 5s")
         XCTAssertEqual(row.representedObject as? String, "sess-c",
                        "the click payload must follow the title, or the row opens the previous record's session")
@@ -520,13 +613,13 @@ final class GlanceSectionTests: XCTestCase {
         state.callsThisHour = 13
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "13 calls this hour · 1 client")
+        XCTAssertEqual(items[0].title, "13 calls this hour · 1 active")
 
         // And it is still updating a cycle later: the freeze was for the rest
         // of the session, not for one tick.
         state.callsThisHour = 14
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[0].title, "14 calls this hour · 1 client")
+        XCTAssertEqual(items[0].title, "14 calls this hour · 1 active")
     }
 
     func testUpdateInPlaceBeforeFirstBuildReportsStructural() {
@@ -625,10 +718,10 @@ final class GlanceSectionTests: XCTestCase {
         observation.invalidate()
 
         XCTAssertTrue(row.image === dotBefore,
-                      "the connected dot is a constant — an identical poll must not allocate a new one")
+                      "the presence dot is a constant per state — an identical poll must not allocate a new one")
         XCTAssertEqual(titleWrites, 0,
                        "an identical poll must not rewrite the title of a row in an open menu")
-        XCTAssertEqual(row.title, "Claude Code — 8 calls · 1m")
+        XCTAssertEqual(row.title, "Claude Code — 8 calls")
     }
 
     /// …and the guards must not freeze the row: the live call count is the whole
@@ -644,8 +737,9 @@ final class GlanceSectionTests: XCTestCase {
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(row.title, "Claude Code — 40 calls · 1m")
-        XCTAssertEqual(row.accessibilityLabel(), "Claude Code, 40 calls, last active 1m ago")
+        XCTAssertEqual(row.title, "Claude Code — 40 calls")
+        XCTAssertEqual(row.accessibilityLabel(),
+                       "Claude Code, 40 calls, active, last active 1m ago")
     }
 
     // MARK: - Only failures are marked (spec 090 US3)

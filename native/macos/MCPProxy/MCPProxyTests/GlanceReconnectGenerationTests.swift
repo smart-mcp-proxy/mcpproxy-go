@@ -40,7 +40,7 @@ final class GlanceReconnectGenerationTests: XCTestCase {
             try reconnectThenAnswer()
             return entries
         }
-        func activeSessions(limit: Int) async throws -> [APIClient.MCPSession] {
+        func recentSessions(limit: Int) async throws -> [APIClient.MCPSession] {
             try reconnectThenAnswer()
             return sessions
         }

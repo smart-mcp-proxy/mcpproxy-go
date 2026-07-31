@@ -383,14 +383,23 @@ actor APIClient {
         return response.sessions
     }
 
-    /// Fetch only currently-active MCP sessions, for the tray glance "Clients" rows.
+    /// Fetch the retained MCP sessions for the tray glance "Clients" rows —
+    /// every one of them, whatever its status (spec 090 FR-016a).
     ///
-    /// The `status` filter is applied server-side during the storage cursor walk,
-    /// before truncation — a client-side filter over a page would miss a session
-    /// that started long ago but is calling tools right now.
-    func activeSessions(limit: Int = 25) async throws -> [MCPSession] {
+    /// This used to ask for `status=active` only, which is the wrong question
+    /// for a stateless transport: a session closes after 30 minutes of silence,
+    /// so the filter emptied the section for most of the day. The tray now
+    /// classifies what comes back by time since last activity
+    /// (`GlancePresence`), and it needs the whole retained page to do it: the
+    /// dedupe (one client, many reconnections) and the summary counts run over
+    /// the response, so a truncated page would understate both.
+    ///
+    /// The server orders by `last_activity` descending BEFORE truncating (spec
+    /// 090 FR-016), so the page is the most recently used sessions rather than
+    /// the most recently started ones.
+    func recentSessions(limit: Int = 100) async throws -> [MCPSession] {
         let response: SessionsResponse = try await fetchWrapped(
-            path: "/api/v1/sessions?status=active&limit=\(limit)"
+            path: "/api/v1/sessions?limit=\(limit)"
         )
         return response.sessions
     }
