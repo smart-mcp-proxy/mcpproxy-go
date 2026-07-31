@@ -78,8 +78,9 @@ final class GlanceSectionTests: XCTestCase {
         let titles = section.items(for: Self.busyState(), now: Self.now).map {
             $0.isSeparatorItem ? "—" : $0.title
         }
-        XCTAssertEqual(Array(titles.prefix(6)), [
+        XCTAssertEqual(Array(titles.prefix(7)), [
             "12 calls this hour · 1 active",
+            "Activity (24h)",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -90,7 +91,7 @@ final class GlanceSectionTests: XCTestCase {
 
     func testActivityRowCarriesFullIdentity() {
         let section = Self.makeSection()
-        let failed = section.items(for: Self.busyState(), now: Self.now)[4]
+        let failed = section.items(for: Self.busyState(), now: Self.now)[5]
         XCTAssertEqual(failed.title, "jira:get_issue · auth failed — 2m")
         XCTAssertEqual(failed.representedObject as? String, "sess-b")
         XCTAssertEqual(failed.image?.accessibilityDescription, "failed")
@@ -102,16 +103,16 @@ final class GlanceSectionTests: XCTestCase {
     func testOpenActivityRowHasNoSessionPayload() {
         let section = Self.makeSection()
         let items = section.items(for: Self.busyState(), now: Self.now)
-        XCTAssertEqual(items[5].title, "Open Activity…")
-        XCTAssertNil(items[5].representedObject)
-        XCTAssertNotNil(items[5].action)
+        XCTAssertEqual(items[6].title, "Open Activity…")
+        XCTAssertNil(items[6].representedObject)
+        XCTAssertNotNil(items[6].action)
     }
 
     func testNoActivityShowsOneMutedRow() {
         let state = Self.busyState()
         state.glanceActivity = []
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
         XCTAssertEqual(row.title, "No tool calls yet")
         XCTAssertFalse(row.isEnabled)
     }
@@ -133,7 +134,7 @@ final class GlanceSectionTests: XCTestCase {
         let titles = section.items(for: state, now: Self.now).map {
             $0.isSeparatorItem ? "—" : $0.title
         }
-        XCTAssertEqual(Array(titles.dropFirst(3).prefix(2)), [
+        XCTAssertEqual(Array(titles.dropFirst(4).prefix(2)), [
             "jira:get_issue ×3 — 30s",
             "github:create_issue — 3m"
         ])
@@ -141,14 +142,14 @@ final class GlanceSectionTests: XCTestCase {
 
     func testTheRowsAgeComesFromTheNewestRecordOfTheRun() {
         let section = Self.makeSection()
-        let row = section.items(for: Self.burstState(), now: Self.now)[3]
+        let row = section.items(for: Self.burstState(), now: Self.now)[4]
         XCTAssertTrue(row.title.hasSuffix("— 30s"),
                       "the run's clock is its newest record, not its oldest")
     }
 
     func testASingleCallRunCarriesNoCountSuffix() {
         let section = Self.makeSection()
-        let row = section.items(for: Self.busyState(), now: Self.now)[3]
+        let row = section.items(for: Self.busyState(), now: Self.now)[4]
         XCTAssertEqual(row.title, "github:create_issue — 30s")
     }
 
@@ -166,7 +167,7 @@ final class GlanceSectionTests: XCTestCase {
                        timestamp: "2027-01-15T07:58:00Z", session: "sess-n3")
         ]
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertEqual(row.title, "jira:get_issue ×3 · auth failed — 30s")
         XCTAssertEqual(row.image?.accessibilityDescription, "failed")
@@ -177,7 +178,7 @@ final class GlanceSectionTests: XCTestCase {
 
     func testTheRepeatCountIsSpokenNotJustDrawn() {
         let section = Self.makeSection()
-        let row = section.items(for: Self.burstState(), now: Self.now)[3]
+        let row = section.items(for: Self.burstState(), now: Self.now)[4]
         XCTAssertEqual(row.accessibilityLabel(),
                        "jira:get_issue, repeated 3 times, succeeded, 30s ago")
     }
@@ -190,7 +191,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.burstState()
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
-        let iconBefore = items[3].image
+        let iconBefore = items[4].image
 
         state.glanceActivity.insert(
             Self.entry(id: "j0", server: "jira", tool: "get_issue",
@@ -198,10 +199,10 @@ final class GlanceSectionTests: XCTestCase {
             at: 0)
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[3].title, "jira:get_issue ×4 — 10s")
-        XCTAssertTrue(items[3].image === iconBefore,
+        XCTAssertEqual(items[4].title, "jira:get_issue ×4 — 10s")
+        XCTAssertTrue(items[4].image === iconBefore,
                       "the same run must keep its icon; only the count and clock moved")
-        XCTAssertEqual(items[3].representedObject as? String, "sess-j0",
+        XCTAssertEqual(items[4].representedObject as? String, "sess-j0",
                        "the click payload follows the run's newest record")
     }
 
@@ -215,7 +216,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.burstState()
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
-        let iconBefore = items[3].image
+        let iconBefore = items[4].image
         XCTAssertNil(iconBefore, "precondition: the successful burst row is unmarked")
 
         state.glanceActivity = [
@@ -227,10 +228,10 @@ final class GlanceSectionTests: XCTestCase {
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[3].title, "obsidian:search_notes ×2 · vault locked — 5s")
-        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed",
+        XCTAssertEqual(items[4].title, "obsidian:search_notes ×2 · vault locked — 5s")
+        XCTAssertEqual(items[4].image?.accessibilityDescription, "failed",
                        "a different run must rewrite the row's entire identity, icon included")
-        XCTAssertEqual(items[3].representedObject as? String, "sess-o1")
+        XCTAssertEqual(items[4].representedObject as? String, "sess-o1")
     }
 
     /// A late status correction on the run's newest record still lands: "same
@@ -246,8 +247,8 @@ final class GlanceSectionTests: XCTestCase {
             timestamp: "2027-01-15T07:59:30Z", session: "sess-j1")
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[3].title, "jira:get_issue ×3 · rate limited — 30s")
-        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed")
+        XCTAssertEqual(items[4].title, "jira:get_issue ×3 · rate limited — 30s")
+        XCTAssertEqual(items[4].image?.accessibilityDescription, "failed")
     }
 
     // MARK: - Reason subtitles (spec 090 US2)
@@ -258,7 +259,7 @@ final class GlanceSectionTests: XCTestCase {
     func testARowWithAReasonRendersItAsTheSubtitle() {
         let state = Self.reasonState()
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertEqual(row.title, "jira:get_issue — 30s", "the reason never joins the title line")
         XCTAssertEqual(Self.subtitle(of: row), "Verify the ticket is still open")
@@ -270,7 +271,7 @@ final class GlanceSectionTests: XCTestCase {
         let long = "Handoff: move the ticket to review per the user's request and notify the reporter"
         let state = Self.reasonState(reason: long)
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         let subtitle = Self.subtitle(of: row)
         XCTAssertEqual(subtitle?.count, GlanceFormatting.reasonBudget)
@@ -282,7 +283,7 @@ final class GlanceSectionTests: XCTestCase {
     /// FR-007: no reason means one line, not an empty second one.
     func testARowWithoutAReasonHasNoSubtitle() {
         let section = Self.makeSection()
-        let row = section.items(for: Self.busyState(), now: Self.now)[3]
+        let row = section.items(for: Self.busyState(), now: Self.now)[4]
         XCTAssertNil(Self.subtitle(of: row))
     }
 
@@ -293,7 +294,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.reasonState()
         let section = Self.makeSection()
         section.supportsRowSubtitles = false
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertNil(Self.subtitle(of: row))
         XCTAssertEqual(row.title, "jira:get_issue — 30s")
@@ -317,7 +318,7 @@ final class GlanceSectionTests: XCTestCase {
                        reason: "An older reason nobody should see")
         ]
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertEqual(row.title, "jira:get_issue ×3 — 30s")
         XCTAssertEqual(Self.subtitle(of: row), "Check the ticket after the failed transition")
@@ -328,7 +329,7 @@ final class GlanceSectionTests: XCTestCase {
     func testAFailedRowShowsTheErrorOnTheTitleAndKeepsTheReasonAsSubtitle() {
         let state = Self.reasonState(status: "error", error: "auth failed: token expired")
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertEqual(row.title, "jira:get_issue · auth failed — 30s")
         XCTAssertEqual(Self.subtitle(of: row), "Verify the ticket is still open")
@@ -352,7 +353,7 @@ final class GlanceSectionTests: XCTestCase {
                        session: "sess-e1")
         ]
         let section = Self.makeSection()
-        let title = section.items(for: state, now: Self.now)[3].title
+        let title = section.items(for: state, now: Self.now)[4].title
 
         let label = String(title.prefix(while: { $0 != "·" })).trimmingCharacters(in: .whitespaces)
         let clause = title
@@ -370,7 +371,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.reasonState(status: "error",
                                      error: "auth failed: token expired. retry after refresh")
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertEqual(row.toolTip,
                        "jira:get_issue\nVerify the ticket is still open\n"
@@ -381,7 +382,7 @@ final class GlanceSectionTests: XCTestCase {
 
     func testClientRowCarriesSessionIdentity() {
         let section = Self.makeSection()
-        let client = section.items(for: Self.busyState(), now: Self.now)[8]
+        let client = section.items(for: Self.busyState(), now: Self.now)[9]
         XCTAssertEqual(client.title, "Claude Code — 8 calls")
         XCTAssertEqual(client.representedObject as? String, "sess-a")
         XCTAssertEqual(client.toolTip, "Claude Code 2.1.0")
@@ -401,7 +402,7 @@ final class GlanceSectionTests: XCTestCase {
         ]
         let section = Self.makeSection()
 
-        let row = section.items(for: state, now: Self.now)[8]
+        let row = section.items(for: state, now: Self.now)[9]
         XCTAssertEqual(row.title, "No recent clients")
         XCTAssertFalse(row.isEnabled)
 
@@ -409,7 +410,7 @@ final class GlanceSectionTests: XCTestCase {
             Self.session(id: "sess-yesterday", name: "Claude Code", version: "2.1.0",
                          calls: 8, lastActivity: "2027-01-15T05:00:00Z")
         ]
-        XCTAssertEqual(section.items(for: state, now: Self.now)[8].title,
+        XCTAssertEqual(section.items(for: state, now: Self.now)[9].title,
                        "Claude Code — 8 calls · seen 3h",
                        "a client from three hours ago is a row, not an empty state")
     }
@@ -418,7 +419,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.busyState()
         state.glanceSessions = []
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[8]
+        let row = section.items(for: state, now: Self.now)[9]
         XCTAssertEqual(row.title, "No recent clients")
         XCTAssertFalse(row.isEnabled)
     }
@@ -438,7 +439,7 @@ final class GlanceSectionTests: XCTestCase {
                          calls: 1, lastActivity: "2027-01-15T05:00:00Z")
         ]
         let section = Self.makeSection()
-        let rows = Array(section.items(for: state, now: Self.now)[8...10])
+        let rows = Array(section.items(for: state, now: Self.now)[9...11])
 
         XCTAssertEqual(rows.map(\.title), [
             "Claude Code — 8 calls",
@@ -469,7 +470,7 @@ final class GlanceSectionTests: XCTestCase {
                          calls: 4, lastActivity: "2027-01-15T07:59:00Z")
         ]
         let section = Self.makeSection()
-        let rows = Array(section.items(for: state, now: Self.now)[8...9])
+        let rows = Array(section.items(for: state, now: Self.now)[9...10])
 
         XCTAssertEqual(rows.map { $0.representedObject as? String }, ["new", "cursor"])
         XCTAssertEqual(rows.map(\.title), ["Claude Code — 9 calls", "Cursor — 4 calls"])
@@ -487,7 +488,7 @@ final class GlanceSectionTests: XCTestCase {
         let items = section.items(for: state, now: Self.now)
 
         XCTAssertEqual(items[0].title, "12 calls this hour")
-        XCTAssertEqual(items[8].title, "Codex — 1 call · seen 3h")
+        XCTAssertEqual(items[9].title, "Codex — 1 call · seen 3h")
     }
 
     /// The submenu's row is built by its delegate when it opens, so these two
@@ -502,7 +503,7 @@ final class GlanceSectionTests: XCTestCase {
 
     func testHistogramSubmenuShowsLoadingUntilUsageArrives() {
         let section = Self.makeSection()
-        let histogram = section.items(for: Self.busyState(), now: Self.now)[10]
+        let histogram = section.items(for: Self.busyState(), now: Self.now)[1]
         XCTAssertEqual(histogram.title, "Activity (24h)")
         open(histogram.submenu)
         XCTAssertEqual(histogram.submenu?.item(at: 0)?.title, "Loading…")
@@ -522,7 +523,7 @@ final class GlanceSectionTests: XCTestCase {
             item.view = view
             return item
         }
-        let submenu = section.items(for: state, now: Self.now)[10].submenu
+        let submenu = section.items(for: state, now: Self.now)[1].submenu
         open(submenu)
         let chart = submenu?.item(at: 0)
         XCTAssertNotNil(chart?.view)
@@ -538,12 +539,17 @@ final class GlanceSectionTests: XCTestCase {
     // "with nothing injected, the submenu shows a real chart" — is
     // `GlanceHistogramSubmenuTests.testTheDefaultFactoryProducesTheRealChart`.
 
+    /// FR-021: the day-level picture comes before the call-level detail. The
+    /// histogram is the best single answer to "what has been happening?", and it
+    /// used to sit at the very bottom, below every row it summarises — the user
+    /// had to read past the detail to reach the overview.
     func testBlockLayoutOrder() {
         let section = Self.makeSection()
         let items = section.items(for: Self.busyState(), now: Self.now)
         let titles = items.map { $0.isSeparatorItem ? "—" : $0.title }
         XCTAssertEqual(titles, [
             "12 calls this hour · 1 active",
+            "Activity (24h)",
             "—",
             "Recent",
             "github:create_issue — 30s",
@@ -552,10 +558,22 @@ final class GlanceSectionTests: XCTestCase {
             "—",
             "Clients",
             "Claude Code — 8 calls",
-            "—",
-            "Activity (24h)",
             "—"
         ])
+    }
+
+    /// The histogram sits with the summary, above the separator that opens the
+    /// detail — "directly below the summary line and above the Recent header"
+    /// is a statement about neighbours, not merely about relative order.
+    func testTheHistogramIsTheSummarysNeighbour() {
+        let section = Self.makeSection()
+        let items = section.items(for: Self.busyState(), now: Self.now)
+
+        XCTAssertEqual(items[0].title, "12 calls this hour · 1 active")
+        XCTAssertEqual(items[1].title, "Activity (24h)")
+        XCTAssertNotNil(items[1].submenu, "it is still the histogram submenu, only moved")
+        XCTAssertTrue(items[2].isSeparatorItem)
+        XCTAssertEqual(items[3].title, "Recent")
     }
 
     // MARK: - In-place updates
@@ -564,7 +582,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.busyState()
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
-        let row = items[3]
+        let row = items[4]
 
         state.glanceActivity = [
             Self.entry(id: "c", server: "obsidian", tool: "search_notes",
@@ -594,7 +612,7 @@ final class GlanceSectionTests: XCTestCase {
 
         XCTAssertFalse(section.updateInPlace(for: state, now: Self.now),
                        "a row-count change must defer a rebuild, not mutate an open menu")
-        XCTAssertEqual(items[3].title, "github:create_issue — 30s", "rows must be left untouched")
+        XCTAssertEqual(items[4].title, "github:create_issue — 30s", "rows must be left untouched")
     }
 
     /// The first usage fetch landing while the menu is open must NOT report
@@ -636,7 +654,7 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.busyState()
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
-        let iconBefore = items[3].image
+        let iconBefore = items[4].image
 
         state.glanceActivity = [
             Self.entry(id: "01JQ8Z0000000000000000001", server: "github", tool: "create_issue",
@@ -647,10 +665,10 @@ final class GlanceSectionTests: XCTestCase {
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertTrue(items[3].image === iconBefore,
+        XCTAssertTrue(items[4].image === iconBefore,
                       "same request id means the same record, so the row's icon must be left alone")
-        XCTAssertEqual(items[3].title, "github:create_issue — 30s")
-        XCTAssertEqual(items[3].representedObject as? String, "sess-a")
+        XCTAssertEqual(items[4].title, "github:create_issue — 30s")
+        XCTAssertEqual(items[4].representedObject as? String, "sess-a")
     }
 
     func testDifferentRecordInTheSameSlotRewritesTheIcon() {
@@ -658,7 +676,7 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
         let previousFailure = state.glanceActivity[1]
-        XCTAssertNil(items[3].image, "precondition: the successful row is unmarked")
+        XCTAssertNil(items[4].image, "precondition: the successful row is unmarked")
 
         state.glanceActivity = [
             Self.entry(id: "c", server: "obsidian", tool: "search_notes", status: "error",
@@ -667,9 +685,9 @@ final class GlanceSectionTests: XCTestCase {
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed",
+        XCTAssertEqual(items[4].image?.accessibilityDescription, "failed",
                        "a different record must rewrite the row's entire identity, icon included")
-        XCTAssertEqual(items[3].representedObject as? String, "sess-c")
+        XCTAssertEqual(items[4].representedObject as? String, "sess-c")
     }
 
     /// "Same record" must not mean "skip the update": the final status arrives
@@ -689,9 +707,9 @@ final class GlanceSectionTests: XCTestCase {
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[3].title, "github:create_issue · rate limited — 30s")
-        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed")
-        XCTAssertEqual(items[3].toolTip, "github:create_issue\nrate limited: try later")
+        XCTAssertEqual(items[4].title, "github:create_issue · rate limited — 30s")
+        XCTAssertEqual(items[4].image?.accessibilityDescription, "failed")
+        XCTAssertEqual(items[4].toolTip, "github:create_issue\nrate limited: try later")
     }
 
     // MARK: - Client rows are not rewritten when nothing changed
@@ -704,7 +722,7 @@ final class GlanceSectionTests: XCTestCase {
     func testIdenticalClientPollWritesNothing() {
         let state = Self.busyState()
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[8]
+        let row = section.items(for: state, now: Self.now)[9]
         let dotBefore = row.image
 
         var titleWrites = 0
@@ -729,7 +747,7 @@ final class GlanceSectionTests: XCTestCase {
     func testChangedClientCallCountStillRewritesTheRow() {
         let state = Self.busyState()
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[8]
+        let row = section.items(for: state, now: Self.now)[9]
 
         state.glanceSessions = [
             Self.session(id: "sess-a", name: "Claude Code", version: "2.1.0",
@@ -749,7 +767,7 @@ final class GlanceSectionTests: XCTestCase {
     /// still announced, so nothing is lost to VoiceOver.
     func testASuccessfulRowCarriesNoStatusIcon() {
         let section = Self.makeSection()
-        let row = section.items(for: Self.busyState(), now: Self.now)[3]
+        let row = section.items(for: Self.busyState(), now: Self.now)[4]
 
         XCTAssertNil(row.image, "a quiet row is the whole point of failure-only marks")
         XCTAssertEqual(row.accessibilityLabel(), "github:create_issue, succeeded, 30s ago")
@@ -758,7 +776,7 @@ final class GlanceSectionTests: XCTestCase {
     /// FR-011: a failure keeps its red cross and its error clause.
     func testAFailedRowCarriesTheFailureMark() {
         let section = Self.makeSection()
-        let row = section.items(for: Self.busyState(), now: Self.now)[4]
+        let row = section.items(for: Self.busyState(), now: Self.now)[5]
 
         XCTAssertEqual(row.image?.accessibilityDescription, "failed")
         XCTAssertEqual(GlanceFormatting.statusSymbolName(forStatus: "error"), "xmark.circle")
@@ -776,7 +794,7 @@ final class GlanceSectionTests: XCTestCase {
                        decision: "blocked", blockReason: "Intent rejected: destructive operation")
         ]
         let section = Self.makeSection()
-        let row = section.items(for: state, now: Self.now)[3]
+        let row = section.items(for: state, now: Self.now)[4]
 
         XCTAssertEqual(row.title, "jira:delete_issue — 30s")
         XCTAssertEqual(Self.subtitle(of: row), "Intent rejected: destructive operation")
@@ -804,7 +822,7 @@ final class GlanceSectionTests: XCTestCase {
                        timestamp: "2027-01-15T07:58:30Z")
         ]
         let section = Self.makeSection()
-        let rows = Array(section.items(for: state, now: Self.now)[3...5])
+        let rows = Array(section.items(for: state, now: Self.now)[4...6])
 
         XCTAssertEqual(rows.map { $0.image == nil }, [true, false, true])
     }
@@ -825,10 +843,10 @@ final class GlanceSectionTests: XCTestCase {
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
 
-        XCTAssertEqual(items[3].title, "jira:get_issue ×27 — 1s")
-        XCTAssertEqual(items[3].image?.accessibilityDescription, "blocked")
-        XCTAssertEqual(items[4].title, "jira:get_issue — 10m")
-        XCTAssertNil(items[4].image, "the successful calls are a separate, unmarked row")
+        XCTAssertEqual(items[4].title, "jira:get_issue ×27 — 1s")
+        XCTAssertEqual(items[4].image?.accessibilityDescription, "blocked")
+        XCTAssertEqual(items[5].title, "jira:get_issue — 10m")
+        XCTAssertNil(items[5].image, "the successful calls are a separate, unmarked row")
     }
 
     // MARK: - Status is carried by shape AND colour
@@ -855,7 +873,7 @@ final class GlanceSectionTests: XCTestCase {
         let items = section.items(for: Self.busyState(), now: Self.now)
         // Only marked rows have an image to keep a tint — the successful row
         // above has none at all (FR-010).
-        XCTAssertEqual(items[4].image?.isTemplate, false,
+        XCTAssertEqual(items[5].image?.isTemplate, false,
                        "a template image is recoloured by the menu, which would drop the status tint")
     }
 

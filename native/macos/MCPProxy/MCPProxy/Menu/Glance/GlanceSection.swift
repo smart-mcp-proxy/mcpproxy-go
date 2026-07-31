@@ -155,6 +155,16 @@ final class GlanceSection {
         let summary = disabledItem(titled: summaryTitle(for: state, now: now))
         summaryItem = summary
         items.append(summary)
+
+        // The day before the minute (FR-021). The histogram answers "what has
+        // been happening?" in one glyph, so it belongs beside the summary line
+        // it illustrates — it used to sit at the very bottom, below every row it
+        // summarises, which made the user read the detail to reach the overview.
+        // It stays above the separator for that reason: summary and shape are
+        // one block, the rows below are another.
+        let histogram = makeHistogramItem(for: state)
+        histogramItem = histogram
+        items.append(histogram)
         items.append(.separator())
 
         items.append(disabledItem(titled: "Recent"))
@@ -189,11 +199,6 @@ final class GlanceSection {
                 items.append(row)
             }
         }
-        items.append(.separator())
-
-        let histogram = makeHistogramItem(for: state)
-        histogramItem = histogram
-        items.append(histogram)
         items.append(.separator())
 
         return items

@@ -72,8 +72,8 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 ## Phase 7: User Story 5 — 24h picture first (P3)
 
-- [ ] T030 [US5] Write failing order assertion in MCPProxyTests/GlanceSectionTests.swift (summary → Activity (24h) → "Recent" → rows → Clients)
-- [ ] T031 [US5] Move the histogram item in MCPProxy/Menu/Glance/GlanceSection.swift `items(for:)` (FR-021); T030 green
+- [x] T030 [US5] Write failing order assertion in MCPProxyTests/GlanceSectionTests.swift (summary → Activity (24h) → "Recent" → rows → Clients)
+- [x] T031 [US5] Move the histogram item in MCPProxy/Menu/Glance/GlanceSection.swift `items(for:)` (FR-021); T030 green
 
 ## Phase 8: Polish & Cross-Cutting
 

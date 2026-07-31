@@ -33,12 +33,12 @@ final class GlanceMenuPolicyTests: XCTestCase {
         let state = GlanceFixtures.connectedState()
         let section = makeSection()
         let rows = section.items(for: state, now: GlanceFixtures.now)
-        let firstRowTitle = rows[3].title
+        let firstRowTitle = rows[4].title
         XCTAssertEqual(firstRowTitle, "github:create_issue — 30s")
 
         var guardState = MenuRebuildGuard()
         XCTAssertEqual(guardState.decide(refreshing: section, from: state, now: Self.later), .rebuild)
-        XCTAssertEqual(rows[3].title, firstRowTitle,
+        XCTAssertEqual(rows[4].title, firstRowTitle,
                        "a closed menu is rebuilt wholesale — the section must not be touched first")
     }
 
@@ -51,7 +51,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
         guardState.menuWillOpen()
         XCTAssertEqual(guardState.decide(refreshing: section, from: state, now: Self.later),
                        .updateInPlace)
-        XCTAssertEqual(rows[3].title, "github:create_issue — 5m",
+        XCTAssertEqual(rows[4].title, "github:create_issue — 5m",
                        "the installed row itself must be rewritten, not a fresh copy of it")
         XCTAssertFalse(guardState.isDirty)
     }
@@ -80,7 +80,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
 
         XCTAssertEqual(guardState.decide(refreshing: section, from: state, now: Self.later),
                        .deferUntilClose)
-        XCTAssertEqual(rows[3].title, "github:create_issue — 30s",
+        XCTAssertEqual(rows[4].title, "github:create_issue — 30s",
                        "a deferred rebuild must leave the on-screen rows exactly as they were")
         XCTAssertEqual(rows[0].title, summaryBefore,
                        "'99 calls' over the old three rows is the half-update the defer exists to prevent")
@@ -105,7 +105,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
         let rows = section.items(for: state, now: GlanceFixtures.now)
 
         let summaryBefore = rows[0].title
-        let firstRowBefore = rows[3].title
+        let firstRowBefore = rows[4].title
         XCTAssertEqual(firstRowBefore, "github:create_issue — 30s")
 
         // Only the SECOND row changes shape; the first row's own text would
@@ -120,9 +120,9 @@ final class GlanceMenuPolicyTests: XCTestCase {
                        "a row gaining a second line resizes the menu — that waits for close")
         XCTAssertEqual(rows[0].title, summaryBefore,
                        "the summary is written before the rows; a refusal must not leave it ahead of them")
-        XCTAssertEqual(rows[3].title, firstRowBefore,
+        XCTAssertEqual(rows[4].title, firstRowBefore,
                        "an earlier row must not be rewritten by an update that then refuses")
-        XCTAssertEqual(rows[4].title, "jira:get_issue — 2m")
+        XCTAssertEqual(rows[5].title, "jira:get_issue — 2m")
     }
 
     /// The mirror case: a reason disappearing shrinks the row, and is refused
@@ -142,7 +142,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
             timestamp: "2027-01-15T07:59:30Z", session: "sess-a")
 
         XCTAssertFalse(section.updateInPlace(for: state, now: Self.later))
-        XCTAssertEqual(rows[3].title, "github:create_issue — 30s",
+        XCTAssertEqual(rows[4].title, "github:create_issue — 30s",
                        "the refused update must leave the row exactly as it was")
     }
 
@@ -164,7 +164,7 @@ final class GlanceMenuPolicyTests: XCTestCase {
             reason: "Open the follow-up ticket for the reporter")
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.later))
-        XCTAssertEqual(rows[3].title, "github:create_issue — 5m")
+        XCTAssertEqual(rows[4].title, "github:create_issue — 5m")
     }
 
     /// The core going away is structural too — the whole block disappears — so
