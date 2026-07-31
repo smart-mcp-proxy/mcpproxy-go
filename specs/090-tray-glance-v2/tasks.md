@@ -86,7 +86,7 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 - Phase 1 → Phase 2 → everything else.
 - US1 (T004–T007) is the MVP.
-- US2, US3, US4 are logically independent, but shared-file contention forces sequential implementation: `GlanceSection.swift` is touched by US1/US2/US3/US4/US5; `AppState.swift` by US1/US3/US4; `GlanceEvent.swift` by US2/US3. Test-writing tasks marked [P] (T008, T010, T012, T014, T016, T018, T020, T022, T024, T026, T028, T032) touch distinct test files and may be authored in parallel.
+- US2, US3, US4 are logically independent, but shared-file contention forces sequential implementation: production `GlanceSection.swift` is touched by US1/US2/US3/US4/US5; `AppState.swift` by US1/US4 (US3 only adds a test in AppStateGlanceTests, no production change); `GlanceEvent.swift` by US2/US3. Tasks marked [P] are parallelizable only WITHIN their phase (they touch files distinct from that phase's other [P] tasks). Across phases the same test files recur (GlanceEventTests: T010/T020; GlanceSectionTests: T012/T022/T028; APIClientGlanceTests: T018/T028; AppStateGlanceTests: T020/T028; GlanceSelectionTests: T022/T028), so cross-phase test authoring is sequential in phase order.
 - US5 (T030–T031) can run any time after Phase 3.
 - T032 needs US1+US3 (grouping + blocked rows); T033–T034 need US4 (session fetch changes); T035 last.
 
