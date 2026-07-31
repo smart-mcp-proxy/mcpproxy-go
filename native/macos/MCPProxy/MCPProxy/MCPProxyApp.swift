@@ -585,10 +585,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         let manager = CoreProcessManager(
             appState: appState,
-            notificationService: notificationService
+            notificationService: notificationService,
+            socketPath: Self.socketPathOverride
         )
         coreManager = manager
         await manager.start(maySpawn: policy.maySpawnCore)
+    }
+
+    /// Dev/QA-only escape hatch: point the app at a non-default core socket
+    /// (e.g. an isolated scratch core) without touching ~/.mcpproxy. The
+    /// CoreProcessManager initializer has always taken an injectable
+    /// socketPath "so a test (or a second app)" can use it; this is the
+    /// second-app case. Unset in normal use, so behavior is unchanged.
+    static var socketPathOverride: String? {
+        ProcessInfo.processInfo.environment["MCPPROXY_SOCKET_PATH"]
     }
 
     private func resolveBundledCoreBinary() -> String? {
@@ -1052,7 +1062,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
             let manager = CoreProcessManager(
                 appState: appState,
-                notificationService: notificationService
+                notificationService: notificationService,
+                socketPath: Self.socketPathOverride
             )
             coreManager = manager
             // An explicit "Start MCPProxy Core" always spawns, whatever the
