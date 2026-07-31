@@ -21,12 +21,17 @@ enum GlanceFormatting {
     /// is a run of records and the outcome it shows is the run's worst
     /// (`GlanceRun.worstStatus`), which may belong to none of the run's other
     /// records.
+    /// A block gets a triangle, not a differently-coloured circle: a policy
+    /// block and an upstream failure are different events, and the difference
+    /// has to survive greyscale and a red-green deficiency (spec 090 FR-011).
     static func statusSymbolName(forStatus status: String) -> String {
         switch status {
         case "success":
             return "checkmark.circle"
         case "error":
             return "xmark.circle"
+        case _ where ActivityEntry.blockingDecisions.contains(status):
+            return "exclamationmark.triangle"
         default:
             return "exclamationmark.circle"
         }
@@ -39,15 +44,26 @@ enum GlanceFormatting {
 
     // MARK: - Row label
 
+    /// Record types whose `server_name` names an upstream server, so the label
+    /// composes `server:tool`. An `internal_tool_call` is deliberately absent:
+    /// its `server_name` is the server it was dispatched AT, not what ran.
+    private static let upstreamNamedTypes: Set<String> = [
+        "tool_call", ActivityEntry.policyDecisionType
+    ]
+
     /// Compose the row's primary label.
     ///
     /// Upstream calls read `server:tool`; discovery/execution built-ins read
     /// just the built-in's name because they have no upstream server.
+    ///
+    /// A blocked policy decision names the upstream call it stopped, so it reads
+    /// `server:tool` too (spec 090 US3) — a blocked row that named only the tool
+    /// would leave out which server the user was being protected from.
     static func rowLabel(for entry: ActivityEntry) -> String {
         let tool = entry.toolName ?? ""
         let server = entry.serverName ?? ""
 
-        if entry.type == "tool_call", !server.isEmpty, !tool.isEmpty {
+        if upstreamNamedTypes.contains(entry.type), !server.isEmpty, !tool.isEmpty {
             // Guard against a tool name that already carries the prefix.
             if tool.hasPrefix("\(server):") {
                 return tool

@@ -429,6 +429,11 @@ final class GlanceSection {
             return "succeeded"
         case "error":
             return "failed"
+        case _ where ActivityEntry.blockingDecisions.contains(status):
+            // Spoken separately from "failed": the call did not go wrong, the
+            // proxy stopped it — and success is announced even though it is no
+            // longer drawn (FR-010), so VoiceOver loses nothing to the quiet.
+            return "blocked"
         default:
             return "in progress"
         }
@@ -439,14 +444,21 @@ final class GlanceSection {
     }
 
     /// The row icon: an SF Symbol whose shape carries the outcome, tinted to
-    /// carry it a second time.
+    /// carry it a second time — or nothing at all, when the call succeeded.
+    ///
+    /// Success is deliberately unmarked (FR-010). In a real 6-week export 1,480
+    /// of 1,564 outcome-bearing events succeeded, so a green tick appeared on
+    /// 95% of rows and told the user nothing; what it did do was bury the 32
+    /// errors and 52 blocks among identical-looking rows. A mark now means
+    /// "look at this".
     ///
     /// The image must be non-template — AppKit recolours a template menu image
     /// to the menu's own text colour, which would silently discard the tint.
     private static func statusImage(forStatus status: String) -> NSImage? {
-        symbolImage(named: GlanceFormatting.statusSymbolName(forStatus: status),
-                    tint: statusTint(forStatus: status),
-                    description: outcomeDescription(forStatus: status))
+        guard status != "success" else { return nil }
+        return symbolImage(named: GlanceFormatting.statusSymbolName(forStatus: status),
+                           tint: statusTint(forStatus: status),
+                           description: outcomeDescription(forStatus: status))
     }
 
     private static func symbolImage(named name: String, tint: NSColor, description: String) -> NSImage? {

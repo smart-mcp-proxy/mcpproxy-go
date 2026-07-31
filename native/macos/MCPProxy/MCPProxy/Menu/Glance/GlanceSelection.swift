@@ -111,6 +111,18 @@ enum GlanceSelection {
         // Rule 2 — every real upstream call.
         if entry.type == "tool_call" { return true }
 
+        // Rule 6 (spec 090 FR-012) — a policy decision that actually STOPPED
+        // the call. It has no other trace anywhere in the menu: the call never
+        // dispatched, so no `tool_call` record was ever written for it, and
+        // without this a block is simply invisible. Warnings and redactions let
+        // the call through and are represented by the call's own record, so
+        // admitting them would spend one of five rows on a decision that
+        // changed nothing. `outcomeClass` is what decides, so a record whose
+        // `decision` metadata was projected away still qualifies on its status.
+        if entry.type == ActivityEntry.policyDecisionType {
+            return entry.outcomeClass == .blocked
+        }
+
         // Rule 3 — discovery/execution built-ins, plus any internal failure
         // (a wrapper that died before dispatch has no upstream record).
         if entry.type == "internal_tool_call" {

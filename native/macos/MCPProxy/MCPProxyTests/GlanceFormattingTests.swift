@@ -8,7 +8,21 @@ final class GlanceFormattingTests: XCTestCase {
     func testStatusSymbolDistinguishesSuccessErrorAndOther() {
         XCTAssertEqual(GlanceFormatting.statusSymbolName(for: Self.entry(status: "success")), "checkmark.circle")
         XCTAssertEqual(GlanceFormatting.statusSymbolName(for: Self.entry(status: "error")), "xmark.circle")
-        XCTAssertEqual(GlanceFormatting.statusSymbolName(for: Self.entry(status: "blocked")), "exclamationmark.circle")
+        XCTAssertEqual(GlanceFormatting.statusSymbolName(for: Self.entry(status: "running")),
+                       "exclamationmark.circle")
+    }
+
+    /// A block is not a failure, and the difference must survive greyscale: the
+    /// triangle is a different SHAPE from the failure's circle, not just a
+    /// different colour (spec 090 FR-011).
+    func testABlockedStatusGetsItsOwnShape() {
+        XCTAssertEqual(GlanceFormatting.statusSymbolName(forStatus: "blocked"), "exclamationmark.triangle")
+        XCTAssertEqual(GlanceFormatting.statusSymbolName(forStatus: "block"), "exclamationmark.triangle",
+                       "the legacy decision value is on disk and must render the same")
+        XCTAssertNotEqual(GlanceFormatting.statusSymbolName(forStatus: "blocked"),
+                          GlanceFormatting.statusSymbolName(forStatus: "error"))
+        XCTAssertNotEqual(GlanceFormatting.statusSymbolName(forStatus: "blocked"),
+                          GlanceFormatting.statusSymbolName(forStatus: "running"))
     }
 
     // MARK: - Row label

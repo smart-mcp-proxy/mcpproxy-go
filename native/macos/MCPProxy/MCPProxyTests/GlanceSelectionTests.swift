@@ -45,6 +45,74 @@ final class GlanceSelectionTests: XCTestCase {
         XCTAssertFalse(GlanceSelection.qualifies(Self.entry(id: "o", type: "oauth_event", status: "error")))
     }
 
+    // MARK: - Rule 6: policy blocks (spec 090 FR-012)
+
+    /// A block is the proxy doing its job, and it has no other trace: the call
+    /// never dispatched, so there is no `tool_call` record to stand in for it.
+    func testABlockedPolicyDecisionQualifies() {
+        let entry = Self.entry(id: "p1", type: "policy_decision", server: "jira", tool: "delete_issue",
+                               status: "blocked", decision: "blocked",
+                               reason: "Destructive operation blocked")
+        XCTAssertTrue(GlanceSelection.qualifies(entry))
+        XCTAssertEqual(entry.reason, "Destructive operation blocked")
+    }
+
+    /// "blocked" is what the runtime emits today; `event_bus.go` still treats
+    /// the older "block" as a block, and records carrying it are already on
+    /// disk.
+    func testTheLegacyBlockDecisionAlsoQualifies() {
+        XCTAssertTrue(GlanceSelection.qualifies(
+            Self.entry(id: "p2", type: "policy_decision", server: "jira", tool: "get_issue",
+                       status: "block", decision: "block", reason: "Quarantined server")))
+    }
+
+    /// A record whose metadata was dropped (a projection, an old record) still
+    /// qualifies: the persisted status IS the decision.
+    func testABlockedRecordWithoutDecisionMetadataQualifiesOnItsStatus() {
+        XCTAssertTrue(GlanceSelection.qualifies(
+            Self.entry(id: "p3", type: "policy_decision", server: "jira", tool: "get_issue",
+                       status: "blocked")))
+    }
+
+    /// Warnings and redactions let the call through — the call's own record is
+    /// the row. Admitting them would spend the five rows on decisions that
+    /// changed nothing (FR-012).
+    func testWarningsAndRedactionsDoNotQualify() {
+        for decision in ["warn", "redacted", "allow"] {
+            let entry = Self.entry(id: decision, type: "policy_decision", server: "jira",
+                                   tool: "get_issue", status: decision, decision: decision,
+                                   reason: "\(decision) decision")
+            XCTAssertFalse(GlanceSelection.qualifies(entry), "\(decision) must not take a row")
+        }
+    }
+
+    /// Rule 1 still beats it: proxy administration is never glance material,
+    /// whatever a policy decided about it.
+    func testABlockedManagementBuiltInIsStillExcluded() {
+        XCTAssertFalse(GlanceSelection.qualifies(
+            Self.entry(id: "p4", type: "policy_decision", tool: "quarantine_security",
+                       status: "blocked", decision: "blocked", reason: "nope")))
+    }
+
+    /// US3 scenario 5: "27 blocked attempts at a tool" and "27 calls to it" are
+    /// different stories, so blocked records never join a run of calls — even
+    /// when they are adjacent and name the same tool.
+    func testBlockedRecordsNeverMergeWithCallsToTheSameTool() {
+        let rows = GlanceSelection.activityRows(from: [
+            Self.entry(id: "b1", type: "policy_decision", server: "jira", tool: "get_issue",
+                       status: "blocked", decision: "blocked", reason: "Quarantined server"),
+            Self.entry(id: "b2", type: "policy_decision", server: "jira", tool: "get_issue",
+                       status: "blocked", decision: "blocked", reason: "Quarantined server"),
+            Self.entry(id: "c1", type: "tool_call", server: "jira", tool: "get_issue"),
+            Self.entry(id: "c2", type: "tool_call", server: "jira", tool: "get_issue")
+        ])
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.map(\.count), [2, 2])
+        XCTAssertEqual(rows.map(\.key.outcomeClass), [.blocked, .call])
+        XCTAssertEqual(rows.first?.displayReason, "Quarantined server")
+    }
+
     // MARK: - Helpers
 
     static func entry(
@@ -53,7 +121,9 @@ final class GlanceSelectionTests: XCTestCase {
         server: String? = nil,
         tool: String? = nil,
         status: String = "success",
-        requestId: String? = nil
+        requestId: String? = nil,
+        decision: String? = nil,
+        reason: String? = nil
     ) -> ActivityEntry {
         var json: [String: Any] = [
             "id": id,
@@ -64,6 +134,13 @@ final class GlanceSelectionTests: XCTestCase {
         if let server { json["server_name"] = server }
         if let tool { json["tool_name"] = tool }
         if let requestId { json["request_id"] = requestId }
+        // A policy decision's own reason sits at the top of metadata, beside the
+        // decision — the shape `activity_service.go` persists and the projection
+        // whitelist keeps.
+        var metadata: [String: Any] = [:]
+        if let decision { metadata["decision"] = decision }
+        if let reason { metadata["reason"] = reason }
+        if !metadata.isEmpty { json["metadata"] = metadata }
         let data = try! JSONSerialization.data(withJSONObject: json)
         // swiftlint:disable:next force_try
         return try! JSONDecoder().decode(ActivityEntry.self, from: data)

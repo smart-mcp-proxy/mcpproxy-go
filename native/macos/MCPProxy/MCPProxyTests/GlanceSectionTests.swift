@@ -208,23 +208,27 @@ final class GlanceSectionTests: XCTestCase {
     /// …and when the row really does come to stand for a different run — a new
     /// run whose oldest record is not the previous one — the whole identity is
     /// rewritten, icon and click payload included.
+    /// The replacement run is a failing one on purpose: with failure-only marks
+    /// a successful row has no icon at all, so success→success could not show
+    /// that the icon is rewritten with the rest of the identity.
     func testADifferentRunInTheSameSlotRewritesTheRowIdentity() {
         let state = Self.burstState()
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
         let iconBefore = items[3].image
+        XCTAssertNil(iconBefore, "precondition: the successful burst row is unmarked")
 
         state.glanceActivity = [
-            Self.entry(id: "o1", server: "obsidian", tool: "search_notes",
-                       timestamp: "2027-01-15T07:59:55Z", session: "sess-o1"),
-            Self.entry(id: "o2", server: "obsidian", tool: "search_notes",
-                       timestamp: "2027-01-15T07:59:50Z", session: "sess-o2"),
+            Self.entry(id: "o1", server: "obsidian", tool: "search_notes", status: "error",
+                       error: "vault locked", timestamp: "2027-01-15T07:59:55Z", session: "sess-o1"),
+            Self.entry(id: "o2", server: "obsidian", tool: "search_notes", status: "error",
+                       error: "vault locked", timestamp: "2027-01-15T07:59:50Z", session: "sess-o2"),
             state.glanceActivity[3]
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertEqual(items[3].title, "obsidian:search_notes ×2 — 5s")
-        XCTAssertFalse(items[3].image === iconBefore,
+        XCTAssertEqual(items[3].title, "obsidian:search_notes ×2 · vault locked — 5s")
+        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed",
                        "a different run must rewrite the row's entire identity, icon included")
         XCTAssertEqual(items[3].representedObject as? String, "sess-o1")
     }
@@ -483,7 +487,7 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(row.title, "obsidian:search_notes — 5s")
         XCTAssertEqual(row.representedObject as? String, "sess-c",
                        "the click payload must follow the title, or the row opens the previous record's session")
-        XCTAssertEqual(row.image?.accessibilityDescription, "succeeded")
+        XCTAssertNil(row.image, "a successful row carries no mark")
         XCTAssertEqual(row.toolTip, "obsidian:search_notes")
         XCTAssertEqual(row.accessibilityLabel(), "obsidian:search_notes, succeeded, 5s ago")
     }
@@ -560,17 +564,17 @@ final class GlanceSectionTests: XCTestCase {
         let state = Self.busyState()
         let section = Self.makeSection()
         let items = section.items(for: state, now: Self.now)
-        let iconBefore = items[3].image
         let previousFailure = state.glanceActivity[1]
+        XCTAssertNil(items[3].image, "precondition: the successful row is unmarked")
 
         state.glanceActivity = [
-            Self.entry(id: "c", server: "obsidian", tool: "search_notes",
-                       timestamp: "2027-01-15T07:59:55Z", session: "sess-c"),
+            Self.entry(id: "c", server: "obsidian", tool: "search_notes", status: "error",
+                       error: "vault locked", timestamp: "2027-01-15T07:59:55Z", session: "sess-c"),
             previousFailure
         ]
 
         XCTAssertTrue(section.updateInPlace(for: state, now: Self.now))
-        XCTAssertFalse(items[3].image === iconBefore,
+        XCTAssertEqual(items[3].image?.accessibilityDescription, "failed",
                        "a different record must rewrite the row's entire identity, icon included")
         XCTAssertEqual(items[3].representedObject as? String, "sess-c")
     }
@@ -644,6 +648,95 @@ final class GlanceSectionTests: XCTestCase {
         XCTAssertEqual(row.accessibilityLabel(), "Claude Code, 40 calls, last active 1m ago")
     }
 
+    // MARK: - Only failures are marked (spec 090 US3)
+
+    /// FR-010: 95% of rows succeed, so a green tick on nearly every one carries
+    /// no information — it only dilutes the marks that matter. The outcome is
+    /// still announced, so nothing is lost to VoiceOver.
+    func testASuccessfulRowCarriesNoStatusIcon() {
+        let section = Self.makeSection()
+        let row = section.items(for: Self.busyState(), now: Self.now)[3]
+
+        XCTAssertNil(row.image, "a quiet row is the whole point of failure-only marks")
+        XCTAssertEqual(row.accessibilityLabel(), "github:create_issue, succeeded, 30s ago")
+    }
+
+    /// FR-011: a failure keeps its red cross and its error clause.
+    func testAFailedRowCarriesTheFailureMark() {
+        let section = Self.makeSection()
+        let row = section.items(for: Self.busyState(), now: Self.now)[4]
+
+        XCTAssertEqual(row.image?.accessibilityDescription, "failed")
+        XCTAssertEqual(GlanceFormatting.statusSymbolName(forStatus: "error"), "xmark.circle")
+        XCTAssertEqual(GlanceSection.statusTint(forStatus: "error"), .systemRed)
+    }
+
+    /// FR-011/FR-012: a block is a different event from a failure and carries a
+    /// different SHAPE, not merely a different colour — and its reason is the
+    /// policy's, on the row's second line.
+    func testABlockedRowCarriesADistinctMarkAndTheBlockReason() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            Self.entry(id: "p1", type: "policy_decision", server: "jira", tool: "delete_issue",
+                       status: "blocked", timestamp: "2027-01-15T07:59:30Z",
+                       decision: "blocked", blockReason: "Intent rejected: destructive operation")
+        ]
+        let section = Self.makeSection()
+        let row = section.items(for: state, now: Self.now)[3]
+
+        XCTAssertEqual(row.title, "jira:delete_issue — 30s")
+        XCTAssertEqual(Self.subtitle(of: row), "Intent rejected: destructive operation")
+        XCTAssertEqual(row.image?.accessibilityDescription, "blocked")
+        XCTAssertEqual(GlanceFormatting.statusSymbolName(forStatus: "blocked"),
+                       "exclamationmark.triangle")
+        XCTAssertNotEqual(GlanceFormatting.statusSymbolName(forStatus: "blocked"),
+                          GlanceFormatting.statusSymbolName(forStatus: "error"),
+                          "shape, not colour, must separate a block from a failure")
+        XCTAssertEqual(row.accessibilityLabel(),
+                       "jira:delete_issue, blocked, 30s ago, "
+                       + "reason: Intent rejected: destructive operation")
+    }
+
+    /// SC-003: in a feed that is mostly successful, the failure is the only
+    /// marked row on screen.
+    func testTheFailureIsTheOnlyMarkedRowInAMostlySuccessfulFeed() {
+        let state = Self.busyState()
+        state.glanceActivity = [
+            Self.entry(id: "s1", server: "github", tool: "create_issue",
+                       timestamp: "2027-01-15T07:59:30Z"),
+            Self.entry(id: "f1", server: "jira", tool: "get_issue", status: "error",
+                       error: "auth failed", timestamp: "2027-01-15T07:59:00Z"),
+            Self.entry(id: "s2", server: "obsidian", tool: "search_notes",
+                       timestamp: "2027-01-15T07:58:30Z")
+        ]
+        let section = Self.makeSection()
+        let rows = Array(section.items(for: state, now: Self.now)[3...5])
+
+        XCTAssertEqual(rows.map { $0.image == nil }, [true, false, true])
+    }
+
+    /// US3 scenario 5: a burst of blocked attempts is one row with its count,
+    /// and it never merges with calls to the same tool.
+    func testABurstOfBlockedAttemptsIsOneRowSeparateFromTheCalls() {
+        let state = Self.busyState()
+        var records = (0..<27).map { index in
+            Self.entry(id: "b\(index)", type: "policy_decision", server: "jira", tool: "get_issue",
+                       status: "blocked",
+                       timestamp: "2027-01-15T07:59:\(String(format: "%02d", 59 - index))Z",
+                       decision: "blocked", blockReason: "Quarantined server")
+        }
+        records.append(Self.entry(id: "c1", server: "jira", tool: "get_issue",
+                                  timestamp: "2027-01-15T07:50:00Z"))
+        state.glanceActivity = records
+        let section = Self.makeSection()
+        let items = section.items(for: state, now: Self.now)
+
+        XCTAssertEqual(items[3].title, "jira:get_issue ×27 — 1s")
+        XCTAssertEqual(items[3].image?.accessibilityDescription, "blocked")
+        XCTAssertEqual(items[4].title, "jira:get_issue — 10m")
+        XCTAssertNil(items[4].image, "the successful calls are a separate, unmarked row")
+    }
+
     // MARK: - Status is carried by shape AND colour
 
     func testStatusIsEncodedByShapeAndColourNotColourAlone() {
@@ -666,9 +759,10 @@ final class GlanceSectionTests: XCTestCase {
     func testStatusIconKeepsItsTintInTheMenu() {
         let section = Self.makeSection()
         let items = section.items(for: Self.busyState(), now: Self.now)
-        XCTAssertEqual(items[3].image?.isTemplate, false,
+        // Only marked rows have an image to keep a tint — the successful row
+        // above has none at all (FR-010).
+        XCTAssertEqual(items[4].image?.isTemplate, false,
                        "a template image is recoloured by the menu, which would drop the status tint")
-        XCTAssertEqual(items[4].image?.isTemplate, false)
     }
 
     // MARK: - Helpers
@@ -754,7 +848,9 @@ final class GlanceSectionTests: XCTestCase {
         timestamp: String,
         session: String? = nil,
         request: String? = nil,
-        reason: String? = nil
+        reason: String? = nil,
+        decision: String? = nil,
+        blockReason: String? = nil
     ) -> ActivityEntry {
         var json: [String: Any] = [
             "id": id,
@@ -770,9 +866,15 @@ final class GlanceSectionTests: XCTestCase {
         if let error { json["error_message"] = error }
         if let session { json["session_id"] = session }
         // Shaped like the wire: a call's reason lives under `metadata.intent`,
-        // which is what the projection whitelist keeps and what the SSE adapter
-        // writes, so the row pipeline reads it the same way in both cases.
-        if let reason { json["metadata"] = ["intent": ["reason": reason]] }
+        // while a policy decision's own reason sits at the top of metadata
+        // beside the decision. Both are what the projection whitelist keeps and
+        // what the SSE adapter writes, so the row pipeline reads them the same
+        // way whether the record was polled or streamed.
+        var metadata: [String: Any] = [:]
+        if let reason { metadata["intent"] = ["reason": reason] }
+        if let decision { metadata["decision"] = decision }
+        if let blockReason { metadata["reason"] = blockReason }
+        if !metadata.isEmpty { json["metadata"] = metadata }
         let data = try! JSONSerialization.data(withJSONObject: json)
         // swiftlint:disable:next force_try
         return try! JSONDecoder().decode(ActivityEntry.self, from: data)
