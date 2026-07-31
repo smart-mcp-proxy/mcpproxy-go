@@ -253,6 +253,11 @@ var contextualIntentKeys = []string{"reason", "operation_type"}
 // returning nil when nothing whitelisted is present so an all-dropped record
 // serialises as an absent object rather than an empty one.
 //
+// Only string values are kept. A whitelisted key is not a promise about its
+// value, and nothing stops a producer from putting a structured error under
+// `reason` — copying by key alone would carry that whole nested payload through
+// the one boundary callers are told payloads cannot cross.
+//
 // The result is always a fresh map: the input belongs to the storage layer (the
 // controller may hand back live records) and must not be edited in place.
 func projectContextualMetadata(metadata map[string]interface{}) map[string]interface{} {
@@ -262,7 +267,7 @@ func projectContextualMetadata(metadata map[string]interface{}) map[string]inter
 
 	projected := make(map[string]interface{}, len(contextualMetadataKeys)+1)
 	for _, key := range contextualMetadataKeys {
-		if value, ok := metadata[key]; ok {
+		if value, ok := metadata[key].(string); ok {
 			projected[key] = value
 		}
 	}
@@ -270,7 +275,7 @@ func projectContextualMetadata(metadata map[string]interface{}) map[string]inter
 	if intent, ok := metadata["intent"].(map[string]interface{}); ok {
 		projectedIntent := make(map[string]interface{}, len(contextualIntentKeys))
 		for _, key := range contextualIntentKeys {
-			if value, ok := intent[key]; ok {
+			if value, ok := intent[key].(string); ok {
 				projectedIntent[key] = value
 			}
 		}

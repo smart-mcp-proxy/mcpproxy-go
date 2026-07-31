@@ -322,6 +322,11 @@ renderings, classifier scores, raw intent objects — is dropped. Whitelisted ke
 that a record does not have are simply omitted, and a record whose metadata is
 entirely non-whitelisted serializes with no `metadata` object at all.
 
+Every kept key is kept only when its value is a **string**. A whitelisted key is
+not a promise about its value: a producer that writes a structured error under
+`reason` would otherwise smuggle that whole payload through the projection, so
+non-string values are dropped like any other non-whitelisted content.
+
 Two things survive the projection deliberately:
 
 - `has_sensitive_data` is derived from `metadata` **before** it is narrowed, so

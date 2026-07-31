@@ -772,6 +772,81 @@ func TestActivityList_ExcludePayloads_ContextualWhitelist(t *testing.T) {
 	})
 }
 
+// A whitelisted KEY is not a promise about the VALUE. Nothing stops a producer
+// from putting a structured error under `reason`, and copying it by key alone
+// would carry that whole payload straight through the exclude_payloads
+// boundary — the one place callers are told payloads cannot appear.
+func TestActivityList_ExcludePayloads_DropsNonStringWhitelistValues(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	activities := []*storage.ActivityRecord{
+		{
+			ID:         "activity-structured-reason",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "github",
+			ToolName:   "create_issue",
+			Status:     "blocked",
+			Timestamp:  time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Metadata: map[string]interface{}{
+				"reason": map[string]interface{}{
+					"summary": "blocked",
+					"payload": "…the entire request body the gate rejected…",
+				},
+				"decision":    "blocked",
+				"client_name": "claude-code",
+				"intent": map[string]interface{}{
+					"reason":         []interface{}{"first", map[string]interface{}{"nested": "blob"}},
+					"operation_type": "write",
+				},
+			},
+		},
+		{
+			ID:         "activity-intent-all-structured",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "analytics",
+			ToolName:   "query",
+			Status:     "success",
+			Timestamp:  time.Date(2024, 6, 15, 13, 0, 0, 0, time.UTC),
+			Metadata: map[string]interface{}{
+				"intent": map[string]interface{}{
+					"reason":         map[string]interface{}{"blob": "…"},
+					"operation_type": []interface{}{"write"},
+				},
+			},
+		},
+	}
+	mockCtrl := &mockActivityController{apiKey: "test-key", activities: activities}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/activity?exclude_payloads=true", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Success bool                           `json:"success"`
+		Data    contracts.ActivityListResponse `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.Len(t, resp.Data.Activities, 2)
+
+	rec := resp.Data.Activities[0]
+	require.Equal(t, "activity-structured-reason", rec.ID)
+	assert.NotContains(t, rec.Metadata, "reason", "an object-valued reason is a payload, not a string")
+	assert.Equal(t, "blocked", rec.Metadata["decision"], "the string-valued keys still survive")
+	assert.Equal(t, "claude-code", rec.Metadata["client_name"])
+
+	intent, ok := rec.Metadata["intent"].(map[string]interface{})
+	require.True(t, ok, "intent survives on the strength of operation_type")
+	assert.NotContains(t, intent, "reason", "an array-valued intent reason is a payload too")
+	assert.Equal(t, "write", intent["operation_type"])
+
+	empty := resp.Data.Activities[1]
+	require.Equal(t, "activity-intent-all-structured", empty.ID)
+	assert.Nil(t, empty.Metadata,
+		"an intent whose every whitelisted value is structured leaves nothing to report")
+}
+
 func keysOf(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
