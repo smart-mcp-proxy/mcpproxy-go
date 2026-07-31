@@ -48,6 +48,69 @@ extension APIClient: ConnectClientDataSource {}
 /// interval instead of spending it.
 typealias ConnectClientSleeper = @MainActor @Sendable (TimeInterval) async -> Void
 
+/// A data source that resolves the app's API client at call time.
+///
+/// The form can be opened before the core is up: until a client exists every
+/// call throws `notReady`, which the model renders as the waiting state and
+/// re-tries every two seconds, so the form populates itself the moment the core
+/// answers (FR-013) — no reopening.
+final class DeferredConnectSource: ConnectClientDataSource, @unchecked Sendable {
+
+    /// The tray only ever builds socket-routed clients (`CoreProcessManager`),
+    /// so the identity is known before the client exists. It is passed in rather
+    /// than assumed so a TCP-configured app still disables its writes.
+    let transportKind: APIClient.TransportKind
+
+    private let resolve: @Sendable () async -> APIClient?
+
+    init(
+        transportKind: APIClient.TransportKind = .unixSocket,
+        resolve: @escaping @Sendable () async -> APIClient?
+    ) {
+        self.transportKind = transportKind
+        self.resolve = resolve
+    }
+
+    private func client() async throws -> APIClient {
+        guard let client = await resolve() else { throw APIClientError.notReady }
+        return client
+    }
+
+    func connectClients() async throws -> [APIClient.ClientStatus] {
+        try await client().connectClients()
+    }
+
+    func clientDetail(_ clientId: String) async throws -> APIClient.ClientStatus {
+        try await client().clientDetail(clientId)
+    }
+
+    func connectPreview(_ clientId: String, serverName: String) async throws -> ConnectPreviewModel {
+        try await client().connectPreview(clientId, serverName: serverName)
+    }
+
+    func connect(
+        _ clientId: String,
+        serverName: String,
+        force: Bool,
+        preconditionToken: String?
+    ) async throws -> APIClient.ConnectResult {
+        try await client().connect(
+            clientId, serverName: serverName, force: force, preconditionToken: preconditionToken)
+    }
+
+    func undoConnect(
+        _ clientId: String,
+        serverName: String,
+        backupName: String?
+    ) async throws -> APIClient.ConnectResult {
+        try await client().undoConnect(clientId, serverName: serverName, backupName: backupName)
+    }
+
+    func disconnect(_ clientId: String, serverName: String) async throws -> APIClient.ConnectResult {
+        try await client().disconnect(clientId, serverName: serverName)
+    }
+}
+
 // MARK: - Model
 
 /// State machine behind the native Connect Client form (spec 091).

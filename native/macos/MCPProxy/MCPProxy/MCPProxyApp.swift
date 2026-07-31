@@ -21,6 +21,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var statusItem: NSStatusItem!
     private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    /// The Connect Client form. Presented as a sheet on the main window when one
+    /// is up, and as its own window otherwise.
+    private var connectClientWindow: NSWindow?
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
 
@@ -210,6 +213,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             name: .openWebUI, object: nil
         )
 
+        // Spec 091: the one route into the native Connect Client form. Presented
+        // directly from here — no delayed notification chains, which is what
+        // made the Add Server path fragile.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(presentConnectClientForm),
+            name: ConnectClientPresentation.route, object: nil
+        )
+
         // Start core
         Task {
             await startCore()
@@ -375,6 +386,70 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 .first { $0.identifier?.rawValue == "com_apple_SwiftUI_Settings_window" }?
                 .close()
         }
+    }
+
+    /// Present the native Connect Client form (spec 091).
+    ///
+    /// Direct presentation, on purpose: the Add Server path posts a notification
+    /// and then hopes two `asyncAfter` hops land in the right order, which is a
+    /// race dressed as a workflow (research D5). Here the window is built and
+    /// shown in this call.
+    @MainActor @objc func presentConnectClientForm() {
+        if let existing = connectClientWindow, existing.isVisible {
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Resolved per call: the form may be opened before the core is up, and
+        // must populate itself once it answers rather than needing a reopen.
+        let appState = self.appState
+        let source = DeferredConnectSource(
+            transportKind: appState.apiClient?.transportKind ?? .unixSocket,
+            resolve: { await MainActor.run { appState.apiClient } }
+        )
+        let model = ConnectClientModel(source: source)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Connect Client"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: ConnectClientView(model: model, onClose: { [weak self] in
+                self?.dismissConnectClientForm()
+            })
+        )
+        connectClientWindow = window
+
+        // A sheet on the main window when there is one — the form belongs to the
+        // app the user is already looking at; a standalone window otherwise,
+        // because a menu-bar app often has no window at all.
+        if let host = mainWindow, host.isVisible {
+            host.beginSheet(window) { [weak self] _ in self?.connectClientWindow = nil }
+            return
+        }
+
+        NSApp.setActivationPolicy(.regular)
+        window.center()
+        window.delegate = self
+        setupMainMenu()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Dismiss the form from its own Close button, whichever way it was shown.
+    @MainActor private func dismissConnectClientForm() {
+        guard let window = connectClientWindow else { return }
+        if let host = window.sheetParent {
+            host.endSheet(window)
+        } else {
+            window.close()
+        }
+        connectClientWindow = nil
     }
 
     @objc private func showAddServer() {
@@ -848,6 +923,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
         addServer.target = self
         menu.addItem(addServer)
+
+        // Spec 091 FR-001: the native connect journey, beside Add Server. The
+        // item is built by its router so the item and its routing are tested
+        // together (a nil target would make it silently do nothing).
+        menu.addItem(ConnectClientMenuRouter.shared.makeMenuItem())
 
         let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: "")
         openApp.target = self

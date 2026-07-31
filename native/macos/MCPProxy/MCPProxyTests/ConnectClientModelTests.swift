@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import MCPProxy
 
 /// State-machine tests for the native Connect Client form (spec 091 T016).
@@ -397,5 +398,64 @@ final class ConnectClientModelTests: XCTestCase {
         await model.connect()
 
         XCTAssertTrue(source.connectCalls.isEmpty)
+    }
+}
+
+/// Presentation wiring for the Connect Client form (spec 091 T018): one shared
+/// route into the form, and accessibility identifiers a UI test can rely on.
+@MainActor
+final class ConnectClientPresentationTests: XCTestCase {
+
+    /// The tray item and (FR-012) the dashboard must both go through the same
+    /// route, so no native path can reach a connect without the preview step.
+    func testTheMenuItemIsTitledConnectClientAndCarriesBothTargetAndAction() {
+        let item = ConnectClientMenuRouter.shared.makeMenuItem()
+
+        XCTAssertEqual(item.title, ConnectClientPresentation.menuTitle)
+        XCTAssertEqual(item.title, "Connect Client…")
+        XCTAssertNotNil(item.action)
+        XCTAssertTrue(item.target === ConnectClientMenuRouter.shared,
+                      "a nil target makes the row silently do nothing")
+    }
+
+    func testDispatchingTheMenuItemPostsTheSharedPresentationRoute() throws {
+        let item = ConnectClientMenuRouter.shared.makeMenuItem()
+        let received = expectation(description: "presentation route posted")
+        let token = NotificationCenter.default.addObserver(
+            forName: ConnectClientPresentation.route, object: nil, queue: .main
+        ) { _ in received.fulfill() }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        let dispatched = NSApplication.shared.sendAction(
+            try XCTUnwrap(item.action), to: item.target, from: item)
+
+        XCTAssertTrue(dispatched, "the menu item did not dispatch")
+        wait(for: [received], timeout: 1)
+    }
+
+    /// FR-010: the identifiers are a contract with the UI tests, so they are
+    /// pinned literally — renaming one silently breaks an external caller.
+    func testAccessibilityIdentifiersAreStable() {
+        XCTAssertEqual(ConnectClientAccessibility.list, "connect-client-list")
+        XCTAssertEqual(ConnectClientAccessibility.row("claude-code"),
+                       "connect-client-row-claude-code")
+        XCTAssertEqual(ConnectClientAccessibility.preview, "connect-client-preview")
+        XCTAssertEqual(ConnectClientAccessibility.entryText, "connect-client-entry-text")
+        XCTAssertEqual(ConnectClientAccessibility.configPath, "connect-client-config-path")
+        XCTAssertEqual(ConnectClientAccessibility.existingSummary,
+                       "connect-client-existing-summary")
+        XCTAssertEqual(ConnectClientAccessibility.safetyNet, "connect-client-safety-net")
+        XCTAssertEqual(ConnectClientAccessibility.credentialNotice,
+                       "connect-client-credential-notice")
+        XCTAssertEqual(ConnectClientAccessibility.refusal, "connect-client-refusal")
+        XCTAssertEqual(ConnectClientAccessibility.entryNameField, "connect-client-entry-name")
+        XCTAssertEqual(ConnectClientAccessibility.connectButton, "connect-client-connect")
+    }
+
+    func testAccessibilityIdentifiersAreUnique() {
+        let identifiers = ConnectClientAccessibility.allIdentifiers
+        XCTAssertEqual(Set(identifiers).count, identifiers.count,
+                       "two elements sharing an identifier make a UI test ambiguous")
+        XCTAssertTrue(identifiers.allSatisfy { $0.hasPrefix("connect-client-") })
     }
 }
