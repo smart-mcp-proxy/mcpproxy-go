@@ -245,8 +245,13 @@ actor APIClient {
 
     // MARK: - Connect (Client Registration)
 
-    /// Client status model returned by `GET /api/v1/connect`.
-    struct ClientStatus: Codable, Identifiable {
+    /// Client status model returned by `GET /api/v1/connect` (list, existence
+    /// checks only) and `GET /api/v1/connect/{id}` (detail, one on-demand read).
+    ///
+    /// Every spec-091 addition is optional: a core older than this app sends
+    /// none of them, and a list that refuses to decode is a much worse outcome
+    /// than a row rendered with defaults.
+    struct ClientStatus: Codable, Identifiable, Equatable {
         var id: String { clientId }
         let clientId: String
         let name: String
@@ -255,12 +260,54 @@ actor APIClient {
         let connected: Bool
         let supported: Bool
         let reason: String?
+        /// Icon slug from the core registry ("claude-code", "cursor", …) — a
+        /// registry identity, NOT an SF Symbol name; see `symbolName`.
+        let icon: String?
+        /// Entry name under which mcpproxy is registered, when connected.
+        let serverName: String?
+        /// Resolved by the detail read; absent in the content-read-free list.
+        let accessState: ConnectAccessState?
+        /// Actionable fix text, populated only when access is denied.
+        let remediation: String?
+        /// Caveat for a supported client (e.g. a bridge requirement).
+        let note: String?
+        /// Connects through a stdio bridge; connectable without an existing config.
+        let bridge: Bool?
 
         enum CodingKeys: String, CodingKey {
             case clientId = "id"
             case name
             case configPath = "config_path"
-            case exists, connected, supported, reason
+            case exists, connected, supported, reason, icon, note, bridge
+            case serverName = "server_name"
+            case accessState = "access_state"
+            case remediation
+        }
+
+        /// Name to render; a core newer than the app may report a client this
+        /// build never heard of, which still renders by name (FR-009).
+        var displayName: String { name.isEmpty ? clientId : name }
+
+        /// SF Symbol for the row. The core's `icon` is a registry slug, so an
+        /// unknown one — the newer-core case — resolves to the generic symbol
+        /// rather than an empty image.
+        var symbolName: String {
+            switch icon ?? clientId {
+            case "claude-code", "claude-desktop":
+                return "brain"
+            case "cursor":
+                return "cursorarrow.rays"
+            case "vscode", "copilot":
+                return "chevron.left.forwardslash.chevron.right"
+            case "windsurf":
+                return "wind"
+            case "codex", "opencode":
+                return "terminal"
+            case "gemini":
+                return "sparkles"
+            default:
+                return "app.connected.to.app.below.fill"
+            }
         }
     }
 
