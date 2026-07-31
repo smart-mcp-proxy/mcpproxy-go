@@ -242,6 +242,17 @@ final class ConnectClientModel: ObservableObject {
     private let source: ConnectClientDataSource
     private let sleeper: ConnectClientSleeper
 
+    /// A mutating request is outstanding.
+    ///
+    /// Deliberately NOT derived from `action`: this model is @MainActor, so
+    /// every `await` is a reentrancy point, and the list, the entry-name field
+    /// and the buttons all stay live while a POST is suspended. `action` is the
+    /// OUTCOME the pane displays and gets reset whenever the preview is
+    /// invalidated (a row click, a name edit) — reading busy off it made the
+    /// double-submit protection disappear mid-write, which is how two
+    /// concurrent read-modify-write cycles could land on the same config file.
+    @Published private(set) var inFlight = false
+
     /// Inputs the currently resolved preview was fetched for.
     private var previewKey: PreviewKey?
 
@@ -296,7 +307,14 @@ final class ConnectClientModel: ObservableObject {
 
     func refreshDetail() async {
         guard let clientId = selection else { return }
-        detail = .loading
+        await refreshDetail(for: clientId)
+    }
+
+    /// Re-read one client's authoritative state. The row keeps it whether or not
+    /// that client is still the selected one — it was read for this client and
+    /// remains true of it — while the detail PANE is only touched when it is.
+    private func refreshDetail(for clientId: String) async {
+        if selection == clientId { detail = .loading }
         do {
             let status = try await source.clientDetail(clientId)
             // The row keeps the resolved state even if the selection moved on:
@@ -337,7 +355,10 @@ final class ConnectClientModel: ObservableObject {
     private func invalidatePreview() {
         preview = .idle
         previewKey = nil
-        action = .idle
+        // Only a SETTLED outcome is cleared: a request still in flight will
+        // publish its own, and erasing its marker here would hide the spinner
+        // while the write is still running.
+        if !inFlight { action = .idle }
     }
 
     // MARK: - Rows (US2)
@@ -431,7 +452,7 @@ final class ConnectClientModel: ObservableObject {
 
     /// A request is in flight; every action button disables (double-click
     /// protection, spec Edge Cases).
-    var isBusy: Bool { action == .inFlight }
+    var isBusy: Bool { inFlight }
 
     var isConnectEnabled: Bool {
         connectControlExists && mutatingDisabledReason == nil && !isBusy
@@ -454,7 +475,10 @@ final class ConnectClientModel: ObservableObject {
         else { return }
 
         let entryName = self.entryName
-        action = .inFlight
+        beginRequest()
+
+        var outcome: ActionState
+        var rePreviewOnly = false
         do {
             let result = try await source.connect(
                 clientId,
@@ -462,34 +486,63 @@ final class ConnectClientModel: ObservableObject {
                 force: preview.changeKind.requiresForce,
                 preconditionToken: preview.preconditionToken
             )
-            action = .succeeded(result)
+            outcome = .succeeded(result)
             // FR-006: undo becomes available for exactly this connect, carrying
             // the identity it returned — no identity means it created the file.
             undoState = .available(
                 clientId: clientId,
                 entryName: entryName,
                 backupName: Self.backupIdentity(from: result.backupPath))
-            // The form shows the refreshed state without being reopened.
-            await refreshAffectedClient()
         } catch let error as APIClientError {
             switch error {
             case .connectConflict(let conflictAction, let message)
                 where conflictAction == Self.preconditionFailedAction:
                 // The previewed state drifted: re-preview ONCE. Never retry the
                 // write — that is what would loop.
-                action = .conflict(message)
-                await refreshPreviewPreservingAction()
+                outcome = .conflict(message)
+                rePreviewOnly = true
             case .connectConflict(_, let message):
                 // The legacy `already_exists` conflict cannot occur in this flow
                 // (a replace always sends force); if it does it is a plain
                 // failure, and re-previewing on it would loop forever.
-                action = .failed(message)
+                outcome = .failed(message)
             default:
-                action = .failed(Self.message(for: error))
+                outcome = .failed(Self.message(for: error))
             }
         } catch {
-            action = .failed(Self.message(for: error))
+            outcome = .failed(Self.message(for: error))
         }
+
+        // The request is settled BEFORE the refresh: the refresh reads, it does
+        // not write, so the controls are usable again while it runs.
+        endRequest(with: outcome, for: clientId)
+
+        if rePreviewOnly {
+            await refreshPreviewPreservingAction(for: clientId)
+        } else if case .succeeded = outcome {
+            // The form shows the refreshed state without being reopened.
+            await refreshAffectedClient(clientId)
+        }
+    }
+
+    /// Mark a mutating request as started. `action` carries the marker for the
+    /// pane's spinner; `inFlight` is what actually gates the controls.
+    private func beginRequest() {
+        inFlight = true
+        action = .inFlight
+    }
+
+    /// Settle a mutating request. The outcome is published ONLY into the pane of
+    /// the client it belongs to: the user may have moved on while it was in
+    /// flight, and one client's success banner must never appear under another
+    /// client's name.
+    private func endRequest(with outcome: ActionState, for clientId: String) {
+        inFlight = false
+        guard selection == clientId else {
+            if action == .inFlight { action = .idle }
+            return
+        }
+        action = outcome
     }
 
     /// The core's discriminator for "the state you previewed has changed".
@@ -516,16 +569,20 @@ final class ConnectClientModel: ObservableObject {
               isUndoEnabled
         else { return }
 
-        action = .inFlight
+        beginRequest()
+        var outcome: ActionState
         do {
             let result = try await source.undoConnect(
                 clientId, serverName: entry, backupName: backupName)
             undoState = .unavailable
-            action = .succeeded(result)
-            await refreshAffectedClient()
+            outcome = .succeeded(result)
         } catch {
             // The connect stands, so the affordance stands: the user can retry.
-            action = .failed(Self.message(for: error))
+            outcome = .failed(Self.message(for: error))
+        }
+        endRequest(with: outcome, for: clientId)
+        if case .succeeded = outcome {
+            await refreshAffectedClient(clientId)
         }
     }
 
@@ -589,14 +646,18 @@ final class ConnectClientModel: ObservableObject {
         pendingDisconnect = nil
         guard selection == confirmation.clientId, isDisconnectEnabled else { return }
 
-        action = .inFlight
+        beginRequest()
+        var outcome: ActionState
         do {
             let result = try await source.disconnect(
                 confirmation.clientId, serverName: confirmation.entryName)
-            action = .succeeded(result)
-            await refreshAffectedClient()
+            outcome = .succeeded(result)
         } catch {
-            action = .failed(Self.message(for: error))
+            outcome = .failed(Self.message(for: error))
+        }
+        endRequest(with: outcome, for: confirmation.clientId)
+        if case .succeeded = outcome {
+            await refreshAffectedClient(confirmation.clientId)
         }
     }
 
@@ -612,16 +673,29 @@ final class ConnectClientModel: ObservableObject {
     /// After a completed action, re-read ONLY the affected client and re-run its
     /// preview, so the form shows the new truth without being reopened and
     /// without refetching (or reading) anything else (US2 scenario 3).
-    private func refreshAffectedClient() async {
-        await refreshDetail()
-        await refreshPreviewPreservingAction()
+    ///
+    /// The client is the one the action was performed on, not whatever is
+    /// selected now: its row must show what the write produced even if the user
+    /// has moved on — but the PREVIEW pane belongs to the current selection, so
+    /// it is only re-run while that is still the same client.
+    private func refreshAffectedClient(_ clientId: String) async {
+        await refreshDetail(for: clientId)
+        guard selection == clientId else { return }
+        await refreshPreviewPreservingAction(for: clientId)
     }
 
     /// Re-run the preview without letting `invalidatePreview`'s action reset
     /// erase the outcome the user is being shown.
-    private func refreshPreviewPreservingAction() async {
+    ///
+    /// The outcome is restored ONLY if nothing newer took the action's place
+    /// while the refetch was in flight. Writing it back unconditionally
+    /// resurrected a settled outcome over a request the user had started since
+    /// (an Undo clicked during this very refresh), which both hid that
+    /// request's own result and re-enabled the button that sent it.
+    private func refreshPreviewPreservingAction(for clientId: String) async {
         let outcome = action
         await refreshPreview()
+        guard selection == clientId, action == .idle else { return }
         action = outcome
     }
 

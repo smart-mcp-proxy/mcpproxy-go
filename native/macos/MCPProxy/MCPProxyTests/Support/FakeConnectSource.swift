@@ -28,6 +28,18 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
     /// observe the model's in-flight state from outside without a real clock.
     var whileConnectInFlight: (@MainActor @Sendable () -> Void)?
 
+    /// Awaited while a connect is in flight, so a test can interleave a whole
+    /// user action (selecting another client) with a suspended write.
+    var duringConnect: (@MainActor @Sendable () async -> Void)?
+
+    /// Awaited while a preview is in flight, receiving the 1-based call index —
+    /// the seam for "the user acted while the post-action refresh was running".
+    var duringPreview: (@MainActor @Sendable (Int) async -> Void)?
+
+    /// Awaited while an undo is in flight; a test releases it to let the undo
+    /// settle, so the window where the undo is still pending is observable.
+    var duringUndo: (@MainActor @Sendable () async -> Void)?
+
     // MARK: Recorded calls
 
     struct ConnectCall: Equatable {
@@ -58,6 +70,7 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
 
     func connectPreview(_ clientId: String, serverName: String) async throws -> ConnectPreviewModel {
         previewCalls.append((clientId, serverName))
+        if let hook = duringPreview { await hook(previewCalls.count) }
         return try next(&previewResults, fallback: FakeConnectSource.preview(serverName: serverName))
     }
 
@@ -73,6 +86,7 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
         if let hook = whileConnectInFlight {
             await MainActor.run { hook() }
         }
+        if let hook = duringConnect { await hook() }
         return try next(&connectResults, fallback: FakeConnectSource.result(action: "created"))
     }
 
@@ -82,6 +96,7 @@ final class FakeConnectSource: ConnectClientDataSource, @unchecked Sendable {
         backupName: String?
     ) async throws -> APIClient.ConnectResult {
         undoCalls.append((clientId, backupName))
+        if let hook = duringUndo { await hook() }
         return try next(&undoResults, fallback: FakeConnectSource.result(action: "restored"))
     }
 

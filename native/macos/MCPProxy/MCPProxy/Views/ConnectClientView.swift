@@ -172,6 +172,10 @@ struct ConnectClientView: View {
                     .accessibilityIdentifier(ConnectClientAccessibility.row(row.clientId))
             }
             .accessibilityIdentifier(ConnectClientAccessibility.list)
+            // Changing client mid-write would leave the outcome pointing at a
+            // pane the user is no longer looking at (the model scopes it, but
+            // the interaction is meaningless anyway while a write runs).
+            .disabled(model.isBusy)
             .onChange(of: selectedID) { newValue in
                 // An unsupported client stays visible but is not a selection:
                 // there is nothing the form could do for it (FR-009).
@@ -346,6 +350,8 @@ struct ConnectClientView: View {
             VStack(alignment: .leading, spacing: 4) {
                 TextField("Entry name", text: $model.entryName)
                     .textFieldStyle(.roundedBorder)
+                    // The name is bound to the write that is already running.
+                    .disabled(model.isBusy)
                     .accessibilityIdentifier(ConnectClientAccessibility.entryNameField)
                 Text("Changing this discards the preview and fetches a new one.")
                     .font(.caption2)
