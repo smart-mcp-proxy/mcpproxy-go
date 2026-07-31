@@ -144,7 +144,7 @@ func parseActivityFilters(r *http.Request) storage.ActivityFilter {
 // @Param end_time query string false "Filter activities before this time (RFC3339)"
 // @Param limit query int false "Maximum records to return (1-100, default 50)"
 // @Param offset query int false "Pagination offset (default 0)"
-// @Param exclude_payloads query bool false "Omit arguments, response and metadata (default: false). For clients that render summary fields only; has_sensitive_data is still derived before metadata is dropped."
+// @Param exclude_payloads query bool false "Omit arguments, response and metadata except a contextual whitelist (intent.reason, intent.operation_type, decision, reason, client_name, client_version) (default: false). For clients that render summary fields only; has_sensitive_data is still derived before metadata is dropped."
 // @Success 200 {object} contracts.APIResponse{data=contracts.ActivityListResponse}
 // @Failure 400 {object} contracts.APIResponse
 // @Failure 401 {object} contracts.APIResponse
@@ -172,6 +172,11 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 	// log, the newest 100 tool-call records are ~848KB whole and ~30KB projected.
 	// HasSensitiveData is derived by storageToContractActivity from Metadata
 	// BEFORE it is dropped, so the flag survives its source.
+	//
+	// Metadata is not dropped wholesale: a small whitelist of short contextual
+	// strings (why a call happened, whether policy blocked it, who called)
+	// survives, because the tray renders them and re-fetching each record in
+	// full to get an 80-character reason would undo the projection's point.
 	excludePayloads := r.URL.Query().Get("exclude_payloads") == "true"
 	contractActivities := make([]contracts.ActivityRecord, len(activities))
 	for i, a := range activities {
@@ -180,7 +185,7 @@ func (s *Server) handleListActivity(w http.ResponseWriter, r *http.Request) {
 			contractActivities[i].Arguments = nil
 			contractActivities[i].Response = ""
 			contractActivities[i].ResponseTruncated = false
-			contractActivities[i].Metadata = nil
+			contractActivities[i].Metadata = projectContextualMetadata(contractActivities[i].Metadata)
 		}
 	}
 
@@ -232,6 +237,52 @@ func (s *Server) handleGetActivityDetail(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSuccess(w, response)
+}
+
+// contextualMetadataKeys are the top-level metadata keys that survive the
+// `exclude_payloads` projection (contracts/api-deltas.md §1). Everything here is
+// a short string the tray glance shows verbatim; anything unbounded (arguments,
+// responses, toon renderings, detection payloads) is deliberately absent.
+var contextualMetadataKeys = []string{"decision", "reason", "client_name", "client_version"}
+
+// contextualIntentKeys are the keys kept inside `metadata.intent`. The rest of
+// the intent object (scores, raw classifier output) is not rendered anywhere.
+var contextualIntentKeys = []string{"reason", "operation_type"}
+
+// projectContextualMetadata narrows metadata to the contextual whitelist,
+// returning nil when nothing whitelisted is present so an all-dropped record
+// serialises as an absent object rather than an empty one.
+//
+// The result is always a fresh map: the input belongs to the storage layer (the
+// controller may hand back live records) and must not be edited in place.
+func projectContextualMetadata(metadata map[string]interface{}) map[string]interface{} {
+	if len(metadata) == 0 {
+		return nil
+	}
+
+	projected := make(map[string]interface{}, len(contextualMetadataKeys)+1)
+	for _, key := range contextualMetadataKeys {
+		if value, ok := metadata[key]; ok {
+			projected[key] = value
+		}
+	}
+
+	if intent, ok := metadata["intent"].(map[string]interface{}); ok {
+		projectedIntent := make(map[string]interface{}, len(contextualIntentKeys))
+		for _, key := range contextualIntentKeys {
+			if value, ok := intent[key]; ok {
+				projectedIntent[key] = value
+			}
+		}
+		if len(projectedIntent) > 0 {
+			projected["intent"] = projectedIntent
+		}
+	}
+
+	if len(projected) == 0 {
+		return nil
+	}
+	return projected
 }
 
 // storageToContractActivity converts a storage ActivityRecord to a contracts ActivityRecord.

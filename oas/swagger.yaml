@@ -3108,9 +3108,10 @@ paths:
         name: offset
         schema:
           type: integer
-      - description: 'Omit arguments, response and metadata (default: false). For
-          clients that render summary fields only; has_sensitive_data is still derived
-          before metadata is dropped.'
+      - description: 'Omit arguments, response and metadata except a contextual whitelist
+          (intent.reason, intent.operation_type, decision, reason, client_name, client_version)
+          (default: false). For clients that render summary fields only; has_sensitive_data
+          is still derived before metadata is dropped.'
         in: query
         name: exclude_payloads
         schema:

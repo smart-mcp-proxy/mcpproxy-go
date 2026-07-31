@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -264,7 +265,7 @@ func TestActivityRequest_InvalidID(t *testing.T) {
 	// Verify URL parsing - chi would normally extract the param
 	assert.Equal(t, http.MethodGet, req.Method)
 	assert.Empty(t, req.URL.Query().Get("id")) // No query param
-	_ = rr // Would check response after handler call
+	_ = rr                                     // Would check response after handler call
 }
 
 // =============================================================================
@@ -273,11 +274,11 @@ func TestActivityRequest_InvalidID(t *testing.T) {
 
 func TestParseActivityFilters_SensitiveDataFilters(t *testing.T) {
 	tests := []struct {
-		name            string
-		query           string
-		wantSensitive   *bool
-		wantDetType     string
-		wantSeverity    string
+		name          string
+		query         string
+		wantSensitive *bool
+		wantDetType   string
+		wantSeverity  string
 	}{
 		{
 			name:          "sensitive_data=true filter",
@@ -511,9 +512,9 @@ func TestExtractSensitiveDataInfo(t *testing.T) {
 
 func TestCalculateMaxSeverity(t *testing.T) {
 	tests := []struct {
-		name       string
-		detection  map[string]interface{}
-		wantMax    string
+		name      string
+		detection map[string]interface{}
+		wantMax   string
 	}{
 		{
 			name: "mixed severities - critical wins",
@@ -544,9 +545,9 @@ func TestCalculateMaxSeverity(t *testing.T) {
 			wantMax: "",
 		},
 		{
-			name:    "nil detections",
+			name:      "nil detections",
 			detection: map[string]interface{}{},
-			wantMax: "",
+			wantMax:   "",
 		},
 		{
 			name: "unknown severity ignored",
@@ -623,4 +624,158 @@ func TestActivityListResponse_SensitiveDataFields_JSON(t *testing.T) {
 // Helper function to create bool pointer
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// =============================================================================
+// Spec 090 (T008): exclude_payloads keeps a contextual-metadata whitelist
+// =============================================================================
+
+// excludePayloadsWhitelistRecords is the fixture for the projection tests: one
+// record whose metadata mixes every whitelisted key with keys that must never
+// survive the projection, and one record that has metadata but nothing
+// whitelisted in it.
+func excludePayloadsWhitelistRecords() []*storage.ActivityRecord {
+	return []*storage.ActivityRecord{
+		{
+			ID:         "activity-contextual",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "github",
+			ToolName:   "create_issue",
+			Status:     "blocked",
+			Timestamp:  time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC),
+			Arguments:  map[string]interface{}{"title": "a very large argument blob"},
+			Response:   "a very large response body",
+			Metadata: map[string]interface{}{
+				// Whitelisted (contracts/api-deltas.md §1).
+				"intent": map[string]interface{}{
+					"reason":         "user asked to file the crash report",
+					"operation_type": "write",
+					// NOT whitelisted, even though it lives under intent.
+					"confidence": 0.91,
+				},
+				"decision":       "blocked",
+				"reason":         "Intent rejected: write operation without a stated reason",
+				"client_name":    "claude-code",
+				"client_version": "2.1.220",
+				// Never whitelisted: unbounded or irrelevant to the glance.
+				"toon_output": "…a very large toon rendering…",
+				"sensitive_data_detection": map[string]interface{}{
+					"detected": true,
+					"detections": []interface{}{
+						map[string]interface{}{"type": "github_token", "severity": "high"},
+					},
+				},
+				"error_payload": map[string]interface{}{"body": "…"},
+				"arbitrary":     "value",
+			},
+		},
+		{
+			ID:         "activity-no-context",
+			Type:       storage.ActivityTypeToolCall,
+			ServerName: "analytics",
+			ToolName:   "query",
+			Status:     "success",
+			Timestamp:  time.Date(2024, 6, 15, 13, 0, 0, 0, time.UTC),
+			Metadata:   map[string]interface{}{"toon_output": "…", "arbitrary": "value"},
+		},
+	}
+}
+
+func TestActivityList_ExcludePayloads_ContextualWhitelist(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	activities := excludePayloadsWhitelistRecords()
+	mockCtrl := &mockActivityController{apiKey: "test-key", activities: activities}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	list := func(t *testing.T, path string) []contracts.ActivityRecord {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-API-Key", "test-key")
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Success bool                           `json:"success"`
+			Data    contracts.ActivityListResponse `json:"data"`
+		}
+		require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+		return resp.Data.Activities
+	}
+
+	t.Run("keeps ONLY the contextual whitelist", func(t *testing.T) {
+		got := list(t, "/api/v1/activity?exclude_payloads=true")
+		require.Len(t, got, 2)
+		rec := got[0]
+		require.Equal(t, "activity-contextual", rec.ID)
+
+		require.NotNil(t, rec.Metadata, "contextual fields must survive the projection")
+		assert.ElementsMatch(t,
+			[]string{"intent", "decision", "reason", "client_name", "client_version"},
+			keysOf(rec.Metadata),
+			"exactly the whitelist, nothing else")
+
+		intent, ok := rec.Metadata["intent"].(map[string]interface{})
+		require.True(t, ok, "intent must survive as an object")
+		assert.Equal(t, "user asked to file the crash report", intent["reason"])
+		assert.Equal(t, "write", intent["operation_type"])
+		assert.ElementsMatch(t, []string{"reason", "operation_type"}, keysOf(intent),
+			"intent is itself whitelisted key-by-key")
+
+		assert.Equal(t, "blocked", rec.Metadata["decision"])
+		assert.Equal(t, "Intent rejected: write operation without a stated reason", rec.Metadata["reason"])
+		assert.Equal(t, "claude-code", rec.Metadata["client_name"])
+		assert.Equal(t, "2.1.220", rec.Metadata["client_version"])
+	})
+
+	t.Run("still omits arguments, response and non-whitelisted metadata", func(t *testing.T) {
+		got := list(t, "/api/v1/activity?exclude_payloads=true")
+		require.Len(t, got, 2)
+		rec := got[0]
+
+		assert.Nil(t, rec.Arguments, "arguments stay excluded")
+		assert.Empty(t, rec.Response, "response stays excluded")
+		for _, dropped := range []string{"toon_output", "sensitive_data_detection", "error_payload", "arbitrary"} {
+			assert.NotContains(t, rec.Metadata, dropped, "%s must not be serialised", dropped)
+		}
+		// The flag is still derived from metadata before the projection runs.
+		assert.True(t, rec.HasSensitiveData, "the derived flag survives its source being dropped")
+	})
+
+	t.Run("a record with no whitelisted keys reports no metadata at all", func(t *testing.T) {
+		got := list(t, "/api/v1/activity?exclude_payloads=true")
+		require.Len(t, got, 2)
+		rec := got[1]
+		require.Equal(t, "activity-no-context", rec.ID)
+		assert.Nil(t, rec.Metadata, "an empty projection is absent, not an empty object")
+	})
+
+	t.Run("the projection does not mutate the stored record", func(t *testing.T) {
+		_ = list(t, "/api/v1/activity?exclude_payloads=true")
+
+		stored := activities[0].Metadata
+		assert.Contains(t, stored, "toon_output", "storage-owned map must be untouched")
+		intent, ok := stored["intent"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Contains(t, intent, "confidence", "nested storage-owned map must be untouched")
+	})
+
+	t.Run("the full response is unchanged", func(t *testing.T) {
+		got := list(t, "/api/v1/activity")
+		require.Len(t, got, 2)
+		rec := got[0]
+
+		assert.NotNil(t, rec.Arguments)
+		assert.Equal(t, "a very large response body", rec.Response)
+		assert.Contains(t, rec.Metadata, "toon_output", "omitting the parameter changes nothing")
+		assert.Contains(t, rec.Metadata, "sensitive_data_detection")
+	})
+}
+
+func keysOf(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }

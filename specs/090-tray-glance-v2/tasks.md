@@ -7,7 +7,7 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 ## Phase 1: Setup
 
-- [ ] T001 Verify green baseline on branch 090-tray-glance-v2: `cd native/macos/MCPProxy && swift test` and `go test ./internal/httpapi/... ./internal/runtime/... ./internal/storage/... ./internal/server/...` both pass before any change (record pre-existing failures, if any, in specs/090-tray-glance-v2/verification/baseline.md)
+- [x] T001 Verify green baseline on branch 090-tray-glance-v2: `cd native/macos/MCPProxy && swift test` and `go test ./internal/httpapi/... ./internal/runtime/... ./internal/storage/... ./internal/server/...` both pass before any change (record pre-existing failures, if any, in specs/090-tray-glance-v2/verification/baseline.md)
 
 ## Phase 2: Foundational (blocking prerequisites)
 
@@ -33,8 +33,8 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 **Independent test**: Records with/without reasons render one- or two-line rows; polled and SSE entries expose identical reasons.
 
-- [ ] T008 [P] [US2] Write failing Go test in internal/httpapi/activity_test.go: with `exclude_payloads=true` the response keeps ONLY the contextual whitelist (`intent.reason`, `intent.operation_type`, `decision`, `reason`, `client_name`, `client_version`) and still omits `arguments`, `response`, and all other metadata (contracts/api-deltas.md §1)
-- [ ] T009 [US2] Implement the whitelist projection in internal/httpapi/activity.go, fix the `exclude_payloads` swagger annotation, run `make swagger` (commit oas/swagger.yaml, oas/docs.go); T008 green, `make swagger-verify` green
+- [x] T008 [P] [US2] Write failing Go test in internal/httpapi/activity_test.go: with `exclude_payloads=true` the response keeps ONLY the contextual whitelist (`intent.reason`, `intent.operation_type`, `decision`, `reason`, `client_name`, `client_version`) and still omits `arguments`, `response`, and all other metadata (contracts/api-deltas.md §1)
+- [x] T009 [US2] Implement the whitelist projection in internal/httpapi/activity.go, fix the `exclude_payloads` swagger annotation, run `make swagger` (commit oas/swagger.yaml, oas/docs.go); T008 green, `make swagger-verify` green
 - [ ] T010 [P] [US2] Write failing tests in MCPProxyTests/GlanceEventTests.swift: intent extraction from both completed-event payloads (metadata populated, reason exposed via the T003 accessors)
 - [ ] T011 [US2] Implement intent extraction in MCPProxy/Menu/Glance/GlanceEvent.swift (research D9, intent part); T010 green
 - [ ] T012 [P] [US2] Write failing tests in MCPProxyTests/GlanceSectionTests.swift + GlanceFormattingTests.swift: subtitle set only on macOS 14.4+ (availability injected as a testable flag), 60-char tail truncation, single-line when no reason, FR-011a failed-row template and truncation precedence (error clause 40 tail-truncated before the label's 34 middle-truncation tightens; age never truncated), tooltip carries full label+reason+error, VoiceOver label includes reason
