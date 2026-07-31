@@ -109,6 +109,60 @@ final class ConnectFormWindowLifecycleTests: XCTestCase {
         host.close()
     }
 
+    /// Counts what the poll asked the clock for, so "it stopped" is a measured
+    /// fact rather than an inference.
+    @MainActor
+    final class PollCounter {
+        private(set) var ticks = 0
+        func tick() { ticks += 1 }
+    }
+
+    /// The leak that mattered is a poll that keeps running, so this drives the
+    /// poll for real: against an unreachable core it iterates, and once the task
+    /// carrying it is cancelled the counter FREEZES.
+    ///
+    /// Cancellation is what the teardown ultimately triggers — SwiftUI cancels
+    /// the `.task` when the hosting view goes away, which the release test above
+    /// pins by proving that view and model are deallocated. That SwiftUI link
+    /// cannot be exercised here: probed on this machine, a `.task` never starts
+    /// under `swift test` even with a key, activated window and a hosting
+    /// controller (zero iterations, the view stays in its initial state), so
+    /// this covers the half that is ours — that `loadList` honours the
+    /// cancellation it is sent.
+    ///
+    /// Note the sleeper mirrors the production one, which returns IMMEDIATELY
+    /// once cancelled (`try? await Task.sleep`): a loop that did not check
+    /// `Task.isCancelled` would not slow down here, it would spin.
+    func testTheReachabilityPollRunsAndThenProvablyStops() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.failure(APIClientError.notReady)]
+        let counter = PollCounter()
+        let model = ConnectClientModel(source: source, sleeper: { _ in
+            counter.tick()
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        })
+
+        let poll = Task { await model.loadList() }
+        defer { poll.cancel() }
+
+        // It is polling: wait for real iterations rather than assuming any.
+        for _ in 0..<200 where counter.ticks < 3 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(counter.ticks, 3,
+                                    "precondition: the form is polling an unreachable core")
+        XCTAssertEqual(model.list, .coreUnreachable(APIClientError.notReady.errorDescription ?? ""))
+
+        poll.cancel()
+        let atCancellation = counter.ticks
+
+        // Well past several poll intervals at this cadence.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+
+        XCTAssertEqual(counter.ticks, atCancellation,
+                       "the poll must STOP, not merely slow down, once its task is cancelled")
+    }
+
     func testAnUnrelatedWindowClosingIsIgnored() {
         let lifecycle = ConnectFormWindowLifecycle()
         let window = makeWindow()
