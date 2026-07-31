@@ -1349,20 +1349,31 @@ func (m *Manager) CloseSession(sessionID string) error {
 	})
 }
 
-// GetRecentSessions returns the most recent sessions.
+// GetRecentSessions returns the sessions that were active most recently.
+//
+// "Recent" means LastActivity, not StartTime. Bucket keys are
+// "{startUnixNano}_{id}", so a cursor walk is start-time order — and a client
+// that connected this morning and is still calling tools sits at the very
+// bottom of it, one reconnect-happy neighbour away from being truncated out of
+// the page. The tray would then say the busiest client on the machine is gone.
+//
+// So the walk collects every retained record first, sorts by LastActivity
+// descending, and only then filters and truncates. Ordering before truncation
+// is the whole guarantee (contracts/api-deltas.md §3); doing it in the caller
+// can only reorder rows that already survived the cut. Session retention caps
+// the bucket at 100 records (enforceSessionRetention), so the full scan and
+// sort are bounded.
 //
 // status filters on SessionRecord.Status ("active" / "closed"); an empty string
-// means no filtering. The filter is applied DURING the cursor walk, before the
-// limit truncates the result, so a session that started long ago but is still
-// active is never dropped by a page full of newer sessions. Filtering after
-// truncation would let the tray report "no connected clients" while a client
-// is actively calling tools.
+// means no filtering. It is applied after the sort and before the limit, so an
+// old-but-active session is never dropped by a page full of newer ones. The
+// returned total counts the whole bucket when unfiltered, and every matching
+// record when filtered.
 func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var sessions []*SessionRecord
-	var total int
+	var all []*SessionRecord
 
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(SessionsBucket))
@@ -1370,49 +1381,51 @@ func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord,
 			return nil // No sessions yet
 		}
 
-		if status == "" {
-			// Unfiltered: total is the whole bucket and the walk can stop early.
-			total = bucket.Stats().KeyN
-
-			// Iterate in reverse (newest first due to timestamp key prefix)
-			c := bucket.Cursor()
-			count := 0
-			for k, v := c.Last(); k != nil && count < limit; k, v = c.Prev() {
-				var session SessionRecord
-				if err := json.Unmarshal(v, &session); err != nil {
-					m.logger.Warnw("Failed to unmarshal session", "error", err)
-					continue
-				}
-				sessions = append(sessions, &session)
-				count++
-			}
-
-			return nil
-		}
-
-		// Filtered: walk the whole bucket so `total` honestly counts matching
-		// records. Session retention caps this bucket at 100 keys
-		// (enforceSessionRetention), so a full walk is bounded and cheap.
+		all = make([]*SessionRecord, 0, bucket.Stats().KeyN)
 		c := bucket.Cursor()
-		for k, v := c.Last(); k != nil; k, v = c.Prev() {
+		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var session SessionRecord
 			if err := json.Unmarshal(v, &session); err != nil {
 				m.logger.Warnw("Failed to unmarshal session", "error", err)
 				continue
 			}
+			all = append(all, &session)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Newest activity first. StartTime breaks ties so the order is stable for
+	// records that share a LastActivity (or have none recorded at all).
+	sort.SliceStable(all, func(i, j int) bool {
+		if !all[i].LastActivity.Equal(all[j].LastActivity) {
+			return all[i].LastActivity.After(all[j].LastActivity)
+		}
+		return all[i].StartTime.After(all[j].StartTime)
+	})
+
+	if status != "" {
+		total := 0
+		sessions := make([]*SessionRecord, 0, limit)
+		for _, session := range all {
 			if session.Status != status {
 				continue
 			}
 			total++
 			if len(sessions) < limit {
-				sessions = append(sessions, &session)
+				sessions = append(sessions, session)
 			}
 		}
+		return sessions, total, nil
+	}
 
-		return nil
-	})
-
-	return sessions, total, err
+	if limit < len(all) {
+		return all[:limit], len(all), nil
+	}
+	return all, len(all), nil
 }
 
 // GetSessionByID retrieves a session by its ID

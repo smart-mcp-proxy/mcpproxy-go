@@ -63,8 +63,8 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 **Independent test**: Session records at various ages classify/dedupe/order correctly; summary counts cover the full deduped set.
 
-- [ ] T024 [P] [US4] Write failing Go test in internal/storage/manager_test.go: an old-start but recently-active session survives `GetRecentSessions(limit)` truncation (ordering by `last_activity` desc happens BEFORE limit, across statuses) (contracts §3)
-- [ ] T025 [US4] Implement collect-all→sort→filter→truncate in internal/storage/manager.go `GetRecentSessions`; T024 green; confirm the runtime post-sort in internal/runtime/runtime.go stays harmless
+- [x] T024 [P] [US4] Write failing Go test in internal/storage/manager_test.go: an old-start but recently-active session survives `GetRecentSessions(limit)` truncation (ordering by `last_activity` desc happens BEFORE limit, across statuses) (contracts §3)
+- [x] T025 [US4] Implement collect-all→sort→filter→truncate in internal/storage/manager.go `GetRecentSessions`; T024 green; confirm the runtime post-sort in internal/runtime/runtime.go stays harmless
 - [ ] T026 [P] [US4] Write failing tests in MCPProxyTests/GlancePresenceTests.swift: state boundaries (<5m active; 5:00 and 30:00 idle; >30m..24h seen; >24h excluded), missing `last_activity` falls back to start time, unparseable excluded, negative age → 0s, dedupe by name+version keeping most recent, "Unknown client" fallback, top-5 ordering, summary counts over full deduped set with seen excluded and empty states omitted
 - [ ] T027 [US4] Implement pure MCPProxy/Menu/Glance/GlancePresence.swift (FR-017–020, research D6); T026 green
 - [ ] T028 [P] [US4] Write failing wiring tests: MCPProxyTests/APIClientGlanceTests.swift asserts the sessions URL is unfiltered `limit=100`; MCPProxyTests/AppStateGlanceTests.swift asserts the summary reads "N active · M idle" (seen excluded, empty states omitted); MCPProxyTests/GlanceSectionTests.swift asserts presence rows (filled/gray/hollow indicators, idle/seen ages) and the placeholder only when the lookback is empty; update GlanceSelectionTests.swift for the `activeClients` replacement
