@@ -791,4 +791,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [087-tpa-daily-refresh](./specs/087-tpa-daily-refresh/) | — | — |
 | [088-scanner-trust-ui](./specs/088-scanner-trust-ui/) | `shipped` | 29/29 (100%) |
 | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) | — | — |
-| [091-connect-client-form](./specs/091-connect-client-form/) | `in-flight` | 13/26 (50%) |
+| [091-connect-client-form](./specs/091-connect-client-form/) | `in-flight` | 15/26 (58%) |

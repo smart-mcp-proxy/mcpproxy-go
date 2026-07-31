@@ -1,0 +1,401 @@
+import XCTest
+@testable import MCPProxy
+
+/// State-machine tests for the native Connect Client form (spec 091 T016).
+///
+/// Everything the model does is driven from synthesized API responses through
+/// `FakeConnectSource`, so these tests pin the invariants — above all SC-002's
+/// "no Connect control without a matching rendered preview" — without a core.
+@MainActor
+final class ConnectClientModelTests: XCTestCase {
+
+    /// Records what the model asked the clock for, so the 2 s reachability poll
+    /// is asserted rather than waited on.
+    @MainActor
+    final class SleepRecorder {
+        var intervals: [TimeInterval] = []
+        var listStates: [ConnectClientModel.ListState] = []
+        weak var model: ConnectClientModel?
+
+        var sleeper: ConnectClientSleeper {
+            { [weak self] interval in
+                self?.intervals.append(interval)
+                if let model = self?.model { self?.listStates.append(model.list) }
+            }
+        }
+    }
+
+    private func makeModel(
+        _ source: FakeConnectSource,
+        recorder: SleepRecorder? = nil
+    ) -> ConnectClientModel {
+        let noSleep: ConnectClientSleeper = { _ in }
+        let model = ConnectClientModel(source: source, sleeper: recorder?.sleeper ?? noSleep)
+        recorder?.model = model
+        return model
+    }
+
+    // MARK: - List
+
+    func testListLoadsFromTheStatOnlyAggregate() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [.success([
+            FakeConnectSource.client(id: "claude-code", name: "Claude Code"),
+            FakeConnectSource.client(id: "cursor", name: "Cursor", exists: false)
+        ])]
+        let model = makeModel(source)
+
+        XCTAssertEqual(model.list, .loading)
+        await model.loadList()
+
+        guard case .loaded(let rows) = model.list else {
+            return XCTFail("expected .loaded, got \(model.list)")
+        }
+        XCTAssertEqual(rows.map(\.clientId), ["claude-code", "cursor"])
+        // Opening the list must not read any client config content — i.e. no
+        // per-client detail call is made (FR-002 / SC-004).
+        XCTAssertTrue(source.detailCalls.isEmpty)
+        XCTAssertTrue(source.previewCalls.isEmpty)
+    }
+
+    /// FR-013: while the core is unreachable the form waits, polls every 2 s and
+    /// populates itself when the core answers — with no user action.
+    func testUnreachableCorePollsEveryTwoSecondsUntilItAnswers() async {
+        let source = FakeConnectSource()
+        source.clientsResults = [
+            .failure(APIClientError.notReady),
+            .success([FakeConnectSource.client(id: "claude-code")])
+        ]
+        let recorder = SleepRecorder()
+        let model = makeModel(source, recorder: recorder)
+
+        await model.loadList()
+
+        XCTAssertEqual(recorder.intervals, [ConnectClientModel.pollInterval])
+        XCTAssertEqual(ConnectClientModel.pollInterval, 2)
+        XCTAssertEqual(recorder.listStates.count, 1)
+        guard case .coreUnreachable(let reason) = recorder.listStates[0] else {
+            return XCTFail("expected .coreUnreachable while polling, got \(recorder.listStates[0])")
+        }
+        XCTAssertFalse(reason.isEmpty, "the waiting state must say what is wrong")
+        guard case .loaded(let rows) = model.list else {
+            return XCTFail("expected .loaded after the core answered, got \(model.list)")
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(source.clientsCallCount, 2)
+    }
+
+    // MARK: - Selection → detail + preview
+
+    func testSelectingAClientResolvesDetailAndPreview() async {
+        let source = FakeConnectSource()
+        source.detailResults = [.success(
+            FakeConnectSource.client(id: "claude-code", connected: true,
+                                     accessState: .accessible, serverName: "mcpproxy"))]
+        source.previewResults = [.success(FakeConnectSource.preview())]
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+
+        XCTAssertEqual(model.selection, "claude-code")
+        XCTAssertEqual(source.detailCalls, ["claude-code"])
+        XCTAssertEqual(source.previewCalls.map(\.clientId), ["claude-code"])
+        guard case .resolved(let detail) = model.detail else {
+            return XCTFail("expected resolved detail, got \(model.detail)")
+        }
+        XCTAssertTrue(detail.connected)
+        XCTAssertEqual(detail.serverName, "mcpproxy")
+        guard case .resolved = model.preview else {
+            return XCTFail("expected resolved preview, got \(model.preview)")
+        }
+    }
+
+    func testEntryNameDefaultsToMCPProxyAndIsPreviewed() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+
+        XCTAssertEqual(model.entryName, "mcpproxy")
+        await model.select("claude-code")
+
+        XCTAssertEqual(source.previewCalls.first?.serverName, "mcpproxy")
+    }
+
+    // MARK: - SC-002: the Connect control is structurally preview-bound
+
+    func testConnectControlDoesNotExistBeforeAPreviewIsResolved() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+
+        XCTAssertFalse(model.connectControlExists, "no selection, no preview, no control")
+
+        await model.select("claude-code")
+        XCTAssertTrue(model.connectControlExists)
+    }
+
+    /// Editing the entry name destroys the rendered preview immediately — before
+    /// any refetch — so no write can be bound to a preview of a different input.
+    func testEditingTheEntryNameDiscardsThePreviewAndTheControl() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+        await model.select("claude-code")
+        XCTAssertTrue(model.connectControlExists)
+
+        model.entryName = "my-proxy"
+
+        XCTAssertEqual(model.preview, .idle)
+        XCTAssertFalse(model.connectControlExists)
+
+        await model.refreshPreview()
+
+        XCTAssertTrue(model.connectControlExists)
+        XCTAssertEqual(source.previewCalls.map(\.serverName), ["mcpproxy", "my-proxy"])
+    }
+
+    /// A preview that arrives for inputs the user has already changed must not
+    /// resurrect the control (the late-response race).
+    func testAPreviewForStaleInputsIsDiscarded() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(FakeConnectSource.preview(serverName: "mcpproxy"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        model.entryName = "my-proxy"
+        // The scripted preview still answers with the OLD entry name.
+        await model.refreshPreview()
+
+        XCTAssertFalse(model.connectControlExists,
+                       "a preview naming another entry must not gate this write")
+    }
+
+    func testARefusedPreviewOffersNoConnectControlAndShowsTheCoreReasonVerbatim() async {
+        let reason = "opencode requires an existing config file; create one first"
+        let source = FakeConnectSource()
+        source.previewResults = [.success(
+            FakeConnectSource.preview(client: "opencode", accessState: .absent, refusal: reason))]
+        let model = makeModel(source)
+
+        await model.select("opencode")
+
+        XCTAssertFalse(model.connectControlExists)
+        XCTAssertEqual(model.connectRefusal, reason)
+    }
+
+    func testAnUnreadableConfigOffersNoConnectControl() async {
+        let source = FakeConnectSource()
+        source.previewResults = [
+            .success(FakeConnectSource.preview(accessState: .malformed)),
+            .success(FakeConnectSource.preview(accessState: .denied))
+        ]
+        let model = makeModel(source)
+
+        await model.select("cursor")
+        XCTAssertFalse(model.connectControlExists, "malformed config: no Connect")
+
+        await model.refreshPreview()
+        XCTAssertFalse(model.connectControlExists, "denied access: no Connect")
+    }
+
+    func testAFailedPreviewOffersNoConnectControlAndKeepsTheCoreMessage() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.failure(
+            APIClientError.httpError(statusCode: 403, message: "operation not permitted"))]
+        let model = makeModel(source)
+
+        await model.select("cursor")
+
+        XCTAssertFalse(model.connectControlExists)
+        guard case .failed(let message) = model.preview else {
+            return XCTFail("expected a failed preview, got \(model.preview)")
+        }
+        XCTAssertTrue(message.contains("operation not permitted"), "got: \(message)")
+    }
+
+    // MARK: - Connect
+
+    func testAnAddSendsTheTokenWithoutForce() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(FakeConnectSource.preview(entryExists: false, token: "tok-add"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        XCTAssertEqual(source.connectCalls, [
+            .init(clientId: "claude-code", serverName: "mcpproxy",
+                  force: false, preconditionToken: "tok-add")
+        ])
+    }
+
+    /// A replace overwrites, so it sends `force` — but only ever TOGETHER with
+    /// the token, which is the actual safety (FR-005).
+    func testAReplaceSendsForceTogetherWithTheToken() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(FakeConnectSource.preview(
+            entryExists: true,
+            summary: ConnectEntrySummary(entryName: "old-proxy", type: "http"),
+            token: "tok-replace"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        XCTAssertEqual(source.connectCalls.first?.force, true)
+        XCTAssertEqual(source.connectCalls.first?.preconditionToken, "tok-replace")
+    }
+
+    /// The form never sends the overwrite flag without a valid token, so against
+    /// a core that issues no token a replace is simply not offered.
+    func testAReplaceWithoutATokenIsNotOfferedAtAll() async {
+        let source = FakeConnectSource()
+        source.previewResults = [.success(
+            FakeConnectSource.preview(entryExists: true, token: nil))]
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+        await model.connect()
+
+        XCTAssertFalse(model.connectControlExists)
+        XCTAssertTrue(source.connectCalls.isEmpty, "force must never be sent tokenless")
+    }
+
+    func testASuccessfulConnectRefreshesTheClientState() async {
+        let source = FakeConnectSource()
+        source.detailResults = [
+            .success(FakeConnectSource.client(id: "claude-code", connected: false)),
+            .success(FakeConnectSource.client(id: "claude-code", connected: true,
+                                              serverName: "mcpproxy"))
+        ]
+        source.connectResults = [.success(
+            FakeConnectSource.result(action: "created", backupPath: "/Users/x/.claude.json.bak"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        guard case .succeeded(let result) = model.action else {
+            return XCTFail("expected .succeeded, got \(model.action)")
+        }
+        XCTAssertEqual(result.action, "created")
+        XCTAssertEqual(source.detailCalls, ["claude-code", "claude-code"],
+                       "the affected client's state must refresh from the core")
+        guard case .resolved(let detail) = model.detail, detail.connected else {
+            return XCTFail("expected the refreshed detail to show connected, got \(model.detail)")
+        }
+    }
+
+    /// Drift → `.conflict` → exactly ONE automatic re-preview, and no retry of
+    /// the write (research D9).
+    func testAPreconditionFailureConflictsAndRePreviewsExactlyOnce() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.failure(APIClientError.connectConflict(
+            action: "precondition_failed", message: "the config changed since the preview"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+        XCTAssertEqual(source.previewCalls.count, 1)
+
+        await model.connect()
+
+        guard case .conflict(let reason) = model.action else {
+            return XCTFail("expected .conflict, got \(model.action)")
+        }
+        XCTAssertEqual(reason, "the config changed since the preview")
+        XCTAssertEqual(source.connectCalls.count, 1, "the write must not be retried")
+        XCTAssertEqual(source.previewCalls.count, 2, "exactly one automatic re-preview")
+    }
+
+    /// The legacy 409 cannot occur in this flow (a replace always sends force),
+    /// and if it does it is a plain failure — re-previewing on it would loop.
+    func testALegacyAlreadyExistsConflictIsAFailureNotARePreview() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.failure(APIClientError.connectConflict(
+            action: "already_exists", message: "entry already exists"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        guard case .failed(let message) = model.action else {
+            return XCTFail("expected .failed, got \(model.action)")
+        }
+        XCTAssertEqual(message, "entry already exists")
+        XCTAssertEqual(source.previewCalls.count, 1, "must not re-preview and loop")
+    }
+
+    func testAFailedConnectKeepsTheCoreMessage() async {
+        let source = FakeConnectSource()
+        source.connectResults = [.failure(
+            APIClientError.httpError(statusCode: 400, message: "config is not writable"))]
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        guard case .failed(let message) = model.action else {
+            return XCTFail("expected .failed, got \(model.action)")
+        }
+        XCTAssertTrue(message.contains("config is not writable"), "got: \(message)")
+    }
+
+    func testActionsAreDisabledWhileARequestIsInFlight() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        var inFlightState: ConnectClientModel.ActionState?
+        var connectEnabledInFlight: Bool?
+        source.whileConnectInFlight = { [weak model] in
+            inFlightState = model?.action
+            connectEnabledInFlight = model?.isConnectEnabled
+        }
+
+        await model.connect()
+
+        XCTAssertEqual(inFlightState, .inFlight)
+        XCTAssertEqual(connectEnabledInFlight, false,
+                       "double-click protection: the button disables while in flight")
+        XCTAssertTrue(model.isConnectEnabled, "and re-enables once the request settles")
+    }
+
+    // MARK: - Transport
+
+    /// Off-socket the mutating controls are DISABLED with an explanation — the
+    /// list, detail and preview keep working (spec's non-socket edge case).
+    func testOffSocketDisablesMutatingControlsWithAnExplanation() async {
+        let source = FakeConnectSource()
+        source.transportKind = .tcp
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+
+        XCTAssertTrue(model.connectControlExists, "the preview still renders")
+        XCTAssertFalse(model.isConnectEnabled)
+        let reason = try? XCTUnwrap(model.mutatingDisabledReason)
+        XCTAssertFalse(reason?.isEmpty ?? true, "the user must be told why")
+        guard case .resolved = model.preview else {
+            return XCTFail("previews must remain available off-socket")
+        }
+    }
+
+    func testOnSocketTheMutatingControlsCarryNoExplanation() async {
+        let source = FakeConnectSource()
+        let model = makeModel(source)
+
+        await model.select("claude-code")
+
+        XCTAssertNil(model.mutatingDisabledReason)
+        XCTAssertTrue(model.isConnectEnabled)
+    }
+
+    /// Belt and braces for the same rule at the model level: with the transport
+    /// off-socket, invoking connect sends nothing at all.
+    func testOffSocketConnectSendsNothing() async {
+        let source = FakeConnectSource()
+        source.transportKind = .tcp
+        let model = makeModel(source)
+        await model.select("claude-code")
+
+        await model.connect()
+
+        XCTAssertTrue(source.connectCalls.isEmpty)
+    }
+}
