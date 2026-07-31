@@ -11,8 +11,8 @@ Swift paths are relative to `native/macos/MCPProxy/` (sources under `MCPProxy/`,
 
 ## Phase 2: Foundational (blocking prerequisites)
 
-- [ ] T002 Write failing tests for `ActivityEntry` derived accessors (`intentReason`, `blockReason`, `reason`, `outcomeClass` incl. decision blocked/block and legacy-absence cases) in MCPProxyTests/ModelsTests.swift
-- [ ] T003 Implement the accessors as an `ActivityEntry` extension in MCPProxy/API/Models.swift (data-model.md table); T002 green
+- [x] T002 Write failing tests for `ActivityEntry` derived accessors (`intentReason`, `blockReason`, `reason`, `outcomeClass` incl. decision blocked/block and legacy-absence cases) in MCPProxyTests/ModelsTests.swift
+- [x] T003 Implement the accessors as an `ActivityEntry` extension in MCPProxy/API/Models.swift (data-model.md table); T002 green
 
 ## Phase 3: User Story 1 — Repeated calls collapse into one row (P1) 🎯 MVP
 
