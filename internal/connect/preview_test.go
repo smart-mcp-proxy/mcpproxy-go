@@ -668,3 +668,64 @@ func TestPreview_TOMLExistingEntryNeverLeaksQuerySecret(t *testing.T) {
 		}
 	}
 }
+
+// --- Spec 091: the preview carries the write's refusal (research D8) ---
+
+// TestPreview_ConnectRefusal_MatchesWriteVerbatim pins FR-003's last clause: a
+// client the core will NOT create a config for (OpenCode) must surface that
+// refusal in the PREVIEW, verbatim, so the user never discovers it by clicking
+// Connect. The assertion compares against the real write's error text, which is
+// what makes "the preview runs the same guard the write would" testable rather
+// than aspirational.
+func TestPreview_ConnectRefusal_MatchesWriteVerbatim(t *testing.T) {
+	svc, _ := serviceWithKey(t, "")
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview must still succeed and REPORT the refusal, got error: %v", err)
+	}
+	if preview.ConnectRefusal == "" {
+		t.Fatal("expected ConnectRefusal for OpenCode with no config file")
+	}
+
+	_, writeErr := svc.Connect("opencode", "mcpproxy", false)
+	if writeErr == nil {
+		t.Fatal("the write must refuse for OpenCode with no config file")
+	}
+	if preview.ConnectRefusal != writeErr.Error() {
+		t.Fatalf("refusal must be the write's reason verbatim:\n preview: %q\n write:   %q",
+			preview.ConnectRefusal, writeErr.Error())
+	}
+}
+
+// TestPreview_ConnectRefusal_EmptyWhenConnectable keeps the field strictly a
+// refusal signal: present ONLY when the write would refuse regardless of user
+// intent. A create-capable client with no config, and OpenCode WITH a config,
+// must both be connectable.
+func TestPreview_ConnectRefusal_EmptyWhenConnectable(t *testing.T) {
+	t.Run("create-capable client, absent config", func(t *testing.T) {
+		svc, _ := serviceWithKey(t, "")
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if preview.ConnectRefusal != "" {
+			t.Fatalf("claude-code is create-capable; got refusal %q", preview.ConnectRefusal)
+		}
+		if preview.AccessState != "absent" {
+			t.Fatalf("expected access_state=absent, got %q", preview.AccessState)
+		}
+	})
+
+	t.Run("opencode with an existing config", func(t *testing.T) {
+		svc, home := serviceWithKey(t, "")
+		seedClientConfig(t, home, "opencode")
+		preview, err := svc.Preview("opencode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if preview.ConnectRefusal != "" {
+			t.Fatalf("OpenCode with a config is connectable; got refusal %q", preview.ConnectRefusal)
+		}
+	})
+}

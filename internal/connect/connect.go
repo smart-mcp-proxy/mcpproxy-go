@@ -385,14 +385,8 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
-	if client.ID == "opencode" {
-		// configPath already prefers whichever candidate exists; reaching a
-		// nonexistent path here means NO OpenCode global config was found.
-		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-			return nil, fmt.Errorf(
-				"no OpenCode config found (looked for opencode.jsonc and opencode.json in %s) — is OpenCode installed?",
-				filepath.Dir(cfgPath))
-		}
+	if err := connectRefusal(client, cfgPath); err != nil {
+		return nil, err
 	}
 
 	var res *ConnectResult
@@ -406,6 +400,30 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
 	// remediation; other errors keep their existing semantics (Spec 075 FR-004).
 	return res, s.asAccessError(client, cfgPath, err)
+}
+
+// connectRefusal reports the reason a connect would refuse for this client
+// regardless of user intent, or nil when the client is connectable.
+//
+// Today the single case is a non-create-capable client whose config is absent:
+// OpenCode owns a config schema mcpproxy will not invent, so connect refuses
+// rather than creating one. It is a package-level function, not a method,
+// precisely so the PREVIEW can run the exact same guard the write runs and
+// surface the reason verbatim before the user ever presses Connect (Spec 091
+// FR-003, research D8) — a divergent copy would let the form promise "a new
+// file will be created; Undo removes it" for a client where that is false.
+func connectRefusal(client *ClientDef, cfgPath string) error {
+	if client.ID != "opencode" {
+		return nil
+	}
+	// configPath already prefers whichever candidate exists; reaching a
+	// nonexistent path here means NO OpenCode global config was found.
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		return fmt.Errorf(
+			"no OpenCode config found (looked for opencode.jsonc and opencode.json in %s) — is OpenCode installed?",
+			filepath.Dir(cfgPath))
+	}
+	return nil
 }
 
 // Disconnect removes the MCPProxy entry from the specified client's configuration.

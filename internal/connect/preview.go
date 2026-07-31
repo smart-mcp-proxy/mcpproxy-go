@@ -50,6 +50,14 @@ type ConnectPreview struct {
 	// drifted — externally (the file or the target entry changed) or
 	// proxy-side (credential rotation, auth toggle, address change).
 	PreconditionToken string `json:"precondition_token"`
+
+	// ConnectRefusal carries, verbatim, the reason a connect would refuse for
+	// this client regardless of user intent — today only a non-create-capable
+	// client (OpenCode) whose config is absent. It is produced by the SAME guard
+	// the write runs, so the form can hide the Connect control and show the
+	// reason instead of letting the user discover it by clicking (Spec 091
+	// FR-003). Empty means connectable.
+	ConnectRefusal string `json:"connect_refusal,omitempty"`
 }
 
 // Preview computes the exact entry a Connect would write for the given client,
@@ -117,7 +125,19 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		// unmasked pending entry the write would produce (Spec 091 FR-005).
 		PreconditionToken: s.preconditionToken(cfgPath, fileExists, existing,
 			buildServerEntry(clientID, s.entryParams(false))),
+		// Run the write's own refusal guard so the form learns "not
+		// connectable" from the preview, never from a failed click (FR-003).
+		ConnectRefusal: refusalText(connectRefusal(client, cfgPath)),
 	}, nil
+}
+
+// refusalText renders a refusal error as the verbatim reason string, or empty
+// when the client is connectable.
+func refusalText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // preWriteState resolves the raw pre-write state shared by the preview and the
