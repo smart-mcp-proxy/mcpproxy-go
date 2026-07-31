@@ -35,6 +35,13 @@ type ConnectPreview struct {
 	// EntryExists (Spec 075): accessible|absent|malformed. A denied read never
 	// reaches here — it is returned as a typed *AccessError (403 + remediation).
 	AccessState string `json:"access_state"`
+
+	// ExistingEntrySummary describes the entry this connect would REPLACE, and
+	// is populated only when EntryExists (Spec 091 FR-003). It is built by
+	// construction from non-secret projections — see EntrySummary — so no
+	// arbitrary value from the user's config can ride out in a preview. It is
+	// display-only: drift detection uses PreconditionToken, never this.
+	ExistingEntrySummary *EntrySummary `json:"existing_entry_summary,omitempty"`
 }
 
 // Preview computes the exact entry a Connect would write for the given client,
@@ -64,6 +71,7 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	// file exists, so an absent config raises no macOS App-Data prompt.
 	accessState := accessAbsent
 	entryExists := false
+	var existingSummary *EntrySummary
 	if _, statErr := os.Stat(cfgPath); statErr == nil {
 		raw, rerr := s.read(cfgPath)
 		if rerr != nil {
@@ -74,10 +82,15 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 			}
 			accessState = classifyAccess(rerr)
 		} else {
-			exists, parsedOK := s.previewEntryExists(*client, raw, serverName)
+			existing, parsedOK := s.resolveExistingEntry(*client, raw, serverName)
 			if parsedOK {
 				accessState = accessAccessible
-				entryExists = exists
+				entryExists = existing != nil
+				if existing != nil {
+					// Sanitized projections only — never the entry itself
+					// (Spec 091 FR-003).
+					existingSummary = buildEntrySummary(existing.name, existing.entry)
+				}
 			} else {
 				// Unparseable config: the preview cannot claim "create" or
 				// "overwrite" honestly; report malformed and let the UI degrade.
@@ -98,42 +111,54 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 	}
 
 	return &ConnectPreview{
-		Client:         clientID,
-		ConfigPath:     cfgPath,
-		Format:         client.Format,
-		ServerKey:      client.ServerKey,
-		ServerName:     serverName,
-		Entry:          maskedEntry,
-		EntryText:      entryText,
-		EntryExists:    entryExists,
-		ContainsAPIKey: s.containsCredential(),
-		Bridge:         client.Bridge,
-		AccessState:    accessState,
+		Client:               clientID,
+		ConfigPath:           cfgPath,
+		Format:               client.Format,
+		ServerKey:            client.ServerKey,
+		ServerName:           serverName,
+		Entry:                maskedEntry,
+		EntryText:            entryText,
+		EntryExists:          entryExists,
+		ContainsAPIKey:       s.containsCredential(),
+		Bridge:               client.Bridge,
+		AccessState:          accessState,
+		ExistingEntrySummary: existingSummary,
 	}, nil
 }
 
-// previewEntryExists reports whether an entry under the exact serverName the
-// write would target already exists in the parsed config, and whether the bytes
-// parsed at all (parsedOK=false => malformed). It mirrors the create-vs-overwrite
-// decision connectJSON / connectTOML make (`serversMap[serverName]` presence),
-// so preview's classification matches the write's force behavior. It never
-// touches the filesystem — the caller supplies already-read bytes.
-func (s *Service) previewEntryExists(client ClientDef, raw []byte, serverName string) (exists, parsedOK bool) {
+// existingEntry is the entry a write would actually replace: the key it lives
+// under (which may differ from the requested server name after adoption) and its
+// parsed value (nil when the value is not an object).
+type existingEntry struct {
+	name  string
+	entry map[string]interface{}
+}
+
+// resolveExistingEntry returns the entry the write would target in the parsed
+// config — nil when there is none — and whether the bytes parsed at all
+// (parsedOK=false => malformed). It mirrors the create-vs-overwrite decision
+// connectJSON / connectTOML make (`serversMap[serverName]` presence, then
+// OpenCode's equivalent-entry adoption), so preview's classification matches the
+// write's force behavior, the sanitized summary names the key that actually
+// disappears, and the precondition token hashes the value the write would
+// clobber. It never touches the filesystem — the caller supplies already-read
+// bytes.
+func (s *Service) resolveExistingEntry(client ClientDef, raw []byte, serverName string) (found *existingEntry, parsedOK bool) {
 	var data map[string]interface{}
 	if client.Format == "toml" {
 		if _, err := toml.Decode(string(raw), &data); err != nil {
-			return false, false
+			return nil, false
 		}
 	} else if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return false, false
+		return nil, false
 	}
 
 	serversMap, ok := data[client.ServerKey].(map[string]interface{})
 	if !ok {
-		return false, true
+		return nil, true
 	}
-	if _, ok := serversMap[serverName]; ok {
-		return true, true
+	if value, ok := serversMap[serverName]; ok {
+		return newExistingEntry(serverName, value), true
 	}
 	// OpenCode's write path adopts an already-installed entry pointing at our MCP
 	// URL even under a different key (incl. the legacy ?apikey= shape) and
@@ -141,11 +166,18 @@ func (s *Service) previewEntryExists(client ClientDef, raw []byte, serverName st
 	// instead of a misleading "create" that then diverges from the write (Spec
 	// 078 FR-002).
 	if client.ID == "opencode" {
-		if _, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found {
-			return true, true
+		if adopted, found := findEquivalentJSONServerName(serversMap, s.baseURL(), serverName); found {
+			return newExistingEntry(adopted, serversMap[adopted]), true
 		}
 	}
-	return false, true
+	return nil, true
+}
+
+// newExistingEntry wraps a resolved config value; a non-object value yields a
+// nil entry map (the key exists, but there is nothing to project).
+func newExistingEntry(name string, value interface{}) *existingEntry {
+	obj, _ := value.(map[string]interface{})
+	return &existingEntry{name: name, entry: obj}
 }
 
 // renderEntrySnippet renders the entry as the merge-ready snippet in the

@@ -560,3 +560,111 @@ func TestConnect_LegacyEntryMigration(t *testing.T) {
 		t.Fatalf("expected removed, got %s", res.Action)
 	}
 }
+
+// --- Spec 091: preview secrecy over arbitrary existing-config content ---
+
+// TestPreview_NeverLeaksExistingEntrySecrets is the adversarial half of FR-003:
+// the preview reads a client config that carries credentials in every carrier
+// mcpproxy knows about (header value, bridge --header arg, env value, ?apikey=
+// query, URL userinfo) plus a user-authored field, and asserts NONE of those
+// values appear anywhere in the serialized preview response. The proxy's own
+// live credential must not appear either — it is masked at construction.
+func TestPreview_NeverLeaksExistingEntrySecrets(t *testing.T) {
+	const liveKey = "LIVE-ROTATED-PROXY-KEY"
+
+	secrets := []string{
+		"HEADER-VALUE-SECRET", "BEARER-VALUE-SECRET", "ENV-VALUE-SECRET",
+		"QUERY-VALUE-SECRET", "USERINFO-VALUE-SECRET", "ARG-HEADER-SECRET",
+		"USER-AUTHORED-SECRET", liveKey,
+	}
+
+	cases := []struct {
+		clientID string
+		config   string
+	}{
+		{
+			clientID: "claude-code",
+			config: `{"mcpServers":{"mcpproxy":{"type":"http",` +
+				`"url":"http://user:USERINFO-VALUE-SECRET@127.0.0.1:8080/mcp?apikey=QUERY-VALUE-SECRET",` +
+				`"headers":{"X-API-Key":"HEADER-VALUE-SECRET","Authorization":"Bearer BEARER-VALUE-SECRET"},` +
+				`"env":{"TOKEN":"ENV-VALUE-SECRET"},"note":"USER-AUTHORED-SECRET"}}}`,
+		},
+		{
+			clientID: "claude-desktop",
+			config: `{"mcpServers":{"mcpproxy":{"command":"npx","args":` +
+				`["-y","mcp-remote","http://127.0.0.1:8080/mcp?apikey=QUERY-VALUE-SECRET",` +
+				`"--header","X-API-Key:ARG-HEADER-SECRET"],"env":{"TOKEN":"ENV-VALUE-SECRET"}}}}`,
+		},
+		{
+			clientID: "opencode",
+			config: `{"mcp":{"proxy-alt":{"type":"remote",` +
+				`"url":"http://127.0.0.1:8080/mcp?apikey=QUERY-VALUE-SECRET",` +
+				`"headers":{"X-API-Key":"HEADER-VALUE-SECRET"},"note":"USER-AUTHORED-SECRET"}}}`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.clientID, func(t *testing.T) {
+			svc, home := serviceWithKey(t, liveKey)
+			svc.WithRequireMCPAuth(true)
+			cfgPath := ConfigPath(tc.clientID, home)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte(tc.config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			preview, err := svc.Preview(tc.clientID, "mcpproxy")
+			if err != nil {
+				t.Fatalf("Preview: %v", err)
+			}
+			if !preview.EntryExists {
+				t.Fatalf("fixture should present an existing entry for %s", tc.clientID)
+			}
+			if preview.ExistingEntrySummary == nil {
+				t.Fatalf("expected an existing-entry summary for %s", tc.clientID)
+			}
+
+			serialized, err := json.Marshal(preview)
+			if err != nil {
+				t.Fatalf("marshal preview: %v", err)
+			}
+			for _, secret := range secrets {
+				if strings.Contains(string(serialized), secret) {
+					t.Errorf("preview leaked %q: %s", secret, serialized)
+				}
+			}
+		})
+	}
+}
+
+// TestPreview_TOMLExistingEntryNeverLeaksQuerySecret covers the TOML client's
+// ?apikey= carrier, the one shape whose credential lives inside the URL itself.
+func TestPreview_TOMLExistingEntryNeverLeaksQuerySecret(t *testing.T) {
+	svc, home := serviceWithKey(t, "LIVE-ROTATED-PROXY-KEY")
+	svc.WithRequireMCPAuth(true)
+	cfgPath := ConfigPath("codex", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "[mcp_servers.mcpproxy]\nurl = \"http://127.0.0.1:8080/mcp?apikey=CODEX-QUERY-SECRET\"\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	preview, err := svc.Preview("codex", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	serialized, err := json.Marshal(preview)
+	if err != nil {
+		t.Fatalf("marshal preview: %v", err)
+	}
+	for _, secret := range []string{"CODEX-QUERY-SECRET", "LIVE-ROTATED-PROXY-KEY"} {
+		if strings.Contains(string(serialized), secret) {
+			t.Errorf("preview leaked %q: %s", secret, serialized)
+		}
+	}
+}
