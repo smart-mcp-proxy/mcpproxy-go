@@ -125,19 +125,26 @@ func (s *Service) Preview(clientID, serverName string) (*ConnectPreview, error) 
 		// unmasked pending entry the write would produce (Spec 091 FR-005).
 		PreconditionToken: s.preconditionToken(cfgPath, fileExists, existing,
 			buildServerEntry(clientID, s.entryParams(false))),
-		// Run the write's own refusal guard so the form learns "not
+		// Run the write's own refusal guards so the form learns "not
 		// connectable" from the preview, never from a failed click (FR-003).
-		ConnectRefusal: refusalText(connectRefusal(client, cfgPath)),
+		// BOTH force-proof guards belong here: the absent-config refusal, and
+		// the commented-.jsonc refusal — a commented file parses leniently, so
+		// without this the preview would render a clean, enabled Connect for a
+		// write that always refuses.
+		ConnectRefusal: refusalText(connectRefusal(client, cfgPath), s.guardJsoncComments(cfgPath)),
 	}, nil
 }
 
-// refusalText renders a refusal error as the verbatim reason string, or empty
-// when the client is connectable.
-func refusalText(err error) string {
-	if err == nil {
-		return ""
+// refusalText renders the first refusal error as its verbatim reason string, or
+// empty when every guard passed. Guards are evaluated in the order the write
+// runs them, so the reason the user is shown is the one they would have hit.
+func refusalText(errs ...error) string {
+	for _, err := range errs {
+		if err != nil {
+			return err.Error()
+		}
 	}
-	return err.Error()
+	return ""
 }
 
 // preWriteState resolves the raw pre-write state shared by the preview and the

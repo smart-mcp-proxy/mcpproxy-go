@@ -729,3 +729,48 @@ func TestPreview_ConnectRefusal_EmptyWhenConnectable(t *testing.T) {
 		}
 	})
 }
+
+// TestPreview_ConnectRefusal_CommentedJsonc is the second half of the refusal
+// parity guarantee (FR-003, research D8): the write has TWO force-proof refusal
+// guards, and the preview must surface both. A commented opencode.jsonc parses
+// leniently, so the preview used to report a clean, connectable "add" — and the
+// user discovered the comment refusal only by pressing Connect.
+func TestPreview_ConnectRefusal_CommentedJsonc(t *testing.T) {
+	svc, home := serviceWithKey(t, "")
+	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
+	content := "{\n  // keep my comments\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n"
+	writeFileT(t, cfgPath, content)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview must report the refusal, not fail: %v", err)
+	}
+	if preview.ConnectRefusal == "" {
+		t.Fatal("expected ConnectRefusal for a commented .jsonc — the write refuses it regardless of intent")
+	}
+
+	_, writeErr := svc.Connect("opencode", "mcpproxy", false)
+	if writeErr == nil {
+		t.Fatal("the write must refuse a commented .jsonc")
+	}
+	if preview.ConnectRefusal != writeErr.Error() {
+		t.Fatalf("refusal must be the write's reason verbatim:\n preview: %q\n write:   %q",
+			preview.ConnectRefusal, writeErr.Error())
+	}
+}
+
+// A comment-free .jsonc rewrites safely (OpenCode's bootstrap stub), so it must
+// stay connectable — the guard is about comments, not about the extension.
+func TestPreview_ConnectRefusal_CommentFreeJsoncIsConnectable(t *testing.T) {
+	svc, home := serviceWithKey(t, "")
+	cfgPath := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
+	writeFileT(t, cfgPath, `{"$schema":"https://opencode.ai/config.json"}`)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ConnectRefusal != "" {
+		t.Fatalf("a comment-free .jsonc is connectable; got refusal %q", preview.ConnectRefusal)
+	}
+}
