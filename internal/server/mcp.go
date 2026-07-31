@@ -650,15 +650,24 @@ func (p *MCPProxyServer) emitActivityPolicyDecision(serverName, toolName, sessio
 	}
 }
 
+// activityRequestIDSeq disambiguates ids minted within the same nanosecond.
+// time.Now() is not guaranteed to advance between two goroutines reading it, so
+// two calls blocked at the same instant on the same tool would otherwise share
+// an id — and the tray, which collapses activity rows by request id, would show
+// two separate attempts as one.
+var activityRequestIDSeq atomic.Uint64
+
 // mintActivityRequestID produces the correlation id shared by every activity
-// event of one dispatch. Nanosecond precision plus the target makes it unique
-// in practice, and the shape matches what the call paths already generated.
+// event of one dispatch. The nanosecond stamp and target keep the shape the
+// call paths already generated (and logs are grepped by); the counter suffix is
+// what actually guarantees uniqueness.
 //
 // Callers mint ONCE, above the earliest policy gate they can reach, and reuse
 // the value: minting per emit site would make two gates in one dispatch look
 // like two unrelated requests.
 func mintActivityRequestID(serverName, toolName string) string {
-	return fmt.Sprintf("%d-%s-%s", time.Now().UnixNano(), serverName, toolName)
+	return fmt.Sprintf("%d-%s-%s-%d", time.Now().UnixNano(), serverName, toolName,
+		activityRequestIDSeq.Add(1))
 }
 
 // emitActivityInternalToolCall safely emits an internal tool call completion event (Spec 024)
